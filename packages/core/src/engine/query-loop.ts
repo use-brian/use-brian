@@ -1,8 +1,10 @@
+import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow, withDocumentFlowDebug } from './document-flow-debug.js'
 import { askQuestionSchema } from '../tools/base/ask-question.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
 import { getHeapStatistics } from 'node:v8'
 import { renderSystemContext } from '../providers/system-context.js'
+import { isInputAuthorityError } from '../providers/input-authority.js'
 import type { LLMProvider, Message, ContentBlock, TokenUsage, AssistantResponse, SendOptions, ThinkingLevel, ToolDefinition, ToolParameter } from '../providers/types.js'
 import type { Tool, ToolContext, ToolResultMeta } from '../tools/types.js'
 import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
@@ -60,8 +62,36 @@ function isUnderHeapPressure(): boolean {
 }
 
 function isAuthorityBoundaryError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null
-    && (error as { reason?: unknown }).reason === 'authority_changed'
+  return isInputAuthorityError(error)
+}
+
+/** A failed input/output boundary cannot revive the same model context. */
+const invalidModelContexts = new WeakSet<object>()
+async function assertModelInputAuthority(context: ToolContext): Promise<void> {
+  return assertModelAuthority(context, 'input')
+}
+/** The final host sink uses the same sticky boundary as streamed loop events. */
+export async function assertModelOutputAuthority(context: ToolContext): Promise<void> {
+  return assertModelAuthority(context, 'output')
+}
+async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'output'): Promise<void> {
+  const check = boundary === 'input' ? context.assertModelInputAuthority : context.assertModelOutputAuthority
+  if (!check && !context.authority) return
+  const identity = context.executionContext ?? context
+  if (invalidModelContexts.has(identity)) {
+    throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed' as const,retrySafe: false })
+  }
+  try {
+    await context.authority?.assertCurrent()
+    await check?.(context)
+  }
+  catch (error) {
+    invalidModelContexts.add(identity)
+    if (isAuthorityBoundaryError(error)) throw error
+    throw Object.assign(new Error('The model context is unavailable.', { cause: error }), {
+      reason: 'authority_changed' as const, retrySafe: false,
+    })
+  }
 }
 
 function hasVisibleText(text: string): boolean {
@@ -575,7 +605,7 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
   // parent clock it was handed, so nesting composes either way.
   const watchdog = options.stallIdleMs
     ? createStallWatchdog({
-        idleMs: options.stallIdleMs,
+        idleMs: Math.max(options.stallIdleMs, (registryRow(options.model)?.firstResponseTimeoutMs ?? 0) * 2),
         parent: options.context.progress,
         label: `queryLoop model=${options.model}`,
       })
@@ -606,7 +636,7 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
       queryLoopCore({ ...options, tools: filteredTools, context: toolContext, stallWatchdog: watchdog ?? undefined }),
     )
     for await (const event of events) {
-      await toolContext.authority?.assertCurrent()
+      await assertModelOutputAuthority(toolContext)
       yield event
     }
   } finally {
@@ -697,7 +727,9 @@ async function* queryLoopCore(
   // `context.abortSignal` rides through to the provider's underlying `fetch`
   // so a client disconnect actually cancels in-flight HTTP, instead of being
   // a no-op while we wait for Cloud Run's 300s cap.
+  await assertModelInputAuthority(context)
   const session = options.stateless ? null : provider.createSession({
+    assertInputAuthority: () => assertModelInputAuthority(context),
     model,
     systemPrompt,
     runtimeSystemContext,
@@ -895,14 +927,14 @@ async function* queryLoopCore(
 
     try {
       await context.authority?.assertCurrent()
+      await assertModelInputAuthority(context)
       // Stateless: send full history via provider.stream() (no rawHistory accumulation).
       // Stateful: send only new messages via session.send() (preserves thought signatures).
-      const sendOpts: SendOptions | undefined = nextThinkingLevel || progress
-        ? {
-            ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),
-            ...(progress ? { progress } : {}),
-          }
-        : undefined
+      const sendOpts: SendOptions = {
+        assertInputAuthority: () => assertModelInputAuthority(context),
+        ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),
+        ...(progress ? { progress } : {}),
+      }
       // Ledger: record what is about to go on the wire — the delta in
       // stateful mode (recorder reconstructs full = start.messages + deltas),
       // the complete history in stateless mode.
@@ -917,6 +949,7 @@ async function* queryLoopCore(
       const modelStream = session
         ? session.send(nextMessages, sendOpts)
         : provider.stream({
+            assertInputAuthority: () => assertModelInputAuthority(context),
             model,
             systemPrompt,
             runtimeSystemContext,
@@ -1084,12 +1117,16 @@ async function* queryLoopCore(
         hasAttemptedReactiveCompact = true
         yield { type: 'status', message: 'Context too large, compacting...' }
         try {
-          const compact = () => compactConversation({
-            provider,
-            model: options.compactModel!,
-            messages: nextMessages,
-            systemPrompt: renderSystemContext({ systemPrompt, runtimeSystemContext }),
-          })
+          const compact = async () => {
+            await assertModelInputAuthority(context)
+            return compactConversation({
+              assertInputAuthority: () => assertModelInputAuthority(context),
+              provider,
+              model: options.compactModel!,
+              messages: nextMessages,
+              systemPrompt: renderSystemContext({ systemPrompt, runtimeSystemContext }),
+            })
+          }
           const compactResult = context.authority
             ? await context.authority.execute(compact)
             : await compact()
@@ -1764,6 +1801,7 @@ async function* queryLoopCore(
             const fallbackResponse = yield* finalizeTerminalResponse({
               provider,
               model,
+              context,
               messages: [
                 ...terminalConversationMessages,
                 { role: 'user', content: drainPrompt },
@@ -1979,6 +2017,7 @@ async function* queryLoopCore(
         const fallbackResponse = yield* finalizeTerminalResponse({
           provider,
           model,
+          context,
           messages: terminalConversationMessages,
           evidence: terminalEvidence,
           stopReason: { code: 'terminal_tool_turn' },
@@ -2068,6 +2107,7 @@ async function* queryLoopCore(
         const fallbackResponse = yield* finalizeTerminalResponse({
           provider,
           model,
+          context,
           messages: terminalConversationMessages,
           evidence: terminalEvidence,
           stopReason: capStop,
@@ -2093,6 +2133,7 @@ async function* queryLoopCore(
       const fallbackResponse = yield* finalizeTerminalResponse({
         provider,
         model,
+        context,
         messages: terminalConversationMessages,
         evidence: terminalEvidence,
         stopReason: { code: 'max_turns' },
@@ -2534,6 +2575,7 @@ function fallbackTerminalResponse(message: string): AssistantResponse {
 async function* finalizeTerminalResponse(params: {
   provider: LLMProvider
   model: string
+  context: ToolContext
   messages: Message[]
   evidence: TerminalEvidenceItem[]
   stopReason: TerminalStopReason
@@ -2543,8 +2585,10 @@ async function* finalizeTerminalResponse(params: {
   systemPrompt?: string
 }): AsyncGenerator<QueryEvent, AssistantResponse> {
   try {
+    await assertModelInputAuthority(params.context)
     const acc = createAccumulator()
     for await (const chunk of params.provider.stream({
+      assertInputAuthority: () => assertModelInputAuthority(params.context),
       model: params.model,
       systemPrompt: params.systemPrompt ?? TERMINAL_FINALIZER_SYSTEM_PROMPT,
       messages: [{
@@ -2587,6 +2631,7 @@ async function* finalizeTerminalResponse(params: {
     }
     console.warn('[query-loop] isolated terminal finalizer returned an invalid envelope; using static fallback')
   } catch (err) {
+    if (isAuthorityBoundaryError(err)) throw err
     console.error('[query-loop] isolated terminal finalizer failed; using static fallback:', err)
   }
 
@@ -2680,6 +2725,12 @@ export function jsonSchemaFromZod(schema: { _def: unknown }): {
 } {
   type TP = ToolParameter
   const def = schema._def as Record<string, unknown>
+
+  // Refined direct tools (including webSearch) retain their object parameters.
+  // Runtime parsing still enforces the refinement; this only exposes its shape.
+  if (def.typeName === 'ZodEffects') {
+    return jsonSchemaFromZod(def.schema as { _def: unknown })
+  }
 
   if (def.typeName === 'ZodObject') {
     const shape = (def as { shape: () => Record<string, { _def: Record<string, unknown> }> }).shape()

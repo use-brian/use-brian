@@ -8,6 +8,8 @@ import { authFetch } from "@/lib/auth-fetch";
 import { getWorkspaceRole } from "@/lib/api/workspaces";
 import { setUserInfoCache } from "@/lib/user";
 import Page from "../page";
+import { invalidateSurfaceCache } from "@/lib/surface-cache";
+vi.mock("@/lib/workspace-context",()=>({useWorkspaceContext:()=>({workspaceId:"workspace-one",me:{id:"viewer-fixture"}})}));
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ workspaceId: "workspace-one" }),
@@ -39,9 +41,11 @@ beforeEach(() => {
   for (const cookie of document.cookie.split(";")) {
     document.cookie = `${cookie.split("=")[0].trim()}=; max-age=0; path=/`;
   }
+  invalidateSurfaceCache("application-management:");
   role = "owner";
   order = ["feed", "chat", "page"];
   fetchMock.mockReset().mockImplementation(async (_url, init) => {
+    if(String(_url).includes('/api/applications/'))return new Response(JSON.stringify(role==='owner'||role==='admin'?{workspaceId:'workspace-one',actor:{userId:'viewer-fixture',assistantId:'assistant-fixture'},validForMs:30_000,readiness:{qualified:false,reason:'consumer_qualification_incomplete',canActivate:false},modules:['records'],clients:[],selectedAppId:null,grants:[],credentials:[],schemas:{state:'available',items:[]},sources:{state:'unavailable',items:[]},links:{miniApps:'/mini-apps',connectors:'/connectors',programmaticAccess:'/programmatic-access',access:'/access'}}:{error:'access_unavailable'}),{status:role==='owner'||role==='admin'?200:403});
     if (init?.method === "PATCH") order = JSON.parse(String(init.body)).homeApps;
     // The API's own role is authoritative even without a member-list identity.
     return response({ role, homeApps: order, members: [] });
@@ -58,6 +62,7 @@ afterEach(async () => {
 });
 
 describe("[COMP:app-web/studio-mini-apps] authenticated editing permissions", () => {
+  it("mounts native management on the existing Mini apps route with truthful readiness",async()=>{await render();expect(host.textContent).toContain(en.applicationManagement.title);expect(host.textContent).toContain(en.applicationManagement.unqualified);expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/applications/workspaces/workspace-one/management'),expect.objectContaining({cache:'no-store'}));});
   it.each(["owner", "admin"])("enables dragging and saves changes for a cookieless %s session", async (value) => {
     role = value;
     expect(document.cookie).toBe("");
@@ -67,7 +72,7 @@ describe("[COMP:app-web/studio-mini-apps] authenticated editing permissions", ()
     const toggle = host.querySelector<HTMLButtonElement>('[data-app="feed"] [data-action="toggle-app"]')!;
     await act(async () => toggle.click());
     expect(order).toEqual(["chat", "page"]);
-    expect(fetchMock).toHaveBeenLastCalledWith(
+    expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/api/workspaces/workspace-one"),
       expect.objectContaining({ method: "PATCH", body: JSON.stringify({ homeApps: ["chat", "page"] }) }),
     );

@@ -185,6 +185,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   fileWrite: 'Save workspace file',
   fileAppend: 'Append to workspace file',
   fileRead: 'Read workspace file',
+  fileReadBytes: 'Download workspace file',
+  saveChatMedia: 'Save archived attachment',
   fileSearch: 'Search workspace files',
   fileSetMeta: 'Update file metadata',
   fileDelete: 'Delete workspace file',

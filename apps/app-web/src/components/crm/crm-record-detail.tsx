@@ -58,7 +58,7 @@ import type { FeedWorkspaceMember } from "@/lib/api/feed";
 import {
   memberDisplayName,
 } from "@/components/brain/property-edit";
-import { formatAmount, formatCurrencyTotals, resolveDealPipelineStage } from "@/lib/crm-view";
+import { addCrmAmounts, formatAmount, formatCurrencyTotals, resolveDealPipelineStage } from "@/lib/crm-view";
 import {
   DateProperty,
   PageTitle,
@@ -95,7 +95,7 @@ export type RecordCommits = {
   rename: (ref: CrmRecordRef) => CellCommit<string>;
   owner: (ref: CrmRecordRef) => CellCommit<string | null>;
   dealPipelineStage: (row: CrmDealRow) => CellCommit<string>;
-  dealAmount: (row: CrmDealRow) => CellCommit<number | null>;
+  dealAmount: (row: CrmDealRow) => CellCommit<number | string | null>;
   dealClose: (row: CrmDealRow) => CellCommit<string | null>;
   dealCompany: (row: CrmDealRow) => CellCommit<string | null>;
   dealContact: (row: CrmDealRow) => CellCommit<string | null>;
@@ -698,10 +698,10 @@ function Relationships({
     );
     const deals = data.deals.filter((d) => d.companyId === record.row.id);
     const openDeals = deals.filter((d) => isOpenStage(d.stage));
-    const pipelineTotals = openDeals.reduce<Record<string, number>>((totals, deal) => {
+    const pipelineTotals = openDeals.reduce<Record<string, number | string>>((totals, deal) => {
       if (deal.amount === null) return totals;
       const currency = deal.currencyCode?.toUpperCase() || "USD";
-      totals[currency] = Math.round(((totals[currency] ?? 0) + deal.amount) * 100) / 100;
+      totals[currency] = addCrmAmounts(totals[currency] ?? 0, deal.amount);
       return totals;
     }, {});
     const pipelineValue = formatCurrencyTotals(pipelineTotals, true);

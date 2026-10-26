@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * [COMP:app-web/workspace-root] A generic workspace/app open waits for the
- * ordered Home config and enters its first mini app. Page is not privileged.
+ * Chat Home immediately, without waiting for App store configuration.
  */
 
 import { act } from "react";
@@ -51,7 +51,7 @@ vi.mock("@/lib/siri-use-brian", () => ({
 
 import WorkspaceRootPage from "../page";
 
-describe("[COMP:app-web/workspace-root] opens the ordered default mini app", () => {
+describe("[COMP:app-web/workspace-root] opens Chat Home and preserves explicit handoffs", () => {
   let container: HTMLDivElement | null = null;
   let root: Root | null = null;
 
@@ -84,28 +84,28 @@ describe("[COMP:app-web/workspace-root] opens the ordered default mini app", () 
   const skeleton = () =>
     container!.querySelector<HTMLElement>('[data-testid="skeleton"]');
 
-  it("opens the first configured app even when sticky Home remembers Page", () => {
+  it("opens Chat even when configuration and previous app name other destinations", () => {
     window.localStorage.setItem("doc:operator-app:w1", "page");
     sidebar.state = {
       homeApps: ["crm", "page"],
       homeAppsLoading: false,
     };
     mount();
-    expect(navigation.replace).toHaveBeenCalledWith("/w/w1/crm");
-    expect(skeleton()!.dataset.surface).toBe("crm");
+    expect(navigation.replace).toHaveBeenCalledWith("/w/w1/chat");
+    expect(skeleton()!.dataset.surface).toBe("chat");
   });
 
-  it("does not redirect from the provider's provisional Page default", () => {
+  it("opens Chat without waiting for catalogue configuration", () => {
     sidebar.state = {
       homeApps: ["page", "office", "chat"],
       homeAppsLoading: true,
     };
     mount();
-    expect(navigation.replace).not.toHaveBeenCalled();
-    expect(skeleton()!.dataset.surface).toBe("");
+    expect(navigation.replace).toHaveBeenCalledWith("/w/w1/chat");
+    expect(skeleton()!.dataset.surface).toBe("chat");
   });
 
-  it("routes once the ordered config lands after an unseeded start", () => {
+  it("keeps Chat as Home when catalogue configuration changes", () => {
     sidebar.state = {
       homeApps: ["page", "office", "chat"],
       homeAppsLoading: true,
@@ -118,13 +118,13 @@ describe("[COMP:app-web/workspace-root] opens the ordered default mini app", () 
     expect(navigation.replace).toHaveBeenCalledWith("/w/w1/chat");
   });
 
-  it("keeps quick capture on Page without waiting for Home config", () => {
-    navigation.query = "capture=1";
+  it.each(["capture=1", "record=1"])("keeps explicit Page handoff %s", (query) => {
+    navigation.query = query;
     sidebar.state = {
       homeApps: ["crm", "page"],
       homeAppsLoading: true,
     };
     mount();
-    expect(navigation.replace).toHaveBeenCalledWith("/w/w1/p?capture=1");
+    expect(navigation.replace).toHaveBeenCalledWith(`/w/w1/p?${query}`);
   });
 });

@@ -118,6 +118,8 @@ export type ToolDefinition = {
 export type ThinkingLevel = 'low' | 'high'
 
 export type SessionOptions = {
+  /** Host-only current input admission; never serialized to a provider. */
+  assertInputAuthority?: () => Promise<void>
   model: string
   /**
    * `false` makes this exact registry alias authoritative. The routing
@@ -157,6 +159,8 @@ export type HttpRetryWindow = { deadline: number; rateLimited: boolean }
 export type ProviderProgress = { touch(kind: string): void }
 
 export type SendOptions = {
+  /** Inherits the session admission when omitted. */
+  assertInputAuthority?: () => Promise<void>
   signal?: AbortSignal
   progress?: ProviderProgress
   httpRetryWindow?: HttpRetryWindow
@@ -179,6 +183,8 @@ export type ProviderSession = {
 
 /** Legacy stateless interface — still useful for single-turn calls */
 export type ProviderRequest = {
+  /** Host-only current input admission, including each physical retry. */
+  assertInputAuthority?: () => Promise<void>
   httpRetryWindow?: HttpRetryWindow
   model: string
   /** See `SessionOptions.allowProviderFallback`. */

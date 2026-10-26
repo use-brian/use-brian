@@ -6,7 +6,7 @@ import { actorAuditIdentity, assertCrmOperationsAuthority, canonicalCrmRequest, 
   type CrmConfigCommand, type CrmOperationsContext } from '@use-brian/core'
 import {
   archiveCrmFieldDefinition, createCrmFieldDefinition, createCrmPipeline, createCrmStage,
-  lockCrmConfiguration, lockCrmConfigurationMember, restoreCrmFieldDefinition, setCrmStageArchived,
+  executeProtectedCrmConfiguration,lockCrmConfiguration, lockCrmConfigurationMember, restoreCrmFieldDefinition, setCrmStageArchived,
   updateCrmFieldDefinition, updateCrmPipeline, updateCrmStage,
 } from './crm-r2.js'
 import { authorizeCrmIntegrationCommand } from '../crm-operations/integration-authority.js'
@@ -45,6 +45,8 @@ async function compose(client: PoolClient, context: CrmOperationsContext, comman
   if (context.actor.kind !== 'integration_key') {
     await lockCrmConfigurationMember(client, workspaceId, userId)
   }
+  const protectedResult=await executeProtectedCrmConfiguration(client,workspaceId,command,undefined,context.actor.kind==='assistant'?context.actor.assistantId:undefined)
+  if(protectedResult)return protectedResult
   // Credential/member admission precedes the shared configuration/domain locks.
   await lockCrmConfiguration(client, workspaceId)
   const base = { workspaceId, userId, client }

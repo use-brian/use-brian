@@ -55,11 +55,12 @@ describe('[COMP:api/workspace-access] migration on the shared embedded single co
     }finally{await holder.end()}
     expect((await createMigrationPlan(f.w,f.u,f.input)).status).toBe('proposed')
   })
-  it('keeps resource simulation, saved review and canonical apply on the reserved client',async()=>{
+  it.each(['memory','task'] as const)('keeps %s simulation, saved review and canonical apply on the reserved client',async(resourceKind)=>{
     const f=await fixture()
-    const root=await createMemory({workspaceId:f.w,userId:f.u,assistantId:f.a,createdByUserId:f.u,summary:'Single connection evidence',sensitivity:'confidential',compartments:[]})
+    const root=resourceKind==='memory'?await createMemory({workspaceId:f.w,userId:f.u,assistantId:f.a,createdByUserId:f.u,summary:'Single connection evidence',sensitivity:'confidential',compartments:[]}):{id:randomUUID()}
+    if(resourceKind==='task')await pool.query("INSERT INTO tasks(id,workspace_id,user_id,assistant_id,title,created_by_user_id,sensitivity) VALUES($1,$2,$3,$4,'Single connection task',$3,'confidential')",[root.id,f.w,f.u,f.a])
     const p=await createMigrationPlan(f.w,f.u,{targetMode:'simple',idempotencyKey:randomUUID(),items:[{
-      reason:'Explicit resource',command:{type:'resource.scope',resourceKind:'memory',resourceId:root.id,action:'assign_team',targetTeamId:f.t},
+      reason:'Explicit resource',command:{type:'resource.scope',resourceKind,resourceId:root.id,action:'assign_team',targetTeamId:f.t},
     }]})
     const i=(await getMigrationPlan(f.w,f.u,p.id)).items[0]
     const r=await prepareMigrationItem(f.w,f.u,p.id,i.id)

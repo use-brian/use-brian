@@ -1,6 +1,25 @@
+import { hasTelegramWorkspaceConversationBinding } from '../../telegram-conversation-admission.js'
+vi.mock('../../telegram-conversation-admission.js', async original => ({ ...await original<typeof import('../../telegram-conversation-admission.js')>(), hasTelegramWorkspaceConversationBinding: vi.fn(async () => true) }))
 import { expectMentionMatches } from './incoming-event-assertions.js'
 import { dispatchIncomingMessageEvent } from '../../message-events.js'
+import { archiveProviderMessageId, normalizeInboundChatMessage } from '../../chat-archive/normalize.js'
+import { createHash } from 'node:crypto'
 vi.mock('../../message-events.js', () => ({ dispatchIncomingMessageEvent: vi.fn(async () => {}) }))
+const { archiveUnroutedInbound, resolveChatArchiveInstanceId, archiveOwnerQuery } = vi.hoisted(() => ({
+  archiveUnroutedInbound: vi.fn(async (_input: unknown) => {}),
+  resolveChatArchiveInstanceId: vi.fn(async (_input: unknown) => 'archive_instance_1'),
+  archiveOwnerQuery: vi.fn(async () => ({ rows: [{ ownerUserId: 'archive_owner_1' }] })),
+}))
+vi.mock('../../chat-archive/live-writer.js', async (original) => ({
+  ...await original<typeof import('../../chat-archive/live-writer.js')>(),
+  archiveUnroutedInbound, resolveChatArchiveInstanceId,
+}))
+vi.mock('../../db/client.js', async (original) => ({
+  ...await original<typeof import('../../db/client.js')>(), query: archiveOwnerQuery,
+}))
+
+vi.mock('../../context-scope/delivery-authority.js', async (original) => ({ ...(await original<typeof import('../../context-scope/delivery-authority.js')>()), createDeliveryAudienceEnvelopeResolver: vi.fn() }))
+vi.mock('../../context-scope/resolve-turn-scope.js', async (original) => ({ ...(await original<typeof import('../../context-scope/resolve-turn-scope.js')>()), resolveLiveAccessCeilingSystem: vi.fn() }))
 // Room convergence has its own suite ([COMP:api/channel-room]); here groups stay unbound.
 vi.mock('../../channel-room/room.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../channel-room/room.js')>()),
@@ -74,6 +93,7 @@ const DEFAULT_DOWNLOAD_VOICE = async () => ({
   mime: 'audio/ogg; codecs=opus',
 })
 let downloadVoiceImpl: () => Promise<{ buffer: Buffer; mime: string }> = DEFAULT_DOWNLOAD_VOICE
+let mediaDownloadError: Error | undefined
 
 const { mergeShadowUser } = vi.hoisted(() => ({
   mergeShadowUser: vi.fn(async () => ({ merged: false })),
@@ -136,6 +156,7 @@ vi.mock('@use-brian/channels', async () => {
         }),
         downloadMedia: vi.fn(async (fileId: string) => {
           mediaDownloadCalls.push(fileId)
+          if (mediaDownloadError) throw mediaDownloadError
           return { buffer: Buffer.from(`bytes-of-${fileId}`), mime: 'image/jpeg', name: `${fileId}.jpg` }
         }),
       })
@@ -178,6 +199,7 @@ vi.mock('../../db/chat-lock.js', () => ({
 // verify the adapter is called with a topic-qualified channel id on reply.
 const pipelineCalls: Array<{
   admittedAnswerContext?: { kind: 'continue'; questionAnswer?: string }
+  archiveInboundAlreadyPersisted?: boolean
   channelId: string
   interactionScope?: ChannelInteractionScope
   incomingMessage?: IncomingMessage
@@ -210,6 +232,7 @@ beforeAll(async () => {
 vi.mock('../channel-pipeline.js', () => ({
   processChannelMessage: vi.fn(async (params: {
     admittedAnswerContext?: { kind: 'continue'; questionAnswer?: string }
+    archiveInboundAlreadyPersisted?: boolean
     interactionScope?: ChannelInteractionScope
     incomingMessage?: IncomingMessage
     questionIntegrationId?: string
@@ -243,6 +266,7 @@ vi.mock('../channel-pipeline.js', () => ({
     // The real central pipeline owns typed-answer resolution and action registration.
     if (!params.admittedAnswerContext && binding && !params.workflowCallback) resolveChannelQuestion(binding)
     pipelineCalls.push({
+      archiveInboundAlreadyPersisted: params.archiveInboundAlreadyPersisted,
       admittedAnswerContext: params.admittedAnswerContext,
       interactionScope: params.interactionScope,
       incomingMessage: params.incomingMessage,
@@ -444,6 +468,10 @@ function flushMicrotasks(): Promise<void> {
 }
 
 beforeEach(() => {
+  archiveUnroutedInbound.mockClear()
+  resolveChatArchiveInstanceId.mockReset().mockResolvedValue('archive_instance_1')
+  archiveOwnerQuery.mockReset().mockResolvedValue({ rows: [{ ownerUserId: 'archive_owner_1' }] })
+  vi.mocked(hasTelegramWorkspaceConversationBinding).mockReset().mockResolvedValue(true)
   discussionStore.savePost.mockClear()
   discussionStore.saveRoot.mockClear()
   discussionStore.read.mockReset().mockResolvedValue(null)
@@ -468,6 +496,7 @@ beforeEach(() => {
   teamRoleResponse = null
   setWebhookCalls.length = 0
   downloadVoiceImpl = DEFAULT_DOWNLOAD_VOICE
+  mediaDownloadError = undefined
   mergeShadowUser.mockClear()
 })
 
@@ -607,9 +636,18 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
     })).toBe(
       'Telegram is connected, but this group is not approved for workspace replies. Ask a workspace owner or admin to approve it in Studio > Channels > Group reply access.',
     )
-    expect(telegramIncomingFailureText('42', {
+  })
+
+  it('uses the shared access notice in a DM without asking users to repeat possibly saved work', () => {
+    const text = telegramIncomingFailureText('42', {
       reason: 'delivery_audience_unverified',
-    })).toBe('Sorry, something went wrong while handling that message. Please send it again.')
+      diagnostic: 'source_held',
+      message: 'Private fixture error',
+    })
+    expect(text).toContain('access to some information')
+    expect(text).toContain('they may already be saved')
+    expect(text).toContain('Check their status before repeating the request')
+    expect(text).not.toMatch(/Please send it again|Private fixture error|source_held/)
   })
 
   // 2026-09-29: an approved group was told it was "not approved" when the
@@ -3288,4 +3326,460 @@ describe('Telegram workflow provider identity', () => {
     await flushMicrotasks()
     expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
   })
+})
+
+
+describe('[COMP:api/telegram-byo-route] shared group upload', () => {
+  it('two addressed bot installations save and acknowledge the same provider document once', async () => {
+    const { resolveRoomBinding } = await import('../../channel-room/room.js')
+    const { findAssistantById } = await import('../../db/users.js')
+    const { createDeliveryAudienceEnvelopeResolver } = await import('../../context-scope/delivery-authority.js')
+    const { resolveLiveAccessCeilingSystem } = await import('../../context-scope/resolve-turn-scope.js')
+    vi.mocked(resolveRoomBinding).mockResolvedValue({ workspaceId: 'ws_1', channelIntegrationId: 'integ_1' })
+    const grants = { workspaceId: 'ws_1', userId: 'owner_1', clearance: 'internal' as const,
+      compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: null }
+    vi.mocked(createDeliveryAudienceEnvelopeResolver).mockReturnValue(async () => ({ allowed: true, source: 'binding', ceiling: { ...grants, userId: '' } }))
+    vi.mocked(resolveLiveAccessCeilingSystem).mockResolvedValue({ ...grants, clearance: 'confidential' })
+    vi.mocked(findAssistantById).mockResolvedValue({ id: 'assistant_1', name: 'First', ownerUserId: 'owner_1',
+      workspaceId: 'ws_1', defaultModelAlias: 'standard', kind: 'standard', clearance: 'confidential', compartments: [] } as never)
+    const claimed = new Set<string>()
+    const mediaReceiptStore = { async claim(key: unknown) { const id=JSON.stringify(key); if(claimed.has(id))return false; claimed.add(id);return true }, async finish() {} }
+    const ingest = vi.fn(async () => ({ status: 'ingested', kind: 'document', episodeId: null, fileName: 'report.pdf', fileId: 'shared-file' } as const))
+    const integrationStore = makeIntegrationStore({ requireMention: false })
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({ provider: {} as never,
+      systemPrompt: '', tools: new Map(), memoryStore: {} as never, capabilityStore: {} as never,
+      integrationStore: integrationStore as never, apiUrl: 'http://test',
+      linkedAccountStore: { findByProvider: async () => ({ userId: 'owner_1' }) } as never,
+      channelUserStore: {} as never,
+      ingestChannelMediaRef: ingest, mediaReceiptStore,
+    }))
+    const update = { update_id: 9901, message: { message_id: 9901, date: 1700000000,
+      from: { id: 42, first_name: 'Example' }, chat: { id: -100123, type: 'supergroup' },
+      document: { file_id: 'bot-one-id', file_name: 'report.pdf', mime_type: 'application/pdf', file_size: 42 } } }
+    try {
+      await postUpdate(app, update)
+      await vi.waitFor(() => expect(ingest).toHaveBeenCalledOnce())
+      await vi.waitFor(() => expect(adapterSendCalls.some(c => c.text?.startsWith('Saved "report.pdf"'))).toBe(true))
+      // A second bot receives a different bot-local file_id for the SAME group message.
+      const originalIntegration = await integrationStore.getByChannelForWebhook()
+      integrationStore.getByChannelForWebhook.mockResolvedValue({ ...originalIntegration, id: 'integ_2', botUsername: 'otherbot' })
+      const originalAssistant = await findAssistantById('assistant_1')
+      vi.mocked(findAssistantById).mockImplementation(async id => ({ ...originalAssistant, id }) as never)
+      mockResolveTelegramRouting.mockResolvedValue({ id: 'ca_2', channelId: 'channel_1', assistantId: 'assistant_2', externalSurfaceId: null, modelAlias: 'standard', createdAt: new Date() })
+      await postUpdate(app, { ...update, message: { ...update.message, document: { ...update.message.document, file_id: 'bot-two-id' } } })
+      await flushMicrotasks(); await flushMicrotasks()
+      expect(ingest).toHaveBeenCalledOnce()
+      expect(ingest).toHaveBeenCalledWith(expect.objectContaining({ scope: { sensitivity: 'internal', compartments: [], projectIds: [] } }))
+      expect(adapterSendCalls.filter(c => c.text?.startsWith('Saved "report.pdf"'))).toHaveLength(1)
+      // Each installation can receive an album in a different order. Its
+      // provider album id, rather than the selected base message, owns intake.
+      const album = (id: number) => ({ update_id: id, message: { ...update.message,
+        message_id: id, media_group_id: 'shared-album', document: { ...update.message.document, file_id: `album-${id}` } } })
+      await postUpdate(app, album(9910))
+      await postUpdate(app, album(9911))
+      await vi.waitFor(() => expect(ingest).toHaveBeenCalledTimes(3), { timeout: 2000 })
+      await vi.waitFor(() => expect(adapterSendCalls.filter(c => c.text?.startsWith('Saved 2 files'))).toHaveLength(1))
+      await postUpdate(app, album(9911))
+      await postUpdate(app, album(9910))
+      // Wait for the second buffered album to reach the receipt store.
+      await vi.waitFor(() => expect(chatLockCalls.filter(c => c === 'tg-byo:-100123')).toHaveLength(4), { timeout: 2000 })
+      await flushMicrotasks(); await flushMicrotasks()
+      expect(ingest).toHaveBeenCalledTimes(3)
+      expect(adapterSendCalls.filter(c => c.text?.startsWith('Saved 2 files'))).toHaveLength(1)
+      vi.mocked(resolveLiveAccessCeilingSystem).mockResolvedValue({ ...grants, clearance: 'public' })
+      const resolvedBeforeRefusal = mediaResolveCalls.length
+      await postUpdate(app, { ...update, update_id: 9902, message: { ...update.message, message_id: 9902 } })
+      await vi.waitFor(() => expect(adapterSendCalls.some(c => c.text === 'This assistant cannot read this group context.')).toBe(true))
+      expect(mediaResolveCalls).toHaveLength(resolvedBeforeRefusal)
+      expect(ingest).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.mocked(resolveRoomBinding).mockResolvedValue(null)
+      vi.mocked(findAssistantById).mockResolvedValue({ id: 'assistant_1', name: 'Test Assistant', ownerUserId: 'owner_1', workspaceId: null, defaultModelAlias: 'gemini-flash', systemPrompt: null } as never)
+    }
+  })
+})
+
+
+describe('[COMP:api/telegram-byo-route] original media archive', () => {
+  function archiveApp(
+    config: Record<string, unknown> = { requireMention: true },
+    extra: Partial<Parameters<typeof telegramByoRoutes>[0]> = {},
+  ) {
+    const storeBuffer = vi.fn(async (input: { providerMessageId: string; bytes: Buffer; mime: string; filename: string }) => ({
+      assetId: `asset_${input.providerMessageId}`,
+      sha256: createHash('sha256').update(input.bytes).digest('hex'),
+      filename: input.filename, mime: input.mime, sizeBytes: input.bytes.length,
+    }))
+    const integrationStore = makeIntegrationStore(config)
+    const app = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      capabilityStore: {} as never, apiUrl: 'https://api.example.com', integrationStore: integrationStore as never,
+      archiveMedia: { storeBuffer } as never, ...extra,
+    }))
+    return { app, storeBuffer }
+  }
+  function photo(messageId: number, extra: Record<string, unknown> = {}) {
+    return { update_id: messageId, message: {
+      message_id: messageId, date: 1_700_000_000,
+      chat: { id: -100101, type: 'supergroup', is_forum: true }, message_thread_id: 7,
+      from: { id: 42, first_name: 'Example Sender' },
+      photo: [{ file_id: `small_${messageId}` }, { file_id: `large_${messageId}` }],
+      ...(typeof extra.caption === 'string' && extra.caption.startsWith('@testbot')
+        ? { caption_entities: [{ type: 'mention', offset: 0, length: 8 }] } : {}),
+      ...extra,
+    } }
+  }
+
+  it('stages an addressed photo under the canonical owner and binding before append, reusing its bytes for the turn', async () => {
+    const { app, storeBuffer } = archiveApp()
+    await postUpdate(app, photo(601, { caption: '@testbot inspect this' }))
+    await vi.waitFor(() => expect(pipelineCalls).toHaveLength(1))
+    expect(resolveChatArchiveInstanceId).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws_1', ownerUserId: 'archive_owner_1', source: 'telegram', conversationId: '-100101:topic:7',
+    }))
+    expect(storeBuffer).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws_1', instanceId: 'archive_instance_1', ownerUserId: 'archive_owner_1',
+      providerMessageId: 'telegram:v1:-100101:601', kind: 'image', mime: 'image/jpeg', bytes: Buffer.from('bytes-of-large_601'),
+    }))
+    expect(storeBuffer.mock.invocationCallOrder[0]).toBeLessThan(archiveUnroutedInbound.mock.invocationCallOrder[0])
+    expect(archiveUnroutedInbound).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws_1', message: expect.objectContaining({
+        messageId: '601', archiveMediaRef: expect.objectContaining({ sha256: createHash('sha256').update('bytes-of-large_601').digest('hex') }),
+      }),
+    }))
+    expect(pipelineCalls[0].archiveInboundAlreadyPersisted).toBe(true)
+    expect(mediaDownloadCalls).toEqual(['large_601'])
+    const archived = archiveUnroutedInbound.mock.calls[0][0] as { message: IncomingMessage }
+    const wire = normalizeInboundChatMessage({ source: 'telegram', message: archived.message })
+    expect(wire.media_ref).toMatchObject({ sha256: createHash('sha256').update('bytes-of-large_601').digest('hex'), availability: 'stored' })
+    expect(JSON.stringify(wire)).not.toMatch(/large_601|fake-token|file_id/)
+    expect(wire.raw_provider_blob).toBeNull()
+  })
+
+  it('keeps media upload and append identities distinct when two chats share message id 1', async () => {
+    const { app, storeBuffer } = archiveApp()
+    await postUpdate(app, photo(1))
+    await postUpdate(app, photo(1, { chat: { id: -100202, type: 'supergroup' }, photo: [{ file_id: 'other_chat_photo' }] }))
+    await vi.waitFor(() => expect(archiveUnroutedInbound).toHaveBeenCalledTimes(2))
+    const uploads = storeBuffer.mock.calls.map(([input]) => input.providerMessageId)
+    const appends = archiveUnroutedInbound.mock.calls.map(([input]) => {
+      const message = (input as { message: IncomingMessage }).message
+      expect(message.messageId).toBe('1') // live provider identity is unchanged
+      return normalizeInboundChatMessage({ source: 'telegram', message })
+    })
+    expect(uploads).toEqual(['telegram:v1:-100101:1', 'telegram:v1:-100202:1'])
+    expect(appends.map(message => message.provider_message_id)).toEqual(uploads)
+    expect(appends[0].media_ref).not.toEqual(appends[1].media_ref)
+    expect(uploads[0]).toBe(archiveProviderMessageId('telegram', '-100101:topic:7', '1'))
+  })
+
+  it('archives an unaddressed photo without starting a conversational turn', async () => {
+    const { app, storeBuffer } = archiveApp()
+    await postUpdate(app, photo(602))
+    await vi.waitFor(() => expect(archiveUnroutedInbound).toHaveBeenCalledTimes(1))
+    await flushMicrotasks()
+    expect(storeBuffer).toHaveBeenCalledTimes(1)
+    expect(pipelineCalls).toHaveLength(0)
+    expect(adapterSendCalls).toHaveLength(0)
+  })
+
+  it('keeps each album member and reuses downloads while the model receives one merged turn', async () => {
+    const { app, storeBuffer } = archiveApp()
+    await postUpdate(app, photo(603, { caption: '@testbot compare these', media_group_id: 'album_example' }))
+    await postUpdate(app, photo(604, { media_group_id: 'album_example' }))
+    await vi.waitFor(() => expect(pipelineCalls).toHaveLength(1))
+    expect(storeBuffer.mock.calls.map(([input]) => input.providerMessageId)).toEqual([
+      'telegram:v1:-100101:603', 'telegram:v1:-100101:604',
+    ])
+    expect(archiveUnroutedInbound.mock.calls.map(([input]) => (input as { message: IncomingMessage }).message.messageId))
+      .toEqual(['603', '604'])
+    expect(pipelineCalls[0].archiveInboundAlreadyPersisted).toBe(true)
+    expect(pipelineCalls[0].userContentBlocks?.filter(block => block.type === 'image')).toHaveLength(2)
+    expect(mediaDownloadCalls).toEqual(['large_603', 'large_604'])
+  })
+
+  it('waits for an album member whose staging outlasts the conversational buffer', async () => {
+    const { app, storeBuffer } = archiveApp()
+    const original = storeBuffer.getMockImplementation()!
+    let release: () => void = () => {}
+    const paused = new Promise<void>(resolve => { release = resolve })
+    storeBuffer.mockImplementation(async input => {
+      if (input.providerMessageId === 'telegram:v1:-100101:610') await paused
+      return original(input)
+    })
+    await postUpdate(app, photo(609, { caption: '@testbot compare these', media_group_id: 'slow_album' }))
+    await postUpdate(app, photo(610, { media_group_id: 'slow_album' }))
+    await vi.waitFor(() => expect(storeBuffer).toHaveBeenCalledTimes(2))
+    await new Promise(resolve => setTimeout(resolve, 550))
+    expect(pipelineCalls).toHaveLength(0)
+    release()
+    await vi.waitFor(() => expect(pipelineCalls).toHaveLength(1), { timeout: 2000 })
+    expect(pipelineCalls[0].userContentBlocks?.filter(block => block.type === 'image')).toHaveLength(2)
+    expect(mediaDownloadCalls).toEqual(['large_609', 'large_610'])
+  })
+
+  it('keeps a staged album member pending while workflow dispatch delays its buffer enrollment', async () => {
+    const { app, storeBuffer } = archiveApp()
+    const dispatch = vi.mocked(dispatchIncomingMessageEvent)
+    dispatch.mockReset().mockResolvedValue(undefined)
+    let release: () => void = () => {}
+    const paused = new Promise<void>(resolve => { release = resolve })
+    try {
+      await postUpdate(app, photo(613, { caption: '@testbot compare these', media_group_id: 'dispatch_album' }))
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1))
+      dispatch.mockImplementationOnce(async () => { await paused })
+      await postUpdate(app, photo(614, { media_group_id: 'dispatch_album' }))
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2))
+      // Both assets and archive messages are complete. Only the later routing
+      // leg is waiting, which previously released the album guard too early.
+      expect(storeBuffer).toHaveBeenCalledTimes(2)
+      expect(archiveUnroutedInbound).toHaveBeenCalledTimes(2)
+      await new Promise(resolve => setTimeout(resolve, 550))
+      expect(pipelineCalls).toHaveLength(0)
+      release()
+      await vi.waitFor(() => expect(pipelineCalls).toHaveLength(1), { timeout: 2000 })
+      expect(pipelineCalls[0].userContentBlocks?.filter(block => block.type === 'image')).toHaveLength(2)
+      expect(mediaDownloadCalls).toEqual(['large_613', 'large_614'])
+    } finally {
+      release()
+      dispatch.mockReset().mockResolvedValue(undefined)
+    }
+  })
+
+  it('records a provider download failure without claiming a stored asset', async () => {
+    const { app, storeBuffer } = archiveApp()
+    mediaDownloadError = new Error('provider temporarily unavailable')
+    await postUpdate(app, photo(611))
+    await vi.waitFor(() => expect(archiveUnroutedInbound).toHaveBeenCalledTimes(1))
+    expect(storeBuffer).not.toHaveBeenCalled()
+    const input = archiveUnroutedInbound.mock.calls[0][0] as { message: IncomingMessage }
+    expect(input.message.archiveMediaAvailability).toBe('failed')
+    expect(input.message.archiveMediaRef).toBeUndefined()
+  })
+
+  it.each(['single', 'album', 'voice'])('keeps reused %s download failures token-safe in live error logs', async kind => {
+    const { app } = archiveApp({ requireMention: true }, kind === 'voice'
+      ? { voiceTranscription: { enabled: true, apiKey: 'fake-test-key' } } : {})
+    mediaDownloadError = new TelegramApiError('downloadFile', 'https://api.example.com/file/bot-secret/image', 502)
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await postUpdate(app, photo(620, {
+        caption: '@testbot inspect this',
+        ...(kind === 'album' ? { media_group_id: 'failed_album' } : {}),
+        ...(kind === 'voice' ? { photo: undefined, voice: { file_id: 'large_620', duration: 1 } } : {}),
+      }))
+      await vi.waitFor(() => expect(pipelineCalls).toHaveLength(1), { timeout: 2000 })
+      expect(errors).toHaveBeenCalled()
+      expect(JSON.stringify(errors.mock.calls)).not.toContain('bot-secret')
+      expect(JSON.stringify(errors.mock.calls)).toContain('502')
+      expect(mediaDownloadCalls).toEqual(['large_620'])
+    } finally { errors.mockRestore() }
+  })
+
+  it('records an unavailable provider source as missing instead of inventing bytes', async () => {
+    const { app, storeBuffer } = archiveApp()
+    await postUpdate(app, photo(612, { photo: [{}], caption: 'source missing' }))
+    await vi.waitFor(() => expect(archiveUnroutedInbound).toHaveBeenCalledTimes(1))
+    expect(storeBuffer).not.toHaveBeenCalled()
+    const input = archiveUnroutedInbound.mock.calls[0][0] as { message: IncomingMessage }
+    expect(input.message.archiveMediaAvailability).toBe('missing')
+    expect(input.message.archiveMediaRef).toBeUndefined()
+  })
+
+  it('stages before no-routing and blocklist exits, retaining the account archive', async () => {
+    mockResolveAnyRouting.mockResolvedValueOnce(null)
+    mockResolveTelegramRouting.mockResolvedValueOnce(null)
+    const first = archiveApp()
+    await postUpdate(first.app, photo(605))
+    await vi.waitFor(() => expect(archiveUnroutedInbound).toHaveBeenCalledTimes(1))
+    await flushMicrotasks()
+    const second = archiveApp({ requireMention: false, userAccessMode: 'blocklist', blockedUserIds: ['42'] })
+    await postUpdate(second.app, photo(606))
+    await vi.waitFor(() => expect(archiveUnroutedInbound).toHaveBeenCalledTimes(2))
+    await flushMicrotasks()
+    expect(first.storeBuffer).toHaveBeenCalledTimes(1)
+    expect(second.storeBuffer).toHaveBeenCalledTimes(1)
+    expect(pipelineCalls).toHaveLength(0)
+  })
+
+  it.each([{}, { requireMentionOverrides: [{ chatId: '-100101', topicId: 134 }] }])('keeps an unowned album ephemeral until invocation, then archives every original member without foreign replies (%j)', async config => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    const { app, storeBuffer } = archiveApp(config)
+    await postUpdate(app, photo(620, { media_group_id: 'invoked_foreign_album',
+      reply_to_message: { message_id: 99, text: 'foreign context', is_automatic_forward: true } }))
+    await flushMicrotasks()
+    expect(storeBuffer).not.toHaveBeenCalled()
+    expect(archiveUnroutedInbound).not.toHaveBeenCalled()
+    expect(resolveChatArchiveInstanceId).not.toHaveBeenCalled()
+    await postUpdate(app, photo(621, { media_group_id: 'invoked_foreign_album', caption: '@testbot inspect these' }))
+    await vi.waitFor(() => expect(pipelineCalls).toHaveLength(1), { timeout: 2000 })
+    expect(storeBuffer).toHaveBeenCalledTimes(2)
+    const originals = archiveUnroutedInbound.mock.calls.map(([input]) => (input as { message: IncomingMessage }).message)
+    expect(originals.map(message => message.messageId).sort()).toEqual(['620', '621'])
+    expect(originals.every(message => !(message.raw as { reply_to_message?: unknown }).reply_to_message)).toBe(true)
+    expect(pipelineCalls[0].archiveInboundAlreadyPersisted).toBe(true)
+    expect(mediaDownloadCalls.sort()).toEqual(['large_620', 'large_621'])
+  })
+
+  it('never stages or archives uninvoked foreign album media', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    const { app, storeBuffer } = archiveApp()
+    await postUpdate(app, photo(622, { media_group_id: 'uninvoked_foreign_album' }))
+    await new Promise(resolve => setTimeout(resolve, 650))
+    expect(storeBuffer).not.toHaveBeenCalled()
+    expect(archiveUnroutedInbound).not.toHaveBeenCalled()
+    expect(resolveChatArchiveInstanceId).not.toHaveBeenCalled()
+    expect(mediaDownloadCalls).toHaveLength(0)
+    expect(pipelineCalls).toHaveLength(0)
+  })
+
+  it('records staging failure explicitly and never logs token-bearing provider failures', async () => {
+    const { app, storeBuffer } = archiveApp()
+    storeBuffer.mockRejectedValueOnce(new Error('https://api.example.com/file/bot-secret/image'))
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await postUpdate(app, photo(607))
+      await vi.waitFor(() => expect(archiveUnroutedInbound).toHaveBeenCalledTimes(1))
+      const input = archiveUnroutedInbound.mock.calls[0][0] as { message: IncomingMessage }
+      expect(input.message.archiveMediaRef).toBeUndefined()
+      expect(input.message.archiveMediaAvailability).toBe('failed')
+      expect(warning.mock.calls.flat().join(' ')).not.toContain('bot-secret')
+    } finally { warning.mockRestore() }
+  })
+
+  it('does not download declared media above Telegram limits and records unavailable coverage', async () => {
+    const { app, storeBuffer } = archiveApp()
+    await postUpdate(app, { update_id: 608, message: {
+      message_id: 608, date: 1_700_000_000, chat: { id: -100101, type: 'supergroup' },
+      from: { id: 42 }, video: { file_id: 'large_video', file_size: 30 * 1024 * 1024 },
+    } })
+    await vi.waitFor(() => expect(archiveUnroutedInbound).toHaveBeenCalledTimes(1))
+    const input = archiveUnroutedInbound.mock.calls[0][0] as { message: IncomingMessage }
+    expect(input.message.archiveMediaAvailability).toBe('failed')
+    expect(storeBuffer).not.toHaveBeenCalled()
+    expect(mediaDownloadCalls).toHaveLength(0)
+  })
+})
+
+describe('[COMP:api/telegram-byo-route] workspace ingress admission', () => {
+  function app(config: Record<string, unknown> = {}) {
+    return createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: {} as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore(config) as never, capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+  }
+  const message = (fields: Record<string, unknown> = {}) => ({ message_id: 6600, date: 1,
+    from: { id: 42 }, chat: { id: -100, type: 'supergroup', is_forum: true }, message_thread_id: 898,
+    text: 'private room chatter', ...fields })
+  function expectNoCapture() {
+    expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+    expect(discussionStore.saveRoot).not.toHaveBeenCalled()
+    expect(discussionStore.savePost).not.toHaveBeenCalled()
+    expect(pipelineCalls).toHaveLength(0)
+    expect(mediaDownloadCalls).toHaveLength(0)
+    expect(mediaResolveCalls).toHaveLength(0)
+    expect(adapterSendCalls).toHaveLength(0)
+  }
+  beforeEach(() => vi.mocked(dispatchIncomingMessageEvent).mockClear())
+  it.each([{}, { document: { file_id: 'foreign-doc', file_name: 'secret.pdf' } },
+    { audio: { file_id: 'foreign-audio', duration: 120 } }])('drops foreign topic text/media before all content sinks (%j)', async fields => {
+    await postUpdate(app({ requireMentionOverrides: [{ chatId: '-100', topicId: 134 }] }), { message: message(fields) })
+    await flushMicrotasks(); expectNoCapture()
+    expect(hasTelegramWorkspaceConversationBinding).not.toHaveBeenCalled()
+  })
+  it('drops unbound foreign workspace traffic regardless of matching clearance or global mention policy', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    await postUpdate(app({ requireMention: false }), { message: message() })
+    await flushMicrotasks(); expectNoCapture()
+    expect(hasTelegramWorkspaceConversationBinding).toHaveBeenCalledWith('ws_1', '-100', '-100:topic:898', 898)
+  })
+  it('fails closed when ownership metadata is unavailable', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockRejectedValue(new Error('offline'))
+    await postUpdate(app(), { message: message() }); await flushMicrotasks(); expectNoCapture()
+  })
+  it('does not save foreign broadcast posts or automatic discussion roots', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    await postUpdate(app(), { channel_post: message({ chat: { id: -100, type: 'channel' }, message_thread_id: undefined }) })
+    await postUpdate(app(), { message: message({ chat: { id: -100, type: 'supergroup' }, message_thread_id: undefined,
+      is_automatic_forward: true }) })
+    await flushMicrotasks(); expectNoCapture()
+  })
+  it('preserves same-workspace owned passive workflow events even when chat is disabled', async () => {
+    const { getChannelForWebhook } = await import('../../db/channels-store.js')
+    vi.mocked(getChannelForWebhook).mockResolvedValueOnce({ workspaceId: 'ws_1', status: 'active', enabledCapabilities: [] } as never)
+    await postUpdate(app(), { message: message() }); await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+    expect(pipelineCalls).toHaveLength(0)
+  })
+  it('still enforces topic ownership for events-only channels', async () => {
+    const { getChannelForWebhook } = await import('../../db/channels-store.js')
+    vi.mocked(getChannelForWebhook).mockResolvedValueOnce({ workspaceId: 'ws_1', status: 'active', enabledCapabilities: [] } as never)
+    await postUpdate(app({ requireMentionOverrides: [{ chatId: '-100', topicId: 134 }] }), { message: message() })
+    await flushMicrotasks(); expectNoCapture()
+  })
+  it('explicit self mention admits only that input, without importing a foreign reply snapshot', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    const instance = app()
+    await postUpdate(instance, { message: message({ text: '@testbot help', entities: [{ type: 'mention', offset: 0, length: 8 }],
+      reply_to_message: { message_id: 99, text: 'foreign source text', is_automatic_forward: true } }) })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+    expect(pipelineCalls).toHaveLength(1)
+    expect((pipelineCalls[0].replyRaw as { reply_to_message?: unknown })?.reply_to_message).toBeUndefined()
+    expect(discussionStore.saveRoot).not.toHaveBeenCalled()
+    vi.mocked(dispatchIncomingMessageEvent).mockClear(); pipelineCalls.length = 0; adapterSendCalls.length = 0
+    await postUpdate(instance, { message: message() }); await flushMicrotasks(); expectNoCapture()
+  })
+  it('buffers foreign albums without any persistent effects unless a member explicitly invokes this bot', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    await postUpdate(app(), { message: message({ media_group_id: 'foreign-album', text: undefined,
+      document: { file_id: 'foreign-doc', file_name: 'secret.pdf' } }) })
+    await new Promise(resolve => setTimeout(resolve, 650)); expectNoCapture()
+  })
+  it('preserves #432 explicit album invocation when the mention is on its second member', async () => {
+    const instance = app({ requireMentionOverrides: [{ chatId: '-100', topicId: 134 }] })
+    for (const [index, caption] of [[0, ''], [1, '@testbot inspect these']] as const) {
+      await postUpdate(instance, { message: message({ message_id: 6700 + index, text: undefined,
+        media_group_id: 'explicit-album', document: { file_id: `doc-${index}`, file_name: `part-${index}.pdf` },
+        caption, caption_entities: caption ? [{ type: 'mention', offset: 0, length: 8 }] : [] }) })
+    }
+    await new Promise(resolve => setTimeout(resolve, 700))
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0].incomingMessage?.files).toHaveLength(2)
+  })
+
+  it('does not treat an unqualified group command as permission to capture into a foreign workspace', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    await postUpdate(app(), { message: message({ text: '/ask remember this', entities: [{ type: 'bot_command', offset: 0, length: 4 }] }) })
+    await flushMicrotasks(); expectNoCapture()
+  })
+  it('honors a self-qualified command outside its owned topics', async () => {
+    await postUpdate(app({ requireMentionOverrides: [{ chatId: '-100', topicId: 134 }] }), {
+      message: message({ text: '/ask@testbot help', entities: [{ type: 'bot_command', offset: 0, length: 12 }] }) })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(pipelineCalls).toHaveLength(1)
+    expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
+  })
+  it('valid foreign-discussion callbacks retain their choice without importing ambient discussion context', async () => {
+    vi.mocked(hasTelegramWorkspaceConversationBinding).mockResolvedValue(false)
+    linkedDiscussionChatId = -200
+    const instance = app()
+    const source = message({ chat: { id: -100, type: 'supergroup' }, message_thread_id: 30,
+      text: '@testbot choose', entities: [{ type: 'mention', offset: 0, length: 8 }] })
+    pipelineQuestion = { question: 'Choose', options: ['A'] }
+    await postUpdate(instance, { message: source }); await flushMicrotasks(); await flushMicrotasks()
+    const action = adapterSendCalls.flatMap(msg => msg.actions ?? []).find(action => 'data' in action)
+    if (!action || !('data' in action)) throw new Error('Expected choice callback')
+    pipelineQuestion = undefined
+    await postUpdate(instance, { callback_query: { id: 'foreign-click', from: { id: 42 }, data: action.data,
+      message: { ...source, text: 'Choose', from: { id: 999999, is_bot: true } } } })
+    await flushMicrotasks(); await flushMicrotasks()
+    expect(hasTelegramWorkspaceConversationBinding).toHaveBeenCalledTimes(2)
+    expect(hasTelegramWorkspaceConversationBinding).toHaveBeenLastCalledWith('ws_1', '-100', '-100:discussion:30', undefined)
+    expect(pipelineCalls).toHaveLength(2)
+    expect(pipelineCalls.at(-1)?.messageText).toBe('A')
+    expect(discussionStore.read).not.toHaveBeenCalled()
+    expect(discussionStore.saveRoot).not.toHaveBeenCalled()
+  })
+
 })

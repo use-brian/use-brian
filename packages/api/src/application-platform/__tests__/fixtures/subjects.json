@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "installation": "https://brian.fixture.example",
+  "otherInstallation": "https://other.fixture.example",
+  "sourceTenant": "source-fixture",
+  "workspaces": [
+    "workspace-one",
+    "workspace-two"
+  ],
+  "departments": [
+    "purchasing",
+    "support"
+  ],
+  "people": [
+    {
+      "key": "staff-reader",
+      "email": "reader@example.com",
+      "department": "purchasing",
+      "sourceFields": [
+        "name"
+      ]
+    },
+    {
+      "key": "staff-manager",
+      "email": "manager@example.com",
+      "department": "purchasing",
+      "sourceFields": [
+        "name",
+        "unitCost"
+      ]
+    },
+    {
+      "key": "foreign-department",
+      "email": "support@example.com",
+      "department": "support",
+      "sourceFields": []
+    },
+    {
+      "key": "portal-customer",
+      "email": "customer@example.com",
+      "member": false
+    }
+  ],
+  "services": [
+    "order-service"
+  ],
+  "assistants": [
+    "operations-assistant",
+    "other-assistant"
+  ],
+  "crmCompany": {
+    "name": "Example Workshop",
+    "domain": "workshop.example"
+  },
+  "referenceMoney": {
+    "currency": "USD",
+    "unitCost": "12.50",
+    "quantity": "3",
+    "total": "37.50"
+  },
+  "securityInterleavings": [
+    "grant-revoked-after-read",
+    "field-downgraded-before-delivery",
+    "source-withdrawn-before-resume",
+    "audit-insert-fails",
+    "outbox-insert-fails",
+    "same-id-other-workspace",
+    "two-connection-cas-race",
+    "same-key-fresh-assertion-retry"
+  ]
+}

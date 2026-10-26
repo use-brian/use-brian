@@ -11,7 +11,9 @@ import type { Sensitivity } from './sensitivity.js'
 export type AttendedExecutionIdentity = {
   kind: 'attended'
   principal:
-    | { kind: 'workspace_member'; userId: string }
+    | { kind: 'workspace_member'; userId: string;
+        /** Host-verified fact. Legacy omission cannot qualify a protected source assertion. */
+        authenticationKind?: 'native_session' | 'verified_channel' | 'credential_attribution' }
     | { kind: 'verified_channel_guest'; userId: string; provider: string; externalId: string }
 }
 
@@ -27,6 +29,8 @@ export type ProgrammaticExecutionIdentity = {
   principal:
     | { kind: 'brain_key' | 'oauth_token' | 'home_app'; credentialId: string; actorUserId?: string }
     | { kind: 'public_share'; credentialId: string; actorUserId: string }
+    | { kind: 'application'; credentialId: string; actorUserId: string; applicationId: string;
+        subjectKind: 'member' | 'external_user' | 'service'; serviceUserId?: string }
   credentialOwnerUserId: string
 }
 
@@ -142,6 +146,10 @@ function validateIdentity(identity: ExecutionIdentity, actorUserId: string): voi
   if (identity.kind === 'attended') {
     required(identity.principal.userId, 'principal')
     if (identity.principal.userId !== actorUserId) throw new Error('execution_actor_mismatch')
+    if (identity.principal.kind === 'workspace_member' && identity.principal.authenticationKind !== undefined
+      && !['native_session', 'verified_channel', 'credential_attribution'].includes(identity.principal.authenticationKind)) {
+      throw new Error('execution_context_invalid:authentication_kind')
+    }
     if (identity.principal.kind === 'verified_channel_guest') {
       required(identity.principal.provider, 'provider')
       required(identity.principal.externalId, 'external_id')
@@ -153,9 +161,23 @@ function validateIdentity(identity: ExecutionIdentity, actorUserId: string): voi
   } else if (identity.kind === 'programmatic') {
     required(identity.principal.credentialId, 'credential')
     required(identity.credentialOwnerUserId, 'credential_owner')
+    if (identity.principal.kind === 'application') {
+      required(identity.principal.applicationId, 'application')
+      if (identity.principal.actorUserId !== actorUserId) throw new Error('execution_actor_mismatch')
+      if (identity.principal.subjectKind === 'service' && identity.principal.serviceUserId !== actorUserId) {
+        throw new Error('execution_actor_mismatch')
+      }
+    }
   } else {
     required(identity.jobId, 'job')
   }
+}
+
+/** Identity facts are plain data; keep caller-owned objects out of the immutable execution. */
+function freezeIdentityFacts(value: unknown): void {
+  if (!value || typeof value !== 'object') return
+  for (const nested of Object.values(value)) freezeIdentityFacts(nested)
+  Object.freeze(value)
 }
 
 /** Validate and freeze the facts every production execution must carry. */
@@ -211,8 +233,10 @@ export function createExecutionContext(input: CreateExecutionContextInput): Exec
     visibilityAssistantIds: ceiling.visibilityAssistantIds,
   }
 
+  const identity = structuredClone(input.identity)
+  freezeIdentityFacts(identity)
   return Object.freeze({
-    identity: input.identity,
+    identity,
     ownership: input.ownership,
     assistant: Object.freeze({ id: access.assistantId, kind: access.assistantKind }),
     security: Object.freeze({
@@ -248,6 +272,7 @@ export function executionToolContext(
   | 'sessionPersisted'
   | 'workspaceId'
   | 'assistantKind'
+  | 'sharedAudience'
   | 'visibilityAssistantIds'
   | 'abortSignal'
   | 'authority'
@@ -282,6 +307,7 @@ export function executionToolContext(
     ...(execution.lifecycle.sessionPersisted === false ? { sessionPersisted: false } : {}),
     workspaceId: execution.ownership.kind === 'workspace' ? execution.ownership.workspaceId : null,
     assistantKind: access.assistantKind,
+    sharedAudience: access.sharedAudience,
     visibilityAssistantIds: access.visibilityAssistantIds,
     abortSignal: execution.lifecycle.abortSignal,
     authority: execution.security.authority,

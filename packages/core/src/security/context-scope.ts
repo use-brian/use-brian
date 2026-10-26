@@ -1,7 +1,7 @@
 import type { AccessContext } from './access-context.js'
 import { isSensitivity, maxSensitivity, type Sensitivity } from './sensitivity.js'
-import { deriveContextFloor, type ScopeSource } from './derived-scope.js'
-import { boundScopeSource } from './source-evidence.js'
+import { DerivedScopeError, deriveContextFloor, resourceScopeKey, type ScopeSource } from './derived-scope.js'
+import { boundScopeSources } from './source-evidence.js'
 
 /** A finite set is a ceiling; null is the universe grant. */
 export type ScopeGrant = string[] | null
@@ -121,13 +121,25 @@ export class ContextScopeAccumulator {
     if (!evidence) return
     // Validate first so an invalid batch cannot leave half-applied evidence.
     if (evidence.sources?.length) {
-      // A later read of the same resource supersedes the earlier snapshot: a
-      // tool that returns its own committed write re-notes a newer version.
-      // The earlier labels already raised the floor below and stay there;
-      // only the lineage pointer moves to the version read last.
+      // Validate every supplied observation before deduplication. Otherwise an
+      // invalid or protected earlier item could disappear behind a later one.
+      const incomingFloors = evidence.sources.map(source =>
+        deriveContextFloor({ producer: 'context', sources: [source] }))
       const latest = new Map<string, ScopeSource>()
       for (const source of [...this.#sources, ...evidence.sources]) {
-        latest.set(JSON.stringify([source.workspaceId, source.resourceKind, source.resourceId]), source)
+        const key = JSON.stringify([source.workspaceId, source.resourceKind, source.resourceId])
+        const previous = latest.get(key)
+        // Native D1 re-reads may advance after this turn's own mutation. An
+        // immutable field/source/revision observation cannot be replaced by
+        // that rule. Conflicting exact observations refuse the whole batch.
+        const immutable = source.resourceKind === 'application_field'
+          || source.resourceKind === 'external_source'
+          || source.resourceKind === 'session_context_revision'
+        if (previous && ((immutable && previous.version !== source.version)
+          || (previous.version === source.version && resourceScopeKey(previous) !== resourceScopeKey(source)))) {
+          throw new DerivedScopeError('scope_source_changed')
+        }
+        latest.set(key, source)
       }
       const sources = [...latest.values()]
       // Label floor only: context may span visibility partitions (a primary
@@ -136,6 +148,9 @@ export class ContextScopeAccumulator {
       const floor = deriveContextFloor({ producer: 'context', sources })
       this.#sources.splice(0, this.#sources.length, ...structuredClone(sources))
       this.note({ sensitivity: floor.sensitivity, compartments: floor.compartments, projectIds: floor.projectIds })
+      // Earlier native snapshots in this same valid batch still raise labels,
+      // even when the lineage pointer advances to their latest version.
+      for (const incoming of incomingFloors) this.note(incoming)
     }
     if (evidence.sensitivity) {
       this.#sensitivity = maxSensitivity(this.#sensitivity, evidence.sensitivity)
@@ -170,15 +185,15 @@ export function scopeEvidenceFromRows(rows: readonly unknown[]): ScopeEvidence {
   const accumulator = new ContextScopeAccumulator()
   const seen = new Set<object>()
   const visit = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || seen.has(value)) return
+    seen.add(value)
+    // Note in read order: a newer version supersedes its pointer while the
+    // accumulator retains the earlier labels. Arrays may also carry evidence.
+    for (const source of boundScopeSources(value)) accumulator.noteSource(source)
     if (Array.isArray(value)) {
       for (const entry of value) visit(entry)
       return
     }
-    if (!value || typeof value !== 'object') return
-    if (seen.has(value)) return
-    seen.add(value)
-    const source = boundScopeSource(value)
-    if (source) accumulator.noteSource(source)
     const row = value as {
       sensitivity?: unknown
       compartments?: unknown

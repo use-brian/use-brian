@@ -15,10 +15,8 @@ const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/
 // serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 await assertLocalFixture()
 const pool = getPool(), store = createDbKnowledgeStore()
-// The isolated fixture provisions its non-owner role AFTER migrations. Mirror
-// only 632's three named runtime grants; no owner-role or broad function grant.
-await pool.query(`GRANT EXECUTE ON FUNCTION claim_knowledge_source_sync(uuid,uuid,uuid,jsonb),
-  release_knowledge_source_sync(uuid,uuid,uuid),apply_knowledge_source_sync(jsonb,jsonb) TO assurance_app`)
+// The maintained fixture installs the migration-declared native sync ACLs.
+// Real operations below exercise them without additional test grants.
 afterAll(async () => { await getAppPool().end(); await pool.end() })
 async function fixture(mode = 'simple', ready = true) {
   const userId = randomUUID(), workspaceId = randomUUID()

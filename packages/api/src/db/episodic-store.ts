@@ -1,4 +1,5 @@
-import type { EpisodicStore, EpisodicMemoryRecord } from '@use-brian/core'
+import { promoteSessionContextEpisode } from './session-context-revisions.js'
+import { bindScopeSources,boundScopeSources,type EpisodicStore,type EpisodicMemoryRecord } from '@use-brian/core'
 import {
   createEpisodicMemory,
   fetchEpisodicByTopic,
@@ -11,7 +12,7 @@ import {
 } from './episodic-memories.js'
 
 function toRecord(r: EpisodicMemoryRow): EpisodicMemoryRecord {
-  return {
+  return bindScopeSources({
     id: r.id,
     userId: r.userId,
     assistantId: r.assistantId,
@@ -24,7 +25,7 @@ function toRecord(r: EpisodicMemoryRow): EpisodicMemoryRecord {
     lastAccessedAt: r.lastAccessedAt,
     accessCount: r.accessCount,
     survivalCount: r.survivalCount,
-  }
+  },boundScopeSources(r))
 }
 
 /**
@@ -33,6 +34,7 @@ function toRecord(r: EpisodicMemoryRow): EpisodicMemoryRecord {
  */
 export function createDbEpisodicStore(): EpisodicStore {
   return {
+    promote: promoteSessionContextEpisode,
     async create(params) {
       const row = await createEpisodicMemory(params)
       return toRecord(row)
@@ -52,17 +54,17 @@ export function createDbEpisodicStore(): EpisodicStore {
       return listEpisodicTopicsBySession(params)
     },
 
-    async listBySession(sessionId) {
-      const rows = await listEpisodicBySession(sessionId)
+    async listBySession(sessionId, authority) {
+      const rows = await listEpisodicBySession(sessionId, authority)
       return rows.map(toRecord)
     },
 
-    async deleteById(id) {
-      await deleteEpisodicById(id)
+    async deleteById(id, authority) {
+      await deleteEpisodicById(id, authority)
     },
 
-    async incrementSurvivalCount(ids) {
-      await incrementEpisodicSurvivalCount(ids)
+    async incrementSurvivalCount(ids, authority) {
+      await incrementEpisodicSurvivalCount(ids, authority)
     },
   }
 }

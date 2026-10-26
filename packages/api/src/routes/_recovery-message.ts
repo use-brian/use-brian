@@ -65,7 +65,7 @@ export type ComposeRecoveryMessageResult = {
 }
 
 /** Always-Flash so a Pro outage doesn't take the recovery path with it. */
-const RECOVERY_MODEL = 'gemini-flash' as const
+const RECOVERY_MODEL = 'gemini-3.6-flash-pro' as const
 
 /**
  * Cap each tool_result snippet sent to Flash. The full Calendar /

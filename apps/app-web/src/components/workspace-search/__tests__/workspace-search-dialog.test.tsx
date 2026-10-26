@@ -31,19 +31,17 @@ beforeEach(()=>{
 })
 afterEach(()=>{act(()=>root.unmount());host.remove()})
 describe('[COMP:app-web/workspace-search] persistent modal behavior',()=>{
-  it('places labelled workspace context above main navigation and removes the page-only search',()=>{
+  it('keeps workspace search in the shared headers alongside persistent app navigation',()=>{
     const source=readFileSync('src/components/doc/doc-sidebar.tsx','utf8')
-    const nav=source.slice(source.indexOf('<nav data-doc-chrome'),source.indexOf('</nav>',source.indexOf('<nav data-doc-chrome')))
-    const context=source.slice(source.indexOf('<div data-doc-chrome data-workspace-context-nav'),source.indexOf('<nav data-doc-chrome'))
-    expect(context).toContain('/projects');expect(context).toContain('/organization')
-    expect(context).not.toContain('PhoneNavLabel')
-    expect(nav).not.toContain('/organization');expect(nav).not.toContain('/projects')
-    expect((source.match(/href=\{`\/w\/\$\{workspaceId\}\/organization`\}/g)??[]).length).toBe(1)
+    expect(source).toContain('<WorkspaceAppRail')
+    expect(source).toContain('<WorkspaceAppRail mobile')
     expect(source).not.toContain('searchOpen');expect(source).not.toContain('EmptySearchResults')
     for(const header of ['brain/brain-topbar','doc/doc-topbar','operator/operator-topbar','studio/studio-topbar','workflow/workflow-topbar']) {
       const code=readFileSync(`src/components/${header}.tsx`,'utf8')
-      expect(code).toContain('<WorkspaceSearchSlot />')
+      expect(code).toContain('<WorkspaceTopbar')
     }
+    const frame=readFileSync('src/components/chrome/workspace-topbar.tsx','utf8')
+    expect(frame.match(/<WorkspaceSearchSlot \/>/g)).toHaveLength(1)
   })
   it('autofocuses, escapes previews, selects a strong hit and Enter opens without sending',async()=>{
     mocks.search.mockResolvedValue(response([strong]));render(<WorkspaceSearchDialog workspaceId="ws" open onClose={mocks.close}/>);await tick()
@@ -89,6 +87,36 @@ describe('[COMP:app-web/workspace-search] persistent modal behavior',()=>{
     const trigger=document.querySelector<HTMLButtonElement>('[data-workspace-search-trigger]')!;act(()=>{trigger.focus();trigger.click()});await tick()
     key(document.querySelector<HTMLInputElement>('[data-workspace-search-input]')!,'Escape');await tick()
     expect(document.querySelector('[data-workspace-search-dialog]')).toBeNull();expect(document.activeElement).toBe(trigger)
+  })
+  it('moves one live search trigger between sidebar and toolbar across collapse and phone resize',async()=>{
+    const previous=Object.getOwnPropertyDescriptor(window,'matchMedia')
+    let desktop=true
+    const listeners=new Set<()=>void>()
+    Object.defineProperty(window,'matchMedia',{configurable:true,value:(query:string)=>({
+      media:query,get matches(){return query==='(min-width: 768px)' && desktop},
+      addEventListener:(_name:string,listener:()=>void)=>{if(query==='(min-width: 768px)')listeners.add(listener)},
+      removeEventListener:(_name:string,listener:()=>void)=>listeners.delete(listener),
+    })})
+    const view=(expanded:boolean)=><WorkspaceSearchProvider workspaceId="ws"><WorkspaceSearchSlot/>{expanded && <WorkspaceSearchSlot placement="sidebar"/>}</WorkspaceSearchProvider>
+    try {
+      render(view(true));await tick()
+      const trigger=()=>document.querySelector<HTMLButtonElement>('[data-workspace-search-trigger]')!
+      expect(trigger().parentElement?.dataset.workspaceSearchPlacement).toBe('sidebar')
+      expect(document.querySelectorAll('[data-workspace-search-trigger]')).toHaveLength(1)
+      act(()=>{trigger().focus();trigger().click()});await type('Unsaved query')
+      render(view(false));await tick()
+      expect(trigger().parentElement?.dataset.workspaceSearchPlacement).toBe('toolbar')
+      expect(document.querySelector<HTMLInputElement>('[data-workspace-search-input]')?.value).toBe('Unsaved query')
+      key(document.querySelector<HTMLInputElement>('[data-workspace-search-input]')!,'Escape');await tick()
+      expect(document.activeElement).toBe(trigger())
+      render(view(true));await tick()
+      act(()=>{desktop=false;listeners.forEach(listener=>listener())});await tick()
+      expect(trigger().parentElement?.dataset.workspaceSearchPlacement).toBe('toolbar')
+      expect(document.querySelectorAll('[data-workspace-search-trigger]')).toHaveLength(1)
+    } finally {
+      render(null)
+      if(previous)Object.defineProperty(window,'matchMedia',previous);else Reflect.deleteProperty(window,'matchMedia')
+    }
   })
   it.each(['p','brain','studio/connectors','workflow','live','office','chat','organization','apps/fixture'])('opens a single modal from %s and reserves a header slot',async route=>{
     mocks.path=`/w/ws/${route}`;render(<WorkspaceSearchProvider workspaceId="ws"><WorkspaceSearchFallback/><WorkspaceSearchSlot/></WorkspaceSearchProvider>);await tick()

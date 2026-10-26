@@ -15,14 +15,17 @@ import type {
   EntityUpdateFields,
   GetEntityOpts,
 } from '@use-brian/core'
-import { maxSensitivity, unionScopeRequirements } from '@use-brian/core'
+import { ENTITY_SOURCES, decodeCrmAmount, maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type { Sensitivity } from '@use-brian/core'
 import type pg from 'pg'
+import { z } from 'zod'
+import { ApplicationPlatformError, applicationJsonSchema } from '@use-brian/shared'
 import { clientCompartment } from '@use-brian/core'
 import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate } from './access-predicate.js'
 import { currentAgentAccess } from './agent-access-context.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getAppPool, getPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
+import { getApplicationTransactionBinding } from '../application-platform/execution-context.js'
 
 /**
  * `entities` store. Schema spec:
@@ -63,6 +66,7 @@ const FULL_SELECT = `
   canonical_id AS "canonicalId",
   aliases,
   attributes,
+  attributes->>'amount' AS "nativeAmountText",
   sensitivity,
   compartments,
   project_ids AS "projectIds",
@@ -100,6 +104,35 @@ const COMPACT_SELECT = `
   source
 `
 
+// Input validation checks shape only. Trusted derivation authority stays on the
+// original objects and is still verified by the existing admission boundary.
+const entityNameInput = z.string().min(1).max(8192).refine(value => value.trim().length > 0)
+const entityJsonAttributes = z.record(applicationJsonSchema)
+const entityScopeInput = { sensitivity:z.enum(['public','internal','confidential']).optional(),
+  compartments:z.array(z.string()).optional(),projectIds:z.array(z.string()).optional() }
+const entityCreateInput = z.object({kind:z.string().min(1),displayName:entityNameInput,workspaceId:z.string(),createdByUserId:z.string(),
+  source:z.enum(ENTITY_SOURCES),userId:z.string().nullable().optional(),assistantId:z.string().nullable().optional(),
+  canonicalId:z.string().nullable().optional(),...entityScopeInput,
+  // Explicit null destinations retain the canonical mode-admission error.
+  compartments:entityScopeInput.compartments.nullable(),projectIds:entityScopeInput.projectIds.nullable(),
+  attributes:entityJsonAttributes.optional(),aliases:z.array(z.string()).optional(),
+  createdByAssistantId:z.string().nullable().optional(),sourceEpisodeId:z.string().nullable().optional(),sourceSessionId:z.string().nullable().optional(),
+  explicitGeneral:z.boolean().optional(),derivation:z.custom<object>(value => value !== null && typeof value === 'object' && !Array.isArray(value)).optional(),
+}).strict()
+const entityPatchInput = z.object({displayName:entityNameInput.optional(),canonicalId:z.string().nullable().optional(),
+  attributes:entityJsonAttributes.optional(),sensitivity:entityScopeInput.sensitivity,
+  verifiedByUserId:z.string().nullable().optional(),verifiedAt:z.date().nullable().optional(),
+  inheritCompartments:z.array(z.string()).optional(),inheritProjectIds:z.array(z.string()).optional(),
+}).strict()
+const entitySuccessorInput = z.object({attributes:entityJsonAttributes,displayName:entityNameInput.optional(),canonicalId:z.string().nullable().optional(),
+  ...entityScopeInput,sourceEpisodeId:z.string().nullable().optional(),source:z.enum(ENTITY_SOURCES).optional(),
+}).strict()
+function assertEntityInputFrame(schema:z.ZodTypeAny,value:unknown):void {
+  let valid=false
+  try {valid=schema.safeParse(value).success} catch { /* Cyclic/non-JSON values are invalid input too. */ }
+  if (!valid) throw new ApplicationPlatformError('invalid_value','The canonical entity input is invalid.')
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 type EntityRow = {
@@ -109,6 +142,7 @@ type EntityRow = {
   canonicalId: string | null
   aliases: string[] | null
   attributes: Record<string, unknown> | null
+  nativeAmountText?: string | null
   sensitivity: string
   compartments: string[]
   projectIds: string[]
@@ -141,7 +175,7 @@ function toEntity(row: EntityRow): EntityRecord {
     displayName: row.displayName,
     canonicalId: row.canonicalId,
     aliases: row.aliases ?? [],
-    attributes: row.attributes ?? {},
+    attributes: row.kind === 'deal' && row.attributes?.amount != null ? { ...row.attributes, amount: decodeCrmAmount(row.attributes.amount,row.nativeAmountText) } : row.attributes ?? {},
     sensitivity: row.sensitivity as Sensitivity,
     compartments: row.compartments ?? [],
     projectIds: row.projectIds ?? [],
@@ -218,9 +252,17 @@ function entitySourceGuard(actorUserId: string, access: AccessContext | undefine
   return { sql: `${execution.sql} AND ${member.sql}`, params: [...execution.params, ...member.params], nextIdx: member.nextIdx }
 }
 
+/** Numeric JSON cannot recover an unsafe integer; SQL numeric input keeps its original text separately. */
+function hasUnsafeNativeAmount(attributes:Record<string,unknown>|undefined):boolean {
+  const amount=attributes?.amount
+  return typeof amount==='number' && Number.isInteger(amount) && !Number.isSafeInteger(amount)
+}
+
 export async function createEntity(params: EntityCreateParams, transactionClient?: pg.PoolClient): Promise<EntityRecord> {
   // Fail fast, before any connection or admission read (WU-4.5).
   assertAuthorshipPresent('createEntity', params.createdByUserId)
+  assertEntityInputFrame(entityCreateInput,params)
+  if(params.kind==='deal' && hasUnsafeNativeAmount(params.attributes)) throw new ApplicationPlatformError('invalid_value','Use an exact decimal string for this native amount.')
   if (!transactionClient) {
     const client = await getAppPool().connect()
     try {
@@ -232,12 +274,21 @@ export async function createEntity(params: EntityCreateParams, transactionClient
     } catch (error) { await client.query('ROLLBACK'); throw error }
     finally { client.release() }
   }
-  params = await admitEntityCreate(transactionClient, params)
+  const application = getApplicationTransactionBinding(transactionClient)
+  if (application && (application.workspaceId !== params.workspaceId || application.actorUserId !== params.createdByUserId)) throw new Error('scope_operation_denied')
+  if (!application) params = await admitEntityCreate(transactionClient, params)
   assertAuthorshipPresent('createEntity', params.createdByUserId)
   const access = entityMutationAccess(params.createdByUserId)
   assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: params.userId ?? null,
     assistantId: params.assistantId ?? null, sensitivity: params.sensitivity ?? 'internal',
     compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, params.derivation ? 'read' : 'mutation', access)
+  if (application) {
+    if (params.derivation) throw new Error('scope_output_not_integrated')
+    const result = await transactionClient.query<EntityRow>(`SELECT ${FULL_SELECT} FROM application_create_canonical_crm_entity($1::jsonb)`,
+      [JSON.stringify({ ...params, aliases: normalizeAliasArray(params.aliases ?? []) })])
+    if (!result.rows[0]) throw new Error('scope_operation_denied')
+    return toEntity(result.rows[0])
+  }
   if (params.derivation) {
     const result = await transactionClient.query<EntityRow>(
       `SELECT ${FULL_SELECT} FROM create_source_derived_entity($1::jsonb,$2::jsonb)`,
@@ -1163,14 +1214,92 @@ export async function listEntities(
  * clearance and private-user visibility using the bound authenticated actor,
  * including legacy user-only callers and owner-pool composed transactions.
  */
+/** Restriction-only field admission; ordinary row/scope admission remains mandatory. */
+export async function assertNativeEntityFieldWrites(
+  actorUserId: string, id: string, fields: EntityUpdateFields,
+  transactionClient?: pg.PoolClient, fieldIntent?: readonly string[],
+): Promise<void> {
+  if (fields.displayName === undefined && fields.canonicalId === undefined && fields.attributes === undefined && !fieldIntent?.length) return
+  const sql = 'SELECT application_native_entity_field_writes_allowed($1,$2::jsonb,$3::text[]) AS allowed'
+  const values = [id, JSON.stringify(fields), fieldIntent ?? null]
+  const result = transactionClient ? await transactionClient.query<{ allowed: boolean }>(sql, values)
+    : await queryWithRLS<{ allowed: boolean }>(actorUserId, sql, values)
+  if (result.rows[0]?.allowed !== true) throw new ApplicationPlatformError('access_unavailable', 'The current native write fields are unavailable.')
+}
+
 export async function updateEntity(
+  actorUserId: string, id: string, fields: EntityUpdateFields, access?: AccessContext,
+  transactionClient?: pg.PoolClient, operation?: { expectedVersion?: string; fieldIntent?: readonly string[] },
+): Promise<EntityRecord | null> {
+  assertEntityInputFrame(entityPatchInput,fields)
+  if(hasUnsafeNativeAmount(fields.attributes) && !transactionClient) {
+    const client=await getAppPool().connect()
+    try {
+      await client.query('BEGIN');await applyRLSGucs(client,actorUserId)
+      const result=await updateEntity(actorUserId,id,fields,access,client,operation)
+      await client.query('COMMIT');return result
+    } catch(error) {await client.query('ROLLBACK').catch(()=>{});throw error}
+    finally {client.release()}
+  }
+  await assertNativeEntityFieldWrites(actorUserId, id, fields, transactionClient, operation?.fieldIntent)
+  if (operation?.fieldIntent === undefined) return updateEntityMutation(actorUserId, id, fields, access, transactionClient, operation)
+  const client = transactionClient ?? await getAppPool().connect()
+  let previous = ''
+  try {
+    if (!transactionClient) { await client.query('BEGIN'); await applyRLSGucs(client, actorUserId) }
+    const source = (await client.query<{ workspace_id: string; kind: string }>(
+      'SELECT workspace_id,kind FROM entities WHERE id=$1', [id])).rows[0]
+    if (!source) { if (!transactionClient) await client.query('COMMIT'); return null }
+    previous = (await client.query<{ intent: string | null }>(
+      "SELECT current_setting('app.native_entity_write_intent',true) AS intent")).rows[0]?.intent ?? ''
+    await client.query("SELECT set_config('app.native_entity_write_intent',$1,true)", [JSON.stringify({
+      workspaceId: source.workspace_id, typeKey: source.kind, id, fields: operation.fieldIntent,
+    })])
+    const result = await updateEntityMutation(actorUserId, id, fields, access, client, operation)
+    await client.query("SELECT set_config('app.native_entity_write_intent',$1,true)", [previous])
+    if (!transactionClient) await client.query('COMMIT')
+    return result
+  } catch (error) {
+    if (!transactionClient) await client.query('ROLLBACK').catch(() => {})
+    else await client.query("SELECT set_config('app.native_entity_write_intent',$1,true)", [previous]).catch(() => {})
+    throw error
+  } finally { if (!transactionClient) client.release() }
+}
+
+async function updateEntityMutation(
   actorUserId: string,
   id: string,
   fields: EntityUpdateFields,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
+  operation?: { expectedVersion?: string; fieldIntent?: readonly string[] },
 ): Promise<EntityRecord | null> {
   access = entityMutationAccess(actorUserId, access)
+  if(hasUnsafeNativeAmount(fields.attributes)) {
+    if(!transactionClient) throw new Error('A canonical amount check requires its source transaction.')
+    const guard=entitySourceGuard(actorUserId,access,'mutation',2)
+    const source=(await transactionClient.query<{kind:string}>(`SELECT kind FROM entities WHERE id=$1 AND valid_to IS NULL
+      AND retracted_at IS NULL AND NOT scope_held AND ${guard.sql} FOR UPDATE`,[id,...guard.params])).rows[0]
+    if(!source) return null
+    if(source.kind==='deal') throw new ApplicationPlatformError('invalid_value','Use an exact decimal string for this native amount.')
+  }
+  if (operation?.expectedVersion !== undefined) {
+    if (!/^[1-9]\d*$/.test(operation.expectedVersion)) throw new ApplicationPlatformError('record_version_conflict','A valid expected source version is required.')
+    if (!transactionClient) {
+      const client=await getAppPool().connect()
+      try {
+        await client.query('BEGIN');await applyRLSGucs(client,actorUserId)
+        const updated=await updateEntity(actorUserId,id,fields,access,client,operation)
+        await client.query('COMMIT');return updated
+      } catch (error) { await client.query('ROLLBACK').catch(()=>{});throw error }
+      finally { client.release() }
+    }
+    const guard=entitySourceGuard(actorUserId,access,'mutation',2)
+    const current=await transactionClient.query<{ version: string }>(`SELECT scope_version::text AS version FROM entities
+      WHERE id=$1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held AND ${guard.sql} FOR UPDATE`,[id,...guard.params])
+    if (!current.rows[0]) return null
+    if (current.rows[0].version!==operation.expectedVersion) throw new ApplicationPlatformError('record_version_conflict','The canonical source version changed.')
+  }
   if (access) assertExecutionResourceScope({ workspaceId: access.workspaceId,
     userId: null, assistantId: null, sensitivity: 'public',
     compartments: fields.inheritCompartments ?? [], projectIds: fields.inheritProjectIds ?? [] }, 'mutation', access)
@@ -1188,8 +1317,13 @@ export async function updateEntity(
     values.push(fields.canonicalId)
   }
   if (fields.attributes !== undefined) {
-    sets.push(`attributes = $${idx++}::jsonb`)
-    values.push(JSON.stringify(fields.attributes))
+    if (operation?.fieldIntent !== undefined) {
+      sets.push(`attributes = application_merge_native_entity_attributes(entities.attributes,$${idx++}::jsonb,$${idx++}::text[])`)
+      values.push(JSON.stringify(fields.attributes),operation.fieldIntent)
+    } else {
+      sets.push(`attributes = $${idx++}::jsonb`)
+      values.push(JSON.stringify(fields.attributes))
+    }
   }
   if (fields.sensitivity !== undefined) {
     sets.push(`sensitivity = CASE WHEN sensitivity_rank($${idx}) > sensitivity_rank(sensitivity) THEN $${idx} ELSE sensitivity END`)
@@ -1292,6 +1426,7 @@ export async function supersedeEntity(
   patch: EntitySupersedePatch,
   transactionClient?: pg.PoolClient,
 ): Promise<EntityRecord | null> {
+  assertEntityInputFrame(entitySuccessorInput,patch)
   const access = entityMutationAccess(actorUserId)
   const ownedClient = transactionClient ? null : await getAppPool().connect()
   const client = transactionClient ?? ownedClient!
@@ -1320,6 +1455,7 @@ export async function supersedeEntity(
         return null
       }
       const old = toEntity(oldRes.rows[0])
+      if(old.kind==='deal' && hasUnsafeNativeAmount(patch.attributes)) throw new ApplicationPlatformError('invalid_value','Use an exact decimal string for this native amount.')
       if (destination?.workspace_id !== old.workspaceId) throw new Error('scope_workspace_mismatch')
       const nextSensitivity = maxSensitivity(old.sensitivity, patch.sensitivity ?? old.sensitivity)
       if (patch.sensitivity !== undefined && patch.sensitivity !== nextSensitivity) {

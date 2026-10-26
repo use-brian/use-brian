@@ -41,6 +41,10 @@ export type CurrentAuthorityBoundary = {
 export type ToolContext = {
   /** Validated production execution facts; flat fields below are its compatibility projection. */
   executionContext?: ExecutionContext
+  /** Host-owned model-input admission. Nested loops pass their current context; never serialized to a model. */
+  assertModelInputAuthority?: (context: ToolContext) => Promise<void>
+  /** Host-owned output admission, distinct from model-input permission; never recorded or model supplied. */
+  assertModelOutputAuthority?: (context: ToolContext) => Promise<void>
   userId: string
   /** Verified human actor for workspace administration. Set only by attended,
    * authenticated entrypoints; a billing owner or callee owner is not an actor. */
@@ -123,6 +127,8 @@ export type ToolContext = {
    * caller that predates the kind=app split; treated as 'standard'.
    */
   assistantKind?: 'standard' | 'app' | 'primary'
+  /** Shared turns cannot read or create a member's personal memory. */
+  sharedAudience?: boolean
   /** Additional visibility ceiling inherited by delegated execution. */
   visibilityAssistantIds?: string[] | null
   /**

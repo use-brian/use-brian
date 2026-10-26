@@ -25,7 +25,7 @@ async function expectAnchors(path: string, anchors: readonly string[]): Promise<
 describe('[COMP:api/context-scope-entrypoints] execution entry-point parity', () => {
   const paths: Record<string, readonly string[]> = {
     'packages/api/src/routes/chat.ts': ['resolveTurnScopeSystem', 'scopeAccumulator', 'effectiveProjectIds'],
-    'packages/api/src/routes/channel-pipeline.ts': ['resolveTurnScopeSystem', 'contextScope: turnScope', 'effectiveProjectIds'],
+    'packages/api/src/routes/channel-pipeline.ts': ['resolveConnectorNativeTurnScopeSystem', 'contextScope: turnScope', 'effectiveProjectIds'],
     'packages/api/src/routes/public-turn.ts': ['resolveExecutionContextSystem', 'scopeAccumulator', 'effectiveProjectIds'],
     'packages/api/src/inter-assistant/executor.ts': ['resolveTurnScopeSystem', 'contextScope: turnScope', 'scopeAccumulator'],
     'packages/api/src/brain-mcp/tools.ts': ['resolveExecutionContextSystem', 'executionToolContext', 'scopeAccumulator'],
@@ -93,8 +93,12 @@ describe('[COMP:tasks/project-context] stable Task Project contract', () => {
   it('uses one stable Project id and carries it through supersession', async () => {
     await expectAnchors('packages/api/src/db/tasks.ts', [
       'project_ids as "projectIds"',
-      'cardinality(project_ids) = 0',
+      'listLegacyCanonicalTasks(ctx,filters)',
       'unionScopeRequirements(old.project_ids',
+    ])
+    await expectAnchors('packages/api/src/db/task-reader.ts', [
+      'meta.scope.projectIds.length!==0',
+      'meta.scope.projectIds.length!==1||meta.scope.projectIds[0]!==filters.projectId',
     ])
     await expectAnchors('packages/core/src/tasks/tools.ts', [
       'Stable Project id for this task',

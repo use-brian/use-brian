@@ -44,7 +44,7 @@ export const AUTO_TITLE_MIN_CHARS = 500
 export const AUTO_TITLE_AI_MIN_CHARS = 1
 
 /** Standard-tier extraction model — same routing as the session auto-title. */
-const TITLE_MODEL = 'gemini-3.1-flash-lite'
+const TITLE_MODEL = 'gemini-3.5-flash-lite'
 
 const PAGE_TITLE_SYSTEM_PROMPT =
   'Give this document a single representative emoji followed by a short descriptive title (3-6 words). The title should capture the specific topic of the page. Output ONLY one emoji, a space, then the title — no markdown, quotes, or punctuation.\n\nRules:\n- Start with exactly one emoji that fits the topic, then a space\n- Title is always 3-6 words\n- Name the specific subject, not just the category\n- No leading/trailing punctuation or quotes\n\nExamples:\nQ3 revenue is up 14% driven by enterprise renewals… → 📈 Q3 Revenue Growth Review\nNotes from the offsite: hiring plan, runway, pricing… → 🗒️ Offsite Planning Notes\nA checklist for shipping the new onboarding flow… → 🚀 Onboarding Flow Launch Checklist'

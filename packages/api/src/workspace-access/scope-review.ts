@@ -269,7 +269,7 @@ function checkImpactLimit(impacts:ScopeReviewImpact[]){
     throw new WorkspaceAccessError('scope_review_impact_too_large',409)
 }
 async function view(client:PoolClient,workspaceId:string,id:string):Promise<ScopeReview>{
-  const job=(await client.query<Job>(`SELECT ${jobColumns} FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2`,[workspaceId,id])).rows[0]
+  const job=(await client.query<Job>(`SELECT ${jobColumns} FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2 AND application_assistant_id IS NULL`,[workspaceId,id])).rows[0]
   if(!job)throw new WorkspaceAccessError('not_found',404)
   const items=(await client.query<Item>(`SELECT ${itemColumns} FROM workspace_scope_review_items WHERE workspace_id=$1 AND review_id=$2 ORDER BY resource_id`,[workspaceId,id])).rows
   return {...job,items,completeCoverage:await completeCoverage(client,workspaceId),validForMs:job.action==='consolidate_default'?Math.max(0,Math.min(30_000,Date.parse(job.expiresAt!)-Date.now())):30_000}
@@ -314,10 +314,10 @@ export async function getWorkspaceScopeInventory(workspaceId:string,userId:strin
     const total=(await client.query<{count:string}>(`SELECT count(*)::text AS count ${base}`,[workspaceId,parsed.data])).rows[0].count
     // Resolve the anchor in this workspace and snapshot. Foreign and missing
     // IDs have identical outcomes; never interpret an invalid anchor as page one.
-    if(reviewAfter&&!(await client.query('SELECT 1 FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2',[workspaceId,reviewAfter])).rows.length)throw new WorkspaceAccessError('not_found',404)
+    if(reviewAfter&&!(await client.query('SELECT 1 FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2 AND application_assistant_id IS NULL',[workspaceId,reviewAfter])).rows.length)throw new WorkspaceAccessError('not_found',404)
     const reviewRows=(await client.query<Job>(`SELECT ${jobColumns} FROM workspace_scope_reviews
-      WHERE workspace_id=$1 AND ($2::uuid IS NULL OR (created_at,id)<(
-        SELECT created_at,id FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2))
+      WHERE workspace_id=$1 AND application_assistant_id IS NULL AND ($2::uuid IS NULL OR (created_at,id)<(
+        SELECT created_at,id FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2 AND application_assistant_id IS NULL))
       ORDER BY created_at DESC,id DESC LIMIT 21`,[workspaceId,reviewAfter??null])).rows
     const recentReviews=reviewRows.slice(0,20)
     const coverage=await getScopeReviewCoverage(client,workspaceId)
@@ -413,7 +413,7 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
       await audit(client,workspaceId,userId,'scope.review.preview',id,revision,{action:command.action,targetTeamId:command.targetTeamId,payloadHash,items:snapshots,contents,impacts})
       return view(client,workspaceId,id)
     }
-    await client.query('SELECT id FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2 FOR UPDATE',[workspaceId,command.reviewId])
+    await client.query('SELECT id FROM workspace_scope_reviews WHERE workspace_id=$1 AND id=$2 AND application_assistant_id IS NULL FOR UPDATE',[workspaceId,command.reviewId])
     const job=await view(client,workspaceId,command.reviewId)
     if(job.payloadHash!==command.payloadHash||hash(job,job.items.map(item=>item.source),job.items.map(item=>item.impact),job.items.map(item=>item.content))!==job.payloadHash)throw new WorkspaceAccessError('scope_review_changed',409)
     if(BigInt(command.expectedVersion)>BigInt(job.version))throw new WorkspaceAccessError('scope_review_changed',409)
@@ -497,7 +497,10 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
         continue
       }
       const adapter=sourceAdapter(job.resourceKind)
-      if(job.action==='assign_team'||job.action==='consolidate_default')await client.query(`UPDATE ${adapter.table} SET compartments=ARRAY[$3::text] WHERE workspace_id=$1 AND id=$2`,[workspaceId,item.resourceId,job.targetCompartment])
+      if(job.action==='assign_team'||job.action==='consolidate_default'){
+        if(job.resourceKind==='task')await client.query('SELECT application_perform_native_task_review($1,$2,$3::bigint,$4,$5,$6)',[workspaceId,job.id,job.version,job.payloadHash,item.resourceId,userId])
+        else await client.query(`UPDATE ${adapter.table} SET compartments=ARRAY[$3::text] WHERE workspace_id=$1 AND id=$2`,[workspaceId,item.resourceId,job.targetCompartment])
+      }
       if(job.action==='hold'){
         if(adapter.category==='source'&&!['session_message','feedback_event'].includes(job.resourceKind)){
           await client.query(`UPDATE ${adapter.table} SET scope_held=true WHERE workspace_id=$1 AND id=$2`,[workspaceId,item.resourceId])
@@ -521,7 +524,8 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
       await client.query("UPDATE workspace_scope_review_items SET status='applied',result_version=$4 WHERE workspace_id=$1 AND review_id=$2 AND resource_id=$3",[workspaceId,job.id,item.resourceId,after.version])
       applied.push({before:item.source,after})
     }
-    await client.query("UPDATE workspace_access_policies SET classification_mode=CASE WHEN classification_mode='legacy' AND $2 NOT IN('consolidate_default','release') THEN 'review' ELSE classification_mode END,revision=revision+1,updated_at=now() WHERE workspace_id=$1",[workspaceId,job.action])
+    if(job.resourceKind==='task'&&['assign_team','consolidate_default'].includes(job.action)&&applied.length>0)await client.query('SELECT application_finalize_native_task_review($1,$2,$3::bigint,$4,$5)',[workspaceId,job.id,job.version,job.payloadHash,userId])
+    else await client.query("UPDATE workspace_access_policies SET classification_mode=CASE WHEN classification_mode='legacy' AND $2 NOT IN('consolidate_default','release') THEN 'review' ELSE classification_mode END,revision=revision+1,updated_at=now() WHERE workspace_id=$1",[workspaceId,job.action])
     const revision=await policy(client,workspaceId)
     const coverage=await getScopeReviewCoverage(client,workspaceId)
     if(!['consolidate_default','release'].includes(job.action))await client.query('UPDATE workspace_access_policies SET reviewed_inventory_revision=$2 WHERE workspace_id=$1',[workspaceId,coverage.unresolved==='0'?SCOPE_REVIEW_REGISTRY_REVISION:null])

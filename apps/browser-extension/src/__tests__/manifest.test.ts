@@ -53,7 +53,7 @@ describe('[COMP:ext/agent] Manifest — narrow permissions', () => {
   })
 
   it('keeps only the narrow permission set', () => {
-    expect(new Set(manifest.permissions)).toEqual(new Set(['tabs', 'storage', 'debugger']))
+    expect(new Set(manifest.permissions)).toEqual(new Set(['tabs', 'storage', 'debugger', 'sidePanel']))
   })
 
   it('declares no content scripts', () => {

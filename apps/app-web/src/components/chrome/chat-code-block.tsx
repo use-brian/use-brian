@@ -69,7 +69,7 @@ export function ChatCodeBlock({ node: _node, children, ...rest }: PreProps) {
   };
 
   return (
-    <div className="group/codeblock relative">
+    <div data-chat-code-block className="group/codeblock relative min-w-0">
       <pre ref={preRef} {...rest}>
         {children}
       </pre>
@@ -79,12 +79,13 @@ export function ChatCodeBlock({ node: _node, children, ...rest }: PreProps) {
         title={copied ? t.copied : t.copyCode}
         onClick={onCopy}
         className={cn(
-          "absolute right-1.5 top-1.5 inline-flex h-9 w-9 items-center justify-center rounded-md border border-border/60 bg-background/90 text-muted-foreground shadow-sm backdrop-blur-sm transition-opacity hover:text-foreground md:h-6 md:w-6",
+          "absolute right-1.5 top-1.5 inline-flex size-11 items-center justify-center rounded-md text-muted-foreground transition-opacity hover:text-foreground md:size-6 pointer-coarse:size-11",
+          "before:pointer-events-none before:absolute before:inset-0 before:m-auto before:size-7 before:rounded-md before:border before:border-border/60 before:bg-background/90 before:shadow-sm md:before:size-6 pointer-coarse:before:size-7 [&>svg]:relative",
           // Always visible on a phone (responsive contract M2); desktop keeps
           // the hover reveal.
           copied
             ? "opacity-100"
-            : "opacity-100 focus-visible:opacity-100 md:opacity-0 md:group-hover/codeblock:opacity-100",
+            : "opacity-100 focus-visible:opacity-100 md:opacity-0 md:group-hover/codeblock:opacity-100 pointer-coarse:opacity-100",
         )}
       >
         {copied ? (

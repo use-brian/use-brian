@@ -183,7 +183,7 @@ export function routeWorkspaceChange(
     return [
       {
         event: BRAIN_REFRESH_EVENT,
-        detail: { workspaceId: payload.workspaceId } satisfies BrainRefreshDetail,
+        detail: { workspaceId: payload.workspaceId, primitive: payload.primitive } satisfies BrainRefreshDetail,
       },
     ];
   }
@@ -350,7 +350,14 @@ export function createRefreshFolder(opts: {
         // A real change folded into the window must not be downgraded to a
         // catch-up by a later catch-up: listeners purge only on the former.
         const keepReal = slot.pending !== null && slot.pending.detail.catchUp !== true && dispatch.detail.catchUp === true;
-        if (!keepReal) slot.pending = dispatch;
+        if (!keepReal) {
+          // A later unrelated update must not hide a source/access-affecting
+          // primitive in the same folded burst. Mixed signals stay conservative.
+          const mixedBrain = dispatch.event === BRAIN_REFRESH_EVENT && slot.pending !== null
+            && slot.pending.detail.catchUp !== true && dispatch.detail.catchUp !== true
+            && slot.pending.detail.primitive !== dispatch.detail.primitive;
+          slot.pending = mixedBrain ? {...dispatch, detail: {...dispatch.detail, primitive: null}} : dispatch;
+        }
         return;
       }
       const handle = setTimer(() => {

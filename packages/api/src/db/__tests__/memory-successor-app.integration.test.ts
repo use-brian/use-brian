@@ -10,8 +10,6 @@ import { runWithAgentAccess } from '../agent-access-context.js'
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
 const pool = getPool()
-// The fixture creates assurance_app after migrations, unlike production app_user.
-await pool.query('GRANT EXECUTE ON FUNCTION hold_memory_successor_descendants(uuid,uuid,bigint) TO assurance_app')
 afterAll(async () => { await getAppPool().end(); await pool.end() })
 
 async function fixture() {

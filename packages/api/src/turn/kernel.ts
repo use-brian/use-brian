@@ -34,14 +34,17 @@ import {
   createTurnOutputCollector,
   DEFAULT_STALL_IDLE_MS,
   queryLoop,
+  assertModelOutputAuthority,
   type QueryEvent,
   type QueryLoopOptions,
   type TurnOutputSelection,
+  type ToolContext,
 } from '@use-brian/core'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 import type { ResolvedWorkspaceCustomLlm } from '../custom-llm-runtime.js'
 import { ensureServableModel } from '../model-resolution.js'
+import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority } from '../application-platform/model-source-authority.js'
 import type { SessionPolicy } from '../session-kind.js'
 import { hasTurnAbort, registerTurnAbort, releaseTurn, startLeaseHeartbeat, takeTurnLease, unregisterTurnAbort } from './lease.js'
 import type { TurnBilling } from './billing.js'
@@ -53,6 +56,11 @@ const FINAL_ONLY_SINKS: ReadonlySet<TurnSinkKind> = new Set(['adapter', 'json', 
 
 export type TurnSink = {
   kind: TurnSinkKind
+  /** Host-only current recipient/source admission for a user-facing sink.
+   * Uses the original execution, lease and live accumulator; never a cached allow.
+   * Omission keeps the kernel's source-delivery validator.
+   */
+  assertOutputAuthority?: (context: ToolContext) => Promise<void>
   /** Every engine event, in order. The `sse` sink renders them; others may observe. */
   onEvent?: (event: QueryEvent) => void | Promise<void>
   /**
@@ -143,6 +151,25 @@ export function servedTurnModel(model: TurnModel): string {
  * re-throws a loop or sink failure after releasing.
  */
 export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<TurnLoopResult> {
+  const original = {
+    execution: params.loop.context.executionContext,
+    authority: params.loop.context.authority,
+    accumulator: params.loop.context.scopeAccumulator,
+  }
+  const assertSinkOutputAuthority = async (context: ToolContext): Promise<void> => {
+    if (!params.sink.assertOutputAuthority) return assertSourceModelOutputAuthority(context)
+    const assertIdentity = () => {
+      if (!original.execution || !original.authority || !original.accumulator
+        || original.authority !== original.execution.security.authority
+        || context.executionContext !== original.execution || context.authority !== original.authority
+        || context.scopeAccumulator !== original.accumulator) {
+        throw Object.assign(new Error('The sink context authority changed.'), { reason: 'authority_changed' as const, retrySafe: false })
+      }
+    }
+    assertIdentity()
+    await params.sink.assertOutputAuthority(context)
+    assertIdentity()
+  }
   const lease = params.lease ?? { mode: 'kernel' as const }
   let token: string | null = null
   if (lease.mode === 'kernel') {
@@ -185,14 +212,35 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     if (params.budget) await params.budget()
     // Loop and sink failures propagate unchanged: the runner's own error path
     // renders them. The lease is released in `finally` either way.
+    const context = { ...params.loop.context,assertModelInputAuthority: async (current: ToolContext) => {
+        const execution = current.executionContext, accumulator = current.scopeAccumulator
+        await params.loop.context.assertModelInputAuthority?.(current)
+        if (current.executionContext !== execution || current.scopeAccumulator !== accumulator) {
+          throw Object.assign(new Error('The model context authority changed.'), { reason: 'authority_changed' as const,retrySafe: false })
+        }
+        await assertSourceModelInputAuthority(current)
+      },assertModelOutputAuthority: async (current: ToolContext) => {
+        const execution = current.executionContext, accumulator = current.scopeAccumulator
+        await params.loop.context.assertModelOutputAuthority?.(current)
+        if (current.executionContext !== execution || current.scopeAccumulator !== accumulator) {
+          throw Object.assign(new Error('The model context authority changed.'), { reason: 'authority_changed' as const,retrySafe: false })
+        }
+        // Nested loop output re-enters host/model context. Delivery permission
+        // is checked at this kernel's actual user-facing sink below.
+        await assertSourceModelInputAuthority(current)
+      } }
     for await (const event of queryLoop({
       ...params.loop,
+      context,
       provider: params.model.provider,
       model: servedTurnModel(params.model),
       stallIdleMs: params.stallIdleMs ?? DEFAULT_STALL_IDLE_MS,
     })) {
       // An aborted turn stops consuming: nothing after a stop reaches a sink.
       if (params.abortController.signal.aborted) break
+      if (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json') {
+        await assertSinkOutputAuthority(context)
+      }
       collector.observe(event)
       await params.sink.onEvent?.(event)
     }
@@ -201,6 +249,12 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       ? sanitizeDeliveryText(selection.text) || null
       : null
     const result: TurnLoopResult = { selection, finalText, aborted: params.abortController.signal.aborted }
+    if (!result.aborted) {
+      await assertModelOutputAuthority(context)
+      if (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json') {
+        await assertSinkOutputAuthority(context)
+      }
+    }
     await params.sink.afterLoop?.(result)
     return result
   } finally {

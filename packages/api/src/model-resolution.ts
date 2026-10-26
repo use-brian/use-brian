@@ -37,7 +37,7 @@ import { deploymentCapabilities } from './edition.js'
  * is not servable and the routing provider throws. Boot resolves it once
  * against the configured providers and injects the result into every lane.
  */
-export const BACKGROUND_MODEL = 'gemini-3.1-flash-lite'
+export const BACKGROUND_MODEL = 'gemini-3.5-flash-lite'
 
 /**
  * Ensure the resolved model can actually be served by a configured provider,
@@ -263,8 +263,8 @@ export function backgroundLatencyBudgetMs(model: string): number {
 
 /**
  * Model alias mapping for the selector — the registry rows flagged with a
- * `chatTierKey`. Standard runs Flash 3 (the same model as Pro) under a
- * synthetic id and a tighter budget; Research runs Pro 3.1 under a synthetic
+ * `chatTierKey`. Standard runs Flash 3.6 (the same model as Pro) under a
+ * synthetic id and a tighter budget; Research runs Gemini 4 Argon under a synthetic
  * id on the deep budget. See the registry rows for the full provenance notes.
  */
 export const MODEL_MAP: Record<string, string> = chatTierDefaults()
@@ -298,8 +298,8 @@ export const PRO_TIER_MODELS: ReadonlySet<string> = tierModelIds('pro')
 export const MAX_TIER_MODELS: ReadonlySet<string> = tierModelIds('max')
 
 /**
- * Aliases for the Research tier — Pro 3.1 on the deep (100/100) budget under
- * the synthetic `gemini-3-pro-research` id. Derived from registry rows with
+ * Aliases for the Research tier — Argon on the deep (200/200) budget under
+ * the synthetic `gemini-4-argon-research` id (plus historical Research rows). Derived from registry rows with
  * `tier: 'research'`.
  */
 export const RESEARCH_TIER_MODELS: ReadonlySet<string> = tierModelIds('research')
@@ -314,7 +314,7 @@ export function isMaxTier(model: string): boolean {
   return MAX_TIER_MODELS.has(model)
 }
 
-/** Whether the model maps to the Research intelligence tier (Pro 3.1, deep budget). */
+/** Whether the model maps to the Research intelligence tier (Argon, deep budget). */
 export function isResearchTier(model: string): boolean {
   return RESEARCH_TIER_MODELS.has(model)
 }

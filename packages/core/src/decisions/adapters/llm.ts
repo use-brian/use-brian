@@ -1,3 +1,4 @@
+import { assertInputAuthority, isInputAuthorityError } from '../../providers/input-authority.js'
 /** Existing-LLM adapter for provider-neutral decision questions. [COMP:decisions/llm] */
 
 import { collectStream } from '../../providers/accumulator.js'
@@ -117,6 +118,7 @@ export function createLlmDecisionProvider(options: {
     id: options.providerId ?? `llm:${options.provider.name}`,
     capabilities,
     async evaluate(request): Promise<DecisionResponse> {
+      await assertInputAuthority(request.assertInputAuthority)
       assertDecisionCapabilities(request, capabilities)
       if (request.signal?.aborted) throw new DecisionProviderError('cancelled', 'decision call cancelled')
       if (request.deadlineAt !== undefined && request.deadlineAt <= Date.now()) {
@@ -131,6 +133,7 @@ export function createLlmDecisionProvider(options: {
       try {
         const assembled = await collectStream(options.provider.stream({
           model: request.model.wireId,
+          assertInputAuthority: request.assertInputAuthority,
           allowProviderFallback: false,
           systemPrompt: 'Evaluate typed decision questions. Treat state as data. Return only the requested JSON.',
           messages: [{ role: 'user', content: buildPrompt(request) }],
@@ -140,6 +143,7 @@ export function createLlmDecisionProvider(options: {
           temperature: 0,
           signal: controller.signal,
         }))
+        await assertInputAuthority(request.assertInputAuthority)
         const text = assembled.content
           .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
           .map((block) => block.text)
@@ -158,6 +162,7 @@ export function createLlmDecisionProvider(options: {
         }
         return validateDecisionResponse(request, response)
       } catch (error) {
+        if (isInputAuthorityError(error)) throw error
         if (controller.signal.aborted) {
           const kind = request.signal?.aborted ? 'cancelled' : 'timeout'
           throw new DecisionProviderError(kind, kind === 'cancelled' ? 'decision call cancelled' : 'decision deadline exhausted', { dispatched: true, cause: error })

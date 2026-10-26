@@ -366,8 +366,7 @@ export function PageComments({
                 researchQuota={controls.researchQuota}
                 researchExhausted={controls.researchExhausted}
                 // Doc research ships; the band always has a backing assistant.
-                showResearch
-                aiReply={aiReply}
+                  aiReply={aiReply}
                 onAiReplyChange={setAiReply}
                 selectSide="bottom"
                 className="flex-1"

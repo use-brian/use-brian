@@ -29,7 +29,7 @@ if (!apiKey) {
   console.error('Set GEMINI_API_KEY to run this verification.')
   process.exit(2)
 }
-const model = process.env.VERIFY_MODEL ?? 'gemini-2.5-flash'
+const model = process.env.VERIFY_MODEL ?? 'gemini-3.8-flash'
 
 let toolCalled = false
 

@@ -413,7 +413,7 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
           nestParentId: resolvedParentId,
           state: 'saved',
           writtenBy: 'user',
-        })
+        }, { provenance: { kind: 'human-authored', actorId: userId } })
         resolvedPageId = created.id
       }
 

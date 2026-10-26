@@ -146,8 +146,11 @@ describe("[COMP:app-web/recording-detail] recording detail route", () => {
     expect(container.querySelector('[data-testid="actions"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="transcript"]')).toBeTruthy();
     await poll();
-    // Processing polling stopped after the complete view; the third read is the
-    // content lease's 15-second authority renewal, not another status poll.
+    // Processing polling stopped after the complete view. Its successful read
+    // renewed authority too, so no redundant request is due at 15s or 20s.
+    expect(getRecording).toHaveBeenCalledTimes(2);
+    await act(async()=>vi.advanceTimersByTimeAsync(5000));
+    // Authority is still renewed, 15s after the successful status read.
     expect(getRecording).toHaveBeenCalledTimes(3);
     expect(container.querySelector('[data-testid="transcript"]')).toBeTruthy();
   });

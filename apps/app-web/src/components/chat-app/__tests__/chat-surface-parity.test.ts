@@ -33,12 +33,19 @@ const dockSuppressionSource = readFileSync(
 );
 
 describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
+  it("keeps drafting available while first-send context admission is pending", () => {
+    expect(source).toContain("disabled={!!pendingQuestion}");
+    expect(source).toMatch(/sendDisabled=\{\s*\(!activeSessionId && !creationContext\.ready\) \|\|/);
+    // The dispatch boundary still checks a live authority snapshot, including
+    // keyboard and programmatic sends that do not pass through the button.
+    expect(source).toContain("if(!sessionIdRef.current&&!creationContext.snapshot())");
+  });
   it("composes the shared pick, drop, paste, and upload-chip affordances", () => {
     expect(source).toContain("useFileAttachments(");
     expect(source).toContain("useFileDrop(");
     expect(source).toContain("<FileDropOverlay active={drop.isDragging}");
     expect(source).toContain("<AttachmentChips");
-    expect(source).toContain("<Paperclip");
+    expect(source).toContain("aria-label={tAttach.attach}");
     expect(source).toContain("imageFilesFromClipboard(event.clipboardData)");
     expect(source).toContain("allowEmptySend={att.hasReady || pendingRecordings.length > 0}");
     expect(source).toContain("att.uploading");
@@ -80,7 +87,7 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     expect(source).toContain("!att.uploading && isAssistantPickerLive({");
     // One hero picker for both views (chat-parity T5), frozen mid-upload: an
     // upload on a fresh pane mints the conversation with these picks.
-    expect(source).toMatch(/<ModeAwareCreationContext context=\{creationContext\}(?: compact)? disabled=\{att\.uploading\}\/>/);
+    expect(source).toMatch(/<ChatContextBar context=\{creationContext\} disabled=\{att\.uploading\} \/>/);
   });
 
   it("carries ready files and previews through a turn and restored history", () => {
@@ -110,7 +117,7 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
   });
 
   it("shares the dock's research and response affordances", () => {
-    expect(source).toContain("showResearch");
+    expect(source).not.toContain("showResearch");
     expect(source).toContain('{ mode: "research" as const }');
     expect(source).toContain('case "citation"');
     expect(source).toContain("<ChatCitationList");
@@ -149,7 +156,7 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     // The textarea's grid placement moved to the wrapper that carries the
     // mention-chip mirror; the cell it occupies is unchanged.
     expect(source).toContain('inputWrapClassName="order-1 col-span-2 min-w-0"');
-    expect(source).toContain("w-full max-h-[240px] min-w-0 resize-none");
+    expect(source).toContain("w-full max-h-[min(240px,30dvh,var(--chat-input-max-height,240px))] min-w-0 resize-none");
     expect(source).not.toContain('rowClassName="flex flex-wrap');
     expect(workspaceChromeSource).toContain("workspaceChatDockSuppressed(");
     expect(dockSuppressionSource).toContain(

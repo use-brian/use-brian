@@ -16,6 +16,7 @@ vi.mock('../client.js', () => ({
   queryWithRLS: vi.fn(),
 }))
 vi.mock('../entities-store.js', () => ({
+  assertNativeEntityFieldWrites: vi.fn(),
   getEntityById: vi.fn(),
   updateEntity: vi.fn(),
 }))
@@ -58,6 +59,7 @@ describe('[COMP:api/crm-record-http] primary participant transaction', () => {
   })
 
   it('clears both representations in one transaction and rolls back a failed write', async () => {
+    vi.mocked(prepareCrmParticipantMutation).mockResolvedValueOnce({ id: 'deal-1', kind: 'deal', attributes: { contact_id: 'contact-previous' } } as never)
     vi.mocked(updateDeal).mockRejectedValueOnce(new Error('write failed'))
 
     await expect(setCrmDealPrimaryContact({

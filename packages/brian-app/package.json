@@ -1,7 +1,7 @@
 {
   "name": "@use-brian/brian-app",
   "version": "0.1.0",
-  "description": "Manifest parser, bundle validator, and lint checks for Use Brian custom Home apps. Shared between the API import/sync path, the assistant tools, and the public CLI.",
+  "description": "Manifest and bundle validation, browser application client, and deployed module/source SDK profiles for Use Brian.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -9,6 +9,18 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./connector": {
+      "types": "./dist/connector.d.ts",
+      "import": "./dist/connector.js"
+    },
+    "./application": {
+      "types": "./dist/application.d.ts",
+      "import": "./dist/application.js"
+    },
+    "./module": {
+      "types": "./dist/module.d.ts",
+      "import": "./dist/module.js"
     }
   },
   "bin": {
@@ -38,6 +50,17 @@
   "devDependencies": {
     "@types/node": "^20.19.39",
     "typescript": "^5.7",
-    "vitest": "^3"
+    "vitest": "^3",
+    "@use-brian/shared": "workspace:*",
+    "@use-brian/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@use-brian/shared": "0.0.1",
+    "@use-brian/core": "0.0.1"
+  },
+  "peerDependenciesMeta": {
+    "@use-brian/core": {
+      "optional": true
+    }
   }
 }

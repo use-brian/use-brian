@@ -90,6 +90,8 @@ export type HomeAppRouteOptions = {
   filesApi: FilesApi
   /** The single server-side signing secret (`JWT_SECRET`). */
   signingSecret: string
+  /** Native-session app maximum capture; absent means no application capability. */
+  applicationBinding?: (actorUserId: string, homeAppId: string) => Promise<string | null>
   /** The API's own origin, folded into the bundle CSP's `connect-src`. */
   apiOrigin: string
   /** The web origin allowed to FRAME a bundle (app-web). See `buildBundleCsp`. */
@@ -497,6 +499,10 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
 
     const manifest = storedManifest(app)
     const renderable = isRenderableHomeApp(app) && manifest !== null
+    let applicationBindingId: string | null = null
+    if (renderable && manifest?.scopes.application && opts.applicationBinding) {
+      try { applicationBindingId = await opts.applicationBinding(userId, app.id) } catch { /* No capability on an unavailable authority reader. */ }
+    }
 
     // A non-renderable app still answers 200 with its state: the frame renders
     // a "needs consent" / "disabled" / "sync error" panel, which is far more
@@ -513,6 +519,7 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
       renderable,
       requestedScopes: manifest?.scopes ?? null,
       grantedScopes: app.grantedScopes,
+      ...(manifest?.scopes.application ? { applicationAvailable: applicationBindingId !== null } : {}),
       ...(renderable && manifest
         ? {
             entryUrl:
@@ -523,6 +530,7 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
               workspaceId: app.workspaceId,
               userId,
               scope: (app.grantedScopes as AppScopes).data,
+              ...(applicationBindingId ? { applicationBindingId } : {}),
               // The GRANTED store tier, not the manifest's request. A manifest
               // that widened after consent sits at `needs_consent` and never
               // reaches here, but reading the grant keeps that true by

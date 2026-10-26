@@ -47,6 +47,27 @@ describe('[COMP:tools/chat-archive] chat archive tools', () => {
     expect(result.data.hits[0]!.channel).toBe('i1:c1@g.us')
   })
 
+  it('projects original Telegram provider and reply ids while retaining stable archive references', async () => {
+    const search = vi.fn(async () => ({
+      hits: [
+        { source: 'telegram', instance_id: 'i1', conversation_id: '-100101:topic:7',
+          message_id: 'archive-row-1', provider_message_id: 'telegram:v1:-100101:1',
+          reply_to_provider_id: 'telegram:v1:-100101:2', media_sha256: 'a'.repeat(64) },
+        { source: 'telegram', instance_id: 'i1', conversation_id: '-100202',
+          message_id: 'archive-row-2', provider_message_id: '1', reply_to_provider_id: '2' },
+      ],
+      embedding_coverage: { partial: false, pending: 0, capped: false, note: 'ok' },
+    }))
+    const [searchTool] = createChatArchiveTools({ client: fakeClient({ search: search as never }) })
+    const result = await searchTool!.execute({ query: 'example' } as never, context) as {
+      data: { hits: Array<{ provider_message_id: string; reply_to_provider_id: string; message_id: string; media_sha256?: string }> }
+    }
+    expect(result.data.hits.map(hit => hit.provider_message_id)).toEqual(['1', '1'])
+    expect(result.data.hits.map(hit => hit.reply_to_provider_id)).toEqual(['2', '2'])
+    expect(result.data.hits.map(hit => hit.message_id)).toEqual(['archive-row-1', 'archive-row-2'])
+    expect(result.data.hits[0].media_sha256).toBe('a'.repeat(64))
+  })
+
   it('surfaces coverage so a thin result set can be told from a blind search', async () => {
     const search = vi.fn(async () => ({
       hits: [],

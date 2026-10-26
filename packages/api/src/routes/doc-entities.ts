@@ -20,6 +20,7 @@
 
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
+import { ApplicationPlatformError } from '@use-brian/shared'
 import type { DocEntityStore, CellValue, PropertyDef } from '@use-brian/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 
@@ -53,6 +54,21 @@ export function docEntitiesRoutes(opts: DocEntitiesRouteOptions): Router {
   }
 
   function serverError(res: Response, where: string, err: unknown): void {
+    if (err instanceof ApplicationPlatformError) {
+      const status = err.code.endsWith('_conflict') ? 409 : err.code === 'authentication_required' ? 401
+        : err.code === 'access_unavailable' ? 404 : 400
+      res.status(status).json({ error: err.code, message: err.message, effect: err.effect, retrySafe: err.retrySafe })
+      return
+    }
+    const code = (err as { code?: string })?.code
+    if (code === '42501') {
+      res.status(403).json({ error: 'access_unavailable', message: 'The operation is unavailable.' })
+      return
+    }
+    if (code === '22023' || code === '22P02' || code === '23514' || code === '23505') {
+      res.status(code === '23505' ? 409 : 400).json({ error: 'invalid_value', message: 'The declared record or schema constraints were not satisfied.' })
+      return
+    }
     const message = err instanceof Error ? err.message : 'Unknown error'
     console.error(`[doc-entities] ${where} failed:`, err)
     if (/unique/i.test(message)) fail(res, 409, message)
@@ -68,7 +84,7 @@ export function docEntitiesRoutes(opts: DocEntitiesRouteOptions): Router {
   router.get('/entity-types/:id', async (req, res) => {
     const ctx = await member(req, res)
     if (!ctx) return
-    const type = await opts.docEntityStore.getEntityType(ctx.workspaceId, req.params.id)
+    const type = await opts.docEntityStore.getEntityType(ctx.workspaceId, req.params.id, { actorUserId: ctx.userId })
     if (!type) return fail(res, 404, 'Entity type not found')
     res.json(type)
   })
@@ -110,8 +126,13 @@ export function docEntitiesRoutes(opts: DocEntitiesRouteOptions): Router {
     const props = (req.body ?? {}).properties
     if (!Array.isArray(props)) return fail(res, 400, 'properties array is required')
     try {
+      const current = await opts.docEntityStore.getEntityType(ctx.workspaceId, req.params.id, { actorUserId: ctx.userId })
+      if (!current) return fail(res, 404, 'Entity type not found')
       const updated = await opts.docEntityStore.updateEntityType(ctx.workspaceId, req.params.id, {
         properties: props as unknown as PropertyDef[],
+      }, { actorUserId: ctx.userId,
+        expectedSchemaVersion: typeof req.body?.expectedSchemaVersion === 'number' ? req.body.expectedSchemaVersion : current.schemaVersion,
+        ...(typeof req.body?.expectedRecordVersion === 'string' ? { expectedRecordVersion: req.body.expectedRecordVersion } : {}),
       })
       res.json(updated)
     } catch (err) {
@@ -127,32 +148,35 @@ export function docEntitiesRoutes(opts: DocEntitiesRouteOptions): Router {
     const property = (req.body ?? {}).property as PropertyDef | undefined
     if (!property || typeof property.name !== 'string') return fail(res, 400, 'property is required')
     try {
-      const current = await opts.docEntityStore.getEntityType(ctx.workspaceId, req.params.id)
+      const current = await opts.docEntityStore.getEntityType(ctx.workspaceId, req.params.id, { actorUserId: ctx.userId })
       if (!current) return fail(res, 404, 'Entity type not found')
       if (current.properties.some((p) => p.name === property.name)) {
         return fail(res, 409, `Property "${property.name}" already exists`)
       }
       const updated = await opts.docEntityStore.updateEntityType(ctx.workspaceId, req.params.id, {
         properties: [...current.properties, property],
-      })
+      }, { actorUserId: ctx.userId, expectedSchemaVersion: current.schemaVersion })
       res.status(201).json(updated)
     } catch (err) {
       serverError(res, 'add property', err)
     }
   })
 
-  // Remove a property (column delete). Cell values stay in the JSONB (soft).
+  // Populated incompatible values require preview/repair; they are never silently orphaned.
   router.delete('/entity-types/:id/properties/:name', async (req, res) => {
     const ctx = await member(req, res)
     if (!ctx) return
     try {
-      const current = await opts.docEntityStore.getEntityType(ctx.workspaceId, req.params.id)
+      const current = await opts.docEntityStore.getEntityType(ctx.workspaceId, req.params.id, { actorUserId: ctx.userId })
       if (!current) return fail(res, 404, 'Entity type not found')
       if (!current.properties.some((p) => p.name === req.params.name)) {
         return fail(res, 404, `Property "${req.params.name}" not found`)
       }
       const updated = await opts.docEntityStore.updateEntityType(ctx.workspaceId, req.params.id, {
         properties: current.properties.filter((p) => p.name !== req.params.name),
+      }, { actorUserId: ctx.userId,
+        expectedSchemaVersion: typeof req.body?.expectedSchemaVersion === 'number' ? req.body.expectedSchemaVersion : current.schemaVersion,
+        ...(typeof req.body?.expectedRecordVersion === 'string' ? { expectedRecordVersion: req.body.expectedRecordVersion } : {}),
       })
       res.json(updated)
     } catch (err) {
@@ -174,6 +198,7 @@ export function docEntitiesRoutes(opts: DocEntitiesRouteOptions): Router {
         req.params.id,
         req.params.name,
         newName,
+        { actorUserId: ctx.userId, ...(typeof req.body?.expectedSchemaVersion === 'number' ? { expectedSchemaVersion: req.body.expectedSchemaVersion } : {}) },
       )
       res.json(updated)
     } catch (err) {
@@ -222,6 +247,9 @@ export function docEntitiesRoutes(opts: DocEntitiesRouteOptions): Router {
       const updated = await opts.docEntityStore.updateEntity(ctx.workspaceId, req.params.id, {
         data: data as Record<string, CellValue>,
         lastEditedBy: ctx.userId,
+      }, { actorUserId: ctx.userId,
+        ...(typeof req.body?.expectedSchemaVersion === 'number' ? { expectedSchemaVersion: req.body.expectedSchemaVersion } : {}),
+        ...(typeof req.body?.expectedRecordVersion === 'string' ? { expectedRecordVersion: req.body.expectedRecordVersion } : {}),
       })
       res.json(updated)
     } catch (err) {
@@ -233,7 +261,7 @@ export function docEntitiesRoutes(opts: DocEntitiesRouteOptions): Router {
     const ctx = await member(req, res)
     if (!ctx) return
     try {
-      await opts.docEntityStore.deleteEntity(ctx.workspaceId, req.params.id)
+      await opts.docEntityStore.deleteEntity(ctx.workspaceId, req.params.id, { actorUserId: ctx.userId })
       res.json({ ok: true })
     } catch (err) {
       serverError(res, 'delete entity', err)

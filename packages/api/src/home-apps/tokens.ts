@@ -56,6 +56,8 @@ export type BridgeTokenPayload = {
   userId: string
   /** Brain access the admin consented to. */
   scope: AppDataScope
+  /** Opaque, viewer-bound app maximum; absent on every older capability. */
+  applicationBindingId?: string
   /**
    * Commerce-store access the admin consented to. OPTIONAL, and absent means
    * `'none'`: a bridge token minted before this claim existed must resolve to
@@ -103,6 +105,7 @@ export function mintBridgeToken(opts: {
   workspaceId: string
   userId: string
   scope: AppDataScope
+  applicationBindingId?: string
   store?: AppStoreScope
   agent?: AppAgentScope
   maxClearance: Sensitivity | null
@@ -117,6 +120,7 @@ export function mintBridgeToken(opts: {
       workspaceId: opts.workspaceId,
       userId: opts.userId,
       scope: opts.scope,
+      ...(opts.applicationBindingId ? { applicationBindingId: opts.applicationBindingId } : {}),
       ...(opts.store && opts.store !== 'none' ? { store: opts.store } : {}),
       ...(opts.agent === 'ask' ? { agent: 'ask' as const } : {}),
       maxClearance: opts.maxClearance,
@@ -207,7 +211,9 @@ export function verifyBridgeToken(opts: {
   if (
     typeof p.workspaceId !== 'string' ||
     typeof p.userId !== 'string' ||
-    (p.scope !== 'read' && p.scope !== 'read_write')
+    (p.scope !== 'none' && p.scope !== 'read' && p.scope !== 'read_write')
+    || p.applicationBindingId !== undefined && (typeof p.applicationBindingId !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p.applicationBindingId))
   ) {
     return { ok: false, reason: 'malformed' }
   }

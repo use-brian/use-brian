@@ -127,9 +127,12 @@ export function createPollWorker(options: PollWorkerOptions) {
   } = options
   let timer: ReturnType<typeof setInterval> | undefined
   let running = false
+  let generation = 0
 
   async function tick() {
-    if (running) return // skip if previous tick still executing
+    if (!timer || running) return // keep one flight across stop/restart
+    const epoch = generation
+    const current = () => timer !== undefined && generation === epoch
     running = true
 
     try {
@@ -137,14 +140,18 @@ export function createPollWorker(options: PollWorkerOptions) {
       // a due job runs a full model turn, and holding a background-lane slot
       // across that would starve every other loop for minutes. The lane exists
       // to bound concurrent DB checkouts, not to serialize work.
-      const dueJobs = await runInBackgroundLane(() => store.getDueJobs())
+      const dueJobs = await runInBackgroundLane(async () => current() ? store.getDueJobs() : [])
 
       for (const candidate of dueJobs) {
+        if (!current()) break
         let job = candidate
         if (candidate.requiresScheduleClaim) {
           // Do not spend a later job's lease while earlier jobs execute.
           if (!store.claimDueJob || !store.finishScheduleClaim) continue
-          const claimed = await runInBackgroundLane(() => store.claimDueJob!(candidate.id))
+          const claimed = await runInBackgroundLane(async () => current() ? store.claimDueJob!(candidate.id) : null)
+          // A late claim belongs to the stopped generation. Leave it
+          // unconsumed for canonical lease recovery, never execute it here.
+          if (!current()) break
           if (!claimed?.scheduleClaimId) continue
           job = claimed
           let success = false
@@ -258,12 +265,16 @@ export function createPollWorker(options: PollWorkerOptions) {
       console.error('[scheduler] Poll error:', err)
     } finally {
       running = false
+      // A restart during an old await must not lose its immediate pass.
+      // Completed effects keep their normal bookkeeping before this point.
+      if (timer && generation !== epoch) void tick()
     }
   }
 
   return {
     start() {
       if (timer) return
+      generation++
       console.log(`[scheduler] Poll worker started (interval: ${intervalMs}ms)`)
       timer = setInterval(tick, intervalMs)
       // Run immediately on start
@@ -271,6 +282,7 @@ export function createPollWorker(options: PollWorkerOptions) {
     },
 
     stop() {
+      generation++
       if (timer) {
         clearInterval(timer)
         timer = undefined
@@ -323,9 +335,12 @@ export function createBatchWorker(options: BatchWorkerOptions) {
   } = options
   let timer: ReturnType<typeof setInterval> | undefined
   let running = false
+  let generation = 0
 
   async function tick() {
-    if (running) return
+    if (!timer || running) return
+    const epoch = generation
+    const current = () => timer !== undefined && generation === epoch
     running = true
 
     try {
@@ -336,6 +351,7 @@ export function createBatchWorker(options: BatchWorkerOptions) {
       // the embedding drain, still present here. Decoupling it is its own item.
       await store.withClaimedBatches(batchLimit, async (batches, markProcessed) => {
         for (const batch of batches) {
+          if (!current()) break
           try {
             await processBatch(batch)
             await markProcessed(batch.id)
@@ -350,18 +366,23 @@ export function createBatchWorker(options: BatchWorkerOptions) {
       console.error('[ingest-batch-worker] poll error:', err)
     } finally {
       running = false
+      // A restart during an old await must not lose its immediate pass.
+      // Completed effects keep their normal bookkeeping before this point.
+      if (timer && generation !== epoch) void tick()
     }
   }
 
   return {
     start() {
       if (timer) return
+      generation++
       console.log(`[ingest-batch-worker] started (interval: ${intervalMs}ms)`)
       timer = setInterval(tick, intervalMs)
       tick()
     },
 
     stop() {
+      generation++
       if (timer) {
         clearInterval(timer)
         timer = undefined

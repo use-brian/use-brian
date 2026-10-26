@@ -293,6 +293,7 @@ describe("[COMP:app-web/feed-tuning-chat] FeedFloatingChat", () => {
     // Panel is mounted even while collapsed — header + empty state ship in
     // the initial markup so an expand never remounts the conversation.
     expect(html).toContain(en.feedPage.tuningChat.title);
+    expect(html).not.toContain(`aria-label="${en.feedPage.tuningChat.research}"`);
     expect(html).toContain(en.feedPage.tuningChat.emptyTitle);
     expect(html).toContain(en.feedPage.tuningChat.suggestion2);
     // Feed's replacement dock must retain the global dock's resize contract:

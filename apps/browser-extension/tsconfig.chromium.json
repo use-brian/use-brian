@@ -6,6 +6,6 @@
     "declarationMap": false,
     "sourceMap": false
   },
-  "files": ["src/allow.ts", "src/background.ts", "src/popup.ts"],
+  "files": ["src/allow.ts", "src/background.ts", "src/popup.ts", "src/sidepanel.tsx"],
   "include": []
 }

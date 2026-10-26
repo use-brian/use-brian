@@ -224,11 +224,13 @@ export type BrainFileTools = {
   fileWrite: Tool
   fileAppend: Tool
   fileRead: Tool
+  fileReadBytes: Tool
   fileSearch: Tool
   fileSetMeta: Tool
   fileDelete: Tool
   saveFileToBrain: Tool
   saveFileBytes: Tool
+  saveChatMedia?: Tool
 }
 
 /**
@@ -497,6 +499,7 @@ const READ_TOOL_NAMES = new Set<string>([
   'getCrmDelivery',
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
+  'fileReadBytes',
   'fileSearch',
   // Brand record (read) — present only when brandTools are wired
   'getBrand',
@@ -1789,10 +1792,11 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ? [
         bridgeCoreTool(opts.fileTools.fileRead, resolveCtx, workspaceId, {
           descriptionOverride:
-            'Read one workspace file by id or path. Returns the full content plus metadata ' +
+            'Read one text workspace file by id or path. Binary files are refused; use fileReadBytes to download their exact bytes. Returns text content plus metadata ' +
             '(title, summary, tags, sensitivity, mime, size). Clearance-filtered to the ' +
             "key's ceiling, scoped to the key's workspace.",
         }),
+        bridgeCoreTool(opts.fileTools.fileReadBytes, resolveCtx, workspaceId),
         bridgeCoreTool(opts.fileTools.fileSearch, resolveCtx, workspaceId, {
           descriptionOverride:
             'Search workspace files by title / summary / tags / name. Returns a compact ' +
@@ -1849,6 +1853,11 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
             "author text use fileWrite. If the id is unknown or expired the call errors. Scoped " +
             "to the key's workspace and clearance.",
         }),
+        ...(opts.fileTools.saveChatMedia ? [bridgeCoreTool(opts.fileTools.saveChatMedia, resolveCtx, workspaceId, {
+          descriptionOverride: 'Save a stored chat attachment into workspace files using the exact media_sha256 from searchChatHistory. ' +
+            'Returns a workspace fileId to download with fileReadBytes. Requires captured archive bytes and read_write scope; a metadata-only message is insufficient. ' +
+            'The archive read is scoped to the authenticated user and the file write uses current workspace authority.',
+        })] : []),
       ]
     : []
 
@@ -2000,7 +2009,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'getCrmPreparation' || t.name === 'listCrmInvoices' ||
       t.name === 'listCrmChangeRequests' || t.name === 'getCrmChangeRequest' || t.name === 'listCrmEngagements' || t.name === 'listCrmBillingRequests' || t.name === 'getCrmBillingBalance' || t.name === 'previewCrmRecurringSuccessors'
     ),
-    ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
+    ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileReadBytes' || t.name === 'fileSearch'),
     ...brandBridges.filter((t) => t.name === 'getBrand'),
     ...(docPageTools
       ? [docPageTools.readPage, docPageTools.listPages, docPageTools.listPageTemplates]
@@ -2042,7 +2051,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ...fileBridges.filter((t) =>
       t.name === 'fileWrite' || t.name === 'fileAppend' ||
       t.name === 'fileSetMeta' || t.name === 'fileDelete' ||
-      t.name === 'saveFileBytes' || t.name === 'saveFileToBrain',
+      t.name === 'saveFileBytes' || t.name === 'saveFileToBrain' || t.name === 'saveChatMedia',
     ),
     ...brandBridges.filter((t) => t.name === 'saveBrandDraft'),
     ...(docPageTools
@@ -2092,7 +2101,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       const ctx = await resolveCtx()
       if ('error' in ctx) return text(ctx.error, true)
       const security = ctx.executionContext?.security
-      if (!security || !security.access.sharedAudience && !['listCrmDeliveryCommitments','getCrmDeliveryAssessment','refreshCrmDeliveryAssessment','recordCrmDeliveryRecognition','reviewCrmDeliveryRecognition','appendCrmDeliveryObservation','withdrawCrmDeliveryObservation'].includes(tool.name)) return tool.handler(args)
+      if (!security || !security.access.sharedAudience && !['fileReadBytes','saveChatMedia','listCrmDeliveryCommitments','getCrmDeliveryAssessment','refreshCrmDeliveryAssessment','recordCrmDeliveryRecognition','reviewCrmDeliveryRecognition','appendCrmDeliveryObservation','withdrawCrmDeliveryObservation'].includes(tool.name)) return tool.handler(args)
       try {
         return await security.authority.execute(() =>
           runWithAgentAccess(security.access, () => tool.handler(args)))

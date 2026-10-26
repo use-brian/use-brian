@@ -99,6 +99,7 @@ export {
   type EntityStore as DocEntityStore,
   type EntityFilter as DocEntityFilter,
   type EntitySort as DocEntitySort,
+  type DocEntityOperationOptions,
 } from './doc-types.js'
 
 export {

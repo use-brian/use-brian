@@ -13,6 +13,9 @@ import { describeScopes, scopeDelta } from "../custom-apps-section";
 const COPY = {
   scopeRead: "Read your workspace brain",
   scopeReadWrite: "Read AND write your workspace brain",
+  scopeBrainNone: "No workspace brain access",
+  scopeApplication: "Application {module}, {resource}: {actions}. Read: {readFields}. Change: {writeFields}.",
+  scopeNoFields: "No fields",
   scopeIdentity: "See your name",
   scopeNet: "Send data to {origin}",
   scopeNone: "No access requested yet",
@@ -22,6 +25,14 @@ const COPY = {
 };
 
 describe("[COMP:app-web/studio-custom-apps] describeScopes", () => {
+  it("spells out application fields separately while withholding workspace-brain access", () => {
+    const application = { moduleKey: "records", resources: [{ typeKey: "request", actions: ["read", "query"], readFields: ["title"], writeFields: [] }] };
+    expect(describeScopes({ data: "none", application }, COPY)).toEqual([
+      COPY.scopeBrainNone, "Application records, request: read, query. Read: title. Change: No fields.",
+    ]);
+    expect(scopeDelta({ data: "none", application }, { data: "none" })).toEqual(["application"]);
+    expect(scopeDelta({ data: "read" }, { data: "none", application })).toEqual(["data"]);
+  });
   it("distinguishes read from read_write — these are different decisions", () => {
     expect(describeScopes({ data: "read" }, COPY)).toEqual([COPY.scopeRead]);
     expect(describeScopes({ data: "read_write" }, COPY)).toEqual([COPY.scopeReadWrite]);

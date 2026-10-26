@@ -19,6 +19,7 @@
  */
 
 import type { Tool, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, McpSettingsStore, FilesApi, EngineHooks, TurnScope } from '@use-brian/core'
+import { buildSourceServiceWorkflowTools } from './source-service.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -89,6 +90,7 @@ export async function buildWorkflowToolRegistry(
     turnScope?: TurnScope
   },
 ): Promise<Map<string, Tool> & { discoveryWarnings?: readonly string[] }> {
+  if(scope.turnScope){const service=await buildSourceServiceWorkflowTools(scope.turnScope);if(service)return service}
   // Start from a fresh shallow copy so first-party tool entries aren't
   // mutated (injectMcpTools attaches a `resolveConfirmation` closure to
   // any tool it touches; we never want that on the boot-time entries).

@@ -83,6 +83,7 @@ async function select(index: number, text: string) {
   await act(async () => (host.querySelectorAll<HTMLButtonElement>('[role="combobox"][aria-labelledby]')[index]).click());
   const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((node) => node.textContent?.trim() === text);
   expect(option, `option ${text}`).toBeDefined();
+  await act(async () => { option!.focus(); });
   await act(async () => option!.click());
 }
 async function add() { await click(copy.add); await fill("channelId", "-100333"); }
@@ -261,6 +262,7 @@ async function pick(label: string, text: string) {
   await act(async () => host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!.click());
   const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((node) => node.textContent?.startsWith(text));
   expect(option).toBeDefined();
+  await act(async () => { option!.focus(); });
   await act(async () => option!.click());
 }
 it("loads only on open and scopes destinations to the exact integration, including seen topics", async () => {
@@ -278,6 +280,7 @@ it("loads only on open and scopes destinations to the exact integration, includi
   expect(document.body.textContent).not.toContain("Other bot");
   expect(document.body.textContent).not.toContain("Unknown owner");
   const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((node) => node.textContent?.startsWith("Broadcast / Planning"));
+  await act(async () => { option!.focus(); });
   await act(async () => option!.click());
   expect(field("channelId").value).toBe("-100555:topic:42");
   await click(copy.save);

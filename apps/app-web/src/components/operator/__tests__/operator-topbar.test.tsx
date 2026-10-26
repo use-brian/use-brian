@@ -1,15 +1,5 @@
-/**
- * [COMP:app-web/operator-topbar] Operator top bar — the shared doc-style
- * chrome row the non-Page operator apps (Tasks / CRM / Feed) open with.
- *
- * app-web's vitest is node-only (no jsdom), so we SSR-render via
- * `renderToString` and assert against the static markup (the doc-topbar test
- * pattern). The router + layout-level sidebar state are module-mocked; here
- * we assert the presentational contract: the chrome controls render, the
- * toggle label flips with the collapse flag, each app's chip carries its
- * `operatorBar` label, the chip is NOT closable, there is no `+` (new-tab)
- * control, and the center/right slots render injected content.
- */
+/** [COMP:app-web/operator-topbar] Inline app identities, responsive controls
+ * and custom labels compose into the same workspace header frame. */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
@@ -48,9 +38,9 @@ beforeEach(() => {
 });
 
 describe("[COMP:app-web/operator-topbar] Operator top bar chrome", () => {
-  it("renders the sidebar toggle + history arrows and the app tab chip", () => {
+  it("renders shared history and the inline app identity", () => {
     const html = wrap(<OperatorTopbar app="tasks" />);
-    expect(html).toContain(en.docPage.topbarSidebarCollapseAria);
+    expect(html).not.toContain(en.docPage.topbarSidebarCollapseAria);
     expect(html).toContain(en.docPage.topbarBackAria);
     expect(html).toContain(en.docPage.topbarForwardAria);
     expect(html).toContain(en.operatorBar.tasks);
@@ -59,11 +49,21 @@ describe("[COMP:app-web/operator-topbar] Operator top bar chrome", () => {
     expect(html).toContain('data-sidebar-collapsed="false"');
   });
 
-  it("flips the sidebar toggle label when collapsed", () => {
+  it("preserves native clearance state when collapsed", () => {
     sidebarState.collapsed = true;
     const html = wrap(<OperatorTopbar app="tasks" />);
-    expect(html).toContain(en.docPage.topbarSidebarExpandAria);
+    expect(html).not.toContain(en.docPage.topbarSidebarExpandAria);
     expect(html).toContain('data-sidebar-collapsed="true"');
+  });
+
+  it("keeps Chat audience and actions in the same shared header", () => {
+    const html = wrap(<OperatorTopbar app="chat" center={<button>Audience</button>} right={<button>New conversation</button>} />);
+    expect(html).toContain("data-workspace-topbar");
+    expect(html).toContain("Audience");
+    expect(html).toContain("New conversation");
+    expect(html).not.toContain(en.docPage.topbarSidebarCollapseAria);
+    expect(html).toContain(en.docPage.topbarBackAria);
+    expect(html).toContain(en.docPage.topbarForwardAria);
   });
 
   it("names every registered non-Page app chip from operatorBar labels", () => {
@@ -121,18 +121,18 @@ describe("[COMP:app-web/operator-topbar] Operator top bar chrome", () => {
     expect(collapsed).toContain("CRM-NAV");
   });
 
-  it("hides the app chip below `sm` by default so the center slot keeps its width (M8)", () => {
+  it("hides the app identity below `sm` by default so the center slot keeps its width (M8)", () => {
     // Regression for the 390px Chat surface: a 200px chip beside a `flex-1
     // min-w-0` center slot absorbed every pixel of negative space and the
     // Personal / Workspace toggle rendered 0px wide. The chip now yields
     // below `sm` in the PRIMITIVE, so no surface has to remember to pass an
     // override (graded: invariants/topbar-chip-gate).
     const html = wrap(<OperatorTopbar app="chat" center={<span>CENTER</span>} />);
-    const chip = /class="([^"]*)"[^>]*>\s*<span class="grid size-4/.exec(html)?.[1] ?? "";
+    const chip = /data-workspace-app-identity[^>]*class="([^"]*)"/.exec(html)?.[1] ?? "";
     expect(chip).toContain("hidden");
     expect(chip).toContain("sm:flex");
-    expect(chip).toContain("sm:w-[148px]");
-    expect(chip).toContain("lg:w-[200px]");
+    expect(chip).toContain("max-w-52");
+    expect(chip).not.toContain("rounded-t-lg");
     expect(chip).not.toMatch(/(^|\s)w-\[200px\]/);
   });
 

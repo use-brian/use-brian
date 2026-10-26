@@ -193,6 +193,8 @@ type ModelRegistryBase = {
   contextWindow: number
   /** Informational until the routing provider consumes it (plan §4.2). */
   maxOutput: number
+  /** Model-specific minimum initial-response window; provider idle and loop liveness share it. */
+  firstResponseTimeoutMs?: number
   /** Per-provider quirk-wrapper stack override (plan L2; consumed by the
    * routing provider, not yet by boot). */
   wrappers?: readonly string[]
@@ -253,6 +255,18 @@ const PRO31_RATES: ModelRates = {
   cacheWritePerMTok: 2.00,
 }
 
+const ARGON_RATES: ModelRates = {
+  brackets: [{ upToInputTokens: Infinity, inPerMTok: 4.00, outPerMTok: 20.00 }],
+  cacheReadPerMTok: 0.20,
+  cacheWritePerMTok: 0, // Explicit caching is unsupported; implicit cache has no write operation.
+}
+
+const FLASH35_LITE_RATES: ModelRates = {
+  brackets: [{ upToInputTokens: Infinity, inPerMTok: 0.30, outPerMTok: 2.50 }],
+  cacheReadPerMTok: 0.03,
+  cacheWritePerMTok: 0.30,
+}
+
 const FLASH25_RATES: ModelRates = {
   brackets: [{ upToInputTokens: Infinity, inPerMTok: 0.30, outPerMTok: 2.50 }],
   cacheReadPerMTok: 0.03,
@@ -275,6 +289,72 @@ const FREE_RATES: ModelRates = {
 
 export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   // ── Chat tiers (Gemini incumbents — every class's default, L10) ──
+  // 2026-10-17 defaults. New recorded ids preserve the old rows' pricing.
+  {
+    alias: 'gemini-3.6-flash-standard',
+    displayName: 'Gemini 3.6 Flash',
+    provider: 'gemini',
+    apiModelId: 'gemini-3.6-flash',
+    class: 'standard-pro',
+    tier: 'standard',
+    status: 'active',
+    chatTierKey: 'standard',
+    menu: true,
+    recordAlias: true,
+    fallbackAlias: 'claude-haiku-4-5',
+    rates: FLASH36_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
+  {
+    alias: 'gemini-3.6-flash-pro',
+    displayName: 'Gemini 3.6 Flash',
+    provider: 'gemini',
+    apiModelId: 'gemini-3.6-flash',
+    class: 'standard-pro',
+    tier: 'pro',
+    status: 'active',
+    chatTierKey: 'pro',
+    menu: true,
+    recordAlias: true,
+    fallbackAlias: 'claude-haiku-4-5',
+    rates: FLASH36_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
+  {
+    alias: 'gemini-4-argon-research',
+    displayName: 'Gemini 4 Argon',
+    provider: 'gemini',
+    apiModelId: 'gemini-4-argon',
+    class: 'research',
+    tier: 'research',
+    status: 'active',
+    chatTierKey: 'research',
+    menu: true,
+    idAliases: ['gemini-4-argon'],
+    recordAlias: true,
+    rates: ARGON_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    firstResponseTimeoutMs: 900_000,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
+  {
+    alias: 'gemini-3.5-flash-lite',
+    displayName: 'Gemini 3.5 Flash-Lite',
+    provider: 'gemini',
+    apiModelId: 'gemini-3.5-flash-lite',
+    class: 'background',
+    tier: 'standard',
+    status: 'active',
+    rates: FLASH35_LITE_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
+  },
   {
     // Standard chat tier — Flash 3, the same model as Pro, on a tighter
     // tool-round budget. Synthetic id keeps it billable-distinct from Pro.
@@ -284,9 +364,8 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     apiModelId: 'gemini-3-flash-preview',
     class: 'standard-pro',
     tier: 'standard',
-    status: 'active',
-    chatTierKey: 'standard',
-    menu: true,
+    status: 'legacy',
+    menu: false,
     recordAlias: true,
     fallbackAlias: 'claude-haiku-4-5', // same class (standard-pro), L2
     rates: FLASH3_RATES,
@@ -302,9 +381,8 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     apiModelId: 'gemini-3-flash-preview',
     class: 'standard-pro',
     tier: 'pro',
-    status: 'active',
-    chatTierKey: 'pro',
-    menu: true,
+    status: 'legacy',
+    menu: false,
     // 'pro' = bare tier key recorded defensively; 'gemini-3-flash-preview' =
     // the resolved provider id actually recorded; 'gemini-flash' = legacy alias.
     idAliases: ['pro', 'gemini-3-flash-preview', 'gemini-flash'],
@@ -332,18 +410,15 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
-    // Research tier automatic default — Pro 3.1 on the deep budget. It is
-    // intentionally absent from the curated picker while its list-price
-    // effective rate exceeds the frozen research anchor. The synthetic id
-    // keeps it billable-distinct from Max and historical Pro-3.1-as-Max rows.
+    // Historical Research identity and Pro 3.1 rates. Argon uses a new id
+    // so old Research rows and older Pro-3.1-as-Max rows never reprice.
     alias: 'gemini-3-pro-research',
     displayName: 'Gemini 3.1 Pro',
     provider: 'gemini',
     apiModelId: 'gemini-3.1-pro-preview',
     class: 'research',
     tier: 'research',
-    status: 'active',
-    chatTierKey: 'research',
+    status: 'legacy',
     menu: false,
     idAliases: ['research'],
     recordAlias: true,
@@ -365,7 +440,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     apiModelId: 'gemini-3.1-flash-lite',
     class: 'background',
     tier: 'standard',
-    status: 'active',
+    status: 'legacy',
     idAliases: ['gemini-3.1-flash-lite-preview'],
     rates: FLASH_LITE_RATES,
     contextWindow: 1_048_576,

@@ -1,177 +1,70 @@
-/**
- * Unit tests for the episodic-memory DB store.
- * Component tag: [COMP:memory/episodic-store].
- *
- * Mocks the `query` helper and exercises the `EpisodicStore` adapter
- * (`episodic-store.ts`) together with the underlying query functions
- * (`episodic-memories.ts`): insert param marshalling (message_span /
- * entity_refs JSON), the default row limits, the fetchByTopic newest-
- * accessed re-sort after `UPDATE ... RETURNING`, the row→record mapping,
- * and the empty-id no-op on the survival-count bump.
- */
-
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-
-vi.mock('../client.js', () => ({
-  query: vi.fn(),
-}))
-
+/** Adapter behavior over already-admitted revision fixtures. Real authority/SQL
+ * enforcement is exercised by persistent-consumers.integration.test.ts. */
+import { beforeEach,describe,it,expect,vi } from 'vitest'
+import { bindScopeSource,boundScopeSources,createExecutionContext,ContextScopeAccumulator } from '@use-brian/core'
+import type { SessionContextRevision } from '../session-context-revisions.js'
+vi.mock('../session-context-revisions.js',async importOriginal=>({...await importOriginal<typeof import('../session-context-revisions.js')>(),readSessionContextRevisions:vi.fn(),writeSessionContextRevision:vi.fn(),mutateSessionContextParents:vi.fn()}))
+import { readSessionContextRevisions,writeSessionContextRevision,mutateSessionContextParents } from '../session-context-revisions.js'
 import { createDbEpisodicStore } from '../episodic-store.js'
-import { query } from '../client.js'
-
-const mockQuery = vi.mocked(query)
-const store = createDbEpisodicStore()
-
-function row(over: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    id: 'ep-1',
-    userId: 'u-1',
-    assistantId: 'a-1',
-    sessionId: 's-1',
-    topicLabel: 'trip-seoul',
-    summary: 'Planned the Seoul itinerary.',
-    messageSpan: { fromSequence: 1, toSequence: 8, turnCount: 4 },
-    entityRefs: null,
-    createdAt: new Date('2026-05-15T00:00:00Z'),
-    lastAccessedAt: new Date('2026-05-15T00:00:00Z'),
-    accessCount: 0,
-    survivalCount: 0,
-    ...over,
-  }
+const store=createDbEpisodicStore(),read=vi.mocked(readSessionContextRevisions),write=vi.mocked(writeSessionContextRevision),mutate=vi.mocked(mutateSessionContextParents)
+const execution=createExecutionContext({identity:{kind:'attended',principal:{kind:'workspace_member',userId:'actor-1'}},ownership:{kind:'workspace',workspaceId:'workspace-1'},
+  access:{workspaceId:'workspace-1',userId:'actor-1',assistantId:'assistant-1',assistantKind:'standard',clearance:'internal',compartments:[],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['assistant-1']},
+  writeDefaults:{compartments:[],projectIds:[]},authority:{async assertCurrent(){},async execute(operation){return operation()}},
+  lifecycle:{abortSignal:new AbortController().signal,sessionId:'session-1',channelType:'web',channelId:'channel-1'}})
+const authority={execution,accumulator:new ContextScopeAccumulator()}
+const span={fromSequence:1,toSequence:8,turnCount:4}
+function row(over:Partial<SessionContextRevision>={}):SessionContextRevision {
+  const source={workspaceId:'workspace-1',userId:null,assistantId:null,sensitivity:'internal' as const,compartments:[],projectIds:[],resourceKind:'session_context_revision',resourceId:over.id??'revision-1',version:'1'}
+  return bindScopeSource({id:'revision-1',parentId:'episode-1',sessionId:'session-1',source,content:{topicLabel:'fictional-topic',summary:'Fictional summary',messageSpan:span,entityRefs:null},
+    userId:'actor-1',assistantId:'assistant-1',createdAt:new Date('2026-05-15'),lastAccessedAt:new Date('2026-05-15'),accessCount:0,survivalCount:0,...over},source)
 }
-
-beforeEach(() => {
-  mockQuery.mockReset()
-})
-
-describe('[COMP:memory/episodic-store] create', () => {
-  it('inserts with message_span + entity_refs JSON-encoded and maps the row', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [row({ entityRefs: ['e-1'] })],
-      rowCount: 1,
-    } as never)
-    const rec = await store.create({
-      userId: 'u-1',
-      assistantId: 'a-1',
-      sessionId: 's-1',
-      topicLabel: 'trip-seoul',
-      summary: 'Planned the Seoul itinerary.',
-      messageSpan: { fromSequence: 1, toSequence: 8, turnCount: 4 },
-      entityRefs: ['e-1'],
-    })
-    // toRecord mapping
-    expect(rec.id).toBe('ep-1')
-    expect(rec.messageSpan).toEqual({ fromSequence: 1, toSequence: 8, turnCount: 4 })
-    expect(rec.entityRefs).toEqual(['e-1'])
-    expect(rec.survivalCount).toBe(0)
-
-    const [sql, params] = mockQuery.mock.calls[0]
-    expect(sql).toContain('INSERT INTO episodic_memories')
-    expect(params?.[5]).toBe(JSON.stringify({ fromSequence: 1, toSequence: 8, turnCount: 4 }))
-    expect(params?.[6]).toBe(JSON.stringify(['e-1']))
+beforeEach(()=>{vi.resetAllMocks();read.mockResolvedValue([]);mutate.mockResolvedValue(0)})
+describe('[COMP:memory/episodic-store] admitted revision adapter',()=>{
+  it('marshals the complete semantic payload and retains bound evidence',async()=>{
+    const revision=row({content:{topicLabel:'fictional-topic',summary:'Fictional summary',messageSpan:span,entityRefs:['entity-1']}});write.mockResolvedValue(revision)
+    const derivation={producer:'fixture:episode',sources:[revision.source]}
+    const rec=await store.create({userId:'actor-1',assistantId:'assistant-1',sessionId:'session-1',topicLabel:'fictional-topic',summary:'Fictional summary',messageSpan:span,entityRefs:['entity-1'],authority,derivation})
+    expect(rec.messageSpan).toEqual(span);expect(rec.entityRefs).toEqual(['entity-1']);expect(rec.survivalCount).toBe(0)
+    expect(boundScopeSources(rec)).toEqual([revision.source])
+    expect(write).toHaveBeenCalledWith({sessionId:'session-1',kind:'episodic_memory',content:revision.content,authority,derivation})
   })
-
-  it('passes null entity_refs when none supplied', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [row()], rowCount: 1 } as never)
-    await store.create({
-      userId: 'u-1',
-      assistantId: 'a-1',
-      sessionId: 's-1',
-      topicLabel: 't',
-      summary: 's',
-      messageSpan: { fromSequence: 0, toSequence: 0, turnCount: 1 },
-    })
-    expect(mockQuery.mock.calls[0][1]?.[6]).toBeNull()
+  it('uses null entity references when none are supplied',async()=>{
+    write.mockResolvedValue(row())
+    await store.create({userId:'actor-1',assistantId:'assistant-1',sessionId:'session-1',topicLabel:'fictional-topic',summary:'Fictional summary',messageSpan:span,authority,derivation:{producer:'fixture:episode',sources:[]}})
+    expect(write.mock.calls[0][0].content.entityRefs).toBeNull()
   })
-})
-
-describe('[COMP:memory/episodic-store] fetchByTopic', () => {
-  it('defaults to limit 3 and re-sorts newest-accessed first', async () => {
-    const older = row({ id: 'ep-old', lastAccessedAt: new Date('2026-05-10T00:00:00Z') })
-    const newer = row({ id: 'ep-new', lastAccessedAt: new Date('2026-05-14T00:00:00Z') })
-    // UPDATE ... RETURNING does not preserve the inner SELECT order — the
-    // store re-sorts. Hand back the rows oldest-first to prove the sort.
-    mockQuery.mockResolvedValueOnce({ rows: [older, newer], rowCount: 2 } as never)
-    const recs = await store.fetchByTopic({ sessionId: 's-1', topicLabel: 'trip-seoul' })
-    expect(recs.map((r) => r.id)).toEqual(['ep-new', 'ep-old'])
-
-    const [sql, params] = mockQuery.mock.calls[0]
-    expect(sql).toContain('UPDATE episodic_memories')
-    expect(sql).toContain('access_count = access_count + 1')
-    expect(params).toEqual(['s-1', 'trip-seoul', 3])
+  it('matches topics only among admitted entries and defaults to the three most recently accessed',async()=>{
+    const rows=[1,2,3,4].map(n=>row({id:`revision-${n}`,parentId:`episode-${n}`,lastAccessedAt:new Date(n*1000)}))
+    read.mockResolvedValue([...rows,row({id:'other',content:{...rows[0].content,topicLabel:'other-topic'}})])
+    const recs=await store.fetchByTopic({sessionId:'session-1',topicLabel:'fictional-topic',authority})
+    expect(recs.map(r=>r.id)).toEqual(['episode-4','episode-3','episode-2']);expect(recs.every(r=>r.accessCount===1)).toBe(true)
+    expect(boundScopeSources(recs[0])).toEqual(boundScopeSources(rows[3]))
+    expect(mutate).toHaveBeenCalledWith(authority,'episodic_memory',[rows[3],rows[2],rows[1]],'access')
   })
-
-  it('honors an explicit limit', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    await store.fetchByTopic({ sessionId: 's-1', topicLabel: 't', limit: 10 })
-    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', 't', 10])
+  it('honors an explicit topic limit',async()=>{
+    read.mockResolvedValue([row(),row({id:'revision-2',parentId:'episode-2'})])
+    expect(await store.fetchByTopic({sessionId:'session-1',topicLabel:'fictional-topic',limit:1,authority})).toHaveLength(1)
   })
-})
-
-describe('[COMP:memory/episodic-store] fetchBySession', () => {
-  it('selects by session newest-first with a default limit of 50', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [row()], rowCount: 1 } as never)
-    const recs = await store.fetchBySession({ sessionId: 's-1' })
-    expect(recs).toHaveLength(1)
-
-    const [sql, params] = mockQuery.mock.calls[0]
-    expect(sql).toContain('FROM episodic_memories')
-    expect(sql).toContain('ORDER BY created_at DESC')
-    expect(params).toEqual(['s-1', 50])
+  it('fetches the newest fifty admitted session records by default',async()=>{
+    read.mockResolvedValue(Array.from({length:51},(_,n)=>row({id:`revision-${n}`,parentId:`episode-${n}`,createdAt:new Date(n*1000)})))
+    const rows=await store.fetchBySession({sessionId:'session-1',authority});expect(rows).toHaveLength(50);expect(rows[0].id).toBe('episode-50')
   })
-})
-
-describe('[COMP:memory/episodic-store] listTopicsBySession', () => {
-  it('returns distinct topic labels with a default limit of 20', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ topicLabel: 'trip-seoul' }, { topicLabel: 'api-quota' }],
-      rowCount: 2,
-    } as never)
-    const topics = await store.listTopicsBySession({ sessionId: 's-1' })
-    expect(topics).toEqual(['trip-seoul', 'api-quota'])
-    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', 20])
+  it('enumerates distinct admitted labels newest first with the topic limit',async()=>{
+    read.mockResolvedValue([row(),row({id:'new',createdAt:new Date('2026-05-16'),content:{...row().content,topicLabel:'new-topic'}}),row({id:'duplicate'})])
+    expect(await store.listTopicsBySession({sessionId:'session-1',authority})).toEqual(['new-topic','fictional-topic'])
+    expect(await store.listTopicsBySession({sessionId:'session-1',authority,limit:1})).toEqual(['new-topic'])
   })
-})
-
-describe('[COMP:memory/episodic-store] listBySession', () => {
-  it('fetches all session rows ascending, without bumping access counters', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [row(), row({ id: 'ep-2' })],
-      rowCount: 2,
-    } as never)
-    const recs = await store.listBySession('s-1')
-    expect(recs.map((r) => r.id)).toEqual(['ep-1', 'ep-2'])
-
-    const [sql, params] = mockQuery.mock.calls[0]
-    expect(sql).toContain('ORDER BY created_at ASC')
-    // No access-counter bump — that is fetchByTopic's job, not this read.
-    expect(sql).not.toContain('access_count = access_count + 1')
-    expect(params).toEqual(['s-1'])
+  it('lists all admitted rows oldest first without changing access counters',async()=>{
+    read.mockResolvedValue([row(),row({id:'old',parentId:'old',createdAt:new Date('2026-05-10')})])
+    expect((await store.listBySession('session-1',authority)).map(r=>r.id)).toEqual(['old','episode-1']);expect(mutate).not.toHaveBeenCalled()
   })
-})
-
-describe('[COMP:memory/episodic-store] deleteById', () => {
-  it('hard-deletes by id', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    await store.deleteById('ep-1')
-    const [sql, params] = mockQuery.mock.calls[0]
-    expect(sql).toContain('DELETE FROM episodic_memories')
-    expect(params).toEqual(['ep-1'])
+  it('deletes only the matched admitted parent with its original authority',async()=>{
+    const value=row();read.mockResolvedValue([value]);await store.deleteById(value.parentId,authority)
+    expect(mutate).toHaveBeenCalledWith(authority,'episodic_memory',[value],'delete')
   })
-})
-
-describe('[COMP:memory/episodic-store] incrementSurvivalCount', () => {
-  it('is a no-op for an empty id list — issues no query', async () => {
-    await store.incrementSurvivalCount([])
-    expect(mockQuery).not.toHaveBeenCalled()
-  })
-
-  it('bulk-increments survival_count for the given ids', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 2 } as never)
-    await store.incrementSurvivalCount(['ep-1', 'ep-2'])
-    const [sql, params] = mockQuery.mock.calls[0]
-    expect(sql).toContain('survival_count = survival_count + 1')
-    expect(sql).toContain('ANY($1::uuid[])')
-    expect(params).toEqual([['ep-1', 'ep-2']])
+  it('does no work for an empty survival list',async()=>{await store.incrementSurvivalCount([]);expect(read).not.toHaveBeenCalled();expect(mutate).not.toHaveBeenCalled()})
+  it('increments only the admitted selected parents',async()=>{
+    const first=row(),other=row({id:'other',parentId:'other'});read.mockResolvedValue([first,other]);await store.incrementSurvivalCount([first.parentId],authority)
+    expect(mutate).toHaveBeenCalledWith(authority,'episodic_memory',[first],'survive')
   })
 })

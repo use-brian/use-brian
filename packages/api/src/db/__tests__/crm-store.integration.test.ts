@@ -311,9 +311,17 @@ describe('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
       // A creates a company in their own workspace
       await store.createCompany({ userId: aUser, workspaceId: aWs, name: 'A Co' })
 
-      // B queries with their own RLS — should see ZERO rows from A's workspace
-      const bSeesA = await store.listCompanies({ workspaceId: aWs, userId: bUser, assistantId: bUser, assistantKind: 'standard' }, {})
-      expect(bSeesA).toHaveLength(0)
+      // Prove the raw RLS isolation on the actual non-superuser application role.
+      const { getAppPool, queryWithRLS } = await import('../client.js')
+      const role = await getAppPool().query<{ rolsuper: boolean; rolbypassrls: boolean }>(
+        'SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')
+      expect(role.rows[0]).toEqual({ rolsuper: false, rolbypassrls: false })
+      const bSeesA = await queryWithRLS(bUser,
+        "SELECT id FROM entities WHERE workspace_id=$1 AND kind='company'", [aWs])
+      expect(bSeesA.rows).toHaveLength(0)
+      // A native nonmember has no admitted canonical query domain.
+      await expect(store.listCompanies({ workspaceId: aWs, userId: bUser, assistantId: bUser, assistantKind: 'standard' }, {}))
+        .rejects.toMatchObject({ code: 'access_unavailable' })
 
       // A queries their own workspace — should see the row
       const aSeesA = await store.listCompanies({ workspaceId: aWs, userId: aUser, assistantId: aUser, assistantKind: 'standard' }, {})

@@ -20,6 +20,7 @@
  */
 
 import dotenv from 'dotenv'
+import { resolveApplicationModules } from './application-modules.js'
 import { bootOpenApi, type OpenApiEnv } from '@use-brian/api/boot.js'
 import { buildEpisodeIngestors } from '@use-brian/api/build-episode-ingestors.js'
 import { buildOpenChannelHosts } from '@use-brian/api/channel-hosts.js'
@@ -33,6 +34,7 @@ import { createSandboxTaskStore } from '@use-brian/api/db/sandbox-task-store.js'
 import { parseStrictBoolean } from '@use-brian/api/auth/outpost-auth-config.js'
 import { resolveApiJwtSecret, shouldRunApiWorkers, isAdministrativeTestMode } from './runtime.js'
 
+const applicationModules = await resolveApplicationModules(process.argv)
 const adminOnly = isAdministrativeTestMode(process.argv)
 if (!adminOnly) dotenv.config()
 
@@ -204,6 +206,7 @@ const browserCredentialEncryptionKey = process.env.BROWSER_CREDENTIAL_ENCRYPTION
 
 const { start } = await bootOpenApi({
   env,
+  applicationModules,
   runWorkers: shouldRunApiWorkers(process.argv),
   startLocalSubscriptionProvider: !adminOnly,
   ports: {

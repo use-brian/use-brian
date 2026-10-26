@@ -4,7 +4,12 @@ import { goalsRoutes, type GoalsRouteOptions } from '../goals.js'
 import { createTestApp } from './helpers.js'
 
 // The confirm/work/abandon routes use the db helpers directly (not the goalStore port).
+vi.mock('../../workspace-access/goal-source-admission.js',()=>({retainedTaskGoalCaller:vi.fn().mockResolvedValue(undefined),retainedTaskGoalForHost:vi.fn().mockResolvedValue(undefined),admitRetainedGoalBoundary:vi.fn()}))
+
 vi.mock('../../db/goals.js', () => ({
+  GOAL_TERMINAL_STATUSES:['done','abandoned'],
+  getRetainedGoalById:vi.fn().mockResolvedValue(null),
+  confirmRetainedGoal:vi.fn(),
   getGoalById: vi.fn(),
   getGoalByIdSystem: vi.fn(),
   narrowGoalContextSystem: vi.fn(),

@@ -35,6 +35,24 @@ function issuePaths(result: ReturnType<typeof parseManifest>) {
 }
 
 describe('[COMP:shared/brian-app-lint] parseManifest', () => {
+  it('validates closed application requirements without implicitly granting the workspace brain', () => {
+    const application = { moduleKey: 'records', resources: [{ typeKey: 'request', actions: ['read', 'query'], readFields: ['title'], writeFields: [] }] }
+    const parsed = parseManifest({ ...VALID, scopes: { data: 'none', application } })
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+    expect(parsed.manifest.scopes.data).toBe('none')
+    expect(parsed.manifest.scopes.application).toEqual(application)
+    for (const value of [{ ...application, sql: 'arbitrary' }, { ...application, resources: [{ ...application.resources[0], actions: ['invented'] }] },
+      { ...application, resources: [{ ...application.resources[0], readFields: ['constructor'] }] }, { ...application, resources: [application.resources[0], application.resources[0]] }]) {
+      expect(parseManifest({ ...VALID, scopes: { data: 'none', application: value } }).ok).toBe(false)
+    }
+    expect(parseManifest({ ...VALID, scopes: { data: 'none' } }).ok).toBe(false)
+    expect(parseManifest({ ...VALID, scopes: { data: 'none', application, store: 'write' } }).ok).toBe(false)
+    expect(scopesExceedGrant({ data: 'read' }, parsed.manifest.scopes)).toBe(true)
+    expect(scopesExceedGrant(parsed.manifest.scopes, { data: 'read' })).toBe(true)
+    expect(scopesExceedGrant(parsed.manifest.scopes, parsed.manifest.scopes)).toBe(false)
+    expect(scopesExceedGrant({ ...parsed.manifest.scopes, application: { ...application, resources: [{ ...application.resources[0], readFields: ['title', 'cost'] }] } }, parsed.manifest.scopes)).toBe(true)
+  })
   it('accepts a minimal valid manifest and defaults the entry', () => {
     const result = parseManifest({ manifestVersion: 1, name: 'X', scopes: { data: 'read' } })
     expect(result.ok).toBe(true)
@@ -317,5 +335,14 @@ describe('[COMP:shared/brian-app-lint] scopes.store', () => {
     expect(scopesExceedGrant({ data: 'read', store: 'read' }, { data: 'read', store: 'write' })).toBe(
       false,
     )
+  })
+})
+
+
+describe('[COMP:shared/brian-app-sdk] scaffold consent contract', () => {
+  it('does not turn a registered command declaration into broader consent', () => {
+    const scope = { data: 'none' as const, application: { moduleKey: 'example_module', resources: [{ typeKey: 'example_record', actions: ['read','command:change'], readFields: ['title'], writeFields: ['title'] }] } }
+    expect(parseManifest({ manifestVersion: 1, name: 'Example application', scopes: scope }).ok).toBe(true)
+    expect(scopesExceedGrant({ ...scope, application: { ...scope.application, resources: [{ ...scope.application.resources[0], actions: ['read','command:change','command:delete'] }] } }, scope)).toBe(true)
   })
 })

@@ -25,6 +25,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppScopes } from "@use-brian/brian-app";
+import { scopesExceedGrant } from "@use-brian/brian-app";
 import {
   AlertTriangle,
   Check,
@@ -70,6 +71,9 @@ export function describeScopes(
   copy: {
     scopeRead: string;
     scopeReadWrite: string;
+    scopeBrainNone: string;
+    scopeApplication: string;
+    scopeNoFields: string;
     scopeIdentity: string;
     scopeNet: string;
     scopeNone: string;
@@ -79,7 +83,12 @@ export function describeScopes(
   },
 ): string[] {
   if (!scopes) return [copy.scopeNone];
-  const lines = [scopes.data === "read_write" ? copy.scopeReadWrite : copy.scopeRead];
+  const lines = [scopes.data === "none" ? copy.scopeBrainNone : scopes.data === "read_write" ? copy.scopeReadWrite : copy.scopeRead];
+  for (const resource of scopes.application?.resources ?? []) {
+    lines.push(format(copy.scopeApplication, { module: scopes.application!.moduleKey, resource: resource.typeKey,
+      actions: resource.actions.join(", "), readFields: resource.readFields.join(", ") || copy.scopeNoFields,
+      writeFields: resource.writeFields.join(", ") || copy.scopeNoFields }));
+  }
   // The store is its own line, never folded into the brain one. Reading a
   // store and changing one are different decisions, and an admin should not
   // have to infer that an app can set prices from a sentence about memories.
@@ -100,7 +109,8 @@ export function describeScopes(
 export function scopeDelta(requested: AppScopes | null, granted: AppScopes | null): string[] {
   if (!requested || !granted) return [];
   const added: string[] = [];
-  if (requested.data === "read_write" && granted.data !== "read_write") added.push("data");
+  if (scopesExceedGrant({ data: requested.data }, { data: granted.data })) added.push("data");
+  if (scopesExceedGrant({ data: "none", application: requested.application }, { data: "none", application: granted.application })) added.push("application");
   // Rank-compared, not equality-compared: none < read < write. A re-sync that
   // widens read -> write is a delta the admin has to see, and one that narrows
   // is not.
@@ -286,7 +296,7 @@ export function CustomAppsSection({
 
               {needsReconsent && delta.length > 0 && (
                 <p className="mt-1.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
-                  {format(t.widened, { what: delta.join(", ") })}
+                  {format(t.widened, { what: delta.map(axis => axis === "application" ? t.scopeApplicationAxis : axis).join(", ") })}
                 </p>
               )}
 

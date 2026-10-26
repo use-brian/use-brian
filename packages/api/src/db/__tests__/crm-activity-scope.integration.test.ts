@@ -10,6 +10,8 @@ import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
+const fixtureRuntimeRole = new URL(process.env.DATABASE_URL_APP!).username
+if (!['app_user','assurance_app'].includes(fixtureRuntimeRole)) throw Error('Unexpected maintained fixture runtime role')
 const pool = getPool()
 const floorColumns = ['user_id','assistant_id','sensitivity','compartments','project_ids','source_scope_version','scope_origin','scope_held']
 async function fixture() {
@@ -128,11 +130,11 @@ describe('[COMP:crm/activity-scope] retained history audience',()=>{
       const row=(await client.query('SELECT * FROM crm_activities WHERE workspace_id=$1',[f.workspaceId])).rows[0]
       expect(row).toMatchObject({scope_origin:'legacy',scope_held:false,sensitivity:'internal',compartments:[]})
       await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.system_bypass','false',true)",[f.memberId])
-      await client.query('SET LOCAL ROLE assurance_app')
+      await client.query(`SET LOCAL ROLE ${fixtureRuntimeRole}`)
       expect((await client.query('SELECT id FROM crm_activities WHERE workspace_id=$1',[f.workspaceId])).rows).toHaveLength(1)
       await client.query('RESET ROLE')
       await client.query("INSERT INTO workspace_access_policies(workspace_id,classification_mode) VALUES($1,'strict') ON CONFLICT(workspace_id) DO UPDATE SET classification_mode='strict'",[f.workspaceId])
-      await client.query('SET LOCAL ROLE assurance_app')
+      await client.query(`SET LOCAL ROLE ${fixtureRuntimeRole}`)
       expect((await client.query('SELECT id FROM crm_activities WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
       await client.query('RESET ROLE')
     } finally {await client.query('ROLLBACK');client.release()}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { roomTurnShape, type RoomTurnFacts } from '../turn.js'
+import { mayReadGroupContext, roomTurnShape, type RoomTurnFacts } from '../turn.js'
 import { roomDisclosureText, roomSpeakerLabel, formatProviderHistory } from '../room.js'
 import { classifySession, policyFor, ROOM_TRANSPORTS, sessionPolicy, transportPolicy } from '../../session-kind.js'
 
@@ -96,5 +96,27 @@ describe('[COMP:api/channel-room] room turns per transport', () => {
   it('keeps transports without group rooms on their own path', () => {
     expect(transportPolicy('wechat').rooms.converge).toBe(false)
     expect(transportPolicy('web').rooms.converge).toBe(false)
+  })
+})
+
+
+describe('[COMP:api/channel-room] bot read admission', () => {
+  const audience = { workspaceId: 'workspace', userId: '', clearance: 'internal' as const,
+    compartments: ['finance'], mutationCompartments: ['finance'], projectIds: ['forecast'], visibilityAssistantIds: null }
+  it('admits a higher bot with matching grants and refuses a lower bot before sharing context', async () => {
+    expect(await mayReadGroupContext({ ...audience, userId: 'actor', clearance: 'confidential' }, audience)).toBe(true)
+    expect(await mayReadGroupContext({ ...audience, userId: 'actor', clearance: 'public' }, audience)).toBe(false)
+    expect(await mayReadGroupContext({ ...audience, userId: 'actor', clearance: 'confidential', compartments: ['marketing'] }, audience)).toBe(false)
+    expect(await mayReadGroupContext({ ...audience, userId: 'actor', projectIds: [] }, audience)).toBe(false)
+    expect(await mayReadGroupContext({ ...audience, workspaceId: 'elsewhere' }, audience)).toBe(false)
+  })
+  it('checks v2 Department tiers even when the legacy axes are neutral', async () => {
+    const target = { ...audience, compartments: ['team:finance'], projectIds: [] }
+    const access = { ...audience, userId: 'actor', clearance: 'confidential' as const, compartments: null, projectIds: null,
+      departmentRead: { workspaceId: 'workspace', userId: 'actor', assistantId: 'bot', base: 'public' as const,
+        departments: { finance: 'public' as const }, contextDepartment: null, binding: null, cap: null } }
+    expect(await mayReadGroupContext(access, target)).toBe(false)
+    expect(await mayReadGroupContext({ ...access, departmentRead: { ...access.departmentRead, departments: { finance: 'confidential' } } }, target)).toBe(true)
+    expect(await mayReadGroupContext(access, { ...target, compartments: [] })).toBe(false)
   })
 })

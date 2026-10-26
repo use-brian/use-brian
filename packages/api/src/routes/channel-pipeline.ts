@@ -1,8 +1,19 @@
+import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
+import { isInputAuthorityError } from '@use-brian/core'
+import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
+import { getPool } from '../db/client.js'
+import type { PoolClient } from 'pg'
+import { withSessionMessagePublication } from '../db/session-context-revisions.js'
+import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
+import { bindScopeSources } from '@use-brian/core'
+import { runTurnSessionStateDiff } from '../turn/session-state.js'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { policyFor } from '../session-kind.js'
-import { roomTurnShape } from '../channel-room/turn.js'
-import { claimRoomDisclosure, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomDisclosureText, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
+import { narrowConnectorTurnScope, resolveConnectorNativeTurnScopeSystem } from '../context-scope/connector-exposure.js'
+import { mayReadGroupContext, roomTurnShape } from '../channel-room/turn.js'
+import { appendChannelRoomMessage, claimChannelRoomTurn } from '../channel-room/messages.js'
+import { admitRoomInputScope, captureChannelRoomInput, claimRoomDisclosure, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomDisclosureText, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
 import { releaseTurn, takeTurnLease, waitForTurnSlot } from '../turn/lease.js'
 import { runAssistantTurn } from '../turn/kernel.js'
 
@@ -30,7 +41,7 @@ import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import {
   buildMemoryContext, createMemoryTools, createSessionStateTools,
-  buildSessionStateBlock, runSessionStateDiff,
+  buildSessionStateBlock,
   synthesizeMissingToolResults,
   collectStream, calculateCost, runPreflight, buildPreflightPrompt,
   runMemoryNudge, sanitize as sanitizeAnalytics, createConfirmationResolver,
@@ -45,8 +56,9 @@ import {
   buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, formatAssistantQuestion,
   createTurnOutputCollector,
   executionToolContext,
-  boundScopeSource,
+  boundScopeSources,
   scopeEvidenceFromRows,
+  pinAccessCeiling,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -90,7 +102,7 @@ import type {
   AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore,
   ConfirmationResolver, Message, TopicClassification, ClassifierRecentTurn,
   EpisodicStore, CapabilityStore, TokenUsage, ToolResultMeta,
-  SessionStateStore, SessionStateRecord, CrmEmailDraftStore,
+  SessionStateStore, CrmEmailDraftStore,
   AccessCeiling, ScopeEvidence,
 } from '@use-brian/core'
 
@@ -205,7 +217,7 @@ export function deliverChannelResponse(
  * The pipeline calls both in order; channels opt in to whichever fits.
  */
 export type ChannelHooks = {
-  /** Called once before the query loop starts. Start typing indicators here. */
+  /** Called once after admission, before classification and context setup. */
   onProcessingStart?(): Promise<void>
 
   /** Called on `status` events from the query loop (e.g., "Researching..."). */
@@ -447,10 +459,9 @@ export type ChannelPipelineParams = AdmittedChannelMessage & {
    */
   externalGuestConnectorTools?: boolean
   /**
-   * Connector-only authority for this channel turn. `sender` preserves the
-   * ordinary member-scoped behavior; `assistant` resolves Team/Project
-   * exposure from the routed assistant while keeping every non-connector
-   * data path sender-scoped; `disabled` removes connector tools for the turn.
+   * Connector enablement for this channel. Both legacy `sender` and `assistant`
+   * settings retain the actual sender's current native Department/Project floor;
+   * `disabled` removes connector tools. A toggle cannot release staff authority.
    */
   connectorAuthority?: 'sender' | 'assistant' | 'disabled'
   /**
@@ -820,6 +831,20 @@ export function countsAsGroupAudienceEvidence(
   return !isGroupChat || row.channelMessageId === null
 }
 
+/** Preserve canonical identity and labels while retaining this delivery's
+ * richer attachment blocks. Only already-admitted history may be overlaid. */
+export function overlayCurrentRoomMessage<T extends { id: string; content: unknown }>(
+  readableRows: readonly T[], current: { id: string; content: unknown },
+): T[] | null {
+  if (!readableRows.some(row => row.id === current.id)) return null
+  const overlaid = readableRows.map(row => {
+    if (row.id !== current.id) return row
+    const overlay = { ...row, content: current.content }
+    return bindScopeSources(overlay, boundScopeSources(row))
+  })
+  return bindScopeSources(overlaid, boundScopeSources(readableRows))
+}
+
 /** Keep exact-audience transcript history without laundering hidden results. */
 export async function filterChannelHistoryForAudience<T extends {
   channelMessageId: string | null
@@ -827,13 +852,18 @@ export async function filterChannelHistoryForAudience<T extends {
   rows: readonly T[]
   group: boolean
   ceiling?: AccessCeiling
+  readerCeiling?: AccessCeiling
   validate?: (evidence: ScopeEvidence, ceiling: AccessCeiling) => Promise<unknown>
 }): Promise<T[]> {
   if (!params.group || !params.ceiling) return [...params.rows]
   const validate = params.validate ?? validateAudienceScopeEvidence
   const decisions = await Promise.all(params.rows.map(async (row) => {
+    if (params.readerCeiling) {
+      if (!boundScopeSources(row).length) return false
+      try { await validate(scopeEvidenceFromRows([row]), params.readerCeiling) } catch { return false }
+    }
     if (row.channelMessageId !== null) return true
-    if (!boundScopeSource(row)) return false
+    if (!boundScopeSources(row).length) return false
     try {
       await validate(scopeEvidenceFromRows([row]), params.ceiling!)
       return true
@@ -849,13 +879,12 @@ type ConnectorTurnScopeResolver = (
 ) => Promise<ResolvedTurnScope>
 
 /**
- * Keep the channel user's data authority separate from the routed assistant's
- * explicitly granted connector authority. The resolver parameter is a narrow
- * test seam for this security boundary; production always uses the canonical
- * TurnScope resolver.
+ * A connector toggle/room cannot replace the authenticated sender. Resolve its
+ * current native floor and retain the narrower turn/audience/credential envelope.
  */
 export async function resolveConnectorTurnScopeForChannelTurn(
   input: {
+    /** Legacy setting retained for call compatibility; it never widens authority. */
     useAssistantConnectorAuthority: boolean
     dataTurnScope: ResolvedTurnScope
     userId: string
@@ -863,19 +892,48 @@ export async function resolveConnectorTurnScopeForChannelTurn(
     workspaceId: string | null
     session: ResolveTurnScopeInput['session']
   },
-  resolveScope: ConnectorTurnScopeResolver = resolveTurnScopeSystem,
+  resolveScope: ConnectorTurnScopeResolver = facts => resolveConnectorNativeTurnScopeSystem(facts, resolveTurnScopeSystem),
 ): Promise<ResolvedTurnScope> {
-  if (!input.useAssistantConnectorAuthority) return input.dataTurnScope
-  return resolveScope({
+  if (!input.workspaceId) return input.dataTurnScope
+  const initiator = await resolveScope({
     userId: input.userId,
     assistant: input.assistant,
     workspaceId: input.workspaceId,
     session: input.session,
-    memberMode: 'assistant',
+    memberMode: 'member',
   })
+  if (initiator.access.userId !== input.userId || initiator.access.workspaceId !== input.workspaceId
+    || initiator.access.assistantId !== input.assistant.id) throw new Error('connector_actor_mismatch')
+  return narrowConnectorTurnScope(input.dataTurnScope, initiator)
 }
 
 // ── Pipeline ─────────────────────────────────────────────────────
+
+type ChannelSpeakerAccount = {
+  provenance: 'registered' | 'shadow' | 'unknown'
+  name: string | null
+  email: string | null
+}
+
+/**
+ * Account facts safe to present to the model and opted-in connectors. A
+ * cached channel profile email does not prove a registered sign-in account.
+ * See channel-user-identity.md, "Non-member senders".
+ */
+export function resolveChannelSpeakerAccount(user: {
+  authProvider: string | null
+  name: string | null
+  email: string | null
+} | null | undefined): ChannelSpeakerAccount {
+  const provenance = user?.authProvider === 'channel'
+    ? 'shadow'
+    : ['email', 'google', 'oidc'].includes(user?.authProvider ?? '') ? 'registered' : 'unknown'
+  return {
+    provenance,
+    name: provenance === 'registered' || !user?.name?.includes('@') ? user?.name ?? null : null,
+    email: provenance === 'registered' ? user?.email ?? null : null,
+  }
+}
 
 /**
  * Private-runtime block for a sender who is not a member of the assistant's
@@ -885,27 +943,29 @@ export async function resolveConnectorTurnScopeForChannelTurn(
  */
 export function buildNonMemberSenderBlock(args: {
   channelType: string
-  senderEmail: string | null
-  senderName: string | null
+  senderAccount: ChannelSpeakerAccount
+  /** Legacy call compatibility only. Enablement cannot create native staff authority. */
   assistantConnectorTools?: boolean
 }): string {
-  const who = args.senderEmail
-    ? `${args.senderName ? `${args.senderName} <${args.senderEmail}>` : args.senderEmail}`
-    : (args.senderName ?? 'this sender')
-  const identity = args.senderEmail
-    ? `Their ${args.channelType} account resolves to the Use Brian account ${args.senderEmail}, and that account is not a member of this workspace.`
-    : `Their ${args.channelType} account could not be matched to a member of this workspace.`
+  const { provenance, email: accountEmail, name: senderName } = args.senderAccount
+  const who = accountEmail
+    ? `${senderName ? `${senderName} <${accountEmail}>` : accountEmail}`
+    : (senderName ?? 'this sender')
+  const identity = provenance === 'registered'
+    ? `Their ${args.channelType} account resolves to ${accountEmail ? `the registered Use Brian account ${accountEmail}` : 'a registered Use Brian account'}, and that account is not a member of this workspace.`
+    : `Their ${args.channelType} account could not be matched to a member of this workspace. ${provenance === 'shadow' ? 'It is represented by a channel-only identity, not a verified Use Brian sign-in account.' : 'Its Use Brian sign-in identity has not been verified.'}`
   return (
     '# Sender is not a workspace member\n\n' +
     `You are answering ${who}, who is NOT a member of this assistant's workspace. ` +
     'Every workspace-native read (workflows, tasks, pages, brain, contacts, deals) will come back empty or "not found" for them. ' +
     'That is an access boundary, not a missing record: do NOT report "no workflows", "no tasks", "not found" or "not visible in this workspace" as fact, do not ask them to open a different workspace, and do not retry lookups. ' +
-    (args.assistantConnectorTools
-      ? 'Connector tools explicitly enabled for this assistant ARE available in this channel. Use those tools normally, and do not say account linking or workspace membership is required to use them. '
-      : 'Do not infer connector availability from workspace membership; use only the connector tools actually present in this turn. ') +
+    'A channel connector setting does not grant this sender staff authority. Do not use protected connectors or claim that enabled assistant tools are available to them. ' +
     `If they ask about workspace-native data or ask you to act on it, tell them plainly: ${identity} ` +
-    'Give both remedies: (1) a workspace admin invites that email to the workspace, or (2) they link this ' +
-    `${args.channelType} account to the Use Brian account they normally use, from Settings -> Account -> Connected accounts, then re-send the message. ` +
+    (provenance === 'registered' ? '' : 'Do not disclose a channel profile email, present it as their Use Brian sign-in account, or tell an admin to invite it. ') +
+    'Give verified linking as the primary remedy: sign in to the Use Brian account they normally use, then link this ' +
+    `${args.channelType} account from Settings -> Account -> Connected accounts and re-send the message. ` +
+    'The linked account must be a workspace member; linking does not itself grant membership. ' +
+    'An alternative is for a workspace admin to invite their confirmed actual Use Brian sign-in email. Ask them to confirm that email rather than guessing from a channel profile. ' +
     'Everything they say in this chat is still answerable from what they provide here.'
   )
 }
@@ -1028,6 +1088,23 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // Split-admission routes have already sent handled replies. A stopped turn
   // must not re-enter admission or start conversational work after media intake.
   if (params.admittedAnswerContext?.kind === 'handled' || params.abortController.signal.aborted) return
+  const transportHooks = params.hooks
+  let processingStarted = false
+  let cleanupCalled = false
+  const hooks: ChannelHooks = {
+    ...transportHooks,
+    async onProcessingStart() {
+      // A provider can create its status before failing its start request.
+      // Even that partial start belongs to this invocation's cleanup.
+      processingStarted = true
+      await transportHooks.onProcessingStart?.()
+    },
+    async onCleanup() {
+      if (cleanupCalled) return
+      cleanupCalled = true
+      await transportHooks.onCleanup?.()
+    },
+  }
   const messageId = params.incomingMessage?.messageId ?? params.incomingChannelMessageId
   const unregister = params.interactionScope ? channelConfirmations.registerTurn(
     params.interactionScope, params.abortController, {
@@ -1041,9 +1118,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     },
   ) : undefined
   try {
-    await processChannelMessageTurn(params)
+    await processChannelMessageTurn({ ...params, hooks })
   } finally {
-    unregister?.()
+    try {
+      if (processingStarted) await hooks.onCleanup?.()
+    } finally {
+      unregister?.()
+    }
   }
 }
 
@@ -1152,14 +1233,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         return hooks.sendResponse(notice ? `${notice}\n\n${text}` : text, ...rest)
       }
     : hooks.sendResponse
-  // D16: a room is hydrated once from what the provider still shows.
-  const roomHistory = room && params.readProviderHistory && await claimRoomHydration(room.id)
-    ? await params.readProviderHistory().catch((err: unknown) => {
-        console.warn(`[${channelType}] room hydration failed; continuing without history:`, err)
-        return null
-      })
-    : null
-  const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
   // Resolve credential/billing ownership before constructing execution facts.
   // It remains attribution only and never substitutes for the channel actor.
   const billingUserId = await billingPartyForAssistant({
@@ -1187,7 +1260,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     externalGuest: params.externalGuest === true,
     memberMode,
   })
-  const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
+  let authorizeDeliveryAudience = createDeliveryAudienceAuthorizer({
     integrationStore: params.channelIntegrationStore,
   })
   const resolveDeliveryAudienceEnvelope = createDeliveryAudienceEnvelopeResolver({
@@ -1260,7 +1333,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       // an approved group also reads their own personal rows.
       sharedAudience: !turnPolicy.context.personalMemory && !(audienceEnvelope?.allowed && audienceEnvelope.ceiling.userId),
       identity: senderIsWorkspaceMember
-        ? { kind: 'attended', principal: { kind: 'workspace_member', userId } }
+        ? { kind: 'attended', principal: { kind: 'workspace_member', userId, authenticationKind: 'verified_channel' } }
         : {
             kind: 'attended',
             principal: {
@@ -1305,6 +1378,18 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     }
     return
   }
+  if (room && audienceEnvelope?.allowed && !(await mayReadGroupContext(pinAccessCeiling(dataTurnScope.access), audienceEnvelope.ceiling))) {
+    await hooks.sendError(new Error(CONTEXT_NOT_AVAILABLE_MESSAGE))
+    await hooks.onCleanup?.()
+    return
+  }
+  const providerInputId = incomingChannelMessageId ?? params.incomingMessage?.messageId
+  if (room && providerInputId != null && !(await claimChannelRoomTurn({
+    sessionId: room.id, assistantId: assistant.id, channelMessageId: String(providerInputId),
+  }))) {
+    await hooks.onCleanup?.()
+    return
+  }
   const clearance = dataTurnScope.access.clearance ?? assistant.clearance
   const compartments = dataTurnScope.effectiveCompartments
   const scopeAccumulator = new ContextScopeAccumulator({
@@ -1312,21 +1397,47 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     projectIds: dataTurnScope.writeProjectIds,
   })
   const inputMessageScope = room && assistant.workspaceId
-    ? roomInputScope(room, assistant.workspaceId)
+    ? roomInputScope(room, assistant.workspaceId, audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined)
     : sessionMessageInputScope({
         scope: dataTurnScope,
         workspaceId: assistant.workspaceId,
         userId,
         sharedAudience: !turnPolicy.context.personalMemory,
       })
-  const currentTurnWrite = () => turnOutputWrite({
-    producer: `turn:${channelType}`,
-    accumulator: scopeAccumulator,
-    envelope: inputMessageScope,
+  if (room && inputMessageScope) await admitRoomInputScope(room, inputMessageScope)
+  // D16: a room is hydrated once from what the provider still shows.
+  const roomHistory = room && audienceEnvelope?.allowed
+    && await mayReadGroupContext(pinAccessCeiling(dataTurnScope.access), { ...audienceEnvelope.ceiling,
+      clearance: (room.effectiveClearance ?? 'internal') as AccessCeiling['clearance'],
+      compartments: room.contextCompartments, projectIds: room.contextProjectId ? [room.contextProjectId] : [] })
+    && params.readProviderHistory && await claimRoomHydration(room.id)
+    ? await params.readProviderHistory().catch((err: unknown) => {
+        console.warn(`[${channelType}] room hydration failed; continuing without history:`, err)
+        return null
+      })
+    : null
+  const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
+  const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
+    && executionContext.identity.kind === 'attended'
+    && executionContext.identity.principal.kind === 'workspace_member'
+    ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
+  const currentTurnWrite = () => ({
+    ...turnOutputWrite({
+      producer: `turn:${channelType}`,
+      accumulator: scopeAccumulator,
+      envelope: inputMessageScope,
+    }),
+    ...(nativeTranscriptAuthority ? { authority: nativeTranscriptAuthority } : {}),
   })
+  if (nativeTranscriptAuthority) {
+    authorizeDeliveryAudience = createAttendedDeliveryAudienceAuthorizer(executionContext, {
+      integrationStore: params.channelIntegrationStore,
+    })
+  }
   const authority = executionContext.security.authority
   const assertDeliveryAudience = async (): Promise<void> => {
-    await authority.assertCurrent()
+    // The native authorizer owns the same original lease at entry and return.
+    if (!nativeTranscriptAuthority) await authority.assertCurrent()
     const decision = await authorizeDeliveryAudience({
       ...audienceInput,
       scopeEvidence: scopeAccumulator.evidence,
@@ -1382,6 +1493,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     rows,
     group: turnPolicy.deliveryCeiling.recipientType === 'group',
     ceiling: audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined,
+    ...(room && audienceEnvelope?.allowed ? { readerCeiling: { ...pinAccessCeiling(dataTurnScope.access), userId: '',
+      ...(dataTurnScope.access.departmentRead ? { departmentRead: { ...dataTurnScope.access.departmentRead, userId: '' } } : {}) } } : {}),
   })
 
   // Expose session ID to channel hooks (e.g., WhatsApp confirmation store)
@@ -1427,6 +1540,14 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       await clearDowngradeNotice(session.id)
     }
   }
+  // Progress starts only after native authority, audience and budget admission,
+  // but before any auxiliary model call or context/tool preparation.
+  if (abortController.signal.aborted) return
+  if (!(await deliveryAudienceAdmitsTurn())) return
+  if (abortController.signal.aborted) return
+  await hooks.onProcessingStart?.()
+  if (abortController.signal.aborted) return
+
   const backgroundLlmRuntime = assistant.workspaceId && params.resolveWorkspaceCustomLlm
     ? await params.resolveWorkspaceCustomLlm({
         workspaceId: assistant.workspaceId,
@@ -1458,13 +1579,55 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     }))
   }
 
+  // Persist authored input before deriving native topic/reply annotations.
+  let classification: TopicClassification | null = null
+  let replyResolved: Awaited<ReturnType<typeof resolveReplyText>> | { text: string; fromAssistant: boolean } | null = null
+  let createdUserMessage = true
+  const persistUserMessage = async (client?: Parameters<typeof addSessionMessage>[1]) => {
+    const input = {
+      sessionId: session.id,
+      role: 'user' as const,
+      content: userContentBlocks,
+      replyToText: replyResolved?.text ?? null,
+      topicLabel: classification?.topic_label ?? null,
+      topicConfidence: classification?.confidence ?? null,
+      channelMessageId: (room ? providerInputId : incomingChannelMessageId) != null
+        ? String(room ? providerInputId : incomingChannelMessageId) : null,
+      senderUserId: roomShape.attributeSenders ? userId : senderUserId ?? null,
+      scope: inputMessageScope,
+    }
+    if (!room) return addSessionMessage(input, client)
+    const result = await appendChannelRoomMessage(input, client)
+    createdUserMessage = result.created
+    return result.message
+  }
+  const persistInboundMessage = async () => params.archiveIncoming && !params.archiveInboundAlreadyPersisted
+    ? await persistInboundChatArchive({
+        source: channelType,
+        // `billingUserId`, not `ownerId`: the archive's `LiveArchiveContext`
+        // declares `ownerUserId: string`, and on a workspace-owned assistant
+        // `ownerId` is NULL. It survives that today (the binding resolves off
+        // `workspaceId`, and `connector_instance.created_by` / the outbox's
+        // `owner_user_id` are both nullable) — but it was writing a null into a
+        // field typed non-null, and the workspace owner is the correct value.
+        ownerUserId: billingUserId,
+        workspaceId: assistant.workspaceId,
+        connectorInstanceId: params.archiveConnectorInstanceId,
+        assistantId: assistant.id,
+        assistantName: assistant.name,
+        conversationId: channelId,
+        message: params.archiveIncoming,
+      }, persistUserMessage)
+    : await persistUserMessage()
+  const earlyUserMessageRow = nativeTranscriptAuthority ? await persistInboundMessage() : undefined
+
   // Load the pre-turn transcript once and reuse it for adaptive research +
   // topic classification. Follow-up detection needs actual dialogue, not an
   // isolated current sentence (2026-08-09 Snapio incident on web; channels
   // share the same classifier contract).
-  const preExistingDbMessages = await filterHistoryForAudience(
-    await getSessionMessages(session.id, { excludeHeld: true }),
-  )
+  const preExistingDbMessages = nativeTranscriptAuthority
+    ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, undefined, earlyUserMessageRow ? earlyUserMessageRow.sequenceNum - 1 : undefined)
+    : await filterHistoryForAudience(await getSessionMessages(session.id, { excludeHeld: true }))
   const adaptiveRecentConversation = preExistingDbMessages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .filter((m) => !(
@@ -1507,7 +1670,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   ) {
     try {
       const { classifyResearchIntent } = await import('@use-brian/core')
-      const adaptive = await classifyResearchIntent({
+      const adaptive = nativeTranscriptAuthority && earlyUserMessageRow
+        ? await classifyAttendedResearchMessage({
+            authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
+            provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
+          })
+        : await classifyResearchIntent({
         provider: backgroundProvider,
         message: messageText,
         model: backgroundLaneModel,
@@ -1520,6 +1688,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         adaptiveResearchActive = true
       }
     } catch (err) {
+      if (nativeTranscriptAuthority || isInputAuthorityError(err)) throw err
       console.warn(`[${channelType}] adaptive-research classifier failed:`, err)
     }
   }
@@ -1574,7 +1743,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // that no longer exists. Same rule the store applies to embedding and
     // extraction failures — see brian-message-store docs/architecture.md
     // → "Failure behavior".
-    if (params.archiveIncoming && !params.archiveInboundAlreadyPersisted) {
+    if (params.archiveIncoming && !params.archiveInboundAlreadyPersisted && !earlyUserMessageRow) {
       try {
         await appendInboundChatArchive({
           source: channelType,
@@ -1622,10 +1791,16 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // justification. See Q9 of the design thread + the `chatEpisodeIngestor`
   // wiring in apps/api/src/index.ts.
 
-  // ── Reply resolution + topic classification (runs BEFORE persist so
-  //    the incoming user message row carries the topic label and reply
-  //    text). See docs/architecture/context-engine/compaction.md.
+  const nativeClassification = nativeTranscriptAuthority && earlyUserMessageRow
+    ? await classifyAttendedSessionMessage({
+        authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
+        provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
+        reply: { channelType, replyToMessageId: replyToMessageId ?? null },
+      })
+    : undefined
+
   const channelUser = await findUserById(userId)
+  const speakerAccount = resolveChannelSpeakerAccount(channelUser)
   const anchorTimezone = channelUser?.timezone ?? 'UTC'
   // Slack/WhatsApp/etc. have no live tz header. Inherit presence from
   // the most recent fresh web observation; fall back to anchor when
@@ -1636,13 +1811,14 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     anchorTimezone,
   })
 
-  const storedReply = await resolveReplyText({
+  const storedReply = nativeClassification ? nativeClassification.reply : await resolveReplyText({
     channelType,
     replyToMessageId: replyToMessageId ?? null,
     session,
     raw: replyRaw,
+    ...(room ? { readableHistory: preExistingDbMessages } : {}),
   })
-  const replyResolved = storedReply ?? (
+  replyResolved = nativeClassification ? nativeClassification.reply : storedReply ?? (
     params.realtimeThreadTarget?.contextText
       ? { text: params.realtimeThreadTarget.contextText, fromAssistant: true }
       : null
@@ -1662,65 +1838,42 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     })
     .filter((t) => t.text.length > 0)
 
-  const knownTopics = await getSessionTopicLabels(session.id, 20)
+  const knownTopics = nativeClassification ? [] : room
+    ? [...new Set(preExistingDbMessages.map(m => m.topicLabel).filter((label): label is string => Boolean(label)))].slice(-20)
+    : await getSessionTopicLabels(session.id, 20)
 
-  let classification: TopicClassification | null = null
-  try {
-    classification = await classifyTopic({
-      provider: backgroundProvider,
-      // Background lane (see the chat.ts counterpart) — Flash Lite per
-      // cost-and-pricing.md → "Standard-tier routing", not the Flash 3
-      // chat alias this had drifted onto.
-      model: backgroundLaneModel,
-      recentUserTurns,
-      replyToText: replyResolved?.text ?? null,
-      currentMessage: messageText,
-      knownTopicsThisSession: knownTopics,
-      decisionRuntime: params.decisionRuntime,
-      workspaceId: assistant.workspaceId ?? undefined,
-      runId: `memory-topic-${session.id}-${Date.now()}`,
-    })
-  } catch (err) {
-    console.error(`[${channelType}] topic classifier failed:`, err)
+  classification = nativeClassification?.classification ?? null
+  if (!nativeClassification) {
+    try {
+      classification = await classifyTopic({
+        provider: backgroundProvider,
+        signal: abortController.signal,
+        // Background lane (see the chat.ts counterpart) — Flash Lite per
+        // cost-and-pricing.md → "Standard-tier routing", not the Flash 3
+        // chat alias this had drifted onto.
+        model: backgroundLaneModel,
+        recentUserTurns,
+        replyToText: replyResolved?.text ?? null,
+        currentMessage: messageText,
+        knownTopicsThisSession: knownTopics,
+        decisionRuntime: params.decisionRuntime,
+        workspaceId: assistant.workspaceId ?? undefined,
+        runId: `memory-topic-${session.id}-${Date.now()}`,
+      })
+    } catch (err) {
+      console.error(`[${channelType}] topic classifier failed:`, err)
+    }
   }
+  if (abortController.signal.aborted) return
 
-  // ── Persist inbound message (with topic label + reply context) ──
-  const persistUserMessage = (client?: Parameters<typeof addSessionMessage>[1]) =>
-    addSessionMessage({
-      sessionId: session.id,
-      role: 'user',
-      content: userContentBlocks,
-      replyToText: replyResolved?.text ?? null,
-      topicLabel: classification?.topic_label ?? null,
-      topicConfidence: classification?.confidence ?? null,
-      channelMessageId:
-        incomingChannelMessageId !== undefined && incomingChannelMessageId !== null
-          ? String(incomingChannelMessageId)
-          : null,
-      // Per-message author for collaborative draft sessions. Other
-      // channels and personal sessions pass null/undefined.
-      // A room attributes every row to its sender (one session, many people).
-      senderUserId: roomShape.attributeSenders ? userId : senderUserId ?? null,
-      scope: inputMessageScope,
-    }, client)
-  const userMessageRow = params.archiveIncoming && !params.archiveInboundAlreadyPersisted
-    ? await persistInboundChatArchive({
-        source: channelType,
-        // `billingUserId`, not `ownerId`: the archive's `LiveArchiveContext`
-        // declares `ownerUserId: string`, and on a workspace-owned assistant
-        // `ownerId` is NULL. It survives that today (the binding resolves off
-        // `workspaceId`, and `connector_instance.created_by` / the outbox's
-        // `owner_user_id` are both nullable) — but it was writing a null into a
-        // field typed non-null, and the workspace owner is the correct value.
-        ownerUserId: billingUserId,
-        workspaceId: assistant.workspaceId,
-        connectorInstanceId: params.archiveConnectorInstanceId,
-        assistantId: assistant.id,
-        assistantName: assistant.name,
-        conversationId: channelId,
-        message: params.archiveIncoming,
-      }, persistUserMessage)
-    : await persistUserMessage()
+  // Reuse the native authored row; legacy profiles persist their input here.
+  const userMessageRow = earlyUserMessageRow ?? await persistInboundMessage()
+  if (room && assistant.workspaceId && createdUserMessage) {
+    await captureChannelRoomInput({
+      room, inputScope: inputMessageScope, workspaceId: assistant.workspaceId,
+      senderUserId: userId, senderName: actorDisplayName ?? null, text: messageText ?? '',
+    })
+  }
   const storedUserSource = await readSessionMessageScopeSource(
     assistant.workspaceId,
     userMessageRow.id,
@@ -1774,7 +1927,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // collaborative-session channels can mirror the new turn to peer
   // viewers via their draft-bus. Final-only channels leave this
   // unimplemented.
-  await hooks.onUserMessageSaved?.({
+  if (createdUserMessage) await hooks.onUserMessageSaved?.({
     id: userMessageRow.id,
     sequenceNum: userMessageRow.sequenceNum,
     content: userContentBlocks,
@@ -1824,12 +1977,25 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // ── Load history ──
   // `fromSequence` skips rows already compacted into the most recent
   // boundary; null (never compacted) loads full history.
-  const dbMessages = await filterHistoryForAudience(await getSessionMessages(session.id, {
-    excludeHeld: true,
-    // A public audience cannot trust the durable summary because it has no
-    // per-source audience evidence. Rebuild from filtered provider history.
-    fromSequence: isolatedAudience ? null : session.compactBoundarySequence,
-  }))
+  let dbMessages = nativeTranscriptAuthority
+    ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, isolatedAudience || room ? null : session.compactBoundarySequence)
+    : await filterHistoryForAudience(await getSessionMessages(session.id, {
+        excludeHeld: true,
+        // A public audience cannot trust the durable summary because it has no
+        // per-source audience evidence. Rebuild from filtered provider history.
+        fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
+      }))
+  if (room) {
+    const currentHistory = overlayCurrentRoomMessage(dbMessages, { id: userMessageRow.id, content: userContentBlocks })
+    if (!currentHistory) {
+      // A provider replay must not relabel an older, more restricted input
+      // or run a model turn after its current question was withheld.
+      await hooks.sendError(new Error(CONTEXT_NOT_AVAILABLE_MESSAGE))
+      await hooks.onCleanup?.()
+      return
+    }
+    dbMessages = currentHistory
+  }
   noteAutomaticScopeEvidence(
     scopeAccumulator,
     dbMessages.filter((message) => countsAsGroupAudienceEvidence(message, isGroupChat)),
@@ -1857,10 +2023,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
   if (!(await deliveryAudienceAdmitsTurn())) return
   const compactionResult = await runProactiveCompaction({
+    modelContext: { execution: executionContext, accumulator: scopeAccumulator },
     sessionMessages: dbMessages,
     timezone: userTimezone,
     senderNames: roomSenderNames,
-    session,
+    session: room ? { ...session, compactSummary: null, compactBoundarySequence: null } : session,
     tier: modelToCompactionTier(logicalModel),
     channelClass: 'messaging',
     profile: 'multi-topic',
@@ -1884,8 +2051,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     analytics,
     usageStore,
     userMessageId: userMessageRow.id,
-    persistLongTermContext: !isolatedAudience && roomShape.memoryWrites,
-    persistSessionSummary: !isolatedAudience,
+    // Room capture owns shared learning. The legacy compaction extractor
+    // reads a privileged personal index and writes per-user memories.
+    persistLongTermContext: !room && !isolatedAudience && roomShape.memoryWrites,
+    persistSessionSummary: !room && !isolatedAudience,
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
     authority,
@@ -1915,12 +2084,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     const viewerCtx = automaticContextAccess(dataTurnScope.access, dataTurnScope.activeProjectId)
     const [soulContext, identityMemories, rankedIndex] = await Promise.all([
       (memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-      memoryStore.getIdentity(viewerCtx),
-      memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP),
+      memoryStore.getIdentity(viewerCtx,nativeTranscriptAuthority),
+      memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP,nativeTranscriptAuthority),
     ])
     const soul = soulContext.content
     scopeAccumulator.note(soulContext.evidence)
-    noteAutomaticScopeEvidence(scopeAccumulator, [...identityMemories, ...rankedIndex.rows])
+    noteAutomaticScopeEvidence(scopeAccumulator, [identityMemories,rankedIndex.rows,...identityMemories, ...rankedIndex.rows])
     for (const m of identityMemories) sensitivityAccumulator.note(m.sensitivity)
     for (const r of rankedIndex.rows) sensitivityAccumulator.note(r.sensitivity)
     let workspaceIdentityMems: typeof identityMemories = []
@@ -1929,12 +2098,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     if (assistant.workspaceId) {
       ;[workspaceIdentityMems, workspaceIdx, teamPurpose] = await Promise.all([
         memoryStore.getWorkspaceIdentity(viewerCtx),
-        memoryStore.getWorkspaceIndex(viewerCtx),
+        memoryStore.getWorkspaceIndex(viewerCtx,undefined,nativeTranscriptAuthority),
         getWorkspacePurpose(assistant.workspaceId),
       ])
       for (const m of workspaceIdentityMems) sensitivityAccumulator.note(m.sensitivity)
       for (const r of workspaceIdx) sensitivityAccumulator.note(r.sensitivity)
-      noteAutomaticScopeEvidence(scopeAccumulator, [...workspaceIdentityMems, ...workspaceIdx])
+      noteAutomaticScopeEvidence(scopeAccumulator, [workspaceIdx,...workspaceIdentityMems, ...workspaceIdx])
     }
     memoryContext = buildMemoryContext({
       soul,
@@ -1954,6 +2123,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   if (!isolatedAudience && episodicStore && classification) {
     try {
       episodicContext = await fetchEpisodicContext({
+        authority: { execution: executionContext, accumulator: scopeAccumulator },
         store: episodicStore,
         sessionId: session.id,
         classification,
@@ -1968,6 +2138,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   if (sessionStateStore && !isolatedAudience) {
     try {
       sessionStateBlock = await buildSessionStateBlock({
+        authority: { execution: executionContext, accumulator: scopeAccumulator },
         store: sessionStateStore,
         sessionId: session.id,
       })
@@ -2094,8 +2265,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // all that teammate's. See layer-1-system-prompt.md → "Speaker identity".
     // `actorChannelId` (Slack `U…`, Telegram handle/id, Feishu/Lark open id, WhatsApp number) rides
     // along so "what is my Slack id" is answered as fact, not guessed.
+    // Account email comes only from the registered-provenance snapshot.
     speakerIdentity: isIdentified && !isolatedAudience
-      ? speakerIdentityFromUser(channelUser, { type: channelType, id: actorChannelId ?? null, displayName: actorDisplayName })
+      ? speakerIdentityFromUser(speakerAccount, { type: channelType, id: actorChannelId ?? null, displayName: actorDisplayName })
       : null,
     memoryContext,
     workspaceFilesContext,
@@ -2162,8 +2334,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       privateRuntimeContextParts.push(
         buildNonMemberSenderBlock({
           channelType,
-          senderEmail: channelUser?.email ?? null,
-          senderName: channelUser?.name ?? null,
+          senderAccount: speakerAccount,
           assistantConnectorTools: connectorToolsAllowed && useAssistantConnectorAuthority,
         }),
       )
@@ -2283,13 +2454,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       },
     })
     try {
-      // An external guest keeps the non-member scope resolved above for every
-      // prompt, memory, file, skill, and write path. The owner's explicit
-      // connector opt-in authorizes only the connector surface enabled for the
-      // routed assistant, so resolve that surface independently and never
-      // reuse it outside this injection call.
+      // Independently impose the actual sender's current native floor. A legacy
+      // assistant-mode toggle or room audience cannot confer staff connectors.
       const turnScope = await resolveConnectorTurnScopeForChannelTurn({
-        useAssistantConnectorAuthority,
+        useAssistantConnectorAuthority: useAssistantConnectorAuthority && !room,
         dataTurnScope,
         userId,
         assistant: {
@@ -2301,6 +2469,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       })
       const injection = await injectMcpTools({
         userId: connectorUserId,
+        executionContext,
+        scopeAccumulator,
         assistantId: assistant.id,
         tools: allTools,
         connectorStore,
@@ -2325,12 +2495,14 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         // Actor identity for opted-in connectors. `actorChannelId` is the
         // channel-native id captured from the inbound webhook by the channel
         // route (Slack user id / Telegram @handle / Feishu-Lark open id / WhatsApp phone); email +
-        // userId come from the resolved channel user. Server-resolved, never
-        // model output. See docs/architecture/engine/tool-hooks.md.
+        // userId come from the resolved channel user. Only a registered account
+        // contributes an email; a cached shadow profile is not account proof.
+        // Server-resolved, never model output. See
+        // docs/architecture/engine/tool-hooks.md.
         actorIdentity: {
           channel: channelType,
           id: actorChannelId ?? null,
-          email: channelUser?.email ?? null,
+          email: speakerAccount.email,
           userId,
           // Short-lived, user-scoped media capability token. Emitted only to
           // connectors the user granted media access (`sendMediaToken`); lets
@@ -2467,9 +2639,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     }
   }
 
-  // ── Processing start ──
+  // ── Pre-generation audience recheck ──
   if (!(await deliveryAudienceAdmitsTurn())) return
-  await hooks.onProcessingStart?.()
 
   const confirmationResolver = createConfirmationResolver()
 
@@ -2524,20 +2695,71 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       }
       return -1
     })()
-    for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
-      const turn = pendingAssistantTurns[turnIdx]
-      if (turn.content.length === 0) continue
-      const assistantRow = await addSessionMessage({
-        sessionId: session.id,
-        role: 'assistant',
-        content: turn.content,
-        // Stamp draft-session author so peer viewers see who drove
-        // the turn that produced this assistant message.
-        senderUserId: senderUserId ?? null,
-        attachments: turnIdx === lastContentIdx && attachments?.length ? attachments : undefined,
-        ...currentTurnWrite(),
-      })
-      lastFlushedAssistantRowId = assistantRow.id
+    const batchWrite = currentTurnWrite()
+    const savedTurns: Array<{ row: Awaited<ReturnType<typeof addSessionMessage>>; content: ContentBlock[] }> = []
+    const publish = async (tx: PoolClient) => {
+      const nativeRows: Array<Parameters<typeof publishNativeSessionMessageBatch>[0]['messages'][number]> = []
+      const nativeSaved = new Map<number, ContentBlock[]>()
+      for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
+        const turn = pendingAssistantTurns[turnIdx]
+        if (turn.content.length === 0) continue
+        if(nativeTranscriptAuthority && 'derivation' in batchWrite){
+          nativeSaved.set(nativeRows.length,turn.content)
+          nativeRows.push({role:'assistant',content:turn.content,senderUserId:senderUserId??null,
+            attachments:turnIdx===lastContentIdx&&attachments?.length?attachments:undefined})
+        } else {
+          const assistantRow = await addSessionMessage({
+            sessionId: session.id,
+            role: 'assistant',
+            content: turn.content,
+            // Stamp draft-session author so peer viewers see who drove
+            // the turn that produced this assistant message.
+            senderUserId: senderUserId ?? null,
+            attachments: turnIdx === lastContentIdx && attachments?.length ? attachments : undefined,
+            ...batchWrite,
+          }, tx)
+          savedTurns.push({ row: assistantRow, content: turn.content })
+        }
+        const missing = synthesizeMissingToolResults(turn.content, turn.toolResults, reason)
+        const allResults = [...turn.toolResults, ...missing]
+        if (allResults.length > 0) {
+          if(nativeTranscriptAuthority && 'derivation' in batchWrite)nativeRows.push({role:'user',content:allResults})
+          else await addSessionMessage({
+            sessionId: session.id,
+            role: 'user',
+            content: allResults,
+            ...batchWrite,
+          }, tx)
+        }
+      }
+      if(nativeRows.length&&nativeTranscriptAuthority&&'derivation' in batchWrite){
+        const rows=await publishNativeSessionMessageBatch({sessionId:session.id,messages:nativeRows,
+          derivation:batchWrite.derivation,derivationTarget:batchWrite.derivationTarget,authority:nativeTranscriptAuthority},tx)
+        for(const [index,row] of rows.entries()){
+          const content=nativeSaved.get(index)
+          if(content)savedTurns.push({row,content})
+        }
+      }
+    }
+    await authority.execute(async () => {
+      if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
+        return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish, { turnToken: turnLeaseToken })
+      }
+      const tx = await getPool().connect()
+      try {
+        await tx.query('BEGIN')
+        await publish(tx)
+        await tx.query('COMMIT')
+      } catch (error) {
+        await tx.query('ROLLBACK').catch(() => {})
+        throw error
+      } finally {
+        tx.release()
+      }
+    })
+    if (savedTurns.length) await assertDeliveryAudience()
+    for (const saved of savedTurns) {
+      lastFlushedAssistantRowId = saved.row.id
       // Streaming channels surface the persisted row so the client
       // can attach actions (regenerate, copy, thumbs-up) and so
       // collaborative channels can mirror the assistant turn to peer
@@ -2545,20 +2767,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       // text) fire this once per buffered turn that has content.
       // Final-only channels leave the hook unimplemented.
       await hooks.onAssistantMessageSaved?.({
-        id: assistantRow.id,
-        sequenceNum: assistantRow.sequenceNum,
-        content: turn.content,
+        id: saved.row.id,
+        sequenceNum: saved.row.sequenceNum,
+        content: saved.content,
       })
-      const missing = synthesizeMissingToolResults(turn.content, turn.toolResults, reason)
-      const allResults = [...turn.toolResults, ...missing]
-      if (allResults.length > 0) {
-        await addSessionMessage({
-          sessionId: session.id,
-          role: 'user',
-          content: allResults,
-          ...currentTurnWrite(),
-        })
-      }
     }
   }
 
@@ -2819,8 +3031,50 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         ? { maxTurns: tierBudget.maxTurns, maxToolCalls: tierBudget.maxToolCalls }
         : {}),
       },
-      sink: { kind: 'adapter', onEvent: async (event) => {
-      await assertDeliveryAudience()
+      sink: { kind: 'adapter', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async () => {
+        await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
+        if (!sessionStateStore || !isIdentified || isolatedAudience) return
+        try {
+          const result = await runTurnSessionStateDiff({
+            authority: { execution: executionContext, accumulator: scopeAccumulator },
+            provider: backgroundProvider, model: backgroundLaneModel, store: sessionStateStore,
+            userMessage: bindScopeSources<Message>({ role: 'user', content: messageText }, storedUserSource ? [storedUserSource] : []),
+            assistantTurns: pendingAssistantTurns,
+          })
+          analytics?.logEvent({
+            userId, assistantId: assistant.id, sessionId: session.id,
+            eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
+            channelType,
+            metadata: {
+              upserts: result.upserts,
+              resolves: result.resolves,
+              failed: Boolean(result.errorMessage),
+            },
+          })
+          // Same billing split as every other overhead row on this path: the
+          // workspace pays, the channel user is recorded as the actor. This
+          // pair used to pass the bare `userId`, which billed a (possibly
+          // shadow) channel user for an auxiliary call they never asked for
+          // and split one turn's overhead across two payers.
+          await recordOverheadUsage({
+            usageStore,
+            userId: billingUserId,
+            actorUserId: userId,
+            assistantId: assistant.id,
+            sessionId: session.id,
+            userMessageId: userMessageRow.id,
+            model: result.model,
+            usage: result.usage,
+            source: 'overhead:session-state-diff',
+            triggerKey: 'session_state_diff',
+            ...backgroundUsageAttribution,
+          })
+        } catch (err) {
+          if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
+          console.debug(`[${channelType}] session-state diff unavailable`)
+        }
+      }, onEvent: async (event) => {
+      if (!nativeTranscriptAuthority) await assertDeliveryAudience()
       turnOutput.observe(event)
       researchObserver?.observe(event)
       switch (event.type) {
@@ -3204,70 +3458,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
     await settleResearch(turnLoopResult.finalText ?? '', abortController.signal.aborted)
 
-    // ── Session-state diff pass (fire-and-forget safety net) ──
-    // See docs/architecture/context-engine/session-state.md.
-    if (sessionStateStore && isIdentified && !isolatedAudience) {
-      const stateStore = sessionStateStore
-      const diffRecentTurns: Message[] = []
-      const assistantLastText = pendingAssistantTurns
-        .flatMap((t) => t.content)
-        .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n')
-      if (assistantLastText) {
-        diffRecentTurns.push(
-          { role: 'user', content: messageText },
-          { role: 'assistant', content: assistantLastText },
-        )
-      }
-      stateStore
-        .listOpenBySession(session.id)
-        .then((open: SessionStateRecord[]) =>
-          runSessionStateDiff({
-            provider: backgroundProvider,
-            // Standard tier per docs/architecture/platform/cost-and-pricing.md
-            // → Model routing (extraction / classification / structured-output bucket).
-            model: backgroundLaneModel,
-            sessionId: session.id,
-            userId,
-            assistantId: assistant.id,
-            store: stateStore,
-            recentTurns: diffRecentTurns,
-            openCommitments: open,
-          }),
-        )
-        .then((result) => {
-          analytics?.logEvent({
-            userId, assistantId: assistant.id, sessionId: session.id,
-            eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
-            channelType,
-            metadata: {
-              upserts: result.upserts,
-              resolves: result.resolves,
-              error: result.errorMessage ? sanitizeAnalytics(result.errorMessage) : undefined,
-            },
-          })
-          // Same billing split as every other overhead row on this path: the
-          // workspace pays, the channel user is recorded as the actor. This
-          // pair used to pass the bare `userId`, which billed a (possibly
-          // shadow) channel user for an auxiliary call they never asked for
-          // and split one turn's overhead across two payers.
-          return recordOverheadUsage({
-            usageStore,
-            userId: billingUserId,
-            actorUserId: userId,
-            assistantId: assistant.id,
-            sessionId: session.id,
-            userMessageId: userMessageRow.id,
-            model: result.model,
-            usage: result.usage,
-            source: 'overhead:session-state-diff',
-            triggerKey: 'session_state_diff',
-            ...backgroundUsageAttribution,
-          })
-        })
-        .catch((err) => console.debug(`[${channelType}] session-state diff failed:`, err))
-    }
 
     // ── Memory nudge (identified users only) ──
     // Records usage as `overhead:nudge` once the judge call returns. Fire-and-

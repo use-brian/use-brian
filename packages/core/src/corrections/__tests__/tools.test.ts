@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { ContextScopeAccumulator } from '../../security/context-scope.js'
 import { createCorrectionTools } from '../tools.js'
 import type {
   ApplySoftRetractInput,
@@ -23,6 +24,8 @@ const ROW_ID = '11111111-1111-4111-8111-111111111111'
 
 function makeContext(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
+    executionContext: {} as NonNullable<ToolContext['executionContext']>,
+    scopeAccumulator: new ContextScopeAccumulator(),
     userId: USER_ID,
     assistantId: 'asst-1',
     sessionId: 'sess-1',
@@ -61,6 +64,7 @@ function makeDeps(overrides?: {
       ? overrides.memorySnapshot ?? null
       : {
           id: ROW_ID,
+          scopeVersion: '1',
           workspaceId: WORKSPACE_ID,
           retractedAt: null,
           validTo: null,
@@ -177,6 +181,17 @@ describe('[COMP:corrections/tools] createCorrectionTools', () => {
 
       expect(result.isError).toBeUndefined()
       expect(rec.softRetract).toHaveLength(1)
+      expect(rec.softRetract[0]!.operation?.authority.accumulator).toBeInstanceOf(ContextScopeAccumulator)
+      expect(rec.softRetract[0]!.operation?.expectedVersion).toBe('1')
+      const unframed = await retractMemory.execute({ memory_id: ROW_ID, reason: 'wrong' }, makeContext({ executionContext: undefined }))
+      expect(unframed.isError).toBe(true)
+      expect(rec.softRetract).toHaveLength(1)
+      deps.retraction.applySoftRetract = async () => { throw Object.assign(new Error('Original authority changed'), { operationMayHaveExecuted: true, retrySafe: false }) }
+      const uncertain = await retractMemory.execute({ memory_id: ROW_ID, reason: 'wrong' }, makeContext())
+      expect(uncertain.isError).toBe(true)
+      expect(String(uncertain.data)).toContain('may have committed')
+      expect(String(uncertain.data)).toContain('Do not repeat')
+      expect(String(uncertain.data)).not.toMatch(/nothing was saved|nothing changed/i)
       expect(rec.softRetract[0]!).toMatchObject({
         workspaceId: WORKSPACE_ID,
         memoryId: ROW_ID,

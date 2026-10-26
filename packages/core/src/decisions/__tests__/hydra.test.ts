@@ -90,6 +90,32 @@ function operation(params: {
 }
 
 describe('[COMP:decisions/hydra] bounded cascade', () => {
+  it.each(['hybrid', 'shadow'] as const)('never recovers a wrapped %s primary authority refusal', async (mode) => {
+    const refusal = Object.assign(new Error('Synthetic provider authority refusal'), { reason: 'authority_changed', retrySafe: false })
+    const wrapped = new DecisionProviderError('transport', 'Synthetic provider wrapper', { cause: refusal })
+    const complete = vi.fn(operation().completeWithLlm)
+    await expect(executeDecisionCascade({ request: decisionRequest(), operation: operation({ complete }),
+      route: { mode, primary: provider(async () => { throw wrapped }), profile: profile(mode), allowSyntheticProfile: true },
+    })).rejects.toBe(wrapped)
+    expect(complete).not.toHaveBeenCalled()
+  })
+
+  it('never converts an LLM authority refusal into safe default', async () => {
+    const refusal = Object.assign(new Error('Synthetic provider authority refusal'), { reason: 'authority_changed', retrySafe: false })
+    const safeFailure = vi.fn((): Result => ({ verdict: 'safe' }))
+    await expect(executeDecisionCascade({ request: decisionRequest(),
+      operation: { ...operation({ complete: async () => { throw refusal } }), safeFailure }, route: { mode: 'llm_only' },
+    })).rejects.toBe(refusal)
+    expect(safeFailure).not.toHaveBeenCalled()
+  })
+
+  it('propagates a primary authority refusal from observation-only execution', async () => {
+    const refusal = Object.assign(new Error('Synthetic provider authority refusal'), { reason: 'authority_changed', retrySafe: false })
+    await expect(executeDecisionObservation({ request: decisionRequest(), operation: operation(),
+      route: { mode: 'hybrid', primary: provider(async () => { throw refusal }), profile: profile(), allowSyntheticProfile: true },
+    })).rejects.toBe(refusal)
+  })
+
   it('preserves LLM-only as one complete call with no primary dispatch', async () => {
     const primary = vi.fn(async () => response())
     const complete = vi.fn(operation().completeWithLlm)

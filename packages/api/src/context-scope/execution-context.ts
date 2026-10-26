@@ -15,8 +15,12 @@ import {
 import {
   createAuthorityLease,
   createSessionAuthorityLease,
+  AuthorityChangedError,
   type SessionAuthoritySnapshot,
 } from './authority-lease.js'
+import { pinPolicyEpoch } from './policy-epoch.js'
+import { findAssistantById } from '../db/users.js'
+import {authSessionStore} from '../db/auth-session-store.js'
 import {
   projectRoomAudienceCeiling,
   resolveLiveAccessCeilingSystem,
@@ -24,6 +28,7 @@ import {
   type ResolveTurnScopeDeps,
   type ResolveTurnScopeInput,
   type ResolvedTurnScope,
+  type TurnScopeAssistant,
 } from './resolve-turn-scope.js'
 
 export type ResolveExecutionContextInput = ResolveTurnScopeInput & {
@@ -35,6 +40,7 @@ export type ResolveExecutionContextInput = ResolveTurnScopeInput & {
   provenance?: ScopeEvidence
   /** Required for attended/public session runs; absent for request-scoped MCP/system jobs. */
   sessionAuthority?: SessionAuthoritySnapshot
+  nativeSessionCredential?:{userId:string;sessionId:string;authVersion:number}
   credentialCurrent?: () => Promise<boolean>
   /** Optional recipient/surface ceiling that may only narrow this execution. */
   maximumAccess?: AccessCeiling
@@ -61,6 +67,8 @@ export type ResolvedExecutionContext = {
 }
 
 export type ResolveExecutionContextDeps = ResolveTurnScopeDeps & {
+  pinPolicyEpoch?: typeof pinPolicyEpoch
+  resolveAssistant?: (id: string) => Promise<TurnScopeAssistant | null>
   resolveScope?: typeof resolveTurnScopeSystem
   resolveLive?: typeof resolveLiveAccessCeilingSystem
   createSessionLease?: (
@@ -69,6 +77,7 @@ export type ResolveExecutionContextDeps = ResolveTurnScopeDeps & {
   createLease?: (
     starting: AccessCeiling,
     resolveCurrent: () => Promise<AccessCeiling | null>,
+    policyCurrent?: () => Promise<boolean>,
   ) => CurrentAuthorityBoundary
 }
 
@@ -123,6 +132,19 @@ export async function resolveExecutionContextSystem(
   input: ResolveExecutionContextInput,
   deps: ResolveExecutionContextDeps = {},
 ): Promise<ResolvedExecutionContext> {
+  if(input.nativeSessionCredential){
+    if(input.nativeSessionCredential.userId!==input.userId)throw new AuthorityChangedError()
+    input={...input,nativeSessionCredential:Object.freeze(structuredClone(input.nativeSessionCredential))}
+  }
+  const workspaceId = input.workspaceId ?? input.assistant.workspaceId
+  const policyCurrent = workspaceId ? await (deps.pinPolicyEpoch ?? pinPolicyEpoch)({
+    workspaceId, principalId: input.userId, assistantId: input.assistant.id,
+  }) : undefined
+  if (workspaceId) {
+    const assistant = await (deps.resolveAssistant ?? findAssistantById)(input.assistant.id)
+    if (!assistant || assistant.workspaceId !== workspaceId) throw new AuthorityChangedError()
+    input = { ...input, assistant }
+  }
   const resolveScope = deps.resolveScope ?? resolveTurnScopeSystem
   const resolveLive = deps.resolveLive ?? resolveLiveAccessCeilingSystem
   const scopeDeps: ResolveTurnScopeDeps = {
@@ -161,6 +183,7 @@ export async function resolveExecutionContextSystem(
     clientSelfMemory: input.surface?.clientSelfMemory,
   }
   const starting = boundedStartingCeiling(access, input.identity)
+  if (policyCurrent && !(await policyCurrent())) throw new AuthorityChangedError()
   const authority = input.sessionAuthority
     ? (deps.createSessionLease ?? createSessionAuthorityLease)({
         starting,
@@ -173,11 +196,14 @@ export async function resolveExecutionContextSystem(
         memberMode: input.memberMode,
         ignoreSessionBinding: input.ignoreSessionBinding,
         systemRead: input.surface?.systemRead,
+        nativeSessionCredential: input.nativeSessionCredential,
         credentialCurrent: input.credentialCurrent,
         maximumAccessCurrent: input.maximumAccessCurrent,
+        policyCurrent,
       })
     : (deps.createLease ?? createAuthorityLease)(starting, async () => {
         if (input.credentialCurrent && !(await input.credentialCurrent())) return null
+      if(input.nativeSessionCredential&&(input.nativeSessionCredential.userId!==input.userId||!await authSessionStore.validateAccess(input.nativeSessionCredential,{touch:false})))return null
         let current = await resolveLive(input, scopeDeps)
         current = input.identity.kind === 'delegated'
           ? intersectAccessCeilings(current, input.identity.parentCeiling)
@@ -187,7 +213,7 @@ export async function resolveExecutionContextSystem(
         return maximum
           ? intersectAccessCeilings(current, { ...maximum, userId: current.userId })
           : null
-      })
+      }, policyCurrent)
 
   return {
     turnScope,

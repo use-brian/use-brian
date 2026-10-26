@@ -23,7 +23,7 @@
  */
 
 /** Auth-provider-id prefixes that mark a shadow user as an external principal. */
-export const EXTERNAL_PRINCIPAL_NAMESPACES = ['api', 'chatlink'] as const
+export const EXTERNAL_PRINCIPAL_NAMESPACES = ['api', 'chatlink', 'app-service', 'app-user'] as const
 
 /** The same prefixes as SQL `LIKE` patterns. */
 export const EXTERNAL_PRINCIPAL_PREFIXES = EXTERNAL_PRINCIPAL_NAMESPACES.map(

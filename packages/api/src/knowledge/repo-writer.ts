@@ -32,6 +32,7 @@ import type {
   KnowledgeRepoWriteResult,
   KnowledgeWriteActor,
   Sensitivity,
+  SessionContextAuthority,
 } from '@use-brian/core'
 import * as github from '../github/client.js'
 import { splitFrontmatterBlock, resolveRepoFilePath, validateKnowledgeEntryPath } from './repo-files.js'
@@ -69,6 +70,10 @@ export type RepoWriterStore = {
     writeAccess: boolean | null
     /** Tier for entries without explicit frontmatter (mig 410). */
     defaultSensitivity: Sensitivity
+    bindingVersion?: string
+    bindingSensitivity?: Sensitivity | null
+    bindingCompartments?: string[] | null
+    bindingProjectIds?: string[] | null
   } | null>
   upsertByPath(params: {
     workspaceId: string; path: string; title: string
@@ -88,6 +93,12 @@ export type RepoWriterStore = {
     writtenBy?: KnowledgeWriteActor
     actorId?: string | null
   }): Promise<{ id: string; path: string }>
+  publishRepoWrite?: (input: {
+    source: NonNullable<Awaited<ReturnType<RepoWriterStore['getSource']>>>
+    entryId?: string; expectedVersion?: string
+    entry: Parameters<RepoWriterStore['upsertByPath']>[0]
+  }, authority: SessionContextAuthority | undefined,
+  effect: () => Promise<{ sha: string | null; url: string | null }>) => Promise<{ row: { id: string; path: string }; sha: string | null; url: string | null }>
   updateSourceWriteAccess(id: string, writeAccess: boolean): Promise<void>
 }
 
@@ -159,7 +170,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
    * access — flip the cached probe so injection drops the write tools on
    * the next turn (fire-and-forget; the sync tick re-probes regardless).
    */
-  function classifyWriteError(source: { id: string; repo: string }, err: unknown): KnowledgeRepoWriteResult {
+  function classifyWriteError(source: { id: string; repo: string }, err: unknown, dispatched = false): KnowledgeRepoWriteResult {
     const message = err instanceof Error ? err.message : String(err)
     if (message.includes('(403)')) {
       deps.store.updateSourceWriteAccess(source.id, false).catch((e) => {
@@ -178,16 +189,22 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
         message: `The GitHub token for ${source.repo} is invalid or revoked. Reconnect it in Studio → Connectors.`,
       }
     }
-    return { ok: false, reason: 'error', message: `GitHub write failed: ${message}` }
+    return dispatched
+      ? { ok: false, reason: 'error', retrySafe: false, operationMayHaveExecuted: true,
+          message: 'The GitHub write was dispatched, but its outcome could not be confirmed. Check the source before considering another write.' }
+      : { ok: false, reason: 'error', message: `GitHub write failed before dispatch: ${message}` }
   }
 
-  function classifyLocalWriteError(source: { repo: string }, err: unknown): KnowledgeRepoWriteResult {
+  function classifyLocalWriteError(source: { repo: string }, err: unknown, dispatched = false): KnowledgeRepoWriteResult {
     const code = (err as NodeJS.ErrnoException | null)?.code
     const message = err instanceof Error ? err.message : String(err)
     if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') {
       return { ok: false, reason: 'not_writable', message: `The local knowledge directory is not writable: ${source.repo}` }
     }
-    return { ok: false, reason: 'error', message: `Local knowledge write failed: ${message}` }
+    return dispatched
+      ? { ok: false, reason: 'error', retrySafe: false, operationMayHaveExecuted: true,
+          message: 'The local knowledge write was attempted, but its outcome could not be confirmed. Check the source before considering another write.' }
+      : { ok: false, reason: 'error', message: `Local knowledge write failed before dispatch: ${message}` }
   }
 
   function toPosixPath(value: string): string {
@@ -280,15 +297,18 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
    * re-resolves wikilinks workspace-wide.
    */
   async function writeThrough(
-    source: { id: string; workspaceId: string; rootPath: string; defaultSensitivity: Sensitivity },
+    source: NonNullable<Awaited<ReturnType<RepoWriterStore['getSource']>>>,
     relativePath: string,
     fileContent: string,
-    commitSha: string | null,
+    effect: () => Promise<{ sha: string | null; url: string | null }>,
+    authority: SessionContextAuthority | undefined,
+    expected: { entryId?: string; expectedVersion?: string },
     requestedBy: { userId: string } | null | undefined,
     scope: { compartments: string[]; projectIds: string[] },
-  ): Promise<{ id: string; path: string }> {
+  ): Promise<{ row: { id: string; path: string }; sha: string | null; url: string | null }> {
+    if (!deps.store.publishRepoWrite) throw new Error('knowledge_repo_publication_required')
     const parsed = parseMarkdownFile(relativePath, fileContent)
-    return await deps.store.upsertByPath({
+    return await deps.store.publishRepoWrite({ source, ...expected, entry: {
       workspaceId: source.workspaceId,
       path: parsed.path,
       title: parsed.title,
@@ -301,7 +321,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
       sensitivityExplicit: parsed.sensitivityExplicit,
       metadata: { ...parsed.metadata, _rawRelated: parsed.related },
       sourceId: source.id,
-      sourceSha: commitSha,
+      sourceSha: null,
       compartments: scope.compartments,
       projectIds: scope.projectIds,
       // Assistant-authored: becomes `DispatchEvent.isBot` on the `knowledge`
@@ -311,7 +331,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
       // `match.fromBots: true`.
       writtenBy: 'system',
       actorId: requestedBy?.userId ?? null,
-    })
+    } }, authority, effect)
   }
 
   function mirrorFailure(sourceType: 'github' | 'local', commitSha: string | null, err: unknown): KnowledgeRepoWriteResult {
@@ -319,14 +339,16 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
     return {
       ok: false,
       reason: 'error',
+      retrySafe: false,
+      operationMayHaveExecuted: true,
       message: sourceType === 'github'
-        ? `The change was committed to GitHub${commitSha ? ` (${commitSha.slice(0, 7)})` : ''}, but the local mirror update failed — it will appear after the next sync (within ~15 minutes).`
-        : 'The local knowledge file was updated, but the database mirror failed — it will recover after the next sync (within ~15 minutes).',
+        ? `The change was committed to GitHub${commitSha ? ` (${commitSha.slice(0, 7)})` : ''}, but the local mirror update failed. Check the source; the next sync can reconcile the mirror only while source access and admission remain available.`
+        : 'The local knowledge file was updated, but the database mirror failed. Check the source; the next sync can reconcile the mirror only while source access and admission remain available.',
     }
   }
 
   return {
-    async commitEntryUpdate({ workspaceId, entry, newBody, changeSummary, requestedBy, compartments, projectIds }) {
+    async commitEntryUpdate({ workspaceId, entry, newBody, changeSummary, requestedBy, compartments, projectIds, authority }) {
       const target = await resolveTarget(workspaceId, entry.sourceId)
       if (!target.ok) return target.result
       const { source } = target
@@ -336,6 +358,9 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
       let newFile: string
       let commitSha: string | null = null
       let commitUrl: string | null = null
+      let dispatched = false
+      let sourceWriteCompleted = false
+      let row: { id: string; path: string }
 
       if (target.kind === 'github') {
         try {
@@ -359,15 +384,19 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
           }
           const body = newBody.endsWith('\n') ? newBody : `${newBody}\n`
           newFile = `${frontmatter}${body}`
-          const res = await ops.createOrUpdateFile(target.pat, target.owner, target.repo, {
-            path: filePath,
-            content: newFile,
-            message: commitMessage(changeSummary, entry.path, requestedBy),
-            branch: source.branch,
+          const published = await writeThrough(source, relativePath, newFile, async () => {
+            dispatched = true
+            const res = await ops.createOrUpdateFile(target.pat, target.owner, target.repo, {
+              path: filePath, content: newFile, message: commitMessage(changeSummary, entry.path, requestedBy), branch: source.branch,
+            })
+            const ref = commitRef(res); commitSha = ref.sha; commitUrl = ref.url; sourceWriteCompleted = true
+            return ref
+          }, authority, { entryId: entry.id, expectedVersion: entry.scopeVersion }, requestedBy, {
+            compartments: compartments ?? entry.compartments ?? [], projectIds: projectIds ?? entry.projectIds ?? [],
           })
-          ;({ sha: commitSha, url: commitUrl } = commitRef(res))
+          row = published.row
         } catch (err) {
-          return classifyWriteError(source, err)
+          return sourceWriteCompleted ? mirrorFailure(source.sourceType, commitSha, err) : classifyWriteError(source, err, dispatched)
         }
       } else {
         try {
@@ -385,28 +414,27 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
           }
           const body = newBody.endsWith('\n') ? newBody : `${newBody}\n`
           newFile = `${frontmatter}${body}`
-          await replaceLocalFile(filePath, newFile)
+          const published = await writeThrough(source, relativePath, newFile, async () => {
+            dispatched = true
+            await replaceLocalFile(filePath, newFile)
+            sourceWriteCompleted = true
+            return { sha: null, url: null }
+          }, authority, { entryId: entry.id, expectedVersion: entry.scopeVersion }, requestedBy, {
+            compartments: compartments ?? entry.compartments ?? [], projectIds: projectIds ?? entry.projectIds ?? [],
+          })
+          row = published.row
         } catch (err) {
-          return classifyLocalWriteError(source, err)
+          return sourceWriteCompleted ? mirrorFailure(source.sourceType, null, err) : classifyLocalWriteError(source, err, dispatched)
         }
       }
 
-      let row: { id: string; path: string }
-      try {
-        row = await writeThrough(source, relativePath, newFile, commitSha, requestedBy, {
-          compartments: compartments ?? entry.compartments ?? [],
-          projectIds: projectIds ?? entry.projectIds ?? [],
-        })
-      } catch (err) {
-        return mirrorFailure(source.sourceType, commitSha, err)
-      }
       emitAudit(requestedBy, {
         workspaceId, sourceId: source.id, sourceType: source.sourceType, entryId: row.id, op: 'update', repo: source.repo, commitSha,
       })
       return { ok: true, entryId: row.id, path: row.path, sourceType: source.sourceType, commitSha, commitUrl }
     },
 
-    async commitEntryCreate({ workspaceId, sourceId, path, fileContent, changeSummary, requestedBy, compartments, projectIds }) {
+    async commitEntryCreate({ workspaceId, sourceId, path, fileContent, changeSummary, requestedBy, compartments, projectIds, authority }) {
       const target = await resolveTarget(workspaceId, sourceId)
       if (!target.ok) return target.result
       const { source } = target
@@ -421,6 +449,9 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
       let newFile: string
       let commitSha: string | null = null
       let commitUrl: string | null = null
+      let dispatched = false
+      let sourceWriteCompleted = false
+      let row: { id: string; path: string }
 
       if (target.kind === 'github') {
         try {
@@ -435,15 +466,17 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
           filePath = prefix ? `${prefix}/${entryPath}.md` : `${entryPath}.md`
           relativePath = relativeRepoPath(source.rootPath, filePath)
           newFile = fileContent.endsWith('\n') ? fileContent : `${fileContent}\n`
-          const res = await ops.createOrUpdateFile(target.pat, target.owner, target.repo, {
-            path: filePath,
-            content: newFile,
-            message: commitMessage(changeSummary, entryPath, requestedBy),
-            branch: source.branch,
-          })
-          ;({ sha: commitSha, url: commitUrl } = commitRef(res))
+          const published = await writeThrough(source, relativePath, newFile, async () => {
+            dispatched = true
+            const res = await ops.createOrUpdateFile(target.pat, target.owner, target.repo, {
+              path: filePath, content: newFile, message: commitMessage(changeSummary, entryPath, requestedBy), branch: source.branch,
+            })
+            const ref = commitRef(res); commitSha = ref.sha; commitUrl = ref.url; sourceWriteCompleted = true
+            return ref
+          }, authority, {}, requestedBy, { compartments: compartments ?? [], projectIds: projectIds ?? [] })
+          row = published.row
         } catch (err) {
-          return classifyWriteError(source, err)
+          return sourceWriteCompleted ? mirrorFailure(source.sourceType, commitSha, err) : classifyWriteError(source, err, dispatched)
         }
       } else {
         try {
@@ -455,24 +488,21 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
           filePath = await ensureLocalCreateParent(target.root, entryPath)
           relativePath = toPosixPath(nodePath.relative(target.root, filePath))
           newFile = fileContent.endsWith('\n') ? fileContent : `${fileContent}\n`
-          await fs.writeFile(filePath, newFile, { flag: 'wx' })
+          const published = await writeThrough(source, relativePath, newFile, async () => {
+            dispatched = true
+            await fs.writeFile(filePath, newFile, { flag: 'wx' })
+            sourceWriteCompleted = true
+            return { sha: null, url: null }
+          }, authority, {}, requestedBy, { compartments: compartments ?? [], projectIds: projectIds ?? [] })
+          row = published.row
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
             return { ok: false, reason: 'file_exists', message: `An entry already exists at "${entryPath}". Use updateKnowledgeEntry to change it.` }
           }
-          return classifyLocalWriteError(source, err)
+          return sourceWriteCompleted ? mirrorFailure(source.sourceType, null, err) : classifyLocalWriteError(source, err, dispatched)
         }
       }
 
-      let row: { id: string; path: string }
-      try {
-        row = await writeThrough(source, relativePath, newFile, commitSha, requestedBy, {
-          compartments: compartments ?? [],
-          projectIds: projectIds ?? [],
-        })
-      } catch (err) {
-        return mirrorFailure(source.sourceType, commitSha, err)
-      }
       emitAudit(requestedBy, {
         workspaceId, sourceId: source.id, sourceType: source.sourceType, entryId: row.id, op: 'create', repo: source.repo, commitSha,
       })

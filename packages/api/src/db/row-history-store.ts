@@ -1,3 +1,4 @@
+import { bindScopeSources, boundScopeSources, DerivedScopeError } from '@use-brian/core'
 import type {
   RetrievalActor,
   RetrievalEnvelope,
@@ -34,9 +35,9 @@ import { getWorkspaceFileHistory } from './workspace-files.js'
  * columns); widening that helper would ripple into `TaskRecord`
  * consumers, which is out of WU-6.9's scope.
  *
- * Sensitivity-clearance projection is deferred to WS-4 (WU-4.2). Today
- * the walkers run through `queryWithRLS` for workspace partition +
- * visibility-double only.
+ * Memory uses the original host's guarded canonical history port and preserves
+ * its source bindings through display projection. The other walkers retain
+ * their existing per-primitive permission paths and require separate proof.
  */
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -71,9 +72,9 @@ type RawVersion = {
 // ── Per-primitive raw fetchers ──────────────────────────────────────
 
 async function fetchMemoryVersions(actor: RetrievalActor, rowId: string): Promise<RawVersion[]> {
-  void actor
-  const { chain } = await getMemoryHistory(rowId)
-  return chain.map((m) => ({
+  if (!actor.authority) throw new DerivedScopeError('scope_evidence_missing')
+  const history = await getMemoryHistory(rowId, actor, actor.authority)
+  const rows = history.chain.map((m) => bindScopeSources({
     id: m.id,
     validFrom: m.validFrom,
     validTo: m.validTo,
@@ -89,7 +90,8 @@ async function fetchMemoryVersions(actor: RetrievalActor, rowId: string): Promis
       summary: m.summary,
       tags: m.tags,
     },
-  }))
+  }, boundScopeSources(m)))
+  return bindScopeSources(rows, boundScopeSources(history))
 }
 
 async function fetchTaskVersions(actor: RetrievalActor, rowId: string): Promise<RawVersion[]> {
@@ -250,7 +252,7 @@ function parseAsOf(asOf: string | undefined): Date | null {
 }
 
 function toVersion(primitive: RowHistoryPrimitive, raw: RawVersion): RowHistoryVersion {
-  return {
+  return bindScopeSources({
     id: raw.id,
     primitive,
     status: deriveStatus(raw),
@@ -263,7 +265,7 @@ function toVersion(primitive: RowHistoryPrimitive, raw: RawVersion): RowHistoryV
     created_by_assistant_id: raw.createdByAssistantId,
     created_at: raw.createdAt.toISOString(),
     display: raw.display,
-  }
+  }, boundScopeSources(raw))
 }
 
 // ── Public surface ──────────────────────────────────────────────────
@@ -300,7 +302,8 @@ export function createDbRowHistoryStore(): Pick<RetrievalStore, 'getRowHistory'>
         ? visible
         : visible.filter((row) => row.retractedAt === null)
 
-      const chain = filtered.map((row) => toVersion(input.primitive, row))
+      const sources = boundScopeSources(raw)
+      const chain = bindScopeSources(filtered.map((row) => toVersion(input.primitive, row)), sources)
 
       // `current_id` per spec — the version active at the pivot. With
       // no `as_of`, that's the row with `valid_to IS NULL`. With an
@@ -315,14 +318,14 @@ export function createDbRowHistoryStore(): Pick<RetrievalStore, 'getRowHistory'>
       })
       const current_id = head ? head.id : null
 
-      return {
-        api_version: 'v1',
-        data: { chain, current_id },
+      return bindScopeSources({
+        api_version: 'v1' as const,
+        data: bindScopeSources({ chain, current_id }, sources),
         meta: {
           retrieved_at: new Date().toISOString(),
           truncated: false,
         },
-      }
+      }, sources)
     },
   }
 }

@@ -2047,6 +2047,44 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
 })
 
 describe('[COMP:workflow/failure-delivery] terminal workflow notification', () => {
+  it.each(['failed', 'timeout'] as const)('keeps private metadata out of a %s notification while retaining the authorized run detail', async status => {
+    const stores = makeFakeStores()
+    const hiddenName = 'SYNTHETIC_PRIVATE_WORKFLOW_LABEL'
+    const hiddenStep = 'synthetic_private_step'
+    const hiddenReason = 'synthetic_private_failure_reason'
+    const hiddenMessage = 'SYNTHETIC_PRIVATE_FAILURE_DETAIL'
+    const delivered: string[] = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: { async send() {
+        throw Object.assign(new Error(hiddenMessage), { reason: status === 'timeout' ? 'timeout' : hiddenReason })
+      } },
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async params => {
+        delivered.push(params.text)
+        return { status: 'delivered', channelType: params.channelType, channelId: params.channelId }
+      },
+    }
+    const { workflow, run } = await seedWorkflowAndRun(deps, {
+      startStepId: hiddenStep,
+      steps: [{ id: hiddenStep, type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Return synthetic output' }],
+      failureDelivery: { channelType: 'slack', channelId: 'C00000001' },
+    })
+    workflow.name = hiddenName
+    await advanceWorkflowRun(deps, run.id)
+    await advanceWorkflowRun(deps, run.id)
+    expect(delivered).toHaveLength(1)
+    for (const hidden of [hiddenName, hiddenStep, hiddenReason, hiddenMessage]) {
+      expect(delivered[0].includes(hidden)).toBe(false)
+    }
+    expect(delivered[0]).toBe(`A workflow run ${status}. Review the run in the web app before retrying.\nRun: ${run.id}`)
+    expect(stores.runs.get(run.id)?.status).toBe(status)
+    expect(String(stores.runs.get(run.id)?.error?.message).includes(hiddenMessage)).toBe(true)
+    expect(stores.stepRuns.some(row => row.stepId === hiddenStep && row.status === 'failed')).toBe(true)
+  })
+
   it('preserves the terminal result when notification assistant resolution fails', async () => {
     const stores = makeFakeStores()
     let resolutions = 0
@@ -2122,8 +2160,8 @@ describe('[COMP:workflow/failure-delivery] terminal workflow notification', () =
     await advanceWorkflowRun(deps, run.id)
 
     expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toContain('Failed step: collect')
-    expect(delivered[0]).toContain('Error: timeout')
+    expect(delivered[0]).toBe(`A workflow run timeout. Review the run in the web app before retrying.\nRun: ${run.id}`)
+    expect(delivered[0].includes('collect')).toBe(false)
     expect(delivered[0]).not.toContain('do-not-send')
     expect(stores.runs.get(run.id)?.status).toBe('timeout')
     expect(audits.filter((event) => event.type === 'workflow.failure_delivered')).toHaveLength(1)

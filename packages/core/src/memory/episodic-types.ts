@@ -1,3 +1,6 @@
+import type { SessionContextAuthority } from './session-state-types.js'
+import type { DerivedWriteEvidence } from '../security/derived-scope.js'
+
 /**
  * Short-term / episodic memory tier.
  *
@@ -35,7 +38,8 @@ export type EpisodicMemoryRecord = {
    * evicted (access_count==0) or promoted. Starts at 0, bumped each time
    * compaction's housekeeping pass keeps the row. At the promotion
    * threshold it graduates to `memories` as a `context`-type row with
-   * source='episodic-graduation' and the episodic row is deleted.
+   * source='episodic-graduation'. Its certified source is retained while the
+   * episodic row is retired from active recall.
    * See docs/context-engine/compaction.md → "Episodic lifecycle".
    */
   survivalCount: number
@@ -54,6 +58,8 @@ export type EpisodicStore = {
     summary: string
     messageSpan: EpisodicMessageSpan
     entityRefs?: unknown[]
+    authority?: SessionContextAuthority
+    derivation?: DerivedWriteEvidence
   }): Promise<EpisodicMemoryRecord>
 
   /**
@@ -65,6 +71,7 @@ export type EpisodicStore = {
     sessionId: string
     topicLabel: string
     limit?: number
+    authority?: SessionContextAuthority
   }): Promise<EpisodicMemoryRecord[]>
 
   /**
@@ -73,6 +80,7 @@ export type EpisodicStore = {
   fetchBySession(params: {
     sessionId: string
     limit?: number
+    authority?: SessionContextAuthority
   }): Promise<EpisodicMemoryRecord[]>
 
   /**
@@ -82,6 +90,7 @@ export type EpisodicStore = {
   listTopicsBySession(params: {
     sessionId: string
     limit?: number
+    authority?: SessionContextAuthority
   }): Promise<string[]>
 
   /**
@@ -89,19 +98,21 @@ export type EpisodicStore = {
    * counters. Used by the compaction housekeeping pass to decide which
    * rows to evict, promote, or keep.
    */
-  listBySession(sessionId: string): Promise<EpisodicMemoryRecord[]>
+  listBySession(sessionId: string, authority?: SessionContextAuthority): Promise<EpisodicMemoryRecord[]>
 
   /**
-   * Hard-delete an episodic row by id. Called by the housekeeping
-   * pass for evictions (access_count==0) and after successful
-   * promotions to long-term memories.
+   * Hard-delete an admitted cold episodic row for eviction. Promotion uses
+   * the separate atomic retirement port and never deletes its source.
    */
-  deleteById(id: string): Promise<void>
+  deleteById(id: string, authority?: SessionContextAuthority): Promise<void>
+
+  /** Canonical atomic publication/retirement; no plaintext copy/delete fallback. */
+  promote?(id: string, authority: SessionContextAuthority): Promise<{ memoryId: string; created: boolean }>
 
   /**
    * Bulk-increment the `survival_count` of the given rows by 1. Called
    * by the housekeeping pass for rows that were neither evicted nor
    * promoted in the current compaction. No-op when the list is empty.
    */
-  incrementSurvivalCount(ids: string[]): Promise<void>
+  incrementSurvivalCount(ids: string[], authority?: SessionContextAuthority): Promise<void>
 }

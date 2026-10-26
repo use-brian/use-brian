@@ -11,6 +11,7 @@
 
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
+import type { SessionContextAuthority } from '../memory/session-state-types.js'
 
 // ── Entity kinds ─────────────────────────────────────────────────────
 
@@ -548,7 +549,13 @@ export interface EntityLinksStore {
    */
   create(params: EntityLinkCreateParams): Promise<EntityLinkRecord>
 
+  /** Explicit capability: legacy adapters must never silently drop retained authority. */
+  createRetainedMemoryLink?(params: EntityLinkCreateParams, authority: SessionContextAuthority): Promise<EntityLinkRecord>
+
   getById(ctx: AccessContext, id: string): Promise<EntityLinkRecord | null>
+
+  /** Current retained point read; requires a real host authority, never a serialized actor. */
+  getRetainedMemoryLink?(ctx: AccessContext, id: string, authority: SessionContextAuthority): Promise<EntityLinkRecord | null>
 
   walkOutbound(
     ctx: AccessContext,

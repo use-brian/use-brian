@@ -116,3 +116,136 @@ describe('[COMP:app/wechat-desktop-bridge] outbox worker', () => {
     expect(disconnects).toBe(1)
   })
 })
+
+describe('[COMP:app/wechat-desktop-bridge] R4 lost outbound acknowledgement', () => {
+  it.each(['text', 'document'] as const)('reconciles a completed %s send after acknowledgement loss without repeating it', async (kind) => {
+    const agent = fakeAgent()
+    const bridge = fakeBridge()
+    const item: OutboxItem = {
+      id: 'outbound-operation-fictional',
+      type: 'message',
+      peerId: 'wxid_fictional_recipient',
+      createdAt: new Date(0).toISOString(),
+      payload: {
+        text: kind === 'text' ? 'synthetic-outbound-sentinel' : '',
+        format: 'plain',
+        ...(kind === 'document' ? { documents: [{ filename: 'fictional.txt', mime: 'text/plain', dataBase64: Buffer.from('synthetic-file-sentinel').toString('base64') }] } : {}),
+      },
+    }
+    // The bridge transport simulates an item becoming claimable again after
+    // its first acknowledgement is lost. The worker and formatter are real;
+    // the API lease clock/database are outside this focused regression.
+    bridge.queue.push([item], [item])
+    let attempts = 0
+    let finish!: () => void
+    const finished = new Promise<void>((resolve) => { finish = resolve })
+    const worker = createOutboxWorker({
+      agent, bridge, log: silentLogger,
+      onDisconnect: async () => {},
+      sleep: async () => { await new Promise((resolve) => setImmediate(resolve)) },
+    })
+    bridge.ack = async () => {
+      attempts++
+      if (attempts === 1) throw new Error('synthetic acknowledgement transport loss')
+      worker.stop()
+      finish()
+    }
+    worker.start()
+    try {
+      await finished
+    } finally {
+      worker.stop()
+    }
+    expect(attempts).toBe(2)
+    // Numeric-only failure output never dumps protected outbound bytes.
+    expect(agent.sent.length).toBe(1)
+  })
+})
+
+describe('[COMP:app/wechat-desktop-bridge] retained acknowledgement controls', () => {
+  it('keeps a failed send result while retrying its acknowledgement', async () => {
+    const agent = fakeAgent()
+    const bridge = fakeBridge()
+    agent.sendResult = { success: false, error: 'synthetic send refusal' }
+    bridge.queue.push([msgItem('synthetic payload', 'plain')])
+    let attempts = 0
+    let previous: unknown
+    let sameResult = false
+    let originalFailedResult = false
+    let finish!: () => void
+    const finished = new Promise<void>((resolve) => { finish = resolve })
+    const w = createOutboxWorker({ agent, bridge, log: silentLogger, sleep: async () => {}, onDisconnect: async () => {} })
+    bridge.ack = async (results) => {
+      attempts++
+      if (attempts === 1) { previous = results; throw new Error('synthetic ack loss') }
+      sameResult = results === previous
+      originalFailedResult = results[0]?.ok === false
+      w.stop()
+      finish()
+    }
+    w.start()
+    try { await finished } finally { w.stop() }
+    expect(agent.sent.length).toBe(1)
+    expect(attempts).toBe(2)
+    expect(sameResult).toBe(true)
+    expect(originalFailedResult).toBe(true)
+  })
+
+  it('stops an acknowledgement retry after shutdown without polling another item', async () => {
+    const agent = fakeAgent()
+    const bridge = fakeBridge()
+    bridge.queue.push([msgItem('first', 'plain')], [msgItem('second', 'plain')])
+    let finish!: () => void
+    const finished = new Promise<void>((resolve) => { finish = resolve })
+    const w = createOutboxWorker({ agent, bridge, log: silentLogger, sleep: async () => {}, onDisconnect: async () => {} })
+    let attempts = 0
+    bridge.ack = async () => { attempts++; w.stop(); finish(); throw new Error('synthetic ack loss') }
+    w.start()
+    try { await finished; await new Promise((resolve) => setImmediate(resolve)) } finally { w.stop() }
+    expect(agent.sent.length).toBe(1)
+    expect(attempts).toBe(1)
+    expect(bridge.queue.length).toBe(1)
+  })
+
+  it('keeps invalid bridge credentials fatal after a completed send', async () => {
+    const agent = fakeAgent()
+    const bridge = fakeBridge()
+    bridge.queue.push([msgItem('first', 'plain')], [msgItem('second', 'plain')])
+    let finish!: () => void
+    const finished = new Promise<void>((resolve) => { finish = resolve })
+    let fatalCalls = 0
+    const w = createOutboxWorker({
+      agent, bridge, log: silentLogger, sleep: async () => {}, onDisconnect: async () => {},
+      onFatal: () => { fatalCalls++; finish() },
+    })
+    bridge.ack = async () => { throw Object.assign(new Error('synthetic credential refusal'), { name: 'FatalConfigError' }) }
+    w.start()
+    try { await finished } finally { w.stop() }
+    expect(agent.sent.length).toBe(1)
+    expect(fatalCalls).toBe(1)
+    expect(bridge.queue.length).toBe(1)
+  })
+
+  it('polls later work only after the retained batch acknowledgement succeeds', async () => {
+    const agent = fakeAgent()
+    const bridge = fakeBridge()
+    bridge.queue.push([msgItem('first', 'plain')], [{ ...msgItem('second', 'plain'), id: 'item-2' }])
+    const trace: string[] = []
+    const send = agent.sendMessage
+    agent.sendMessage = async (params) => { trace.push('send'); return send(params) }
+    let finish!: () => void
+    const finished = new Promise<void>((resolve) => { finish = resolve })
+    let attempts = 0
+    const w = createOutboxWorker({ agent, bridge, log: silentLogger, sleep: async () => {}, onDisconnect: async () => {} })
+    bridge.ack = async () => {
+      trace.push('ack')
+      attempts++
+      if (attempts === 1) throw new Error('synthetic ack loss')
+      if (attempts === 3) { w.stop(); finish() }
+    }
+    w.start()
+    try { await finished } finally { w.stop() }
+    expect(trace).toEqual(['send', 'ack', 'ack', 'send', 'ack'])
+    expect(agent.sent.length).toBe(2)
+  })
+})

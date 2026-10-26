@@ -1,6 +1,8 @@
+import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import type { LLMProvider, ProviderSession, SessionOptions, SendOptions, Message, StreamChunk, StreamFn, TokenUsage } from './types.js'
 import { fitMessagesToBudget, resolveInputTokenLimit, isContextOverflowError, MODEL_CONTEXT_FIT_RATIO } from './context-budget.js'
+import { assertInputAuthority } from './input-authority.js'
 
 /**
  * Composable stream wrappers.
@@ -106,10 +108,11 @@ export const DEFAULT_FIRST_CHUNK_MS = 90_000
  */
 export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number): StreamWrapper {
   return (inner) => async function* (request) {
+    const firstWindowMs = Math.max(firstChunkTimeoutMs ?? timeoutMs, registryRow(request.model)?.firstResponseTimeoutMs ?? 0)
     const controller = new AbortController()
     const signal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal
     // Admission retries share this window; they cannot extend it or become idle replays.
-    const httpRetryWindow = { deadline: Date.now() + (firstChunkTimeoutMs ?? timeoutMs), rateLimited: false }
+    const httpRetryWindow = { deadline: Date.now() + firstWindowMs, rateLimited: false }
     const stream = inner({ ...request, signal, httpRetryWindow })
     const iterator = stream[Symbol.asyncIterator]()
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -117,7 +120,7 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
     let sawReasoningChunk = false
 
     const timeoutPromise = () => {
-      const windowMs = sawFirstDeliverableChunk ? timeoutMs : (firstChunkTimeoutMs ?? timeoutMs)
+      const windowMs = sawFirstDeliverableChunk ? timeoutMs : firstWindowMs
       const phase = sawFirstDeliverableChunk
         ? ''
         : sawReasoningChunk
@@ -802,6 +805,10 @@ export function defaultWrappers(options?: {
   verbose?: boolean
 }): StreamWrapper[] {
   return [
+    (inner) => async function* (request) {
+      await assertInputAuthority(request.assertInputAuthority)
+      yield* inner(request)
+    },
     wrapContextBudget(),
     wrapSanitizeToolNames(),
     wrapRepairToolCallArgs(),
@@ -853,9 +860,10 @@ export function wrapProvider(
           // successful stream — see gemini.ts), so re-sending trimmed messages
           // on the budget wrapper's retry is safe. The other wrappers don't
           // touch `req.messages`, so this is a no-op for them.
-          const adaptedFn: StreamFn = (req) => inner.send(req.messages, { ...sendOpts, signal: req.signal, httpRetryWindow: req.httpRetryWindow })
+          const adaptedFn: StreamFn = (req) => inner.send(req.messages, { ...sendOpts, signal: req.signal, httpRetryWindow: req.httpRetryWindow, assertInputAuthority: req.assertInputAuthority })
           const wrapped = composeWrappers(adaptedFn, ...wrappers)
           return wrapped({
+            assertInputAuthority: sendOpts?.assertInputAuthority ?? sessionOpts.assertInputAuthority,
             model: sessionOpts.model,
             systemPrompt: sessionOpts.systemPrompt,
             runtimeSystemContext: sessionOpts.runtimeSystemContext,

@@ -40,51 +40,16 @@ const ctxFor = (workspaceId: string, clearance?: 'public' | 'internal' | 'confid
   clearance,
 })
 
+// Viewer query-construction cases now execute against real non-owner SQL in
+// application-platform/__tests__/knowledge-query-shape.integration.test.ts.
+// No mocked canonical domain or current admission is introduced here.
 beforeEach(() => {
   vi.clearAllMocks()
   published.length = 0
 })
 
 describe('[COMP:api/knowledge-store] entries', () => {
-  describe('search', () => {
-    it('uses FTS with plainto_tsquery and ranks by ts_rank_cd, scoped by team', async () => {
-      mockQuery.mockResolvedValueOnce({
-        rows: [{ id: 'e1', path: 'products/vault', title: 'Vault', summary: 'Vault product' }],
-        rowCount: 1,
-      } as never)
 
-      const results = await store.search(ctxFor('t1'), 'vault fees')
-      expect(results).toHaveLength(1)
-      const sql = mockQuery.mock.calls[0][0] as string
-      expect(sql).toContain('plainto_tsquery')
-      expect(sql).toContain('ts_rank_cd')
-      expect(sql).toContain('ke.workspace_id = $1')
-      // Per-assistant source denylist applied on the consumption path.
-      expect(sql).toContain('assistant_disabled_knowledge_sources')
-      expect(sql).toContain('adks.assistant_id = $5')
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'vault fees', 10, 'confidential', 'a1'])
-    })
-  })
-
-  describe('listByPath', () => {
-    it('lists top-level entries when pathPrefix is empty', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [{ path: 'index' }], rowCount: 1 } as never)
-
-      await store.listByPath(ctxFor('t1'), '')
-      const sql = mockQuery.mock.calls[0][0] as string
-      expect(sql).toContain("NOT LIKE '%/%'")
-      expect(sql).toContain('ke.workspace_id = $1')
-    })
-
-    it('lists direct children and index entry for a nested path', async () => {
-      mockQuery
-        .mockResolvedValueOnce({ rows: [{ path: 'products/vault/fees' }], rowCount: 1 } as never)
-        .mockResolvedValueOnce({ rows: [{ path: 'products/vault' }], rowCount: 1 } as never)
-
-      const results = await store.listByPath(ctxFor('t1'), 'products/vault')
-      expect(results).toHaveLength(2)
-    })
-  })
 
   describe('getById', () => {
     it('returns null when not found', async () => {
@@ -144,114 +109,9 @@ describe('[COMP:api/knowledge-store] entries', () => {
     })
   })
 
-  describe('listSummaries', () => {
-    it('returns id, path, summary, sensitivity scoped by team and clearance', async () => {
-      mockQuery.mockResolvedValueOnce({
-        rows: [
-          { id: 'e1', path: 'a', summary: 'Summary A', sensitivity: 'internal' },
-          { id: 'e2', path: 'b', summary: null, sensitivity: 'public' },
-        ],
-        rowCount: 2,
-      } as never)
 
-      const summaries = await store.listSummaries(ctxFor('t1'))
-      expect(summaries).toHaveLength(2)
-      expect(summaries[1].summary).toBeNull()
-      const sql = mockQuery.mock.calls[0][0] as string
-      expect(sql).toContain('workspace_id = $1')
-      expect(sql).toContain('sensitivity_rank')
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'confidential'])
-    })
-  })
 
-  describe('listForBrain', () => {
-    it('returns recent rows ordered by updated_at when query is empty', async () => {
-      mockQuery.mockResolvedValueOnce({
-        rows: [
-          { id: 'e1', title: 'A', path: 'a.md', sensitivity: 'public' },
-          { id: 'e2', title: 'B', path: 'b.md', sensitivity: 'internal' },
-        ],
-        rowCount: 2,
-      } as never)
 
-      const rows = await store.listForBrain(ctxFor('t1'), '', 50)
-      expect(rows).toHaveLength(2)
-      const sql = mockQuery.mock.calls[0][0] as string
-      expect(sql).toContain('workspace_id = $1')
-      // `, id` is a PAGINATION tiebreaker, not decoration: this is the
-      // knowledge arm of the Brain list's composite cursor, and rows tied on
-      // `updated_at` (a bulk KB import writes many at once) would otherwise
-      // reshuffle between pages, showing duplicates and skipping others.
-      expect(sql).toContain('ORDER BY updated_at DESC, id')
-      expect(sql).not.toContain('plainto_tsquery')
-      // Offset defaults to 0 when the caller does not page.
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'confidential', 50, 0])
-    })
-
-    it('offsets by the caller\'s cursor position', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-      await store.listForBrain(ctxFor('t1'), '', 50, 120)
-      expect(mockQuery.mock.calls[0][0] as string).toContain('OFFSET')
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'confidential', 50, 120])
-    })
-
-    it('floors a negative or fractional offset to zero-or-whole rows', async () => {
-      mockQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
-      await store.listForBrain(ctxFor('t1'), '', 50, -5)
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'confidential', 50, 0])
-      await store.listForBrain(ctxFor('t1'), '', 50, 10.7)
-      expect(mockQuery.mock.calls[1][1]).toEqual(['t1', 'confidential', 50, 10])
-    })
-
-    it('runs FTS ranked by ts_rank_cd when query is non-empty', async () => {
-      mockQuery.mockResolvedValueOnce({
-        rows: [{ id: 'e1', title: 'Pricing', path: 'platform/pricing.md', sensitivity: 'internal' }],
-        rowCount: 1,
-      } as never)
-
-      await store.listForBrain(ctxFor('t1'), 'pricing model', 20)
-      const sql = mockQuery.mock.calls[0][0] as string
-      expect(sql).toContain('plainto_tsquery')
-      expect(sql).toContain('ts_rank_cd')
-      // Same tiebreaker reasoning as the empty-query branch — `ts_rank_cd`
-      // ties are common, so paging without it would repeat and skip rows.
-      expect(sql).toContain('DESC, id')
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'pricing model', 'confidential', 20, 0])
-    })
-  })
-
-  describe('listForGraph', () => {
-    it('returns ranked rows with clearance-scoped relatedIds', async () => {
-      mockQuery.mockResolvedValueOnce({
-        rows: [
-          { id: 'e1', title: 'Identity', path: 'features/identity.md', sensitivity: 'confidential', relatedIds: ['e2'] },
-          { id: 'e2', title: 'Memory', path: 'features/memory.md', sensitivity: 'internal', relatedIds: ['e1'] },
-        ],
-        rowCount: 2,
-      } as never)
-
-      const rows = await store.listForGraph(ctxFor('t1'), 500)
-      expect(rows).toHaveLength(2)
-      const sql = mockQuery.mock.calls[0][0] as string
-      expect(sql).toContain('workspace_id = $1')
-      expect(sql).toContain('sensitivity_rank(ke.sensitivity) <= sensitivity_rank($2)')
-      expect(sql).toContain('sensitivity_rank(ke2.sensitivity) <= sensitivity_rank($2)')
-      expect(sql).toContain('ORDER BY ke.updated_at DESC')
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'confidential', 500])
-    })
-  })
-
-  describe('hasEntries', () => {
-    it('returns true when entries exist', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [{ exists: true }], rowCount: 1 } as never)
-      expect(await store.hasEntries(ctxFor('t1'))).toBe(true)
-    })
-
-    it('returns false when no entries', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [{ exists: false }], rowCount: 1 } as never)
-      expect(await store.hasEntries(ctxFor('t1'))).toBe(false)
-    })
-  })
 
   describe('listPathsSystem', () => {
     it('lists all paths without clearance filter for sync worker', async () => {
@@ -390,39 +250,6 @@ describe('[COMP:api/knowledge-store] per-assistant source scoping', () => {
     })
   })
 
-  describe('read-path filter', () => {
-    it('listByPath top-level excludes disabled sources and passes assistantId', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [{ path: 'index' }], rowCount: 1 } as never)
-      await store.listByPath(ctxFor('t1'), '')
-      const sql = mockQuery.mock.calls[0][0] as string
-      expect(sql).toContain('assistant_disabled_knowledge_sources')
-      // Applied to both the row filter and the child-count subquery.
-      expect(sql).toContain('adks.source_id = ke.source_id')
-      expect(sql).toContain('adks.source_id = ke2.source_id')
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'confidential', 'a1'])
-    })
-
-    it('getByPath excludes disabled sources', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-      await store.getByPath(ctxFor('t1'), 'products/vault')
-      const sql = mockQuery.mock.calls[0][0] as string
-      expect(sql).toContain('adks.assistant_id = $4')
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'products/vault', 'confidential', 'a1'])
-    })
-
-    it('does NOT apply the denylist for a primary reflector context', async () => {
-      // The brain explorer + workspace coordinator set assistantKind='primary'
-      // and span every source — no denylist clause, no assistantId param.
-      const primaryCtx: AccessContext = {
-        workspaceId: 't1', userId: 'u1', assistantId: 'p1', assistantKind: 'primary', clearance: 'confidential',
-      }
-      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-      await store.search(primaryCtx, 'vault')
-      const sql = mockQuery.mock.calls[0][0] as string
-      expect(sql).not.toContain('assistant_disabled_knowledge_sources')
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'vault', 10, 'confidential'])
-    })
-  })
 })
 
 describe('[COMP:api/kb-write-capability] source write-access cache', () => {

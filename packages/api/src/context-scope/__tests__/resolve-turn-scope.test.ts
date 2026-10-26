@@ -9,12 +9,30 @@ import {
   resolveLiveAccessCeilingSystem,
   sessionMessageInputScope,
   turnOutputWrite,
+  noteAutomaticScopeEvidence,
   type TurnScopeAssistant,
 } from '../resolve-turn-scope.js'
-import { ContextScopeAccumulator, type ResourceScope, type ScopeSource } from '@use-brian/core'
+import { ContextScopeAccumulator, bindScopeSource, bindScopeSources, type ResourceScope, type ScopeSource } from '@use-brian/core'
 
 const TEAM_ID = '11111111-1111-4111-8111-111111111111'
 const PROJECT_ID = '22222222-2222-4222-8222-222222222222'
+
+describe('[COMP:api/context-scope-resolver] automatic canonical evidence', () => {
+  const source = (id: string): ScopeSource => ({ workspaceId: 'fixture-workspace',resourceKind: 'memory',resourceId: id,version: '1',
+    userId: null,assistantId: null,sensitivity: 'internal',compartments: [],projectIds: [] })
+  it('preserves bound contributors alongside a legacy reader source instead of replacing them', () => {
+    const accumulator = new ContextScopeAccumulator()
+    noteAutomaticScopeEvidence(accumulator,[bindScopeSource({ summary: 'Fictional fact' },source('bound-source')),
+      { summary: 'Legacy fictional fact',scopeSource: source('legacy-source') }])
+    expect(accumulator.evidence.sources).toEqual([source('bound-source'),source('legacy-source')])
+  })
+  it('keeps all aggregate contributors and ignores a conflicting source-shaped content property', () => {
+    const accumulator = new ContextScopeAccumulator()
+    const result = bindScopeSources({ total: 2,scopeSource: source('forged-property') },[source('first-contributor'),source('second-contributor')])
+    noteAutomaticScopeEvidence(accumulator,[result])
+    expect(accumulator.evidence.sources).toEqual([source('first-contributor'),source('second-contributor')])
+  })
+})
 
 const assistant: TurnScopeAssistant = {
   id: 'assistant-1',
@@ -362,6 +380,8 @@ describe('[COMP:api/context-scope-resolver] resolveTurnScopeSystem', () => {
       store: store(),
       resolveWorkspaceRole,
       createSessionLease,
+      pinPolicyEpoch: async () => async () => true,
+      resolveAssistant: async () => assistant,
     })
 
     expect(resolveWorkspaceRole).toHaveBeenCalledWith('external-user', 'workspace-1', true)
@@ -481,21 +501,44 @@ describe('[COMP:api/context-scope-resolver] turnOutputWrite', () => {
     accumulator.noteSource(source({ resourceKind: 'session_message', userId: 'user-1', assistantId: 'primary-1' }))
     accumulator.noteSource(source({ resourceId: 'memory-2' }))
     const write = turnOutputWrite({ producer: 'turn:web', accumulator, envelope })
-    expect(write).toEqual({ derivation: { producer: 'turn:web', sources: accumulator.evidence.sources } })
+    expect(write).toEqual({ derivation: { producer: 'turn:web', sources: accumulator.evidence.sources },
+      derivationTarget: envelope })
   })
 
-  it('stamps the session envelope, raised to the label floor, when a primary read across partitions', () => {
+  it('retains the declared personal target and its labels when every input is workspace-wide', () => {
+    const accumulator = new ContextScopeAccumulator()
+    accumulator.noteSource(source({ resourceId: 'workspace-input-1', sensitivity: 'confidential', compartments: ['team:source'] }))
+    accumulator.noteSource(source({ resourceId: 'workspace-input-2' }))
+    expect(turnOutputWrite({ producer: 'turn:delegated-input', accumulator, envelope })).toEqual({
+      derivation: { producer: 'turn:delegated-input', sources: accumulator.evidence.sources },
+      derivationTarget: { ...envelope, sensitivity: 'confidential', compartments: ['assistant-default', 'team:source'] },
+    })
+  })
+
+  it('keeps complete ancestry with a raised transcript target when a primary reads across partitions', () => {
     // The turn's own message plus a workspace memory another assistant authored.
     const accumulator = new ContextScopeAccumulator()
     accumulator.noteSource(source({ resourceKind: 'session_message', userId: 'user-1', assistantId: 'primary-1' }))
     accumulator.noteSource(source({ resourceId: 'memory-2', userId: 'user-2', assistantId: 'other-assistant',
       sensitivity: 'confidential', compartments: ['team:finance'], projectIds: ['project-a'] }))
     expect(turnOutputWrite({ producer: 'turn:web', accumulator, envelope })).toEqual({
-      scope: {
+      derivation: { producer: 'turn:web', sources: accumulator.evidence.sources },
+      derivationTarget: {
         workspaceId: 'workspace-1', userId: 'user-1', assistantId: 'primary-1',
         sensitivity: 'confidential', compartments: ['assistant-default', 'team:finance'], projectIds: ['project-a'],
       },
     })
+  })
+
+  it('never loses external field observations among mixed native partitions', () => {
+    const accumulator = new ContextScopeAccumulator()
+    accumulator.noteSource(source({ assistantId: 'first-assistant' }))
+    accumulator.noteSource(source({ resourceId: 'memory-2', assistantId: 'second-assistant' }))
+    accumulator.noteSource(source({ resourceKind: 'external_source', resourceId: 'field-observation-1', version: 'immutable-field-observation', compartments: ['team:source'] }))
+    const write = turnOutputWrite({ producer: 'turn:external', accumulator, envelope })
+    expect(write).toMatchObject({ derivation: { producer: 'turn:external', sources: accumulator.evidence.sources },
+      derivationTarget: { compartments: ['assistant-default','team:source'] } })
+    expect('derivation' in write && write.derivation.sources).toHaveLength(3)
   })
 
   it('uses the envelope when nothing bound was read, and keeps legacy unscoped turns unchanged', () => {

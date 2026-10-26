@@ -162,20 +162,28 @@ export function createRunQueueWorker(deps: RunQueueWorkerDeps): RunQueueWorker {
 
   let timer: ReturnType<typeof setInterval> | null = null
   let inFlight = 0
+  // Direct tick() remains usable before start(); stop requires a fresh start.
+  let stopped = false
+  let generation = 0
+  const current = (epoch: number) => !stopped && generation === epoch
   /** Serialize claim loops — concurrent nudges collapse into one pass plus
    *  one queued re-pass (so a nudge landing mid-pass is never lost). */
   let draining = false
   let repass = false
 
-  async function reap(): Promise<void> {
+  async function reap(epoch: number): Promise<void> {
+    if (!current(epoch)) return
     try {
       await deps.store.failExhaustedPendingRunsSystem({ leaseSeconds, maxClaimAttempts })
+      if (!current(epoch)) return
       await deps.store.requeueStaleRunningRunsSystem({ staleSeconds, maxClaimAttempts })
+      if (!current(epoch)) return
       // Inline-path runs the queue does not own, and never will. It reaps them
       // anyway because this is the only ticking sweeper over `workflow_runs`,
       // and the alternative is what shipped: nobody owning them at all. Marking
       // dead is not claiming — see `failAbandonedInlineRunsSystem`.
       const abandoned = await deps.store.failAbandonedInlineRunsSystem({ abandonedSeconds })
+      if (!current(epoch)) return
       if (abandoned > 0) {
         console.warn(
           `[run-queue] failed ${abandoned} abandoned inline-path run(s) ` +
@@ -187,8 +195,8 @@ export function createRunQueueWorker(deps: RunQueueWorkerDeps): RunQueueWorker {
     }
   }
 
-  async function drainOnce(): Promise<void> {
-    while (inFlight < maxConcurrent) {
+  async function drainOnce(epoch: number): Promise<void> {
+    while (current(epoch) && inFlight < maxConcurrent) {
       let claimed: ClaimedRun | null
       try {
         claimed = await deps.store.claimNextPendingRunSystem({
@@ -200,7 +208,9 @@ export function createRunQueueWorker(deps: RunQueueWorkerDeps): RunQueueWorker {
         onError(err, {})
         return
       }
-      if (!claimed) return
+      // The durable claim stays pending until its normal lease expires.
+      // Never execute a claim returned to a stopped/replaced local drain.
+      if (!claimed || !current(epoch)) return
       inFlight++
       const { runId } = claimed
       void deps
@@ -210,25 +220,29 @@ export function createRunQueueWorker(deps: RunQueueWorkerDeps): RunQueueWorker {
           inFlight--
           // A finished run may unblock its workflow's next queued run
           // (per-workflow serialization) — pull it without waiting a tick.
-          nudge()
+          if (!stopped) nudge()
         })
     }
   }
 
   async function tick(): Promise<void> {
+    if (stopped) return
     if (draining) {
       repass = true
       return
     }
     draining = true
+    const epoch = generation
     try {
-      await reap()
+      await reap(epoch)
       do {
         repass = false
-        await drainOnce()
-      } while (repass)
+        await drainOnce(epoch)
+      } while (current(epoch) && repass)
     } finally {
       draining = false
+      // start() may have queued a fresh pass while an old claim was awaited.
+      if (!stopped && generation !== epoch) nudge()
     }
   }
 
@@ -239,12 +253,17 @@ export function createRunQueueWorker(deps: RunQueueWorkerDeps): RunQueueWorker {
   return {
     start() {
       if (timer) return
+      stopped = false
+      generation++
       timer = setInterval(nudge, intervalMs)
       // unref so a lingering interval never holds a shutting-down process
       if (typeof timer.unref === 'function') timer.unref()
       nudge()
     },
     stop() {
+      stopped = true
+      generation++
+      repass = false
       if (timer) clearInterval(timer)
       timer = null
     },

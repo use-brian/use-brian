@@ -44,6 +44,109 @@ async function persistInitialEvidence(f: Awaited<ReturnType<typeof fixture>>, sc
 
 describe('[COMP:api/workflow-authority] persisted member-run authority',()=>{
   afterAll(async()=>{await getAppPool().end();await pool.end()})
+  it('exposes only exact actor-owned workflow policy metadata on an app transaction',async()=>{
+    const f=await fixture()
+    await resolveWorkflowRunScope(f.params)
+    const otherAssistant=randomUUID()
+    await pool.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance,compartments) VALUES($1,'Other synthetic assistant',$2,$3,'standard','confidential',NULL)",
+      [otherAssistant,f.owner,f.workspaceId])
+    const expected=(await pool.query('SELECT read_application_policy_epoch($1,$2,$3) AS snapshot',
+      [f.workspaceId,f.userId,f.assistantId])).rows[0].snapshot
+    expect((await pool.query('SELECT read_workflow_policy_epoch($1,$2,$3,$4) AS snapshot',
+      [f.workspaceId,f.run.id,f.userId,f.assistantId])).rows[0].snapshot).toBeNull()
+    const client=await getAppPool().connect()
+    try {
+      await client.query('BEGIN')
+      await applyRLSGucs(client,f.userId)
+      const read=async(args=[f.workspaceId,f.run.id,f.userId,f.assistantId])=>
+        (await client.query('SELECT read_workflow_policy_epoch($1,$2,$3,$4) AS snapshot',args)).rows[0].snapshot
+      expect(await read()).toEqual(expected)
+      for(const changed of [
+        [randomUUID(),f.run.id,f.userId,f.assistantId],
+        [f.workspaceId,randomUUID(),f.userId,f.assistantId],
+        [f.workspaceId,f.run.id,f.owner,f.assistantId],
+        [f.workspaceId,f.run.id,f.userId,otherAssistant],
+      ]) expect(await read(changed)).toBeNull()
+      await client.query("SELECT set_config('app.application_id',$1,true)",[randomUUID()])
+      expect(await read()).toBeNull()
+      await client.query("SELECT set_config('app.application_id','',true)")
+      await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
+      expect(await read()).toBeNull()
+      await client.query("SELECT set_config('app.current_user_id','invalid',true)")
+      expect(await read()).toBeNull()
+      await applyRLSGucs(client,f.userId)
+      await client.query('SAVEPOINT private_epoch')
+      await expect(client.query('SELECT read_application_policy_epoch($1,$2,$3)',[f.workspaceId,f.userId,f.assistantId]))
+        .rejects.toMatchObject({code:'42501'})
+      await client.query('ROLLBACK TO SAVEPOINT private_epoch')
+      expect(await read()).toEqual(expected)
+      await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.userId])
+      expect(await read()).toBeNull()
+    } finally { await client.query('ROLLBACK');client.release() }
+  })
+  it('invalidates a retained workflow epoch on its locked app client without an owner escape',async()=>{
+    const f=await fixture()
+    await pool.query(`CREATE FUNCTION application_workflow_epoch_fixture(w uuid,resource jsonb,kind text,action text) RETURNS jsonb
+      LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$ SELECT NULL::jsonb $$`)
+    await pool.query('REVOKE ALL ON FUNCTION application_workflow_epoch_fixture(uuid,jsonb,text,text) FROM PUBLIC')
+    await pool.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader)
+      VALUES('workflow_epoch_fixture','1',ARRAY[]::text[],'application_workflow_epoch_fixture(uuid,jsonb,text,text)'::regprocedure)`)
+    const contract={module_key:'workflow_epoch_fixture',contract_version:'1'}
+    const scope=await resolveWorkflowRunScope(f.params)
+    await persistInitialEvidence(f,scope)
+    const source=scope.executionContext.security.authority.snapshotSource!()
+    if(source.kind!=='workflow')throw new Error('Expected workflow source')
+    const client=await getAppPool().connect(),probe=await pool.connect()
+    let changed=false
+    try {
+      await client.query('BEGIN');await applyRLSGucs(client,f.userId)
+      const ownerRead=vi.spyOn(pool,'query').mockRejectedValue(new Error('Owner-pool escape'))
+      try {
+        const retained=await resolveRetainedWorkflowSource(source,client)
+        expect(await retained.executeWithAuthority(async()=> 'authorized')).toBe('authorized')
+        await probe.query('UPDATE application_native_field_contracts SET contract_version=$2 WHERE module_key=$1',
+          [contract.module_key,contract.contract_version+'.r4'])
+        changed=true
+        const effect=vi.fn(async()=> 'must not execute')
+        await expect(retained.executeWithAuthority(effect)).rejects.toMatchObject({reason:'authority_changed',operationMayHaveExecuted:false})
+        expect(effect).not.toHaveBeenCalled()
+        await probe.query('UPDATE application_native_field_contracts SET contract_version=$2 WHERE module_key=$1',
+          [contract.module_key,contract.contract_version])
+        changed=false
+        await expect(retained.executeWithAuthority(effect)).rejects.toMatchObject({reason:'authority_changed'})
+        expect(effect).not.toHaveBeenCalled()
+        expect(ownerRead).not.toHaveBeenCalled()
+      } finally { ownerRead.mockRestore() }
+    } finally {
+      await client.query('ROLLBACK');client.release()
+      if(changed)await probe.query('UPDATE application_native_field_contracts SET contract_version=$2 WHERE module_key=$1',
+        [contract.module_key,contract.contract_version])
+      probe.release()
+      await pool.query("DELETE FROM application_native_field_contracts WHERE module_key='workflow_epoch_fixture'")
+      await pool.query('DROP FUNCTION application_workflow_epoch_fixture(uuid,jsonb,text,text)')
+    }
+    const fresh=await resolveWorkflowRunScope(f.params)
+    expect(await fresh.executeWithAuthority(async()=> 'fresh')).toBe('fresh')
+  })
+  it.each([true,false])('the real executor refuses a policy gain during registry construction (manual=%s)',async manual=>{
+    const f=await fixture(manual)
+    await pool.query('UPDATE workflows SET definition=$2::jsonb WHERE id=$1',[f.workflow.id,JSON.stringify({
+      startStepId:'effect',steps:[{id:'effect',type:'tool_call',toolName:'syntheticEffect',arguments:{}}],
+    })])
+    const execute=vi.fn(async()=>({data:{ok:true}}))
+    const tool=buildTool({name:'syntheticEffect',description:'Synthetic lifecycle effect',inputSchema:z.object({}),execute})
+    const result=await advanceWorkflowRun({workflowStore:createDbWorkflowStore(),runStore:f.runStore,
+      resolvePrimary:async()=>f.assistantId,resolveRunScope:resolveWorkflowRunScope,
+      buildToolRegistry:async()=>{
+        await pool.query("UPDATE workspace_members SET role='admin' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.userId])
+        return new Map([[tool.name,tool]])
+      },
+      consultTransport:{async send(){throw new Error('Unexpected consult')}},
+    },f.run.id)
+    expect(result).toMatchObject({kind:'failed',error:{reason:'authority_changed'}})
+    expect(execute).not.toHaveBeenCalled()
+    expect((await f.runStore.getRunSystem(f.run.id))?.status).toBe('failed')
+  })
   it('retains workflow authority in a child credential across issuance and standalone renewal', async () => {
     const f = await fixture()
     await pool.query("UPDATE workspace_members SET role='admin' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId,f.userId])

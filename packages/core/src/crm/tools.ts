@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { applicationJsonSchema } from '@use-brian/shared'
 import type { Classifier } from '../classification/types.js'
 import type { EntityKind } from '../entities/types.js'
 import type { AccessContext } from '../security/access-context.js'
@@ -18,6 +19,8 @@ import {
 } from '../entities/index.js'
 import {
   DEAL_STAGES,
+  crmAmountSchema,
+  type CrmAmount,
   type CompanyListRow,
   type CompanyRecord,
   type ContactListRow,
@@ -442,7 +445,7 @@ function compactDeal(row: DealListRow): {
   contact_id: string | null
   company_id: string | null
   stage: DealStage
-  amount: number | null
+  amount: CrmAmount | null
   close_date: string | null
   updated_at: string
 } {
@@ -468,7 +471,7 @@ function fullDeal(row: DealRecord): {
   contact_id: string | null
   company_id: string | null
   stage: DealStage
-  amount: number | null
+  amount: CrmAmount | null
   close_date: string | null
   external_ref: Record<string, unknown>
   created_at: string
@@ -567,9 +570,13 @@ export function createCrmTools(
       company_id: idShape.optional().describe('UUID of an existing company in this workspace. Omit if unknown or unaffiliated. Setting this auto-writes a works_at edge — do NOT also pass a duplicate works_at in `links`.'),
       tags: tagShape.optional(),
       external_ref: externalRefShape.optional().describe('Reserved for sync-engine round-tripping ({provider, id, url}). Leave empty unless mirroring a record from an external system.'),
+      custom_fields:z.record(applicationJsonSchema).optional().describe('Values for current declared CRM custom fields; supply required values at creation.'),
       links: explicitLinksField,
-    }),
+    }).strict(),
     async execute(input, context) {
+      const parsed=saveContact.inputSchema.safeParse(input)
+      if(!parsed.success) return {data:'Invalid CRM input. Check the declared fields and value types.',isError:true}
+      input=parsed.data
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const writeScope = crmWriteScope(context)
@@ -610,6 +617,7 @@ export function createCrmTools(
           companyId: input.company_id ?? null,
           tags: input.tags,
           externalRef: input.external_ref,
+          ...(input.custom_fields!==undefined?{customFields:input.custom_fields}:{}),
           // Research findings come from the public web — stamp `public`
           // (confidential source seen still floors). Else: store default.
           sensitivity: writeScope.sensitivity,
@@ -723,10 +731,14 @@ export function createCrmTools(
       company_id: idShape.nullable().optional(),
       tags: tagShape.optional(),
       external_ref: externalRefShape.optional(),
+      custom_fields:z.record(applicationJsonSchema).optional().describe('Values for current declared CRM custom fields; supply required values at creation.'),
       links: explicitLinksField,
       closeLinks: explicitClosesField,
-    }),
+    }).strict(),
     async execute(input, context) {
+      const parsed=updateContact.inputSchema.safeParse(input)
+      if(!parsed.success) return {data:'Invalid CRM input. Check the declared fields and value types.',isError:true}
+      input=parsed.data
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const writeScope = crmWriteScope(context)
@@ -738,6 +750,7 @@ export function createCrmTools(
       if (input.company_id !== undefined) fields.companyId = input.company_id
       if (input.tags !== undefined) fields.tags = input.tags
       if (input.external_ref !== undefined) fields.externalRef = input.external_ref
+      if (input.custom_fields !== undefined) fields.customFields = input.custom_fields
 
       const hasFieldChange = Object.keys(fields).length > 0
       const hasLinkChange = (input.links?.length ?? 0) > 0
@@ -831,9 +844,13 @@ export function createCrmTools(
       domain: z.string().max(256).optional().describe('Primary web domain (e.g. "acme.com"). Used to disambiguate against synced sources.'),
       tags: tagShape.optional(),
       external_ref: externalRefShape.optional(),
+      custom_fields:z.record(applicationJsonSchema).optional().describe('Values for current declared CRM custom fields; supply required values at creation.'),
       links: explicitLinksField,
-    }),
+    }).strict(),
     async execute(input, context) {
+      const parsed=saveCompany.inputSchema.safeParse(input)
+      if(!parsed.success) return {data:'Invalid CRM input. Check the declared fields and value types.',isError:true}
+      input=parsed.data
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const writeScope = crmWriteScope(context)
@@ -876,6 +893,7 @@ export function createCrmTools(
           domain: input.domain ?? null,
           tags: input.tags,
           externalRef: input.external_ref,
+          ...(input.custom_fields!==undefined?{customFields:input.custom_fields}:{}),
           // Research findings come from the public web — stamp `public`
           // (confidential source seen still floors). Else: store default.
           sensitivity: writeScope.sensitivity,
@@ -983,10 +1001,14 @@ export function createCrmTools(
       domain: z.string().max(256).nullable().optional(),
       tags: tagShape.optional(),
       external_ref: externalRefShape.optional(),
+      custom_fields:z.record(applicationJsonSchema).optional().describe('Values for current declared CRM custom fields; supply required values at creation.'),
       links: explicitLinksField,
       closeLinks: explicitClosesField,
-    }),
+    }).strict(),
     async execute(input, context) {
+      const parsed=updateCompany.inputSchema.safeParse(input)
+      if(!parsed.success) return {data:'Invalid CRM input. Check the declared fields and value types.',isError:true}
+      input=parsed.data
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const writeScope = crmWriteScope(context)
@@ -996,6 +1018,7 @@ export function createCrmTools(
       if (input.domain !== undefined) fields.domain = input.domain
       if (input.tags !== undefined) fields.tags = input.tags
       if (input.external_ref !== undefined) fields.externalRef = input.external_ref
+      if (input.custom_fields !== undefined) fields.customFields = input.custom_fields
 
       const hasFieldChange = Object.keys(fields).length > 0
       const hasLinkChange = (input.links?.length ?? 0) > 0
@@ -1084,16 +1107,20 @@ export function createCrmTools(
         contact_id: idShape.optional(),
         company_id: idShape.optional(),
         stage: stageEnum.optional().describe('Defaults to `lead`.'),
-        amount: z.number().nonnegative().optional().describe('Decimal dollars (e.g. 50000 for $50k).'),
+        amount: crmAmountSchema.optional().describe('Nonnegative decimal amount. Use a decimal string for exact precision, especially large amounts.'),
         close_date: dateOnlyShape.optional().describe('Expected close date, YYYY-MM-DD.'),
         tags: tagShape.optional(),
         external_ref: externalRefShape.optional(),
+      custom_fields:z.record(applicationJsonSchema).optional().describe('Values for current declared CRM custom fields; supply required values at creation.'),
         links: explicitLinksField,
-      })
+      }).strict()
       .refine((v) => v.contact_id !== undefined || v.company_id !== undefined, {
         message: 'A deal must be linked to at least one of contact_id or company_id.',
       }),
     async execute(input, context) {
+      const parsed=saveDeal.inputSchema.safeParse(input)
+      if(!parsed.success) return {data:'Invalid CRM input. Check the declared fields and value types.',isError:true}
+      input=parsed.data
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const writeScope = crmWriteScope(context)
@@ -1109,6 +1136,7 @@ export function createCrmTools(
           amount: input.amount ?? null,
           closeDate: input.close_date ? new Date(input.close_date) : null,
           externalRef: input.external_ref,
+          ...(input.custom_fields!==undefined?{customFields:input.custom_fields}:{}),
           // Research findings come from the public web — stamp `public`
           // (confidential source seen still floors). Else: store default.
           sensitivity: writeScope.sensitivity,
@@ -1210,13 +1238,17 @@ export function createCrmTools(
       id: idShape,
       contact_id: idShape.nullable().optional(),
       company_id: idShape.nullable().optional(),
-      amount: z.number().nonnegative().nullable().optional(),
+      amount: crmAmountSchema.nullable().optional(),
       close_date: dateOnlyShape.nullable().optional(),
       external_ref: externalRefShape.optional(),
+      custom_fields:z.record(applicationJsonSchema).optional().describe('Values for current declared CRM custom fields; supply required values at creation.'),
       links: explicitLinksField,
       closeLinks: explicitClosesField,
-    }),
+    }).strict(),
     async execute(input, context) {
+      const parsed=updateDeal.inputSchema.safeParse(input)
+      if(!parsed.success) return {data:'Invalid CRM input. Check the declared fields and value types.',isError:true}
+      input=parsed.data
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const writeScope = crmWriteScope(context)
@@ -1227,6 +1259,7 @@ export function createCrmTools(
       if (input.amount !== undefined) fields.amount = input.amount
       if (input.close_date !== undefined) fields.closeDate = input.close_date === null ? null : new Date(input.close_date)
       if (input.external_ref !== undefined) fields.externalRef = input.external_ref
+      if (input.custom_fields !== undefined) fields.customFields = input.custom_fields
 
       const hasFieldChange = Object.keys(fields).length > 0
       const hasLinkChange = (input.links?.length ?? 0) > 0
@@ -1312,8 +1345,11 @@ export function createCrmTools(
     inputSchema: z.object({
       id: idShape,
       stage: stageEnum,
-    }),
+    }).strict(),
     async execute(input, context) {
+      const parsed = advanceDealStage.inputSchema.safeParse(input)
+      if (!parsed.success) return { data: 'Invalid CRM input. Check the declared fields and value types.', isError: true }
+      input = parsed.data
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const writeScope = crmWriteScope(context)

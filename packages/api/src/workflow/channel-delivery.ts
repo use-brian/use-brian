@@ -76,28 +76,33 @@ export type WorkflowChannelDeliveryOptions = {
   dispatchWorkflowPublication?: DispatchWorkflowPublication
 }
 
-/**
- * Frame a Slack push failure for the model. The raw throw is
- * `Slack API chat.postMessage: channel_not_found` — a bare code that names
- * neither what did not happen nor what to do about it, and which the executor
- * copies verbatim into the step run's `__delivery.error` (the model's ONLY
- * account of the delivery). `describeSlackError` supplies the diagnosis, the
- * next step and the retry verdict; this adds what the code cannot know — that
- * this was a WORKFLOW DELIVERY, to which channel/thread, and that the message
- * did not reach anyone. See docs/architecture/engine/tool-executor.md →
- * "Failure copy".
- */
-function slackDeliveryFailure(err: unknown, channelId: string, threadRef?: string): string {
+type SlackDeliveryReceipt = NonNullable<Extract<DeliveryOutcome, { status: 'failed' }>['receipt']>
+
+// Narrow, known no-effect rejections. Unknown/provider-internal/transport errors
+// remain uncertain, even when they happen on the first chunk.
+// https://docs.slack.dev/reference/methods/chat.postMessage/#errors
+const SLACK_NO_EFFECT_REJECTIONS = new Set([
+  'channel_not_found', 'not_in_channel', 'missing_scope', 'invalid_auth',
+  'not_authed', 'is_archived', 'no_text', 'no_permission',
+])
+
+function slackDeliveryFailure(err: unknown, receipt: SlackDeliveryReceipt, threadRef?: string): string {
   const where = threadRef
-    ? `Slack channel \`${channelId}\` (as a reply in thread \`${threadRef}\`)`
-    : `Slack channel \`${channelId}\``
-  // Non-Slack throws (network, adapter bug) never reached Slack at all —
-  // describeSlackError passes them through as their bare message, so the
-  // retry verdict has to be supplied here.
-  const verdict = isSlackApiError(err)
-    ? ''
-    : ' Slack never answered this call (a network or adapter failure, not a Slack rejection), so retry once; if it fails again, tell the user Slack delivery is not getting through.'
-  return `Slack delivery FAILED — this step's output was NOT posted to ${where}. ${describeSlackError(err)}${verdict} The text is saved in the assistant's Slack session history so it is not lost, but nobody was notified: do not tell the user it was sent.`
+    ? `Slack channel \`${receipt.channelId}\` (as a reply in thread \`${threadRef}\`)`
+    : `Slack channel \`${receipt.channelId}\``
+  if (receipt.effect === 'none') {
+    const diagnosis = isSlackApiError(err) ? describeSlackError(err)
+      : 'Delivery preparation failed before the provider send started.'
+    return `Slack delivery failed: no message was posted to ${where}. ${diagnosis} This attempt is safe to retry after correcting the cause and rechecking current authority. Do not tell the user it was sent.`
+  }
+  const state = receipt.effect === 'complete'
+    ? 'Slack acknowledged the delivery, but local delivery bookkeeping failed.'
+    : receipt.effect === 'partial'
+      ? `Slack delivery is partial: ${receipt.messageIds.length} message(s) were acknowledged.`
+      : 'Slack delivery is unconfirmed; messages may already have been posted.'
+  // Never reuse describeSlackError here: its per-call remedy cannot account for
+  // an earlier accepted chunk and may advise repeating an uncertain write.
+  return `${state} Check ${where} and the saved delivery receipt before taking further action. Do not resend the full output: it could duplicate messages. Do not report complete delivery until reconciled.`
 }
 
 export function createWorkflowChannelDelivery(
@@ -399,23 +404,50 @@ function createDelivery(
       if (!integ) return { status: 'skipped', channelType, reason: 'no_integration' }
       // `threadRef` (an earlier delivery's Slack ts) posts into that thread;
       // the returned ts anchors later `deliver.thread` steps.
+      const messageIds: string[] = []
+      let attemptedMessages = 0, acknowledgedCalls = 0, failedCalls = 0
+      let missingAcknowledgement = false, sendStarted = false, sendCompleted = false
+      const receipt = (effect: SlackDeliveryReceipt['effect']): SlackDeliveryReceipt => ({
+        channelId, attemptedMessages, messageIds: [...messageIds], effect,
+        retrySafe: effect === 'none',
+      })
       try {
         const prepared = await prepareQuestion(integ.id)
-        const slackTs = await createSlackAdapter({
+        const adapter = createSlackAdapter({
           botToken: (integ.credentials as { bot_token: string }).bot_token,
           botUserId: integ.botUserId ?? undefined,
-        }).sendMessage(
+          onOutboundAudit: async event => {
+            if (event.kind !== 'post_message' || event.channel !== channelId) return
+            attemptedMessages++
+            if (event.status === 'failed') { failedCalls++; return }
+            acknowledgedCalls++
+            if (typeof event.externalTs === 'string' && event.externalTs.trim()) {
+              if (!messageIds.includes(event.externalTs)) messageIds.push(event.externalTs)
+            } else missingAcknowledgement = true
+            // Deliberately do not retain event.text, event.error or credentials.
+          },
+        })
+        sendStarted = true
+        const slackTs = await adapter.sendMessage(
           channelId,
           { text: prepared.text, format: 'markdown' },
           threadRef ? { threadTs: threadRef } : undefined,
         )
+        if (!slackTs || missingAcknowledgement) throw new Error('slack_acknowledgement_unavailable')
+        if (!messageIds.includes(slackTs)) messageIds.push(slackTs)
+        attemptedMessages = Math.max(attemptedMessages, messageIds.length)
+        sendCompleted = true
         await attachQuestion(prepared.token, slackTs)
-        return { status: 'delivered', channelType, channelId, messageId: slackTs || undefined }
+        return { status: 'delivered', channelType, channelId, messageId: slackTs, receipt: receipt('complete') }
       } catch (err) {
-        // Return the typed `failed` outcome rather than throwing: the executor
-        // would otherwise stamp the raw `Slack API <method>: <code>` message
-        // into `__delivery.error`. Same control flow, model-actionable copy.
-        return { status: 'failed', channelType, error: slackDeliveryFailure(err, channelId, threadRef) }
+        const rejected = isSlackApiError(err) && err.method === 'chat.postMessage'
+          && err.httpStatus === undefined && SLACK_NO_EFFECT_REJECTIONS.has(err.code)
+          && failedCalls === 1 && !missingAcknowledgement
+        const effect = sendCompleted ? 'complete'
+          : !sendStarted || rejected && acknowledgedCalls === 0 && attemptedMessages === 1 ? 'none'
+            : rejected && acknowledgedCalls > 0 ? 'partial' : 'unknown'
+        const saved = receipt(effect)
+        return { status: 'failed', channelType, receipt: saved, error: slackDeliveryFailure(err, saved, threadRef) }
       }
     }
 

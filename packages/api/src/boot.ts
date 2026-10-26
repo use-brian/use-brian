@@ -1,4 +1,21 @@
+import { resolveRetainedTaskGoalAuthority } from './workspace-access/goal-source-admission.js'
+import { assertSourceModelOutputAuthority } from './application-platform/model-source-authority.js'
+import { executionToolContext } from '@use-brian/core'
+import type { SessionContextAuthority } from '@use-brian/core'
+import {advanceRetainedGoalWorkflow,pauseWorkflowRunForWait,resumeWorkflowWaitJob} from './workflow/wait-lifecycle.js'
 import { createEngineeringArchivePublisher } from './engineering-history/publisher.js'
+import type { PoolClient } from 'pg'
+import type { ApplicationModuleDefinition } from '@use-brian/core'
+import { ApplicationPlatformService } from './application-platform/service.js'
+import { createCanonicalNativeApplicationModule } from './application-platform/native-adapters.js'
+import { createCanonicalGenericApplicationModule } from './application-platform/generic-adapter.js'
+import { buildHomeApplicationMcpProfile } from './application-platform/mcp.js'
+import { captureApplicationHomeBinding } from './application-platform/home-auth.js'
+import { applicationPlatformRoutes } from './routes/application-platform.js'
+import { ApplicationManagementService } from './application-platform/management.js'
+import { connectorActorMetadataRoutes } from './application-platform/connector-actor-metadata.js'
+import { createConnectorActorKeyStore } from './application-platform/connector-actor-keys.js'
+import { createConnectorSourceRuntimeFactory, configureConnectorSourceRuntimeFactory, type ConnectorSourceRuntimeFactory } from './application-platform/source-runtime.js'
 import { createEngineeringHistoryService } from './engineering-history/service.js'
 import { createCaptureConfigurationReader } from './engineering-history/configuration.js'
 import { engineeringHistoryRoutes } from './routes/engineering-history.js'
@@ -112,7 +129,6 @@ import {
   createEntityAliasTools,
   createScheduleWorkflowTool,
   advanceWorkflowRun,
-  stepSuccessors,
   createWorkflowEventDispatcher,
   createIngestWorkflowTrigger,
   type WorkflowEventDispatcher,
@@ -508,7 +524,10 @@ import { type GoalDeliver } from './goals/writeback.js'
 import {
   tryClaimGoalForTick,
   transitionRunningGoalStatusSystem,
+  claimGoalRollupTerminalSystem,
+  finishNativeTaskGoalTerminalSystem,
   getGoalByIdSystem,
+  getGoalForExecutionSystem,
   updateGoalSystem,
   getGoalAwaitingEventSystem,
   setGoalAwaitingEventSystem,
@@ -581,7 +600,6 @@ import { sweepStaleByoBindings } from './files/byo-staleness.js'
 import {
   createDbWorkflowStore,
   createDbWorkflowRunStore,
-  getRunIdForStepRun,
   findEventTriggeredWorkflowsSystem,
   getWorkflowCreatorSystem,
   createWorkflowRunQueueStore,
@@ -1367,6 +1385,8 @@ export interface PublicExtraRouteDeps {
 }
 
 export interface BootOpenApiOptions {
+  /** Trusted deployed open module code, composed into the existing module registry. */
+  applicationModules?: readonly ApplicationModuleDefinition<PoolClient>[]
   env: OpenApiEnv
   /** Shared self-host/hosted application integration configuration; no automatic grants. */
   externalApps?: ReturnType<typeof externalAppConfiguration>
@@ -1455,6 +1475,7 @@ export interface BootContext {
   taskStore: ReturnType<typeof createDbTaskStore>
   connectorStore: ReturnType<typeof createDbConnectorStore>
   connectorInstanceStore: ReturnType<typeof createConnectorInstanceStore>
+  connectorSourceRuntimeFactory?: ConnectorSourceRuntimeFactory
   workspaceToolPolicyStore: ReturnType<typeof createWorkspaceToolPolicyStore>
   mcpSettingsStore: ReturnType<typeof createDbMcpSettingsStore>
   assistantConnectorStore: ReturnType<typeof createDbAssistantConnectorStore>
@@ -1625,6 +1646,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // request directly even when the uploaded file itself is JSON.
     if (
       req.path === '/api/local-files'
+      || /^\/api\/applications(?:\/|$)/.test(req.path)
       || (req.method === 'PUT' && /^\/internal\/chat-archive\/media\/[^/]+\/content$/.test(req.path))
       || (req.method === 'POST' && /^\/bridge\/v1\/channels\/[^/]+\/media\/[^/]+$/.test(req.path))
       // The public CRM intake route owns a tighter 1 MiB parser. Skipping the
@@ -1829,7 +1851,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // the structural rollup AND the acting-loop driver (no silent termination,
   // goals.md §7).
   const deliverGoalTerminal: GoalDeliver = async (goal, terminal, reason) => {
-    publishGoalActivity(goal.id, {
+    const retained=await resolveRetainedTaskGoalAuthority(goal)
+    if(retained)await assertSourceModelOutputAuthority({...executionToolContext(retained.authority.execution,{appId:'native'}),scopeAccumulator:retained.authority.accumulator})
+    if(!retained)publishGoalActivity(goal.id, {
       event: 'done',
       data: { status: terminal, ...(reason ? { reason } : {}) },
     })
@@ -1838,7 +1862,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // BOTH terminal paths (acting loop + structural rollup) converge, so the
     // taxonomy is covered without touching either loop. Emit before the channel
     // delivery so a delivery failure never loses the event.
-    analytics.logEvent({
+    if(!retained)analytics.logEvent({
       userId: goal.createdByUserId,
       channelType: 'workflow',
       eventName: terminal === 'done' ? 'goal_done' : 'goal_blocked',
@@ -1864,7 +1888,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       userId: goal.createdByUserId,
       text,
       channelType: 'web',
-      scopeEvidence: {
+      scopeEvidence: retained?.authority.accumulator.evidence??{
         sensitivity: 'public',
         compartments: goal.authoringAuthority?.ceiling.mutationCompartments ?? [],
         projectIds: goal.contextProjectId ? [goal.contextProjectId] : [],
@@ -1878,6 +1902,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // metering).
   const goalRollup = createGoalRollupRunner({
     goalStore,
+    claimTerminal: claimGoalRollupTerminalSystem,
+    finishTerminal:finishNativeTaskGoalTerminalSystem,
     deliverGoalDone: (goal) => deliverGoalTerminal(goal, 'done', null),
   })
   // Task autopilot v2 (task-goal-autopilot.md §8): a top-level task create no
@@ -1886,14 +1912,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // on a pass. The judge needs the provider + usage stores, constructed later
   // in boot, so the hook calls through this late-bound ref. Null (OSS keyless,
   // or before wiring) = no drafting — fail-closed by design.
-  let judgeTaskForGoal: ((task: TaskRecord, userId: string) => void) | null = null
+  let judgeTaskForGoal: ((task: TaskRecord, userId: string, authority?: SessionContextAuthority) => void) | null = null
   // Assigned execution (goals.md -> "Formation, readiness and automatic
   // entry"): late-bound like the judge. A create carrying trusted human
   // assignment provenance enters execution; anything else keeps triage.
   let enterOrTriageTask: ((task: TaskRecord, userId: string, assignment?: TaskAssignmentProvenance) => void) | null = null
   const taskStore = createDbTaskStore({
     onTaskTerminal: goalRollup.onTaskTerminal,
-    onTaskCreate: (task, userId, assignment) => {
+    onTaskCreate: (task, userId, assignment, authority) => {
+      if(authority){judgeTaskForGoal?.(task,userId,authority);return}
       if (enterOrTriageTask) enterOrTriageTask(task, userId, assignment)
       else judgeTaskForGoal?.(task, userId)
     },
@@ -2303,6 +2330,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const mcpSettingsStore = createDbMcpSettingsStore()
   const credKey = env.CHANNEL_CREDENTIAL_KEY ? loadChannelCredentialKey(env.CHANNEL_CREDENTIAL_KEY) : null
   const connectorInstanceStore = createConnectorInstanceStore(credKey)
+  const connectorSourceRuntimeFactory = createConnectorSourceRuntimeFactory({ issuer: env.API_URL,
+    keys: credKey ? createConnectorActorKeyStore(credKey) : undefined, instances: connectorInstanceStore })
+  configureConnectorSourceRuntimeFactory(connectorSourceRuntimeFactory, { instances: connectorInstanceStore })
   // Workspace-owned OAuth app credentials (migration 394) — a customer's own
   // Entra registration, resolved ahead of deployment config. See
   // docs/architecture/integrations/msgraph.md → "Auth".
@@ -3597,27 +3627,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       },
       { workspaceId, assistantId, userId, turnScope },
     ),
-    pauseRunForWait: async ({ runId, stepRunId, workspaceId, triggeredBy, dueAt }) => {
-      const primary = await resolvePrimaryAssistantForWorkspace(workspaceId)
-      if (!primary) throw new Error(`pauseRunForWait: no primary assistant for workspace ${workspaceId}`)
-      await jobStore.create({
-        assistantId: primary,
-        userId: triggeredBy ?? primary,
-        schedule: {
-          type: 'once',
-          datetime: new Date(dueAt.getTime() - dueAt.getTimezoneOffset() * 60_000)
-            .toISOString().slice(0, 19),
-        },
-        timezone: 'UTC',
-        mode: 'local',
-        instructions: JSON.stringify({ kind: 'workflow_wait_resume', runId, stepRunId }),
-        channelType: 'workflow',
-        channelId: runId,
-        nextRunAt: dueAt,
-        workflowId: (await workflowRunStore.getRunSystem(runId))?.workflowId ?? '',
-        workflowStepRunId: stepRunId,
-      })
-    },
+    pauseRunForWait: params => pauseWorkflowRunForWait(params,{jobStore,runStore:workflowRunStore,resolvePrimary:resolvePrimaryAssistantForWorkspace}),
     emitAudit: async (event) => {
       const details: Record<string, unknown> = {}
       if (event.type === 'workflow.run_started') {
@@ -3787,9 +3797,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     assertSourceAuthority: assertGoalCrmSourceAuthority,
     executeWithAuthority: async (goal, operation) =>
       (await resolveGoalAuthoritySystem(goal)).executeWithAuthority(operation),
-    goalStore,
+    goalStore:{...goalStore,getByIdSystem:getGoalForExecutionSystem},
     tryClaim: tryClaimGoalForTick,
     transitionRunningStatus: transitionRunningGoalStatusSystem,
+    finishTerminal:finishNativeTaskGoalTerminalSystem,
     sessionCostUsd: (sessionId) =>
       usageStore ? usageStore.getSessionCostUsd(sessionId) : Promise.resolve(0),
     meteringAvailable: () => Boolean(usageStore),
@@ -3818,7 +3829,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         }
       : undefined,
     dispatchRun: async ({ goal, runId }) => {
-      publishGoalActivity(goal.id, {
+      const retainedGoal=await resolveRetainedTaskGoalAuthority(goal)
+      if(!retainedGoal)publishGoalActivity(goal.id, {
         event: 'status',
         data: { phase: 'iteration_started' },
       })
@@ -3871,7 +3883,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         throw Object.assign(new Error('goal_source_scope_unavailable'), { code:'goal_source_scope_unavailable' })
       }
       const terminal = outcome.kind === 'completed' || outcome.kind === 'failed'
-      publishGoalActivity(goal.id, {
+      if(!retainedGoal)publishGoalActivity(goal.id, {
         event: 'status',
         data: {
           phase: outcome.kind === 'paused'
@@ -4138,7 +4150,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       promotion: createMemoryToEntityPromotionStore(),
       entityMerge: { repo: createEntityMergeStore() },
       provider,
-      reclassifierModel: 'gemini-flash',
+      reclassifierModel: 'gemini-3.6-flash-pro',
       decisionRuntime,
       resolveLlm: async (workspaceId) => {
         const runtime = await resolveBackgroundRuntime(workspaceId)
@@ -4398,7 +4410,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         return CORE_CAPABILITY_LINES
       }
     }
-  judgeTaskForGoal = (task, userId) => {
+  judgeTaskForGoal = (task, userId, authority) => {
     void triageTaskForGoal(task, userId, {
       goalStore,
       // The task's selected executor, and only while the acting user can
@@ -4415,7 +4427,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       publicCoreCapabilities: CORE_CAPABILITY_LINES,
       summariseCapabilities: summariseWorkspaceCapabilities,
       judge: taskTriageJudge,
-    }).catch((err) => console.error('[goals] task triage draft failed:', err))
+    }, authority).catch((err) => console.error('[goals] task triage draft failed:', err))
   }
   // An update that makes an assistant the executor triages for it (the
   // previous executor's drafts were retired in the update transaction).
@@ -4527,6 +4539,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // verifier a read-only host snapshot so it checks the claim against reality.
   const goalWorkTools = createGoalWorkTools({
     createCompletionWorkflow,
+    advanceRetainedWorkflowRun: (runId,claim) => advanceRetainedGoalWorkflow(runId,workflowExecutorDeps,claim),
     kickoffGoal: goalDriver.kickoffGoal,
     assessClarity: goalClarityAssessor,
     verify: goalVerifier,
@@ -4683,8 +4696,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   let brainFileTools:
     | Pick<
         ReturnType<typeof createFileTools>,
-        'fileWrite' | 'fileAppend' | 'fileRead' | 'fileSearch' | 'fileSetMeta' | 'fileDelete' | 'saveFileToBrain' | 'saveFileBytes'
+        'fileWrite' | 'fileAppend' | 'fileRead' | 'fileReadBytes' | 'fileSearch' | 'fileSetMeta' | 'fileDelete' | 'saveFileToBrain' | 'saveFileBytes'
       >
+        & { saveChatMedia?: Tool }
     | null = null
   let fileIngestor: unknown = null
   if (filesBlobClient) {
@@ -4820,6 +4834,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     allTools.set('fileWrite', fileTools.fileWrite)
     allTools.set('fileAppend', fileTools.fileAppend)
     allTools.set('fileRead', fileTools.fileRead)
+    allTools.set('fileReadBytes', fileTools.fileReadBytes)
     allTools.set('fileSearch', fileTools.fileSearch)
     allTools.set('fileSetMeta', fileTools.fileSetMeta)
     allTools.set('fileDelete', fileTools.fileDelete)
@@ -4870,17 +4885,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // which is why it registers here and not with the read-only archive
     // tools at their earlier block.
     if (messageStoreClient) {
-      allTools.set('saveChatMedia', createSaveChatMediaTool({ client: messageStoreClient, filesApi }))
+      allTools.set('saveChatMedia', createSaveChatMediaTool({ client: messageStoreClient, filesApi, resolvePolicy: resolveFilesToolPolicy }))
     }
     brainFileTools = {
       fileWrite: fileTools.fileWrite,
       fileAppend: fileTools.fileAppend,
       fileRead: fileTools.fileRead,
+      fileReadBytes: fileTools.fileReadBytes,
       fileSearch: fileTools.fileSearch,
       fileSetMeta: fileTools.fileSetMeta,
       fileDelete: fileTools.fileDelete,
       saveFileToBrain: fileTools.saveFileToBrain,
       saveFileBytes: fileTools.saveFileBytes,
+      saveChatMedia: allTools.get('saveChatMedia'),
     }
 
     // Direct file ingest is open: store the original bytes, derive text, then
@@ -4970,7 +4987,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ? {
           apiKeyEnvName: 'GOOGLE_API_KEY' as const,
           apiKey: browserGeminiKey,
-          model: env.BROWSER_USE_MODEL || 'gemini-3-flash-preview',
+          model: env.BROWSER_USE_MODEL || 'gemini-3.6-flash',
           providerKeySource: 'platform' as const,
         }
     : browserDashscopeKey
@@ -5500,7 +5517,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             return {
               apiKeyEnvName: 'GOOGLE_API_KEY' as const,
               apiKey: gemini.secret,
-              model: env.BROWSER_USE_MODEL || 'gemini-3-flash-preview',
+              model: env.BROWSER_USE_MODEL || 'gemini-3.6-flash',
               providerKeySource: 'platform' as const,
               recordSpend: async (model: string, usage: TokenUsage) => {
                 await gemini.recordSpend(calculateCost(model, usage))
@@ -5677,6 +5694,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     workspaceToolPolicyStore,
     workerManager,
+    connectorSourceRuntimeFactory,
     workerRunsStore,
     knowledgeStore,
     knowledgeCaptureRuleStore,
@@ -5905,6 +5923,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
               }
             },
             consumeBudget: async (appId: string) => consumeHomeAppBudget(appId),
+            applicationProfile: req => buildHomeApplicationMcpProfile(req, env.JWT_SECRET, applicationService),
           },
         }
       : {}),
@@ -5970,6 +5989,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL }))
+  app.use(connectorActorMetadataRoutes(env.API_URL))
+  const applicationService = new ApplicationPlatformService([
+    createCanonicalNativeApplicationModule(), createCanonicalGenericApplicationModule(), ...(opts.applicationModules ?? []),
+  ])
+  app.use('/api/applications', applicationPlatformRoutes({ service: applicationService,
+    home: { signingSecret: env.JWT_SECRET, consumeBudget: consumeHomeAppBudget },
+    oauth: { clientStore: oauthClientStore, workspaceStore, signingSecret: env.JWT_SECRET, webAppUrl: env.APP_URL,
+      requireAuth: requireAuth(env.JWT_SECRET) },
+    management: { service: new ApplicationManagementService(applicationService), requireAuth: requireAuth(env.JWT_SECRET),
+      origins: [env.APP_URL, env.AUTHED_APP_URL].filter(Boolean) as string[] } }))
   app.use('/api/brain/oauth', oauthRoutes({
     clientStore: oauthClientStore,
     authorizationStore: oauthAuthorizationStore,
@@ -6201,6 +6230,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       requireAuth: requireAuth(env.JWT_SECRET),
       filesApi,
       signingSecret: env.JWT_SECRET,
+      applicationBinding: captureApplicationHomeBinding,
       apiOrigin: env.API_URL ?? '',
       // The frame lives in app-web, on a DIFFERENT origin from this API — so
       // the bundle CSP has to name it explicitly or the browser blocks it.
@@ -8414,37 +8444,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         return `goal tick: ${goalTick.goalId}`
       }
       if (!job.workflowId) return 'no workflow_id on job'
-      if (job.workflowStepRunId) {
-        const runId = await getRunIdForStepRun(job.workflowStepRunId)
-        if (!runId) return `step run ${job.workflowStepRunId} not found (workflow may have been deleted)`
-        await workflowRunStore.updateStepRun(job.workflowStepRunId, {
-          status: 'completed', output: { resumed: true }, finishedAt: new Date(),
-        })
-        const run = await workflowRunStore.getRunSystem(runId)
-        const wf = run ? await workflowStore.findByIdSystem(run.workflowId) : null
-        // Resume PAST the completed wait step via an explicit frontier —
-        // possibly several successors (fan-out array), possibly none (a
-        // terminal wait completes the run instead of re-entering at
-        // startStepId). The cursor stays on the wait step; the executor
-        // stamps currentStepId as each successor starts.
-        let startAt: string[] | undefined
-        if (run && wf) {
-          const waitStep = wf.definition.steps.find((s) => s.id === run.currentStepId)
-          startAt = waitStep
-            ? stepSuccessors(waitStep, wf.definition.steps.map((s) => s.id))
-            : undefined
-          await workflowRunStore.updateRun(runId, { status: 'running' })
-        }
-        const outcome = await advanceWorkflowRun(workflowExecutorDeps, runId, startAt ? { startAt } : undefined)
-        await jobStore.update(job.id, { enabled: false })
-        if (outcome.kind === 'failed') {
-          throw new Error(
-            `workflow wait wake-up ${runId} failed: ${outcome.error?.reason ?? 'unknown'}` +
-            (outcome.error?.message ? ` — ${outcome.error.message}` : ''),
-          )
-        }
-        return `workflow wait wake-up: ${outcome.kind}`
-      }
+      if (job.workflowStepRunId) return resumeWorkflowWaitJob(job,{jobStore,runStore:workflowRunStore,workflowStore,executorDeps:workflowExecutorDeps})
       let triggerInput: Record<string, unknown> = {}
       try {
         const parsed = JSON.parse(job.instructions) as { input?: Record<string, unknown> }
@@ -9608,6 +9608,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     generateSynthesize,
     connectorStore,
     connectorInstanceStore,
+    connectorSourceRuntimeFactory,
     workspaceToolPolicyStore,
     mcpSettingsStore,
     assistantConnectorStore,
@@ -9909,6 +9910,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // JWT guard. All gated on the integration store (CHANNEL_CREDENTIAL_KEY).
     if (integrationStore) {
       app.use('/webhook/telegram', telegramByoRoutes({
+        archiveMedia: chatArchiveLiveMedia,
         questionStore: channelQuestionStore,
         backgroundModel,
         decisionRuntime,

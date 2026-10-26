@@ -23,6 +23,7 @@ import type {
   SessionOptions,
   StreamChunk,
 } from './types.js'
+import { assertInputAuthority, isInputAuthorityError } from './input-authority.js'
 
 // ── Error classification ───────────────────────────────────────
 
@@ -105,6 +106,7 @@ export type WrapFallbackOptions = {
 // ── Helpers ────────────────────────────────────────────────────
 
 function shouldFallback(err: unknown, retryable: number[]): { eligible: boolean; status: number | null; kind: ErrorKind } {
+  if (isInputAuthorityError(err)) return { eligible: false,status: null,kind: 'unknown' }
   const status = extractStatus(err)
   const kind = classifyError(err)
   if (status === null) return { eligible: false, status, kind }
@@ -179,6 +181,7 @@ export function wrapFallback(
   const fallbackModelName = opts?.fallbackModel ?? fallback.models[0] ?? fallback.name
 
   async function* runStream(request: ProviderRequest): AsyncIterable<StreamChunk> {
+    await assertInputAuthority(request.assertInputAuthority)
     // Phase 1 — try the primary. We must peek the first chunk to detect
     // whether the primary failed BEFORE emitting anything; mid-stream
     // errors fall through to the caller without a swap (we've already
@@ -202,9 +205,11 @@ export function wrapFallback(
       model: fallbackModelName,
     }
     try {
+      await assertInputAuthority(request.assertInputAuthority)
       const fallbackStream = fallback.stream(fallbackRequest)
       const fbPeeked = await peekFirstChunk(fallbackStream)
       if (fbPeeked.kind === 'error') {
+        if (isInputAuthorityError(fbPeeked.error)) throw fbPeeked.error
         // Both failed → surface the primary error (the operator cares about
         // the root cause, not the recovery cascade).
         throw peeked.error
@@ -217,6 +222,7 @@ export function wrapFallback(
       })
       yield* streamFromPeeked(fbPeeked.first, fbPeeked.rest)
     } catch (fallbackErr) {
+      if (isInputAuthorityError(fallbackErr)) throw fallbackErr
       // Re-throw the ORIGINAL primary error so caller error handling
       // (chat route catch, analytics) keeps a stable shape.
       if (fallbackErr === peeked.error) throw peeked.error
@@ -238,6 +244,8 @@ export function wrapFallback(
 
     return {
       async *send(messages: Message[], opts2?: SendOptions): AsyncIterable<StreamChunk> {
+        const check = opts2?.assertInputAuthority ?? sessionOpts.assertInputAuthority
+        await assertInputAuthority(check)
         const primaryStream = primarySession.send(messages, opts2)
         const peeked = await peekFirstChunk(primaryStream)
         if (peeked.kind === 'chunk') {
@@ -250,13 +258,13 @@ export function wrapFallback(
           throw peeked.error
         }
 
-        if (!fallbackSession) {
-          fallbackSession = fallback.createSession(fallbackSessionOpts)
-        }
         try {
+          await assertInputAuthority(check)
+          if (!fallbackSession) fallbackSession = fallback.createSession(fallbackSessionOpts)
           const fbStream = fallbackSession.send(messages, opts2)
           const fbPeeked = await peekFirstChunk(fbStream)
           if (fbPeeked.kind === 'error') {
+            if (isInputAuthorityError(fbPeeked.error)) throw fbPeeked.error
             throw peeked.error
           }
           opts?.analytics?.onFallback({
@@ -267,6 +275,7 @@ export function wrapFallback(
           })
           yield* streamFromPeeked(fbPeeked.first, fbPeeked.rest)
         } catch (fallbackErr) {
+          if (isInputAuthorityError(fallbackErr)) throw fallbackErr
           if (fallbackErr === peeked.error) throw peeked.error
           throw peeked.error
         }

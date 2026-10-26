@@ -1,3 +1,5 @@
+import { isDeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
+
 /**
  * User-facing text for a channel `sendError` hook.
  *
@@ -7,7 +9,7 @@
  * in front of a user; arbitrary provider/runtime wording is replaced with
  * the generic retry line.
  *
- * Two kinds of message pass through verbatim:
+ * Known server-authored notices pass through verbatim:
  *
  * - usage-limit notices — the message IS the recovery step, and
  * - the custom-model inline-image refusal minted by channel-pipeline.ts,
@@ -19,9 +21,12 @@
  *   Telegram BYO route had been fixed in isolation and the other seven
  *   channel routes kept masking. This helper is the one copy of that
  *   decision; route-local whitelists are the drift that caused the repeat.
+ * Typed audience refusals get a fixed access notice: a tool may have committed
+ * before delivery was withheld, so generic retry advice risks duplicate work.
  *
  * Spec: docs/architecture/platform/byo-llm-key.md → "Strict fallback and
- * attachments".
+ * attachments"; docs/architecture/context-engine/scoped-context.md ->
+ * "Refusals name their rule internally".
  */
 /**
  * A channel turn never carries an explicit `custom:<id>` selection, so it
@@ -80,10 +85,14 @@ export const CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE =
 export const CONTEXT_NOT_AVAILABLE_MESSAGE =
   "This chat's Team or Project context is no longer available. Ask a workspace admin to restore it, or start a new chat in an available context."
 
+const DELIVERY_AUDIENCE_NOTICE =
+  "I couldn't share the reply in this chat because access to some information couldn't be verified. If you requested changes, they may already be saved. Check their status before repeating the request."
+
 export function channelUserErrorText(
   err: Error,
   fallback = 'Something went wrong. Please try again.',
 ): string {
+  if (isDeliveryAudienceUnverifiedError(err)) return DELIVERY_AUDIENCE_NOTICE
   if (err.message.includes('usage limit')) return err.message
   if (err.message === CUSTOM_MODEL_IMAGE_REJECTION) return err.message
   if (err.message === CONTEXT_NOT_AVAILABLE_MESSAGE) return err.message

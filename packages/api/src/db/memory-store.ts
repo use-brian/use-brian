@@ -1,9 +1,13 @@
-import { bindScopeSource, type EntityLinksStore, type MemoryRecord, type MemoryStore } from '@use-brian/core'
+import { createHash } from 'node:crypto'
+import { ContextScopeAccumulator, DerivedScopeError,bindScopeSource,bindScopeSources,boundScopeSources, type EntityLinksStore, type MemoryRecord, type MemoryStore, type ScopeSource } from '@use-brian/core'
 import { query } from './client.js'
+import {readRetainedContextFrame,writeRetainedContextFrame} from './session-context-revisions.js'
+import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
+import {readApplicationFieldAncestors} from '../application-platform/field-evidence.js'
 import { readReflectionReceipt, type ReflectionReceiptKind } from './reflection-evidence.js'
 import { writeScopedSummary, getSoulContext } from './scoped-summary-store.js'
 import {
-  createMemory, updateMemory, getMemoryById, getMemoryByIdSystem, searchMemories, searchMemoriesByIdPrefix,
+  emitCreatedMemoryEdges,createMemory, updateMemory, getMemoryById, getMemoryByIdSystem, searchMemories, searchMemoriesByIdPrefix,
   getIdentityMemories, getMemoryIndex, getMemoryIndexSystem, getMemoryIndexRanked, trackRecall, trackRecallOutcome, getSoul, countMemories,
   listMemoriesWithMetrics, writeConsolidationScore, deleteMemory,
   listCronContextCandidatesForPrune,
@@ -31,12 +35,12 @@ function bindMemorySource<T extends MemorySourceRow>(row: T): T {
 }
 
 function projectMemory(m: MemoryRecord): MemoryRecord {
-  return bindMemorySource({ id: m.id, scope: m.scope, summary: m.summary,
+  return bindScopeSources(bindMemorySource({ id: m.id, scope: m.scope, summary: m.summary,
     detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
     workspaceId: m.workspaceId, userId: m.userId, assistantId: m.assistantId,
     compartments: m.compartments, projectIds: m.projectIds, scopeVersion: m.scopeVersion,
     ...(m.scopeSource ? { scopeSource: m.scopeSource } : {}),
-  })
+  }),boundScopeSources(m))
 }
 
 /**
@@ -53,6 +57,25 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
   const { entityLinks } = deps
   return {
     async create(params) {
+      const {authority,...command}=params
+      if(authority){
+        const {execution,accumulator}=authority
+        if(!(accumulator instanceof ContextScopeAccumulator)||command.createdByUserId!==execution.security.access.userId
+          ||command.createdByAssistantId!=null&&command.createdByAssistantId!==execution.assistant.id
+          ||command.assistantId!==execution.assistant.id||command.workspaceId!==undefined&&command.workspaceId!==execution.security.access.workspaceId
+          ||command.sourceSessionId!==undefined&&command.sourceSessionId!==execution.lifecycle.sessionId)throw new DerivedScopeError('scope_evidence_missing')
+        const roots=new ContextScopeAccumulator({sources:[...(accumulator.evidence.sources??[]),...(command.derivation?.sources??[])]})
+        const initial=roots.evidence.sources??[],workspaceId=execution.security.access.workspaceId
+        roots.note({sources:[...await readExternalSourceAncestors(workspaceId,initial),...await readApplicationFieldAncestors(workspaceId,initial)]})
+        const sources=roots.evidence.sources??[]
+        const m=await writeRetainedContextFrame(authority,sources,client=>createMemory({...command,workspaceId,
+          createdByAssistantId:command.createdByAssistantId??undefined,sourceEpisodeId:command.sourceEpisodeId??undefined,
+          ...(sources.length?{derivation:{producer:command.derivation?.producer??'tool:saveMemory:create',sources}}:{})},undefined,client))
+        // Preserve the canonical hook after commit. Source-backed graph
+        // publication still owns its independent current authority contract.
+        emitCreatedMemoryEdges(m,{...command,...(sources.length?{derivation:{producer:command.derivation?.producer??'tool:saveMemory:create',sources}}:{}),createdByAssistantId:command.createdByAssistantId??undefined,sourceEpisodeId:command.sourceEpisodeId??undefined},entityLinks)
+        return projectMemory(m)
+      }
       // WU-4.5 authorship is now declared on the `MemoryStore.create`
       // interface itself — every caller passes `createdByUserId`
       // through, the cast workaround that previously bridged the gap
@@ -71,42 +94,73 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       return projectMemory(m)
     },
 
-    async update(id, updates, access) {
+    async update(id, updates, access, operation) {
+      if (operation) {
+        const { authority, expectedVersion, writeFields } = operation
+        const { execution, accumulator } = authority
+        if (!(accumulator instanceof ContextScopeAccumulator) || !access || access.systemRead
+          || access.userId !== execution.security.access.userId || access.workspaceId !== execution.security.access.workspaceId
+          || access.assistantId !== execution.assistant.id || !expectedVersion) throw new DerivedScopeError('scope_evidence_missing')
+        const prior = await getMemoryById(access, id, undefined, undefined, authority)
+        if (!prior || prior.scopeVersion !== expectedVersion) throw new DerivedScopeError('scope_source_changed')
+        const roots = new ContextScopeAccumulator({sources:[...accumulator.evidence.sources ?? [],
+          ...updates.derivation?.sources ?? [], ...boundScopeSources(prior)]})
+        roots.note({sources:[{resourceKind:'memory',resourceId:prior.id,version:prior.scopeVersion,
+          workspaceId:access.workspaceId,userId:prior.userId,assistantId:prior.assistantId,
+          sensitivity:prior.sensitivity,compartments:prior.compartments,projectIds:prior.projectIds}]})
+        const workspaceId = access.workspaceId, initial = roots.evidence.sources ?? []
+        roots.note({sources:[...await readExternalSourceAncestors(workspaceId,initial),
+          ...await readApplicationFieldAncestors(workspaceId,initial)]})
+        const sources = roots.evidence.sources ?? []
+        const contextFingerprint = createHash('sha256').update(JSON.stringify({identity:execution.identity,
+          ceiling:execution.security.ceiling,ownership:execution.ownership})).digest('hex')
+        const m = await writeRetainedContextFrame(authority,sources,client => updateMemory(id,
+          {...updates,derivation:{producer:updates.derivation?.producer ?? 'tool:saveMemory:update',sources}},access,client,
+          {expectedVersion,writeFields,assistantId:execution.assistant.id,sessionId:execution.lifecycle.sessionId,contextFingerprint}))
+        return m ? projectMemory(m) : null
+      }
       const m = await updateMemory(id, updates, access)
       if (!m) return null
       return projectMemory(m)
     },
 
-    async getById(ctx, id) {
+    async getById(ctx, id,authority) {
+      if(authority){
+        const {execution,accumulator}=authority
+        if(!(accumulator instanceof ContextScopeAccumulator)||ctx.systemRead||ctx.userId!==execution.security.access.userId
+          ||ctx.workspaceId!==execution.security.access.workspaceId||ctx.assistantId!==execution.assistant.id)throw new DerivedScopeError('scope_evidence_missing')
+        const m=await getMemoryById(ctx,id,undefined,undefined,authority)
+        return m?projectMemory(m):null
+      }
       const m = await getMemoryById(ctx, id)
       if (!m) return null
       return projectMemory(m)
     },
 
-    async search(ctx, params) {
+    async search(ctx, params,authority) {
       // ID prefix lookup (for truncated index IDs like [id:5794afc9])
       if (params.idPrefix) {
         const results = await searchMemoriesByIdPrefix(ctx, {
           idPrefix: params.idPrefix,
           limit: params.limit,
-        })
-        return results.map(projectMemory)
+        },authority)
+        return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
       }
 
       const results = await searchMemories(ctx, {
         searchQuery: params.query,
         limit: params.limit,
-      })
-      return results.map(projectMemory)
+      },authority)
+      return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
-    async getIdentity(ctx) {
-      const results = await getIdentityMemories(ctx)
-      return results.map(projectMemory)
+    async getIdentity(ctx,authority) {
+      const results = await getIdentityMemories(ctx,authority)
+      return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
-    async getIndex(ctx, validOnly) {
-      return (await getMemoryIndex(ctx, validOnly)).map(bindMemorySource)
+    async getIndex(ctx, validOnly,authority) {
+      const results=await getMemoryIndex(ctx, validOnly,authority);return bindScopeSources(results.map(bindMemorySource),boundScopeSources(results))
     },
 
     async getIndexSystem(assistantId, userId, validOnly) {
@@ -119,9 +173,9 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       return projectMemory(m)
     },
 
-    async getIndexRanked(ctx, limit) {
-      const result = await getMemoryIndexRanked(ctx, limit)
-      return { ...result, rows: result.rows.map(bindMemorySource) }
+    async getIndexRanked(ctx, limit,authority) {
+      const result = await getMemoryIndexRanked(ctx, limit,authority)
+      return bindScopeSources({ ...result, rows: bindScopeSources(result.rows.map(bindMemorySource),boundScopeSources(result.rows)) },boundScopeSources(result))
     },
 
     async trackRecall(memoryId, queryHash) {
@@ -396,11 +450,11 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
 
     async getWorkspaceIdentity(ctx) {
       const results = await getWorkspaceIdentityMemories(ctx)
-      return results.map(projectMemory)
+      return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
-    async getWorkspaceIndex(ctx, validOnly) {
-      return (await getWorkspaceMemoryIndex(ctx, validOnly)).map(bindMemorySource)
+    async getWorkspaceIndex(ctx, validOnly,authority) {
+      const results=await getWorkspaceMemoryIndex(ctx, validOnly,authority);return bindScopeSources(results.map(bindMemorySource),boundScopeSources(results))
     },
 
     async getWorkspaceIndexSystem(assistantId, workspaceId, validOnly) {
@@ -409,23 +463,23 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
 
     async getWorkspaceMemoriesByCategory(ctx, tag) {
       const results = await getWorkspaceMemoriesByCategory(ctx, tag)
-      return results.map(projectMemory)
+      return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
-    async searchTeam(ctx, params) {
+    async searchTeam(ctx, params,authority) {
       if (params.idPrefix) {
         const results = await searchWorkspaceMemoriesByIdPrefix(ctx, {
           idPrefix: params.idPrefix,
           limit: params.limit,
-        })
-        return results.map(projectMemory)
+        },authority)
+        return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
       }
 
       const results = await searchWorkspaceMemories(ctx, {
         searchQuery: params.query,
         limit: params.limit,
-      })
-      return results.map(projectMemory)
+      },authority)
+      return bindScopeSources(results.map(projectMemory),boundScopeSources(results))
     },
 
     async listWorkspaceMemoryGroups() {

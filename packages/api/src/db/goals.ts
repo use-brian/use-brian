@@ -1,4 +1,14 @@
-import { admitGoalSource, bindTaskGoalSource } from '../workspace-access/goal-source-admission.js'
+import { WorkflowDefinitionSchema,runtimeSuccessors,accessCeilingContains,pinAccessCeiling,type AuthoringAuthority } from '@use-brian/core'
+import { resolveGoalAuthoritySystem,resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
+import { readWorkflowRunInTransaction } from './workflow-store.js'
+import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
+import { readLegacyCanonicalCrmPoint } from './crm-reader.js'
+import { taskNeedsIndependentSourceAuthoritySql } from './task-reader.js'
+import { randomUUID } from 'node:crypto'
+import {isDeepStrictEqual} from 'node:util'
+import {boundScopeSources} from '@use-brian/core'
+import {WorkspaceAccessError} from '../workspace-access/policy.js'
+import { admitGoalSource, bindTaskGoalSource,assertTaskGoalSourceCompatible,retainedTaskGoalWrite,readRetainedTaskGoal,writeRetainedTaskGoal,resolveRetainedTaskGoalAuthority,unboundNativeTaskGoalHost } from '../workspace-access/goal-source-admission.js'
 import { admitOperationalAuthoring, type OperationalHumanAuthor } from '../workspace-access/operational-admission.js'
 /**
  * Goals SQL helpers — the operational goal-seeker primitive.
@@ -9,9 +19,10 @@ import { admitOperationalAuthoring, type OperationalHumanAuthor } from '../works
  * authorization gate; user reads go through the app pool (`queryWithRLS`),
  * confined by the `goals_workspace_member` policy.
  */
-import type { DoneWhenNode, EventSubscription, GoalBrief, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalListRow, GoalMeans, GoalRecord, GoalStatus } from '@use-brian/core'
-import { query, queryWithRLS, getPool } from './client.js'
+import type { DoneWhenNode, EventSubscription, GoalBrief, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalListRow, GoalMeans, GoalRecord, GoalStatus, SessionContextAuthority } from '@use-brian/core'
+import { applyRLSGucs,getAppPool,rollbackAndRelease,query, queryWithRLS, getPool } from './client.js'
 import type pg from 'pg'
+import { updateTask } from './tasks.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import type { BrainChangeAction } from '../brain-stream/sse-fanout.js'
 
@@ -60,7 +71,7 @@ const FULL_SELECT = `
   context_group_id as "contextGroupId", context_project_id as "contextProjectId",
   authoring_authority as "authoringAuthority",
   confirmed_at as "confirmedAt", completion_claim as "completionClaim",
-  brief, created_at as "createdAt", updated_at as "updatedAt"
+  brief, created_at as "createdAt", updated_at as "updatedAt", updated_at::text as "mutationVersion"
 `
 
 export const GOAL_TERMINAL_STATUSES = ['done', 'abandoned'] as const
@@ -89,10 +100,12 @@ type GoalRow = {
   brief: GoalBrief | null
   createdAt: Date
   updatedAt: Date
+  mutationVersion:string
 }
 
+const goalReadVersions=new WeakMap<GoalRecord,string>()
 function toRecord(row: GoalRow): GoalRecord {
-  return {
+  const record:GoalRecord = {
     id: row.id,
     workspaceId: row.workspaceId,
     parentGoalId: row.parentGoalId,
@@ -118,14 +131,31 @@ function toRecord(row: GoalRow): GoalRecord {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
+  goalReadVersions.set(record,row.mutationVersion)
+  return record
+}
+
+const retainedGoalRequiredSql=`EXISTS(SELECT 1 FROM goal_task_source_authority s WHERE s.goal_id=goals.id AND s.proof->'retained' IS NOT NULL)
+ OR EXISTS(SELECT 1 FROM tasks source_task WHERE goals.host_type='task' AND source_task.id=goals.host_id AND source_task.workspace_id=goals.workspace_id
+   AND (${taskNeedsIndependentSourceAuthoritySql('source_task')} OR EXISTS(SELECT 1 FROM scope_derivations d WHERE d.workspace_id=source_task.workspace_id
+     AND d.resource_kind='task' AND d.resource_id IN(source_task.id,source_task.logical_id))))`
+
+/** Metadata-only hold for lifecycle adapters without the retained origin frame. */
+async function retainedGoalIsHeld(id:string):Promise<boolean>{
+  return(await query<{held:boolean}>(`SELECT EXISTS(SELECT 1 FROM goals WHERE id=$1 AND (${retainedGoalRequiredSql})) AS held`,[id])).rows[0]?.held!==false
 }
 
 /** Insert a goal (owner pool; the route/engine is the authz gate). */
 export async function createGoal(params: GoalCreateParams, humanAuthor?: OperationalHumanAuthor, taskSource?: object): Promise<GoalRecord> {
-  const client = await getPool().connect()
+  const retained=taskSource?retainedTaskGoalWrite(taskSource,client=>insertGoal(params,humanAuthor,taskSource,client)):undefined
+  return retained??insertGoal(params,humanAuthor,taskSource)
+}
+async function insertGoal(params: GoalCreateParams,humanAuthor?:OperationalHumanAuthor,taskSource?:object,transactionClient?:pg.PoolClient):Promise<GoalRecord>{
+  const client = transactionClient??await getPool().connect()
   const result = await (async () => {
     try {
-      await client.query('BEGIN')
+      if(!transactionClient)await client.query('BEGIN')
+      if(!transactionClient&&params.host?.type==='task')await assertTaskGoalSourceCompatible(params.workspaceId,params.host.id,client)
       // Parent/host/session-derived and autodrafted goals need canonical source
       // proof, not a human default or a creator/owner guess. Block ready mode
       // until those adapters supply it; legacy creation remains unchanged.
@@ -142,14 +172,15 @@ export async function createGoal(params: GoalCreateParams, humanAuthor?: Operati
       if (params.confirmed !== false && !params.authoringAuthority) {
         throw Object.assign(new Error('Goal authoring permissions are missing. Confirm the goal from a current workspace turn.'), { reason: 'goal_authority_unavailable' })
       }
-      const inserted = await client.query<GoalRow>(
+      const goalId=randomUUID()
+      let inserted = await client.query<GoalRow>(
         `INSERT INTO goals (
-           workspace_id, parent_goal_id, recipe_id, host_type, host_id,
+           ${transactionClient?'id,':''}workspace_id, parent_goal_id, recipe_id, host_type, host_id,
            outcome, done_when, means, budget, policy, status, created_by_user_id,
            origin_session_id, context_group_id, context_project_id, authoring_authority, confirmed_at, brief
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb, $17, $18::jsonb)
-         RETURNING ${FULL_SELECT}`,
+         VALUES (${transactionClient?'$19,':''}$1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb, $17, $18::jsonb)
+         ${transactionClient?'':`RETURNING ${FULL_SELECT}`}`,
         [
           params.workspaceId,
           params.parentGoalId ?? null,
@@ -171,20 +202,25 @@ export async function createGoal(params: GoalCreateParams, humanAuthor?: Operati
           // `confirmed: false` to mint a draft (autopilot §4/§8).
           params.confirmed === false ? null : new Date(),
           params.brief ? JSON.stringify(params.brief) : null,
+          ...(transactionClient?[goalId]:[]),
         ],
       )
-      if (taskSource) await bindTaskGoalSource(client, params.host!.id, inserted.rows[0].id)
-      await client.query('COMMIT')
+      if (taskSource) await bindTaskGoalSource(client, params.host!.id, transactionClient?goalId:inserted.rows[0].id)
+      if(transactionClient){
+        inserted=await client.query<GoalRow>(`SELECT ${FULL_SELECT} FROM goals WHERE id=$1 AND goal_crm_scope_visible(id)`,[goalId])
+        if(inserted.rows.length!==1)throw new Error('goal_source_unsupported')
+      }
+      if(!transactionClient)await client.query('COMMIT')
       return inserted
     } catch (error) {
-      await client.query('ROLLBACK')
+      if(!transactionClient)await client.query('ROLLBACK')
       throw error
     } finally {
-      client.release()
+      if(!transactionClient)client.release()
     }
   })()
   const created = toRecord(result.rows[0])
-  notifyGoalChange(created.workspaceId, 'create', created.id)
+  if(!transactionClient)notifyGoalChange(created.workspaceId, 'create', created.id)
   return created
 }
 
@@ -207,8 +243,33 @@ export async function getGoalById(userId: string, id: string, transactionClient?
 
 /** System read by id (engine path; no user context). */
 export async function getGoalByIdSystem(id: string): Promise<GoalRecord | null> {
-  const result = await query<GoalRow>(`SELECT ${FULL_SELECT} FROM goals WHERE id = $1`, [id])
+  const result = await query<GoalRow>(`SELECT ${FULL_SELECT} FROM goals WHERE id = $1 AND NOT (${retainedGoalRequiredSql})`, [id])
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
+}
+
+/** Protected Goal point read uses the caller's original admitted frame. */
+export async function getRetainedGoalById(userId:string,id:string,authority:SessionContextAuthority):Promise<GoalRecord|null>{
+  if(userId!==authority.execution.security.access.userId)throw new Error('goal_source_unsupported')
+  const goal=await readRetainedTaskGoal(id,authority,async client=>{
+    const result=await client.query<GoalRow>(`SELECT ${FULL_SELECT} FROM goals WHERE id=$1 AND goal_crm_scope_visible(id)`,[id])
+    return result.rows[0]?toRecord(result.rows[0]):null
+  })
+  if(goal){
+    const original=await resolveRetainedTaskGoalAuthority(goal)
+    if(!original)throw new Error('goal_source_unsupported')
+    await original.assertCurrent()
+    await authority.execution.security.authority.assertCurrent()
+  }
+  return goal
+}
+
+/** Driver-only loader: authenticate immutable origin before selecting Goal payload. */
+export async function getGoalForExecutionSystem(id:string):Promise<GoalRecord|null>{
+  const metadata=(await query<Pick<GoalRow,'id'|'workspaceId'|'createdByUserId'|'authoringAuthority'> & {hostType:string|null;hostId:string|null}>(`SELECT id,workspace_id AS "workspaceId",created_by_user_id AS "createdByUserId",authoring_authority AS "authoringAuthority",host_type AS "hostType",host_id AS "hostId" FROM goals WHERE id=$1`,[id])).rows[0]
+  if(!metadata)return null
+  const goal={...metadata,host:metadata.hostType?{type:metadata.hostType as GoalHostRef['type'],id:metadata.hostId!}:null}
+  const retained=await resolveRetainedTaskGoalAuthority(goal)
+  return retained?getRetainedGoalById(metadata.createdByUserId!,id,retained.authority):getGoalByIdSystem(id)
 }
 
 /**
@@ -223,6 +284,7 @@ export async function stampGoalCompletionSystem(
   id: string,
   because: string,
 ): Promise<GoalRecord | null> {
+  if(await retainedGoalIsHeld(id))return null
   const claim: GoalCompletionClaim = { because, verifiedAt: new Date().toISOString() }
   const result = await query<GoalRow>(
     `UPDATE goals SET completion_claim = $1::jsonb WHERE id = $2 RETURNING ${FULL_SELECT}`,
@@ -337,7 +399,7 @@ type GoalCascadeExecutor = {
     /** The retired rows (`RETURNING id, workspace_id`) — a pg client returns
      *  them; a narrower executor may omit them and the cascade then emits no
      *  `goal` signal (the write still lands). */
-    rows?: Array<{ id: string; workspaceId: string }>
+    rows?: Array<{ id: string; workspaceId: string; owner?: boolean; held?: boolean }>
   }>
 }
 
@@ -356,9 +418,24 @@ type GoalCascadeExecutor = {
 export async function abandonGoalsForHostTaskSystem(
   taskId: string,
   reason: GoalHostCascadeReason,
-  opts: { draftsOnly?: boolean; exec?: GoalCascadeExecutor } = {},
+  opts: { draftsOnly?: boolean; exec?: GoalCascadeExecutor;afterCommit?:(effect:()=>void)=>void } = {},
 ): Promise<number> {
   const exec = opts.exec ?? { query: (text: string, values: unknown[]) => query(text, values) }
+  const notifyRetired = async (rows: Array<{ id: string; workspaceId: string }>) => {
+    if (!rows.length) return
+    // Reuse an owner transaction instead of acquiring its max:1 pool again.
+    // An app_user transaction cannot inspect private source metadata; its
+    // independent owner pool reads only the classification, never Goal payload.
+    const owner = await exec.query(`SELECT pg_has_role(current_user,c.relowner,'USAGE') AS owner FROM pg_class c WHERE c.oid='goals'::regclass`, [])
+    const sql = `SELECT id, workspace_id AS "workspaceId", (${retainedGoalRequiredSql}) AS held FROM goals WHERE id=ANY($1::uuid[])`
+    const admitted = owner.rows?.[0]?.owner === true
+      ? await exec.query(sql, [rows.map(row => row.id)])
+      : await query<{id:string;workspaceId:string;held:boolean}>(sql, [rows.map(row => row.id)])
+    for (const row of admitted.rows ?? []) if (row.held === false) {
+      const effect=()=>notifyGoalChange(row.workspaceId,'update',row.id)
+      if(opts.afterCommit)opts.afterCommit(effect);else effect()
+    }
+  }
   const skippedStatuses = opts.draftsOnly
     ? CLOSE_CASCADE_SKIP_STATUSES
     : GOAL_TERMINAL_STATUSES
@@ -370,7 +447,7 @@ export async function abandonGoalsForHostTaskSystem(
       RETURNING id, workspace_id as "workspaceId"`,
     [taskId, reason, skippedStatuses],
   )
-  for (const row of result.rows ?? []) notifyGoalChange(row.workspaceId, 'update', row.id)
+  await notifyRetired(result.rows ?? [])
   let retired = 0
   if (reason !== 'host_task_closed') {
     // Resumable execution (goals.md -> "Resumable task execution"): a deleted
@@ -384,7 +461,7 @@ export async function abandonGoalsForHostTaskSystem(
         RETURNING id, workspace_id as "workspaceId"`,
       [taskId, reason, GOAL_TERMINAL_STATUSES],
     )
-    for (const row of exec2.rows ?? []) notifyGoalChange(row.workspaceId, 'update', row.id)
+    await notifyRetired(exec2.rows ?? [])
     retired = exec2.rowCount ?? 0
   }
   return (result.rowCount ?? 0) + retired
@@ -395,6 +472,7 @@ export async function listGoalsByHostSystem(host: GoalHostRef): Promise<GoalReco
   const result = await query<GoalRow>(
     `SELECT ${FULL_SELECT} FROM goals
      WHERE host_type = $1 AND host_id = $2
+       AND NOT (${retainedGoalRequiredSql})
      ORDER BY updated_at DESC`,
     [host.type, host.id],
   )
@@ -407,6 +485,7 @@ export async function setGoalStatusSystem(
   status: GoalStatus,
   blockerReason: string | null = null,
 ): Promise<GoalRecord | null> {
+  if(await retainedGoalIsHeld(id))return null
   const result = await query<GoalRow>(
     `UPDATE goals SET status = $1, blocker_reason = $2 WHERE id = $3 RETURNING ${FULL_SELECT}`,
     [status, blockerReason, id],
@@ -429,6 +508,7 @@ export async function transitionRunningGoalStatusSystem(
   status: GoalStatus,
   blockerReason: string | null = null,
 ): Promise<boolean> {
+  if(await retainedGoalIsHeld(id))return false
   const result = await query<{ id: string; workspaceId: string }>(
     `UPDATE goals
         SET status = $1, blocker_reason = $2, updated_at = now()
@@ -441,6 +521,115 @@ export async function transitionRunningGoalStatusSystem(
   return transitioned
 }
 
+function goalTerminalMaterial(goal:GoalRecord) {
+  return {
+    workspaceId: goal.workspaceId,
+    createdByUserId: goal.createdByUserId,
+    parentGoalId: goal.parentGoalId,
+    recipeId: goal.recipeId,
+    host: goal.host,
+    outcome: goal.outcome,
+    doneWhen: goal.doneWhen,
+    means: goal.means,
+    budget: goal.budget,
+    policy: goal.policy,
+    originSessionId: goal.originSessionId,
+    contextGroupId: goal.contextGroupId,
+    contextProjectId: goal.contextProjectId,
+    authoringAuthority: goal.authoringAuthority ?? null,
+    brief: goal.brief ?? null,
+    completionClaim: goal.completionClaim ?? null,
+  }
+}
+
+/** Claim one structural completion without reviving a cancelled/edited Goal.
+ * This compares evaluated material; it is not current source authorization. */
+export async function claimGoalRollupTerminalSystem(goal: GoalRecord): Promise<boolean> {
+  if (!goal.confirmedAt) return false
+  const material = goalTerminalMaterial(goal)
+  const result = await query<{ workspaceId: string }>(
+    `UPDATE goals SET status='done',blocker_reason=NULL,updated_at=now()
+      WHERE id=$1 AND workspace_id=$2 AND status='active' AND confirmed_at IS NOT NULL
+        AND NOT (${retainedGoalRequiredSql})
+        AND jsonb_build_object(
+          'workspaceId',workspace_id,'createdByUserId',created_by_user_id,
+          'parentGoalId',parent_goal_id,'recipeId',recipe_id,
+          'host',CASE WHEN host_type IS NULL THEN NULL ELSE jsonb_build_object('type',host_type,'id',host_id) END,
+          'outcome',outcome,'doneWhen',done_when,'means',COALESCE(means,'{}'::jsonb),
+          'budget',COALESCE(budget,'{}'::jsonb),'policy',COALESCE(policy,'{}'::jsonb),
+          'originSessionId',origin_session_id,'contextGroupId',context_group_id,
+          'contextProjectId',context_project_id,'authoringAuthority',authoring_authority,
+          'brief',brief,'completionClaim',completion_claim
+        )=$3::jsonb
+      RETURNING workspace_id AS "workspaceId"`,
+    [goal.id,goal.workspaceId,JSON.stringify(material)],
+  )
+  const claimed = (result.rowCount ?? 0) === 1
+  if (claimed) notifyGoalChange(result.rows[0].workspaceId,'update',goal.id)
+  return claimed
+}
+
+/** Atomic terminal composition for explicitly authored, unbound native Task
+ * hosts. Source-backed producer proofs require their own authentic transition. */
+export async function finishNativeTaskGoalTerminalSystem(goal:GoalRecord,terminal:'done'|'blocked',reason:string|null,
+ expectedStatus:'active'|'running'):Promise<GoalRecord|null>{
+ if(goal.host?.type!=='task'||!goal.createdByUserId||!goal.authoringAuthority)throw Object.assign(new Error('goal_source_scope_unavailable'),{reason:'goal_source_scope_unavailable'})
+ const originalHost=goal.host.id,actor=goal.createdByUserId,authoring=goal.authoringAuthority
+ const authority=await resolveGoalAuthoritySystem(goal),effects:Array<()=>void>=[]
+ let committed=false
+ try{
+  const result=await authority.executeWithAuthority(async()=>{
+   const client=await getAppPool().connect()
+   try{
+    await client.query('BEGIN');await applyRLSGucs(client,actor)
+    // Canonical task writers take this barrier before any Goal host repoint.
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[goal.workspaceId])
+    const current=(await client.query<GoalRow>(`SELECT ${FULL_SELECT} FROM goals WHERE id=$1 AND workspace_id=$2
+     AND status=$3 AND confirmed_at IS NOT DISTINCT FROM $4::timestamptz FOR UPDATE`,
+     [goal.id,goal.workspaceId,expectedStatus,goal.confirmedAt])).rows[0]
+    if(!current){await client.query('ROLLBACK');return null}
+    const evaluated=toRecord(current)
+    // Physical host rotation is canonical identity maintenance. Every other
+    // evaluated field must remain exact, including the immutable authority.
+    const {host:_old,...before}=goalTerminalMaterial(goal),{host:_new,...after}=goalTerminalMaterial(evaluated)
+    if(!isDeepStrictEqual(before,after)){await client.query('ROLLBACK');return null}
+    if(evaluated.host?.type!=='task')throw Object.assign(new Error('goal_source_scope_unavailable'),{reason:'goal_source_scope_unavailable'})
+    const locked=await client.query<{id:string}>('SELECT id FROM tasks WHERE workspace_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE',
+     [goal.workspaceId,[...new Set([originalHost,evaluated.host.id])]])
+    if(locked.rows.length!==new Set([originalHost,evaluated.host.id]).size)throw Object.assign(new Error('Goal host unavailable'),{reason:'goal_host_write_unavailable'})
+    // Owner metadata classifies committed ancestry while the exact original and
+    // current physical rows are locked. It does not authorize the Task write.
+    const native=await unboundNativeTaskGoalHost(goal)
+    if(!native||native.id!==evaluated.host.id)throw Object.assign(new Error('goal_source_scope_unavailable'),{reason:'goal_source_scope_unavailable'})
+    const scope=()=>resolveWorkflowAuthoringScope({userId:actor,workspaceId:goal.workspaceId,assistantId:authoring.assistantId,
+     authoringAuthority:authoring,contextGroupId:goal.contextGroupId,contextProjectId:goal.contextProjectId},client)
+    const currentScope=await scope()
+    const task=await updateTask(actor,evaluated.host.id,{status:terminal},undefined,{writtenBy:'system',access:{...currentScope.access,
+     assistantId:authoring.assistantId,assistantKind:currentScope.access.assistantKind??'primary'}},
+     {client,afterCommit:effect=>effects.push(effect)})
+    if(!task||task.logicalId!==native.logicalId)throw Object.assign(new Error('Goal host unavailable'),{reason:'goal_host_write_unavailable'})
+    await scope()
+    const updated=(await client.query<GoalRow>(`UPDATE goals SET status=$2,blocker_reason=$3,updated_at=now()
+     WHERE id=$1 AND status=$4 AND host_type='task' AND host_id=$5 RETURNING ${FULL_SELECT}`,
+     [goal.id,terminal,reason,expectedStatus,task.id])).rows[0]
+    if(!updated)throw Object.assign(new Error('Goal ownership changed'),{reason:'goal_host_write_unavailable'})
+    await client.query('COMMIT');committed=true
+    return toRecord(updated)
+   }finally{await rollbackAndRelease(client)}
+  })
+  if(!result)return null
+  // This is egress revalidation, never a claim of postcommit rollback.
+  const current=await unboundNativeTaskGoalHost({...goal,host:{type:'task',id:originalHost}})
+  if(!current||current.id!==result.host?.id)throw Object.assign(new Error('goal_source_scope_unavailable'),{reason:'goal_source_scope_unavailable'})
+  effects.push(()=>notifyGoalChange(result.workspaceId,'update',result.id))
+  for(const effect of effects)effect()
+  return result
+ }catch(error){
+  if(committed)throw Object.assign(error instanceof Error?error:new Error('goal_source_unavailable'),{retrySafe:false,operationMayHaveExecuted:true})
+  throw error
+ }
+}
+
 /** Update a goal's curated fields and/or confirm it (autopilot §4). `confirm:
  *  true` sets `confirmed_at = now()` (arming a draft); `outcome` / `doneWhen` /
  *  `brief` let the creator amend the drafted detail (§8 triage edits); `means`
@@ -451,6 +640,7 @@ export async function updateGoalSystem(
   id: string,
   fields: { outcome?: string; doneWhen?: DoneWhenNode; means?: GoalMeans; budget?: GoalRecord['budget']; brief?: GoalBrief | null; confirm?: boolean; originSessionId?: string; authoringAuthority?: NonNullable<GoalRecord['authoringAuthority']> },
 ): Promise<GoalRecord | null> {
+  if(await retainedGoalIsHeld(id))return null
   const sets: string[] = []
   const values: unknown[] = []
   let idx = 1
@@ -499,6 +689,7 @@ export async function narrowGoalContextSystem(
   contextGroupId: string | null,
   contextProjectId: string | null,
 ): Promise<GoalRecord | null> {
+  if(await retainedGoalIsHeld(id))return null
   const result = await query<GoalRow>(
     `UPDATE goals
         SET context_group_id = $1,
@@ -522,7 +713,7 @@ export async function narrowGoalContextSystem(
  *  the caller backs off. This is the exclusive-runs guard (`goals.md` §7). */
 export async function tryClaimGoalForTick(id: string): Promise<boolean> {
   const result = await query(
-    `UPDATE goals SET status = 'running' WHERE id = $1 AND status = 'active' RETURNING id`,
+    `UPDATE goals SET status = 'running' WHERE id = $1 AND status = 'active' AND NOT (${retainedGoalRequiredSql}) RETURNING id`,
     [id],
   )
   return (result.rowCount ?? 0) > 0
@@ -555,6 +746,7 @@ export async function setGoalAwaitingEventSystem(
   id: string,
   marker: GoalAwaitingEventMarker,
 ): Promise<void> {
+  if(await retainedGoalIsHeld(id))throw new Error('goal_source_unsupported')
   await query(`UPDATE goals SET awaiting_event = $1::jsonb WHERE id = $2`, [
     JSON.stringify(marker),
     id,
@@ -565,6 +757,7 @@ export async function setGoalAwaitingEventSystem(
  *  cleared — so a resume can be claimed exactly once when two events race on
  *  the same goal (only the call that flips it null schedules the tick). */
 export async function clearGoalAwaitingEventSystem(id: string): Promise<boolean> {
+  if(await retainedGoalIsHeld(id))return false
   const result = await query(
     `UPDATE goals SET awaiting_event = NULL WHERE id = $1 AND awaiting_event IS NOT NULL RETURNING id`,
     [id],
@@ -576,6 +769,7 @@ export async function clearGoalAwaitingEventSystem(id: string): Promise<boolean>
 export async function getGoalAwaitingEventSystem(
   id: string,
 ): Promise<GoalAwaitingEventMarker | null> {
+  if(await retainedGoalIsHeld(id))return null
   const result = await query<{ awaitingEvent: GoalAwaitingEventMarker | null }>(
     `SELECT awaiting_event as "awaitingEvent" FROM goals WHERE id = $1`,
     [id],
@@ -593,9 +787,150 @@ export async function findEventWaitingGoalsSystem(
     `SELECT id as "goalId", awaiting_event->'subscriptions' as subscriptions
        FROM goals
       WHERE awaiting_event IS NOT NULL
+        AND NOT (${retainedGoalRequiredSql})
         AND workspace_id = $1
         AND status <> ALL($2)`,
     [workspaceId, GOAL_TERMINAL_STATUSES],
   )
   return result.rows.map((r) => ({ goalId: r.goalId, subscriptions: r.subscriptions ?? [] }))
+}
+
+/** Typed draft confirmation shared by native human and Brian callers. No lifecycle dispatch. */
+export async function confirmRetainedGoal(userId:string,expected:GoalRecord,fields:{outcome?:string;brief?:GoalBrief},authority:SessionContextAuthority):Promise<GoalRecord|null>{
+ const version=goalReadVersions.get(expected)
+ const changed=fields.outcome!==undefined&&fields.outcome!==expected.outcome||fields.brief!==undefined&&!isDeepStrictEqual(fields.brief,expected.brief)
+ if(changed&&(authority.accumulator.evidence.sources??[]).some(source=>!boundScopeSources(expected).some(saved=>isDeepStrictEqual(saved,source))))throw new WorkspaceAccessError('goal_source_unsupported',409)
+ if(!version||userId!==authority.execution.security.access.userId)throw new Error('goal_source_unsupported')
+ const result=await writeRetainedTaskGoal(expected.id,authority,async client=>{
+  const result=await client.query<GoalRow>(`UPDATE goals SET confirmed_at=now(),outcome=COALESCE($3,outcome),
+   brief=CASE WHEN $4::jsonb IS NULL THEN brief ELSE $4::jsonb END,
+   status=CASE WHEN status='blocked' THEN 'active' ELSE status END
+   WHERE id=$1 AND updated_at=$2::timestamptz AND confirmed_at IS NULL AND status IN('active','blocked')
+    AND means='{}'::jsonb AND goal_crm_scope_visible(id) RETURNING ${FULL_SELECT}`,
+   [expected.id,version,fields.outcome??null,fields.brief?JSON.stringify(fields.brief):null])
+  return result.rows[0]?toRecord(result.rows[0]):null
+ })
+ if(result)try{
+  const original=await resolveRetainedTaskGoalAuthority(result)
+  if(!original)throw new Error('goal_source_unsupported')
+  await original.assertCurrent();await authority.execution.security.authority.assertCurrent()
+ }catch(error){throw Object.assign(error instanceof Error?error:new Error('goal_source_unavailable'),{retrySafe:false,operationMayHaveExecuted:true})}
+ return result
+}
+
+/** Recover only the existing pre-wait deterministic checkpoint. Completed
+ * branches are evidence, never another execution; every proof must match the
+ * original selected graph and the saved frontier. */
+function retainedInitialFrontier(definition: ReturnType<typeof WorkflowDefinitionSchema.parse>,
+ currentStepId: string | null, vars: Record<string, unknown>,
+ rows: {stepId:string;stepType:string;status:string;output:Record<string,unknown>|null}[]): string[] {
+ const unavailable=()=>{throw new Error('goal_source_unsupported')}
+ const steps=new Map(definition.steps.map(step=>[step.id,step]))
+ const starts=Array.isArray(definition.startStepId)?definition.startStepId:[definition.startStepId]
+ const completed=new Map<string,{branchTaken:'true'|'false'}>()
+ for(const row of rows){
+  const step=steps.get(row.stepId),branch=row.output?.branchTaken
+  if(step?.type!=='branch'||row.stepType!=='branch'||row.status!=='completed'||completed.has(row.stepId)
+   ||!row.output||Object.keys(row.output).join(',')!=='branchTaken'||branch!=='true'&&branch!=='false')unavailable()
+  completed.set(row.stepId,{branchTaken:branch as 'true'|'false'})
+ }
+ const walk=(seeds:string[],proofs?:Set<string>)=>{
+  const visited=new Set<string>(),active=new Set<string>(),frontier:string[]=[]
+  const visit=(id:string)=>{
+   if(active.has(id)||!steps.has(id))unavailable()
+   if(visited.has(id))return // Definition joins share one canonical cursor.
+   active.add(id);visited.add(id)
+   const proof=completed.get(id),step=steps.get(id)!
+   if(proof){
+    proofs?.add(id)
+    for(const successor of runtimeSuccessors(step,{kind:'success',output:proof,...proof},definition.steps.map(step=>step.id)))visit(successor)
+   }else frontier.push(id)
+   active.delete(id)
+  }
+  for(const id of seeds)visit(id)
+  return frontier
+ }
+ const proofs=new Set<string>(),expected=walk(starts,proofs)
+ if(proofs.size!==completed.size)unavailable()
+ let saved:string[]
+ if(Object.hasOwn(vars,'__frontier')){
+  const frontier=vars.__frontier
+  if(!Array.isArray(frontier)||frontier.some(id=>typeof id!=='string'||!steps.has(id))||new Set(frontier).size!==frontier.length)unavailable()
+  saved=walk(frontier as string[])
+ }else{
+  if(rows.length===0){if(currentStepId!==starts[0])unavailable();saved=[...starts]}
+  else {if(!currentStepId||!completed.has(currentStepId)||expected.length)unavailable();saved=[]}
+ }
+ if(!isDeepStrictEqual([...saved].sort(),[...expected].sort()))unavailable()
+ return saved
+}
+
+/** Internal claim metadata is a fence, never source authority. */
+export type RetainedGoalWorkflowClaim={claimedAt:string;claimAttempts:number}
+async function retainedGoalWorkflowClaim(client:pg.PoolClient,runId:string):Promise<RetainedGoalWorkflowClaim>{
+ const claim=(await client.query<RetainedGoalWorkflowClaim>('SELECT claimed_at::text AS "claimedAt",claim_attempts AS "claimAttempts" FROM workflow_runs WHERE id=$1',[runId])).rows[0]
+ if(!claim?.claimedAt||!Number.isInteger(claim.claimAttempts)||claim.claimAttempts<1)throw new Error('goal_source_unsupported')
+ return claim
+}
+
+/** Explicit native-only deterministic means, shared by the actual Brian command. */
+export async function armRetainedGoalWorkflow(userId:string,expected:GoalRecord,workflowId:string,authority:SessionContextAuthority){
+ const version=goalReadVersions.get(expected)
+ if(!version||!expected.confirmedAt||userId!==authority.execution.security.access.userId)throw new Error('goal_source_unsupported')
+ return writeRetainedTaskGoal(expected.id,authority,async client=>{
+  const current=(await client.query<GoalRow>(`SELECT ${FULL_SELECT} FROM goals WHERE id=$1 AND updated_at=$2::timestamptz
+    AND confirmed_at IS NOT NULL AND status='active' AND goal_crm_scope_visible(id) FOR UPDATE`,[expected.id,version])).rows[0]
+  if(!current)throw new Error('goal_source_unsupported')
+  const existing=(await client.query<{id:string;status:string;live:boolean;expired:boolean;currentStepId:string|null;vars:Record<string,unknown>}>("SELECT id,status,claimed_at>clock_timestamp()-interval '10 minutes' AS live,claimed_at<=clock_timestamp()-interval '10 minutes' AS expired,current_step_id AS \"currentStepId\",vars FROM workflow_runs WHERE source_goal_id=$1 ORDER BY started_at LIMIT 1 FOR UPDATE",[expected.id])).rows[0]
+  if(existing){
+   if(current.means?.workflowId!==workflowId||(await client.query<{allowed:boolean}>('SELECT retained_goal_workflow_current($1,false) AS allowed',[existing.id])).rows[0]?.allowed!==true)throw new Error('goal_source_unsupported')
+   let dispatch=existing.status==='pending'&&!existing.live
+   if(existing.status==='running'&&existing.expired){
+    const definition=WorkflowDefinitionSchema.parse((await client.query<{definition:unknown}>('SELECT definition FROM workflows WHERE id=$1 FOR SHARE',[workflowId])).rows[0]?.definition)
+    const rows=(await client.query<{stepId:string;stepType:string;status:string;output:Record<string,unknown>|null}>('SELECT step_id AS \"stepId\",step_type AS \"stepType\",status,output FROM workflow_step_runs WHERE run_id=$1 ORDER BY started_at FOR UPDATE',[existing.id])).rows
+    if(rows.some(step=>step.stepType==='wait')||(await client.query("SELECT id FROM scheduled_jobs WHERE channel_type='workflow' AND channel_id=$1 FOR UPDATE",[existing.id])).rows.length)throw new Error('goal_source_unsupported') // session-kind-exempt: scheduled_jobs.channel_type identifies a workflow resume job, not a session.
+    const frontier=retainedInitialFrontier(definition,existing.currentStepId,existing.vars,rows)
+    await client.query("UPDATE workflow_runs SET vars=jsonb_set(vars,'{__frontier}',$2::jsonb) WHERE id=$1",[existing.id,JSON.stringify(frontier)])
+    dispatch=true
+   }
+   if(dispatch)await client.query('UPDATE workflow_runs SET claimed_at=clock_timestamp(),claim_attempts=claim_attempts+1 WHERE id=$1',[existing.id])
+   return{goal:toRecord(current),run:(await readWorkflowRunInTransaction(client,expected.workspaceId,existing.id))!,dispatch,
+    claim:dispatch?await retainedGoalWorkflowClaim(client,existing.id):undefined}
+  }
+  if(Object.keys(current.means??{}).length)throw new Error('goal_source_unsupported')
+  const workflow=(await client.query<{definition:unknown;authority:AuthoringAuthority;actor:string;contextGroupId:string|null;contextProjectId:string|null}>(`SELECT definition,authoring_authority AS authority,created_by AS actor,
+    context_group_id AS "contextGroupId",context_project_id AS "contextProjectId" FROM workflows
+    WHERE id=$1 AND workspace_id=$2 AND enabled FOR SHARE`,[workflowId,expected.workspaceId])).rows[0]
+  if(!workflow||(await client.query("SELECT id FROM assistants WHERE id=$1 AND workspace_id=$2 AND kind='primary' FOR SHARE",[workflow.authority?.assistantId,expected.workspaceId])).rows.length!==1)throw new Error('goal_source_unsupported')
+  const definition=WorkflowDefinitionSchema.parse(workflow.definition)
+  if(definition.principal||definition.failureDelivery||definition.taskIntake||definition.steps.some(step=>!['wait','branch'].includes(step.type)||step.type==='wait'&&(!step.at||step.until||(step.at.timezone??'UTC')!=='UTC'))
+   ||workflow.actor!==userId||workflow.authority?.assistantId!==expected.authoringAuthority?.assistantId
+   ||workflow.contextGroupId!==expected.contextGroupId||workflow.contextProjectId!==expected.contextProjectId)throw new Error('goal_source_unsupported')
+  const scope=await resolveWorkflowAuthoringScope({userId,workspaceId:expected.workspaceId,assistantId:workflow.authority.assistantId,
+    authoringAuthority:workflow.authority,contextGroupId:workflow.contextGroupId,contextProjectId:workflow.contextProjectId},client)
+  if(!accessCeilingContains(pinAccessCeiling(scope.access),expected.authoringAuthority!.ceiling))throw new Error('goal_source_unsupported')
+  const roots=boundScopeSources(expected)
+  if(roots.some(source=>source.resourceKind==='external_source')||(await readExternalSourceAncestors(expected.workspaceId,roots,client)).length)throw new Error('goal_source_unsupported')
+  const task=await readLegacyCanonicalCrmPoint(authority.execution.security.access,'task',expected.host!.id,['title'],client)
+  const title=task?.projection.values.title
+  if(typeof title!=='string')throw new Error('goal_source_unsupported')
+  const input:Record<string,unknown>={goalId:expected.id,goalOutcome:current.outcome,taskTitle:title}
+  if(current.brief?.verification)input.goalVerification=current.brief.verification
+  if(current.brief?.approach)input.goalApproach=current.brief.approach
+  const updated=(await client.query<GoalRow>(`UPDATE goals SET means=jsonb_build_object('workflowId',$3::text)
+    WHERE id=$1 AND updated_at=$2::timestamptz RETURNING ${FULL_SELECT}`,[expected.id,version,workflowId])).rows[0]
+  if(!updated)throw new Error('goal_source_unsupported')
+  const runId=randomUUID()
+  const inserted=await client.query(`INSERT INTO workflow_runs(id,workflow_id,workspace_id,triggered_by,trigger_kind,input,source_goal_id,
+    context_group_id,context_project_id,context_compartments,context_project_ids)
+    SELECT $6,w.id,w.workspace_id,$3,'manual',$4::jsonb,$5,w.context_group_id,w.context_project_id,
+     CASE WHEN g.compartment_key IS NULL THEN '{}'::text[] ELSE ARRAY[g.compartment_key] END,
+     CASE WHEN w.context_project_id IS NULL THEN '{}'::uuid[] ELSE ARRAY[w.context_project_id] END
+    FROM workflows w LEFT JOIN workspace_groups g ON g.id=w.context_group_id WHERE w.id=$1 AND w.workspace_id=$2`,
+    [workflowId,expected.workspaceId,userId,JSON.stringify(input),expected.id,runId])
+  if(inserted.rowCount!==1)throw new Error('goal_source_unsupported')
+  await client.query('SELECT bind_retained_goal_workflow_run($1,$2)',[runId,expected.id])
+  return{goal:toRecord(updated),run:(await readWorkflowRunInTransaction(client,expected.workspaceId,runId))!,dispatch:true,
+   claim:await retainedGoalWorkflowClaim(client,runId)}
+ })
 }

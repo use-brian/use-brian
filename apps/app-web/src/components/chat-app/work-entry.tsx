@@ -59,12 +59,13 @@ export function WorkEntry({ workspaceId, scope, onDraft, includeDelivery=true }:
 
   return (
     <div className="space-y-3" data-testid="work-entry">
+      <p className="text-xs leading-5 text-muted-foreground">{t.description}</p>
       <BriefWork
         workspaceId={workspaceId}
         scope={scope}
         title={scope.kind === "personal" ? t.title : t.scopedTitle}
         onContinueInChat={(_item, draft) => onDraft(draft)}
-        hideWhenEmpty
+        embedded
       />
       {includeDelivery?<ClientDeliveryOversight workspaceId={workspaceId} scope={scope} onDraft={onDraft}/>:null}
       {briefHref ? (

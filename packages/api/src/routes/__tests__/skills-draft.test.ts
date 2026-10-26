@@ -241,7 +241,7 @@ describe('[COMP:api/skills-route] POST /draft', () => {
     await request(draftApp({ provider: mockProvider(VALID_DRAFT, free), plan: 'free' }))
       .post('/api/skills/draft')
       .send(turnBody({ model: 'max' }))
-    expect(free.model).toBe('gemini-3-flash-standard')
+    expect(free.model).toBe('gemini-3.6-flash-standard')
 
     const paid: Captured = {}
     await request(draftApp({ provider: mockProvider(VALID_DRAFT, paid), plan: 'max_5x' }))

@@ -9,6 +9,8 @@ const collabSingletonAliases = resolveCollabSingletonAliases(import.meta.url);
  * identities without externalizing React peers into another pnpm store.
  */
 export default defineConfig({
+  // Synthetic tests use explicit environment only; never discover workspace dotenv.
+  envDir: false,
   // Next's PostCSS plugin-string format is not a Vite plugin object. Unit
   // tests don't need Tailwind generation when a lazy component imports CSS.
   css: { postcss: { plugins: [] } },

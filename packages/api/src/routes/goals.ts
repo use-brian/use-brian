@@ -25,7 +25,14 @@
  * [COMP:api/goals-route]
  */
 
-import { Router } from 'express'
+import { Router,type Request,type Response,type NextFunction } from 'express'
+import {SourceProtocolError} from '@use-brian/brian-app/connector'
+import {DerivedScopeError} from '@use-brian/core'
+import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
+import {WorkspaceAccessError} from '../workspace-access/policy.js'
+import {ContextScopeAccumulator,type SessionContextAuthority} from '@use-brian/core'
+import {resolveNativeApplicationModuleExecution} from '../application-platform/native-module-runtime.js'
+import {retainedTaskGoalCaller,retainedTaskGoalForHost,admitRetainedGoalBoundary} from '../workspace-access/goal-source-admission.js'
 import { z } from 'zod'
 import {
   GOAL_HOST_TYPES,
@@ -41,6 +48,9 @@ import {
 } from '@use-brian/core'
 import {
   getGoalById,
+  GOAL_TERMINAL_STATUSES,
+  getRetainedGoalById,
+  confirmRetainedGoal,
   narrowGoalContextSystem,
   setGoalStatusSystem,
   updateGoalSystem,
@@ -137,6 +147,17 @@ function projectGoalDetail(g: GoalRecord) {
 export function goalsRoutes(opts: GoalsRouteOptions): Router {
   const router = Router()
   const contextStore = opts.contextStore ?? createDbContextScopeStore()
+
+  async function readGoal(req:Request,id:string):Promise<{goal:GoalRecord|null;authority?:SessionContextAuthority}>{
+    const userId=req.userId!
+    const ordinary=await getGoalById(userId,id)
+    if(ordinary)return{goal:ordinary}
+    const source=await retainedTaskGoalCaller(userId,id)
+    if(!source)return{goal:null}
+    const execution=await resolveNativeApplicationModuleExecution(req,source.workspaceId,source.assistantId,undefined,source.maximumAccess)
+    const authority={execution,accumulator:new ContextScopeAccumulator(execution.security.provenance)}
+    return{goal:await getRetainedGoalById(userId,id,authority),authority}
+  }
 
   // GET /:id/stream — authenticated live activity for one acting goal.
   // The RLS read is the authority gate; activity itself is ephemeral and
@@ -269,6 +290,23 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
       confirmed,
       originSessionId,
     })
+    if(hostType==='task'&&hostId){
+      const candidate=await retainedTaskGoalForHost(userId,workspaceId,hostId)
+      if(candidate&&!goals.some(goal=>goal.id===candidate)){
+        const {goal,authority}=await readGoal(req,candidate)
+        if(goal&&authority){
+          // Filter only after payload admission; hidden candidates never affect response counts.
+          if((!status||goal.status===status)&&(!confirmed||!!goal.confirmedAt)
+            &&(confirmed!==false||!goal.confirmedAt)&&(!originSessionId||goal.originSessionId===originSessionId)
+            &&(status||includeTerminal||!GOAL_TERMINAL_STATUSES.some(terminal=>terminal===goal.status))){
+            await admitRetainedGoalBoundary(authority,goal,'deliver')
+            goals.push({...goal,hostTitle:null})
+            goals.sort((a,b)=>b.updatedAt.getTime()-a.updatedAt.getTime())
+            goals.splice(50)
+          }
+        }
+      }
+    }
     res.json({ goals: goals.map(projectGoal) })
   })
 
@@ -281,11 +319,12 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
       res.status(401).json({ error: 'Unauthorized' })
       return
     }
-    const goal = await getGoalById(userId, req.params.id)
+    const {goal,authority}=await readGoal(req,req.params.id)
     if (!goal) {
       res.status(404).json({ error: 'Not found' })
       return
     }
+    if(authority)await admitRetainedGoalBoundary(authority,goal,'deliver')
     res.json({ goal: projectGoalDetail(goal) })
   })
 
@@ -376,7 +415,7 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
       return
     }
     // RLS-scoped membership check — `getGoalById` returns null for a non-member.
-    const existing = await getGoalById(userId, req.params.id)
+    const {goal:existing,authority}=await readGoal(req,req.params.id)
     if (!existing) {
       res.status(404).json({ error: 'Not found' })
       return
@@ -399,9 +438,10 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
         : undefined
     // Clarity gate (§12, widened §8) — block confirmation of a configuration an
     // agent couldn't work; surface the clarifying question for the user.
+    if(authority)await admitRetainedGoalBoundary(authority,existing,'context')
     if (opts.assessClarity) {
       const effectiveBrief = brief ?? existing.brief ?? undefined
-      const assistantId = await opts.resolveAssistantId?.(userId, existing.workspaceId)
+      const assistantId = authority?.execution.assistant.id??await opts.resolveAssistantId?.(userId, existing.workspaceId)
       const verdict = await opts.assessClarity({
         outcome: outcome ?? existing.outcome,
         verification: effectiveBrief?.verification,
@@ -409,8 +449,11 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
         userId,
         workspaceId: existing.workspaceId,
         assistantId,
+        ...(authority?{assertInputAuthority:()=>admitRetainedGoalBoundary(authority,existing,'context')}:{})
       })
+      if(authority)await admitRetainedGoalBoundary(authority,existing,'context')
       if (!verdict.clear) {
+        if(authority)await admitRetainedGoalBoundary(authority,existing,'deliver')
         res.json({ ok: false, needsClarification: true, question: verdict.clarifyingQuestion ?? null })
         return
       }
@@ -419,13 +462,15 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
       res.status(503).json({ error: 'Goal authoring authority is unavailable on this server' })
       return
     }
-    const goal = await updateGoalSystem(req.params.id, {
+    const goal = authority ? await confirmRetainedGoal(userId,existing,{outcome,brief},authority) : await updateGoalSystem(req.params.id, {
       confirm: true,
       outcome,
       brief,
       authoringAuthority: existing.authoringAuthority
         ?? await opts.resolveAuthoringAuthority!({ userId,goal:existing }),
     })
+    if(authority&&!goal){res.status(409).json({error:'goal_changed'});return}
+    if(authority&&goal)try{await admitRetainedGoalBoundary(authority,goal,'deliver')}catch(error){throw Object.assign(error instanceof Error?error:new Error('goal_source_unavailable'),{retrySafe:false,operationMayHaveExecuted:true})}
     res.json({ ok: true, goal: goal ? projectGoal(goal) : null })
   })
 
@@ -516,5 +561,13 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
     res.json({ ok: true, goal: goal ? projectGoal(goal) : null })
   })
 
+  router.use((error:unknown,_req:Request,res:Response,next:NextFunction)=>{
+    if(error instanceof SourceProtocolError||error instanceof DerivedScopeError||error instanceof WorkspaceAccessError||isAuthorityChangedError(error)){
+      const effect=error as {retrySafe?:boolean;operationMayHaveExecuted?:boolean}
+      res.status(409).json({error:'goal_source_unavailable',...(effect.retrySafe===undefined?{}:{retrySafe:effect.retrySafe}),...(effect.operationMayHaveExecuted===undefined?{}:{operationMayHaveExecuted:effect.operationMayHaveExecuted})})
+      return
+    }
+    next(error)
+  })
   return router
 }

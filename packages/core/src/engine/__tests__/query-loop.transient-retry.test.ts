@@ -119,7 +119,6 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
     const { provider, calls } = scriptedProvider([
       { kind: 'chunks', chunks: textChunks('restricted') },
     ])
-    let checks = 0
     const events: QueryEvent[] = []
     const run = async () => {
       for await (const event of queryLoop({
@@ -133,8 +132,9 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
           ...baseContext,
           authority: {
             async assertCurrent() {
-              checks++
-              if (checks > 1) {
+              // The provider attempt has started; pre-dispatch checks must not
+              // consume an artificial call-count permission budget.
+              if (calls.length > 0) {
                 throw Object.assign(new Error('authority changed'), { reason: 'authority_changed' })
               }
             },

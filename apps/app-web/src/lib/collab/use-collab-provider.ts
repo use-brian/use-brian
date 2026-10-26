@@ -19,12 +19,14 @@ import { useEffect, useState } from "react";
 import * as Y from "yjs";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import type { IndexeddbPersistence } from "y-indexeddb";
-import { getValidAccessToken } from "@/lib/auth-fetch";
+import { subscribeUserInfo } from "@/lib/user";
 import { hasLoadedState } from "@/lib/collab/doc-empty";
 import { DRAWING_PROTOCOL } from '@use-brian/doc-model';
 
 import { resolveSyncUrl } from "@/lib/offline/sync-local-page";
 import { evictCachedPage, LOCAL_PAGES_CHANGED, readLocalPage } from "@/lib/offline/offline-pages";
+import { currentOfflineWriteAuthority, sameOfflineWriteAuthority, pinOfflineWriteSession,
+  offlinePageDocumentKey, offlineWriteUnavailable, type OfflineWriteAuthority } from "@/lib/offline/application-write-authority";
 
 export type CollabStatus = "connecting" | "connected" | "disconnected";
 
@@ -47,7 +49,12 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
     doc: Y.Doc;
     provider: HocuspocusProvider;
     discardLocalChanges: () => Promise<void>;
+    authority: OfflineWriteAuthority;
   } | null>(null);
+  const [, identityChanged] = useState(0);
+  useEffect(() => subscribeUserInfo(() => identityChanged(value => value + 1)), []);
+  const activeAuthority = currentOfflineWriteAuthority();
+  const authorityKey = activeAuthority ? JSON.stringify(activeAuthority) : null;
   const [status, setStatus] = useState<CollabStatus>("connecting");
   const [synced, setSynced] = useState(false);
   const [writeDenied, setWriteDenied] = useState(false);
@@ -61,7 +68,8 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
     // between a page switch and its metadata resolving): hold no socket.
     // Lets the shell call this hook unconditionally (Rules of Hooks) while
     // still tearing the previous page's connection down.
-    if (!pageId) {
+    const authority = currentOfflineWriteAuthority();
+    if (!pageId || !authority || JSON.stringify(authority) !== authorityKey) {
       setBundle(null);
       setStatus("connecting");
       setSynced(false);
@@ -69,12 +77,14 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
     }
     const doc = new Y.Doc();
     const officeDocument = pageId.startsWith("office:");
+    const documentKey = officeDocument ? null : offlinePageDocumentKey(pageId, authority);
     const socket = new HocuspocusProviderWebsocket({ url: resolveSyncUrl(), autoConnect: false });
     let persistence: IndexeddbPersistence | null = null;
     let cancelled = false;
+    let disposed = false;
     let provider: HocuspocusProvider;
     const purgeDeniedPage = async () => {
-      if (officeDocument || cancelled) return;
+      if (cancelled) return;
       cancelled = true;
       setWriteDenied(true);
       setAccessDenied(true);
@@ -83,13 +93,15 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
       provider.destroy();
       socket.destroy();
       await persistence?.destroy();
-      const { clearDocument } = await import("y-indexeddb");
-      await Promise.all([
-        clearDocument(`doc-page-${pageId}`),
-        evictCachedPage(pageId),
-      ]);
+      if (!officeDocument) {
+        const { clearDocument } = await import("y-indexeddb");
+        await Promise.all([
+          ...(documentKey ? [clearDocument(documentKey)] : []),
+          evictCachedPage(pageId, authority),
+        ]);
+      }
       if (!doc.isDestroyed) doc.destroy();
-      setBundle(null);
+      if (!disposed) setBundle(null);
     };
     provider = new HocuspocusProvider({
       websocketProvider: socket,
@@ -99,7 +111,12 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
       // refreshes on 401), the socket has no retry path, so we refresh here
       // when the 1h access token is missing/expired — otherwise an expired
       // token loops "Reconnecting…" forever.
-      token: async () => (officeDocument ? "" : DRAWING_PROTOCOL) + ((await getValidAccessToken()) ?? ""),
+      token: async () => {
+        if (cancelled) throw offlineWriteUnavailable();
+        const session = await pinOfflineWriteSession(authority);
+        if (cancelled) throw offlineWriteUnavailable();
+        return (officeDocument ? "" : DRAWING_PROTOCOL) + session.bearer();
+      },
       onStatus: ({ status: s }) => {
         const v = String(s);
         setStatus(
@@ -124,19 +141,19 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
         if (payload === 'page-access-denied') void purgeDeniedPage();
         if (payload === 'office-write-denied') setWriteDenied(true);
         if (payload === 'office-write-allowed') setWriteDenied(false);
-        if (payload === 'office-access-denied') { setWriteDenied(true); setAccessDenied(true); }
+        if (payload === 'office-access-denied') void purgeDeniedPage();
       },
     });
     // An externally owned socket does not auto-attach its document provider.
     provider.attach();
-    setBundle({ doc, provider, discardLocalChanges: async () => {
+    setBundle({ doc, provider, authority, discardLocalChanges: async () => {
       // Only exposed behind the page's explicit local-reset confirmation.
       if (doc.isDestroyed) return;
       cancelled = true;
       provider.destroy(); socket.destroy();
       await persistence?.destroy();
       const { clearDocument } = await import('y-indexeddb');
-      await clearDocument(`doc-page-${pageId}`);
+      if (documentKey) await clearDocument(documentKey);
       window.location.reload();
     } });
 
@@ -151,8 +168,8 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
     let started = false;
     const connectRegisteredPage = async () => {
       const local = officeDocument ? null : await readLocalPage(pageId);
-      if (cancelled) return;
-      if (local && !local.registered) {
+      if (cancelled || !sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority())) return;
+      if (local) {
         setStatus("disconnected");
         return;
       }
@@ -163,10 +180,18 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
     };
     window.addEventListener(LOCAL_PAGES_CHANGED, connectRegisteredPage);
     void connectRegisteredPage();
-    if (!officeDocument) void import("y-indexeddb")
+    const unsubscribe = subscribeUserInfo(() => {
+      if (sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority())) return;
+      cancelled = true;
+      provider.destroy(); socket.destroy();
+      void persistence?.destroy();
+      if (!doc.isDestroyed) doc.destroy();
+      setBundle(null); setSynced(false); setStatus("disconnected");
+    });
+    if (documentKey) void import("y-indexeddb")
       .then(({ IndexeddbPersistence: Idb }) => {
-        if (cancelled) return; // effect torn down before the import resolved
-        persistence = new Idb(`doc-page-${pageId}`, doc);
+        if (cancelled || !sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority())) return;
+        persistence = new Idb(documentKey, doc);
         // Offline-usable: once local state loads, treat the editor as ready
         // even if the socket never connects — but ONLY when the store actually
         // held state (the page has been opened on this device before). A page
@@ -177,7 +202,7 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
         void persistence.whenSynced
           .then(async () => {
             const local = await readLocalPage(pageId);
-            if (cancelled) return;
+            if (cancelled || !sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority())) return;
             if (local) Y.applyUpdate(doc, local.seed);
             if (hasLoadedState(doc)) setSynced(true);
           })
@@ -191,6 +216,8 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
 
     return () => {
       cancelled = true;
+      disposed = true;
+      unsubscribe();
       void persistence?.destroy();
       window.removeEventListener(LOCAL_PAGES_CHANGED, connectRegisteredPage);
       provider.destroy();
@@ -205,18 +232,20 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
       setRecoveryRequired(false);
       setAccessDenied(false);
     };
-  }, [pageId]);
+  }, [pageId, authorityKey]);
+
+  const admittedBundle = bundle && sameOfflineWriteAuthority(bundle.authority, activeAuthority) ? bundle : null;
 
   return {
-    doc: bundle?.doc ?? null,
-    provider: bundle?.provider ?? null,
+    doc: admittedBundle?.doc ?? null,
+    provider: admittedBundle?.provider ?? null,
     status,
-    synced,
+    synced: !!admittedBundle && synced,
     writeDenied: writeDenied || reloadRequired || recoveryRequired,
     reloadRequired,
     briefProtected,
     recoveryRequired,
     accessDenied,
-    discardLocalChanges: bundle?.discardLocalChanges,
+    discardLocalChanges: admittedBundle?.discardLocalChanges,
   };
 }

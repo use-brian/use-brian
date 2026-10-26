@@ -34,12 +34,17 @@ describe('[COMP:api/channel-live-authority] exact destination authority wiring',
   it('keeps hidden session state outside an isolated public audience', () => {
     const source = readFileSync(new URL('../channel-pipeline.ts', import.meta.url), 'utf8')
     expect(source).toContain('if (sessionStateStore && !isolatedAudience)')
-    expect(source).toContain('if (sessionStateStore && isIdentified && !isolatedAudience)')
+    const adapterSink = source.match(/sink: \{ kind: 'adapter',([\s\S]*?)afterLoop: async \(\) => \{([\s\S]*?)const result = await runTurnSessionStateDiff\(/)
+    expect(adapterSink?.[1]).toContain('...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}),')
+    const postLoop = adapterSink?.[2] ?? ''
+    expect(postLoop).toMatch(/await flushBufferedTurns\([^\n]+\)\s+if \(!sessionStateStore \|\| !isIdentified \|\| isolatedAudience\) return\s+try \{/)
+    expect(source.match(/runTurnSessionStateDiff\(/g)).toHaveLength(1)
     expect(source).toContain('maximumAccessCurrent: currentAudienceMaximum')
-    expect(source).toContain('persistSessionSummary: !isolatedAudience')
+    expect(source).toContain('persistSessionSummary: !room && !isolatedAudience')
+    expect(source).toContain('persistLongTermContext: !room && !isolatedAudience && roomShape.memoryWrites')
     expect(source).toContain('getClaimsForLatestAssistantMessage(session.id, true)')
     const pendingRecordingBlock = source.match(
-      /Pre-flight-confirm reply correlation[\s\S]*?Processing start/,
+      /Pre-flight-confirm reply correlation[\s\S]*?Pre-generation audience recheck/,
     )?.[0] ?? ''
     expect(pendingRecordingBlock).toContain('if (!isolatedAudience) {')
   })

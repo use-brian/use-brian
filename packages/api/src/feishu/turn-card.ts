@@ -84,5 +84,8 @@ function reportCardFailure(operation: string, error: unknown): void {
   // No raw SDK errors, request content, credentials, or model text in logs.
   const code = error && typeof error === 'object' && 'providerCode' in error
     ? String(error.providerCode).slice(0, 40) : 'unavailable'
-  console.warn(`[feishu] streaming card ${operation} failed (code=${code})`)
+  const recovery = code === '99991672'
+    ? '; required_scope=cardkit:card:write; approve and publish the app permission'
+    : ''
+  console.warn(`[feishu] streaming card ${operation} failed (code=${code}${recovery})`)
 }

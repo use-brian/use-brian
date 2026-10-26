@@ -24,7 +24,7 @@ import {
 } from '../route-helpers.js'
 import { query } from '../../db/client.js'
 import { injectMcpTools } from '../../mcp/inject.js'
-import { CONNECTOR_SCOPE_RESTRICTION } from '../../mcp/discovery-diagnostics.js'
+import { CONNECTOR_SCOPE_RESTRICTION, CONNECTOR_SOURCE_RESTRICTION } from '../../mcp/discovery-diagnostics.js'
 
 const mockQuery = vi.mocked(query)
 
@@ -80,6 +80,14 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
     // No search surface: `injectMcpTools` skips the mcp_search pair when no
     // source exists, and these three pin the original strict behaviour.
     const noSearch = new Map()
+    it.each([false,true])('keeps protected-source recovery truthful and bounded (search=%s)', searchable => {
+      const result = buildUnavailableCapabilitiesPrompt([CONNECTOR_SOURCE_RESTRICTION], new Map(searchable ? [['mcp_search',{}]] : []), [])
+      expect(result).toContain('current source account mapping/permissions')
+      expect(result).toContain('Do not suggest owner credentials')
+      expect(result).toContain('Unavailable source data is not an empty result')
+      expect(result).toContain('check its status first')
+      expect(result).not.toContain('say Use Brian has no integration')
+    })
 
     it('returns empty string for empty array', () => {
       expect(buildUnavailableCapabilitiesPrompt([], noSearch, [])).toBe('')

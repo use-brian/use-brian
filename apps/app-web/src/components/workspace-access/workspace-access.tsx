@@ -1,6 +1,7 @@
 "use client";
 
 /** Explicit permissions, separate from the organization directory. [COMP:app-web/workspace-access] */
+import { ApplicationManagement } from '@/components/applications/application-admin';
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import type { DepartmentAccessCommand, DepartmentAccessTeam, WorkspaceAccessOverview, WorkspaceAccessHistory, DepartmentReadGrant } from '@use-brian/shared';
 import { useProtectedProjection } from '@/lib/use-protected-projection';
@@ -86,6 +87,7 @@ function WorkspaceAccessPanel({selection,embedded,hideIdentity}:{selection?:Acce
     {notReady?<p role="status" style={toneFill('orange')} className="flex items-start gap-2 rounded-lg px-3 py-2 text-[13px] leading-relaxed"><ShieldAlert aria-hidden className="mt-0.5 size-4 shrink-0"/>{personDetail?t.personAccessLimited:t.notReady}</p>:null}
     {!personDetail ? <HowItWorks summary={t.notesSummary}><p>{t.boundaryHint}{data.canAdminister?` ${t.adminHint}`:''}</p>{peopleVisible&&!selection?<p>{t.peopleHint}</p>:null}</HowItWorks> : null}
     {historyVisible&&data.canAdminister?<MigrationProgressPanel/>:null}
+    {data.canAdminister&&!personDetail?<ApplicationManagement surface="access"/>:null}
     {historyVisible?<OrganizationTopbarActions>
       {data.canAdminister?<button type="button" aria-label={t.reviewData} title={t.reviewData} onClick={()=>setReviewOpen(true)} className={organizationTopbarActionCls}><ScanSearch aria-hidden className="size-3.5 shrink-0"/><span className="max-lg:hidden">{t.reviewData}</span></button>:null}
       <button type="button" aria-label={t.accessAudit} title={t.accessAudit} aria-pressed={inspection==='events'} onClick={()=>setInspection('events')} className={organizationTopbarActionCls}><History aria-hidden className="size-3.5 shrink-0"/><span className="max-lg:hidden">{t.accessAudit}</span></button>

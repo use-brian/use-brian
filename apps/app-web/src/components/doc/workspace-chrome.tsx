@@ -32,6 +32,11 @@
 
 import { WorkspaceSearchProvider, WorkspaceSearchFallback } from "@/components/workspace-search/workspace-search-provider";
 import { DesktopBrowserCoordinator } from "@/components/computer/desktop-browser-coordinator";
+import { WorkspaceTopbarProvider, WorkspaceTopbarHost } from "@/components/chrome/workspace-topbar";
+import { useWorkspaceSidebarResize, WorkspaceSidebarResizeHandle } from "./workspace-sidebar-resize";
+import { WorkspaceThemePicker } from "./workspace-theme-picker";
+import { Tooltip } from "@/components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { DesktopUpdateChip } from "@/components/chrome/desktop-update-chip";
 import {
   createContext,
@@ -60,16 +65,11 @@ import {
 import {
   DEFAULT_OPERATOR_APP,
   homeAppFromPathname,
-  homeAppBasePath,
-  homeAppPath,
-  isHomeAppPath,
   readOperatorApp,
   writeHomeAppLocation,
   writeOperatorApp,
   type HomeAppEntry,
 } from "@/lib/operator-apps";
-import { pendingApprovalTotal } from "@/lib/api/home-dock";
-import { homeLandingPath } from "@/lib/suggested-landing";
 import { useDocChatOthersRun } from "@/lib/doc-chat-relay";
 import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { useWorkspaceEvents } from "@/lib/workspace-events";
@@ -150,6 +150,7 @@ export function WorkspaceChrome({
   children: React.ReactNode;
 }) {
   const t = useT().docPage;
+  const sidebarResize = useWorkspaceSidebarResize();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -252,13 +253,13 @@ export function WorkspaceChrome({
     inboxOpen,
     setInboxOpen,
     sidebarCollapsed,
+    setSidebarCollapsed,
     sidebarOpen,
     setSidebarOpen,
     studioSetupIncomplete,
     homeApps,
     customApps,
     dock,
-    dockLoading,
     reloadSidebar,
     handleNewDraft,
     handleAddChild,
@@ -494,26 +495,17 @@ export function WorkspaceChrome({
   }, [workspaceId]);
   const studioNudge = studioSetupIncomplete === true && !nudgeDismissed;
 
-  // ── Operator app-bar + sticky Home resolution (operator-apps.ts) ───────
-  // WHICH apps show is workspace config (`workspaces.home_apps`, migration
-  // 385), carried by the sidebar-data provider and repaired live off the
-  // `workspace_config` signal — this component never unmounts during SPA
-  // navigation, so it cannot fetch config on mount and stay correct. The old
-  // `feedEnabled = true` hardcode is subsumed: Feed is on the strip when the
-  // workspace put it there.
-  //
-  // The active surface's operator app (or the open custom app), or null on
-  // Brain / Studio / Workflow. Visiting an app persists it per workspace, and
-  // the top-row Home icon + ⌘/Ctrl+1 resolve to the persisted app — Home
-  // resumes your last app, never a hard-coded `/p`.
+  // ── Active mini-app identity and per-app resume (operator-apps.ts) ─────
+  // The shared provider keeps catalogue configuration and custom grants live.
+  // Existing per-app resume and legacy Suggested identity remain separate
+  // from the fixed Chat destination owned by Home.
   const suggestedOpen =
     activeSurface === "p" && searchParams?.get("suggested") === "1";
   const routedOperatorApp = homeAppFromPathname(activeSurface, pathname);
   useEffect(() => {
     if (suggestedOpen) return;
-    // Only remember an app the workspace actually shows. Persisting a disabled
-    // one would make Home resolve to a surface that is not on the strip.
-    if (routedOperatorApp && (homeApps as string[]).includes(routedOperatorApp)) {
+    // Each mini-app keeps its own validated last pathname; Home remains Chat.
+    if (routedOperatorApp) {
       writeOperatorApp(workspaceId, routedOperatorApp);
       if (pathname) {
         writeHomeAppLocation(workspaceId, routedOperatorApp, pathname);
@@ -523,8 +515,6 @@ export function WorkspaceChrome({
   // localStorage is client-only; render the SSR-safe default first and
   // resolve after mount (and whenever a visit updates the cache).
   const [homeApp, setHomeApp] = useState<HomeAppEntry>(DEFAULT_OPERATOR_APP);
-  const [navigationCacheReady, setNavigationCacheReady] = useState(false);
-  useEffect(() => setNavigationCacheReady(true), []);
   useEffect(() => {
     if (
       !suggestedOpen &&
@@ -537,29 +527,8 @@ export function WorkspaceChrome({
     }
   }, [homeApps, routedOperatorApp, suggestedOpen, workspaceId]);
   const activeOperatorApp = suggestedOpen ? homeApp : routedOperatorApp;
-  // While the selected app is open, its live pathname is newer than the
-  // effect-written cache by one render. Use it immediately so a Home click
-  // after an in-app navigation cannot jump back to the previous object.
-  const currentAppPath =
-    !suggestedOpen &&
-    routedOperatorApp === homeApp &&
-    pathname &&
-    isHomeAppPath(workspaceId, homeApp, pathname)
-      ? pathname
-      : null;
-  const resumeHomeHref = currentAppPath
-    ? currentAppPath
-    : navigationCacheReady
-      ? homeAppPath(workspaceId, homeApp)
-      : homeAppBasePath(workspaceId, homeApp);
-  const homeHref =
-    suggestedOpen || dockLoading || !navigationCacheReady
-      ? resumeHomeHref
-      : homeLandingPath(
-          workspaceId,
-          resumeHomeHref,
-          pendingApprovalTotal(dock),
-        );
+  // Home is the Chat mini-app, independent of workspace curation or the last app.
+  const homeHref = `/w/${workspaceId}/chat`;
   const onDismissStudioNudge = useCallback(() => {
     setNudgeDismissed(true);
     try {
@@ -569,18 +538,8 @@ export function WorkspaceChrome({
     }
   }, [workspaceId]);
 
-  // ⌘/Ctrl+1/2/3/4 jump to Home / Brain / Studio / Workflow — preserving the web
-  // PageToggle's shortcuts now that the toggle is dropped (§4). Numbered left to
-  // right in toolbar order: ⌘1 is Home — which resolves to the workspace's
-  // persisted operator app (Page by default; see `operator-apps.ts`) — then
-  // Brain / Studio / Workflow on 2 / 3 / 4. Feed's old ⌘5 died with its
-  // top-row icon: it lives in the Home app-bar now. Ignored while typing in an
-  // input/textarea/contenteditable so it never hijacks editor or form keystrokes;
-  // Shift/Alt-modified combos are left alone too. The modifier is
-  // browser-dependent (`surfaceShortcutModifierPressed`): Firefox reserves
-  // Accel+digit for tab switching and ignores preventDefault on it, so there
-  // the binding is plain Ctrl+digit and ⌘+digit is left to the browser's tab
-  // switch (never both at once).
+  // Preserve established Home / Brain / Studio / Workflow shortcuts.
+  // Home is always Chat. Typing and browser-specific modifier rules remain.
   useEffect(() => {
     if (typeof window === "undefined") return;
     // Final routes (N6): `/studio` is a redirect to its first section.
@@ -625,14 +584,17 @@ export function WorkspaceChrome({
     : offlineState.offline ? t.offlineBannerBody : "";
 
   return (
+    <div ref={sidebarResize.containerRef} style={sidebarResize.style} data-workspace-layout data-workspace-sidebar-resizing={sidebarResize.resizing || undefined} className="h-full min-h-0 w-full">
     <WorkspaceSearchProvider workspaceId={workspaceId}>
+    <WorkspaceTopbarProvider onToggleSidebar={() => setSidebarCollapsed(value => !value)}>
     <WorkspaceFileDropBoundary
       workspaceId={workspaceId}
       assistantId={chatAssistantId}
       offline={offlineState.offline}
-      className="relative flex h-full w-full flex-col overflow-hidden"
+      className="workspace-window-shell relative flex h-full w-full flex-col overflow-hidden bg-sidebar-accent/40"
     >
       <DesktopBrowserCoordinator workspaceId={workspaceId} />
+      <WorkspaceTopbarHost><WorkspaceSearchFallback /></WorkspaceTopbarHost>
       <div data-workspace-surfaces className="relative flex min-h-0 w-full flex-1 overflow-hidden">
         {/* Backdrop — mobile only, dismisses the drawer on tap. */}
         {sidebarOpen && (
@@ -656,9 +618,10 @@ export function WorkspaceChrome({
             // window-drag — the other half of the `md:translate-none` fix below.
             // On desktop only `width` animates (the collapse); the drawer slide is
             // mobile-only, so nothing translate-related touches the drag ancestor there.
-            "transition-[translate,width] duration-200 md:transition-[width]",
+            sidebarResize.resizing ? "transition-none" : "transition-[translate,width] duration-200 md:transition-[width]",
             "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:w-[80vw] max-md:max-w-[280px] max-md:shadow-xl",
-            sidebarOpen ? "max-md:translate-x-0" : "max-md:-translate-x-full",
+            // A closed phone drawer must also leave the keyboard/a11y tree.
+            sidebarOpen ? "max-md:visible max-md:translate-x-0" : "max-md:invisible max-md:-translate-x-full",
             // Desktop: clip the fixed-width inner aside to 0 when collapsed
             // (overflow-hidden keeps its content from reflowing mid-animation).
             // `md:translate-none`, NOT `md:translate-x-0`: in the Electron desktop
@@ -670,11 +633,13 @@ export function WorkspaceChrome({
             // the window by that whitespace. `translate-none` clears it. No ancestor of
             // a `[data-doc-chrome]` drag region may set transform/translate/scale/rotate.
             "md:translate-none md:static md:overflow-hidden",
-            sidebarCollapsed ? "md:w-0" : "md:w-64",
+            sidebarCollapsed ? "md:w-14" : "md:w-[calc(3.5rem+var(--workspace-sidebar-width,14rem))]",
           ].join(" ")}
         >
           <DocSidebar
             workspaceId={workspaceId}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
             saved={saved}
             drafts={drafts}
             teamspaces={teamspaces}
@@ -718,7 +683,6 @@ export function WorkspaceChrome({
             suggestedOpen={suggestedOpen}
             studioNudge={studioNudge}
             onDismissStudioNudge={onDismissStudioNudge}
-            homeHref={homeHref}
             homeApps={homeApps}
             customApps={customApps}
           />
@@ -729,6 +693,7 @@ export function WorkspaceChrome({
             doc page surface (page mention) or the Chat surface (room mention,
             T-H7 — positioned at latest; scroll-to-message is deferred) and
             closes the panel. */}
+        {!sidebarCollapsed && <WorkspaceSidebarResizeHandle {...sidebarResize.handleProps} />}
         <InboxPanel
           open={inboxOpen}
           workspaceId={workspaceId}
@@ -788,10 +753,16 @@ export function WorkspaceChrome({
             the shell handles in place). It never keys/remounts `children`, so the
             doc shell and its Yjs socket survive every switch. */}
         <ActiveOperatorAppContext.Provider value={activeOperatorApp}>
-          <SurfaceTransition className="relative flex h-full min-w-0 flex-1 flex-col">
-            <WorkspaceSearchFallback />
-            {children}
-          </SurfaceTransition>
+          <div data-workspace-app-frame className={cn(
+            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background md:mb-2 md:mt-3 md:mr-2 md:rounded-r-2xl md:border-y md:border-r md:border-border",
+            sidebarCollapsed && "md:rounded-l-2xl md:border-l",
+          )}>
+            <div data-workspace-app-body className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden md:pt-2 [&_[data-surface-chrome-skeleton]]:hidden">
+              <SurfaceTransition className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col">
+                {children}
+              </SurfaceTransition>
+            </div>
+          </div>
         </ActiveOperatorAppContext.Provider>
 
         {/* The ONE assistant chat dock — mounted once for EVERY surface so a
@@ -855,57 +826,58 @@ export function WorkspaceChrome({
             button bottom-right. Brian Nearby owns capture in its own window. */}
         {dockSuppressed && !brianNearby ? <FloatingRecorderHost /> : null}
       </div>
-      {/* Workspace status row. Contained in the LEFT SIDEBAR, not a full-width
-          bar: this overlay is pinned to the bottom-left corner at the sidebar's
-          width and paints nothing of its own, so over the slot the sidebar
-          reserves (`data-doc-sidebar-status-slot`) it reads as the sidebar's
-          last row, and once the sidebar collapses (or the phone drawer closes)
-          the label floats over the surface with no background. On phones the
-          healthy label is hidden while the drawer is closed; notices and the
-          independent intake/update chips stay available. One node
-          for every sidebar state: it never moves or remounts, so the intake
-          tray keeps its state and the live region is not re-announced. Only
-          its children take pointer events. The brain-intake chip + tray share
-          the row but sit OUTSIDE the sync live region, so an upload tick never
-          re-announces the sync sentence. */}
+      {/* One persistent footer: theme and sync stay over the app rail even
+          when the contextual panel collapses. Auxiliary activity chips extend
+          beside it, outside the live region, without remounting their tray. */}
       <div
         data-workspace-footer
         className={cn(
-          "pointer-events-none absolute bottom-0 left-0 flex w-64 max-w-full items-center gap-2 py-0 pl-3 pr-2 pb-[env(safe-area-inset-bottom)] text-[11px] [&>*]:pointer-events-auto",
-          WORKSPACE_STATUS_ROW_HEIGHT_CLASS,
-          // The sidebar wrapper is a `z-40` layer in BOTH layouts: a fixed drawer
-          // on a phone, and a flex item on desktop (flex items honor z-index
-          // even when `static`). Rise above it whenever the sidebar is showing,
-          // or its surface paints over the label. While the label floats, stay
-          // unlayered, below the fixed phone toolbars and the chat button.
+          "pointer-events-none absolute bottom-0 left-0 flex w-64 max-w-full flex-col items-center text-[11px] md:z-40 md:w-14",
           sidebarOpen && "z-40",
-          !sidebarCollapsed && "md:z-40",
         )}
       >
-        <div
-          data-workspace-sync-status
-          role="status"
-          aria-live="polite"
-          aria-atomic="true"
-          title={syncDescription || syncTitle}
-          className={cn(
-            "relative z-10 flex min-w-0 shrink items-center gap-2",
-            !sidebarOpen && !hasSyncNotice && "max-md:hidden",
-            hasSyncNotice ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
-          )}
-        >
-          {offlineState.reconnecting && !offlineState.offline && offlineState.paused === 0 ? (
-            <RefreshCw aria-hidden className="size-3 shrink-0 animate-spin" />
-          ) : (
-            <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", hasSyncNotice ? "bg-amber-500" : "bg-emerald-500")} />
-          )}
-          <span className="min-w-0 truncate font-medium">{syncTitle}</span>
-          {syncDescription ? <span className="sr-only">{syncDescription}</span> : null}
+        <div className={cn("pointer-events-auto flex w-full justify-center px-2", !sidebarOpen && "max-md:hidden")}>
+          <WorkspaceThemePicker />
         </div>
-        <DesktopUpdateChip />
-        <BrainIntakeTray workspaceId={workspaceId} />
+        <div className={cn("flex w-64 max-w-[100vw] self-start items-center pb-[env(safe-area-inset-bottom)] md:w-[calc(3.5rem+var(--workspace-sidebar-width,14rem))]", WORKSPACE_STATUS_ROW_HEIGHT_CLASS)}>
+          <div
+            data-workspace-sync-status
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            className={cn(
+              "pointer-events-auto relative z-10 min-w-0 shrink md:flex md:w-14 md:shrink-0 md:justify-center",
+              !sidebarOpen && !hasSyncNotice && "max-md:hidden",
+              hasSyncNotice ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
+            )}
+          >
+            <Popover>
+              <Tooltip side="right" label={<span className="block max-w-64 whitespace-normal">{syncTitle}{syncDescription ? <span className="mt-1 block">{syncDescription}</span> : null}</span>}>
+                <PopoverTrigger aria-label={syncTitle} className="flex h-11 max-w-full items-center gap-2 rounded-lg px-3 hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 md:h-7 md:w-11 md:justify-center md:px-0">
+                  {offlineState.reconnecting && !offlineState.offline && offlineState.paused === 0 ? (
+                    <RefreshCw aria-hidden className="size-3 shrink-0 animate-spin" />
+                  ) : (
+                    <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", hasSyncNotice ? "bg-amber-500" : "bg-emerald-500")} />
+                  )}
+                  <span className="min-w-0 truncate font-medium md:sr-only">{syncTitle}</span>
+                  {syncDescription ? <span className="sr-only">{syncDescription}</span> : null}
+                </PopoverTrigger>
+              </Tooltip>
+              <PopoverContent side="top" align="start" sideOffset={8} aria-label={syncTitle} className="w-[min(18rem,calc(100vw-1rem))] gap-1.5 text-sm">
+                <p className="font-medium">{syncTitle}</p>
+                {syncDescription ? <p className="text-muted-foreground">{syncDescription}</p> : null}
+              </PopoverContent>
+            </Popover>
+          </div>
+          <div data-workspace-activity-footer className="pointer-events-none flex min-w-0 items-center gap-2 px-2 [&>*]:pointer-events-auto">
+            <DesktopUpdateChip />
+            <BrainIntakeTray workspaceId={workspaceId} />
+          </div>
+        </div>
       </div>
     </WorkspaceFileDropBoundary>
+    </WorkspaceTopbarProvider>
     </WorkspaceSearchProvider>
+    </div>
   );
 }

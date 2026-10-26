@@ -81,6 +81,15 @@ describe('[COMP:api/turn-kernel] runAssistantTurn', () => {
     expect(leaseCalls.at(-1)).toBe('release')
   })
 
+  it('refuses a route output hook that replaces the invocation before final sink handling',async () => {
+    const afterLoop = vi.fn(),context = { scopeAccumulator: undefined,
+      assertModelOutputAuthority: async (current: { scopeAccumulator?: unknown }) => { current.scopeAccumulator = {} } }
+    await expect(runAssistantTurn(params('return',{ loop: { ...params('return').loop,context: context as never },
+      sink: { kind: 'return',afterLoop } }))).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+    expect(afterLoop).not.toHaveBeenCalled()
+    expect(leaseCalls.at(-1)).toBe('release')
+  })
+
   it('releases the lease on an aborted turn', async () => {
     const abortController = new AbortController()
     abortController.abort()
@@ -116,6 +125,21 @@ describe('[COMP:api/turn-kernel] runAssistantTurn', () => {
     }))
     expect(leaseCalls).toContain('touch')
     expect(leaseCalls).not.toContain('release')
+  })
+
+  it('keeps heartbeating through awaited post-turn persistence and propagates its refusal', async () => {
+    loopEvents = [textTurn('Fictional final response')]
+    const refused = Object.assign(new Error('Current context unavailable'), { reason: 'authority_changed' })
+    await expect(runAssistantTurn(params('adapter', {
+      sink: { kind: 'adapter', afterLoop: async () => {
+        const touched = leaseCalls.filter(call => call === 'touch').length
+        await new Promise(resolve => setTimeout(resolve, 30))
+        expect(leaseCalls.filter(call => call === 'touch').length).toBeGreaterThan(touched)
+        expect(leaseCalls).not.toContain('release')
+        throw refused
+      } },
+    }))).rejects.toBe(refused)
+    expect(leaseCalls.at(-1)).toBe('release')
   })
 
   it('stops delivering events once the turn is aborted', async () => {

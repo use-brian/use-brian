@@ -1,11 +1,10 @@
 /**
  * Pure policy for Electron's microphone and display-media handlers.
  *
- * The display handler grants a primary-display video stream only because
- * Chromium's getDisplayMedia contract requires one; app-web drops that track
- * immediately and keeps the loopback audio. Keeping trust + source selection
- * here makes both capture security boundaries unit-testable without booting
- * Electron.
+ * Audio-only capture uses the trusted app frame as Chromium's required video
+ * source, so system audio does not depend on physical screen capture starting.
+ * Explicit video capture uses the confirmed screen/window. Keeping the intent,
+ * trust and grant policy here makes the boundaries testable without Electron.
  *
  * [COMP:app-desktop/system-audio]
  */
@@ -13,6 +12,83 @@
 export type DisplaySource = {
   display_id: string;
 };
+
+/** Tested compatibility for the affected macOS/Electron screen backend only. */
+export function screenCaptureDisabledFeatures(
+  platform: string, osRelease: string, electronVersion: string,
+): string[] {
+  return platform === "darwin" && osRelease.split(".")[0] === "25" && electronVersion === "43.2.0"
+    ? ["ScreenCaptureKitMacScreen"] : [];
+}
+
+export type DisplayCaptureIntent =
+  | { kind: "audio"; includeSystemAudio: true }
+  | { kind: "screen" | "window"; sourceId: string; includeSystemAudio: boolean };
+
+export function parseDisplayCaptureIntent(value: unknown): DisplayCaptureIntent {
+  if (!value || typeof value !== "object") throw new Error("Invalid capture intent");
+  const input = value as Record<string, unknown>;
+  if (input.kind === "audio" && input.includeSystemAudio === true) {
+    return { kind: "audio", includeSystemAudio: true };
+  }
+  if (
+    (input.kind === "screen" || input.kind === "window") &&
+    typeof input.sourceId === "string" && input.sourceId.length > 0 && input.sourceId.length <= 512 &&
+    input.sourceId.startsWith(`${input.kind}:`) &&
+    typeof input.includeSystemAudio === "boolean"
+  ) {
+    return { kind: input.kind, sourceId: input.sourceId, includeSystemAudio: input.includeSystemAudio };
+  }
+  throw new Error("Invalid capture intent");
+}
+
+/** One grant per preparation, bound to both the app window and its exact frame. */
+export class CapturePreparations<Frame> {
+  private prepared = new Map<number, { frame: Frame; intent: DisplayCaptureIntent }>();
+  private modern = new Set<number>();
+
+  prepare(owner: number, frame: Frame, intent: DisplayCaptureIntent): void {
+    this.modern.add(owner);
+    this.prepared.set(owner, { frame, intent });
+  }
+
+  take(owner: number, frame: Frame):
+    | { kind: "legacy" }
+    | { kind: "denied" }
+    | { kind: "prepared"; intent: DisplayCaptureIntent } {
+    const entry = this.prepared.get(owner);
+    this.prepared.delete(owner);
+    if (entry?.frame === frame) return { kind: "prepared", intent: entry.intent };
+    return { kind: this.modern.has(owner) ? "denied" : "legacy" };
+  }
+
+  clear(): void {
+    this.prepared.clear();
+    this.modern.clear();
+  }
+}
+
+/** Resolve a grant without ever enumerating a physical display for audio only. */
+export async function resolveDisplayCapture<Frame, Source extends DisplaySource & { id: string }>(opts: {
+  intent: DisplayCaptureIntent | { kind: "legacy"; sourceId: string | null };
+  frame: Frame;
+  getSources: (types: Array<"screen" | "window">) => Promise<Source[]>;
+  primaryDisplayId: string | number;
+}): Promise<{ video: Frame | Source; audio?: "loopback" }> {
+  if (opts.intent.kind === "audio") return { video: opts.frame, audio: "loopback" };
+  const intent = opts.intent;
+  const sources = await opts.getSources(intent.kind === "legacy"
+    ? intent.sourceId ? ["screen", "window"] : ["screen"]
+    : [intent.kind]);
+  const source = intent.kind === "legacy"
+    ? sources.find((candidate) => candidate.id === intent.sourceId) ?? selectPrimaryDisplaySource(sources, opts.primaryDisplayId)
+    : sources.find((candidate) => candidate.id === intent.sourceId);
+  if (!source) throw new Error("The selected capture source is unavailable");
+  return {
+    video: source,
+    ...(intent.kind === "legacy" || intent.includeSystemAudio ? { audio: "loopback" as const } : {}),
+  };
+}
 
 export type CaptureSourceWithThumbnail = {
   id: string;

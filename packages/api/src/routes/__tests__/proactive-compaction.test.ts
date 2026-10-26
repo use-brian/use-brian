@@ -210,111 +210,19 @@ function makeMemoryStore(): MemoryStore {
   } as unknown as MemoryStore
 }
 
-describe('[COMP:api/proactive-compaction] houseKeepEpisodic — episodic lifecycle', () => {
-  it('evicts rows with access_count == 0', async () => {
-    const cold = record({ id: 'cold', accessCount: 0, survivalCount: 0 })
-    const store = makeEpisodicStore([cold])
-    const memStore = makeMemoryStore()
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
+describe('[COMP:api/proactive-compaction] episodic housekeeping authority', () => {
+  // Evict/keep/promote, complete derivation, rollback and concurrency positives
+  // now execute against real guarded SQL in attended-consumers integration.
+  it('refuses housekeeping without canonical authority before reading counters or writing', async () => {
+    const store = makeEpisodicStore([record({ id: 'fictional-episode', accessCount: 4, survivalCount: 2 })])
+    const memoryStore = makeMemoryStore()
+    await expect(houseKeepEpisodic({ episodicStore: store, memoryStore,
       sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 0, evicted: 1, kept: 0 })
-    expect(store.deleteById).toHaveBeenCalledWith('cold')
-    expect(memStore.create).not.toHaveBeenCalled()
-    expect(store.incrementSurvivalCount).toHaveBeenCalledWith([])
-  })
-
-  it('promotes rows that reach survival_count + 1 >= threshold (3)', async () => {
-    // survival_count=2 + 1 = 3 → crosses threshold
-    const mature = record({ id: 'mature', topicLabel: 'japan trip', summary: 'User planning 5-day Tokyo trip...', accessCount: 4, survivalCount: 2 })
-    const store = makeEpisodicStore([mature])
-    const memStore = makeMemoryStore()
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
-      sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 1, evicted: 0, kept: 0 })
-    expect(memStore.create).toHaveBeenCalledWith(expect.objectContaining({
-      scope: 'shared',
-      source: 'episodic-graduation',
-      summary: 'Recurring topic: japan trip',
-      detail: 'User planning 5-day Tokyo trip...',
-      tags: ['episodic-graduation', 'japan trip'],
-      assistantId: 'a1',
-      userId: 'u1',
-      sourceSessionId: 's1',
-    }))
-    expect(store.deleteById).toHaveBeenCalledWith('mature')
-  })
-
-  it('bumps survival_count for rows that are accessed but not yet mature', async () => {
-    const young = record({ id: 'young', accessCount: 1, survivalCount: 0 })
-    const store = makeEpisodicStore([young])
-    const memStore = makeMemoryStore()
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
-      sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 0, evicted: 0, kept: 1 })
-    expect(store.incrementSurvivalCount).toHaveBeenCalledWith(['young'])
+    })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(store.listBySession).not.toHaveBeenCalled()
     expect(store.deleteById).not.toHaveBeenCalled()
-    expect(memStore.create).not.toHaveBeenCalled()
-  })
-
-  it('keeps the episodic row when promotion write fails — retried next compaction', async () => {
-    const mature = record({ id: 'mature', accessCount: 3, survivalCount: 5 })
-    const store = makeEpisodicStore([mature])
-    const memStore = makeMemoryStore()
-    ;(memStore.create as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('DB down'))
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
-      sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 0, evicted: 0, kept: 0 })
-    expect(store.deleteById).not.toHaveBeenCalled()   // never deletes if memory write fails
-  })
-
-  it('handles a mixed batch: evict, promote, keep all in one pass', async () => {
-    const rows = [
-      record({ id: 'cold', accessCount: 0, survivalCount: 1 }),
-      record({ id: 'young', accessCount: 2, survivalCount: 0 }),
-      record({ id: 'mature', accessCount: 5, survivalCount: 2 }),
-    ]
-    const store = makeEpisodicStore(rows)
-    const memStore = makeMemoryStore()
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
-      sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 1, evicted: 1, kept: 1 })
-    expect(store.incrementSurvivalCount).toHaveBeenCalledWith(['young'])
-    expect(store.deleteById).toHaveBeenCalledWith('cold')
-    expect(store.deleteById).toHaveBeenCalledWith('mature')
-    expect(memStore.create).toHaveBeenCalledTimes(1)
-  })
-
-  it('returns zero stats on an empty session', async () => {
-    const store = makeEpisodicStore([])
-    const memStore = makeMemoryStore()
-
-    const stats = await houseKeepEpisodic({
-      episodicStore: store, memoryStore: memStore,
-      sessionId: 's1', assistantId: 'a1', userId: 'u1',
-    })
-
-    expect(stats).toEqual({ promoted: 0, evicted: 0, kept: 0 })
-    expect(store.incrementSurvivalCount).toHaveBeenCalledWith([])
+    expect(store.incrementSurvivalCount).not.toHaveBeenCalled()
+    expect(memoryStore.create).not.toHaveBeenCalled()
   })
 })
 
@@ -416,6 +324,7 @@ function baseParams(overrides: Partial<Parameters<typeof runProactiveCompaction>
     analytics: overrides.analytics,
     circuitBreaker: overrides.circuitBreaker,
     authority: overrides.authority,
+    persistSessionSummary: overrides.persistSessionSummary ?? false,
   } as Parameters<typeof runProactiveCompaction>[0]
 }
 
@@ -425,7 +334,7 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     mockFindSessionById.mockReset()
   })
 
-  it('prepends existing session.compactSummary on the no-compaction fast path', async () => {
+  it('withholds an uncertified session scalar on the in-memory fast path', async () => {
     const sessionMessages = [
       makeSessionMessage({ sequenceNum: 10, role: 'user', content: [{ type: 'text', text: 'hi' }] }),
     ]
@@ -436,14 +345,14 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     }))
 
     expect(result.compacted).toBe(false)
-    expect(result.messages.length).toBeGreaterThanOrEqual(2)
-    expect(result.messages[0].role).toBe('system')
-    expect(result.messages[0].content).toBe('previously summarized context')
+    expect(result.messages).toHaveLength(1)
+    expect(result.messages[0].role).toBe('user')
+    expect(JSON.stringify(result.messages)).not.toContain('previously summarized context')
     // DB write must not fire on the fast path.
     expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
   })
 
-  it('returns just the prepended summary when sessionMessages is empty', async () => {
+  it('does not turn a legacy scalar into context when admitted history is empty', async () => {
     const result = await runProactiveCompaction(baseParams({
       sessionMessages: [],
       session: makeSession({ compactSummary: 'old summary', compactBoundarySequence: 5 }),
@@ -451,9 +360,7 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     }))
 
     expect(result.compacted).toBe(false)
-    expect(result.messages).toEqual([
-      { role: 'system', content: 'old summary' },
-    ])
+    expect(result.messages).toEqual([])
     expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
   })
 
@@ -485,7 +392,7 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     expect(sessionStateStore.purgeResolvedOlderThan).not.toHaveBeenCalled()
   })
 
-  it('on unconditional compaction, calls setCompactSummaryAndBoundary with cursor = first recent seq', async () => {
+  it('preserves the current user anchor in ephemeral unconditional compaction', async () => {
     // Build a session where findRecentSplit will anchor the last user msg
     // as recent and everything before it as compactable. Sequence spans
     // 100..105, last user text at 105.
@@ -498,7 +405,6 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
       makeSessionMessage({ sequenceNum: 105, role: 'assistant', content: [{ type: 'text', text: 'another reply' }] }),
       makeSessionMessage({ sequenceNum: 106, role: 'user', content: [{ type: 'text', text: 'current turn' }] }),
     ]
-    mockSetCompactSummaryAndBoundary.mockResolvedValueOnce(true)
 
     const result = await runProactiveCompaction(baseParams({
       sessionMessages,
@@ -507,22 +413,18 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     }))
 
     expect(result.compacted).toBe(true)
-    expect(mockSetCompactSummaryAndBoundary).toHaveBeenCalledOnce()
-    const [sessionId, summary, newCursor, expectedCursor] = mockSetCompactSummaryAndBoundary.mock.calls[0]
-    expect(sessionId).toBe('s1')
-    expect(summary).toContain('compacted summary body')
-    // Cursor must point at the FIRST recent DB row — not a later synthetic
-    // boundary seq. This is the core of the Fix 1a invariant.
-    expect(newCursor).toBeGreaterThanOrEqual(100)
-    expect(newCursor).toBeLessThanOrEqual(106)
-    // And specifically: should be > all compactable seqs and ≤ 106.
-    const lastCompactableSeq = newCursor - 1
-    expect(lastCompactableSeq).toBeGreaterThanOrEqual(100)
-    // Optimistic-concurrency guard passes current cursor (null here).
-    expect(expectedCursor).toBeNull()
+    expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
+    expect(result.messages[0].role).toBe('system')
+    expect(JSON.stringify(result.messages.at(-1))).toContain('current turn')
+    // Actual first-recent cursor publication is asserted through the real
+    // canonical writer, not a mocked rowCount/boolean return.
+
   })
 
-  it('compacts an external guest session without writing long-term context', async () => {
+  it.each(['external guest', 'shared room'])('compacts an %s session without reading personal memory or writing long-term context', async (audience) => {
+    mockSetCompactSummaryAndBoundary.mockImplementation(async (_id, summary, boundarySequence) => ({
+      id: 'fictional-compact-summary', summary, boundarySequence,
+    }))
     const sessionMessages: SessionMessage[] = [
       makeSessionMessage({ sequenceNum: 100, role: 'user', content: [{ type: 'text', text: 'old question' }] }),
       makeSessionMessage({ sequenceNum: 101, role: 'assistant', content: [{ type: 'text', text: 'old answer' }] }),
@@ -534,7 +436,6 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     } as unknown as MemoryStore
     const episodicStore = makeEpisodicStore([])
     const chatEpisodeIngestor = vi.fn(async () => undefined)
-    mockSetCompactSummaryAndBoundary.mockResolvedValueOnce(true)
 
     const result = await runProactiveCompaction({
       ...baseParams({
@@ -547,6 +448,7 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
       workspaceId: 'ws_1',
       chatEpisodeIngestor,
       persistLongTermContext: false,
+      persistSessionSummary: audience !== 'shared room',
     })
 
     expect(result.compacted).toBe(true)
@@ -556,6 +458,7 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     expect(episodicStore.listBySession).not.toHaveBeenCalled()
     expect(episodicStore.create).not.toHaveBeenCalled()
     expect(chatEpisodeIngestor).not.toHaveBeenCalled()
+    expect(mockSetCompactSummaryAndBoundary).toHaveBeenCalledTimes(audience === 'shared room' ? 0 : 1)
   })
 
   it('propagates authority loss instead of trimming or running later derived writes', async () => {
@@ -594,7 +497,7 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     expect(chatEpisodeIngestor).not.toHaveBeenCalled()
   })
 
-  it('falls back to pass-through without persisting episodic rows when the concurrency guard fails', async () => {
+  it('refuses an unadmitted CAS winner instead of adopting its raw scalar', async () => {
     const sessionMessages: SessionMessage[] = [
       makeSessionMessage({ sequenceNum: 200, role: 'user', content: [{ type: 'text', text: 'a' }] }),
       makeSessionMessage({ sequenceNum: 201, role: 'assistant', content: [{ type: 'text', text: 'b' }] }),
@@ -608,30 +511,24 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     }))
     const episodicStore = makeEpisodicStore([])
 
-    const result = await runProactiveCompaction(baseParams({
+    await expect(runProactiveCompaction(baseParams({
       sessionMessages,
       session: makeSession({ compactBoundarySequence: null }),
       unconditional: true,
       episodicStore,
-    }))
-
-    expect(result.compacted).toBe(false)
-    expect(result.messages[0]).toEqual({
-      role: 'system',
-      content: 'winner summary written by the concurrent turn',
-    })
-    // Episodic persistence must NOT fire — the winner already did it.
+      persistSessionSummary: true,
+    }))).rejects.toMatchObject({ reason: 'authority_changed' })
     expect(episodicStore.create).not.toHaveBeenCalled()
-    expect(mockFindSessionById).toHaveBeenCalledWith('s1')
+    expect(mockFindSessionById).not.toHaveBeenCalled()
+
   })
 
-  it('excludes the prepended summary from the LLM input (no summary-of-summary)', async () => {
+  it('does not feed an uncertified DTO summary into an ephemeral model', async () => {
     const sessionMessages: SessionMessage[] = [
       makeSessionMessage({ sequenceNum: 300, role: 'user', content: [{ type: 'text', text: 'distinctive-content-abc' }] }),
       makeSessionMessage({ sequenceNum: 301, role: 'assistant', content: [{ type: 'text', text: 'reply-xyz' }] }),
       makeSessionMessage({ sequenceNum: 302, role: 'user', content: [{ type: 'text', text: 'current' }] }),
     ]
-    mockSetCompactSummaryAndBoundary.mockResolvedValueOnce(true)
     const streamedMessages: Message[][] = []
     const provider: LLMProvider = {
       createSession() { return {} as never },
@@ -653,7 +550,7 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
 
     // At least one stream call happened (extraction + summarization). None
     // of them should have been given the PREVIOUS-SUMMARY-MARKER content —
-    // that's the recursive-summarization trap Fix 1a must avoid.
+    // only the admitted certified summary may contribute to a later round.
     const anyHadPreviousSummary = streamedMessages.some((msgs) =>
       msgs.some((m) =>
         typeof m.content === 'string'
@@ -664,25 +561,26 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence
     expect(anyHadPreviousSummary).toBe(false)
   })
 
-  it('caps the persisted summary at 8000 chars to prevent unbounded growth', async () => {
+  it('caps the in-memory summary including its marker at 8000 chars', async () => {
     const sessionMessages: SessionMessage[] = [
       makeSessionMessage({ sequenceNum: 400, role: 'user', content: [{ type: 'text', text: 'old' }] }),
       makeSessionMessage({ sequenceNum: 401, role: 'assistant', content: [{ type: 'text', text: 'reply' }] }),
       makeSessionMessage({ sequenceNum: 402, role: 'user', content: [{ type: 'text', text: 'current' }] }),
     ]
-    mockSetCompactSummaryAndBoundary.mockResolvedValueOnce(true)
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      await runProactiveCompaction(baseParams({
+      const result = await runProactiveCompaction(baseParams({
         sessionMessages,
         unconditional: true,
         provider: mockProviderWithSummary('x'.repeat(12_000)),
       }))
 
-      const [, summaryPersisted] = mockSetCompactSummaryAndBoundary.mock.calls[0]
-      expect((summaryPersisted as string).length).toBeLessThanOrEqual(8_100) // 8000 + suffix
-      expect(summaryPersisted as string).toMatch(/\[summary truncated at cap\]$/)
+      const summary = result.messages[0].content
+      expect(typeof summary).toBe('string')
+      expect(summary.length).toBeLessThanOrEqual(8_000)
+      expect(summary).toMatch(/\[summary truncated at cap\]$/)
+      expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('summary cap fired'))
     } finally {
       warnSpy.mockRestore()
@@ -822,7 +720,6 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — self-heal r
     clock += 61_000 // past the 60s cooldown → half-open
     expect(breaker.isOpen).toBe(false)
 
-    mockSetCompactSummaryAndBoundary.mockResolvedValueOnce(true)
     const result = await runProactiveCompaction(baseParams({
       sessionMessages: compactableMessages(),
       unconditional: true,
@@ -840,7 +737,6 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — self-heal r
       makeSessionMessage({ sequenceNum: 101, role: 'assistant', content: [{ type: 'text', text: 'ok' }] }),
       makeSessionMessage({ sequenceNum: 102, role: 'user', content: [{ type: 'text', text: 'Done' }] }),
     ]
-    mockSetCompactSummaryAndBoundary.mockResolvedValueOnce(true)
     const { logger, events } = makeAnalytics()
     await runProactiveCompaction(baseParams({
       sessionMessages,
@@ -857,7 +753,6 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — self-heal r
   })
 
   it('does NOT emit session_autohealed for a normal-sized session', async () => {
-    mockSetCompactSummaryAndBoundary.mockResolvedValueOnce(true)
     const { logger, events } = makeAnalytics()
     await runProactiveCompaction(baseParams({
       sessionMessages: compactableMessages(),

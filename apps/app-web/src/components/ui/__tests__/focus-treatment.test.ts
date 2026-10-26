@@ -4,7 +4,8 @@
  * Text-entry fields turn their existing border blue through the app-wide
  * `:focus-visible` override in `app/globals.css`. Composite fields put that
  * border change on their `focus-within` wrapper and suppress every nested
- * focus shadow. Outside halos stay reserved for discrete keyboard controls.
+ * focus shadow. Discrete keyboard controls use one shape-preserving outline;
+ * resize separators use a line rather than a rectangular halo.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -54,6 +55,19 @@ const appSourceFiles = tsxFiles(SOURCE_ROOT).map((file) => ({
 }));
 
 describe("[COMP:app-web/focus-treatment] source contract", () => {
+  it("uses one snug keyboard outline without inheriting the parent shape or stacking halos", () => {
+    expect(GLOBALS_CSS).toMatch(/:not\(\[role="combobox"\]\):focus-visible\s*\{\s*outline: 2px solid var\(--ring\) !important;\s*outline-offset: 0 !important;\s*box-shadow: none !important;/);
+    expect(GLOBALS_CSS).not.toContain("0 0 0 2px var(--background), 0 0 0 4px");
+    expect(GLOBALS_CSS).not.toMatch(/:focus-visible[^{}]*\{[^{}]*border-radius: inherit/);
+  });
+
+  it("uses axis-specific separator lines and retains a system high-contrast focus cue", () => {
+    expect(GLOBALS_CSS).toMatch(/:where\(\[role="separator"\]\[tabindex\]\):focus-visible\s*\{[^}]*outline: none !important;[^}]*background-color: transparent !important;[^}]*box-shadow: inset -2px 0 0 var\(--ring\) !important;/);
+    expect(GLOBALS_CSS).toContain("box-shadow: inset 0 -2px 0 var(--ring) !important;");
+    expect(GLOBALS_CSS).toMatch(/@media \(forced-colors: active\)\s*\{\s*:root :focus-visible\s*\{\s*outline: 2px solid Highlight !important;/);
+    expect(GLOBALS_CSS).toContain("[data-sidebar-resize-track], [data-sidebar-resize-grip]");
+  });
+
   it("turns text-entry borders into the focus frame and suppresses every field halo", () => {
     expect(GLOBALS_CSS).toMatch(
       /:where\([\s\S]*?input\[type="text"\][\s\S]*?textarea[\s\S]*?\):focus-visible\s*\{[\s\S]*?border-color:\s*var\(--ring\)\s*!important;[\s\S]*?box-shadow:\s*none\s*!important;/,

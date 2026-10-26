@@ -26,6 +26,12 @@ describe("[COMP:app-web/connect-browser] Extension pairing bridge", () => {
     expect(send).toHaveBeenCalledWith(ID, { type: "pair", ...CREDS });
   });
 
+  it("marks implicit setup so the extension can refuse replacing a live task", async () => {
+    const send: ExtensionMessenger = vi.fn(async () => ({ ok: true }));
+    expect(await pairViaExtension({ extensionId: ID, ...CREDS, automatic: true, send })).toBe("paired");
+    expect(send).toHaveBeenCalledWith(ID, { type: "pair", ...CREDS, automatic: true });
+  });
+
   it("reports not_installed when nothing answers", async () => {
     // Chrome resolves the callback with undefined (and sets lastError) when no
     // extension owns the id, so absence arrives as a value, not a throw.

@@ -78,9 +78,11 @@ export type CreationContext=ReturnType<typeof useCreationContext>;
 export function ModeAwareCreationContext({disabled=false,context,compact=false}:{disabled?:boolean;context:CreationContext;compact?:boolean}){
  const t=useT().modeContext,a=useT().workspaceAccess;
  if(context.intent==='existing')return <p className="text-sm">{t.existing}</p>;
- if(!context.mode.data||!context.choices)return <div>{context.error?<p role="alert">{t.stale}</p>:<SurfaceSkeletonFor surface="organization" chrome={false}/>}<Button type="button" className="max-sm:min-h-11" onClick={()=>void context.refresh()}>{a.reload}</Button></div>;
- return <section className="space-y-3 text-sm"><p>{context.intent==='private'?t.private:context.mode.readySimple?t.shared:t.destination}</p>
-  <ContextScopePicker teams={context.choices.teams} projects={context.choices.projects} teamId={context.teamId} projectId={context.projectId} onTeamChange={context.selectTeam} onProjectChange={context.selectProject} disabled={disabled} hideTeam={context.intent==='new-shared'&&context.mode.readySimple} showProjectHint={!compact}/>
+ // Creation choices are small controls, not an Organization list. Keep the
+ // composer quiet while authority loads; a retry belongs only to a failure.
+ if(!context.mode.data||!context.choices)return <div aria-busy={!context.error||undefined} className="min-h-8 max-sm:min-h-11 text-sm">{context.error?<><p role="alert">{t.stale}</p><Button type="button" className="max-sm:min-h-11" onClick={()=>void context.refresh()}>{a.reload}</Button></>:null}</div>;
+ return <section className={compact?"space-y-1 text-sm":"space-y-3 text-sm"}>{compact?null:<p>{context.intent==='private'?t.private:context.mode.readySimple?t.shared:t.destination}</p>}
+  <ContextScopePicker teams={context.choices.teams} projects={context.choices.projects} teamId={context.teamId} projectId={context.projectId} onTeamChange={context.selectTeam} onProjectChange={context.selectProject} disabled={disabled} hideTeam={context.intent==='new-shared'&&context.mode.readySimple} showProjectHint={!compact} inline={compact}/>
   {compact?null:<p>{t.boundaries}</p>}{!compact&&!context.mode.readySimple&&!context.legacy&&!context.ready&&!context.reviewNeeded?<p>{t.choose}</p>:null}
   {context.reviewNeeded?<div role="alert"><p>{t.stale}</p><Button type="button" className="max-sm:min-h-11" onClick={context.review}>{t.review}</Button></div>:null}
  </section>;

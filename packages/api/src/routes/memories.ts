@@ -26,8 +26,13 @@ import { getSoulContext } from '../db/scoped-summary-store.js'
  *   DELETE /:memoryId                   — delete a memory
  */
 
-import { Router } from 'express'
-import type { AccessContext } from '@use-brian/core'
+import { Router,type Request,type Response } from 'express'
+import {ApplicationPlatformError} from '@use-brian/shared'
+import {ContextScopeAccumulator,DerivedScopeError,scopeEvidenceFromRows,executionToolContext,type AccessContext,type SessionContextAuthority} from '@use-brian/core'
+import {resolveNativeApplicationModuleExecution} from '../application-platform/native-module-runtime.js'
+import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
+import {SourceProtocolError} from '@use-brian/brian-app/connector'
+import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import {
   listMemories, getMemoryById, updateMemory, deleteMemory,
   searchMemories, getMemoryStats,
@@ -72,6 +77,30 @@ async function resolveViewerCtx(
     session: { contextGroupId: null, contextProjectId: null },
   })
   return scope.access
+}
+
+/** The existing native resolver consumes verified middleware claims and the real selected assistant. */
+async function resolveViewerRead(req:Request,assistantId:string):Promise<SessionContextAuthority|null>{
+ const ctx=req.userId?await resolveViewerCtx(req.userId,assistantId):null
+ if(!ctx)return null
+ const execution=await resolveNativeApplicationModuleExecution(req,ctx.workspaceId,assistantId)
+ return{execution,accumulator:new ContextScopeAccumulator(execution.security.provenance)}
+}
+async function admitViewerRead(authority:SessionContextAuthority,value:object):Promise<void>{
+ authority.accumulator.note(scopeEvidenceFromRows([value]))
+ await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-memory-read'}),scopeAccumulator:authority.accumulator})
+}
+
+/** Keep native credential refusal distinct from unavailable Memory authority. */
+function sendNativeReadRefusal(error:unknown,res:Response):boolean {
+ if(!(error instanceof ApplicationPlatformError))return false
+ if(error.code==='authentication_required'){
+  res.status(401).json({error:'authentication_required'});return true
+ }
+ if(error.code==='access_unavailable'){
+  res.status(404).json({error:'Not found'});return true
+ }
+ return false
 }
 
 export function memoryRoutes(): Router {
@@ -133,6 +162,7 @@ export function memoryRoutes(): Router {
   // ── List memories (paginated, filterable) ──────────────────────
 
   router.get<AssistantParams>('/', async (req, res) => {
+    res.setHeader('Cache-Control','no-store')
     const userId = await verifyMembership(req, res)
     if (!userId) return
     const { assistantId } = req.params
@@ -147,7 +177,8 @@ export function memoryRoutes(): Router {
     const offset = parseInt(req.query.offset as string) || 0
 
     try {
-      const ctx = await resolveViewerCtx(userId, assistantId)
+      const authority=await resolveViewerRead(req,req.params.assistantId)
+      const ctx=authority?.execution.security.access
       if (!ctx) {
         res.status(404).json({ error: 'Assistant not found' })
         return
@@ -187,24 +218,27 @@ export function memoryRoutes(): Router {
         const include = req.query.include as string | undefined
         const wantBadOutcome = include === 'bad_outcome'
 
+        const rows = await listUnverifiedByWorkspace(ctx, limit, cursor,authority!)
+        let scoreEvidence: object = []
         let badOutcomeIds: Set<string> | null = null
         const outcomeScores = new Map<
           string,
           { recallCount: number; negativeCount: number; correctionCount: number }
         >()
         if (wantBadOutcome) {
-          // Compute the bad-outcome set first (small — capped by recall
-          // events in the 30d window), then filter the unverified list
-          // against it. Two queries, but the second drains the
-          // unverified partial-index scan as normal and just discards
-          // misses. Cheaper than a single composite query that always
-          // pays for the JOIN even when the include flag is absent.
+          // The canonical page and original native authority precede all score
+          // predicates. Feedback/session fields and association absence are
+          // independently admitted by the retained outcome domain.
           const scored = await listMemoriesByRecentOutcome({
             workspaceId: ctx.workspaceId,
             windowDays: 30,
             sentimentFilter: 'negative',
             minBadCount: 2,
+            authority: authority!,
+            memoryIds: rows.map(row=>row.id),
+            memorySources: scopeEvidenceFromRows([rows])?.sources??[],
           })
+          scoreEvidence = scored
           badOutcomeIds = new Set(scored.map((s) => s.memoryId))
           for (const s of scored) {
             outcomeScores.set(s.memoryId, {
@@ -213,13 +247,9 @@ export function memoryRoutes(): Router {
               correctionCount: s.correctionCount,
             })
           }
-          if (badOutcomeIds.size === 0) {
-            res.json({ memories: [], cursor: null })
-            return
-          }
+
         }
 
-        const rows = await listUnverifiedByWorkspace(ctx, limit, cursor)
         const filteredRows = badOutcomeIds
           ? rows.filter((r) => badOutcomeIds!.has(r.id)).map((r) => ({
               ...r,
@@ -234,13 +264,23 @@ export function memoryRoutes(): Router {
               }),
             ).toString('base64')
           : null
+        await admitViewerRead(authority!,[rows,scoreEvidence])
         res.json({ memories: filteredRows, cursor: nextCursor })
         return
       }
 
-      const { memories, total } = await listMemories(ctx, { tag, scope, limit, offset })
+      const { memories, total } = await listMemories(ctx, { tag, scope, limit, offset },authority!)
+      await admitViewerRead(authority!,memories)
       res.json({ memories, total, limit, offset })
     } catch (err) {
+      if(sendNativeReadRefusal(err,res))return
+      const sql=err as {code?:string;message?:string}
+      if(sql?.code==='0A000'&&sql.message==='outcome_profile_unavailable'){res.status(503).json({error:'Outcome scoring unavailable for this feedback history'});return}
+      if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'
+        ||sql?.code==='42501'&&['query_domain_unavailable','access_unavailable','scope_evidence_missing','scope_source_changed'].includes(sql.message??'')){
+        res.status(404).json({error:'Not found'});return
+      }
+      if(err instanceof SourceProtocolError){res.status(503).json({error:'Unavailable'});return}
       console.error('[memories] list failed:', err)
       res.status(500).json({ error: 'Failed to list memories' })
     }
@@ -288,6 +328,7 @@ export function memoryRoutes(): Router {
   // ── Search ─────────────────────────────────────────────────────
 
   router.get<AssistantParams>('/search', async (req, res) => {
+    res.setHeader('Cache-Control','no-store')
     const userId = await verifyMembership(req, res)
     if (!userId) return
     const { assistantId } = req.params
@@ -298,14 +339,23 @@ export function memoryRoutes(): Router {
     }
 
     try {
-      const ctx = await resolveViewerCtx(userId, assistantId)
+      const authority=await resolveViewerRead(req,req.params.assistantId)
+      const ctx=authority?.execution.security.access
       if (!ctx) {
         res.status(404).json({ error: 'Assistant not found' })
         return
       }
-      const memories = await searchMemories(ctx, { searchQuery: q.trim(), limit: 20 })
+      const memories = await searchMemories(ctx, { searchQuery: q.trim(), limit: 20 },authority!)
+      await admitViewerRead(authority!,memories)
       res.json({ memories })
     } catch (err) {
+      if(sendNativeReadRefusal(err,res))return
+      const sql=err as {code?:string;message?:string}
+      if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'
+        ||sql?.code==='42501'&&['query_domain_unavailable','access_unavailable','scope_evidence_missing','scope_source_changed'].includes(sql.message??'')){
+        res.status(404).json({error:'Not found'});return
+      }
+      if(err instanceof SourceProtocolError){res.status(503).json({error:'Unavailable'});return}
       console.error('[memories] search failed:', err)
       res.status(500).json({ error: 'Failed to search memories' })
     }
@@ -315,6 +365,7 @@ export function memoryRoutes(): Router {
   // NOTE: Must be before /:memoryId to avoid Express matching "team" as memoryId.
 
   router.get<AssistantParams>('/team', async (req, res) => {
+    res.setHeader('Cache-Control','no-store')
     const access = await verifyTeamAccess(req, res)
     if (!access) return
     const { assistantId } = req.params
@@ -330,14 +381,23 @@ export function memoryRoutes(): Router {
     }
 
     try {
-      const ctx = await resolveViewerCtx(access.userId, assistantId)
+      const authority=await resolveViewerRead(req,req.params.assistantId)
+      const ctx=authority?.execution.security.access
       if (!ctx) {
         res.status(404).json({ error: 'Assistant not found' })
         return
       }
-      const { memories, total } = await listWorkspaceMemories(ctx, { tag, limit, offset })
+      const { memories, total } = await listWorkspaceMemories(ctx, { tag, limit, offset },authority!)
+      await admitViewerRead(authority!,memories)
       res.json({ memories, total, limit, offset })
     } catch (err) {
+      if(sendNativeReadRefusal(err,res))return
+      const sql=err as {code?:string;message?:string}
+      if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'
+        ||sql?.code==='42501'&&['query_domain_unavailable','access_unavailable','scope_evidence_missing','scope_source_changed'].includes(sql.message??'')){
+        res.status(404).json({error:'Not found'});return
+      }
+      if(err instanceof SourceProtocolError){res.status(503).json({error:'Unavailable'});return}
       console.error('[memories] team list failed:', err)
       res.status(500).json({ error: 'Failed to list team memories' })
     }
@@ -428,6 +488,7 @@ export function memoryRoutes(): Router {
   // ── Team memories search ───────────────────────────────────────
 
   router.get<AssistantParams>('/team/search', async (req, res) => {
+    res.setHeader('Cache-Control','no-store')
     const access = await verifyTeamAccess(req, res)
     if (!access) return
     const { assistantId } = req.params
@@ -444,14 +505,23 @@ export function memoryRoutes(): Router {
     }
 
     try {
-      const ctx = await resolveViewerCtx(access.userId, assistantId)
+      const authority=await resolveViewerRead(req,req.params.assistantId)
+      const ctx=authority?.execution.security.access
       if (!ctx) {
         res.status(404).json({ error: 'Assistant not found' })
         return
       }
-      const memories = await searchWorkspaceMemories(ctx, { searchQuery: q.trim(), limit: 20 })
+      const memories = await searchWorkspaceMemories(ctx, { searchQuery: q.trim(), limit: 20 },authority!)
+      await admitViewerRead(authority!,memories)
       res.json({ memories })
     } catch (err) {
+      if(sendNativeReadRefusal(err,res))return
+      const sql=err as {code?:string;message?:string}
+      if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'
+        ||sql?.code==='42501'&&['query_domain_unavailable','access_unavailable','scope_evidence_missing','scope_source_changed'].includes(sql.message??'')){
+        res.status(404).json({error:'Not found'});return
+      }
+      if(err instanceof SourceProtocolError){res.status(503).json({error:'Unavailable'});return}
       console.error('[memories] team search failed:', err)
       res.status(500).json({ error: 'Failed to search team memories' })
     }
@@ -460,22 +530,32 @@ export function memoryRoutes(): Router {
   // ── Get single memory ─────────────────────────────────────────
 
   router.get<MemoryParams>('/:memoryId', async (req, res) => {
+    res.setHeader('Cache-Control','no-store')
     const userId = await verifyMembership(req, res)
     if (!userId) return
 
     try {
-      const ctx = await resolveViewerCtx(userId, req.params.assistantId)
+      const authority=await resolveViewerRead(req,req.params.assistantId)
+      const ctx=authority?.execution.security.access
       if (!ctx) {
         res.status(404).json({ error: 'Assistant not found' })
         return
       }
-      const memory = await getMemoryById(ctx, req.params.memoryId)
+      const memory = await getMemoryById(ctx, req.params.memoryId,undefined,undefined,authority!)
       if (!memory) {
         res.status(404).json({ error: 'Memory not found' })
         return
       }
+      await admitViewerRead(authority!,memory)
       res.json({ memory })
     } catch (err) {
+      if(sendNativeReadRefusal(err,res))return
+      const sql=err as {code?:string;message?:string}
+      if(err instanceof DerivedScopeError||isAuthorityChangedError(err)||err instanceof SourceProtocolError&&err.code==='source_access_denied'
+        ||sql?.code==='42501'&&['query_domain_unavailable','access_unavailable','scope_evidence_missing','scope_source_changed'].includes(sql.message??'')){
+        res.status(404).json({error:'Not found'});return
+      }
+      if(err instanceof SourceProtocolError){res.status(503).json({error:'Unavailable'});return}
       console.error('[memories] get failed:', err)
       res.status(500).json({ error: 'Failed to get memory' })
     }

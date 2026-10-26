@@ -60,7 +60,7 @@ beforeEach(() => {
   mocks.getRecording.mockResolvedValue({ status: 'queued' })
   mocks.concat.mockResolvedValue({ buffer: Buffer.from('assembled'), mime: 'audio/mp4' })
 })
-describe('watch service recovery and ordering', () => {
+describe('[COMP:recordings/watch-intake] watch service recovery and ordering', () => {
   it('does not transcribe past an earlier gap', async () => {
     windows = [window(1)]
     const h = harness(), result = await h.service.retry(g, c.client_id)
@@ -214,7 +214,7 @@ describe('watch service recovery and ordering', () => {
     h.pages.createDraft.mockImplementation(async (input: { anchorKey?: string }) => (input.anchorKey ? { id: 'new-folder' } : { id: c.page_id }) as never)
     await h.service.prepare(g, c)
     expect(h.pages.findIdByAnchorKey).toHaveBeenCalledWith(g.owner_id, g.workspace_id, 'meeting-notes-folder')
-    expect(h.pages.createDraft).toHaveBeenNthCalledWith(1, expect.objectContaining({ anchorKey: 'meeting-notes-folder', name: 'Meeting notes', userId: g.owner_id }))
+    expect(h.pages.createDraft).toHaveBeenNthCalledWith(1, expect.objectContaining({ anchorKey: 'meeting-notes-folder', name: 'Meeting notes', userId: g.owner_id }), { provenance: { kind: 'human-authored', actorId: g.owner_id } })
     expect(h.pages.createDraft).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: c.page_id, nestParentId: 'new-folder' }), expect.anything())
   })
   it('reuses an existing Meeting notes folder for a new watch page', async () => {
@@ -286,7 +286,7 @@ describe('watch service recovery and ordering', () => {
     await expect(authorizeWatchDestination(g)).rejects.toMatchObject({ status: 401 })
   })
 })
-describe('watch default blueprint', () => {
+describe('[COMP:recordings/watch-intake] watch default blueprint', () => {
   it('uses the workspace default only when it resolves to an accessible blueprint', async () => {
     mocks.workspaceDefault.mockResolvedValue(null)
     expect(await defaultWatchBlueprint(g)).toBeNull()

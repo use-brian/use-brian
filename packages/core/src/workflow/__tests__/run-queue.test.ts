@@ -260,3 +260,105 @@ describe('[COMP:workflow/run-queue] abandoned inline-run reaper', () => {
     expect(advanced).toEqual(['r1'])
   })
 })
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
+}
+
+describe('[COMP:workflow/run-queue] stop and restart admission', () => {
+  it('keeps already dispatched advances inside capacity after restarting', async () => {
+    const release = deferred<void>(), store = makeStore([run(1), run(2)])
+    const advanced: string[] = []
+    const worker = createRunQueueWorker({ store, maxConcurrent: 1, advance: async id => {
+      advanced.push(id)
+      if (id === 'r1') await release.promise
+    } })
+    try {
+      await worker.tick()
+      worker.stop()
+      worker.start()
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(advanced).toEqual(['r1'])
+      release.resolve()
+      await vi.waitFor(() => expect(advanced).toEqual(['r1', 'r2']))
+    } finally { release.resolve(); worker.stop() }
+  })
+
+  it('does not continue reaping or claim after stop during a reap await', async () => {
+    const entered = deferred<void>(), release = deferred<void>()
+    const store = makeStore([run(1)])
+    store.failExhaustedPendingRunsSystem = async () => { entered.resolve(); await release.promise; return 0 }
+    const stale = vi.spyOn(store, 'requeueStaleRunningRunsSystem')
+    const advance = vi.fn(async () => {})
+    const worker = createRunQueueWorker({ store, advance })
+    const tick = worker.tick()
+    await entered.promise
+    worker.stop()
+    release.resolve()
+    await tick
+    expect(stale).not.toHaveBeenCalled()
+    expect(store.claims).toBe(0)
+    expect(advance).not.toHaveBeenCalled()
+  })
+
+  it('does not advance a claim that resolves after stop', async () => {
+    const entered = deferred<void>(), release = deferred<ClaimedRun | null>()
+    const store = makeStore([])
+    let first = true
+    store.claimNextPendingRunSystem = async () => {
+      if (!first) return null
+      first = false
+      entered.resolve()
+      return release.promise
+    }
+    const advance = vi.fn(async () => {})
+    const worker = createRunQueueWorker({ store, advance })
+    const tick = worker.tick()
+    await entered.promise
+    worker.stop()
+    release.resolve(run(1))
+    await tick
+    expect(advance).not.toHaveBeenCalled()
+  })
+
+  it('does not restart the drain when an already dispatched advance finishes after stop', async () => {
+    const release = deferred<void>(), store = makeStore([run(1), run(2)])
+    const advance = vi.fn(async () => { await release.promise })
+    const worker = createRunQueueWorker({ store, advance, maxConcurrent: 1 })
+    await worker.tick()
+    expect(advance).toHaveBeenCalledTimes(1)
+    worker.stop()
+    const claimsAtStop = store.claims, reapsAtStop = store.reaps
+    release.resolve()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    worker.nudge()
+    await worker.tick()
+    expect(store.claims).toBe(claimsAtStop)
+    expect(store.reaps).toBe(reapsAtStop)
+    expect(advance).toHaveBeenCalledTimes(1)
+  })
+
+  it('restarts with a fresh pass without admitting the previous generation claim', async () => {
+    const entered = deferred<void>(), release = deferred<ClaimedRun | null>()
+    const store = makeStore([run(2)]), claim = store.claimNextPendingRunSystem.bind(store)
+    let first = true
+    store.claimNextPendingRunSystem = async params => {
+      if (first) { first = false; entered.resolve(); return release.promise }
+      return claim(params)
+    }
+    const advanced: string[] = []
+    const worker = createRunQueueWorker({ store, advance: async id => { advanced.push(id) }, maxConcurrent: 1 })
+    try {
+      const tick = worker.tick()
+      await entered.promise
+      worker.stop()
+      worker.start()
+      release.resolve(run(1))
+      await tick
+      await vi.waitFor(() => expect(advanced.includes('r2')).toBe(true))
+      expect(advanced.includes('r1')).toBe(false)
+    } finally { worker.stop() }
+  })
+})

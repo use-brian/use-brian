@@ -50,7 +50,7 @@ export type {
 } from './context-scope.js'
 export { deriveContextFloor, deriveResourceScope, deriveWriteScope, DerivedScopeError, describeScopeRefusal, resourceScopeKey, sourcesShareVisibility } from './derived-scope.js'
 export type { ResourceScope, ScopeSource, DerivedWriteEvidence } from './derived-scope.js'
-export { bindScopeSource, boundScopeSource } from './source-evidence.js'
+export { bindScopeSource, boundScopeSource, bindScopeSources, boundScopeSources } from './source-evidence.js'
 
 export { pinAccessCeiling, pinAuthoringAuthority, parseAuthoringAuthority, intersectAccessCeilings, accessCeilingContains } from './access-ceiling.js'
 export type { AccessCeiling, AuthoringAuthority } from './access-ceiling.js'

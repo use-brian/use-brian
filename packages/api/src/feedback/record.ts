@@ -185,7 +185,7 @@ export async function recordFeedback(params: RecordFeedbackParams): Promise<{
     ],
   )
     analyticsId = analyticsResult.rows[0]?.id ?? null
-    if (analyticsId && feedbackScope && target.source) {
+    if (analyticsId && feedbackScope && target.source && kind === 'negative') {
       feedbackSource = {
         ...feedbackScope,
         resourceKind: 'feedback_event',

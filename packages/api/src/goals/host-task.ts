@@ -23,6 +23,15 @@ import type {
 import { query } from '../db/client.js'
 import { updateTask } from '../db/tasks.js'
 
+/** A missing/refused canonical write must not become completion delivery. */
+class GoalHostWriteUnavailableError extends Error {
+  readonly reason = 'goal_host_write_unavailable'
+  constructor() {
+    super('The Goal host is unavailable for this terminal write.')
+    this.name = 'GoalHostWriteUnavailableError'
+  }
+}
+
 export function createTaskHostAdapter(deps: { actorUserId: string }): HostAdapter {
   const { actorUserId } = deps
   return {
@@ -31,7 +40,8 @@ export function createTaskHostAdapter(deps: { actorUserId: string }): HostAdapte
       // reason lives on the goal (tasks have no reason field). Automated
       // write — the task-event self-loop guard keys on writtenBy.
       const status = terminal === 'done' ? 'done' : 'blocked'
-      await updateTask(actorUserId, host.id, { status }, undefined, { writtenBy: 'system' })
+      const written = await updateTask(actorUserId, host.id, { status }, undefined, { writtenBy: 'system' })
+      if (!written) throw new GoalHostWriteUnavailableError()
     },
     async recordProgress(): Promise<void> {
       // No-op for tasks in v1 — per-iteration progress is read from

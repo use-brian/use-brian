@@ -74,4 +74,17 @@ describe('[COMP:api/feishu-turn-card] streaming lifecycle', () => {
     port.open.mockRejectedValueOnce(new Error('permission denied'))
     expect(await FeishuTurnCard.open(api, 'oc_chat', 'Thinking...')).toBeUndefined()
   })
+
+  it('names the permission recovery without logging the rejected request', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { port, api } = fake()
+    port.open.mockRejectedValueOnce(Object.assign(new Error('private provider request'), {
+      providerCode: 99991672, config: { headers: { Authorization: 'private credential' } },
+    }))
+    expect(await FeishuTurnCard.open(api, 'oc_chat', 'Private question')).toBeUndefined()
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      '[feishu] streaming card open failed (code=99991672; required_scope=cardkit:card:write; approve and publish the app permission)',
+    )
+    expect(port.open).toHaveBeenCalledOnce()
+  })
 })

@@ -13,6 +13,7 @@ import { cpSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { computeSourceHash } from './build-hash.mjs'
+import { buildSidepanel } from './build-sidepanel.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const staticDir = join(root, 'static')
@@ -21,6 +22,8 @@ const dist = join(root, 'dist')
 for (const entry of readdirSync(staticDir)) {
   cpSync(join(staticDir, entry), join(dist, entry), { recursive: true })
 }
+
+await buildSidepanel(root)
 
 const build = computeSourceHash(root)
 const sourceDateEpoch = process.env.SOURCE_DATE_EPOCH

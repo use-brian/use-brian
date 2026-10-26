@@ -33,4 +33,45 @@ describe("[COMP:app-desktop/bundled-cors] file renderer API bridge", () => {
       "Access-Control-Allow-Origin": ["null"],
     });
   });
+
+  it("allows the credentialed local renderer to read a bearer-only API response", () => {
+    // Public API opaque-origin responses deliberately omit credential admission.
+    // The trusted native bridge must complete the local renderer's include mode.
+    const apiHeaders = {
+      "access-control-allow-origin": ["null"],
+      "access-control-allow-headers": ["Content-Type, Authorization, X-Client-Timezone"],
+      vary: ["Origin"],
+    };
+    const headers = bridgeBundledCorsHeaders(apiHeaders, { includeCredentials: true });
+    expect(headers["Access-Control-Allow-Origin"]).toEqual(["null"]);
+    expect(headers["Access-Control-Allow-Credentials"]).toEqual(["true"]);
+    expect(headers.vary).toEqual(["Origin"]);
+    expect(apiHeaders).not.toHaveProperty("Access-Control-Allow-Credentials");
+  });
+
+  it("normalizes conflicting upstream credential headers only for local include mode", () => {
+    const upstream = {
+      "access-control-allow-credentials": ["false"],
+      "ACCESS-CONTROL-ALLOW-CREDENTIALS": ["true"],
+      "content-type": ["application/json"],
+    };
+    expect(bridgeBundledCorsHeaders(upstream, { includeCredentials: true })).toEqual({
+      "content-type": ["application/json"],
+      "Access-Control-Allow-Origin": ["null"],
+      "Access-Control-Allow-Credentials": ["true"],
+    });
+    expect(bridgeBundledCorsHeaders(upstream)).toEqual({
+      ...upstream,
+      "Access-Control-Allow-Origin": ["null"],
+    });
+  });
+
+  it("removes upstream credential admission when a local requester is untrusted", () => {
+    expect(bridgeBundledCorsHeaders({
+      "access-control-allow-credentials": ["true"],
+      "ACCESS-CONTROL-ALLOW-CREDENTIALS": ["true"],
+    }, { includeCredentials: false })).toEqual({
+      "Access-Control-Allow-Origin": ["null"],
+    });
+  });
 });

@@ -117,7 +117,7 @@ export async function maybeHandleChannelWorkflowContext(params: ChannelWorkflowC
       const { turnScope: scope, executionContext } = await resolveExecutionContextSystem({ userId: params.userId, assistant: { ...params.assistant,
         compartments: params.assistant.compartments === undefined ? [] : params.assistant.compartments,
       }, workspaceId,
-        identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: params.userId } },
+        identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: params.userId, authenticationKind: 'verified_channel' } },
         ownership: { kind: 'workspace', workspaceId },
         // Synthetic correlation ID only: no conversational session is created.
         lifecycle: { sessionId: `question:${binding.token}`, channelType: params.channelType,

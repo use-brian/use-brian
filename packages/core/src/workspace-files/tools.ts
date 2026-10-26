@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { createHash } from 'node:crypto'
 import { buildTool, type Tool } from '../tools/types.js'
 import { tolerantInt } from '../tools/schema-tolerance.js'
 import {
@@ -39,7 +40,7 @@ import {
 } from './tool-helpers.js'
 
 /**
- * Ten chat tools for the workspace filesystem primitive
+ * Eleven tools for the workspace filesystem primitive
  * (company-brain §10, Q3 Phase A): fileWrite, fileAppend, fileRead,
  * fileSearch, fileSetMeta, fileDelete, saveFileToBrain, saveFileBytes,
  * plus the outbound sendFile (built in `send-file.ts`) and the PDF
@@ -49,8 +50,8 @@ import {
  * `saveFileBytes` is the byte-preserving sibling of `fileWrite`: the caller
  * provides raw bytes as base64 (not a cache id like saveFileToBrain, not
  * UTF-8 text like fileWrite), so a programmatic caller that holds a file's
- * bytes can persist the real binary. It is the one file tool that lets bytes
- * cross a tool-call boundary; the size cap below is the guard.
+ * bytes can persist the real binary. `fileReadBytes` is its bounded export
+ * counterpart; neither base64 representation is interpreted as text.
  *
  * Capability: every tool carries `requiresCapability: 'files'` so the
  * §17 grant column gates them at `filterToolsByCapabilities` time. The
@@ -70,6 +71,8 @@ export type FileToolEvent =
   | { type: 'file_meta_updated'; fileId: string; path: string; fields: string[] }
   | { type: 'file_deleted'; fileId: string; path: string }
   | { type: 'file_searched'; resultCount: number; query?: string }
+
+export const MAX_FILE_READ_BYTES = 10 * 1024 * 1024
 
 export type FileToolEventContext = {
   userId: string
@@ -224,6 +227,7 @@ export function createFileTools(
   fileWrite: Tool
   fileAppend: Tool
   fileRead: Tool
+  fileReadBytes: Tool
   fileSearch: Tool
   fileSetMeta: Tool
   fileDelete: Tool
@@ -359,14 +363,13 @@ export function createFileTools(
       // `api.read` is a UTF-8 decode. On a stored image / PDF / binary that
       // returns mojibake with no error, and the model has no way to tell that
       // from a genuinely garbled document — so it describes the noise. Refuse
-      // instead, and point at what CAN be done with the bytes. (The byte-safe
-      // reader `api.readBytes` exists but has no tool surface: bytes leave the
-      // brain only by being delivered, never by entering the transcript.)
+      // instead, and point at the byte-preserving export separately.
       if (isBinaryMime(result.value.file.mime)) {
         return {
           data:
             `${result.value.file.path} is ${result.value.file.mime} — a binary file whose contents cannot be read as text. ` +
             'Do not attempt to describe or quote its contents from this tool. ' +
+            'For an exact download, use fileReadBytes and decode its base64 in client code. ' +
             'If the file has been ingested, read its extracted text with searchFileContent (the per-file content search) instead. ' +
             'The file itself can still be delivered: send it to the user in this conversation, or attach it to an email, using its path. ' +
             'Its title, summary, and tags are in the workspace files index if you need to describe it.',
@@ -378,6 +381,50 @@ export function createFileTools(
         data: {
           file: fullFile(result.value.file),
           content: result.value.content,
+        },
+        scopeEvidence: scopeEvidenceFromRows([result.value.file]),
+      }
+    },
+  })
+
+  const fileReadBytes = buildTool({
+    name: 'fileReadBytes',
+    requiresCapability: 'files',
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    resolveConfirmation: confirm('fileReadBytes'),
+    description:
+      'Download one workspace file by id or path as exact bytes encoded in base64, with metadata and a SHA-256 checksum. ' +
+      'Decode the base64 in client code to save the original file; it is transport data, not extracted text or a visual inspection. ' +
+      'Maximum file size is 10 MiB. Larger files must be downloaded in the authenticated Files UI. ' +
+      'For text content use fileRead; for indexed passages use searchFileContent.',
+    inputSchema: z.object({ file: idOrPathShape.describe('UUID or absolute workspace path of the file.') }),
+    async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId)
+      if (gate) return gate
+      const policyGate = await blockedGate('fileReadBytes', context)
+      if (policyGate) return policyGate
+
+      const ctx = ctxFor(context)
+      const stat = await api.stat(ctx, input.file)
+      if (!stat.ok) return { data: errorMessage(stat.error), isError: true }
+      const tooLarge = () => ({
+        data: 'This file exceeds the 10 MiB fileReadBytes export limit. Download it through the authenticated Files UI. No bytes were exported; do not retry this tool for the same oversized file.',
+        isError: true as const,
+      })
+      if (stat.value.sizeBytes > MAX_FILE_READ_BYTES) return tooLarge()
+      // Pin the admitted version: a replacement at the same path must not
+      // silently select a different file after the size check.
+      const result = await api.readBytes(ctx, stat.value.id)
+      if (!result.ok) return { data: errorMessage(result.error), isError: true }
+      if (result.value.bytes.byteLength > MAX_FILE_READ_BYTES) return tooLarge()
+      const bytes = Buffer.from(result.value.bytes)
+      return {
+        data: {
+          file: fullFile(result.value.file),
+          encoding: 'base64',
+          base64: bytes.toString('base64'),
+          sha256: createHash('sha256').update(bytes).digest('hex'),
         },
         scopeEvidence: scopeEvidenceFromRows([result.value.file]),
       }
@@ -743,5 +790,5 @@ export function createFileTools(
       opts?.onEvent?.({ type: 'file_created', fileId: evt.fileId, path: evt.path, sizeBytes: evt.sizeBytes }, ctx),
   })
 
-  return { fileWrite, fileAppend, fileRead, fileSearch, fileSetMeta, fileDelete, saveFileToBrain, saveFileBytes, sendFile, renderPdf }
+  return { fileWrite, fileAppend, fileRead, fileReadBytes, fileSearch, fileSetMeta, fileDelete, saveFileToBrain, saveFileBytes, sendFile, renderPdf }
 }

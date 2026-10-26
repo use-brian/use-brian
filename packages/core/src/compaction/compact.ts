@@ -8,6 +8,9 @@
 
 import type { Message, LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
+import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
+import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
+import type { ScopeSource } from '../security/derived-scope.js'
 /**
  * Output shape for `extractMemoriesBeforeCompaction`. Moved here from
  * the (now-retired) regex pattern-extractor as part of Q9's `extractPatterns`
@@ -225,6 +228,8 @@ export type CompactionResult = {
 }
 
 export type CompactionOptions = {
+  /** Host-only input authority inherited by every provider dispatch. */
+  assertInputAuthority?: () => Promise<void>
   provider: LLMProvider
   model: string // use a cheap model (Flash)
   messages: Message[]
@@ -249,6 +254,7 @@ export type CompactionOptions = {
  * pointer to the episodic store.
  */
 export async function compactConversation(options: CompactionOptions): Promise<CompactionResult> {
+  const sources = options.messages.flatMap((message) => boundScopeSources(message))
   const profile: CompactionProfile = options.profile ?? 'linear'
   const prompt = COMPACT_PROMPTS[profile]
   const tokensBefore = estimateTokens(options.messages)
@@ -258,14 +264,18 @@ export async function compactConversation(options: CompactionOptions): Promise<C
     { role: 'user', content: prompt },
   ]
 
+  await assertInputAuthority(options.assertInputAuthority)
   const response = await collectStream(
     options.provider.stream({
+      assertInputAuthority: options.assertInputAuthority,
       model: options.model,
       messages: compactMessages,
       systemPrompt: options.systemPrompt,
       maxTokens: SUMMARY_MAX_TOKENS,
     }),
   )
+
+  await assertInputAuthority(options.assertInputAuthority)
 
   const summary = response.content
     .filter((b) => b.type === 'text')
@@ -298,9 +308,11 @@ export async function compactConversation(options: CompactionOptions): Promise<C
     content: boundaryText,
   }
 
+  bindScopeSources(boundaryMessage, sources)
+  for (const episode of episodes ?? []) bindScopeSources(episode, sources)
   const tokensAfter = estimateTokens([boundaryMessage])
 
-  return {
+  return bindScopeSources({
     summary,
     boundaryMessage,
     tokensBefore,
@@ -308,7 +320,7 @@ export async function compactConversation(options: CompactionOptions): Promise<C
     usage: response.usage,
     model: response.model || options.model,
     episodes,
-  }
+  }, sources)
 }
 
 // ── Multi-topic output parser ──────────────────────────────────
@@ -426,20 +438,18 @@ export type CompactionTier = 'standard' | 'pro'
  * Map a resolved provider model id to its compaction tier. The resolved
  * model is what's actually going to run the next turn (after plan and
  * budget downgrades), so the threshold matches the window the model will
- * see. Flash-class models (Standard `gemini-3.1-flash-lite` and Pro
- * `gemini-3-flash-preview`) use the standard ceiling; Pro 3.1 (research
- * escalation) and Flash 3.8 (Max default, with older Max Flash ids retained for
+ * see. Flash-Lite and the Standard/Pro synthetic Flash ids use the standard
+ * ceiling; Argon (Research) and Flash 3.8 (Max, with older Max Flash ids retained for
  * historical sessions) use the pro ceiling. All Max Flash models ship with a
  * 1M-token frontier window, so compacting them at the Flash Lite threshold
  * would silently shrink what the user paid 10 credits for.
  *
- * Matches by substring so both the `resolveModel` aliases (`gemini-flash`,
- * `gemini-3.1-flash-lite`, `gemini-pro`) and the real provider IDs
- * (`gemini-3-flash-preview`, `gemini-3.1-flash-lite` / its retired
- * `-preview` SKU, `gemini-3.8-flash`, older Max Flash ids,
- * `gemini-3.1-pro-preview`) classify correctly.
+ * Synthetic Standard/Pro ids are checked before the bare Max Flash family.
+ * Substring matching then covers current and historical provider ids.
  */
 export function modelToCompactionTier(model: string): CompactionTier {
+  if (model.includes('flash-lite')) return 'standard'
+  if (model === 'gemini-3.6-flash-standard' || model === 'gemini-3.6-flash-pro') return 'standard'
   if (
     model.includes('gemini-3.8-flash') ||
     model.includes('gemini-3.7-flash') ||
@@ -533,6 +543,9 @@ If there are no new facts that pass the ladder, return an empty array: [].
 Respond with ONLY the JSON array, no other text.`
 
 export type PreCompactionExtractionOptions = {
+  /** Host-only authority and admitted index observations, never model arguments. */
+  assertInputAuthority?: () => Promise<void>
+  sourceEvidence?: readonly ScopeSource[]
   provider: LLMProvider
   model: string
   messages: Message[]
@@ -561,6 +574,10 @@ export type PreCompactionExtractionResult = {
 export async function extractMemoriesBeforeCompaction(
   options: PreCompactionExtractionOptions,
 ): Promise<PreCompactionExtractionResult> {
+  const sources = [
+    ...options.messages.flatMap((message) => boundScopeSources(message)),
+    ...structuredClone(options.sourceEvidence ?? []),
+  ]
   // Collect all user message text
   const userText = options.messages
     .filter((m) => m.role === 'user')
@@ -572,7 +589,7 @@ export async function extractMemoriesBeforeCompaction(
     .join('\n')
 
   if (userText.trim().length === 0) {
-    return { facts: [], usage: null, model: null }
+    return bindScopeSources({ facts: [], usage: null, model: null }, sources)
   }
 
   // v2 (Q9): regex Phase 1 retired. Pre-compaction extraction is now
@@ -592,8 +609,10 @@ export async function extractMemoriesBeforeCompaction(
         : '(none)',
     )
 
+    await assertInputAuthority(options.assertInputAuthority)
     const response = await collectStream(
       options.provider.stream({
+        assertInputAuthority: options.assertInputAuthority,
         model: options.model,
         messages: [
           ...options.messages,
@@ -603,6 +622,7 @@ export async function extractMemoriesBeforeCompaction(
         maxTokens: 1_000,
       }),
     )
+    await assertInputAuthority(options.assertInputAuthority)
     servedModel = response.model || options.model
 
     usage = response.usage
@@ -625,7 +645,8 @@ export async function extractMemoriesBeforeCompaction(
           confidence: 0.6,
         }))
     }
-  } catch {
+  } catch (error) {
+    if (isInputAuthorityError(error)) throw error
     // LLM extraction is best-effort — regex facts are still returned.
     // `usage` may have been set before a JSON-parse failure; we keep it
     // so the caller still attributes the tokens we did consume.
@@ -642,5 +663,6 @@ export async function extractMemoriesBeforeCompaction(
     merged.push(fact)
   }
 
-  return { facts: merged, usage, model: usage ? servedModel ?? options.model : null }
+  for (const fact of merged) bindScopeSources(fact, sources)
+  return bindScopeSources({ facts: merged, usage, model: usage ? servedModel ?? options.model : null }, sources)
 }

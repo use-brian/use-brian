@@ -47,8 +47,8 @@ const EVALS_DIR = join(__dirname, '..', 'src', 'evals')
 const RESULTS_ROOT = join(__dirname, '..', 'eval-results')
 const BASELINES_DIR = join(EVALS_DIR, 'baselines')
 
-const SUT_MODEL = process.env.EVAL_SUT_MODEL?.trim() || 'gemini-flash'
-const HEADLESS_JUDGE_MODEL = 'gemini-pro' // → gemini-3.1-pro-preview (D1 fallback)
+const SUT_MODEL = process.env.EVAL_SUT_MODEL?.trim() || 'gemini-3.6-flash-pro'
+const HEADLESS_JUDGE_MODEL = 'gemini-4-argon-research' // Current Research judge.
 
 const RUBRICS: Array<{ dimension: 'justification-grounding' | 'nearest-route' | 'no-invented-ui'; question: string }> = [
   {

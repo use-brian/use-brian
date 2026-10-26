@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import { viewsRoutes } from '../../routes/views.js'
-import { afterAll, describe, expect, it } from 'vitest'
+import { recordingLiveRoutes } from '../../routes/recording-live.js'
+import { createWorkspaceStore } from '../workspace-store.js'
+import { hasLiveMarkerBlock } from '@use-brian/shared'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { getAppPool, getPool, queryWithRLS } from '../client.js'
 import { createDbSavedViewStore, copySavedViewPage } from '../saved-views-store.js'
 import { createTeamspaceStore } from '../teamspace-store.js'
@@ -13,7 +16,6 @@ const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/
 await assertLocalFixture()
 const pool = getPool(), store = createDbSavedViewStore()
 // local-fixture creates its non-bypass app role after running migrations.
-await pool.query('GRANT EXECUTE ON FUNCTION lock_page_placement_teamspace(uuid,uuid) TO assurance_app')
 async function fixture(mode = 'simple', linked = true) {
   const w = randomUUID(), owner = randomUUID(), group = randomUUID(), teamspace = randomUUID(), fileId = randomUUID()
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [owner])
@@ -29,8 +31,105 @@ async function fixture(mode = 'simple', linked = true) {
   const create = (patch: Partial<Parameters<typeof store.createDraft>[0]> = {}) => store.createDraft({ userId: owner, workspaceId: w, name: 'Authored', entity: 'tasks', viewType: 'table', binding: { entity: 'tasks', viewType: 'table' }, page: { blocks: [] }, ...patch }, { provenance: { kind: 'human-authored', actorId: owner } })
   return { w, owner, group, teamspace, fileId, create }
 }
+// As with the existing copy-route fixture below, middleware supplies verified
+// host identity. The real router, membership reader and app-role store run intact.
+function liveStartApp(actor?: string, access?: Parameters<typeof runWithAgentAccess>[0]) {
+  const externalWork = vi.fn(() => { throw new Error('Live start must not invoke external work') })
+  const app = express()
+  app.use(express.json(), (req, _res, next) => {
+    if (actor) { req.userId = actor; req.authSessionId = randomUUID() }
+    if (access) runWithAgentAccess(access, next)
+    else next()
+  })
+  app.use('/api/recordings', recordingLiveRoutes({
+    getRole: createWorkspaceStore().getRole,
+    savedViewStore: store,
+    provider: { name: 'unused', models: [], stream: externalWork, createSession: externalWork },
+    backgroundModel: 'unused', voiceTranscription: { enabled: true, apiKey: 'unused' },
+    transcribeWindow: externalWork, reviseNotes: externalWork,
+  }))
+  return { app, externalWork }
+}
+async function pageCount(workspaceId: string) {
+  return (await pool.query('SELECT count(*)::int AS count FROM saved_views WHERE workspace_id=$1', [workspaceId])).rows[0].count
+}
 afterAll(async () => { await getAppPool().end(); await pool.end() })
 describe('authored page placement admission', () => {
+  it('[COMP:recordings/live-page-route] authors ready live-start root and chosen-parent pages as the authenticated app-role actor', async () => {
+    const role = (await getAppPool().query(`SELECT session_user,current_user,r.rolsuper,r.rolbypassrls,
+      pg_get_userbyid(c.relowner)=session_user AS owns_pages
+      FROM pg_roles r CROSS JOIN pg_class c WHERE r.rolname=session_user AND c.oid='saved_views'::regclass`)).rows[0]
+    expect(role).toEqual({ session_user: 'app_user', current_user: 'app_user', rolsuper: false, rolbypassrls: false, owns_pages: false })
+    const f = await fixture(), h = liveStartApp(f.owner), parent = await f.create()
+    for (const nestParentId of [null, parent.id]) {
+      const before = await pageCount(f.w)
+      const response = await request(h.app).post('/api/recordings/live/start').send({
+        workspaceId: f.w, destination: 'new', parentPageId: nestParentId, title: 'Review notes',
+        userId: randomUUID(), actorId: randomUUID(),
+        provenance: { kind: 'human-authored', actorId: randomUUID() },
+        page: { blocks: [{ kind: 'text', id: 'injected', text: 'Untrusted source' }] },
+        blocks: [{ kind: 'text', id: 'injected', text: 'Untrusted source' }],
+      })
+      expect(response.status).toBe(201)
+      expect(response.body).toMatchObject({ title: 'Review notes', sessionId: expect.any(String), notesHeadingId: expect.any(String), markerBlockId: expect.stringMatching(/^live:/) })
+      expect(await pageCount(f.w)).toBe(before + 1)
+      const page = await store.getById(f.owner, response.body.pageId)
+      expect(page).toMatchObject({ createdBy: f.owner, state: 'saved', name: 'Review notes', nestParentId, teamspaceId: f.teamspace, clearance: parent.clearance })
+      expect(page!.page!.blocks).toEqual([
+        { id: response.body.notesHeadingId, kind: 'heading', level: 2, text: 'Meeting notes' },
+        { id: expect.any(String), kind: 'text', variant: 'muted', text: 'Listening for the first update...' },
+        { id: response.body.markerBlockId, kind: 'text', variant: 'caption', text: expect.stringContaining('Notes are provisional') },
+      ])
+      expect(hasLiveMarkerBlock(page!.page!.blocks)).toBe(true)
+    }
+    expect(h.externalWork).not.toHaveBeenCalled()
+  })
+  it('[COMP:recordings/live-page-route] creates and reuses exactly one ready Meeting notes folder with child continuity', async () => {
+    const f = await fixture(), h = liveStartApp(f.owner)
+    const start = () => request(h.app).post('/api/recordings/live/start').send({ workspaceId: f.w, destination: 'meeting-notes', folderName: 'Meeting notes' })
+    const first = await start()
+    expect(first.status).toBe(201)
+    expect(await pageCount(f.w)).toBe(2)
+    const folders = (await pool.query("SELECT id FROM saved_views WHERE workspace_id=$1 AND anchor_key='meeting-notes-folder'", [f.w])).rows
+    expect(folders).toHaveLength(1)
+    const folderId = folders[0].id
+    expect(await store.getById(f.owner, first.body.pageId)).toMatchObject({ nestParentId: folderId, teamspaceId: f.teamspace })
+    await store.update(f.owner, folderId, { name: 'Renamed notes' }, 'user')
+    const second = await start()
+    expect(second.status).toBe(201)
+    expect(second.body.pageId).not.toBe(first.body.pageId)
+    expect(await pageCount(f.w)).toBe(3)
+    expect((await pool.query("SELECT id,name FROM saved_views WHERE workspace_id=$1 AND anchor_key='meeting-notes-folder'", [f.w])).rows).toEqual([{ id: folderId, name: 'Renamed notes' }])
+    for (const id of [first.body.pageId, second.body.pageId]) {
+      expect(await store.getById(f.owner, id)).toMatchObject({ nestParentId: folderId, createdBy: f.owner, state: 'saved' })
+    }
+    expect(h.externalWork).not.toHaveBeenCalled()
+  })
+  it('[COMP:recordings/live-page-route] refuses missing actors, nonmembers and foreign or invisible live-start parents without writes', async () => {
+    const f = await fixture(), foreign = await fixture(), foreignParent = await foreign.create()
+    const body = { workspaceId: f.w, destination: 'new', userId: f.owner, provenance: { kind: 'human-authored', actorId: f.owner } }
+    const absent = liveStartApp(), outsider = liveStartApp(foreign.owner), h = liveStartApp(f.owner)
+    expect((await request(absent.app).post('/api/recordings/live/start').send(body)).status).toBe(401)
+    expect((await request(outsider.app).post('/api/recordings/live/start').send(body)).status).toBe(403)
+    for (const parentPageId of [foreignParent.id, randomUUID()]) {
+      expect((await request(h.app).post('/api/recordings/live/start').send({ ...body, parentPageId })).status).toBe(404)
+    }
+    expect(await pageCount(f.w)).toBe(0)
+    expect(await pageCount(foreign.w)).toBe(1)
+    for (const entry of [absent, outsider, h]) expect(entry.externalWork).not.toHaveBeenCalled()
+  })
+  it('[COMP:recordings/live-page-route] keeps current read reach separate from live-start mutation authority', async () => {
+    const f = await fixture(), parent = await f.create()
+    const access = { workspaceId: f.w, userId: f.owner, clearance: 'confidential', compartments: [`team:${f.group}`], mutationCompartments: [], projectIds: null }
+    expect(await runWithAgentAccess(access, () => store.getById(f.owner, parent.id))).toMatchObject({ id: parent.id })
+    const h = liveStartApp(f.owner, access)
+    const response = await request(h.app).post('/api/recordings/live/start').send({ workspaceId: f.w, destination: 'new', parentPageId: parent.id })
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'Could not prepare the live meeting page' })
+    expect(await pageCount(f.w)).toBe(1)
+    expect(h.externalWork).not.toHaveBeenCalled()
+  })
+
   it('copies the current canonical live page through production HTTP as an app-role member', async () => {
     const f = await fixture(), source = await f.create(), member = randomUUID()
     await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [member])

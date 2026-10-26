@@ -5,14 +5,16 @@ import { makeBrainContextResolver } from '../../brain-mcp/tools.js'
 import { createDbOAuthAuthorizationStore } from '../oauth-authorization-store.js'
 import { hashSecret } from '../api-key-store.js'
 import { createDbBrainKeyStore } from '../brain-keys-store.js'
-import { createCrmCredentialTools, crmOperationsSha256, type CrmCredentialParent, type ToolContext } from '@use-brian/core'
+import { createCrmCredentialTools, executionToolContext, crmOperationsSha256, type CrmCredentialParent, type ToolContext } from '@use-brian/core'
 import pg from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { createCrmIntegrationStore } from '../crm-integration-store.js'
 import { createCrmIntegrationRecordReadStore } from '../crm-integration-records.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { captureAuthoringAuthoritySystem } from '../../context-scope/workflow-authority.js'
-import { applyRLSGucs } from '../client.js'
+import { applyRLSGucs,getPool,getAppPool } from '../client.js'
+import { findAssistantById } from '../users.js'
+import { resolveExecutionContextSystem } from '../../context-scope/execution-context.js'
 import { mintBridgeToken } from '../../home-apps/tokens.js'
 import { getHomeApp } from '../home-apps-store.js'
 import { assertCrmCredentialParent, configureCrmHomeAppParentSigner } from '../../crm-operations/integration-department-authority.js'
@@ -51,7 +53,7 @@ async function fixture() {
 }
 
 describe('[COMP:api/crm-integration-auth] Departmental credential issuance and record access', () => {
-  afterAll(async () => { await Promise.all([owner.end(), app.end()]) })
+  afterAll(async () => { await Promise.all([owner.end(), app.end(),getPool().end(),getAppPool().end()]) })
 
   it('caps Home-app children to the viewer token and renews live app grants', async () => {
     const f = await fixture(), appId=randomUUID(), assistantId=randomUUID()
@@ -240,34 +242,36 @@ describe('[COMP:api/crm-integration-auth] Departmental credential issuance and r
       create: (input, authority) => keys.create(f.workspaceId, f.userId, input, authority),
       revoke: async (input, authority) => ({ revoked: await keys.revoke(f.workspaceId, f.userId, input.credentialId, authority) }),
     })
-    const context: ToolContext = { workspaceId: f.workspaceId, userId: f.userId, assistantId, assistantKind: 'primary',
-      appId: assistantId, sessionId: randomUUID(), channelType: 'web', channelId: 'fixture', abortSignal: new AbortController().signal,
-      clearance: 'internal', compartments: null, mutationCompartments: null, projectIds: null, visibilityAssistantIds: null,
-      activeCapabilities: new Set(['configure', 'crm', 'home_app:crm:write']) }
+    const currentContext=async():Promise<ToolContext> => {
+      const execution=(await resolveExecutionContextSystem({userId:f.userId,workspaceId:f.workspaceId,assistant:(await findAssistantById(assistantId))!,memberMode:'member',
+        identity:{kind:'attended',principal:{kind:'workspace_member',userId:f.userId,authenticationKind:'native_session'}},
+        ownership:{kind:'workspace',workspaceId:f.workspaceId},lifecycle:{sessionId:randomUUID(),sessionPersisted:false,channelId:'credential-fixture',channelType:'web',abortSignal:new AbortController().signal}})).executionContext
+      return {...executionToolContext(execution,{appId:assistantId}),activeCapabilities:new Set(['configure','crm','home_app:crm:write'])}
+    }
     const request = { ...input, requestId: randomUUID(), departmentBinding: { departmentIds: [], cap: 'internal' } }
     for (const capability of ['configure', 'crm', 'home_app:crm:write']) {
       await owner.query('UPDATE assistant_capabilities SET revoked_at=clock_timestamp() WHERE assistant_id=$1 AND capability=$2', [assistantId, capability])
-      expect(await native.createCrmCredential.execute(request, context)).toMatchObject({ isError: true, data: { error: 'not_authorized' } })
-      expect(await native.listCrmCredentials.execute({}, context)).toMatchObject({ isError: true, data: { error: 'not_authorized' } })
+      expect(await native.createCrmCredential.execute(request, await currentContext())).toMatchObject({ isError: true, data: { error: 'not_authorized' } })
+      expect(await native.listCrmCredentials.execute({}, await currentContext())).toMatchObject({ isError: true, data: { error: 'not_authorized' } })
       expect((await owner.query('SELECT id FROM crm_integration_credentials WHERE workspace_id=$1', [f.workspaceId])).rows).toEqual([])
       expect((await owner.query("SELECT id FROM workspace_audit_log WHERE workspace_id=$1 AND event_type='crm.integration_credential_created'", [f.workspaceId])).rows).toEqual([])
       await owner.query('UPDATE assistant_capabilities SET revoked_at=NULL WHERE assistant_id=$1 AND capability=$2', [assistantId, capability])
     }
-    const created = await native.createCrmCredential.execute(request, context)
+    const created = await native.createCrmCredential.execute(request, await currentContext())
     expect(created.isError).not.toBe(true)
     const first = created.data as { id: string; oneTimeSecret: string }
     expect(await keys.authenticate(first.oneTimeSecret)).not.toBeNull()
-    expect(await native.createCrmCredential.execute(request, context)).toMatchObject({ isError: true,
+    expect(await native.createCrmCredential.execute(request, await currentContext())).toMatchObject({ isError: true,
       data: { error: 'conflict', reason: 'credential_already_issued', credentialId: first.id } })
-    const rotated = await native.createCrmCredential.execute({ ...request, requestId: randomUUID(), revokeCredentialId: first.id }, context)
+    const rotated = await native.createCrmCredential.execute({ ...request, requestId: randomUUID(), revokeCredentialId: first.id }, await currentContext())
     expect(rotated.isError).not.toBe(true)
     const second = rotated.data as { id: string; oneTimeSecret: string }
     expect(await keys.authenticate(first.oneTimeSecret)).toBeNull()
     expect(await keys.authenticate(second.oneTimeSecret)).not.toBeNull()
-    expect(await native.revokeCrmCredential.execute({ credentialId: second.id }, context)).toMatchObject({ data: { revoked: true } })
+    expect(await native.revokeCrmCredential.execute({ credentialId: second.id }, await currentContext())).toMatchObject({ data: { revoked: true } })
     expect(await keys.authenticate(second.oneTimeSecret)).toBeNull()
     await owner.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2", [f.workspaceId, f.userId])
-    expect(await native.listCrmCredentials.execute({}, context)).toMatchObject({ isError: true, data: { error: 'not_authorized' } })
+    expect(await native.listCrmCredentials.execute({}, await currentContext())).toMatchObject({ isError: true, data: { error: 'not_authorized' } })
   })
 
   it('pins delegated credential issuance to the executing assistant and complete authoring ceiling', async () => {

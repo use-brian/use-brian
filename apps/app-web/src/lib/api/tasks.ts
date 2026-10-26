@@ -73,6 +73,8 @@ export function isTaskRowList(value: unknown): value is TaskRow[] {
         typeof (row as TaskRow).id === "string" &&
         typeof (row as TaskRow).title === "string" &&
         typeof (row as TaskRow).status === "string" &&
+        Array.isArray((row as TaskRow).tags) &&
+        (row as TaskRow).tags.every((tag) => typeof tag === "string") &&
         !!(row as TaskRow).attributes &&
         typeof (row as TaskRow).attributes === "object",
     )

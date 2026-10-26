@@ -85,6 +85,8 @@ describe('[COMP:channels/approval-deliveries] createApprovalDeliveryDispatcher',
     const body = JSON.parse((init as { body: string }).body)
     expect(body.chat_id).toBe('chat-99')
     expect(body.text).toContain('approve appr-abc') // short id in the reply hint
+    expect(body.text.includes('Nightly report')).toBe(false)
+    expect(body.text.includes('gmailSend')).toBe(false)
   })
 
   it('is a stubbed no-op for the slack channel', async () => {
@@ -111,6 +113,8 @@ it.each(['telegram', 'slack', 'whatsapp', 'msteams', 'feishu'] as const)(
     // Tool arguments are run content; the push never carries them.
     expect(text).not.toContain('a@b.com')
     expect(text).not.toContain('Args:')
+    expect(text.includes('Nightly report')).toBe(false)
+    expect(text.includes('gmailSend')).toBe(false)
     expect(text).toContain('Approve or reject on the web: https://app.test/w/ws-1/approvals')
     expect(text).not.toContain('Reply with')
     expect(text).not.toContain('`approve ')

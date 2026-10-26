@@ -3,6 +3,7 @@ import { createTokens, verifyRefreshTokenClaims } from '../auth/jwt.js'
 import { requireAuth } from '../auth/middleware.js'
 import { verifyTgLinkToken } from '../auth/tg-link-token.js'
 import { isValidTimezone } from '../auth/client-timezone.js'
+import { applicationOnboardingFromNextPath, applicationOnboardingRequestValid } from '../application-platform/onboarding.js'
 import { backfillUserProfileFromProvider, findOrCreateUser, findUserById, findUserByEmail, getDefaultAssistant, getUserAssistant, promoteChannelUser, updateUserTimezone, type User } from '../db/users.js'
 import { query } from '../db/client.js'
 import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.js'
@@ -96,10 +97,11 @@ export function authRoutes(
    *   3. We bind Telegram → user via linkedAccountStore.upsert + mergeShadowUser.
    */
   router.post('/google', async (req, res) => {
-    const { idToken, tgLinkToken, timezone: bodyTimezone } = req.body as {
+    const { idToken, tgLinkToken, timezone: bodyTimezone, applicationRequest } = req.body as {
       idToken?: string
       tgLinkToken?: string
       timezone?: string
+      applicationRequest?: unknown
     }
     if (!idToken) {
       res.status(400).json({ error: 'Missing idToken' })
@@ -122,6 +124,10 @@ export function authRoutes(
         : undefined
 
     try {
+      const applicationOnly = applicationRequest !== undefined
+      if (applicationOnly && !await applicationOnboardingRequestValid(applicationRequest, jwtSecret)) {
+        res.status(400).json({ error: 'application_signin_unavailable' }); return
+      }
       // Verify Google ID token via Google's tokeninfo endpoint
       const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`)
       if (!googleRes.ok) {
@@ -153,6 +159,7 @@ export function authRoutes(
       // findOrCreateUser, whose INSERT hits idx_users_email (the 2026-07-17
       // duplicate-key 500 behind login's `auth_failed`).
       const emailVerified = String(googleData.email_verified) === 'true'
+      if (applicationOnly && !emailVerified) { res.status(401).json({ error: 'google_email_unverified' }); return }
       let user: User
       let isNew = false
       const existingShadow = await findUserByEmail(googleData.email)
@@ -216,6 +223,7 @@ export function authRoutes(
           name: googleData.name,
           avatarUrl: googleData.picture,
           timezone: captureTz,
+          ...(applicationOnly ? { onboarding: 'application' as const } : {}),
         })
         user = result.user
         isNew = result.isNew
@@ -293,9 +301,14 @@ export function authRoutes(
       .update('\x00')
       .update(identity.subject)
       .digest('base64url')
+    const applicationRequest = req.headers['x-usebrian-application-request']
+    const applicationOnly = applicationRequest !== undefined
+    if (applicationOnly && !await applicationOnboardingRequestValid(applicationRequest, jwtSecret)) {
+      res.status(400).json({ error: 'application_signin_unavailable' }); return
+    }
     const providerUser = await oidcAuth.findUserBySubject(providerId)
-    const mappedWorkspaceIds = matchedOidcWorkspaceIds(oidcAuth.config.enrollment, identity)
-    if (identity.email && !providerUser && mappedWorkspaceIds.length === 0 && !(await oidcAuth.canSignInEmail(identity.email))) {
+    const mappedWorkspaceIds = applicationOnly ? [] : matchedOidcWorkspaceIds(oidcAuth.config.enrollment, identity)
+    if (!applicationOnly && identity.email && !providerUser && mappedWorkspaceIds.length === 0 && !(await oidcAuth.canSignInEmail(identity.email))) {
       res.status(403).json({ error: 'email_enrollment_required' })
       return
     }
@@ -343,6 +356,7 @@ export function authRoutes(
           name: identity.name,
           avatarUrl: identity.avatarUrl,
           timezone: identity.timezone,
+          ...(applicationOnly ? { onboarding: 'application' as const } : {}),
         })
         user = result.user
         isNew = result.isNew
@@ -455,8 +469,9 @@ export function authRoutes(
     try {
       const now = new Date()
       const windowStart = new Date(now.getTime() - 60 * 60 * 1000)
+      const onboarding = await applicationOnboardingFromNextPath(nextPath ?? null, jwtSecret)
       const [admitted, emailCount, ipCount] = await Promise.all([
-        canSignInEmail ? canSignInEmail(emailRaw) : Promise.resolve(true),
+        onboarding === 'invalid' ? Promise.resolve(false) : onboarding === 'application' || !canSignInEmail ? Promise.resolve(true) : canSignInEmail(emailRaw),
         magicLinkStore.countRecentForEmail(emailRaw, windowStart),
         ip ? magicLinkStore.countRecentForIp(ip, windowStart) : Promise.resolve(0),
       ])
@@ -544,7 +559,9 @@ export function authRoutes(
       res.status(401).json({ error: 'expired_or_used' })
       return
     }
-    if (emailAuth.canSignInEmail && !(await emailAuth.canSignInEmail(consumed.email))) {
+    const onboarding = await applicationOnboardingFromNextPath(consumed.nextPath, jwtSecret)
+    if (onboarding === 'invalid') { res.status(400).json({ error: 'application_signin_unavailable' }); return }
+    if (onboarding !== 'application' && emailAuth.canSignInEmail && !(await emailAuth.canSignInEmail(consumed.email))) {
       res.status(403).json({ error: 'email_enrollment_required' })
       return
     }
@@ -611,7 +628,9 @@ export function authRoutes(
       res.status(401).json({ error: 'expired_or_used' })
       return
     }
-    if (emailAuth.canSignInEmail && !(await emailAuth.canSignInEmail(result.email))) {
+    const onboarding = await applicationOnboardingFromNextPath(result.nextPath, jwtSecret)
+    if (onboarding === 'invalid') { res.status(400).json({ error: 'application_signin_unavailable' }); return }
+    if (onboarding !== 'application' && emailAuth.canSignInEmail && !(await emailAuth.canSignInEmail(result.email))) {
       res.status(403).json({ error: 'email_enrollment_required' })
       return
     }
@@ -1156,7 +1175,7 @@ async function backfillOidcTimezone(user: User, timezone: string | undefined, er
 // The desktop sign-in bridge travels as an absolute app-origin URL through
 // ALLOWED_NEXT_HOSTS below, not this list. Keep in sync with the web verify
 // route and the Google OAuth callback.
-const ALLOWED_NEXT_PREFIXES = ['/brain', '/studio', '/workflow', '/chat', '/onboarding', '/invite']
+const ALLOWED_NEXT_PREFIXES = ['/brain', '/studio', '/workflow', '/chat', '/onboarding', '/invite', '/oauth/authorize']
 
 // Sidan-owned hosts an absolute `nextPath` may target. Lets a magic-link
 // sign-in carry a cross-app return (e.g. the desktop bridge at
@@ -1177,7 +1196,7 @@ const ALLOWED_NEXT_HOSTS = new Set<string>([
 
 function isAllowedNextPath(s: string, allowedReturnOrigins: string[] = []): boolean {
   if (typeof s !== 'string') return false
-  if (s.length > 512) return false
+  if (s.length > 8192) return false
   if (s.startsWith('//')) return false
   if (s.startsWith('/')) {
     return ALLOWED_NEXT_PREFIXES.some(
@@ -1275,7 +1294,9 @@ async function respondWithEmailSession(
   },
 ): Promise<void> {
   try {
-    const { user, isNew } = await findOrCreateEmailUser(consumed.email, captureTz)
+    const onboarding = await applicationOnboardingFromNextPath(consumed.nextPath, jwtSecret)
+    if (onboarding === 'invalid') { res.status(400).json({ error: 'application_signin_unavailable' }); return }
+    const { user, isNew } = await findOrCreateEmailUser(consumed.email, captureTz, onboarding)
 
     let linkWarning: string | undefined
     if (tgLink) {
@@ -1328,6 +1349,7 @@ async function respondWithEmailSession(
 async function findOrCreateEmailUser(
   email: string,
   captureTz: string | undefined,
+  onboarding: 'workspace' | 'application' = 'workspace',
 ): Promise<{ user: User; isNew: boolean }> {
   const existing = await findUserByEmail(email)
   if (existing) {
@@ -1368,5 +1390,6 @@ async function findOrCreateEmailUser(
     authProviderId: email,
     email,
     timezone: captureTz,
+    ...(onboarding === 'application' ? { onboarding } : {}),
   })
 }

@@ -1,3 +1,16 @@
+import {boundScopeSources} from '@use-brian/core'
+import {generateAttendedSessionTitle} from './attended-session-title.js'
+import {readSessionTitle} from '../db/session-title-store.js'
+import {authSessionStore} from '../db/auth-session-store.js'
+import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
+import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
+import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
+import type { PoolClient } from 'pg'
+import { withSessionMessagePublication } from '../db/session-context-revisions.js'
+import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
+import { bindScopeSources } from '@use-brian/core'
+import { runTurnSessionStateDiff } from '../turn/session-state.js'
+import { RESEARCH_EFFORT_BUDGETS, researchEffortInstruction, type ResearchEffort } from '@use-brian/core'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
 import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
@@ -27,8 +40,8 @@ import {
 } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
-import { classifySession, policyFor, sessionPolicy } from '../session-kind.js'
+import { isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { classifySession, isPersonalChat, policyFor, sessionPolicy } from '../session-kind.js'
 import { abortLocalTurn, precheckTurnAdmission, registerTurnAbort, releaseTurn, takeTurnLease, unregisterTurnAbort, waitForTurnSlot, TURN_SLOT_WAIT_TIMEOUT_MS } from '../turn/lease.js'
 import { runAssistantTurn, turnUsageIdentity } from '../turn/kernel.js'
 import { resolveTurnBilling } from '../turn/billing.js'
@@ -488,6 +501,7 @@ type WebChatOptions = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption (team-admin-configured tools). */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
+  connectorSourceRuntimeFactory?: import('../application-platform/source-runtime.js').ConnectorSourceRuntimeFactory
   /** Shared workspace tool policy (migration 312) — governs team-owned connector tool allow/ask/block. */
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   workerManager?: import('@use-brian/core').WorkerManager
@@ -891,12 +905,12 @@ const RESEARCH_MAX_WORKER_WAVES = 4
  * No restated rules, no quoted tags, no protocol prose. Nothing to
  * paraphrase.
  */
-function createResearchWorkerDrainPrompt(): (text: string, results: WorkerResult[]) => string {
+export function createResearchWorkerDrainPrompt(maxWaves: number = RESEARCH_MAX_WORKER_WAVES): (text: string, results: WorkerResult[]) => string {
   let waveCount = 0
   return (notificationText, results) => {
     waveCount++
     const failed = results.filter((r) => r.status === 'failed')
-    const cappedOut = waveCount >= RESEARCH_MAX_WORKER_WAVES
+    const cappedOut = waveCount >= maxWaves
 
     if (failed.length > 0 && !cappedOut) {
       return `Wave ${waveCount} results:\n\n${notificationText}\n\n${failed.length} worker(s) failed; respawn them per the protocol in your system prompt.`
@@ -935,7 +949,7 @@ export function isUserBlocked(
  *
  * Eligible only when the caller left `mode` unpinned (`undefined`), the
  * assistant is workspace-scoped (research requires workspace billing),
- * the plan is paid, AND the assistant is NOT `kind='app'`. (Message
+ * research allowance remains, AND the assistant is NOT `kind='app'`. (Message
  * presence is guarded separately at the call site, where it also
  * narrows the message type for the classifier input.)
  *
@@ -957,11 +971,12 @@ export function isAdaptiveResearchEligible(args: {
   userPlan: string
   assistantKind: string | null | undefined
   researchPlanGate?: boolean
+  researchQuotaAvailable?: boolean
 }): boolean {
   return (
     args.requestedMode === undefined &&
     !!args.workspaceId &&
-    (args.researchPlanGate === false || args.userPlan !== 'free') &&
+    args.researchQuotaAvailable !== false &&
     args.assistantKind !== 'app'
   )
 }
@@ -2052,6 +2067,11 @@ export async function runSessionResume(
   return { status: 'completed' }
 }
 
+/** A client may narrow chat admission to its own personal conversation. */
+export function mayUsePersonalChatSession(session: Parameters<typeof classifySession>[0] & { userId: string }, userId: string): boolean {
+  return session.userId === userId && isPersonalChat(classifySession(session))
+}
+
 /**
  * Web chat API route.
  * POST /api/chat { message, sessionId?, model? }
@@ -2070,7 +2090,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   router.post('/', async (req, res) => {
     // Inference wiring through the turn kernel's boot registration.
     const turnOptions = withTurnInference(options)
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn, researchActivityId: requestedResearchActivityId } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, sessionAudience: requestedSessionAudience, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn, researchActivityId: requestedResearchActivityId } = req.body as {
       /**
        * A saved research result the member is explicitly following up on
        * (research card). Resolved under the member's own access; an unknown
@@ -2146,6 +2166,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       /** Requesting app-web surface. `presentDocument` is admitted only for
        *  the full Chat operator app, whose client renders its payload. */
       appOrigin?: string
+      /** Narrow this request to an owned personal web conversation. Never changes visibility. */
+      sessionAudience?: 'personal'
       /**
        * Doc-surface anchor: the id of the page open in `apps/app-web`.
        * On a doc assistant it is passed to `injectDocTools` as the
@@ -2220,6 +2242,14 @@ export function chatRoutes(options: WebChatOptions): Router {
        */
       followupChips?: boolean
     }
+    if (requestedSessionAudience !== undefined && requestedSessionAudience !== 'personal') {
+      res.status(400).json({ code: 'invalid_session_audience', error: 'Unsupported session audience constraint.' })
+      return
+    }
+    if (requestedSessionAudience === 'personal' && (!req.userId || !req.authSessionId || req.authVersion === undefined)) {
+      res.status(401).json({ code: 'personal_session_auth_required', error: 'Sign in to start a personal chat.' })
+      return
+    }
     let requestedRoomResponseGroup: RoomResponseGroupRequest | null = null
     let roomResponseGroupInvalid = false
     if (rawRoomResponseGroup !== undefined) {
@@ -2234,11 +2264,12 @@ export function chatRoutes(options: WebChatOptions): Router {
     // turn) sees the replaced text — the original is durable in the artifact.
     let message = rawMessage
     // `requestedMode` semantics:
-    //   - 'research'  → manual on, classifier skipped, downstream uses research budget
-    //   - 'default'   → manual off, classifier skipped (user explicitly opted out)
+    //   - 'research'  → legacy explicit entry, classifier skipped, deep research budget
+    //   - 'default'   → API opt-out, classifier skipped
     //   - undefined   → adaptive: run the research-intent classifier (mig 196 phase)
     //                    and let it decide. Same downstream effect as 'research'.
     let researchMode = requestedMode === 'research'
+    let assessedResearchEffort: ResearchEffort = 'deep'
 
     // Text, ordinary files, or staged recordings may independently start a
     // turn. A recording-only send is the clarification UX after upload.
@@ -2324,6 +2355,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
     try {
       const jwtUserId = (req as { userId?: string }).userId
+      const credentialClaims = jwtUserId ? Object.freeze({userId:jwtUserId,sessionId:req.authSessionId,authVersion:req.authVersion}) : undefined
       const user = await resolveUser(jwtUserId)
       if (!user) {
         sendEvent('error', { error: 'User not found' })
@@ -2479,13 +2511,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform' as const,
       }
 
-      // Adaptive research runs before normal session resolution so a denied
-      // research turn does not create an empty thread. Resolve an EXISTING
-      // thread read-only here only when the classifier will run, authorize it
-      // with the same session gate as the main path, and cache its transcript
-      // for the topic classifier below. New chats correctly have no history.
-      // This is what makes the classifier's "follow-ups are OFF" rule real
-      // (2026-08-09 Snapio valuation-multiple incident).
+      // Eligibility and explicit quota denial precede session creation. Actual
+      // assessment waits for this request's canonical execution and admitted
+      // authored/history query; no owner-read transcript reaches a provider.
       const adaptiveResearchEligible =
         !researchMode &&
         !!message &&
@@ -2495,58 +2523,21 @@ export function chatRoutes(options: WebChatOptions): Router {
           userPlan,
           assistantKind: assistant.kind,
           researchPlanGate: deploymentCapabilities().researchPlanGate,
+          researchQuotaAvailable: !assistant.workspaceId || !deploymentCapabilities().researchPlanGate || userPlan !== 'free' ||
+            (await getWorkspaceResearchUsed(assistant.workspaceId!)) < FREE_RESEARCH_QUOTA,
         })
-      let adaptiveSessionId: string | null = null
-      let adaptiveDbMessages: SessionMessage[] = []
-      let adaptiveRecentConversation: Array<{ role: 'user' | 'assistant'; text: string }> = []
-      if (adaptiveResearchEligible) {
-        let adaptiveSession = requestedSessionId
-          ? await findSessionById(requestedSessionId)
-          : undefined
-        const adaptiveStickyChannelId = resolveStickyChannelId(requestedChannelId, requestedSessionId)
-        if (!adaptiveSession && adaptiveStickyChannelId) {
-          adaptiveSession = await findSessionByChannel({
-            assistantId: assistant.id,
-            userId: user.id,
-            channelType: 'web',
-            channelId: adaptiveStickyChannelId,
-          })
-        }
-        if (
-          adaptiveSession?.assistantId === assistant.id &&
-          !(await gateSessionRead(user.id, adaptiveSession))
-        ) {
-          adaptiveSessionId = adaptiveSession.id
-          adaptiveDbMessages = await getSessionMessages(adaptiveSession.id, { excludeHeld: true })
-          adaptiveRecentConversation = adaptiveDbMessages
-            .filter((m) => m.role === 'user' || m.role === 'assistant')
-            .filter((m) => !(
-              m.role === 'assistant' &&
-              Array.isArray(m.content) &&
-              (m.content as Array<{ type?: string }>).some((block) => block.type === 'tool_use')
-            ))
-            .map((m) => ({
-              role: m.role as 'user' | 'assistant',
-              text: extractPlainText(m.content as Message['content']).trim(),
-            }))
-            .filter((turn) => turn.text.length > 0)
-            .slice(-6)
-        }
-      }
-
       // Adaptive research entry. When the request didn't pin a mode, run a
       // cheap Gemini-Flash-Lite classifier to decide whether this message
       // warrants research mode. If yes, flip `researchMode = true` so the
       // existing quota gate / model upgrade / worker pipeline downstream
-      // kicks in just like manual entry. Gated by `isAdaptiveResearchEligible`:
-      // skipped on free plans, on assistants outside a workspace (research
+      // applies the assessed effort. Gated by `isAdaptiveResearchEligible`:
+      // skipped when free allowance is exhausted, outside a workspace (research
       // requires workspace billing), and on `kind='app'` assistants
       // (doc/feed — research mode strips the very authoring tools they
       // need, so silent auto-entry would break their core job).
       //
-      // The LLM call happens here; usage gets recorded later, once the
-      // session + user message rows exist for attribution. We carry the
-      // classifier result through `adaptiveResearchOverhead`.
+      // Assessment runs below after canonical session and authored-input
+      // admission. Its usage is recorded through `adaptiveResearchOverhead`.
       // Operate-site override (docs/architecture/engine/coordinator-pattern.md
       // → "Adaptive entry and the operate-site override"): a request to open /
       // browse / log into / act on ONE named site or URL must keep the normal
@@ -2559,41 +2550,13 @@ export function chatRoutes(options: WebChatOptions): Router {
       // classifier below ORs in its language-agnostic verdict. It only gates
       // the AUTOMATIC delegation triggers (adaptive entry, the Pro/Max
       // splitter, the Flash standard preflight) — the explicit research
-      // toggle wins, which the `!researchMode` guard encodes.
+      // API override wins, which the `!researchMode` guard encodes.
       let operateSiteIntent = !researchMode && !!message && detectOperateSiteIntent(message)
       let adaptiveResearchOverhead: {
         model: string | null
         usage: TokenUsage | null
         reason: string | null
       } | null = null
-      if (
-        adaptiveResearchEligible &&
-        message
-      ) {
-        const { classifyResearchIntent } = await import('@use-brian/core')
-        const adaptive = await classifyResearchIntent({
-          provider: backgroundProvider,
-          message,
-          model: backgroundModel,
-          recentConversation: adaptiveRecentConversation,
-          decisionRuntime: options.decisionRuntime,
-          workspaceId: assistant.workspaceId ?? undefined,
-        }).catch(() => ({ research: false, operateSite: false, reason: null, usage: null, model: null }))
-        adaptiveResearchOverhead = {
-          model: adaptive.model,
-          usage: adaptive.usage,
-          reason: adaptive.reason,
-        }
-        operateSiteIntent = operateSiteIntent || adaptive.operateSite
-        if (adaptive.research) {
-          researchMode = true
-          // `phase` is a stable, client-localizable code; `message` stays for
-          // non-web consumers and logs. The web client renders a research
-          // banner off `phase` (see chat-experience.tsx `case "status"`).
-          sendEvent('status', { phase: 'research_detected', message: 'Detected deep-research intent…' })
-        }
-      }
-
       // Research-mode quota gate (mig 185_workspace_research_quota).
       //
       // `mode: 'research'` is the brain empty-state's deep-research entry
@@ -2608,11 +2571,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       // tolerant — a counter-write failure can't deny a turn the gate
       // already approved, but it also won't double-count on retry.
       let researchUsedAfter: number | null = null
-      if (researchMode) {
+      const admitResearchQuota = async (): Promise<boolean> => {
         if (!assistant.workspaceId) {
           sendEvent('error', { error: 'Research mode requires a workspace assistant' })
           res.end()
-          return
+          return false
         }
         const used = await getWorkspaceResearchUsed(assistant.workspaceId)
         const researchPlanGate = deploymentCapabilities().researchPlanGate
@@ -2633,7 +2596,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             quota: FREE_RESEARCH_QUOTA,
           })
           res.end()
-          return
+          return false
         }
         researchUsedAfter = await incrementWorkspaceResearchUsed(assistant.workspaceId)
         // Tell the frontend the new count + remaining so the chrome can
@@ -2643,7 +2606,9 @@ export function chatRoutes(options: WebChatOptions): Router {
           quota: FREE_RESEARCH_QUOTA,
           isPaid,
         })
+        return true
       }
+      if (researchMode && !(await admitResearchQuota())) return
 
       // Q20 blocklist (permissions.md §Per-assistant user blocklist): if the
       // inbound author is in this assistant's blocked_user_ids, the assistant
@@ -2743,7 +2708,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         const rawOrigin = typeof (req.body as { appOrigin?: unknown })?.appOrigin === 'string' // session-kind-exempt: request body field, not a session row
           ? (req.body as { appOrigin: string }).appOrigin
           : null
-        const appOrigin = rawOrigin && KNOWN_ORIGINS.has(rawOrigin) ? rawOrigin : null
+        const appOrigin = requestedSessionAudience === 'personal' ? 'chat' : rawOrigin && KNOWN_ORIGINS.has(rawOrigin) ? rawOrigin : null
         const createSession = appOrigin === 'chat' && req.userId && req.authSessionId && req.authVersion !== undefined // session-kind-exempt: the requested surface of a new chat, not a session row
           ? (params: Parameters<typeof findOrCreateSession>[0]) => createPersonalWebSession({ ...params, workspaceId: assistant.workspaceId },
             { actorUserId: req.userId!, authSessionId: req.authSessionId!, authVersion: req.authVersion! })
@@ -2762,6 +2727,17 @@ export function chatRoutes(options: WebChatOptions): Router {
             : {}),
         })
         isNewSession = true
+      }
+
+      if (requestedSessionAudience === 'personal' && !mayUsePersonalChatSession(session, user.id)) {
+        sendEvent('error', { code: 'personal_session_required', error: 'This chat requires your own personal conversation. Start a new chat.' })
+        options.analytics?.logEvent({
+          userId: user.id, assistantId: assistant.id, sessionId: session.id,
+          eventName: 'chat_setup_error', channelType: 'web',
+          metadata: { error_type: sanitize('personal_session_required'), stage: sanitize('session_binding') },
+        })
+        res.end()
+        return
       }
 
       if (
@@ -2962,7 +2938,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           : session,
         identity: {
           kind: 'attended',
-          principal: { kind: 'workspace_member', userId: user.id },
+          principal: { kind: 'workspace_member', userId: user.id, authenticationKind: 'native_session' },
         },
         ownership: assistant.workspaceId
           ? { kind: 'workspace', workspaceId: assistant.workspaceId }
@@ -2975,6 +2951,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           transport: classifySession(session).transport,
         },
         attribution: { billingUserId: user.id },
+        ...(credentialClaims?.userId===user.id&&credentialClaims.sessionId&&credentialClaims.authVersion!==undefined
+          ?{nativeSessionCredential:{userId:credentialClaims.userId,sessionId:credentialClaims.sessionId,authVersion:credentialClaims.authVersion}}
+          :{credentialCurrent:credentialClaims?()=>credentialClaims.userId===user.id
+            ?authSessionStore.validateAccess(credentialClaims):Promise.resolve(false):undefined}),
         sessionAuthority: session,
         ...(officeLane ? officeLaneExecutionBounds(officeLane, user.id, officeLaneDeps) : {}),
       })
@@ -3029,14 +3009,24 @@ export function chatRoutes(options: WebChatOptions): Router {
         userId: user.id,
         sharedAudience: !policyFor(session).context.personalMemory,
       })
-      const currentTurnWrite = () => turnOutputWrite({
-        producer: 'turn:web',
-        accumulator: scopeAccumulator,
-        envelope: inputMessageScope,
+      const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
+        && executionContext.identity.kind === 'attended'
+        && executionContext.identity.principal.kind === 'workspace_member'
+        ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
+      const currentTurnWrite = () => ({
+        ...turnOutputWrite({
+          producer: 'turn:web',
+          accumulator: scopeAccumulator,
+          envelope: inputMessageScope,
+        }),
+        ...(nativeTranscriptAuthority ? { authority: nativeTranscriptAuthority } : {}),
       })
-      const authorizeDeliveryAudience = createDeliveryAudienceAuthorizer()
+      const authorizeDeliveryAudience = nativeTranscriptAuthority
+        ? createAttendedDeliveryAudienceAuthorizer(executionContext)
+        : createDeliveryAudienceAuthorizer()
       const assertDeliveryAudience = (): Promise<void> => turnTiming.time('audience_check', async () => {
-        await authority.assertCurrent()
+        // The native authorizer owns the same original lease at entry and return.
+        if (!nativeTranscriptAuthority) await authority.assertCurrent()
         const decision = await authorizeDeliveryAudience({
           workspaceId: assistant.workspaceId ?? '',
           assistantId: assistant.id,
@@ -3959,19 +3949,69 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
+      // Authored input precedes generated annotation. The current typed query
+      // binds both this row and the historical classifier/reply inputs.
+      const earlyStoredUserMsg = nativeTranscriptAuthority
+        ? prePersistedUserMsg ?? await addSessionMessage({
+            sessionId: session.id,
+            role: 'user',
+            content: userContentBlocks.length > 0 ? userContentBlocks : [{ type: 'text', text: userMessageText }],
+            senderUserId: user.id,
+            scope: inputMessageScope,
+          })
+        : undefined
+      // Assess after the original canonical invocation and authored input exist.
+      // Quota races retain this real request and its denial in the same thread.
+      if (
+        adaptiveResearchEligible &&
+        message
+      ) {
+        if (!nativeTranscriptAuthority || !earlyStoredUserMsg) {
+          throw Object.assign(new Error('The assessment context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+        }
+        const adaptive = await classifyAttendedResearchMessage({
+          authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
+          provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+        })
+        adaptiveResearchOverhead = {
+          model: adaptive.model,
+          usage: adaptive.usage,
+          reason: adaptive.reason,
+        }
+        operateSiteIntent = operateSiteIntent || adaptive.operateSite
+        if (adaptive.research) {
+          if (!(await authority.execute(admitResearchQuota))) return
+          await assertDeliveryAudience()
+          researchMode = true
+          assessedResearchEffort = 'effort' in adaptive ? adaptive.effort ?? 'standard' : 'standard'
+          // `phase` is a stable, client-localizable code; `message` stays for
+          // non-web consumers and logs. The web client renders a research
+          // banner off `phase` (see chat-experience.tsx `case "status"`).
+          sendEvent('status', { phase: 'research_detected', message: 'Detected deep-research intent…' })
+        }
+      }
+
+      const nativeClassification = nativeTranscriptAuthority && earlyStoredUserMsg
+        ? await classifyAttendedSessionMessage({
+            authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
+            provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+            reply: { channelType: 'web', replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
+          })
+        : undefined
+
       // ── Reply resolution + topic classification ────────────────
       // Resolve the replied-to message text (if any) and classify the
       // current turn's topic. Classifier input: recent user turns, known
       // topics in the session, the reply target's text as a strong prior.
-      const replyResolved = await resolveReplyText({
+      const replyResolved = nativeClassification ? nativeClassification.reply : await resolveReplyText({
         channelType: 'web',
         replyToMessageId: replyTo?.id ?? null,
         session,
         clientSnippet: replyTo?.text,
       })
 
-      const preExistingDbMessages = adaptiveSessionId === session.id
-        ? adaptiveDbMessages
+      const preExistingDbMessages = nativeClassification && earlyStoredUserMsg
+        ? nativeClassification.history.filter(row => row.sequenceNum < earlyStoredUserMsg.sequenceNum)
         : await getSessionMessages(session.id, { excludeHeld: true })
       const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
         .filter((m) => m.role === 'user' && Array.isArray(m.content))
@@ -3987,27 +4027,29 @@ export function chatRoutes(options: WebChatOptions): Router {
         })
         .filter((t) => t.text.length > 0)
 
-      const knownTopics = await getSessionTopicLabels(session.id, 20)
+      const knownTopics = nativeClassification ? [] : await getSessionTopicLabels(session.id, 20)
 
-      let classification: TopicClassification | null = null
-      try {
-        classification = await classifyTopic({
-          provider: backgroundProvider,
-          // Background lane — a per-turn classifier is exactly the invisible
-          // work cost-and-pricing.md → "Standard-tier routing" pins to Flash
-          // Lite (its sibling classifiers already do). Had drifted onto the
-          // Flash 3 chat alias at 2x the rate.
-          model: backgroundModel,
-          recentUserTurns,
-          replyToText: replyResolved?.text ?? null,
-          currentMessage: userMessageText,
-          knownTopicsThisSession: knownTopics,
-          decisionRuntime: options.decisionRuntime,
-          workspaceId: assistant.workspaceId ?? undefined,
-          runId: `memory-topic-${session.id}-${Date.now()}`,
-        })
-      } catch (err) {
-        console.error('[chat] topic classifier failed:', err)
+      let classification: TopicClassification | null = nativeClassification?.classification ?? null
+      if (!nativeClassification) {
+        try {
+          classification = await classifyTopic({
+            provider: backgroundProvider,
+            // Background lane — a per-turn classifier is exactly the invisible
+            // work cost-and-pricing.md → "Standard-tier routing" pins to Flash
+            // Lite (its sibling classifiers already do). Had drifted onto the
+            // Flash 3 chat alias at 2x the rate.
+            model: backgroundModel,
+            recentUserTurns,
+            replyToText: replyResolved?.text ?? null,
+            currentMessage: userMessageText,
+            knownTopicsThisSession: knownTopics,
+            decisionRuntime: options.decisionRuntime,
+            workspaceId: assistant.workspaceId ?? undefined,
+            runId: `memory-topic-${session.id}-${Date.now()}`,
+          })
+        } catch (err) {
+          console.error('[chat] topic classifier failed:', err)
+        }
       }
 
       // Execution-plan lifecycle (anti-leak). Reuse the topic-classifier
@@ -4046,7 +4088,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // waiting for the slot — reuse it instead of inserting twice.
       let researchActivity: ResearchActivity | null = null
       let researchObserver: ReturnType<typeof createResearchTurnObserver> | null = null
-      const storedUserMsg = prePersistedUserMsg ?? await addSessionMessage({
+      const storedUserMsg = earlyStoredUserMsg ?? prePersistedUserMsg ?? await addSessionMessage({
         sessionId: session.id,
         role: 'user',
         content: userContentBlocks.length > 0
@@ -4096,7 +4138,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             workspaceId: assistant.workspaceId, sessionId: session.id, requestMessageId: storedUserMsg.id,
             actorUserId: user.id, assistantId: assistant.id, projectId: session.contextProjectId ?? null,
             entry: requestedMode === 'research' ? 'explicit' : 'adaptive',
-            runtime: { surface: 'web', assistantKind: assistant.kind, plan: userPlan ?? null },
+            runtime: { surface: 'web', assistantKind: assistant.kind, plan: userPlan ?? null, effort: assessedResearchEffort },
             sensitivity: inputMessageScope?.sensitivity ?? null,
             compartments: inputMessageScope?.compartments ?? null,
           })
@@ -4264,10 +4306,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       // "Provider signatures".
       // `fromSequence` skips rows already compacted into the most recent
       // boundary; null (never compacted) loads full history.
-      const dbMessages = await getSessionMessages(session.id, {
-        fromSequence: session.compactBoundarySequence,
-        excludeHeld: true,
-      })
+      const dbMessages = nativeTranscriptAuthority
+        ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, session.compactBoundarySequence)
+        : await getSessionMessages(session.id, {
+            fromSequence: session.compactBoundarySequence,
+            excludeHeld: true,
+          })
       noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
       const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
@@ -4337,6 +4381,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // loop.
       await assertDeliveryAudience()
       const compactionResult = await runProactiveCompaction({
+        modelContext: { execution: executionContext, accumulator: scopeAccumulator },
         sessionMessages: dbMessages,
         timezone: user.timezone ?? 'UTC',
         senderNames: sharedSenderNames,
@@ -4453,11 +4498,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       turnTiming.mark('admission')
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-        options.memoryStore.getIdentity(viewerCtx),
-        options.memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP),
+        options.memoryStore.getIdentity(viewerCtx,nativeTranscriptAuthority),
+        options.memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP,nativeTranscriptAuthority),
         getPreferredChannel(assistant.id, user.id),
         getSelfEntityId(viewerCtx),
       ])
+      noteAutomaticScopeEvidence(scopeAccumulator,[identityMemories,...identityMemories])
       const soul = soulContext.content
       scopeAccumulator.note(soulContext.evidence)
 
@@ -4485,8 +4531,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           entityLinks: options.entityLinksStore,
           candidates: options.brainCandidateStore,
         }
-        const matchMemories = rankedIndex.rows.map((m) => ({ id: m.id, summary: m.summary }))
-        void runLocalMatchCheck(matchMemories, matchDeps).catch((err) => {
+        const matchMemories = rankedIndex.rows.filter(m=>!boundScopeSources(m).some(source=>source.resourceKind==='application_field'||source.resourceKind==='external_source')).map((m) => ({ id: m.id, summary: m.summary }))
+        if(matchMemories.length)void runLocalMatchCheck(matchMemories, matchDeps).catch((err) => {
           console.warn(
             `[chat/retrieval-match] check failed for user ${user.id}: ${
               err instanceof Error ? err.message : String(err)
@@ -4507,7 +4553,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (assistant.workspaceId) {
         ;[workspaceIdentityMemories, teamMemoryIndex, teamVoiceRules, workspaceIdentity] = await Promise.all([
           options.memoryStore.getWorkspaceIdentity(viewerCtx),
-          options.memoryStore.getWorkspaceIndex(viewerCtx),
+          options.memoryStore.getWorkspaceIndex(viewerCtx,undefined,nativeTranscriptAuthority),
           options.memoryStore.getWorkspaceMemoriesByCategory(viewerCtx, 'voice'),
           getWorkspaceIdentity(assistant.workspaceId),
         ])
@@ -4525,6 +4571,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         feedTurnContext.learningCoverage = feedPromptContext?.dimensions.memory.coverage ?? { state: 'failed', eligible: 0, retrieved: 0, reviewed: 0, limits: ['source_read_failed'] }
       }
 
+      const voiceTitle = nativeTranscriptAuthority && classifySession(session).anchor.kind === 'feed_draft'
+        ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
+      if(voiceTitle)await assertSourceModelInputAuthority({...executionToolContext(executionContext,{appId:'native-session-voice-title'}),scopeAccumulator})
       const memoryContext = buildMemoryContext({
         soul,
         identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
@@ -4545,7 +4594,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // platform's rules. Tuning chat / ordinary sessions pass null and
         // see every rule, platform-labelled.
         voiceTargetPlatform:
-          classifySession(session).anchor.kind === 'feed_draft' ? voicePlatformFromDraftTitle(session.title) : null,
+          classifySession(session).anchor.kind === 'feed_draft' ? voicePlatformFromDraftTitle(voiceTitle?.title) : null,
         teamPurpose,
         assistantName: assistant.name,
         selfEntityId,
@@ -4693,6 +4742,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (options.episodicStore && classification) {
         try {
           episodicContext = await fetchEpisodicContext({
+            authority: { execution: executionContext, accumulator: scopeAccumulator },
             store: options.episodicStore,
             sessionId: session.id,
             classification,
@@ -4709,6 +4759,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (options.sessionStateStore) {
         try {
           sessionStateBlock = await buildSessionStateBlock({
+            authority: { execution: executionContext, accumulator: scopeAccumulator },
             store: options.sessionStateStore,
             sessionId: session.id,
           })
@@ -5556,6 +5607,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const sensitivityAccumulator = new SensitivityAccumulator()
       const compartmentAccumulator = new CompartmentAccumulator()
       noteAutomaticScopeEvidence(scopeAccumulator, [
+        rankedIndex.rows,teamMemoryIndex,
         ...identityMemories,
         ...rankedIndex.rows,
         ...workspaceIdentityMemories,
@@ -5904,6 +5956,8 @@ export function chatRoutes(options: WebChatOptions): Router {
         allowKnowledgeWrites: true,
         knowledgeCaptureText: message ?? '',
         contextScope: turnScope,
+        executionContext,
+        scopeAccumulator,
         // On-demand introspection lane (ability audit §6-c/d): workspace
         // PRIMARY assistants only — these read workspace-operational state
         // (approvals / scheduled jobs / research runs / session history).
@@ -6314,15 +6368,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         // and durable rehydrate. Explicit custom selectors still ride
         // workerRuntime and remain pinned authoritatively.
         options.workerManager?.setResearchModel(logicalModel, session.id)
-        // Cap concurrent workers at 5 for the research session. Lowered
-        // from 10 after sustained 4GB OOM crashes — 10 concurrent worker
-        // queryLoops at HIGH thinking + their statelessHistory growth +
-        // their Gemini fetch buffers compounded faster than V8 could GC.
-        // 5 halves the parallel memory pressure while still giving the
-        // coordinator real fan-out. The coordinator can refill the pool
-        // after Phase 4b drains between waves, so total worker output
-        // across multi-wave is comparable to the 10-cap setup.
-        options.workerManager?.setMaxConcurrent(5, session.id)
+        // The assessment bounds parallelism and each worker's effort. Five
+        // remains the absolute deep-research concurrency ceiling for memory.
+        options.workerManager?.setResearchEffort(assessedResearchEffort, session.id)
+        options.workerManager?.setMaxConcurrent(RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxConcurrent, session.id)
       }
 
       // ── Pre-flight: automatic parallel research ──────────────
@@ -6697,7 +6746,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // workers returning snippet-only summaries and the coordinator concluding
       // "no info found" before workers had real urlReader content.
       const coordinatorBaseAddendum = COORDINATOR_BASE_ADDENDUM
-      const coordinatorResearchAddendum = COORDINATOR_RESEARCH_ADDENDUM
+      const coordinatorResearchAddendum = `${COORDINATOR_RESEARCH_ADDENDUM}\n\n${researchEffortInstruction(assessedResearchEffort)}`
       // Coordinator addenda are mode-stable and stay on the system prompt.
       // Preflight findings are hidden runtime metadata, so they also stay in
       // the trusted channel inside the private-runtime suffix.
@@ -6935,46 +6984,51 @@ export function chatRoutes(options: WebChatOptions): Router {
           attachments: typeof outboundAttachments
         }
         const savedTurns: SavedTurn[] = []
-        await authority.execute(async () => {
-          const tx = await getPool().connect()
-          try {
-            await tx.query('BEGIN')
-            for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
-              const turn = pendingAssistantTurns[turnIdx]
-              // Pure empty response (safety filter / MAX_TOKENS with zero
-              // content). Nothing to persist for this turn — the loop just
-              // exits without appending a blank message.
-              if (turn.content.length === 0) continue
+        const batchWrite = currentTurnWrite()
+        const publish = async (tx: PoolClient) => {
+          const nativeRows: Array<Parameters<typeof publishNativeSessionMessageBatch>[0]['messages'][number]> = []
+          const nativeSaved = new Map<number, { isLast: boolean; attachments: typeof outboundAttachments }>()
+          for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
+            const turn = pendingAssistantTurns[turnIdx]
+            // Pure empty response (safety filter / MAX_TOKENS with zero
+            // content). Nothing to persist for this turn — the loop just
+            // exits without appending a blank message.
+            if (turn.content.length === 0) continue
 
-              // `app` assistants (doc / feed) author their own soul and are
-              // never served the FOLLOW_UP_QUESTIONS_ADDENDUM — but the model
-              // can still *volunteer* a `<followup>[...]</followup>` chip tag,
-              // and once it's persisted raw it (1) renders as literal text on
-              // these surfaces and (2) re-teaches itself via history replay on
-              // the next turn. Strip it from text blocks before it lands in
-              // session_messages. See
-              // docs/architecture/features/follow-up-questions.md → "app surfaces".
-              //
-              // Same defense for the confabulated `<comment-thread-reply pageId=…>`
-              // wrapper a doc assistant sometimes invents around a comment-thread
-              // reply (no prompt defines it) — left raw it renders as tag soup
-              // and leaks an internal page UUID on the comment surfaces.
-              // See docs/architecture/features/doc-comments.md → "Reply routing".
-              const content =
-                assistant.kind === 'app'
-                  ? turn.content
-                      .map((block) =>
-                        block.type === 'text'
-                          ? { ...block, text: stripCommentThreadReplyTag(stripFollowUps(block.text)) }
-                          : block,
-                      )
-                      .filter((block) => !(block.type === 'text' && block.text.length === 0))
-                  : turn.content
-              // The turn was nothing but a chip tag (no real answer / tool calls).
-              if (content.length === 0) continue
+            // `app` assistants (doc / feed) author their own soul and are
+            // never served the FOLLOW_UP_QUESTIONS_ADDENDUM — but the model
+            // can still *volunteer* a `<followup>[...]</followup>` chip tag,
+            // and once it's persisted raw it (1) renders as literal text on
+            // these surfaces and (2) re-teaches itself via history replay on
+            // the next turn. Strip it from text blocks before it lands in
+            // session_messages. See
+            // docs/architecture/features/follow-up-questions.md → "app surfaces".
+            //
+            // Same defense for the confabulated `<comment-thread-reply pageId=…>`
+            // wrapper a doc assistant sometimes invents around a comment-thread
+            // reply (no prompt defines it) — left raw it renders as tag soup
+            // and leaks an internal page UUID on the comment surfaces.
+            // See docs/architecture/features/doc-comments.md → "Reply routing".
+            const content =
+              assistant.kind === 'app'
+                ? turn.content
+                    .map((block) =>
+                      block.type === 'text'
+                        ? { ...block, text: stripCommentThreadReplyTag(stripFollowUps(block.text)) }
+                        : block,
+                    )
+                    .filter((block) => !(block.type === 'text' && block.text.length === 0))
+                : turn.content
+            // The turn was nothing but a chip tag (no real answer / tool calls).
+            if (content.length === 0) continue
 
-              const isLast = turnIdx === lastNonEmptyIdx
-              const attachments = isLast && outboundAttachments.length > 0 ? outboundAttachments : []
+            const isLast = turnIdx === lastNonEmptyIdx
+            const attachments = isLast && outboundAttachments.length > 0 ? outboundAttachments : []
+            if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
+              nativeSaved.set(nativeRows.length, { isLast, attachments })
+              nativeRows.push({role:'assistant',content,senderAssistantId:assistant.id,
+                attachments:attachments.length>0?attachments:undefined})
+            } else {
               const storedAssistantMsg = await addSessionMessage({
                 sessionId: session.id,
                 role: 'assistant',
@@ -6984,27 +7038,47 @@ export function chatRoutes(options: WebChatOptions): Router {
                 // foreign-voice assembly labels read it.
                 senderAssistantId: assistant.id,
                 attachments: attachments.length > 0 ? attachments : undefined,
-                ...currentTurnWrite(),
+                ...batchWrite,
               }, tx)
               savedTurns.push({ stored: storedAssistantMsg, isLast, attachments })
-
-              // Synthesise stubs for any tool_use in this turn's content that
-              // the executor failed to produce a real result for.
-              const missing = synthesizeMissingToolResults(
-                turn.content,
-                turn.toolResults,
-                synthesisReason,
-              )
-              const allResults = [...turn.toolResults, ...missing]
-              if (allResults.length > 0) {
-                await addSessionMessage({
-                  sessionId: session.id,
-                  role: 'user',
-                  content: allResults,
-                  ...currentTurnWrite(),
-                }, tx)
-              }
             }
+
+            // Synthesise stubs for any tool_use in this turn's content that
+            // the executor failed to produce a real result for.
+            const missing = synthesizeMissingToolResults(
+              turn.content,
+              turn.toolResults,
+              synthesisReason,
+            )
+            const allResults = [...turn.toolResults, ...missing]
+            if (allResults.length > 0) {
+              if (nativeTranscriptAuthority && 'derivation' in batchWrite) nativeRows.push({role:'user',content:allResults})
+              else await addSessionMessage({
+                sessionId: session.id,
+                role: 'user',
+                content: allResults,
+                ...batchWrite,
+              }, tx)
+            }
+          }
+          if (nativeRows.length && nativeTranscriptAuthority && 'derivation' in batchWrite) {
+            const rows=await publishNativeSessionMessageBatch({sessionId:session.id,messages:nativeRows,
+              derivation:batchWrite.derivation,derivationTarget:batchWrite.derivationTarget,authority:nativeTranscriptAuthority},tx)
+            for (const [index,stored] of rows.entries()) {
+              const metadata=nativeSaved.get(index)
+              if(metadata)savedTurns.push({stored,...metadata})
+            }
+          }
+        }
+        await authority.execute(async () => {
+          if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
+            return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish,
+              turnLeaseToken ? abortController.signal.aborted ? { stoppedTurnToken: turnLeaseToken } : { turnToken: turnLeaseToken } : undefined)
+          }
+          const tx = await getPool().connect()
+          try {
+            await tx.query('BEGIN')
+            await publish(tx)
             await tx.query('COMMIT')
           } catch (error) {
             await tx.query('ROLLBACK').catch(() => {})
@@ -7398,7 +7472,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             },
           },
           channelType: session.channelType,
-          compactModel: 'gemini-flash',
+          compactModel: 'gemini-3.6-flash-pro',
           confirmationResolver,
           confirmationTimeoutMs: 86_400_000, // 24h for web
           // Coordinator mode: the model is told "Do NOT write any response text
@@ -7434,7 +7508,9 @@ export function chatRoutes(options: WebChatOptions): Router {
           // user confirmed the estimate at exactly this depth.
           ...(meteredTurn
             ? { maxTurns: meteredTurn.toolRounds, maxToolCalls: meteredTurn.toolRounds }
-            : chatTierBudget({ model: logicalModel, researchMode }) ?? {}),
+            : researchMode
+              ? { maxTurns: RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxTurns, maxToolCalls: RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxToolCalls }
+              : chatTierBudget({ model: logicalModel, researchMode }) ?? {}),
           // Execution-plan completeness gate: when the session has an active
           // plan with open steps, a tool-less turn keeps working them instead
           // of stalling half-done; budget exhaustion fires one model-generated
@@ -7468,7 +7544,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             ? { groundingGate: { userMessage: message, draftDelivered: true } }
             : {}),
           ...(researchMode ? {
-            workerDrainPrompt: createResearchWorkerDrainPrompt(),
+            workerDrainPrompt: createResearchWorkerDrainPrompt(RESEARCH_EFFORT_BUDGETS[assessedResearchEffort].maxWaves),
           } : {}),
           // Opt into askQuestion suspend behavior for workspace-scoped
           // chats. The engine only honors the suspend branch when this
@@ -7484,8 +7560,44 @@ export function chatRoutes(options: WebChatOptions): Router {
           // section 6). See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
           },
-          sink: { kind: 'sse', onEvent: async (event) => {
-          await assertDeliveryAudience()
+          sink: { kind: 'sse', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async () => {
+            await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
+            if (!options.sessionStateStore) return
+            try {
+              const result = await runTurnSessionStateDiff({
+                authority: { execution: executionContext, accumulator: scopeAccumulator },
+                provider: backgroundProvider, model: backgroundModel, store: options.sessionStateStore,
+                userMessage: bindScopeSources<Message>({ role: 'user', content: userMessageText }, storedUserSource ? [storedUserSource] : []),
+                assistantTurns: pendingAssistantTurns,
+              })
+              options.analytics?.logEvent({
+                userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
+                channelType: 'web',
+                metadata: {
+                  upserts: result.upserts,
+                  resolves: result.resolves,
+                  failed: Boolean(result.errorMessage),
+                },
+              })
+              await authority.execute(() => recordOverheadUsage({
+                usageStore: options.usageStore,
+                userId: user.id,
+                assistantId: assistant.id,
+                sessionId: session.id,
+                userMessageId: storedUserMsg.id,
+                model: result.model,
+                usage: result.usage,
+                source: 'overhead:session-state-diff',
+                triggerKey: 'session_state_diff',
+                ...backgroundUsageAttribution,
+              }))
+            } catch (err) {
+              if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
+              console.debug('[chat] session-state diff unavailable')
+            }
+          }, onEvent: async (event) => {
+          if (!nativeTranscriptAuthority) await assertDeliveryAudience()
           researchObserver?.observe(event)
 
           if (event.type === 'text_delta') {
@@ -8263,65 +8375,6 @@ export function chatRoutes(options: WebChatOptions): Router {
           }
         }
 
-        // Session-state diff pass. Watches
-        // the last exchange for commitments the model forgot to track with
-        // `trackCommitment`, and auto-resolves ones it forgot to close. See
-        // docs/architecture/context-engine/session-state.md.
-        if (options.sessionStateStore) {
-          const stateStore = options.sessionStateStore
-          const diffRecentTurns: Message[] = []
-          // Last user message + last assistant turn's text — enough to
-          // infer commitment deltas without ballooning the Standard-tier call.
-          const assistantLastText = pendingAssistantTurns
-            .flatMap((t) => t.content)
-            .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
-            .map((b) => b.text)
-            .join('\n')
-          if (assistantLastText) {
-            diffRecentTurns.push(
-              { role: 'user', content: userMessageText },
-              { role: 'assistant', content: assistantLastText },
-            )
-          }
-          try {
-            const open = await authority.execute(() => stateStore.listOpenBySession(session.id))
-            const result = await authority.execute(() => runSessionStateDiff({
-                provider: backgroundProvider,
-                model: backgroundModel,
-                sessionId: session.id,
-                userId: user.id,
-                assistantId: assistant.id,
-                store: stateStore,
-                recentTurns: diffRecentTurns,
-                openCommitments: open,
-              }))
-            options.analytics?.logEvent({
-              userId: user.id, assistantId: assistant.id, sessionId: session.id,
-              eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
-              channelType: 'web',
-              metadata: {
-                upserts: result.upserts,
-                resolves: result.resolves,
-                error: result.errorMessage ? sanitize(result.errorMessage) : undefined,
-              },
-            })
-            await authority.execute(() => recordOverheadUsage({
-              usageStore: options.usageStore,
-              userId: user.id,
-              assistantId: assistant.id,
-              sessionId: session.id,
-              userMessageId: storedUserMsg.id,
-              model: result.model,
-              usage: result.usage,
-              source: 'overhead:session-state-diff',
-              triggerKey: 'session_state_diff',
-              ...backgroundUsageAttribution,
-            }))
-          } catch (err) {
-            if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
-            console.debug('[chat] session-state diff failed:', err)
-          }
-        }
 
         // Memory nudge: judge utility of any getMemory calls.
         // Records usage as `overhead:nudge` once the judge call returns.
@@ -8619,14 +8672,14 @@ export function chatRoutes(options: WebChatOptions): Router {
       // title as an auto-generated placeholder to replace (isPlaceholderTitle —
       // open default false), or every ~10 human turns. The NULL check is robust
       // against tool-use inflating the message count.
-      const needsFirstTitle = !session.title || isPlaceholderTitle(session.title)
+      const currentTitle = nativeTranscriptAuthority ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
+      const needsFirstTitle = !currentTitle || isPlaceholderTitle(currentTitle.title)
       const isNotification = classifySession(session).anchor.kind === 'inbox'
-      let shouldTitle = needsFirstTitle && !isNotification
-      if (!shouldTitle && !isNotification) {
-        const msgCount = await authority.execute(() => countSessionTurns(session.id))
-        // Count only 'user' role messages that are actual human messages
-        // (tool_result messages are also role=user, but this is a rough heuristic)
-        const turnCount = Math.floor(msgCount / 2)
+      let shouldTitle = needsFirstTitle && !isNotification && !currentTitle?.manual
+      if (!shouldTitle && !isNotification && !currentTitle?.manual) {
+        const turnCount = nativeTranscriptAuthority
+          ? await attendedSessionTurnCount(nativeTranscriptAuthority,dbMessages)
+          : Math.floor(await authority.execute(() => countSessionTurns(session.id)) / 2)
         shouldTitle = turnCount > 1 && turnCount % 10 === 0
       }
       if (shouldTitle) {
@@ -8636,14 +8689,15 @@ export function chatRoutes(options: WebChatOptions): Router {
         const autoTitleModel = backgroundModel
         const autoTitle = (async () => {
           try {
-            // Reload messages from DB so we get the assistant response that was
-            // just flushed — the in-memory `messages` array is stale.
-            const freshDbMessages = await authority.execute(() => getSessionMessages(session.id, { limit: 10, excludeHeld: true }))
-            const freshMessages: Message[] = freshDbMessages.map((m) => ({
-              role: m.role as 'user' | 'assistant' | 'system',
-              content: m.content as Message['content'],
-            }))
-            const titleResult = await authority.execute(() => generateTitle(backgroundProvider, freshMessages, autoTitleModel))
+            const titleResult = nativeTranscriptAuthority
+              ? await generateAttendedSessionTitle({authority:nativeTranscriptAuthority,provider:backgroundProvider,model:autoTitleModel,channelPrefix:getTitleChannelPrefix})
+              : await (async()=>{
+                const freshDbMessages = await authority.execute(() => getSessionMessages(session.id, { limit: 10, excludeHeld: true }))
+                const freshMessages: Message[] = freshDbMessages.map((m) => ({
+                  role: m.role as 'user' | 'assistant' | 'system', content: m.content as Message['content'],
+                }))
+                return {...await authority.execute(() => generateTitle(backgroundProvider, freshMessages, autoTitleModel)),written:false}
+              })()
             // generateTitle returns `title: null` when it can't produce a
             // meaningful title (empty excerpt, model returned blank). Keep the
             // existing title in that case — overwriting with a generic fallback
@@ -8664,16 +8718,11 @@ export function chatRoutes(options: WebChatOptions): Router {
               })
               return
             }
-            // Preserve any channel prefix the host kept on the title (e.g. a
-            // bracketed channel discriminator) so downstream filters keep
-            // working after auto-title rewrites it. getTitleChannelPrefix
-            // returns null in the open build. We only re-prefix when the model
-            // didn't already include one.
-            const channelPrefix = getTitleChannelPrefix(session.title)
-            const finalTitle = channelPrefix && !titleResult.title.startsWith('[')
-              ? `${channelPrefix} ${titleResult.title}`
-              : titleResult.title
-            const written = await authority.execute(() => updateSessionTitle(session.id, finalTitle))
+            // The native generator has already committed its current, scoped
+            // title. Other constructors retain their separately tracked path.
+            const finalTitle = titleResult.title
+            const written = nativeTranscriptAuthority ? titleResult.written
+              : await authority.execute(() => updateSessionTitle(session.id, finalTitle))
             if (written && !res.writableEnded) {
               await assertDeliveryAudience()
               sendEvent('title_update', { sessionId: session.id, title: finalTitle })

@@ -28,6 +28,13 @@ vi.mock('../client.js', () => ({
   rollbackAndRelease: vi.fn(),
 }))
 
+// This authorship fixture takes the fresh-company branch after canonical
+// consumed-field candidate admission returns no matching visible company.
+vi.mock('../crm-reader.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../crm-reader.js')>(),
+  queryLegacyCanonicalCrmSql: vi.fn(async () => ({ rows: [], rowCount: 0 })),
+}))
+
 vi.mock('../entities-store.js', () => ({
   createEntity: vi.fn(),
   getEntityById: vi.fn(),

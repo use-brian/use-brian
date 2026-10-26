@@ -104,6 +104,102 @@ describe('[COMP:api/channel-user-store] provider email resolution', () => {
       ['feishu', 'ou_sender', 'assistant-1'],
     )
   })
+
+  it.each(['channel', 'email'])('rematches a corrected email immediately instead of retaining a cached %s account', async authProvider => {
+    const previous = { id: 'previous-user', authProvider, email: 'outdated@company.example' }
+    const member = { id: 'member-1', authProvider: 'email', email: 'member@company.example' }
+    const cached = {
+      provider: 'feishu', providerUserId: 'ou_sender', assistantId: 'assistant-1',
+      userId: previous.id, email: previous.email, displayName: 'Previous Name',
+      cachedAt: new Date(),
+    }
+    const identityStore = {
+      resolve: vi.fn(async () => cached),
+      cache: vi.fn(async () => {}),
+      invalidateForAssistant: vi.fn(async () => {}),
+      sweepExpired: vi.fn(async () => 0),
+      pruneAnonymousShadowUsers: vi.fn(async () => 0),
+    }
+    vi.mocked(query).mockResolvedValue({ rows: [], rowCount: 0 } as never)
+    vi.mocked(findUserByEmail).mockResolvedValueOnce(member as never)
+    const fetchProfile = vi.fn(async () => ({ email: member.email, displayName: 'Member' }))
+
+    const resolved = await resolveChannelUser(identityStore, 'feishu', 'ou_sender', 'assistant-1', fetchProfile)
+
+    expect(identityStore.resolve).not.toHaveBeenCalled()
+    expect(fetchProfile).toHaveBeenCalledOnce()
+    expect(resolved).toEqual({ user: member, isIdentified: true })
+    expect(mergeShadowUser).toHaveBeenCalledWith(
+      member.id, 'ou_sender', 'feishu', expect.objectContaining({ reason: 'email-discovery' }),
+    )
+    expect(identityStore.cache).toHaveBeenCalledWith(expect.objectContaining({
+      userId: member.id, email: member.email, displayName: 'Member',
+    }))
+    expect(query).not.toHaveBeenCalledWith(expect.stringMatching(/INSERT INTO workspace_members/), expect.anything())
+  })
+
+  it.each([
+    { provider: 'slack', authProvider: 'email', ageMinutes: 60 },
+    { provider: 'telegram', authProvider: 'channel', ageMinutes: 4 },
+    { provider: 'slack', authProvider: 'channel', ageMinutes: 60 },
+  ])('keeps a warm $provider/$authProvider cache aged $ageMinutes minutes', async ({ provider, authProvider, ageMinutes }) => {
+    const user = { id: 'cached-user', authProvider, email: 'member@company.example' }
+    const identityStore = {
+      resolve: vi.fn(async () => ({
+        provider, providerUserId: 'sender-1', assistantId: 'assistant-1', userId: user.id,
+        email: user.email, displayName: 'Member', cachedAt: new Date(Date.now() - ageMinutes * 60 * 1000),
+      })),
+      cache: vi.fn(async () => {}),
+      invalidateForAssistant: vi.fn(async () => {}),
+      sweepExpired: vi.fn(async () => 0),
+      pruneAnonymousShadowUsers: vi.fn(async () => 0),
+    }
+    vi.mocked(query).mockResolvedValueOnce({ rows: [user] } as never)
+    const fetchProfile = vi.fn(async () => ({ email: 'different@company.example', displayName: 'Other' }))
+
+    expect(await resolveChannelUser(identityStore, provider, 'sender-1', 'assistant-1', fetchProfile))
+      .toEqual({ user, isIdentified: true })
+    expect(fetchProfile).not.toHaveBeenCalled()
+    expect(identityStore.cache).not.toHaveBeenCalled()
+    expect(mergeShadowUser).not.toHaveBeenCalled()
+  })
+
+  it('does not authenticate a cached registered account when the fresh Feishu profile has no email', async () => {
+    const shadow = {
+      id: 'anonymous-shadow', authProvider: 'channel', authProviderId: 'feishu:ou_sender', name: 'Sender',
+    }
+    const identityStore = {
+      resolve: vi.fn(async () => ({ userId: 'registered-account', email: 'old@company.example' })),
+      cache: vi.fn(async () => {}),
+    } as unknown as ReturnType<typeof createDbChannelUserStore>
+    vi.mocked(query).mockResolvedValue({ rows: [shadow], rowCount: 1 } as never)
+
+    const resolved = await resolveChannelUser(identityStore, 'feishu', 'ou_sender', 'assistant-1',
+      async () => ({ email: null, displayName: 'Sender' }))
+
+    expect(resolved).toEqual({ user: shadow, isIdentified: false })
+    expect(identityStore.resolve).not.toHaveBeenCalled()
+    expect(findUserByEmail).not.toHaveBeenCalled()
+    expect(identityStore.cache).toHaveBeenCalledWith(expect.objectContaining({
+      userId: shadow.id, email: null, displayName: 'Sender',
+    }))
+  })
+
+  it('waits for canonical identity healing before recording and returning the fresh Feishu resolution', async () => {
+    const member = { id: 'member-1', email: 'member@company.example' }
+    vi.mocked(query).mockResolvedValue({ rows: [], rowCount: 0 } as never)
+    vi.mocked(findUserByEmail).mockResolvedValueOnce(member as never)
+    let finishMerge!: () => void
+    vi.mocked(mergeShadowUser).mockImplementationOnce(() => new Promise<void>(resolve => { finishMerge = resolve }) as never)
+    const identityStore = { cache: vi.fn(async () => {}) } as unknown as ReturnType<typeof createDbChannelUserStore>
+    const pending = resolveChannelUser(identityStore, 'feishu', 'ou_sender', 'assistant-1',
+      async () => ({ email: member.email, displayName: 'Member' }))
+    await vi.waitFor(() => expect(mergeShadowUser).toHaveBeenCalledOnce())
+    expect(identityStore.cache).not.toHaveBeenCalled()
+    finishMerge()
+    expect(await pending).toEqual({ user: member, isIdentified: true })
+    expect(identityStore.cache).toHaveBeenCalledOnce()
+  })
 })
 
 describe('[COMP:api/channel-user-store] ensureAssistantMember', () => {

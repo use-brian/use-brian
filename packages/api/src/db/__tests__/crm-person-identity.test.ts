@@ -11,12 +11,14 @@ const entities = vi.hoisted(() => ({
   getEntityById: vi.fn(),
   getEntityByIdSystem: vi.fn(),
   updateEntity: vi.fn(),
+  assertNativeEntityFieldWrites: vi.fn(),
 }))
 const identity = vi.hoisted(() => ({
   bindImportedCrmIdentity: vi.fn(),
   resolveCrmPersonIdentity: vi.fn(),
 }))
 
+const canonical = vi.hoisted(() => ({ point: vi.fn() }))
 const transactionClient = vi.hoisted(() => ({ query: vi.fn(async () => ({ rows: [], rowCount: 0 })), release: vi.fn() }))
 vi.mock('../entities-store.js', () => entities)
 vi.mock('../crm-identity-store.js', () => identity)
@@ -26,6 +28,10 @@ vi.mock('../client.js', () => ({
   query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
   queryGated: vi.fn(async () => ({ rows: [], rowCount: 0 })),
   queryWithRLS: vi.fn(async () => ({ rows: [], rowCount: 0 })),
+}))
+vi.mock('../crm-reader.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../crm-reader.js')>(),
+  readLegacyCanonicalCrmPoint: canonical.point,
 }))
 vi.mock('../authorship-guard.js', () => ({ assertAuthorshipPresent: vi.fn() }))
 vi.mock('../edge-hooks.js', () => ({
@@ -70,6 +76,14 @@ function person(id: string, name: string, email: string | null = null) {
     createdAt: NOW,
     updatedAt: NOW,
   }
+}
+
+function point(row: ReturnType<typeof person>, fields: readonly string[] = ['name','email','phone','companyId','aliases','tags','externalRef','createdAt','updatedAt']) {
+  const scope = { workspaceId: row.workspaceId, userId: null, assistantId: null, sensitivity: row.sensitivity, compartments: [], projectIds: [] }
+  const values = { name: row.displayName, email: row.canonicalId, phone: null, companyId: null,
+    aliases: row.aliases, tags: [], externalRef: {}, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() }
+  return { projection: { ref: { workspaceId: row.workspaceId, origin: { kind: 'native', moduleKey: 'native' }, typeKey: 'person', id: row.id, version: '1' },
+    values: Object.fromEntries(fields.map(key => [key, values[key as keyof typeof values]])), fields: [...fields], policyVersion: 'a'.repeat(64) }, scope, sources: [] }
 }
 
 const BASE = {
@@ -117,7 +131,7 @@ describe('[COMP:crm/person-write-identity] createContact', () => {
       status: 'resolved',
       binding: { entityId: existing.id },
     })
-    entities.updateEntity.mockResolvedValue(existing)
+    canonical.point.mockResolvedValue(point(existing))
 
     const result = await createContact('00000000-0000-4000-8000-000000000002', {
       ...BASE,
@@ -130,7 +144,7 @@ describe('[COMP:crm/person-write-identity] createContact', () => {
   })
 
   it('returns ambiguity and writes nothing for a conflicting stable binding', async () => {
-    entities.updateEntity.mockImplementation(async (_actor, id) => person(id, 'Visible fixture'))
+    canonical.point.mockImplementation(async (_access, _type, id, fields) => point(person(id, 'Visible fixture'), fields))
     identity.resolveCrmPersonIdentity.mockResolvedValue({
       status: 'conflict',
       entityIds: ['00000000-0000-4000-8000-000000000090', '00000000-0000-4000-8000-000000000091'],
@@ -155,7 +169,7 @@ describe('[COMP:crm/person-write-identity] createContact', () => {
 
   it('does not expose an inaccessible stable identity candidate',async()=>{
     identity.resolveCrmPersonIdentity.mockResolvedValue({status:'conflict',entityIds:['hidden-id']})
-    entities.updateEntity.mockResolvedValue(null)
+    canonical.point.mockResolvedValue(null)
     const result=await createContact('00000000-0000-4000-8000-000000000002',{...BASE,stableIdentity:STABLE}).catch(error=>error)
     expect(result).toMatchObject({code:'scope_operation_denied'})
     expect(result.entityIds).toBeUndefined()

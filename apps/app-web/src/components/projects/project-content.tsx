@@ -39,9 +39,9 @@ export function ProjectContent({ project, assistants }: {
     return () => clearTimeout(timer);
   }, [input]);
   const content = useCachedResource(projectContentCacheKey(project.workspaceId, project.id, view, query, offset),
-    () => leaseSurfaceContent(() => getProjectContent(project.workspaceId, project.id, view, query, offset)), {expiresInMs: surfaceContentRemaining});
+    () => leaseSurfaceContent(() => getProjectContent(project.workspaceId, project.id, view, query, offset)), {expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true});
   // Content lease (perceived-performance.md, "Content lease for protected lists").
-  useSurfaceContentRenewal(content.refresh);
+  useSurfaceContentRenewal(content.refresh, true, content.data);
   function ask(text: string) {
     if (!assistantId || project.status !== "active") return;
     const requestId = stashChatHandoff({workspaceId: project.workspaceId, assistantId,

@@ -1,3 +1,4 @@
+vi.mock('../../workspace-access/goal-source-admission.js',async importOriginal=>({...await importOriginal<typeof import('../../workspace-access/goal-source-admission.js')>(),retainedGoalWorkflowFrame:vi.fn().mockResolvedValue(undefined),resolveRetainedGoalWorkflowRuntime:vi.fn().mockResolvedValue(undefined)}))
 /**
  * Unit tests for the workflow + workflow-run stores.
  * Component tag: [COMP:api/workflow-store].
@@ -115,6 +116,7 @@ function stepRow(over: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 beforeEach(() => {
+  vi.mocked(getPool).mockReturnValue({query:async()=>({rows:[],rowCount:0})} as never)
   insertQuery.mockReset()
   transactionQuery.mockClear()
   vi.mocked(getAppPool).mockReturnValue({ connect: async () => ({ query: transactionQuery }) } as never)

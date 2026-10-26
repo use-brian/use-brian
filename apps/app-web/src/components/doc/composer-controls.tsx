@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Shared composer footer controls: the deep-research toggle (left) + the
+ * Shared composer footer controls: the optional AI-reply toggle + the
  * `standard | pro | max` model-tier picker (right). One presentational
  * component rendered by every doc surface that can open an `/api/chat`
  * turn — the floating dock (`floating-chat.tsx`), the page-comments band
@@ -17,14 +17,14 @@
  * ("the floating chat keeps its own inline copy; this hook is the shared seam
  * for new surfaces").
  *
- * Labels reuse the existing `chat.*` dictionary keys (the model + research
- * strings already live there), so this adds no new i18n.
+ * Tier labels reuse `chat.*` dictionary keys. Hosts can supply a localized
+ * `pickerLabel` (Effort in Chat) without changing tier state or admission.
  *
  * [COMP:app-web/composer-controls]
  */
 
 import { useCallback, useState } from "react";
-import { Bot, Sparkles, UserRound } from "lucide-react";
+import { Bot, UserRound } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import {
@@ -34,7 +34,6 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import { useChatModelTier, type ModelTier } from "@/lib/chat-model";
-import { webAppUrl } from "@/lib/primary-auth";
 import { deploymentCapabilities } from "@/lib/edition";
 import { modelTierPlanGateApplies, planGateApplies } from "@/lib/plan-gate";
 
@@ -56,31 +55,22 @@ type ResearchQuotaEvent = {
 type Props = {
   /** Current model tier. */
   model: ModelTier;
+  /** Surface-specific accessible label (Chat presents the curated tiers as effort). */
+  pickerLabel?: string;
   /** Pick a new tier. */
   onModelChange: (tier: ModelTier) => void;
   /** Workspace plan (`free` / `pro` / `max` / …) for tier gating, or null while
    *  it resolves. Over-tier items render disabled. */
   plan: string | null;
-  /** Whether deep-research mode is armed for the next send. */
-  researchMode: boolean;
-  /** Flip research mode. The component owns the exhausted→upgrade redirect, so
-   *  this only fires for a real toggle. */
-  onResearchModeChange: (next: boolean) => void;
-  /** Remaining free-research quota (from the `research_quota` SSE event), or
-   *  null on paid plans / before the first research turn. */
-  researchQuota: ResearchQuota | null;
-  /** Free workspace has hit its lifetime research cap — the toggle becomes an
-   *  upgrade affordance. */
-  researchExhausted: boolean;
-  /** Render the deep-research toggle. Defaults to `false`. Doc research
-   *  mode now ships: a `mode:'research'` doc turn keeps its authoring tools
-   *  (`renderPage`/`patchPage`/…) and web search, swaps in the research soul,
-   *  and authors findings to the page — it never enters the tool-stripping
-   *  coordinator path (the 2026-06-01 fix split "forbids research" from
-   *  "forbids coordinator" server-side). So every doc surface opts in with
-   *  `showResearch` — the floating dock, the Space→AI inline box, and all three
-   *  comment composers. The default stays `false` because feed (`kind='app'`,
-   *  `appType='distribution'`) assistants still have research force-disabled. */
+  /** @deprecated Legacy seed compatibility. Research is assessed automatically. */
+  researchMode?: boolean;
+  /** @deprecated No manual Research control is rendered. */
+  onResearchModeChange?: (next: boolean) => void;
+  /** @deprecated Quota events are handled by the conversation surface. */
+  researchQuota?: ResearchQuota | null;
+  /** @deprecated Quota events are handled by the conversation surface. */
+  researchExhausted?: boolean;
+  /** @deprecated Ignored. Research is assessed automatically. */
   showResearch?: boolean;
   /** Which way the model dropdown opens. Bottom-anchored composers (the dock,
    *  the thread reply) open `top`; the page-comments band (near the page top)
@@ -88,7 +78,7 @@ type Props = {
   selectSide?: "top" | "bottom";
   /** Comment surfaces only: whether the assistant should reply to this turn.
    *  When `false` the comment is posted for teammates with no AI reply, and the
-   *  research + model controls (which only shape an AI turn) are disabled.
+   *  model controls (which only shape an AI turn) are disabled.
    *  Undefined on the floating chat — the AI always answers there, so no toggle
    *  renders. */
   aiReply?: boolean;
@@ -113,17 +103,13 @@ type Props = {
 };
 
 /**
- * The picker + toggle. Pure presentation — every prop is owned by the caller.
+ * Model and optional AI-reply controls. Research is automatic. Pure presentation — every prop is owned by the caller.
  */
 export function ComposerControls({
   model,
+  pickerLabel,
   onModelChange,
   plan,
-  researchMode,
-  onResearchModeChange,
-  researchQuota,
-  researchExhausted,
-  showResearch = false,
   selectSide = "top",
   aiReply,
   onAiReplyChange,
@@ -142,7 +128,7 @@ export function ComposerControls({
   const meteredDisabled = planGateApplies(capabilities, plan);
   const tc = useT().comments;
   // The AI-reply toggle shows only where a host wires it (the comment
-  // composers). When the AI won't reply, the research + model controls — which
+  // composers). When the AI won't reply, the model controls — which
   // only shape an AI turn — are disabled so they don't imply otherwise.
   const showAiToggle = !!onAiReplyChange;
   const aiOn = aiReply !== false;
@@ -175,39 +161,6 @@ export function ComposerControls({
           )}
         </button>
       ) : null}
-      {showResearch ? (
-        <button
-          type="button"
-          disabled={aiTurnDisabled}
-          onClick={() => {
-            if (researchExhausted) {
-              // `/plans` lives on the marketing origin (apps/web) — deep-link
-              // via webAppUrl(), same pattern as billing-section.tsx.
-              if (typeof window !== "undefined") window.location.href = `${webAppUrl()}/plans`;
-              return;
-            }
-            onResearchModeChange(!researchMode);
-          }}
-          aria-pressed={researchMode}
-          title={researchExhausted ? t.researchHintExhausted : t.researchHint}
-          className={cn(
-            "inline-flex shrink-0 items-center gap-1 rounded-lg px-2.5 py-1.5 text-[12px] font-medium transition-colors disabled:pointer-events-none disabled:opacity-40 max-md:py-2.5",
-            researchExhausted
-              ? "bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 dark:text-amber-400"
-              : researchMode
-                ? "bg-primary/15 text-primary hover:bg-primary/20"
-                : "text-muted-foreground hover:bg-muted hover:text-primary",
-          )}
-        >
-          <Sparkles className="size-3.5" aria-hidden />
-          <span>{t.research}</span>
-          {researchMode && researchQuota && !researchQuota.isPaid ? (
-            <span className="ml-0.5 text-[10.5px] tabular-nums opacity-70">
-              {Math.max(0, researchQuota.quota - researchQuota.used)}/{researchQuota.quota}
-            </span>
-          ) : null}
-        </button>
-      ) : null}
       <div className="flex-1" />
       <Select
         value={customSelectedKey ? `custom:${customSelectedKey}` : meteredSelectedKey ? `metered:${meteredSelectedKey}` : model}
@@ -231,7 +184,7 @@ export function ComposerControls({
       >
         <SelectTrigger
           size="sm"
-          aria-label={t.modelLabel}
+          aria-label={pickerLabel ?? t.modelLabel}
           disabled={aiTurnDisabled}
           className="gap-1.5 border-transparent bg-muted/60 text-[16px] hover:bg-muted disabled:pointer-events-none disabled:opacity-40 md:text-xs"
         >

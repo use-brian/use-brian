@@ -28,6 +28,7 @@ vi.mock('../executor.js', async importOriginal => ({
 vi.mock('../task-gate.js', () => ({TaskGate:class {constructor() {return mocks.gate}},CONSENT_PROMPT_TIMEOUT_MS:1000}))
 let data:Record<string,any>
 let messages: any
+let externalMessages: any
 const token = `x.${btoa(JSON.stringify({kind:'browser-ext-session',userId:'u',workspaceId:'w',browserProfileId:'p',exp:Date.now()/1000+600}))}.x`
 const request = {workspaceId:'w',sessionId:'s',taskId:'t',browserProfileId:'p',destinationOrigin:'https://destination.example',items:[{referenceId:'a'.repeat(43),ref:'@e1'}]}
 beforeEach(async () => {
@@ -36,14 +37,15 @@ beforeEach(async () => {
   const sessionData:Record<string,unknown> = {}
   const event=()=>({addListener:vi.fn()})
   vi.stubGlobal('chrome',{
-    runtime:{id:'id',getURL:(s:string)=>`chrome-extension://id/${s}`,getManifest:()=>({}),
-      onMessage:{addListener:(fn:any)=>{messages=fn}},onMessageExternal:event()},
-    storage:{session:{
+    runtime:{id:'id',getURL:(s:string)=>`chrome-extension://id/${s}`,getManifest:()=>({externally_connectable:{matches:['https://app.example/*']}}),
+      onMessage:{addListener:(fn:any)=>{messages=fn}},onMessageExternal:{addListener:(fn:any)=>{externalMessages=fn}},onConnect:event(),onConnectExternal:event()},
+    sidePanel:{setPanelBehavior:vi.fn(async()=>{})},
+    storage:{onChanged:event(),session:{
       get:vi.fn(async(key:string)=>({[key]:sessionData[key]})),
       set:vi.fn(async(v:any)=>{Object.assign(sessionData,v)}),
     },local:{
       get:vi.fn(async(keys:string|string[])=>Object.fromEntries((Array.isArray(keys)?keys:[keys]).map(k=>[k,data[k]]))),
-      set:vi.fn(async(v:any)=>{Object.assign(data,structuredClone(v))}),remove:vi.fn(async(k:string)=>{delete data[k]}),
+      set:vi.fn(async(v:any)=>{Object.assign(data,structuredClone(v))}),remove:vi.fn(async(k:string|string[])=>{for(const key of Array.isArray(k)?k:[k])delete data[key]}),
     }},
     action:{setBadgeText:vi.fn(async()=>{}),setBadgeBackgroundColor:vi.fn(async()=>{})},
     debugger:{onDetach:event()},
@@ -480,3 +482,46 @@ describe('tab helpers honor cancellation across asynchronous Chrome calls', () =
     if (op === 'listTabs') expect(mocks.gate.registerFullTab).toHaveBeenCalledOnce()
   })
 })
+
+describe('[COMP:ext/account-switching] pairing identity boundary', () => {
+  const nextPair = () => `x.${btoa(JSON.stringify({kind:'browser-ext-pair',userId:'other-user',workspaceId:'other-workspace',browserProfileId:'other-profile',exp:Date.now()/1000+600}))}.x`
+  it('stops and drains browser control before installing a different account pairing', async () => {
+    const pairingToken = nextPair(), reply = popup('configure', {relayUrl:'wss://relay.example',pairingToken})
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledWith({ok:true}))
+    expect(mocks.gate.stop).toHaveBeenCalled(); expect(mocks.executor.detach).toHaveBeenCalled()
+    expect(data.pairingToken).toBe(pairingToken)
+    await mocks.relay.onSessionToken(token)
+    expect(data.pairingToken).toBe(pairingToken)
+    expect(data.sessionToken).toBeUndefined()
+  })
+  it('refuses an account change while protected material still needs cleanup', async () => {
+    data.protectedDisclosureLock={request,tabIds:[1],apiBase:'https://api.example',token}
+    const reply = popup('configure', {relayUrl:'wss://relay.example',pairingToken:nextPair()})
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledWith(expect.objectContaining({ok:false,code:'protected_fill_denied'})))
+    expect(data.sessionToken).toBe(token); expect(data.pairingToken).toBeUndefined()
+    expect(data.protectedDisclosureLock).toBeTruthy(); expect(mocks.gate.stop).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('[COMP:ext/account-switching] explicit disconnect', () => {
+  it('cannot be undone by a late session-token response from the old relay', async () => {
+    const reply = popup('disconnect')
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledWith({ok:true}))
+    await mocks.relay.onSessionToken(token)
+    expect(data.sessionToken).toBeUndefined(); expect(data.pairingToken).toBeUndefined()
+    expect(mocks.gate.stop).toHaveBeenCalled()
+  })
+})
+
+
+describe('[COMP:ext/account-switching] automatic binding preserves a live task', () => {
+  it('refuses automatic rebinding before altering credentials or browser control', async () => {
+    const respond = vi.fn();
+    externalMessages({ type: 'pair', automatic: true, pairingToken: token }, { origin: 'https://app.example' }, respond);
+    await vi.waitFor(() => expect(respond).toHaveBeenCalled());
+    expect(respond).toHaveBeenCalledWith(expect.objectContaining({ ok: false }));
+    expect(data.sessionToken).toBe(token); expect(data.pairingToken).toBeUndefined();
+    expect(mocks.gate.stop).not.toHaveBeenCalled(); expect(mocks.executor.detach).not.toHaveBeenCalled();
+  });
+});

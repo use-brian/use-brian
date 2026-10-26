@@ -131,7 +131,7 @@ describe('[COMP:api/member-operation-floor] per-statement member operation floor
         coalesce(pg_get_expr(polqual,polrelid),'')||' '||coalesce(pg_get_expr(polwithcheck,polrelid),'') expr FROM pg_policy`)).rows
     expect(policies.filter(p=>/member_operation_scope_allows\(/.test(p.expr)).map(p=>`${p.tab}.${p.polname}`)).toEqual([])
     const floor=policies.filter(p=>/member_operation_grants\(/.test(p.expr))
-    expect(floor).toHaveLength(40)
+    expect(floor).toHaveLength(44)
     // Every grants call must sit inside a sub-select, which PostgreSQL runs once.
     for(const p of floor)expect({policy:`${p.tab}.${p.polname}`,bare:/(?<!SELECT )member_operation_grants\(/.test(p.expr)}).toEqual({policy:`${p.tab}.${p.polname}`,bare:false})
   })

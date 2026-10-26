@@ -3,6 +3,13 @@ import { createTypeSafeDecisionProvider, type TypeSafeTransportRequest } from '.
 import { decisionRequest } from './fixtures.js'
 
 describe('[COMP:decisions/typesafe] Jev HTTP adapter', () => {
+  it('preserves a transport authority refusal without operational retry', async () => {
+    const refusal = Object.assign(new Error('Synthetic provider authority refusal'), { reason: 'authority_changed', retrySafe: false })
+    const transport = vi.fn(async () => { throw refusal })
+    await expect(createTypeSafeDecisionProvider({ apiKey: 'fixture-key', transport }).evaluate(decisionRequest())).rejects.toBe(refusal)
+    expect(transport).toHaveBeenCalledOnce()
+  })
+
   it('maps Choice to the System One envelope and retains native uncertainty', async () => {
     const transport = vi.fn(async (_request: TypeSafeTransportRequest) => ({
       status: 200,

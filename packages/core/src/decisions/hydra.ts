@@ -4,6 +4,7 @@
  * [COMP:decisions/hydra]
  */
 
+import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
 import type {
   DecisionDisposition,
   DecisionFailureKind,
@@ -103,6 +104,8 @@ export type DecisionCompletionContext = {
 }
 
 export type DecisionCascadeOperation<T> = {
+  /** Process-local current-input check; never provider or client JSON. */
+  assertInputAuthority?: () => Promise<void>
   decide(
     response: DecisionResponse,
     context: { profile?: DecisionEvaluationProfile },
@@ -138,7 +141,7 @@ export type DecisionExecutionRunOptions<T> = {
 
 export type DecisionObservationOperation<T> = Pick<
   DecisionCascadeOperation<T>,
-  'decide' | 'validateResult'
+  'decide' | 'validateResult' | 'assertInputAuthority'
 >
 
 export type DecisionObservationRunOptions<T> = {
@@ -320,6 +323,7 @@ async function withDeadline<T>(params: {
   try {
     return await Promise.race([params.call(controller.signal), interrupted])
   } catch (error) {
+    if (isInputAuthorityError(error)) throw error
     if (params.parent?.aborted) {
       throw new DecisionProviderError('cancelled', 'decision call cancelled', { cause: error })
     }
@@ -333,26 +337,47 @@ async function withDeadline<T>(params: {
   }
 }
 
+/** A later healthy probe cannot revive a refused decision invocation. */
+function currentInputCheck(check?: () => Promise<void>): () => Promise<void> {
+  let refused: unknown
+  let pending: Promise<void> | undefined
+  return async () => {
+    if (refused) throw refused
+    // A transport deadline may leave its current check pending. Recovery must
+    // await that same check, never race a second healthy probe past its refusal.
+    if (pending) return pending
+    pending = assertInputAuthority(check).catch(error => { refused = error; throw error })
+    try { await pending } finally { pending = undefined }
+  }
+}
+
 export async function executeDecisionCascade<T>(
   options: ExecuteDecisionCascadeOptions<T>,
 ): Promise<DecisionCascadeResult<T>> {
   const now = options.now ?? Date.now
   const random = options.random ?? Math.random
   const { request, operation, route } = options
+  const check = currentInputCheck(operation.assertInputAuthority)
+  await check()
   validateDecisionRoute(request, route)
 
   let attempts = 0
   const emit = async (record: DecisionAttemptRecord): Promise<void> => {
+    await check()
     await options.onAttempt?.(record)
+    await check()
   }
 
-  const safe = (kind: DecisionFailureKind): DecisionCascadeResult<T> => ({
-    runId: request.runId,
-    result: operation.validateResult(operation.safeFailure(kind)),
-    path: 'safe_default',
-    attempts,
-    failureKind: kind,
-  })
+  const safe = async (kind: DecisionFailureKind): Promise<DecisionCascadeResult<T>> => {
+    await check()
+    return {
+      runId: request.runId,
+      result: operation.validateResult(operation.safeFailure(kind)),
+      path: 'safe_default',
+      attempts,
+      failureKind: kind,
+    }
+  }
 
   const runCompletion = async (
     kind: DecisionCompletionKind,
@@ -361,6 +386,7 @@ export async function executeDecisionCascade<T>(
     primaryResponse?: DecisionResponse,
     followUpReason?: DecisionFollowUpReason,
   ): Promise<DecisionCompletion<T>> => {
+    await check()
     attempts += 1
     const startedAt = now()
     try {
@@ -371,13 +397,14 @@ export async function executeDecisionCascade<T>(
         call: (signal) => operation.completeWithLlm({
           kind,
           runId: request.runId,
-          request: { ...request, signal, deadlineAt },
+          request: { ...request, signal, deadlineAt, assertInputAuthority: check },
           ...(kind === 'generation' && primaryResponse ? { primaryResponse } : {}),
           ...(followUpReason ? { followUpReason } : {}),
           signal,
           deadlineAt,
         }),
       })
+      await check()
       const validated = { ...completion, result: operation.validateResult(completion.result) }
       await emit({
         runId: request.runId,
@@ -394,6 +421,7 @@ export async function executeDecisionCascade<T>(
       })
       return validated
     } catch (error) {
+      if (isInputAuthorityError(error)) throw error
       const failure = normalizeDecisionFailure(error)
       await emit({
         runId: request.runId,
@@ -417,6 +445,7 @@ export async function executeDecisionCascade<T>(
       const completion = await runCompletion('llm_only', 'llm_only', request.deadlineAt)
       return { runId: request.runId, result: completion.result, path: 'llm_only', attempts }
     } catch (error) {
+      if (isInputAuthorityError(error)) throw error
       const failure = normalizeDecisionFailure(error)
       if (failure.kind === 'cancelled') throw failure
       return safe(failure.kind)
@@ -431,12 +460,14 @@ export async function executeDecisionCascade<T>(
       const completion = await runCompletion('llm_only', 'llm_only', totalDeadline)
       return { runId: request.runId, result: completion.result, path: 'llm_only', attempts }
     } catch (error) {
+      if (isInputAuthorityError(error)) throw error
       const failure = normalizeDecisionFailure(error)
       if (failure.kind === 'cancelled') throw failure
       return safe(failure.kind)
     }
   }
 
+  await check()
   attempts += 1
   const primaryAttempt = attempts
   const primaryStartedAt = now()
@@ -449,8 +480,9 @@ export async function executeDecisionCascade<T>(
       parent: request.signal,
       deadlineAt: primaryDeadline,
       now,
-      call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline }),
+      call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline, assertInputAuthority: check }),
     })
+    await check()
     disposition = operation.decide(primaryResponse, { profile })
     await emit({
       runId: request.runId,
@@ -467,6 +499,7 @@ export async function executeDecisionCascade<T>(
       ...(primaryResponse.usage ? { usage: primaryResponse.usage } : {}),
     })
   } catch (error) {
+    if (isInputAuthorityError(error)) throw error
     primaryFailure = normalizeDecisionFailure(error)
     await emit({
       runId: request.runId,
@@ -497,6 +530,7 @@ export async function executeDecisionCascade<T>(
         ...(primaryResponse ? { primaryResponse } : {}),
       }
     } catch (error) {
+      if (isInputAuthorityError(error)) throw error
       const failure = normalizeDecisionFailure(error)
       if (failure.kind === 'cancelled') throw failure
       return safe(failure.kind)
@@ -516,6 +550,7 @@ export async function executeDecisionCascade<T>(
       )
       return { runId: request.runId, result: completion.result, path: 'operational_failover', attempts }
     } catch (error) {
+      if (isInputAuthorityError(error)) throw error
       const failure = normalizeDecisionFailure(error)
       if (failure.kind === 'cancelled') throw failure
       return safe(failure.kind)
@@ -532,7 +567,9 @@ export async function executeDecisionCascade<T>(
         attempts,
         primaryResponse,
       }
-    } catch {
+    } catch (error) {
+      if (isInputAuthorityError(error)) throw error
+      await check()
       if (route.allowInvalidResponseRecovery === false || totalDeadline <= now()) {
         return safe('invalid_response')
       }
@@ -540,6 +577,7 @@ export async function executeDecisionCascade<T>(
         const completion = await runCompletion('operational_failover', 'operational_failover', totalDeadline)
         return { runId: request.runId, result: completion.result, path: 'operational_failover', attempts, primaryResponse }
       } catch (error) {
+        if (isInputAuthorityError(error)) throw error
         const failure = normalizeDecisionFailure(error)
         if (failure.kind === 'cancelled') throw failure
         return safe(failure.kind)
@@ -565,6 +603,7 @@ export async function executeDecisionCascade<T>(
       primaryResponse,
     }
   } catch (error) {
+    if (isInputAuthorityError(error)) throw error
     const failure = normalizeDecisionFailure(error)
     if (failure.kind === 'cancelled') throw failure
     return safe(failure.kind)
@@ -583,6 +622,8 @@ export async function executeDecisionObservation<T>(
   const now = options.now ?? Date.now
   const random = options.random ?? Math.random
   const { request, operation, route } = options
+  const check = currentInputCheck(operation.assertInputAuthority)
+  await check()
   validateDecisionRoute(request, route)
   if (route.mode === 'llm_only') {
     return { runId: request.runId, path: 'skipped', attempts: 0 }
@@ -601,8 +642,9 @@ export async function executeDecisionObservation<T>(
       parent: request.signal,
       deadlineAt: primaryDeadline,
       now,
-      call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline }),
+      call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline, assertInputAuthority: check }),
     })
+    await check()
     let disposition = operation.decide(response, { profile })
     if (disposition.kind === 'complete') {
       disposition = { kind: 'complete', result: operation.validateResult(disposition.result) }
@@ -621,6 +663,7 @@ export async function executeDecisionObservation<T>(
       ...(disposition.kind === 'follow_up' ? { followUpReason: disposition.reason } : {}),
       ...(response.usage ? { usage: response.usage } : {}),
     })
+    await check()
     const path = disposition.kind === 'complete'
       ? 'observed_complete'
       : disposition.kind === 'follow_up'
@@ -628,6 +671,7 @@ export async function executeDecisionObservation<T>(
         : 'observed_unavailable'
     return { runId: request.runId, path, attempts: 1, disposition, primaryResponse: response }
   } catch (error) {
+    if (isInputAuthorityError(error)) throw error
     const failure = normalizeDecisionFailure(error)
     await options.onAttempt?.({
       runId: request.runId,

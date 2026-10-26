@@ -1,10 +1,13 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,describe,expect,it} from 'vitest'
 import {ContextScopeAccumulator,createMemoryTools,type AccessCeiling,type ScopeEvidence,type ScopeSource,type ToolContext} from '@use-brian/core'
-import {getPool,getAppPool,runWithAgentAccess} from '../../db/client.js'
+import {getPool,getAppPool,runWithAgentAccess,applyRLSGucs} from '../../db/client.js'
 import {createMemory} from '../../db/memories.js'
+import {createContact} from '../../db/crm.js'
+import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
+import {createDbContextScopeStore} from '../../db/context-scope-store.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {validateCallerScopeEvidence} from '../caller-evidence.js'
+import {validateCallerScopeEvidence,validateAudienceScopeEvidence} from '../caller-evidence.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
@@ -97,6 +100,71 @@ describe('[COMP:api/caller-scope-evidence] canonical consult evidence and memory
     })
     expect((await pool.query('SELECT summary FROM memories WHERE id=$1',[f.source.id])).rows[0].summary).toBe('Source context')
     expect((await pool.query("SELECT compartments FROM memories WHERE workspace_id=$1 AND summary='Read-only derived note'",[f.workspaceId])).rows[0].compartments).toEqual(['product'])
+  })
+  it('admits actual read evidence across assistant partitions without intersecting their visibility',async()=>{
+    const f=await fixture(),other=await createMemory({workspaceId:f.workspaceId,userId:f.userId,assistantId:f.callee,createdByUserId:f.userId,summary:'Fictional second partition',sensitivity:'internal'})
+    const otherSource=(await pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,other.id])).rows[0].source
+    const result=await validateAudienceScopeEvidence({sources:[f.snapshot,otherSource]},f.ceiling)
+    expect(result.sources?.map(source=>source.resourceId).sort()).toEqual([f.source.id,other.id].sort())
+    expect(result.sensitivity).toBe('internal')
+  })
+  it('raises the actual delivered floor to current admitted source labels',async()=>{
+    const f=await fixture();await pool.query("UPDATE memories SET compartments=ARRAY['product','finance'] WHERE id=$1",[f.source.id])
+    const result=await validateCallerScopeEvidence(f.evidence,f.ceiling)
+    expect(result.compartments).toEqual(['finance','product'])
+    expect(result.sources).toContainEqual(f.snapshot)
+  })
+  it('refuses actual source reclassification beyond the current receiver ceiling',async()=>{
+    const f=await fixture();await pool.query("UPDATE memories SET sensitivity='confidential' WHERE id=$1",[f.source.id])
+    await expect(validateAudienceScopeEvidence(f.evidence,f.ceiling)).rejects.toMatchObject({reason:'delivery_audience_unverified',diagnostic:'source_reclassified',retrySafe:false})
+  })
+  it('refuses a real failed metadata transaction without owner fallback or protected diagnostics',async()=>{
+    const f=await fixture(),client=await getAppPool().connect()
+    try{
+      await client.query('BEGIN');await applyRLSGucs(client,f.userId)
+      await expect(client.query('SELECT 1/0')).rejects.toMatchObject({code:'22012'})
+      await expect(validateCallerScopeEvidence(f.evidence,f.ceiling,client)).rejects.toMatchObject({reason:'caller_evidence_unavailable',diagnostic:'source_unverifiable',retrySafe:false})
+      await expect(validateAudienceScopeEvidence(f.evidence,f.ceiling,client)).rejects.toMatchObject({reason:'delivery_audience_unverified',retrySafe:false})
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await validateCallerScopeEvidence(f.evidence,f.ceiling)).sources).toContainEqual(f.snapshot)
+  })
+  it('refuses an actually changed causal CRM event even while its live entity remains readable',async()=>{
+    const f=await fixture(),contact=await createContact(f.userId,{workspaceId:f.workspaceId,name:'Fictional causal contact'}),id=randomUUID()
+    await pool.query(`INSERT INTO crm_domain_event_outbox(id,workspace_id,event_type,event_key,subject_kind,subject_id,payload,actor_kind)
+      VALUES($1::uuid,$2,'crm.consent.changed',$1::text,'contact',$3,'{}','user')`,[id,f.workspaceId,contact.id])
+    const event=(await pool.query("SELECT read_scope_source($1,'crm_event',$2) AS source",[f.workspaceId,id])).rows[0].source
+    expect(event).toMatchObject({resourceKind:'crm_event',held:false})
+    const parent=(await pool.query("SELECT read_scope_source($1,'entity',$2) AS source",[f.workspaceId,event.causalEntityId])).rows[0].source
+    const ceiling={...f.ceiling,visibilityAssistantIds:null,compartments:null,projectIds:null,clearance:'confidential' as const}
+    expect((await validateCallerScopeEvidence({sources:[event,parent]},ceiling)).sources).toContainEqual(event)
+    await pool.query('UPDATE crm_domain_event_outbox SET payload=$2 WHERE id=$1',[id,{fictionalChange:true}])
+    expect((await pool.query("SELECT read_scope_source($1,'crm_event',$2) AS source",[f.workspaceId,id])).rows[0].source.version).not.toBe(event.version)
+    await expect(validateCallerScopeEvidence({sources:[event,parent]},ceiling)).rejects.toMatchObject({diagnostic:'source_changed',retrySafe:false})
+  })
+  it.each(['caller','audience'])('retains actual current Project and assistant limits in department %s evidence',async kind=>{
+    const f=await fixture(),validate=kind==='caller'?validateCallerScopeEvidence:validateAudienceScopeEvidence
+    const sales=await createDbWorkspaceGroupStore().createTeam(f.userId,f.workspaceId,{name:'Fictional sales',key:'fictional-sales'})
+    const otherProject=await createDbContextScopeStore().createProject(f.userId,f.workspaceId,{name:'Fictional other'})
+    await pool.query("UPDATE memories SET sensitivity='confidential',compartments=ARRAY[$2]::text[] WHERE id=$1",[f.source.id,sales.compartmentKey])
+    const source=(await pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,f.source.id])).rows[0].source
+    const ceiling:AccessCeiling={...f.ceiling,departmentRead:{workspaceId:f.workspaceId,userId:f.userId,assistantId:f.sourceAssistant,
+      base:'public',departments:{[sales.id]:'confidential'},binding:null,contextDepartment:null,cap:null}}
+    expect((await validate({sources:[source]},ceiling)).sources).toContainEqual(source)
+    await expect(validate({sources:[source]},{...ceiling,visibilityAssistantIds:[]})).rejects.toMatchObject({diagnostic:'assistant_visibility'})
+    await expect(validate({sources:[source]},{...ceiling,projectIds:[]})).rejects.toMatchObject({diagnostic:'projects'})
+    await pool.query('UPDATE memories SET project_ids=ARRAY[$2]::uuid[] WHERE id=$1',[f.source.id,otherProject.id])
+    await expect(validate({sources:[source]},ceiling)).rejects.toMatchObject({diagnostic:'source_reclassified'})
+  })
+  it('refuses an actual source reclassified into a currently inaccessible department',async()=>{
+    const f=await fixture(),groups=createDbWorkspaceGroupStore()
+    const sales=await groups.createTeam(f.userId,f.workspaceId,{name:'Fictional sales',key:'fictional-sales'}),finance=await groups.createTeam(f.userId,f.workspaceId,{name:'Fictional finance',key:'fictional-finance'})
+    await pool.query("UPDATE memories SET compartments=ARRAY[$2]::text[] WHERE id=$1",[f.source.id,sales.compartmentKey])
+    const source=(await pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,f.source.id])).rows[0].source
+    const ceiling:AccessCeiling={...f.ceiling,departmentRead:{workspaceId:f.workspaceId,userId:f.userId,assistantId:f.sourceAssistant,
+      base:'public',departments:{[sales.id]:'internal'},binding:null,contextDepartment:null,cap:null}}
+    expect((await validateAudienceScopeEvidence({sources:[source]},ceiling)).sources).toContainEqual(source)
+    await pool.query("UPDATE memories SET compartments=ARRAY[$2]::text[] WHERE id=$1",[f.source.id,finance.compartmentKey])
+    await expect(validateAudienceScopeEvidence({sources:[source]},ceiling)).rejects.toMatchObject({diagnostic:'source_reclassified'})
   })
   it('keeps known label floors while refusing malformed source metadata without leaking it',async()=>{
     const f=await fixture()

@@ -10,7 +10,8 @@
  * cached payload so the slide-out and the next open never show it again.
  */
 
-import { act } from "react";
+import { act, useState } from "react";
+import { Dialog } from "@base-ui/react/dialog";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InboxPayload } from "@/lib/api/inbox";
@@ -93,6 +94,8 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
 let root: Root | null = null;
 let container: HTMLDivElement;
 const onOpenPage = vi.fn();
+const onOpenRoom = vi.fn();
+const onClose = vi.fn();
 
 function panel(open: boolean) {
   return (
@@ -100,23 +103,25 @@ function panel(open: boolean) {
       open={open}
       workspaceId="w1"
       sidebarCollapsed={false}
-      onClose={() => {}}
+      onClose={onClose}
       onOpenPage={onOpenPage}
-      onOpenRoom={() => {}}
+      onOpenRoom={onOpenRoom}
     />
   );
 }
 
-async function render(open: boolean) {
+async function renderNode(node: React.ReactNode) {
   if (!root) {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
   }
   await act(async () => {
-    root!.render(panel(open));
+    root!.render(node);
   });
 }
+
+async function render(open: boolean) { await renderNode(panel(open)); }
 
 const skeleton = () => container.querySelector("[data-inbox-skeleton]");
 
@@ -124,6 +129,10 @@ beforeEach(() => {
   resetSurfaceCache();
   fetchInbox.mockReset();
   onOpenPage.mockReset();
+  onOpenRoom.mockReset();
+  onClose.mockReset();
+  markInboxRead.mockClear();
+  dismissInboxReply.mockClear();
 });
 
 afterEach(async () => {
@@ -134,6 +143,8 @@ afterEach(async () => {
     root = null;
   }
   container?.remove();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("[COMP:app-web/inbox-panel] Inbox flyout on the surface cache", () => {
@@ -231,4 +242,88 @@ describe("[COMP:app-web/inbox-panel] Inbox flyout on the surface cache", () => {
     expect(cached?.pending).toEqual([]);
     expect(cached?.pendingCount).toBe(0);
   });
+
+  it("shows a true empty state without marking or dismissing any items on open", async () => {
+    await loadSurfaceCache(inboxCacheKey("w1"), async () => payload({ pending: [], mentions: [], pendingCount: 0, unreadMentionCount: 0 }));
+    fetchInbox.mockReturnValue(new Promise(() => {}));
+    await render(true);
+    expect(container.querySelector('[role=dialog]')?.getAttribute('aria-labelledby')).toBeTruthy();
+    expect(container.querySelector('[data-inbox-empty]')?.textContent).toContain(en.docPage.inboxEmptyTitle);
+    expect(markInboxRead).not.toHaveBeenCalled();
+    expect(dismissInboxReply).not.toHaveBeenCalled();
+  });
+
+  it("shows a cold error instead of claiming an unavailable Inbox is empty", async () => {
+    fetchInbox.mockRejectedValue(new Error('Unavailable'));
+    await render(true);
+    await act(async () => { await settle(); });
+    expect(container.querySelector('[role=alert]')?.textContent).toBe(en.docPage.inboxError);
+    expect(container.querySelector('[data-inbox-empty]')).toBeNull();
+    expect(markInboxRead).not.toHaveBeenCalled();
+  });
+
+  it("opens a page mention and clears only that notification", async () => {
+    await loadSurfaceCache(inboxCacheKey("w1"), async () => payload());
+    fetchInbox.mockReturnValue(new Promise(() => {}));
+    await render(true);
+    const row = [...container.querySelectorAll('button')].find(button => button.textContent?.includes('Roadmap'))!;
+    await act(async () => { row.click(); await settle(); });
+    expect(onOpenPage).toHaveBeenCalledExactlyOnceWith('page-2');
+    expect(markInboxRead).toHaveBeenCalledExactlyOnceWith('w1', ['mention-1']);
+    expect(readSurfaceCache<InboxPayload>(inboxCacheKey('w1')).data?.pending).toHaveLength(1);
+    expect(readSurfaceCache<InboxPayload>(inboxCacheKey('w1')).data?.mentions).toEqual([]);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("names and opens a room mention through the room callback and clears its unread cache", async () => {
+    const room = { kind: 'room_mention', id: 'mention-room', sessionId: 'room-a', sessionMessageId: 'message-a', roomTitle: 'Planning room', actorUserId: 'member-two', actorName: 'A teammate', preview: 'Review the draft.', createdAt: '2026-10-01T00:00:00Z', readAt: null } as InboxPayload['mentions'][number];
+    await loadSurfaceCache(inboxCacheKey('w1'), async () => payload({ pending: [], pendingCount: 0, mentions: [room] }));
+    fetchInbox.mockReturnValue(new Promise(() => {}));
+    await render(true);
+    const row = [...container.querySelectorAll('button')].find(button => button.textContent?.includes('Planning room'))!;
+    expect(row.textContent).toContain(en.docPage.inboxMentionByActorInRoom.replace('{actor}', 'A teammate').replace('{room}', 'Planning room'));
+    await act(async () => { row.click(); await settle(); });
+    expect(onOpenRoom).toHaveBeenCalledExactlyOnceWith('room-a');
+    expect(onOpenPage).not.toHaveBeenCalled();
+    expect(markInboxRead).toHaveBeenCalledExactlyOnceWith('w1', ['mention-room']);
+    expect(readSurfaceCache<InboxPayload>(inboxCacheKey('w1')).data?.unreadMentionCount).toBe(0);
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])("dismisses via Escape and restores a visible focus target (phone=%s)", async (phone) => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: phone && query.includes('max-width'), media: query, addEventListener() {}, removeEventListener() {} }));
+    await loadSurfaceCache(inboxCacheKey('w1'), async () => payload({ pending: [], mentions: [] }));
+    fetchInbox.mockReturnValue(new Promise(() => {}));
+    function Host() {
+      const [open, setOpen] = useState(false), [drawer, setDrawer] = useState(true);
+      return <><button data-inbox-trigger aria-expanded={open} style={{ visibility: phone && !drawer ? 'hidden' : 'visible' }} onClick={() => { setDrawer(false); setOpen(true); }}>Open Inbox</button><button data-doc-mobile-menu>Navigation</button><InboxPanel open={open} workspaceId="w1" sidebarCollapsed={false} onClose={() => { onClose(); setOpen(false); }} onOpenPage={onOpenPage} onOpenRoom={onOpenRoom} /></>;
+    }
+    // The real shell owns a closed file-import Dialog around its children.
+    await renderNode(<Dialog.Root open={false}><Host /></Dialog.Root>);
+    const trigger = container.querySelector<HTMLButtonElement>('[data-inbox-trigger]')!, navigation = container.querySelector<HTMLButtonElement>('[data-doc-mobile-menu]')!;
+    for (const button of [trigger, navigation]) button.getClientRects = () => [new DOMRect(0, 0, 44, 44)] as unknown as DOMRectList;
+    trigger.focus();
+    await act(async () => { trigger.click(); await settle(); });
+    const close = container.querySelector<HTMLButtonElement>(`[aria-label="${en.docPage.inboxCloseAria}"]`)!;
+    await vi.waitFor(() => expect(document.activeElement).toBe(close));
+    expect(container.querySelector('[data-inbox-backdrop]')).not.toBeNull();
+    expect(container.querySelector('[data-inbox-panel]')?.getAttribute('aria-modal')).toBe(phone ? 'true' : null);
+    await act(async () => { close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await settle(); });
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    await vi.waitFor(() => expect(document.activeElement).toBe(phone ? navigation : trigger));
+    if (!phone) {
+      await act(async () => { trigger.click(); await settle(); });
+      await vi.waitFor(() => expect(document.activeElement?.getAttribute('aria-label')).toBe(en.docPage.inboxCloseAria));
+      const closeAgain = container.querySelector<HTMLButtonElement>(`[aria-label="${en.docPage.inboxCloseAria}"]`)!;
+      await act(async () => { navigation.focus(); await settle(); });
+      // Nonmodal Inbox permits focus outside. A later controlled dismissal
+      // must preserve that target rather than restoring over the user's choice.
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+      await act(async () => { closeAgain.click(); await settle(); });
+      await vi.waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
+      expect(document.activeElement).toBe(navigation);
+    }
+  });
+
 });

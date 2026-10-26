@@ -1,3 +1,4 @@
+import type {RetainedGoalWorkflowClaim} from '../db/goals.js'
 /**
  * Task-autopilot chat tools — the confirm + spin-up surface (the api half;
  * these need the workflow builder + the acting-loop kickoff, so they live here,
@@ -16,8 +17,10 @@
  * [COMP:goals/work-tools]
  */
 import { z } from 'zod'
+import {ContextScopeAccumulator} from '@use-brian/core'
+import {retainedTaskGoalCaller,admitRetainedGoalBoundary} from '../workspace-access/goal-source-admission.js'
 import { buildTool, EventSubscriptionSchema, notFoundFailure, pinToolAuthoringAuthority, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@use-brian/core'
-import { getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem, updateGoalSystem } from '../db/goals.js'
+import { armRetainedGoalWorkflow,getRetainedGoalById,confirmRetainedGoal,getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem, updateGoalSystem } from '../db/goals.js'
 import { goalAcceptedMeta } from './acknowledgement.js'
 
 /** Real chat sessions are UUIDs; workflow iterations carry synthetic
@@ -25,6 +28,8 @@ import { goalAcceptedMeta } from './acknowledgement.js'
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export type GoalWorkToolsDeps = {
+  advanceRetainedWorkflowRun?: (runId:string,claim:RetainedGoalWorkflowClaim)=>Promise<{kind:string}>
+
   /** Build the simple default "complete this task" workflow for a goal's host
    *  task, returning its id. Wired in boot to `buildOneStepReminderWorkflow`. */
   createCompletionWorkflow: (goal: GoalRecord, userId: string) => Promise<string>
@@ -94,13 +99,18 @@ export function createGoalWorkTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
-      const existing = await getGoalByIdSystem(input.goal_id)
+      const ordinary=await getGoalByIdSystem(input.goal_id)
+      const source=ordinary?undefined:await retainedTaskGoalCaller(context.userId,input.goal_id)
+      const authority=source&&context.executionContext&&context.scopeAccumulator instanceof ContextScopeAccumulator
+        ?{execution:context.executionContext,accumulator:context.scopeAccumulator}:undefined
+      const existing=ordinary??(authority?await getRetainedGoalById(context.userId,input.goal_id,authority):null)
       if (!existing || existing.workspaceId !== context.workspaceId) {
         return goalNotFound(input.goal_id, 'Nothing was confirmed.')
       }
       // Clarity gate (§12, widened §8) — don't arm a goal an agent couldn't
       // recognise as done. Assess the would-be configuration: the outcome (the
       // refinement, or the current one) plus the triage brief when present.
+      if(authority)await admitRetainedGoalBoundary(authority,existing,'context')
       if (deps.assessClarity) {
         const outcome = input.outcome?.trim() || existing.outcome
         const verdict = await deps.assessClarity({
@@ -110,8 +120,11 @@ export function createGoalWorkTools(
           userId: context.userId,
           workspaceId: context.workspaceId!,
           assistantId: context.assistantId,
+          ...(authority?{assertInputAuthority:()=>admitRetainedGoalBoundary(authority,existing,'context')}:{})
         })
+        if(authority)await admitRetainedGoalBoundary(authority,existing,'context')
         if (!verdict.clear) {
+          if(authority)await admitRetainedGoalBoundary(authority,existing,'deliver')
           return {
             data:
               `Goal ${input.goal_id} was NOT confirmed: its outcome is not concrete enough for an agent to recognise as done. ${verdict.clarifyingQuestion} ` +
@@ -121,14 +134,15 @@ export function createGoalWorkTools(
           }
         }
       }
-      const goal = await updateGoalSystem(input.goal_id, {
+      const goal = authority?await confirmRetainedGoal(context.userId,existing,{outcome:input.outcome},authority):await updateGoalSystem(input.goal_id, {
         confirm: true,
         outcome: input.outcome,
         authoringAuthority: existing.authoringAuthority ?? pinToolAuthoringAuthority(context),
       })
       if (!goal) return goalNotFound(input.goal_id, 'The goal was not confirmed and its outcome was not changed.')
+      if(authority)try{await admitRetainedGoalBoundary(authority,goal,'deliver')}catch(error){throw Object.assign(error instanceof Error?error:new Error('goal_source_unavailable'),{retrySafe:false,operationMayHaveExecuted:true})}
       return {
-        data: `Confirmed goal [${goal.id}]: ${goal.outcome}. Spin it up with workTask to have me work the task to done.`,
+        data: `Confirmed goal [${goal.id}]: ${goal.outcome}. `+(authority?'An explicitly selected native-only workflow with UTC waits and branches can be started with workTask. Recurring Goal execution remains held.':'Spin it up with workTask to have me work the task to done.'),
       }
     },
   })
@@ -149,6 +163,26 @@ export function createGoalWorkTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const retainedCaller=await retainedTaskGoalCaller(context.userId,input.goal_id)
+      if(retainedCaller){
+        if(!context.executionContext||!(context.scopeAccumulator instanceof ContextScopeAccumulator)
+          ||!input.workflow_id||!deps.advanceRetainedWorkflowRun)return{isError:true,data:'No work was started. This retained Goal requires an explicit existing workflow with only wait and branch steps.'}
+        const authority={execution:context.executionContext,accumulator:context.scopeAccumulator}
+        const original=await getRetainedGoalById(context.userId,input.goal_id,authority)
+        if(!original||original.workspaceId!==context.workspaceId)return goalNotFound(input.goal_id,'No work was started.')
+        const armed=await armRetainedGoalWorkflow(context.userId,original,input.workflow_id,authority)
+        if(!armed)throw new Error('goal_source_unsupported')
+        // A replay observes the existing wait/terminal run. It never advances a
+        // paused wait early or allocates another workflow allowance.
+        try{
+          const result=armed.dispatch&&armed.claim&&['pending','running'].includes(armed.run.status)?await deps.advanceRetainedWorkflowRun(armed.run.id,armed.claim):{kind:armed.run.status}
+          await admitRetainedGoalBoundary(authority,armed.goal,'deliver')
+          return{data:{goalId:armed.goal.id,workflowRunId:armed.run.id,status:result.kind,
+            message:'The selected deterministic workflow was started. Recurring Goal ticks and terminal Goal completion remain held.'}}
+        }catch{
+          return{isError:true,retrySafe:false,operationMayHaveExecuted:true,data:'The workflow was armed, but its current result could not be released. Work may have executed. Do not create a replacement run.'}
+        }
+      }
       const goal = await getGoalByIdSystem(input.goal_id)
       if (!goal || goal.workspaceId !== context.workspaceId) return goalNotFound(input.goal_id, 'No work was started.')
       if (!goal.confirmedAt) {

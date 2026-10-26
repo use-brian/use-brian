@@ -116,7 +116,7 @@ describe('[COMP:doc/auto-title] generatePageTitle', () => {
       'Q3 revenue is up 14% driven by enterprise renewals and net expansion.',
     )
     expect(result.title).toBe('Q3 Revenue Growth Review')
-    expect(result.model).toBe('gemini-3.1-flash-lite')
+    expect(result.model).toBe('gemini-3.5-flash-lite')
     expect(result.usage).toEqual({ inputTokens: 100, outputTokens: 5 })
   })
 

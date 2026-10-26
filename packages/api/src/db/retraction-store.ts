@@ -9,7 +9,9 @@
  * SQL touches `memories` (for retraction) and the episode-derived rows
  * (for re-extraction supersession).
  *
- * Access model: system-level operator state. The caller is the admin
+ * Native chat retractions carry original host authority through the canonical
+ * nonowner retained frame and exact CAS port. The legacy operator path below
+ * retains system-level operator state. Its caller is the admin
  * corrections route (`X-Admin-Key`-gated), or Feed's member-authorized
  * correction service supplying its already-authorized transaction. Every primitive table
  * carries a `system_bypass` RLS policy (memories: migration 015;
@@ -24,7 +26,7 @@
  * [COMP:corrections/retraction-store]
  */
 
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import type pg from 'pg'
 import type {
   EpisodeDerivationSnapshot,
@@ -32,7 +34,12 @@ import type {
   MemoryRetractionRepository,
   MemoryRetractionSnapshot,
 } from '@use-brian/core'
+import { ContextScopeAccumulator, DerivedScopeError, boundScopeSources, deriveWriteScope, resourceScopeKey, RANK, scopeGrantContains } from '@use-brian/core'
 import { getPool, query } from './client.js'
+import { getMemoryById } from './memories.js'
+import { writeRetainedContextFrame } from './session-context-revisions.js'
+import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
+import { readApplicationFieldAncestors } from '../application-platform/field-evidence.js'
 
 // ── Memory retraction ────────────────────────────────────────────────
 
@@ -73,7 +80,14 @@ export function createMemoryRetractionStore(transactionClient?: pg.PoolClient): 
   // output suppression receipt in the caller-owned domain transaction.
   const execute = transactionClient ? transactionClient.query.bind(transactionClient) : query
   return {
-    async readMemoryForRetraction(workspaceId, memoryId) {
+    async readMemoryForRetraction(workspaceId, memoryId, authority) {
+      if (authority) {
+        if (transactionClient || workspaceId !== authority.execution.security.access.workspaceId) throw new DerivedScopeError('scope_evidence_missing')
+        const memory = await getMemoryById(authority.execution.security.access, memoryId, undefined, undefined, authority)
+        // This operation does not consume the extraction-only hash, which the
+        // canonical selected-field projection deliberately does not expose.
+        return memory ? { ...toMemorySnapshot({ ...memory, workspaceId, semanticHash: null }), scopeVersion: memory.scopeVersion } : null
+      }
       const result = await execute<MemoryRetractionRow>(
         `SELECT ${MEMORY_SNAPSHOT_COLS}
            FROM memories
@@ -85,6 +99,37 @@ export function createMemoryRetractionStore(transactionClient?: pg.PoolClient): 
     },
 
     async applySoftRetract(input) {
+      if (input.operation) {
+        const { authority, expectedVersion } = input.operation, { execution, accumulator } = authority
+        const access = execution.security.access
+        if (transactionClient || !(accumulator instanceof ContextScopeAccumulator) || input.workspaceId !== access.workspaceId
+          || input.retractedBy !== access.userId || access.systemRead || access.assistantId !== execution.assistant.id || !expectedVersion) throw new DerivedScopeError('scope_evidence_missing')
+        const prior = await getMemoryById(access, input.memoryId, undefined, undefined, authority)
+        if (!prior || prior.scopeVersion !== expectedVersion) throw new DerivedScopeError('scope_source_changed')
+        const highWater = accumulator.evidence, originalInputs = JSON.stringify(highWater)
+        const roots = new ContextScopeAccumulator(highWater)
+        roots.note({ sources: [...boundScopeSources(prior), {
+          resourceKind: 'memory', resourceId: prior.id, version: prior.scopeVersion, workspaceId: access.workspaceId,
+          userId: prior.userId, assistantId: prior.assistantId, sensitivity: prior.sensitivity, compartments: prior.compartments, projectIds: prior.projectIds,
+        }] })
+        const initial = roots.evidence.sources ?? []
+        roots.note({ sources: [...await readExternalSourceAncestors(access.workspaceId, initial), ...await readApplicationFieldAncestors(access.workspaceId, initial)] })
+        if (JSON.stringify(accumulator.evidence) !== originalInputs) throw new DerivedScopeError('scope_source_changed')
+        const reasonEvidence = roots.evidence
+        const target = { workspaceId: access.workspaceId, userId: prior.userId, assistantId: prior.assistantId,
+          sensitivity: prior.sensitivity, compartments: prior.compartments, projectIds: prior.projectIds }
+        const inherited = deriveWriteScope({ producer: 'tool:retractMemory', sources: reasonEvidence.sources ?? [] }, target, access.userId)
+        if (resourceScopeKey(inherited) !== resourceScopeKey(target) || RANK[roots.sensitivity] > RANK[prior.sensitivity]
+          || !scopeGrantContains(prior.compartments, roots.compartments) || !scopeGrantContains(prior.projectIds, roots.projectIds)) throw new DerivedScopeError('scope_visibility_incompatible')
+        const fingerprint = createHash('sha256').update(JSON.stringify({ identity: execution.identity, ceiling: execution.security.ceiling, ownership: execution.ownership, reasonEvidence })).digest('hex')
+        await writeRetainedContextFrame(authority, roots.evidence.sources ?? [], async client => {
+          const result = await client.query<{ receipt: string }>('SELECT retract_admitted_native_memory($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) AS receipt',
+            [access.workspaceId, prior.id, expectedVersion, execution.assistant.id, execution.lifecycle.sessionId, fingerprint, input.reason, input.now, JSON.stringify(reasonEvidence)])
+          if (!result.rows[0]?.receipt) throw new DerivedScopeError('scope_evidence_missing')
+          // No invalidated body or old observation is read after the correction.
+        })
+        return
+      }
       // D.3 — retraction stamps `retracted_at` ("was never correct")
       // alongside `valid_to`. A row already superseded keeps its earlier
       // `valid_to`; an active row gets `valid_to = now()`.

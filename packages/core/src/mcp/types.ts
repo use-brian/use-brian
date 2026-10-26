@@ -66,6 +66,8 @@ export type McpToolInfo = {
   name: string
   description: string
   inputSchema: Record<string, unknown>
+  /** Authenticated source adapter hint; protected read profiles require an explicit true. */
+  readOnlyHint?: boolean
 }
 
 // ── Confirmation types ────────────────────────────────────────

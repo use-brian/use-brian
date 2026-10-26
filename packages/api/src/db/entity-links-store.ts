@@ -13,6 +13,11 @@ import type { Sensitivity } from '@use-brian/core'
 import type pg from 'pg'
 import { buildAccessPredicate } from './access-predicate.js'
 import { queryWithRLS, getAppPool, applyRLSGucs } from './client.js'
+import { ContextScopeAccumulator, DerivedScopeError, bindScopeSources, boundScopeSources, deriveWriteScope, type ScopeSource, type SessionContextAuthority } from '@use-brian/core'
+import { getMemoryById } from './memories.js'
+import { readRetainedContextFrame, writeRetainedContextFrame } from './session-context-revisions.js'
+import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
+import { readApplicationFieldAncestors } from '../application-platform/field-evidence.js'
 
 /**
  * `entity_links` store. Schema spec:
@@ -137,6 +142,7 @@ export async function createEntityLink(
   actorUserId: string,
   params: EntityLinkCreateParams,
   transactionClient?: pg.PoolClient,
+  freshOnly = false,
 ): Promise<EntityLinkRecord> {
   if (!transactionClient) {
     const client = await getAppPool().connect()
@@ -181,7 +187,7 @@ export async function createEntityLink(
        )
        ON CONFLICT (workspace_id, source_kind, source_id, target_kind, target_id, edge_type)
          WHERE valid_to IS NULL AND retracted_at IS NULL
-         DO UPDATE SET
+         ${freshOnly ? 'DO NOTHING' : `DO UPDATE SET
            ${admission.ready ? `user_id = EXCLUDED.user_id,
            assistant_id = EXCLUDED.assistant_id,
            sensitivity = EXCLUDED.sensitivity,` : ''}
@@ -199,7 +205,7 @@ export async function createEntityLink(
            AND entity_links.compartments <@ EXCLUDED.compartments
            AND entity_links.project_ids <@ EXCLUDED.project_ids
            AND array_position(ARRAY['public','internal','confidential'],entity_links.sensitivity)
-             <= array_position(ARRAY['public','internal','confidential'],EXCLUDED.sensitivity)` : ''}
+             <= array_position(ARRAY['public','internal','confidential'],EXCLUDED.sensitivity)` : ''}`}
        RETURNING ${FULL_SELECT}`,
       [
         params.sourceKind,
@@ -221,7 +227,7 @@ export async function createEntityLink(
       ],
     )
     if (result.rows[0]) return toLink(result.rows[0])
-    if (admission.ready) throw new WorkspaceAccessError('context_not_available', 404)
+    if (freshOnly || admission.ready) throw new WorkspaceAccessError('context_not_available', 404)
 
     const existing = await run<EntityLinkRow>(
       `SELECT ${FULL_SELECT} FROM entity_links
@@ -455,10 +461,94 @@ export async function retractEntityLink(
   return toLink(result.rows[0])
 }
 
+/** Retained graph support starts with canonical Memory endpoints; IDs alone do not grant it. */
+function requireMemoryLinkAuthority(authority: SessionContextAuthority, ctx?: AccessContext): void {
+  const e = authority.execution, access = e.security.access
+  if (!(authority.accumulator instanceof ContextScopeAccumulator) || e.ownership.kind !== 'workspace'
+    || e.identity.kind !== 'attended' || e.identity.principal.kind !== 'workspace_member'
+    || e.identity.principal.userId !== access.userId || e.ownership.workspaceId !== access.workspaceId || e.surface.readOnly || access.sharedAudience
+    || access.assistantId !== e.assistant.id || e.surface.systemRead || e.surface.clientSelfMemory
+    || ctx && (ctx.systemRead || ctx.clientSelfMemory || ctx.userId !== access.userId || ctx.workspaceId !== access.workspaceId || ctx.assistantId !== e.assistant.id)) {
+    throw new DerivedScopeError('scope_evidence_missing')
+  }
+}
+async function completeMemoryLinkRoots(authority: SessionContextAuthority, initial: readonly ScopeSource[]): Promise<ScopeSource[]> {
+  const roots = new ContextScopeAccumulator({ sources: [...initial] }), workspace = authority.execution.security.access.workspaceId
+  roots.note({ sources: [...await readExternalSourceAncestors(workspace, initial), ...await readApplicationFieldAncestors(workspace, initial)] })
+  return roots.evidence.sources ?? []
+}
+async function createRetainedMemoryLink(params: EntityLinkCreateParams, authority: SessionContextAuthority): Promise<EntityLinkRecord> {
+  requireMemoryLinkAuthority(authority)
+  params = structuredClone(params)
+  const e = authority.execution, access = e.security.access
+  if (params.sourceKind !== 'memory' || params.targetKind !== 'memory' || params.validTo || params.sourceEpisodeId
+    || params.userId !== access.userId || params.workspaceId !== access.workspaceId || params.assistantId !== e.assistant.id) {
+    throw new DerivedScopeError('scope_evidence_missing')
+  }
+  const endpoints = []
+  for (const id of [params.sourceId, params.targetId]) {
+    const memory = await getMemoryById(access, id, undefined, undefined, authority)
+    if (!memory) throw new DerivedScopeError('scope_source_changed')
+    endpoints.push(memory)
+  }
+  const sources = await completeMemoryLinkRoots(authority, [...authority.accumulator.evidence.sources ?? [],
+    ...endpoints.flatMap(memory => [...boundScopeSources(memory), {
+      resourceKind: 'memory', resourceId: memory.id, version: memory.scopeVersion, workspaceId: access.workspaceId,
+      userId: memory.userId, assistantId: memory.assistantId, sensitivity: memory.sensitivity,
+      compartments: memory.compartments, projectIds: memory.projectIds,
+    }]),
+  ])
+  const scope = deriveWriteScope({ producer: 'memory-explicit-link', sources }, {
+    workspaceId: params.workspaceId, userId: access.userId, assistantId: e.assistant.id,
+    sensitivity: params.sensitivity ?? 'internal', compartments: params.compartments ?? [], projectIds: params.projectIds ?? [],
+  }, access.userId)
+  return writeRetainedContextFrame(authority, sources, async client => {
+    const link = await createEntityLink(access.userId, { ...params, ...scope }, client, true)
+    const source = (await client.query<{ source: ScopeSource }>("SELECT read_admitted_native_scope_snapshot($1,'entity_link',$2) || jsonb_build_object('resourceKind','entity_link','resourceId',$2::text) AS source", [params.workspaceId, link.id])).rows[0]?.source
+    if (!source?.version) throw new DerivedScopeError('scope_evidence_missing')
+    await client.query('SELECT record_admitted_memory_link_derivation($1,$2,$3,$4,$5)',
+      [params.workspaceId, link.id, source.version, 'memory-explicit-link', JSON.stringify(sources)])
+    return bindScopeSources(link, [source, ...sources])
+  })
+}
+async function readRetainedMemoryLink(ctx: AccessContext, id: string, authority: SessionContextAuthority): Promise<EntityLinkRecord | null> {
+  requireMemoryLinkAuthority(authority, ctx)
+  ctx = structuredClone(ctx)
+  const root = await readRetainedContextFrame(authority, authority.accumulator.evidence.sources ?? [], async client =>
+    (await client.query<{ source: ScopeSource | null }>("SELECT read_admitted_native_scope_snapshot($1,'entity_link',$2) || jsonb_build_object('resourceKind','entity_link','resourceId',$2::text) AS source", [ctx.workspaceId, id])).rows[0]?.source)
+  if (!root || !root.version) return null
+  let sources = await completeMemoryLinkRoots(authority, [...authority.accumulator.evidence.sources ?? [], root])
+  const link = await readRetainedContextFrame(authority, sources, async client => {
+    const ap = buildAccessPredicate(ctx, { startIdx: 3 })
+    const row = (await client.query<EntityLinkRow>(`SELECT ${FULL_SELECT} FROM entity_links WHERE id=$1 AND scope_version::text=$2 AND ${ap.sql}`, [id, root.version, ...ap.params])).rows[0]
+    return row ? toLink(row) : null
+  })
+  if (!link) return null
+  if (link.sourceKind !== 'memory' || link.targetKind !== 'memory') throw new DerivedScopeError('scope_evidence_missing')
+  const endpointSources: ScopeSource[] = []
+  for (const endpoint of [link.sourceId, link.targetId]) {
+    const memory = await getMemoryById(ctx, endpoint, undefined, undefined, authority)
+    if (!memory) throw new DerivedScopeError('scope_source_changed')
+    endpointSources.push(...boundScopeSources(memory), {
+      resourceKind: 'memory', resourceId: memory.id, version: memory.scopeVersion, workspaceId: ctx.workspaceId,
+      userId: memory.userId, assistantId: memory.assistantId, sensitivity: memory.sensitivity,
+      compartments: memory.compartments, projectIds: memory.projectIds,
+    })
+  }
+  sources = await completeMemoryLinkRoots(authority, [...sources, ...endpointSources])
+  return readRetainedContextFrame(authority, sources, async client => {
+    const current = (await client.query<{ allowed: boolean }>('SELECT memory_link_current_ancestry_allows($1,$2,$3) AS allowed', [ctx.workspaceId, id, root.version])).rows[0]?.allowed
+    if (current !== true) throw new DerivedScopeError('scope_source_changed')
+    return bindScopeSources(link, [...sources])
+  })
+}
+
 // ── Factory ──────────────────────────────────────────────────────────
 
 export function createDbEntityLinksStore(): EntityLinksStore {
   return {
+    createRetainedMemoryLink,
+    getRetainedMemoryLink: readRetainedMemoryLink,
     async create(params) {
       const actor = params.userId ?? params.assistantId
       if (!actor) {

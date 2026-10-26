@@ -25,7 +25,7 @@ import {
   type CrmSegmentPredicate,
   type AccessContext,
 } from '@use-brian/core'
-import { getPool } from './client.js'
+import { applyRLSGucs,getAppPool,getPool,rollbackAndRelease } from './client.js'
 import { associationProviderInheritance, associationCheckoutInheritance, assertAssociationCheckoutParent, admitAssociationSourceScope, beginAssociationCreation, assertAssociationOrderAuthority, loadAssociationOrderScope } from '../association/source-scope.js'
 import type { AssociationActor } from '@use-brian/core'
 import { readCrmPrivacyPolicy, saveCrmPrivacyPolicy } from '../crm-operations/privacy-policy.js'
@@ -43,7 +43,7 @@ import { crmEvidenceRequestHash, resolveCrmEvidenceReplay, type CrmEvidenceReque
 import { executeCrmConfigCommand } from './crm-config-commands.js'
 import type { CrmConfigCommand } from '@use-brian/core'
 import { readCrmMutationSource } from './crm.js'
-import { updateEntity } from './entities-store.js'
+import { assertNativeEntityFieldWrites,updateEntity } from './entities-store.js'
 import { currentAgentAccess, runWithAgentAccess } from './agent-access-context.js'
 import { admitCrmIntegrationBinding } from '../crm-operations/integration-department-authority.js'
 import { readCrmIntakeAuthority } from '../crm-operations/intake-department-authority.js'
@@ -342,6 +342,8 @@ export type CrmCommercialTransaction = {
 }
 
 export type CrmOperationsStore = {
+  /** Protected catalog commands retain the actual non-owner native principal. */
+  configurationTransaction?<T>(context:CrmOperationsContext,fn:(tx:CrmOperationsTransaction)=>Promise<T>):Promise<T>
   transaction<T>(
     context: CrmOperationsContext,
     fn: (tx: CrmOperationsTransaction) => Promise<T>,
@@ -1581,6 +1583,8 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext, ef
 
     async setDealPipelineStage(params) {
       const access = await stageActorAccess(client, context)
+      const fieldIntent=['pipelineId','pipelineStageId','stage']
+      await assertNativeEntityFieldWrites(access.userId,params.dealId,{},client,fieldIntent)
       const source = await readCrmMutationSource(access, params.dealId, ['deal'], client)
       if (!source) return null
       const project = (entity: typeof source) => ({ id: entity.id, name: entity.displayName,
@@ -1643,8 +1647,8 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext, ef
       const legacyStage = stage.legacyStage
         ?? (stage.category === 'won' ? 'won' : stage.category === 'lost' ? 'lost' : 'lead')
       const updated = await updateEntity(access.userId, params.dealId, { attributes: {
-        ...deal.attributes, pipeline_id: params.pipelineId, pipeline_stage_id: params.stageId, stage: legacyStage,
-      } }, access, client)
+        pipeline_id: params.pipelineId, pipeline_stage_id: params.stageId, stage: legacyStage,
+      } }, access, client,{fieldIntent})
       const updatedDeal = updated ? project(updated) : null
       if (!updatedDeal) return null
       await client.query(
@@ -1707,24 +1711,67 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext, ef
       }
     },
     async emitDomainEvent(params) {
-      const result = await client.query<{ id: string }>(
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('crm-domain-event:'||$1::text||':'||$2::text,0))",[workspaceId,params.eventKey])
+      const existing=await client.query<{id:string}>(
+        'SELECT id FROM crm_domain_event_outbox WHERE workspace_id=$1 AND event_key=$2',
+        [workspaceId,params.eventKey])
+      if(existing.rows[0]) return existing.rows[0].id
+      await client.query(
         `INSERT INTO crm_domain_event_outbox (
            workspace_id,event_type,event_key,subject_kind,subject_id,payload,
            actor_kind,occurred_at
-         ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)
-         ON CONFLICT (workspace_id,event_key) DO UPDATE SET event_key=EXCLUDED.event_key
-         RETURNING id`,
+         ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,
         [workspaceId, params.eventType, params.eventKey, params.subjectKind,
           params.subjectId, JSON.stringify(params.payload), params.actor.kind,
           params.occurredAt],
       )
-      return result.rows[0]!.id
+      // The restrictive STABLE scope reader sees new rows in the next statement.
+      const result=await client.query<{id:string}>(
+        'SELECT id FROM crm_domain_event_outbox WHERE workspace_id=$1 AND event_key=$2',
+        [workspaceId,params.eventKey])
+      if(!result.rows[0]) throw new CrmOperationsError('not_authorized','The committed event is unavailable in the current scope.')
+      return result.rows[0].id
     },
   }
 }
 
 export function createDbCrmOperationsStore(pool: Pool = getPool(), transactionClient?: PoolClient): CrmOperationsStore {
-  return {
+  const store:CrmOperationsStore = {
+    async configurationTransaction(context,fn) {
+      // This is only a restrictive transport probe, never a data/role admission.
+      // A binding racing this probe is still enforced by the canonical SQL guard.
+      const probe=transactionClient??await pool.connect()
+      let protectedCatalog:boolean
+      try {
+        protectedCatalog=(await probe.query<{protected:boolean}>('SELECT application_native_crm_configuration_protected($1) AS protected',[context.workspaceId])).rows[0]?.protected===true
+      } finally {if(!transactionClient)probe.release()}
+      if(!protectedCatalog)return store.transaction(context,fn)
+      const actor=context.actor
+      if(!['user','assistant','workflow','import'].includes(actor.kind)||!('userId' in actor)||!actor.userId) {
+        throw new CrmOperationsError('not_authorized','Protected configuration requires a current native principal.')
+      }
+      const client=transactionClient??await getAppPool().connect(),effects:Array<()=>void>=[]
+      try {
+        if(!transactionClient){await client.query('BEGIN');await applyRLSGucs(client,actor.userId)}
+        else if((await client.query<{actor:string}>("SELECT current_setting('app.current_user_id',true) AS actor")).rows[0]?.actor!==actor.userId) {
+          throw new CrmOperationsError('not_authorized','The configuration transaction actor is unavailable.')
+        }
+        const role=(await client.query<{bypass:boolean}>(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+          FROM pg_roles r JOIN pg_class c ON c.oid='public.application_native_field_contracts'::regclass WHERE r.rolname=current_user`)).rows[0]
+        if(role?.bypass!==false)throw new CrmOperationsError('not_authorized','Protected configuration requires a non-owner transaction.')
+        await stageActorAccess(client,context)
+        await beginAssociationCreation(client,context.workspaceId)
+        const result=await fn(createTransaction(client,context,effects))
+        if(!transactionClient)await client.query('COMMIT')
+        if(!transactionClient)for(const effect of effects)effect()
+        return result
+      } catch(error) {
+        if((error as {code?:string}).code==='42501'||error instanceof WorkspaceAccessError||(error as {code?:string}).code==='scope_operation_denied') {
+          throw new CrmOperationsError('not_authorized','The current configuration authority is unavailable.')
+        }
+        throw error
+      } finally {if(!transactionClient)await rollbackAndRelease(client)}
+    },
     async transaction(context, fn) {
       const client = transactionClient ?? await pool.connect()
       const effects: Array<() => void> = []
@@ -1781,6 +1828,7 @@ export function createDbCrmOperationsStore(pool: Pool = getPool(), transactionCl
       }
     },
   }
+  return store
 }
 
 export function crmOperationsActorAssistantId(actor: CrmOperationsActor): string | null {

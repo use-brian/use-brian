@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { buildConnectorAuthHeaders, isValidHeaderName, isValidHeaderValue, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders } from '../auth-headers.js'
+import { buildConnectorAuthHeaders, isValidHeaderName, isValidHeaderValue, mergeValidatedHeaders, mergeHostConnectorIdentityHeaders, preflightHeadersToRecord, actorIdentityHeaders } from '../auth-headers.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -299,12 +299,12 @@ describe('[COMP:api/actor-identity] actorIdentityHeaders', () => {
   })
 
   it('actor headers win when merged over auth + (reserved-stripped) preflight', () => {
-    const actor = actorIdentityHeaders({ channel: 'whatsapp', id: '15551234567', email: 'real@user.com', userId: 'u-4' })
-    const merged = mergeValidatedHeaders({ Authorization: 'Bearer x' }, actor)
+    const actor = actorIdentityHeaders({ channel: 'whatsapp', id: '15551234567', email: 'staff@example.com', userId: 'u-4' })
+    const merged = mergeHostConnectorIdentityHeaders({ Authorization: 'Bearer x' }, actor)
     expect(merged).toMatchObject({
       Authorization: 'Bearer x',
       'X-Sidanclaw-Actor-Id': '15551234567',
-      'X-Sidanclaw-Actor-Email': 'real@user.com',
+      'X-Sidanclaw-Actor-Email': 'staff@example.com',
     })
   })
 })

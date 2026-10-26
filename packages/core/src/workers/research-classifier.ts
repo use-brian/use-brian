@@ -1,17 +1,19 @@
+import {bindScopeSources,boundScopeSources} from '../security/source-evidence.js'
+import {DerivedScopeError} from '../security/derived-scope.js'
+import {assertInputAuthority,isInputAuthorityError} from '../providers/input-authority.js'
+import type {SessionContextAuthority} from '../memory/session-state-types.js'
 /**
  * Pre-flight classifier for adaptive research-mode entry.
  *
- * Decides whether a user message warrants research mode — the same flag the
- * web composer's manual toggle sets. When true, the chat / channel route
- * upgrades the model (Pro 3.1), raises the per-turn budget, and (on chat)
- * spins up worker delegation. Skipped for short messages and for callers
- * outside the research-eligible plan tier.
- *
- * Uses Gemini 3.1 Flash Lite — cheap classifier, JSON-only output. Mirrors
- * the pattern in `splitter.ts`.
+ * An isolated cheap assessment receives the request and admitted dialogue,
+ * decides whether fresh multi-source evidence is needed, and chooses effort.
+ * The chat route promotes research turns to the stronger model and read-only
+ * parallel workers. The caller owns quota and credit admission.
  *
  * [COMP:workers/research-classifier]
  */
+
+import { researchEffort, type ResearchEffort } from './research-effort.js'
 
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
@@ -20,19 +22,18 @@ import type {
   DecisionResponse,
 } from '../decisions/index.js'
 
-const CLASSIFIER_SYSTEM_PROMPT = `You decide if a user message warrants deep research mode.
+const CLASSIFIER_SYSTEM_PROMPT = `You are an isolated research-assessment worker. Decide whether the current request needs fresh multi-source investigation and choose the smallest sufficient effort.
 Return JSON only. No explanation.
 
 Input is JSON with:
 - currentMessage: the message to classify.
 - recentConversation: up to six earlier user/assistant text turns, oldest first.
 
-Use recentConversation to resolve whether currentMessage is a follow-up. A follow-up that asks
-to extend, explain, quantify, reframe, or strategize material already discussed is OFF even when
-the same words would look like a research brief in isolation. Research is ON only when the CURRENT
-message starts or explicitly requests a new deep investigation.
+Use recentConversation to resolve whether currentMessage is a follow-up. A follow-up that only explains, reframes, or strategizes material already discussed is OFF.
+A follow-up that needs NEW evidence, source verification or a new comparison can be ON.
+Assess the current evidence need, not whether the word research appears.
 
-Research mode is ON when the request needs DEEP INVESTIGATION — multi-source web synthesis,
+Research mode is ON when the request needs MULTI-SOURCE INVESTIGATION — multi-source web synthesis,
 comparative analysis across products / papers / events, in-depth competitive scans, structured
 reports, anything where the user is asking the assistant to act like an analyst.
 
@@ -40,9 +41,15 @@ Research mode is OFF for:
 - Greetings, acknowledgments, casual chat
 - Simple factual lookups answerable in one step ("what time is it in Tokyo")
 - Quick how-to questions
-- Follow-ups that reference prior conversation context
+- Follow-ups answerable from the supplied conversation without fresh investigation
 - Tasks the assistant can do with its own memory + a couple of tool calls
-- Messages under ~10 words
+- Requests to summarize or rewrite existing material without new evidence
+
+A short request can still need research. Choose effort according to scope, uncertainty and evidence needed:
+- focused: one bounded question or narrow comparison; two independent angles, one wave.
+- standard: several questions needing cross-source comparison; three workers, up to two waves.
+- deep: broad or explicitly exhaustive investigation, substantial uncertainty or conflicting evidence; five workers, up to four waves.
+Use the smallest sufficient effort. Never choose deep merely because the user says research.
 
 Research mode is OFF — and this is a SITE OPERATION — when the user asks to open, browse,
 log into, or act on ONE specific named website / web app / URL ("browse luma for events in hk",
@@ -52,12 +59,12 @@ investigation ("research the HK events landscape") is still research even if sit
 This holds in EVERY language, and asking for the computer/browser BY NAME is always a site
 operation ("用 computer use 去睇下要幾錢", "幫我上官網睇下價錢", "ブラウザで公式サイトを見て").
 
-If research warranted: {"research":true,"reason":"<one short phrase, lower-case>"}
+If research warranted: {"research":true,"effort":"focused|standard|deep","reason":"<one short phrase, lower-case>"}
 If a site operation: {"research":false,"operate_site":true}
 Otherwise: {"research":false}`
 
 const MIN_MESSAGE_LENGTH = 40
-const CLASSIFIER_MODEL = 'gemini-3.1-flash-lite'
+const CLASSIFIER_MODEL = 'gemini-3.5-flash-lite'
 
 // ── CJK-aware effective length ─────────────────────────────────────
 //
@@ -78,6 +85,10 @@ function effectiveLength(message: string): number {
 }
 
 export type ResearchClassifyOptions = {
+  /** Original canonical invocation and complete privately bound classifier inputs. */
+  authority?: SessionContextAuthority
+  assertInputAuthority?: () => Promise<void>
+  signal?: AbortSignal
   provider: LLMProvider
   message: string
   /**
@@ -86,7 +97,7 @@ export type ResearchClassifyOptions = {
    * infer conversation state from one isolated sentence.
    */
   recentConversation?: Array<{ role: 'user' | 'assistant'; text: string }>
-  /** Override the short-message bypass; defaults to 40 chars. */
+  /** Maximum effective length for the trivial-chat fast path; defaults to 40. */
   minMessageLength?: number
   /**
    * Background-lane model. Callers with boot context (the API routes) pass an
@@ -103,6 +114,8 @@ export type ResearchClassifyOptions = {
 export type ResearchClassifyResult = {
   /** Whether the classifier flagged the message as needing research mode. */
   research: boolean
+  /** Smallest sufficient research effort; absent for ordinary/site requests. */
+  effort?: ResearchEffort
   /**
    * The message asks to open / browse / log into / act on ONE specific named
    * site or URL — a site operation, not research. Mutually exclusive with
@@ -162,9 +175,9 @@ export function detectOperateSiteIntent(message: string): boolean {
 
 const RESEARCH_OPERATION = {
   id: 'research.intent',
-  version: '1',
+  version: '2',
   stateVersion: '1',
-  questionVersion: '1',
+  questionVersion: '2',
 } as const
 
 function primaryResearchResult(response: DecisionResponse): ResearchClassifyResult | null {
@@ -176,8 +189,9 @@ function primaryResearchResult(response: DecisionResponse): ResearchClassifyResu
       : null,
     model: response.model.wireId,
   }
-  if (answer.value === 'research') {
-    return { research: true, operateSite: false, reason: 'research_classifier', ...common }
+  if (['research', 'research_focused', 'research_deep'].includes(answer.value)) {
+    const effort = answer.value === 'research_focused' ? 'focused' : answer.value === 'research_deep' ? 'deep' : 'standard'
+    return { research: true, effort, operateSite: false, reason: 'research_classifier', ...common }
   }
   if (answer.value === 'operate_site') {
     return { research: false, operateSite: true, reason: 'operate_site_classifier', ...common }
@@ -197,12 +211,17 @@ function validateResearchResult(result: ResearchClassifyResult): ResearchClassif
 }
 
 async function classifyResearchWithLlm(params: {
+  assertInputAuthority?: () => Promise<void>
+  signal?: AbortSignal
   provider: LLMProvider
   model: string
   message: string
   recentConversation: Array<{ role: 'user' | 'assistant'; text: string }>
 }): Promise<ResearchClassifyResult> {
+  await assertInputAuthority(params.assertInputAuthority)
   const stream = params.provider.stream({
+    assertInputAuthority: params.assertInputAuthority,
+    signal: params.signal,
     model: params.model,
     systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
     messages: [{
@@ -217,6 +236,7 @@ async function classifyResearchWithLlm(params: {
   })
 
   const response = await collectStream(stream)
+  await assertInputAuthority(params.assertInputAuthority)
   const text = response.content
     .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
     .map((b) => b.text)
@@ -229,6 +249,7 @@ async function classifyResearchWithLlm(params: {
 
   const parsed = JSON.parse(jsonMatch[0]) as {
     research?: unknown
+    effort?: unknown
     operate_site?: unknown
     reason?: unknown
   }
@@ -243,6 +264,7 @@ async function classifyResearchWithLlm(params: {
   }
   return {
     research: true,
+    effort: researchEffort(parsed.effort),
     operateSite: false,
     reason: typeof parsed.reason === 'string' ? parsed.reason : null,
     usage: response.usage,
@@ -258,7 +280,7 @@ async function classifyResearchWithLlm(params: {
  * cheap path on. Caller is responsible for plan / quota gating; this
  * classifier just answers the intent question.
  */
-export async function classifyResearchIntent(
+async function classifyResearchIntentCurrent(
   options: ResearchClassifyOptions,
 ): Promise<ResearchClassifyResult> {
   const { provider, message, minMessageLength = MIN_MESSAGE_LENGTH } = options
@@ -270,10 +292,10 @@ export async function classifyResearchIntent(
     return { research: false, operateSite: true, reason: 'operate_site_fast_path', usage: null, model: null }
   }
 
-  // Short messages never warrant research — short-circuit before the LLM
-  // call. Length is CJK-weighted (see `effectiveLength`) so a compact
-  // Cantonese/Chinese ask is not mistaken for a greeting.
-  if (effectiveLength(message) <= minMessageLength) {
+  // Only clearly trivial short chat bypasses assessment. A short substantive
+  // question can need several sources without containing a research keyword.
+  const trivialChat = /^(?:(?:hi|hello|hey)(?: there)?|thanks|thank you|ok(?:ay)?|sure|got it|yes|no|早晨|你好|多謝|谢谢|謝謝|こんにちは|ありがとう|而家得閒嗎)[\s!?.,。！？，]*$/iu
+  if (!message.trim() || (effectiveLength(message) <= minMessageLength && trivialChat.test(message.trim()))) {
     return { research: false, operateSite: false, reason: null, usage: null, model: null }
   }
 
@@ -290,13 +312,17 @@ export async function classifyResearchIntent(
         runId: options.runId ?? `research-intent-${Date.now()}`,
         operation: RESEARCH_OPERATION,
         state: { currentMessage: message, recentConversation },
+        assertInputAuthority: options.assertInputAuthority,
+        signal: options.signal,
         questions: [{
           kind: 'choice',
           id: 'intent',
-          prompt: 'Classify the current request. Follow-ups are ordinary; one named site is a site operation.',
+          prompt: 'Assess fresh evidence needs using recent dialogue. Existing-context explanation is ordinary; new evidence can require research even in a short follow-up. Choose the smallest sufficient research effort. One named site is a site operation.',
           options: [
             { value: 'ordinary', description: 'Normal request or contextual follow-up' },
-            { value: 'research', description: 'New deep multi-source investigation' },
+            { value: 'research_focused', description: 'Narrow multi-source investigation: two angles, one wave' },
+            { value: 'research', description: 'Standard multi-source comparison: three workers, two waves' },
+            { value: 'research_deep', description: 'Broad, exhaustive or conflicting evidence: five workers, four waves' },
             { value: 'operate_site', description: 'Open, browse, log into, or act on one named site' },
           ],
         }],
@@ -326,6 +352,8 @@ export async function classifyResearchIntent(
         async completeWithLlm(context) {
           const result = await classifyResearchWithLlm({
             provider: context.llm.provider,
+            assertInputAuthority: options.assertInputAuthority,
+            signal: options.signal,
             model: context.llm.modelId,
             message,
             recentConversation,
@@ -348,10 +376,47 @@ export async function classifyResearchIntent(
   }
 
   try {
-    return await classifyResearchWithLlm({ provider, model, message, recentConversation })
-  } catch {
-    // Any failure → safe default, no research. Usage is lost because the
+    return await classifyResearchWithLlm({ provider, model, message, recentConversation, assertInputAuthority: options.assertInputAuthority, signal: options.signal })
+  } catch (error) {
+    if (isInputAuthorityError(error)) throw error
+    await assertInputAuthority(options.assertInputAuthority)
+    // Any ordinary failure → safe default, no research. Usage is lost because the
     // stream didn't complete; caller records nothing.
     return { research: false, operateSite: false, reason: null, usage: null, model: null }
   }
+}
+
+/** Complete admitted classifier inputs survive deterministic paths and provider fallback. */
+export async function classifyResearchIntent(options: ResearchClassifyOptions): Promise<ResearchClassifyResult> {
+  const inputs=boundScopeSources(options),authority=options.authority
+  if(authority){
+    if(!inputs.length||typeof options.assertInputAuthority!=='function')throw new DerivedScopeError('scope_evidence_missing')
+    authority.accumulator.note({sources:inputs})
+  } else if(inputs.length)throw new DerivedScopeError('scope_evidence_missing')
+  let refusal:unknown,pending:Promise<void>|undefined
+  const check=async()=>{
+    if(refusal)throw refusal
+    if(pending)return pending
+    pending=(async()=>{
+      if(authority){
+        await assertInputAuthority(()=>authority.execution.security.authority.assertCurrent())
+        if(authority.execution.lifecycle.abortSignal.aborted)throw Object.assign(new Error('The classifier context is unavailable.'),{reason:'authority_changed',retrySafe:false})
+      }
+      await assertInputAuthority(options.assertInputAuthority)
+    })().catch(error=>{refusal=error;throw error})
+    try{await pending}finally{pending=undefined}
+  }
+  await check()
+  const input=structuredClone({message:options.message,recentConversation:options.recentConversation})
+  const observed=authority?structuredClone(authority.accumulator.evidence.sources??[]):inputs
+  const signal=AbortSignal.any([...(options.signal?[options.signal]:[]),...(authority?[authority.execution.lifecycle.abortSignal]:[])])
+  let result:ResearchClassifyResult
+  try{result=await classifyResearchIntentCurrent({...options,...input,signal,assertInputAuthority:check})}
+  catch(error){
+    if(isInputAuthorityError(error))throw error
+    await check()
+    result={research:false,operateSite:false,reason:null,usage:null,model:null}
+  }
+  await check()
+  return bindScopeSources(result,observed)
 }

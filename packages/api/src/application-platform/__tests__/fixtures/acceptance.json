@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "note": "Required acceptance blueprint. Pending is not a passing or skipped test. The final verifier must require actual runtime results for every ID.",
+  "cases": [
+    {
+      "id": "A01",
+      "requirement": "Different workspaces/installations cannot list, resolve, search, relate, mutate or deliver each other's data, even with equal local IDs/names.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A02",
+      "requirement": "Generic create/patch/import rejects undeclared fields, invalid enum/type/required/relationship values consistently across UI/API/tool/workflow; unique/CAS races produce one valid outcome.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A03",
+      "requirement": "CRM remains the same `entities` IDs/graph references; native module and generic records reference that canonical company with current access.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A04",
+      "requirement": "The native operations workflow enforces cost-field/role rules and approval state; its multi-record command/audit/outbox commits once or fully rolls back, including replay.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A05",
+      "requirement": "Two native frontends use one Brian backend. The portal user signs in through Brian, has no workspace membership and sees only granted records/fields.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A06",
+      "requirement": "App-data service/bot credentials are hashed, scoped, revocable and parent-bound; spoofed user/email/roles do not impersonate; existing chat/Brain/Home/OAuth audiences never cross.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A07",
+      "requirement": "Record/field denial covers query predicates, ordering, count/aggregate, relation pickers, graph/vector candidates, provenance, exports and direct IDs before exposure.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A08",
+      "requirement": "App/client/grant/field downgrade invalidates tokens' effective rights and running streams, confirmations, background/resumed work and client/offline caches.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A09",
+      "requirement": "A foreign department cannot discover/call a labelled connector or obtain its output via shared assistant, channel, cache, memory, consult, artifact or delivery.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A10",
+      "requirement": "Source verifies exact authenticated initiator and executing assistant plus issuer/workspace/instance/audience; unknown source mapping denies despite valid Brian authentication.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A11",
+      "requirement": "Forged, expired, wrong-alg/type/key, body-swapped, user/assistant-swapped, cross-instance/tenant and replayed actor assertions fail. Fresh retry preserves idempotency; rotation/revoke behaves as \u00a76.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A12",
+      "requirement": "Same-department users retain different source record/field rights across direct and retained results; one user's revocation does not revoke another's independent grant.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A13",
+      "requirement": "Source withdrawal, stale/unverifiable access, outage or grant contraction blocks retrieval/replay/model context, derived writes and final delivery; missing external source never falls back to native historical `gone` semantics.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A14",
+      "requirement": "Actual light/REM/deep consolidation, compaction, KB/files, graph/CRM facts, tasks/Goals, workflow state and Page/Office artifacts preserve ancestor/field evidence without laundering.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A15",
+      "requirement": "Group recipients without applicable local/source rights receive no restricted tokens/files; a private authorized requester does not confer rights on the room.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A16",
+      "requirement": "Unattended and delegated work retains its named actor/parent grant; revocation between source read, approval, resume and effect/delivery stops further work; uncertain completed effects reconcile.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A17",
+      "requirement": "Governed retention checks current source access; independent snapshots need explicit release; ephemeral content leaves no protected transcript/tool/answer/cache/index bytes and is refused on an incompatible lane.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A18",
+      "requirement": "Legacy incomplete evidence remains held until the authorized product review/repair path qualifies it. Activation cannot bypass unresolved in-scope coverage or invent rights.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A19",
+      "requirement": "New modules and a second independent source fixture use published SDK profiles without editing another module's internals, core ACL rules or per-channel allowlists.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A20",
+      "requirement": "Fresh OSS/hosted-overlay migrations and representative legacy upgrade preserve IDs, existing grants, schema values, queued work and client compatibility; no applied migration changes.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A21",
+      "requirement": "UI/Brian management paths invoke identical services; secrets stay out of model/logs; four locales, 360px/desktop controls, live invalidation and safe retry states work.",
+      "status": "pending",
+      "testNames": []
+    },
+    {
+      "id": "A22",
+      "requirement": "The checked \u00a78 ledger lists every in-scope consumer and its enforcing test; both editions consume the open implementation. Required tests/builds pass with no new baseline entries.",
+      "status": "pending",
+      "testNames": []
+    }
+  ]
+}

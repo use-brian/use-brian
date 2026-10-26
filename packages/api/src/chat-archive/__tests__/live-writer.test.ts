@@ -137,6 +137,18 @@ describe('[COMP:api/chat-archive-live-capture] live writer', () => {
     }))
   })
 
+  it('passes the Telegram source into outbound normalization for message and reply identity parity', async () => {
+    const { writer, fanout } = harness()
+    await writer.appendOutbound({ ...context, source: 'telegram', conversationId: '-100101:topic:7',
+      sessionMessageId: 'session-message-1', providerMessageId: '2', replyToProviderId: '1', text: 'reply',
+    })
+    expect(fanout.fanout).toHaveBeenCalledWith(expect.objectContaining({
+      messages: [expect.objectContaining({
+        provider_message_id: 'telegram:v1:-100101:2', reply_to_provider_id: 'telegram:v1:-100101:1',
+      })],
+    }))
+  })
+
   it('drops an unrouted message rather than guessing an owner', async () => {
     // The owner is the archive's compartment key under row-level security.
     // Writing one conversation under two owners would split it across that

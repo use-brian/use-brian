@@ -1,45 +1,12 @@
 "use client";
 
+import { ApplicationManagement } from '@/components/applications/application-admin';
+
 /**
- * Studio → Mini apps — which operator apps show on Home, and in what order.
- *
- * This tab existed once (deleted 2026-07-23) as a card gallery over the
- * dormant `MINI_APPS` shared registry. It returns doing a **different job**:
- * it is a configurator over the operator-app registry, writing
- * `workspaces.home_apps` (migration 385). The old registry is not reused and
- * not touched.
- *
- * Config is workspace-wide (D1): one strip, set by an owner/admin, seen by
- * every member. Per-user overrides are deferred.
- *
- * Four behaviours worth stating, because each is a decision rather than a
- * default:
- *
- *   - **Save on change**, no Save button (the workspace-sections precedent).
- *     A toggle that needs confirming reads as a form; this is a preference.
- *     The optimistic flip reverts if the write fails.
- *   - **Disabling is not removing** (T11). Routes stay reachable, so a
- *     bookmark, a notification deep link, or a home-dock card into a hidden
- *     app all keep working. The note under the grid says so, because "hidden"
- *     otherwise reads as "gone".
- *   - **Hiding the app you are standing in** asks first, via `confirmDialog` —
- *     the strip entry disappearing under the user is exactly the moment a
- *     silent save feels like a bug.
- *   - **Order is the array**, dragged here. `home_apps` renders in stored
- *     order end to end (nothing downstream sorts it), so the shown apps are a
- *     sortable list rather than a grid, and the hidden ones sit below it —
- *     position only means something for an app that is actually on the strip.
- *     Turning an app on therefore **appends**; re-inserting it at its registry
- *     slot would shove aside a position the admin had chosen.
- *
- * The catch this layout solves: the strip lives in the sidebar under Home and
- * renders NOTHING outside the operator family, so an admin standing in Studio
- * cannot see the thing they are configuring. `HomeStripPreview` mirrors it
- * here, and updates on every drag-over rather than on drop — the order is a
- * visual property, so the feedback has to be visual and has to arrive before
- * the commit.
- *
- * Spec: docs/architecture/features/home-apps.md.
+ * Studio mini-app curation and custom app management. The ordered workspace
+ * configuration curates App store; Home remains Chat and personal pins stay
+ * local. Existing owner/admin, import and grant checks remain authoritative.
+ * Spec: docs/architecture/features/home-apps.md and workspace-navigation.md.
  * [COMP:app-web/studio-mini-apps]
  */
 
@@ -63,7 +30,8 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, Home, Puzzle, type LucideIcon } from "lucide-react";
+import { ArrowUpRight, GitBranch, GripVertical, Store, Puzzle, Users, type LucideIcon } from "lucide-react";
+import Link from "next/link";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -84,6 +52,7 @@ import {
 import { CUSTOM_HOME_APP_PREFIX, customHomeAppId } from "@use-brian/shared/home-apps";
 import { surfaceFromPathname } from "@/lib/doc-page-url";
 import { requestHomeAppsRefresh } from "@/lib/home-apps-events";
+import { requestSidebarClose } from "@/lib/sidebar-close";
 import {
   getWorkspaceHomeApps,
   getWorkspaceRole,
@@ -365,6 +334,7 @@ export default function StudioMiniAppsPage() {
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-6">
       <p className="text-sm text-muted-foreground">{copy.intro}</p>
+      <ApplicationManagement surface="apps"/>
 
       <p className="mt-4 text-xs font-medium text-muted-foreground tabular-nums">
         {format(copy.counter, {
@@ -384,9 +354,9 @@ export default function StudioMiniAppsPage() {
         </p>
       )}
 
-      <HomeStripPreview
+      <AppStoreOrderPreview
         title={copy.previewTitle}
-        homeLabel={t.docPage.iconHome}
+        storeLabel={t.workspaceNav.appStore}
         order={previewOrder}
         moving={drag?.active ?? null}
         metaFor={metaFor}
@@ -464,6 +434,15 @@ export default function StudioMiniAppsPage() {
 
       <p className="mt-4 text-xs text-muted-foreground">{copy.routesStayNote}</p>
 
+      <section className="mt-6 border-t border-border pt-4" aria-label={copy.workspaceToolsHeading}>
+        <h2 className="text-sm font-medium">{copy.workspaceToolsHeading}</h2>
+        <p className="mt-1 text-xs text-muted-foreground">{copy.workspaceToolsNote}</p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Link href={`/w/${workspaceId}/workflow`} onClick={requestSidebarClose} className="inline-flex min-h-8 items-center gap-2 rounded-md px-2 text-sm hover:bg-muted max-md:min-h-11"><GitBranch className="size-4" aria-hidden />{t.docPage.iconWorkflow}<ArrowUpRight className="size-3.5" aria-hidden /></Link>
+          <Link href={`/w/${workspaceId}/organization`} onClick={requestSidebarClose} className="inline-flex min-h-8 items-center gap-2 rounded-md px-2 text-sm hover:bg-muted max-md:min-h-11"><Users className="size-4" aria-hidden />{t.organization.title}<ArrowUpRight className="size-3.5" aria-hidden /></Link>
+        </div>
+      </section>
+
       <CustomAppsSection
         workspaceId={workspaceId}
         canEdit={canEdit}
@@ -475,27 +454,17 @@ export default function StudioMiniAppsPage() {
   );
 }
 
-/**
- * The Home dock as it will render, mirroring `OperatorAppBar` deliberately
- * closely — the sidebar chrome tokens (`bg-sidebar`, `doc-nav-active`), the
- * 28px icon squares, the `pl-4` indent under the Home pill. The point is
- * recognition: an admin should see the actual thing, not an abstraction of it,
- * because the strip is unreachable from Studio (the bar renders nothing off
- * the operator family) and icon order is exactly the kind of change you cannot
- * evaluate from a list of names.
- *
- * `moving` highlights the app under the cursor so the eye can follow it
- * through the drag.
- */
-function HomeStripPreview({
+/** Preview the workspace's selected App store order, including Chat.
+ * Personal pins are independent of this owner/admin configuration. */
+function AppStoreOrderPreview({
   title,
-  homeLabel,
+  storeLabel,
   order,
   moving,
   metaFor,
 }: {
   title: string;
-  homeLabel: string;
+  storeLabel: string;
   order: readonly HomeAppEntry[];
   moving: HomeAppEntry | null;
   /** Same resolver the list uses, so the preview cannot disagree with it. */
@@ -507,18 +476,17 @@ function HomeStripPreview({
         {title}
       </p>
       <div className="bg-sidebar px-2 py-2 text-sidebar-foreground">
-        {/* The Home pill, so the strip below reads as its children the way it
-            does in the sidebar. Inert: this is a picture, not a nav. */}
+        {/* App store identity. This preview changes no routes or permissions. */}
         <div className="flex flex-row items-center gap-0.5 pb-1.5">
           <span className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md doc-nav-active px-2 text-[13px] font-medium text-sidebar-accent-foreground">
-            <Home className="size-[17px] shrink-0" aria-hidden />
-            {homeLabel}
+            <Store className="size-[17px] shrink-0" aria-hidden />
+            {storeLabel}
           </span>
         </div>
         <div
           role="group"
           aria-label={title}
-          className="flex flex-row items-center gap-0.5 pl-4 pr-2"
+          className="flex flex-row flex-wrap items-center gap-0.5 pr-2"
         >
           {order.map((key) => {
             const { label, Icon } = metaFor(key);
@@ -604,7 +572,7 @@ function SortableAppRow({
         data-action="reorder"
         aria-label={dragLabel}
         disabled={disabled}
-        className="flex size-6 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground/60 hover:bg-border hover:text-foreground active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40"
+        className="flex size-6 shrink-0 cursor-grab touch-none items-center justify-center rounded text-muted-foreground/60 hover:bg-border hover:text-foreground active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-40 max-md:size-11"
         {...attributes}
         {...listeners}
       >
@@ -638,7 +606,7 @@ function HiddenAppRow({
       className="flex items-center gap-2 rounded-lg border border-border bg-background px-2 py-2.5"
     >
       {/* Keeps the icon and name on the same x as the sortable rows above. */}
-      <span className="size-6 shrink-0" aria-hidden />
+      <span className="size-6 shrink-0 max-md:size-11" aria-hidden />
       <Icon
         className="size-4 shrink-0 text-muted-foreground"
         strokeWidth={1.8}
@@ -678,18 +646,13 @@ function AppSwitch({
       disabled={disabled}
       onClick={onToggle}
       className={cn(
-        "relative h-4 w-7 shrink-0 rounded-full transition-colors",
-        on ? "bg-primary" : "bg-muted-foreground/30",
+        "flex h-6 w-9 shrink-0 items-center justify-center rounded-md max-md:h-11 max-md:w-11",
         disabled && "cursor-not-allowed opacity-60",
       )}
     >
-      <span
-        aria-hidden
-        className={cn(
-          "absolute top-0.5 size-3 rounded-full bg-background transition-all",
-          on ? "left-3.5" : "left-0.5",
-        )}
-      />
+      <span aria-hidden className={cn("relative h-4 w-7 rounded-full transition-colors", on ? "bg-primary" : "bg-muted-foreground/30")}>
+        <span className={cn("absolute top-0.5 size-3 rounded-full bg-background transition-all", on ? "left-3.5" : "left-0.5")} />
+      </span>
     </button>
   );
 }

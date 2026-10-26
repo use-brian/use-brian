@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import express from 'express'
+import type { PoolClient } from 'pg'
 import request from 'supertest'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { getPool, getAppPool } from '../../db/client.js'
 import { createMemory } from '../../db/memories.js'
+import { createTask } from '../../db/tasks.js'
 import { createDbWorkspaceGroupStore } from '../../db/workspace-group-store.js'
-import { executeWorkspaceScopeReview as execute, getWorkspaceScopeInventory as inventory, getWorkspaceScopeReview as review } from '../scope-review.js'
+import { executeWorkspaceScopeReviewInTransaction, executeWorkspaceScopeReview as execute, getWorkspaceScopeInventory as inventory, getWorkspaceScopeReview as review } from '../scope-review.js'
 import { workspaceAccessRoutes } from '../../routes/workspace-access.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
@@ -31,6 +33,335 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
     for(const id of ids)sources.push((await pool.query('SELECT read_scope_source($1,\'memory\',$2) AS source',[f.workspaceId,id])).rows[0].source)
     return createMemory({workspaceId:f.workspaceId,userId:f.owner,assistantId:f.assistantId,createdByUserId:f.owner,summary:'Derived impact fixture',sensitivity:'confidential',derivation:{producer:'review-fixture',sources}})
   }
+  const task=async(f:Awaited<ReturnType<typeof fixture>>,userId=f.owner)=>{
+    const id=randomUUID(),project=randomUUID()
+    await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,$4,$4,$3)",[project,f.workspaceId,f.owner,project])
+    await pool.query("INSERT INTO tasks(id,workspace_id,user_id,assistant_id,title,created_by_user_id,sensitivity,project_ids) VALUES($1,$2,$3,$4,'Private classification task',$3,'confidential',ARRAY[$5::uuid])",[id,f.workspaceId,userId,f.assistantId,project])
+    return id
+  }
+  const applyOn=async(client:PoolClient,f:Awaited<ReturnType<typeof fixture>>,job:{id:string;version:string;payloadHash:string},actor=f.owner)=>
+    executeWorkspaceScopeReviewInTransaction(client,f.workspaceId,actor,{type:'scope.review.apply',reviewId:job.id,expectedVersion:job.version,payloadHash:job.payloadHash})
+  const perform=async(client:PoolClient,f:Awaited<ReturnType<typeof fixture>>,job:{id:string;version:string;payloadHash:string},id:string)=>{
+    await client.query("SELECT set_config('app.scope_review_actor',$1,true)",[f.owner])
+    await client.query('SELECT application_perform_native_task_review($1,$2,$3::bigint,$4,$5,$6)',[f.workspaceId,job.id,job.version,job.payloadHash,id,f.owner])
+  }
+  it('classifies another member private task from another administrator preview without granting task reads',async()=>{
+    const f=await fixture(),administrator=randomUUID(),id=await task(f,f.member)
+    await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[administrator])
+    await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'admin')",[f.workspaceId,administrator])
+    const before=(await pool.query('SELECT to_jsonb(t) row FROM tasks t WHERE id=$1',[id])).rows[0].row
+    const job=await f.preview([id],'assign_team','task')
+    const result=await execute(f.workspaceId,administrator,{type:'scope.review.apply',reviewId:job.id,expectedVersion:job.version,payloadHash:job.payloadHash})
+    expect(result.status).toBe('complete')
+    const after=(await pool.query('SELECT to_jsonb(t) row FROM tasks t WHERE id=$1',[id])).rows[0].row
+    const preserved=(row:Record<string,unknown>)=>Object.fromEntries(Object.entries(row).filter(([key])=>!['compartments','scope_version','updated_at'].includes(key)))
+    expect(preserved(after)).toEqual(preserved(before));expect(after.scope_version).toBe(before.scope_version+1)
+    expect(after.compartments).toEqual([f.team.compartmentKey])
+    expect((await pool.query('SELECT created_by FROM workspace_scope_reviews WHERE id=$1',[job.id])).rows[0].created_by).toBe(f.owner)
+    expect((await pool.query("SELECT count(*)::int n FROM workspace_access_events WHERE subject_id=$1 AND kind='scope.review.apply'",[job.id])).rows[0].n).toBe(1)
+    expect((await pool.query('SELECT count(*)::int n FROM application_native_task_write_intents WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(0)
+    const reader=await getAppPool().connect()
+    try{
+      await reader.query('BEGIN');await reader.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
+      expect((await reader.query("SELECT application_task_patch_state($1,$2,'{}') state",[f.workspaceId,id])).rows[0].state).toBeNull()
+      expect((await reader.query("SELECT read_native_application_record($1,'task',$2) state",[f.workspaceId,id])).rows[0].state).toBeNull()
+    }finally{await reader.query('ROLLBACK');reader.release()}
+    expect((await f.apply(job)).status).toBe('complete')
+  })
+  it.each(['bare','scope_actor','current_actor','set_role'])('does not convert raw owner %s writes into review authority',async(mode)=>{
+    const f=await fixture(),id=await task(f),client=await pool.connect()
+    try{
+      await client.query('BEGIN')
+      if(mode!=='bare')await client.query("SELECT set_config('app.scope_review_actor',$1,true)",[f.owner])
+      if(mode==='current_actor'||mode==='set_role')await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
+      if(mode==='set_role')await client.query('SET LOCAL ROLE app_user')
+      await expect(client.query('UPDATE tasks SET compartments=ARRAY[$2::text] WHERE id=$1',[id,f.team.compartmentKey])).rejects.toMatchObject({code:'42501'})
+    }finally{await client.query('ROLLBACK');client.release()}
+  })
+  it('keeps the saved-review private functions and ledger inaccessible to actual app_user',async()=>{
+    const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await getAppPool().connect(),host=await pool.connect()
+    try{
+      await host.query('BEGIN');await perform(host,f,job,id)
+      expect((await host.query('SELECT count(*)::int n FROM application_native_task_write_intents WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(1)
+      const role=(await client.query("SELECT session_user=current_user same,r.rolsuper,r.rolbypassrls,pg_has_role(r.oid,c.relowner,'MEMBER') owner_member FROM pg_roles r CROSS JOIN pg_class c WHERE r.rolname=session_user AND c.oid='tasks'::regclass")).rows[0]
+      expect(role).toEqual({same:true,rolsuper:false,rolbypassrls:false,owner_member:false})
+      await client.query('BEGIN');await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.scope_review_actor',$1,true)",[f.owner])
+      await expect(client.query('SELECT application_perform_native_task_review($1,$2,$3::bigint,$4,$5,$6)',[f.workspaceId,job.id,job.version,job.payloadHash,id,f.owner])).rejects.toMatchObject({code:'42501'})
+      await client.query('ROLLBACK');await client.query('BEGIN')
+      expect((await client.query('SELECT * FROM application_native_task_write_intents')).rows).toEqual([])
+      expect((await client.query("UPDATE application_native_task_write_intents SET fields=ARRAY['title'] WHERE workspace_id=$1",[f.workspaceId])).rowCount).toBe(0)
+      expect((await pool.query("SELECT c.relrowsecurity,NOT EXISTS(SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid) no_policies FROM pg_class c WHERE c.oid='application_native_task_write_intents'::regclass")).rows[0]).toEqual({relrowsecurity:true,no_policies:true})
+      await expect(client.query("INSERT INTO application_native_task_write_intents(transaction_id,backend_pid,workspace_id,logical_id,physical_id,source_version,action,actor_user_id,policy_revision,fields,native_review) VALUES(txid_current(),pg_backend_pid(),$1,$2,$2,1,'patch',$3,'not-authority','{}','{\"phase\":\"prepared\"}')",[f.workspaceId,id,f.owner])).rejects.toMatchObject({code:'42501'})
+    }finally{await client.query('ROLLBACK');client.release();await host.query('ROLLBACK');host.release()}
+  })
+  it.each(['missing','hash','version','item','nonadmin','application'])('rejects %s saved task review facts without an intent',async(fault)=>{
+    const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await pool.connect()
+    try{
+      await client.query('BEGIN');await client.query("SELECT set_config('app.scope_review_actor',$1,true)",[fault==='nonadmin'?f.member:f.owner])
+      if(fault==='application')await client.query("SELECT set_config('app.application_id',$1,true)",[randomUUID()])
+      await expect(client.query('SELECT application_perform_native_task_review($1,$2,$3::bigint,$4,$5,$6)',[f.workspaceId,fault==='missing'?randomUUID():job.id,fault==='version'?'2':job.version,fault==='hash'?'0'.repeat(64):job.payloadHash,fault==='item'?randomUUID():id,fault==='nonadmin'?f.member:f.owner])).rejects.toMatchObject({code:'42501'})
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await pool.query('SELECT compartments FROM tasks WHERE id=$1',[id])).rows[0].compartments).toEqual([])
+  })
+  it.each(['unfinalized','missing_outcome','context','post_finalize','post_hold','deleted','missing_item','missing_state','duplicate_finalize','missing_epoch','ordinary_merge'])('refuses %s task classification at its statement or deferred boundary',async(fault)=>{
+    const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await pool.connect()
+    try{
+      await client.query('BEGIN')
+      if(fault==='missing_epoch'){
+        await client.query('DELETE FROM application_policy_workspace_epochs WHERE workspace_id=$1',[f.workspaceId])
+        await expect(perform(client,f,job,id)).rejects.toMatchObject({code:'42501'})
+      }else if(fault==='ordinary_merge'){
+        await perform(client,f,job,id);await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
+        await expect(client.query("SELECT application_record_native_task_write_intent(t,'{}','patch') FROM tasks t WHERE t.id=$1",[id])).rejects.toThrow('task identity changed')
+      }else if(fault==='unfinalized'||fault==='missing_outcome'){
+        await perform(client,f,job,id)
+        if(fault==='missing_outcome')await client.query('SELECT application_finalize_native_task_review($1,$2,$3::bigint,$4,$5)',[f.workspaceId,job.id,job.version,job.payloadHash,f.owner])
+        await expect(client.query('SET CONSTRAINTS ALL IMMEDIATE')).rejects.toMatchObject({code:'42501'})
+      }else{
+        await applyOn(client,f,job)
+        if(fault==='context'){
+          await client.query("SELECT set_config('app.v2_assistant_id',$1,true)",[f.assistantId])
+          await expect(client.query('SET CONSTRAINTS ALL IMMEDIATE')).rejects.toMatchObject({code:'42501'})
+        }else if(['post_hold','deleted','missing_item','missing_state'].includes(fault)){
+          if(fault==='post_hold')await client.query('UPDATE tasks SET scope_held=true WHERE id=$1',[id])
+          if(fault==='deleted')await client.query('DELETE FROM tasks WHERE id=$1',[id])
+          if(fault==='missing_item')await client.query("UPDATE workspace_scope_review_items SET status='pending',result_version=NULL WHERE review_id=$1",[job.id])
+          if(fault==='missing_state')await client.query("DELETE FROM scope_resource_states WHERE workspace_id=$1 AND resource_kind='task' AND resource_id=$2",[f.workspaceId,id])
+          await expect(client.query('SET CONSTRAINTS ALL IMMEDIATE')).rejects.toMatchObject({code:'42501'})
+        }else if(fault==='duplicate_finalize')await expect(client.query('SELECT application_finalize_native_task_review($1,$2,$3::bigint,$4,$5)',[f.workspaceId,job.id,job.version,job.payloadHash,f.owner])).rejects.toMatchObject({code:'42501'})
+        else await expect(client.query("UPDATE tasks SET title='Unreviewed title' WHERE id=$1",[id])).rejects.toMatchObject({code:'42501'})
+      }
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await pool.query('SELECT compartments FROM tasks WHERE id=$1',[id])).rows[0].compartments).toEqual([])
+    expect((await pool.query('SELECT version::text,status FROM workspace_scope_reviews WHERE id=$1',[job.id])).rows[0]).toEqual({version:'1',status:'preview'})
+  })
+  it('rejects a policy contraction after finalization instead of refreshing the task witness',async()=>{
+    const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await pool.connect()
+    try{
+      await client.query('BEGIN');await applyOn(client,f,job)
+      await client.query("UPDATE workspace_access_policies SET classification_mode='strict' WHERE workspace_id=$1",[f.workspaceId])
+      await expect(client.query('SET CONSTRAINTS ALL IMMEDIATE')).rejects.toMatchObject({code:'42501'})
+    }finally{await client.query('ROLLBACK');client.release()}
+  })
+  const blockedBy=async(waiter:number,blocker:number)=>{
+    const deadline=Date.now()+5_000
+    do{
+      const result=(await pool.query<{blocked:boolean}>('SELECT $2::int=ANY(pg_blocking_pids($1::int)) blocked',[waiter,blocker])).rows[0]
+      if(result.blocked)return
+      await new Promise<void>(resolve=>setImmediate(resolve))
+    }while(Date.now()<deadline)
+    throw new Error('Expected observed PostgreSQL lock waiter')
+  }
+  it('does not rebase an unrelated committed epoch while its page finalizer is a proven waiter',async()=>{
+    const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await pool.connect(),blocker=await pool.connect()
+    try{
+      await client.query('BEGIN');await perform(client,f,job,id)
+      await blocker.query('BEGIN');await blocker.query('SELECT 1 FROM application_policy_workspace_epochs WHERE workspace_id=$1 FOR UPDATE',[f.workspaceId])
+      const waiterPid=(await client.query('SELECT pg_backend_pid() pid')).rows[0].pid,blockerPid=(await blocker.query('SELECT pg_backend_pid() pid')).rows[0].pid
+      const finalizing=client.query('SELECT application_finalize_native_task_review($1,$2,$3::bigint,$4,$5)',[f.workspaceId,job.id,job.version,job.payloadHash,f.owner]).then(()=>null,error=>error as {code:string})
+      await blockedBy(waiterPid,blockerPid)
+      await blocker.query("UPDATE application_policy_workspace_epochs SET revision=nextval('application_policy_revision_seq') WHERE workspace_id=$1",[f.workspaceId]);await blocker.query('COMMIT')
+      expect(await finalizing).toMatchObject({code:'42501'})
+    }finally{await client.query('ROLLBACK');await blocker.query('ROLLBACK');client.release();blocker.release()}
+    expect((await pool.query('SELECT compartments FROM tasks WHERE id=$1',[id])).rows[0].compartments).toEqual([])
+  })
+  it('serializes a later effective policy contraction behind the completed page with an observed waiter',async()=>{
+    const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await pool.connect(),waiter=await pool.connect()
+    try{
+      await client.query('BEGIN');await applyOn(client,f,job)
+      const holderPid=(await client.query('SELECT pg_backend_pid() pid')).rows[0].pid,waiterPid=(await waiter.query('SELECT pg_backend_pid() pid')).rows[0].pid
+      const contraction=waiter.query("UPDATE workspace_access_policies SET classification_mode='strict',revision=revision+1 WHERE workspace_id=$1",[f.workspaceId])
+      await blockedBy(waiterPid,holderPid);await client.query('COMMIT');await contraction
+    }finally{await client.query('ROLLBACK');client.release();waiter.release()}
+    expect((await pool.query('SELECT compartments FROM tasks WHERE id=$1',[id])).rows[0].compartments).toEqual([f.team.compartmentKey])
+    expect((await pool.query('SELECT count(*)::int n FROM application_native_task_write_intents WHERE workspace_id=$1',[f.workspaceId])).rows[0].n).toBe(0)
+  })
+  it('requires the actual page audit and rolls back task, reviewed state and review outcome if it is suppressed',async()=>{
+    const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await pool.connect()
+    try{
+      await client.query('BEGIN');await applyOn(client,f,job)
+      const historical=(await client.query("SELECT actor_user_id,policy_revision,changes FROM workspace_access_events WHERE subject_id=$1 AND kind='scope.review.apply'",[job.id])).rows[0]
+      await client.query('ROLLBACK')
+      await pool.query("INSERT INTO workspace_access_events(workspace_id,actor_user_id,kind,subject_id,policy_revision,changes) VALUES($1,$2,'scope.review.apply',$3,$4,$5::jsonb)",[f.workspaceId,historical.actor_user_id,job.id,historical.policy_revision,JSON.stringify(historical.changes)])
+      await client.query('BEGIN')
+      await client.query(`CREATE FUNCTION pg_temp.suppress_task_review_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.workspace_id='${f.workspaceId}'::uuid AND NEW.kind='scope.review.apply' THEN RETURN NULL;END IF;RETURN NEW;END $$;
+        CREATE TRIGGER aaa_task_review_audit_fault BEFORE INSERT ON workspace_access_events FOR EACH ROW EXECUTE FUNCTION pg_temp.suppress_task_review_audit()`)
+      await applyOn(client,f,job)
+      await expect(client.query('SET CONSTRAINTS ALL IMMEDIATE')).rejects.toThrow('task review page audit missing')
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await pool.query('SELECT compartments FROM tasks WHERE id=$1',[id])).rows[0].compartments).toEqual([])
+    expect((await pool.query('SELECT status,version::text FROM workspace_scope_reviews WHERE id=$1',[job.id])).rows[0]).toEqual({status:'preview',version:'1'})
+    expect((await pool.query("SELECT * FROM scope_resource_states WHERE workspace_id=$1 AND resource_kind='task' AND resource_id=$2",[f.workspaceId,id])).rows).toEqual([])
+  })
+  it('rolls back an item25 task failure atomically and retains bounded page/replay semantics on retry',async()=>{
+    const f=await fixture(),ids:string[]=[]
+    for(let index=0;index<26;index++)ids.push(await task(f))
+    const job=await f.preview(ids,'assign_team','task'),client=await pool.connect(),last=job.items[24].resourceId
+    const snapshot=async()=>({tasks:(await pool.query('SELECT to_jsonb(t) value FROM tasks t WHERE workspace_id=$1 ORDER BY id',[f.workspaceId])).rows,
+      policy:(await pool.query('SELECT to_jsonb(p) value FROM workspace_access_policies p WHERE workspace_id=$1',[f.workspaceId])).rows,
+      states:(await pool.query('SELECT to_jsonb(s) value FROM scope_resource_states s WHERE workspace_id=$1 ORDER BY resource_id,resource_version',[f.workspaceId])).rows,
+      reviews:(await pool.query('SELECT to_jsonb(r) value FROM workspace_scope_reviews r WHERE workspace_id=$1 ORDER BY id',[f.workspaceId])).rows,
+      items:(await pool.query('SELECT to_jsonb(i) value FROM workspace_scope_review_items i WHERE workspace_id=$1 ORDER BY review_id,resource_id',[f.workspaceId])).rows,
+      events:(await pool.query('SELECT to_jsonb(e) value FROM workspace_access_events e WHERE workspace_id=$1 ORDER BY id',[f.workspaceId])).rows,
+      intents:(await pool.query('SELECT to_jsonb(i) value FROM application_native_task_write_intents i WHERE workspace_id=$1 ORDER BY physical_id',[f.workspaceId])).rows})
+    const before=await snapshot()
+    try{
+      await client.query('BEGIN');await client.query(`CREATE FUNCTION pg_temp.fail_task_page() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.id='${last}'::uuid THEN RAISE EXCEPTION 'fictional task page failure' USING ERRCODE='23514';END IF;RETURN NEW;END $$;
+        CREATE TRIGGER aaa_task_page_fault BEFORE UPDATE OF compartments ON tasks FOR EACH ROW EXECUTE FUNCTION pg_temp.fail_task_page()`)
+      await expect(applyOn(client,f,job)).rejects.toThrow('fictional task page failure')
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect(await snapshot()).toEqual(before)
+    expect((await pool.query("SELECT count(*)::int n FROM workspace_scope_review_items WHERE review_id=$1 AND status='applied'",[job.id])).rows[0].n).toBe(0)
+    expect((await pool.query("SELECT count(*)::int n FROM workspace_access_events WHERE subject_id=$1 AND kind='scope.review.apply'",[job.id])).rows[0].n).toBe(0)
+    const first=await f.apply(job);expect(first.status).toBe('running')
+    expect(first.items.filter(item=>item.status==='applied')).toHaveLength(25)
+    const complete=await f.apply(first);expect(complete.status).toBe('complete')
+    const after=await snapshot();await f.apply(job);expect(await snapshot()).toEqual(after)
+  })
+  it('retains ordinary app_user explicit no-op task versioning without a review witness',async()=>{
+    const f=await fixture(),id=await task(f),client=await getAppPool().connect()
+    const before=(await pool.query('SELECT scope_version::text version FROM tasks WHERE id=$1',[id])).rows[0].version
+    try{
+      await client.query('BEGIN');await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
+      await client.query('UPDATE tasks SET compartments=compartments WHERE id=$1',[id]);await client.query('COMMIT')
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await pool.query('SELECT scope_version::text version FROM tasks WHERE id=$1',[id])).rows[0].version).toBe(String(BigInt(before)+1n))
+  })
+  it.each(['top_level','open','released','nested_released','prior_age'])('composes a complete task review in a supplied client %s transaction',async(mode)=>{
+    const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await pool.connect()
+    try{
+      await client.query('BEGIN')
+      if(mode==='prior_age'){
+        const reference=(await client.query("SELECT age('3'::xid) reference,pg_current_xact_id_if_assigned()::text assigned")).rows[0]
+        expect(reference.assigned).toBeNull()
+        const other=(await pool.query('SELECT txid_current()::text xid')).rows[0].xid
+        const top=(await client.query('SELECT txid_current()::text xid')).rows[0].xid
+        expect(BigInt(top)).toBeGreaterThan(BigInt(other))
+      }
+      if(mode!=='top_level')await client.query('SAVEPOINT reviewed_task')
+      if(mode==='nested_released')await client.query('SAVEPOINT nested_task')
+      await applyOn(client,f,job)
+      if(mode==='nested_released')await client.query('RELEASE SAVEPOINT nested_task')
+      if(mode==='released'||mode==='nested_released'||mode==='prior_age')await client.query('RELEASE SAVEPOINT reviewed_task')
+      await client.query('COMMIT')
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await pool.query('SELECT compartments FROM tasks WHERE id=$1',[id])).rows[0].compartments).toEqual([f.team.compartmentKey])
+  })
+  it.each(['before_first','between_items','before_finalize'])('refuses exact policy revision drift %s without manufacturing a page revision',async(when)=>{
+    const f=await fixture(),first=await task(f),second=await task(f),job=await f.preview([first,second],'assign_team','task'),client=await pool.connect()
+    try{
+      await client.query('BEGIN')
+      if(when!=='before_first')await perform(client,f,job,first)
+      await client.query('UPDATE workspace_access_policies SET revision=revision+1 WHERE workspace_id=$1',[f.workspaceId])
+      if(when==='before_finalize')await expect(client.query('SELECT application_finalize_native_task_review($1,$2,$3::bigint,$4,$5)',[f.workspaceId,job.id,job.version,job.payloadHash,f.owner])).rejects.toMatchObject({code:'42501'})
+      else await expect(perform(client,f,job,when==='before_first'?first:second)).rejects.toMatchObject({code:'42501'})
+    }finally{await client.query('ROLLBACK');client.release()}
+  })
+  it('retains the actual workspace lock against a concurrent assistant policy contraction',async()=>{
+    const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await pool.connect(),other=await pool.connect()
+    try{
+      await client.query('BEGIN');await applyOn(client,f,job);await other.query('BEGIN')
+      await expect(other.query("UPDATE assistants SET team_scope_mode='assigned' WHERE id=$1",[f.assistantId])).rejects.toMatchObject({code:'55P03'})
+      await other.query('ROLLBACK');await client.query('COMMIT')
+    }finally{await client.query('ROLLBACK');await other.query('ROLLBACK');client.release();other.release()}
+  })
+  it('uses registered task restrictions without granting business fields and rejects configuration or private-port drift',async()=>{
+    const f=await fixture(),ids=[await task(f),await task(f),await task(f)]
+    await pool.query(`CREATE TABLE task_review_fixture_configuration(workspace_id uuid PRIMARY KEY REFERENCES workspaces(id),enabled boolean NOT NULL,revision bigint NOT NULL);
+      ALTER TABLE task_review_fixture_configuration ENABLE ROW LEVEL SECURITY;REVOKE ALL ON task_review_fixture_configuration FROM PUBLIC;
+      CREATE FUNCTION task_review_fixture_revision(w uuid) RETURNS text LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$ SELECT coalesce((SELECT revision::text FROM task_review_fixture_configuration WHERE workspace_id=w),'0') $$;
+      REVOKE ALL ON FUNCTION task_review_fixture_revision(uuid) FROM PUBLIC;
+      CREATE FUNCTION task_review_fixture_catalog(w uuid,o jsonb,t text) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+      DECLARE keys text[];fields jsonb;
+      BEGIN
+       IF NOT coalesce((SELECT enabled FROM task_review_fixture_configuration WHERE workspace_id=w),false) THEN RETURN NULL;END IF;
+       keys:=application_native_field_keys(t);
+       SELECT jsonb_agg(jsonb_build_object('key',key,'read','[["reader"]]'::jsonb,'write','[["writer"]]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb) ORDER BY key) INTO fields FROM unnest(keys) key;
+       RETURN jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion','review-1','policyVersion','review-1','fieldKeys',keys,'fields',fields,
+        'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,'sensitivity','internal','compartments','[]'::jsonb,'projectIds','[]'::jsonb));
+      END $$;
+      REVOKE ALL ON FUNCTION task_review_fixture_catalog(uuid,jsonb,text) FROM PUBLIC;
+      CREATE FUNCTION task_review_fixture_metadata(w uuid,o jsonb,t text,i text) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+      DECLARE source jsonb;
+      BEGIN source:=read_scope_source(w,'task',i::uuid);IF source IS NULL THEN RETURN NULL;END IF;
+       RETURN (task_review_fixture_catalog(w,o,t)-'scope')||jsonb_build_object('recordVersion',source->>'version','source',source);
+      END $$;
+      REVOKE ALL ON FUNCTION task_review_fixture_metadata(uuid,jsonb,text,text) FROM PUBLIC;
+      INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader,configuration_required,configuration_reader)
+       VALUES('native','review-1',ARRAY['reader','writer'],'task_review_fixture_metadata(uuid,jsonb,text,text)'::regprocedure,'task_review_fixture_catalog(uuid,jsonb,text)'::regprocedure,true,'task_review_fixture_revision(uuid)'::regprocedure)`)
+    try{
+      await pool.query('INSERT INTO task_review_fixture_configuration VALUES($1,true,1)',[f.workspaceId])
+      await pool.query(`INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key) VALUES($1,'{"kind":"native","moduleKey":"native"}','task','native')`,[f.workspaceId])
+      const titleDenied=async()=>{
+        const reader=await getAppPool().connect()
+        try{
+          await reader.query('BEGIN');await reader.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
+          expect((await reader.query("SELECT application_task_patch_state($1,$2,ARRAY['title']) value",[f.workspaceId,ids[0]])).rows[0].value).toBeNull()
+        }finally{await reader.query('ROLLBACK');reader.release()}
+      }
+      await titleDenied()
+      expect((await f.apply(await f.preview([ids[0]],'assign_team','task'))).status).toBe('complete')
+      await titleDenied()
+      const second=await f.preview([ids[1]],'assign_team','task')
+      await pool.query('UPDATE task_review_fixture_configuration SET enabled=false,revision=2 WHERE workspace_id=$1',[f.workspaceId])
+      await expect(f.apply(second)).rejects.toMatchObject({code:'42501'})
+      await pool.query('UPDATE task_review_fixture_configuration SET enabled=true,revision=3 WHERE workspace_id=$1',[f.workspaceId])
+      for(const drift of ['configuration','acl','body']){
+        const job=await f.preview([ids[2]],'assign_team','task'),client=await pool.connect()
+        try{
+          await client.query('BEGIN');await applyOn(client,f,job)
+          if(drift==='configuration')await client.query('UPDATE task_review_fixture_configuration SET revision=revision+1 WHERE workspace_id=$1',[f.workspaceId])
+          if(drift==='acl')await client.query('GRANT EXECUTE ON FUNCTION task_review_fixture_metadata(uuid,jsonb,text,text) TO app_user')
+          if(drift==='body')await client.query(`CREATE OR REPLACE FUNCTION task_review_fixture_revision(w uuid) RETURNS text LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$ SELECT 'changed'::text $$`)
+          await expect(client.query('SET CONSTRAINTS ALL IMMEDIATE')).rejects.toMatchObject({code:'42501'})
+        }finally{await client.query('ROLLBACK');client.release()}
+      }
+    }finally{
+      await pool.query('DELETE FROM application_native_resource_owners WHERE workspace_id=$1',[f.workspaceId])
+      await pool.query('DELETE FROM task_review_fixture_configuration WHERE workspace_id=$1',[f.workspaceId])
+      await pool.query("DELETE FROM application_native_field_contracts WHERE module_key='native';DROP FUNCTION task_review_fixture_metadata(uuid,jsonb,text,text);DROP FUNCTION task_review_fixture_catalog(uuid,jsonb,text);DROP FUNCTION task_review_fixture_revision(uuid);DROP TABLE task_review_fixture_configuration")
+    }
+  })
+  it.each(['title','user_id','assistant_id','sensitivity','project_ids','parent_id','id','logical_id','compartments'])('refuses a trigger-added mixed %s mutation inside the exact classification statement',async(field)=>{
+    const f=await fixture(),id=await task(f),job=await f.preview([id],'assign_team','task'),client=await pool.connect()
+    const values:Record<string,unknown>={title:'Unreviewed business title',user_id:f.member,assistant_id:null,sensitivity:'internal',project_ids:[],parent_id:randomUUID(),id:randomUUID(),logical_id:randomUUID(),compartments:[]}
+    try{
+      await client.query('BEGIN')
+      await client.query(`CREATE FUNCTION pg_temp.mix_task_review() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW:=jsonb_populate_record(NEW,TG_ARGV[0]::jsonb);RETURN NEW;END $$;
+        CREATE TRIGGER za_task_review_mixed BEFORE UPDATE OF compartments ON tasks FOR EACH ROW EXECUTE FUNCTION pg_temp.mix_task_review('${JSON.stringify({[field]:values[field]})}')`)
+      await expect(applyOn(client,f,job)).rejects.toMatchObject({code:'42501'})
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await pool.query('SELECT compartments FROM tasks WHERE id=$1',[id])).rows[0].compartments).toEqual([])
+  })
+  it('holds known task descendants without creating semantic task revisions, receipts or command events',async()=>{
+    const f=await fixture(),id=await task(f),source=(await pool.query("SELECT read_scope_source($1,'task',$2) value",[f.workspaceId,id])).rows[0].value
+    const output=await createMemory({workspaceId:f.workspaceId,userId:f.owner,assistantId:f.assistantId,createdByUserId:f.owner,summary:'Derived from classified task',sensitivity:'confidential',projectIds:source.projectIds,derivation:{producer:'task-review-fixture',sources:[source]}})
+    const effects=async()=>({history:(await pool.query("SELECT to_jsonb(v) value FROM brain_row_versions v WHERE workspace_id=$1 AND primitive='task' ORDER BY id",[f.workspaceId])).rows,
+      receipts:(await pool.query('SELECT to_jsonb(r) value FROM application_operation_receipts r WHERE workspace_id=$1 ORDER BY id',[f.workspaceId])).rows,
+      audits:(await pool.query('SELECT to_jsonb(a) value FROM application_command_audit a WHERE workspace_id=$1 ORDER BY receipt_id',[f.workspaceId])).rows,
+      events:(await pool.query('SELECT to_jsonb(e) value FROM application_committed_events e WHERE workspace_id=$1 ORDER BY receipt_id',[f.workspaceId])).rows})
+    const before=await effects(),job=await f.preview([id],'assign_team','task')
+    expect(job.items[0].impact?.descendants.map(row=>row.resourceId)).toContain(output.id)
+    expect((await f.apply(job)).status).toBe('complete')
+    expect((await pool.query('SELECT scope_held FROM memories WHERE id=$1',[output.id])).rows[0].scope_held).toBe(true)
+    expect(await effects()).toEqual(before)
+  })
+  it('retains current logical-parent classification without granting parent reads',async()=>{
+    const f=await fixture(),parent=await task(f),projects=(await pool.query('SELECT project_ids FROM tasks WHERE id=$1',[parent])).rows[0].project_ids
+    const child=await createTask(f.owner,{workspaceId:f.workspaceId,title:'Private parent classification child',parentId:parent,sensitivity:'confidential',projectIds:projects,
+      visibility:{userId:f.owner,assistantId:f.assistantId},access:{workspaceId:f.workspaceId,userId:f.owner,assistantId:f.assistantId,assistantKind:'standard',clearance:'confidential'}})
+    const job=await f.preview([child.id],'assign_team','task')
+    expect((await f.apply(job)).status).toBe('complete')
+    expect((await pool.query('SELECT parent_id FROM tasks WHERE id=$1',[child.id])).rows[0].parent_id).toBe(parent)
+  })
+  it('retains an ordinary app_user own-task business patch without administrative review',async()=>{
+    const f=await fixture(),id=await task(f),client=await getAppPool().connect()
+    try{
+      await client.query('BEGIN');await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.owner])
+      await client.query("UPDATE tasks SET title='Ordinary authorized title' WHERE id=$1",[id]);await client.query('COMMIT')
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await pool.query('SELECT title FROM tasks WHERE id=$1',[id])).rows[0].title).toBe('Ordinary authorized title')
+  })
   it('freezes bounded content plus transitive and overlapping impact and applies the same reach',async()=>{
     const f=await fixture(),first=await f.create(),second=await f.create()
     const shared=await derived(f,[first.id,second.id]),leaf=await derived(f,[shared.id])
@@ -391,6 +722,22 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
     await expect(pool.query("UPDATE workspace_scope_reviews SET reason='Changed' WHERE id=$1",[preview.id])).rejects.toThrow('scope_review_proposal_immutable')
     await expect(pool.query("UPDATE workspace_scope_review_items SET source_snapshot='{}' WHERE review_id=$1",[preview.id])).rejects.toThrow('scope_review_proposal_immutable')
     expect((await review(f.workspaceId,f.owner,preview.id)).status).toBe('preview')
+  })
+  it('keeps genuine native review identity separate from application recovery',async()=>{
+    const f=await fixture(),record=await f.create(),saved=await f.preview([record.id])
+    expect((await pool.query('SELECT application_assistant_id FROM workspace_scope_reviews WHERE id=$1',[saved.id])).rows).toEqual([{application_assistant_id:null}])
+    expect((await review(f.workspaceId,f.owner,saved.id)).id).toBe(saved.id)
+    const client=await getAppPool().connect()
+    try{
+      for(const cancel of [false,true]){
+        await client.query('BEGIN');await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.v2_assistant_id',$2,true)",[f.owner,f.assistantId])
+        await expect(client.query('SELECT application_legacy_review_apply($1,$2,$3,$4,$5,$6)',[f.workspaceId,f.assistantId,saved.id,saved.version,saved.payloadHash,cancel])).rejects.toMatchObject({code:'42501'})
+        await client.query('ROLLBACK')
+      }
+      await client.query('BEGIN');await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.v2_assistant_id',$2,true)",[f.owner,f.assistantId])
+      await expect(client.query('SELECT application_legacy_review_view($1,$2,$3)',[f.workspaceId,f.assistantId,saved.id])).rejects.toMatchObject({code:'42501'});await client.query('ROLLBACK')
+    }finally{await client.query('ROLLBACK');client.release()}
+    expect((await execute(f.workspaceId,f.owner,{type:'scope.review.cancel',reviewId:saved.id,expectedVersion:saved.version,payloadHash:saved.payloadHash})).status).toBe('cancelled')
   })
   it('protects review metadata and writes through the real application database role',async()=>{
     const f=await fixture(),preview=await f.preview([(await f.create()).id]),client=await getAppPool().connect()

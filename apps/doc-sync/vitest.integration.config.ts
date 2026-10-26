@@ -7,6 +7,8 @@ import { resolveCollabSingletonAliases } from '../../scripts/collab-singletons.m
 // database; the unit config (vitest.config.ts) excludes them so `pnpm test`
 // never needs one. Resolution matches the unit config.
 export default defineConfig({
+  // Synthetic tests use explicit environment only; never discover workspace dotenv.
+  envDir: false,
   // Absorbed (submodule-of-platform) mode resolves some packages from the
   // superproject's pnpm store, one level above this repository.
   server: { fs: { allow: [fileURLToPath(new URL('../../..', import.meta.url))] } },

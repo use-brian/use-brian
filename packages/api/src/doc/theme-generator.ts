@@ -35,7 +35,7 @@ export class ThemeGenerationError extends Error {
 }
 
 /** Standard-tier extraction model — same routing as the page auto-title. */
-const THEME_MODEL = 'gemini-3.1-flash-lite'
+const THEME_MODEL = 'gemini-3.5-flash-lite'
 
 /** Hard cap on the prompt we forward to the model. */
 const MAX_PROMPT_CHARS = 600

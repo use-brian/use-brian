@@ -132,12 +132,12 @@ describe('[COMP:api/recovery-message] composeRecoveryMessage', () => {
       channelType: 'telegram',
     })
     expect(result).not.toBeNull()
-    expect(result!.model).toBe('gemini-flash')
+    expect(result!.model).toBe('gemini-3.6-flash-pro')
     expect(result!.text).toContain('12:00')
     expect(result!.usage).toEqual({ inputTokens: 100, outputTokens: 50 })
     // Verify the helper sent the right model + a structured payload.
     const call = (provider.stream as ReturnType<typeof vi.fn>).mock.calls[0][0]
-    expect(call.model).toBe('gemini-flash')
+    expect(call.model).toBe('gemini-3.6-flash-pro')
     const payload = JSON.parse(call.messages[0].content)
     expect(payload.userMessage).toBe('改做兩個鐘 12-2')
     expect(payload.successfulActions).toHaveLength(1)

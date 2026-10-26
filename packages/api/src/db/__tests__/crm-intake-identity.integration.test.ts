@@ -102,6 +102,7 @@ describe('[COMP:crm/operations-store] Actual intake identity resolution', () => 
 
   it('existing_or_new joins the one live contact, fills only its gaps and never overwrites', async () => {
     const f = await fixture()
+    await pool.query("INSERT INTO crm_field_definitions(workspace_id,entity_kind,field_key,label,field_type) VALUES($1,'person','locale','Fictional locale','text'),($1,'person','source_site','Fictional site','text')",[f.workspaceId])
     const existing = await pool.query<{ id: string }>(`INSERT INTO entities (workspace_id,kind,display_name,canonical_id,attributes,created_by_user_id,source)
       VALUES ($1,'person','Real Name','owner@example.com',
         jsonb_build_object('email','owner@example.com','tags',jsonb_build_array('member'),'custom_fields',jsonb_build_object('locale','en')),$2,'manual')

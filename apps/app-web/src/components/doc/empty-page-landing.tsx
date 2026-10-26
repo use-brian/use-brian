@@ -474,7 +474,6 @@ export function EmptyPageLanding({
               onResearchModeChange={setResearchMode}
               researchQuota={null}
               researchExhausted={false}
-              showResearch
               selectSide="bottom"
               className="flex-1"
             />

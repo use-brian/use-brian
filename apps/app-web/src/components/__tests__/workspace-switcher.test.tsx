@@ -13,7 +13,7 @@
  * follow.
  */
 
-import { act, createContext, useContext, type ReactNode } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -24,16 +24,12 @@ const { routerPush } = vi.hoisted(() => ({ routerPush: vi.fn() }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: routerPush, replace: vi.fn(), prefetch: vi.fn() }),
 }));
+const activeWorkspace = vi.hoisted(() => ({
+  workspaceId: "w1", name: "Acme", iconSeed: null as number | null,
+  iconUrl: null as string | null, role: "owner", clearance: "internal", me: { id: "u1" },
+}));
 vi.mock("@/lib/workspace-context", () => ({
-  useWorkspaceContext: () => ({
-    workspaceId: "w1",
-    name: "Acme",
-    iconSeed: null,
-    iconUrl: null,
-    role: "owner",
-    clearance: "internal",
-    me: { id: "u1" },
-  }),
+  useWorkspaceContext: () => activeWorkspace,
   WORKSPACE_ICON_CHANGED_EVENT: "brian:workspace-icon-changed",
   WORKSPACE_RENAMED_EVENT: "brian:workspace-renamed",
 }));
@@ -64,59 +60,18 @@ vi.mock("@/lib/api/workspaces", () => ({
 }));
 vi.mock("@/lib/accounts", () => ({ getAccountsDir: () => [] }));
 vi.mock("@/lib/route-progress", () => ({ routeProgress: { start: vi.fn() } }));
-vi.mock("@/components/team-avatar", () => ({ TeamAvatar: () => null }));
+vi.mock("@/components/team-avatar", () => ({ TeamAvatar: ({ iconUrl }: { iconUrl: string | null }) => <img alt="" data-workspace-avatar src={iconUrl ?? undefined} /> }));
+vi.mock("@/components/ui/tooltip", () => ({ Tooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/desktop-accounts", () => ({ DesktopAccounts: () => null }));
 vi.mock("@/components/ui/user-avatar", () => ({ UserAvatar: () => null }));
 vi.mock("@/components/create-workspace-form", () => ({
   CreateWorkspaceForm: () => null,
 }));
 vi.mock("@/components/settings-modal/settings-modal", () => ({
-  SettingsModal: () => null,
+  SettingsModal: ({ open, initialSection }: { open: boolean; initialSection: string }) => open ? <div data-settings-modal>{initialSection}</div> : null,
   OPEN_SETTINGS_EVENT: "brian:open-settings",
 }));
-// A minimal popover: the trigger toggles `open`, the content renders only
-// while open. Enough to exercise the first-open paint without base-ui.
-vi.mock("@/components/ui/popover", () => {
-  const Ctx = createContext<{ open: boolean; onOpenChange: (o: boolean) => void }>({
-    open: false,
-    onOpenChange: () => {},
-  });
-  return {
-    Popover: ({
-      open,
-      onOpenChange,
-      children,
-    }: {
-      open: boolean;
-      onOpenChange: (o: boolean) => void;
-      children: ReactNode;
-    }) => <Ctx.Provider value={{ open, onOpenChange }}>{children}</Ctx.Provider>,
-    PopoverTrigger: ({
-      children,
-      ...props
-    }: {
-      children: ReactNode;
-      [key: string]: unknown;
-    }) => {
-      const ctx = useContext(Ctx);
-      const { ref: _ref, ...rest } = props as { ref?: unknown };
-      return (
-        <button
-          type="button"
-          data-testid="trigger"
-          {...(rest as Record<string, unknown>)}
-          onClick={() => ctx.onOpenChange(!ctx.open)}
-        >
-          {children}
-        </button>
-      );
-    },
-    PopoverContent: ({ children }: { children: ReactNode; [key: string]: unknown }) => {
-      const ctx = useContext(Ctx);
-      return ctx.open ? <div data-testid="content">{children}</div> : null;
-    },
-  };
-});
+
 
 import {
   __resetWorkspaceCacheForTest,
@@ -132,6 +87,7 @@ describe("[COMP:app-web/workspace-switcher] paints the shared workspace list", (
   let root: Root | null = null;
 
   beforeEach(() => {
+    activeWorkspace.name = "Acme"; activeWorkspace.iconUrl = null;
     __resetWorkspaceCacheForTest();
     authFetchMock.mockReset();
     desktopBridgeMock.mockReset().mockReturnValue(null);
@@ -149,25 +105,55 @@ describe("[COMP:app-web/workspace-switcher] paints the shared workspace list", (
     container = null;
   });
 
-  async function mount() {
+  async function mount(iconOnly = false) {
     await act(async () => {
-      root!.render(<WorkspaceSwitcher />);
+      root!.render(<WorkspaceSwitcher iconOnly={iconOnly} />);
       await settle();
     });
   }
 
   async function open() {
     await act(async () => {
-      container!.querySelector<HTMLButtonElement>('[data-testid="trigger"]')!.click();
+      container!.querySelector<HTMLButtonElement>('[data-workspace-switcher-trigger]')!.click();
       await settle();
     });
   }
 
-  const content = () => container!.querySelector('[data-testid="content"]');
+  const content = () => document.querySelector('[data-slot="popover-content"]');
   const rowNames = () =>
     Array.from(content()!.querySelectorAll('ul li button[role="menuitem"] span.flex-1')).map(
       (el) => el.textContent,
     );
+
+  it("opens directly from the icon and tracks shared workspace identity without a name row", async () => {
+    setWorkspaces([{ id: "w1", name: "Acme" }, { id: "w2", name: "Beta" }]);
+    await mount(true);
+    const trigger = container!.querySelector<HTMLButtonElement>("[data-workspace-switcher-trigger]")!;
+    expect(trigger.textContent).toBe("");
+    expect(trigger.getAttribute("aria-label")).toBe("Switch workspace (Acme)");
+    expect(trigger.hasAttribute("data-workspace-icon")).toBe(true);
+    await open();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(rowNames()).toEqual(["Acme", "Beta"]);
+    expect(content()!.textContent).toContain("Acme");
+    expect(authFetchMock).not.toHaveBeenCalled();
+    await open();
+    activeWorkspace.name = "Fictional studio";
+    activeWorkspace.iconUrl = "https://example.test/workspace.png";
+    await mount(true);
+    expect(trigger.getAttribute("aria-label")).toBe("Switch workspace (Fictional studio)");
+    expect(trigger.querySelector("img")?.getAttribute("src")).toBe(activeWorkspace.iconUrl);
+  });
+
+  it("retains one settings owner when Settings opens from the icon menu", async () => {
+    setWorkspaces([{ id: "w1", name: "Acme" }]);
+    await mount(true); await open();
+    const settings = [...content()!.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Settings")!;
+    await act(async () => settings.click());
+    expect(content()).toBeNull();
+    expect(container!.querySelectorAll("[data-settings-modal]")).toHaveLength(1);
+    expect(container!.querySelector("[data-settings-modal]")?.textContent).toBe("ws-general");
+  });
 
   it("first open paints an already-fetched list with no fetch and no loading line", async () => {
     setWorkspaces([
@@ -233,7 +219,7 @@ describe("[COMP:app-web/workspace-switcher] paints the shared workspace list", (
     expect(authFetchMock).not.toHaveBeenCalled();
   });
 
-  it("switches through the bare workspace root so its first mini app decides", async () => {
+  it("switches through the bare workspace root so the shared Home resolver applies", async () => {
     setWorkspaces([
       { id: "w1", name: "Acme" },
       { id: "w2", name: "Beta" },

@@ -1,3 +1,4 @@
+import { normalizeSessionVisibility } from '../session-kind.js'
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import {
@@ -9,6 +10,7 @@ import {
 } from '@use-brian/core'
 import { findSessionAuthorityById, type Session } from '../db/sessions.js'
 import { findAssistantById } from '../db/users.js'
+import {authSessionStore} from '../db/auth-session-store.js'
 import { resolveLiveAccessCeilingSystem } from './resolve-turn-scope.js'
 
 /** A stale model context cannot be revived by granting access back later. */
@@ -32,6 +34,7 @@ const leases = new AsyncLocalStorage<readonly AuthorityLease[]>()
 export function createAuthorityLease(
   starting: AccessCeiling,
   resolveCurrent: () => Promise<AccessCeiling | null>,
+  policyCurrent?: () => Promise<boolean>,
 ): AuthorityLease {
   const invocationId = randomUUID()
   const pinned = intersectAccessCeilings(starting, starting)
@@ -43,8 +46,10 @@ export function createAuthorityLease(
     async assertCurrent() {
       if (invalid) throw new AuthorityChangedError(operationMayHaveExecuted)
       try {
+        if (policyCurrent && !(await policyCurrent())) throw new AuthorityChangedError()
         const current = await resolveCurrent()
         if (!current || !accessCeilingContains(current, pinned)) invalid = true
+        if (policyCurrent && !(await policyCurrent())) invalid = true
       } catch {
         // Failure to verify is not permission. Keep underlying diagnostics out
         // of the model response and never return content from stale context.
@@ -92,11 +97,15 @@ export function createSessionAuthorityLease(input: {
   memberMode?: 'enforce' | 'assistant' | 'member' | 'external'
   ignoreSessionBinding?: boolean
   systemRead?: boolean
+  nativeSessionCredential?:{userId:string;sessionId:string;authVersion:number}
   credentialCurrent?: () => Promise<boolean>
   /** Re-resolve a recipient/surface ceiling at every authority boundary. */
   maximumAccessCurrent?: () => Promise<AccessCeiling | null>
+  /** Construction-pinned native/application field and configuration metadata. */
+  policyCurrent?: () => Promise<boolean>
 }): AuthorityLease {
-  const sourceRead = { visibility: input.session.visibility, mode: input.session.mode,
+  const nativeCredential=input.nativeSessionCredential?Object.freeze(structuredClone(input.nativeSessionCredential)):undefined
+  const sourceRead = { visibility: normalizeSessionVisibility(input.session.visibility), mode: input.session.mode,
     effectiveClearance: input.session.effectiveClearance,
     contextCompartments: input.session.contextCompartments ? [...input.session.contextCompartments] : undefined }
   const expected = {
@@ -114,7 +123,10 @@ export function createSessionAuthorityLease(input: {
     const [session, assistant, credentialCurrent] = await Promise.all([
       findSessionAuthorityById(expected.id),
       findAssistantById(expected.executingAssistantId),
-      input.credentialCurrent?.() ?? Promise.resolve(true),
+      (async()=>{
+        if(input.credentialCurrent&&!await input.credentialCurrent())return false
+        return !nativeCredential||nativeCredential.userId===expected.authorityUserId&&await authSessionStore.validateAccess(nativeCredential,{touch:false})
+      })(),
     ])
     if (!session || !assistant || !credentialCurrent) return null
     const currentLock = session.contextLockedAt?.toISOString() ?? null
@@ -146,14 +158,15 @@ export function createSessionAuthorityLease(input: {
     return maximum
       ? intersectAccessCeilings(current, { ...maximum, userId: current.userId })
       : null
-  })
+  }, input.policyCurrent)
   const invocation = lease.snapshotSource!()
   lease.snapshotSource = () => {
-    if (!input.durableSessionSource || expected.contextLockedAt === null || input.credentialCurrent || input.maximumAccessCurrent) return { ...invocation }
+    if (!input.durableSessionSource || expected.contextLockedAt === null || input.credentialCurrent || input.maximumAccessCurrent
+      ||nativeCredential&&nativeCredential.userId!==expected.authorityUserId) return { ...invocation }
     const snapshot = AuthoritySourceSchema.safeParse({ version: 1, kind: 'session', invocationId: invocation.invocationId, ...expected,
       contextLockedAt: expected.contextLockedAt, memberMode: input.memberMode ?? 'enforce',
       ignoreSessionBinding: input.ignoreSessionBinding ?? false, systemRead: input.systemRead ?? false,
-      ...sourceRead })
+      ...sourceRead,...(nativeCredential?{nativeCredential}:{}) })
     return snapshot.success ? snapshot.data : { ...invocation }
   }
   return lease

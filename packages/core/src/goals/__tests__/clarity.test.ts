@@ -68,6 +68,14 @@ describe('[COMP:goals/clarity] parseClarityVerdict', () => {
 })
 
 describe('[COMP:goals/clarity] createGoalClarityAssessor', () => {
+  it('does not disclose input or fail open when current authority contracts during runtime resolution',async()=>{
+    const requests:Array<Record<string,unknown>>=[]
+    let current=true
+    const assess=createGoalClarityAssessor({provider:mockProvider('{"clear":true}',requests),model:'mock',modelTier:'standard',resolveLlm:async()=>{current=false;return null}})
+    await expect(assess({outcome:'Fictional protected result',workspaceId:'fictional-workspace',assertInputAuthority:async()=>{if(!current)throw new Error('Unavailable current source')}})).rejects.toMatchObject({reason:'authority_changed'})
+    expect(requests).toEqual([])
+  })
+
   it('returns clear for a concrete outcome', async () => {
     const assess = createGoalClarityAssessor({ provider: mockProvider('{"clear":true}'), model: 'mock', modelTier: 'standard', resolveLlm: null })
     expect((await assess({ outcome: 'Email the Q3 report to Acme' })).clear).toBe(true)

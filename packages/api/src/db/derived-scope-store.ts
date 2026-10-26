@@ -12,12 +12,49 @@ type CanonicalEvidenceRow = ResourceScope & {
   causalEntityId?: string
 }
 
+/** Keep the owner-only native snapshot function outside the app-role external statement. */
+async function scopeSnapshots(client: Pick<pg.ClientBase, 'query'>, workspaceId: string, sources: readonly ScopeSource[],
+  reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source', workflowRunId?: string, requiredExternalAction?: 'context' | 'deliver', admittedNative = false, recordedFields = false) {
+  const result: Array<{ ord: number; snapshot: CanonicalEvidenceRow | null }> = []
+  for (const profile of ['native','field','external'] as const) {
+    const group = sources.map((source,index) => ({ source,index })).filter(({ source }) =>
+      (source.resourceKind === 'external_source' ? 'external' : source.resourceKind === 'application_field' ? 'field' : 'native') === profile)
+    if (group.length === 0) continue
+    const rows = profile === 'field' ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
+      recordedFields ? 'SELECT ord,snapshot FROM read_native_session_field_snapshots($1,$2,$3)'
+        : `SELECT t.ord::int AS ord,read_entity_derivation_source($1,'application_field',t.id) AS snapshot
+       FROM unnest($2::uuid[],$3::text[]) WITH ORDINALITY AS t(id,version,ord)`,
+      [workspaceId,group.map(({ source }) => source.resourceId),group.map(({ source }) => source.version)])).rows
+      : profile === 'external' ? (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
+      `SELECT t.ord::int AS ord,${requiredExternalAction ? "CASE WHEN current_setting('app.external_source_action',true)=$3 THEN external_source_snapshot($1,t.id) ELSE '{\"held\":true}'::jsonb END" : 'external_source_snapshot($1,t.id)'} AS snapshot
+        FROM unnest($2::uuid[]) WITH ORDINALITY AS t(id,ord)`,
+      [workspaceId,group.map(({ source }) => source.resourceId),...(requiredExternalAction ? [requiredExternalAction] : [])])).rows
+      : (await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
+        `SELECT t.ord::int AS ord,${workflowRunId ? 'read_workflow_validation_source($1,$4,t.kind,t.id)' : `${admittedNative ? 'read_admitted_native_scope_snapshot' : reader}($1,t.kind,t.id)`} AS snapshot
+          FROM unnest($2::text[],$3::uuid[]) WITH ORDINALITY AS t(kind,id,ord)`,
+        [workspaceId,group.map(({ source }) => source.resourceKind),group.map(({ source }) => source.resourceId),...(workflowRunId ? [workflowRunId] : [])])).rows
+    for (const row of rows) if (group[row.ord - 1]) result.push({ ord: group[row.ord - 1].index + 1, snapshot: row.snapshot })
+  }
+  return result
+}
+
+/** Context/read receipts cannot authorize durable derivatives. SQL independently guards lineage inserts. */
+async function requireExternalRetention(client: Pick<pg.PoolClient, 'query'>, evidence: DerivedWriteEvidence) {
+  const external = evidence.sources.filter(source => source.resourceKind === 'external_source')
+  if (!external.length) return
+  const rows = (await client.query<{ allowed: boolean }>(`SELECT external_source_retention_allowed(t.workspace,t.id,t.version) AS allowed
+    FROM unnest($1::uuid[],$2::uuid[],$3::text[]) AS t(workspace,id,version)`,
+    [external.map(source => source.workspaceId),external.map(source => source.resourceId),external.map(source => source.version)])).rows
+  if (rows.length !== external.length || rows.some(row => row.allowed !== true)) throw new DerivedScopeError('scope_source_changed')
+}
+
 /** Must run inside the SAME transaction as the canonical writer. */
 export async function validateDerivedMemoryInputs(
   client: Pick<pg.PoolClient, 'query'>,
   evidence: DerivedWriteEvidence,
 ): Promise<ResourceScope> {
   const floor = deriveResourceScope(evidence)
+  await requireExternalRetention(client, evidence)
   await revalidateScopeSources(client, floor.workspaceId, evidence.sources)
   return floor
 }
@@ -27,6 +64,7 @@ export async function validateDerivedEntityInputs(
   client: Pick<pg.PoolClient, 'query'>, evidence: DerivedWriteEvidence,
 ): Promise<ResourceScope> {
   const floor = deriveResourceScope(evidence)
+  await requireExternalRetention(client, evidence)
   await revalidateScopeSources(client, floor.workspaceId, evidence.sources, 'read_entity_derivation_source')
   return floor
 }
@@ -41,10 +79,12 @@ export async function validateDerivedEntityInputs(
 export async function validateDerivedWriteInputs(
   client: Pick<pg.PoolClient, 'query'>,
   evidence: DerivedWriteEvidence,
+  nativeReader:'read_scope_source'|'read_entity_derivation_source'='read_scope_source',
 ): Promise<Pick<ResourceScope, 'workspaceId' | 'sensitivity' | 'compartments' | 'projectIds'>> {
   const labels = deriveContextFloor(evidence)
+  await requireExternalRetention(client, evidence)
   const workspaceId = evidence.sources[0]!.workspaceId
-  await revalidateScopeSources(client, workspaceId, evidence.sources)
+  await revalidateScopeSources(client, workspaceId, evidence.sources,nativeReader)
   return { workspaceId, ...labels }
 }
 
@@ -54,11 +94,12 @@ export async function validateDerivedWriteInputs(
  * transaction. Audience and consult checks judge current labels instead
  * (`readCurrentScopeSources`).
  *
- * ONE statement for every source. A round trip per source made a transcript
+ * One statement per authority profile (native and external). A round trip per source made a transcript
  * flush cost `rows x sources` round trips (45 s for eight buffered tool rounds
  * over ~100 sources on 2026-09-29). `unnest ... WITH ORDINALITY` evaluates
  * `read_scope_source`, and so takes its locks, in array order, which keeps the
- * shared sorted lock order every writer uses.
+ * shared sorted native lock order every writer uses. External observations use
+ * their separate receipt-scoped facade and never grant access to native snapshots.
  */
 async function revalidateScopeSources(
   client: Pick<pg.PoolClient, 'query'>,
@@ -66,16 +107,17 @@ async function revalidateScopeSources(
   sources: readonly ScopeSource[],
   reader: 'read_scope_source' | 'read_entity_derivation_source' = 'read_scope_source',
 ): Promise<void> {
+  if(reader==='read_scope_source'){
+    const role=(await client.query<{admitted:boolean}>(`SELECT NOT (r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE')) AS admitted
+      FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.memories'::regclass WHERE r.rolname=current_user`)).rows[0]
+    if(role?.admitted===true)reader='read_entity_derivation_source'
+  }
   const unique = new Map(sources.map(source=>[`${source.resourceKind}:${source.resourceId}`,source]))
   // All writers use the same lock order, including mixed primitive prompts.
   const list=[...unique.values()].sort((a,b)=>`${a.resourceKind}:${a.resourceId}`.localeCompare(`${b.resourceKind}:${b.resourceId}`))
   for(const source of list)if(source.workspaceId!==workspaceId)throw new DerivedScopeError('scope_workspace_mismatch')
   if(list.length===0)return
-  const { rows }=await client.query<{ord:number;snapshot:CanonicalEvidenceRow|null}>(
-    `SELECT t.ord::int AS ord, ${reader}($1, t.kind, t.id) AS snapshot
-       FROM unnest($2::text[], $3::uuid[]) WITH ORDINALITY AS t(kind, id, ord)`,
-    [workspaceId,list.map(source=>source.resourceKind),list.map(source=>source.resourceId)],
-  )
+  const rows=await scopeSnapshots(client,workspaceId,list,reader,undefined,undefined,list.some(source=>source.resourceKind==='application_field'))
   const byOrd=new Map(rows.map(row=>[row.ord,row.snapshot]))
   list.forEach((source,index)=>{
     const row=byOrd.get(index+1)
@@ -93,7 +135,8 @@ async function revalidateScopeSources(
  * `gone` covers delete, supersession, retraction and legacy rows: the content
  * was read under the recorded envelope, and removing it later does not make
  * that read unauthorized (scoped-context.md -> "Audience checks are per
- * source", decision D1).
+ * source", decision D1). External observations never use that historical
+ * allowance: missing, retired or changed observations are unverifiable.
  */
 export type CurrentSourceState =
   | { state: 'current'; source: ScopeSource }
@@ -105,7 +148,7 @@ export type CurrentSourceState =
   | { state: 'stale_input'; source: ScopeSource }
 
 /**
- * One round trip for every source, no transaction: an audience check couples
+ * One round trip per authority profile, no write transaction: an audience check couples
  * no write to these rows, so it needs the current envelope, not a lock held
  * across a later statement. Derived writers use `revalidateScopeSources`.
  */
@@ -114,16 +157,14 @@ export async function readCurrentScopeSources(
   workspaceId: string,
   sources: readonly ScopeSource[],
   workflowRunId?: string,
+  requiredExternalAction?: 'context' | 'deliver',
+  admittedNative = false,
 ): Promise<CurrentSourceState[]> {
   const unique = new Map(sources.map(source=>[`${source.resourceKind}:${source.resourceId}`,source]))
   const list = [...unique.values()]
   if (list.length === 0) return []
   if (list.some(source=>source.workspaceId!==workspaceId)) throw new DerivedScopeError('scope_workspace_mismatch')
-  const { rows } = await client.query<{ ord: number; snapshot: CanonicalEvidenceRow | null }>(
-    `SELECT t.ord::int AS ord, ${workflowRunId ? 'read_workflow_validation_source($1,$4,t.kind,t.id)' : 'read_scope_source($1,t.kind,t.id)'} AS snapshot
-       FROM unnest($2::text[], $3::uuid[]) WITH ORDINALITY AS t(kind, id, ord)`,
-    [workspaceId, list.map(source=>source.resourceKind), list.map(source=>source.resourceId), ...(workflowRunId ? [workflowRunId] : [])],
-  )
+  const rows = await scopeSnapshots(client,workspaceId,list,'read_scope_source',workflowRunId,requiredExternalAction,admittedNative,true)
   const byOrd = new Map(rows.map(row=>[row.ord, row.snapshot]))
   return list.map((source, index): CurrentSourceState => {
     // No result row at all is a failed read, not a deleted source.
@@ -131,14 +172,16 @@ export async function readCurrentScopeSources(
     const row = byOrd.get(index + 1) ?? null
     // A CRM event snapshot is withheld (NULL) while held or retired, so its
     // absence is not proof of deletion.
-    if (!row) return source.resourceKind === 'crm_event' ? { state: 'held', source } : { state: 'gone', source }
+    if (!row) return source.resourceKind === 'external_source' || source.resourceKind === 'application_field' || source.resourceKind === 'session_context_revision' ? { state: 'unverifiable', source }
+      : source.resourceKind === 'crm_event' ? { state: 'held', source } : { state: 'gone', source }
     if (row.held) return { state: 'held', source }
     if (source.resourceKind === 'crm_event' && (!row.causalEntityId
       || !unique.has(`entity:${row.causalEntityId}`))) return { state: 'unverifiable', source }
-    if (row.retractedAt || row.validTo) return { state: 'gone', source }
+    if (row.retractedAt || row.validTo) return source.resourceKind === 'external_source' ? { state: 'unverifiable', source } : { state: 'gone', source }
     if (row.version === source.version && resourceScopeKey(row) === resourceScopeKey(source)) {
       return { state: 'current', source }
     }
+    if (source.resourceKind === 'external_source') return { state: 'unverifiable', source }
     // An outbox event is immutable by nature and is the run's causal input:
     // a changed payload means the run would finish on stale input, so its
     // version must still match (scoped-context.md -> "CRM workflow input
@@ -166,9 +209,38 @@ export async function recordDerivedResource(
   // The output must carry every label it was derived from and must not take
   // another person's private rows anywhere else; its assistant visibility is
   // the target's own (decision D3).
+  await requireExternalRetention(client, evidence)
   const floor = deriveWriteScope(evidence, output, actorUserId)
   if (resourceScopeKey(floor) !== resourceScopeKey(output)) {
     throw new DerivedScopeError('scope_visibility_incompatible')
+  }
+  if(output.resourceKind==='task'){
+    const role=(await client.query<{admitted:boolean}>(`SELECT NOT(r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE'))
+      AND nullif(current_setting('app.application_id',true),'') IS NULL AS admitted
+      FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.tasks'::regclass WHERE r.rolname=current_user`)).rows[0]
+    if(role?.admitted===true){await client.query('SELECT record_admitted_native_task_derivation($1,$2,$3,$4,$5)',
+      [output.workspaceId,output.resourceId,output.version,evidence.producer,JSON.stringify(evidence.sources)]);return}
+  }
+  if(output.resourceKind==='knowledge_entry'&&evidence.sources.some(source=>source.resourceKind==='application_field')){
+    await client.query('SELECT record_admitted_knowledge_entry_derivation($1,$2,$3,$4,$5)',
+      [output.workspaceId,output.resourceId,output.version,evidence.producer,JSON.stringify(evidence.sources)])
+    return
+  }
+  if (evidence.sources.some(source => source.resourceKind === 'application_field')) {
+    await client.query('SELECT record_admitted_application_field_derivation($1,$2,$3,$4,$5,$6)',
+      [output.workspaceId,output.resourceKind,output.resourceId,output.version,evidence.producer,JSON.stringify(evidence.sources)])
+    return
+  }
+  if(output.resourceKind==='memory') {
+    // The current database role, never a caller flag, selects the existing
+    // restricted native lineage port. Owner workers keep their existing path.
+    const role=(await client.query<{admitted:boolean}>(`SELECT NOT (r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE')) AS admitted
+      FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.memories'::regclass WHERE r.rolname=current_user`)).rows[0]
+    if(role?.admitted===true){
+      await client.query('SELECT record_admitted_application_field_derivation($1,$2,$3,$4,$5,$6)',
+        [output.workspaceId,output.resourceKind,output.resourceId,output.version,evidence.producer,JSON.stringify(evidence.sources)])
+      return
+    }
   }
   await client.query(`INSERT INTO workspace_access_policies(workspace_id) VALUES($1) ON CONFLICT DO NOTHING`, [output.workspaceId])
   const { rows } = await client.query<{ id: string }>(
@@ -206,4 +278,4 @@ export async function recordDerivedResource(
 }
 
 /** Output families whose readers enforce page ancestry. */
-const PAGE_LINEAGE_OUTPUT_KINDS = new Set(['workspace_file', 'file_segment'])
+const PAGE_LINEAGE_OUTPUT_KINDS = new Set(['workspace_file', 'file_segment', 'session_context_revision'])

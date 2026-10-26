@@ -1,18 +1,57 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { runReflectionConsolidation, type ScopeSource } from '@use-brian/core'
-import { getPool,getAppPool } from '../client.js'
-import { createMemory,updateMemory } from '../memories.js'
-import { createDbMemoryStore } from '../memory-store.js'
-import { createMemoryRetractionStore } from '../retraction-store.js'
-import { createSoftDeleteStore } from '../soft-delete-store.js'
-import { readReflectionReceipt } from '../reflection-evidence.js'
-import { addSessionMessage, readSessionMessageScopeSource } from '../sessions.js'
-import { recordFeedback } from '../../feedback/record.js'
-const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
+// Native loading preserves the maintained fixture's import.meta.resolve in Node22.
+const { assertLocalFixture,createLocalFixture,cleanRuntimeEnvironment,runCommand } = createRequire(import.meta.url)(
+  fileURLToPath(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url)))
+// Refuse plain/ambient invocation before creating any fixture or DB-bound module.
 await assertLocalFixture()
-const pool=getPool()
+const runtime=cleanRuntimeEnvironment(process.env)
+const pgBin=(await runCommand('pg_config',['--bindir'],{env:runtime})).trim()
+const isolatedFixture=await createLocalFixture({pgBin,env:runtime})
+const previousEnvironment=new Map<string,string|undefined>(Object.keys(isolatedFixture.env).map(key=>[key,process.env[key]]))
+let closePools:(()=>Promise<void>)|undefined,disposed=false
+async function disposeReflectionFixture(){
+  if(disposed)return
+  disposed=true
+  const failures:unknown[]=[]
+  try {await closePools?.()}catch(error){failures.push(error)}
+  try {await isolatedFixture.dispose()}catch(error){failures.push(error)}
+  finally {for(const [key,value] of previousEnvironment){if(value===undefined)delete process.env[key];else process.env[key]=value}}
+  if(failures.length)throw new AggregateError(failures,'Reflection fixture cleanup failed')
+}
+const dependencies=await(async()=>{
+  try {
+    Object.assign(process.env,isolatedFixture.env)
+    await assertLocalFixture(isolatedFixture.env)
+    // These module-cached pools must first bind to this isolated fork's own DB.
+    const client=await import('../client.js')
+    closePools=async()=>{
+      const results=await Promise.allSettled([client.getAppPool().end(),client.getPool().end()])
+      const failures=results.filter(result=>result.status==='rejected').map(result=>result.reason)
+      if(failures.length)throw new AggregateError(failures,'Reflection pools failed to close')
+    }
+    // Shared dependency graphs must finish sequentially in Vitest's module loader.
+    const memories=await import('../memories.js')
+    const memoryStore=await import('../memory-store.js')
+    const retractionStore=await import('../retraction-store.js')
+    const softDeleteStore=await import('../soft-delete-store.js')
+    const reflectionEvidence=await import('../reflection-evidence.js')
+    const sessions=await import('../sessions.js')
+    const feedback=await import('../../feedback/record.js')
+    const modules=[memories,memoryStore,retractionStore,softDeleteStore,reflectionEvidence,sessions,feedback] as const
+    return {pool:client.getPool(),modules}
+  }catch(error){
+    try {await disposeReflectionFixture()}catch(cleanupError){throw new AggregateError([error,cleanupError],'Reflection fixture initialization and cleanup failed')}
+    throw error
+  }
+})()
+const {pool,modules:[{createMemory,updateMemory},{createDbMemoryStore},{createMemoryRetractionStore},{createSoftDeleteStore},
+  {readReflectionReceipt},{addSessionMessage,readSessionMessageScopeSource},{recordFeedback}]}=dependencies
+afterAll(disposeReflectionFixture)
 async function fixture() {
   const workspaceId=randomUUID(),userId=randomUUID(),assistantId=randomUUID()
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[userId])
@@ -32,7 +71,6 @@ async function fixture() {
   return{workspaceId,userId,assistantId,memory,receipt,read,derive}
 }
 describe('[COMP:api/reflection-evidence] [COMP:api/conversation-feedback-evidence] verification receipt provenance',()=>{
-  afterAll(async()=>{await getAppPool().end();await pool.end()})
   it('runs real reflection per exact department bucket with actual canonical writes',async()=>{
     const f=await fixture()
     const finance=await createMemory({workspaceId:f.workspaceId,userId:f.userId,assistantId:f.assistantId,createdByUserId:f.userId,summary:'Finance source',sensitivity:'confidential',compartments:['finance']})
@@ -158,8 +196,13 @@ describe('[COMP:api/reflection-evidence] [COMP:api/conversation-feedback-evidenc
   it('upgrades existing saved scopes without inventing evidence for legacy receipts',async()=>{
     const f=await fixture(),id=await f.receipt(),legacy=randomUUID(),malformed=randomUUID(),client=await pool.connect()
     const migration=(await readFile(new URL('../../../migrations/587_verification_derivation.sql',import.meta.url),'utf8')).replace(/^BEGIN;\s*/,'').replace(/COMMIT;\s*$/,'')
+    const bundleSql=`SELECT to_jsonb(d) AS derivation,coalesce((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.source_kind,s.source_id)
+      FROM scope_derivation_sources s WHERE s.workspace_id=d.workspace_id AND s.derivation_id=d.id),'[]'::jsonb) AS sources
+      FROM scope_derivations d ORDER BY d.workspace_id,d.id`
+    let beforeBundles: {derivation:{id:string;resource_kind:string};sources:{source_kind:string}[]}[]|undefined
     try {
       await client.query('BEGIN')
+      beforeBundles=(await client.query(bundleSql)).rows
       const before=(await client.query('SELECT source_scope FROM memory_verifications WHERE id=$1',[id])).rows[0].source_scope
       await client.query('DROP TRIGGER memory_verification_lifecycle ON memories; DROP FUNCTION hold_memory_verification_lifecycle()')
       for(const table of ['memory_verifications','brain_verifications']) {
@@ -171,10 +214,21 @@ describe('[COMP:api/reflection-evidence] [COMP:api/conversation-feedback-evidenc
       await client.query("INSERT INTO memory_verifications(id,workspace_id,memory_id,verified_by,action,reason) VALUES($1,$2,$3,$4,'edit_summary','Unclassified legacy correction')",[legacy,f.workspaceId,f.memory.id,f.userId])
       await client.query("INSERT INTO memory_verifications(id,workspace_id,memory_id,verified_by,action,source_scope) VALUES($1,$2,$3,$4,'edit_summary',$5)",[malformed,f.workspaceId,f.memory.id,f.userId,JSON.stringify({...before,sensitivity:undefined})])
       await client.query('ALTER TABLE memory_verifications ENABLE TRIGGER memory_verification_scope')
-      // Inside this rolled-back transaction: rows other suites wrote with newer
-      // source kinds would fail the predecessor CHECK this replay re-adds.
-      await client.query('DELETE FROM scope_derivation_sources WHERE workspace_id IS DISTINCT FROM $1',[f.workspaceId])
-      await client.query("DELETE FROM scope_derivation_sources WHERE source_kind IN('correction_audit','session_message','feedback_event')")
+      // The predecessor CHECK cannot admit later source kinds. Remove only
+      // complete incompatible bundles inside this rolled-back replay, never edges.
+      const supported=['memory','entity','entity_link','task','workspace_file','episode','knowledge_entry','kb_chunk','crm_event','memory_verification','brain_verification']
+      const incompatible=beforeBundles.filter(bundle=>bundle.sources.some(source=>!supported.includes(source.source_kind)))
+      // Current workflow edge-deletion refusal is covered by workflow-input-evidence;
+      // its later stale/held bundles still require whole-bundle replay cleanup.
+      console.info('Historical 587 replay bundle metadata', {compatible:beforeBundles.length-incompatible.length,
+        incompatible:incompatible.length,workflowBundles:incompatible.filter(bundle=>bundle.sources.some(source=>source.source_kind==='workflow_run')).length,
+        outputKinds:[...new Set(incompatible.map(bundle=>bundle.derivation.resource_kind))].sort()})
+      const removed=(await client.query(`DELETE FROM scope_derivations d WHERE EXISTS(
+        SELECT 1 FROM scope_derivation_sources s WHERE s.workspace_id=d.workspace_id AND s.derivation_id=d.id
+          AND NOT(s.source_kind=ANY($1::text[]))) RETURNING d.id`,[supported])).rows
+      expect(removed.map(row=>row.id).sort()).toEqual(incompatible.map(bundle=>bundle.derivation.id).sort())
+      const removedIds=new Set(incompatible.map(bundle=>bundle.derivation.id))
+      expect((await client.query(bundleSql)).rows).toEqual(beforeBundles.filter(bundle=>!removedIds.has(bundle.derivation.id)))
       // Later migrations renamed these functions' parameters; move the current
       // definitions aside (rolled back below) so the historical replay can create its own.
       await client.query('ALTER FUNCTION read_scope_source(uuid,text,uuid) RENAME TO read_scope_source_current; ALTER FUNCTION scope_source_ancestors(uuid,text,uuid) RENAME TO scope_source_ancestors_current')
@@ -183,7 +237,10 @@ describe('[COMP:api/reflection-evidence] [COMP:api/conversation-feedback-evidenc
       expect((await client.query("SELECT read_scope_source($1,'memory_verification',$2) AS source",[f.workspaceId,id])).rows[0].source).toMatchObject({compartments:['product'],sensitivity:'confidential'})
       expect((await client.query("SELECT read_scope_source($1,'memory_verification',$2) AS source",[f.workspaceId,legacy])).rows[0].source).toBeNull()
       expect((await client.query("SELECT read_scope_source($1,'memory_verification',$2) AS source",[f.workspaceId,malformed])).rows[0].source).toBeNull()
-    } finally {await client.query('ROLLBACK');client.release()}
+    } finally {
+      try {await client.query('ROLLBACK');if(beforeBundles)expect((await client.query(bundleSql)).rows).toEqual(beforeBundles)}
+      finally {client.release()}
+    }
   })
   it('learns from actual soft-delete receipts without quoting archived row snapshots',async()=>{
     const f=await fixture(),repo=createSoftDeleteStore()
@@ -254,13 +311,29 @@ describe('[COMP:api/reflection-evidence] [COMP:api/conversation-feedback-evidenc
   it('does not backfill legacy correction receipts from current target scope',async()=>{
     const f=await fixture(),id=randomUUID(),client=await pool.connect()
     const migration=(await readFile(new URL('../../../migrations/588_correction_reflection_scope.sql',import.meta.url),'utf8')).replace(/^BEGIN;\s*/,'').replace(/COMMIT;\s*$/,'')
+    const bundleSql=`SELECT to_jsonb(d) AS derivation,coalesce((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.source_kind,s.source_id)
+      FROM scope_derivation_sources s WHERE s.workspace_id=d.workspace_id AND s.derivation_id=d.id),'[]'::jsonb) AS sources
+      FROM scope_derivations d ORDER BY d.workspace_id,d.id`
+    let beforeBundles: {derivation:{id:string;resource_kind:string};sources:{source_kind:string}[]}[]|undefined
     try {
       await client.query('BEGIN')
+      beforeBundles=(await client.query(bundleSql)).rows
       await client.query('DROP TRIGGER a_correction_scope ON correction_audit; DROP TRIGGER canonical_scope_version ON correction_audit; DROP POLICY correction_scope_read ON correction_audit; DROP FUNCTION capture_correction_scope(); ALTER TABLE correction_audit DROP COLUMN source_scope,DROP COLUMN scope_version,DROP COLUMN scope_held')
-      // Inside this rolled-back transaction: rows other suites wrote with newer
-      // source kinds would fail the predecessor CHECK this replay re-adds.
-      await client.query('DELETE FROM scope_derivation_sources WHERE workspace_id IS DISTINCT FROM $1',[f.workspaceId])
-      await client.query("DELETE FROM scope_derivation_sources WHERE source_kind IN('session_message','feedback_event')")
+      // The predecessor CHECK cannot admit later source kinds. Remove only
+      // complete incompatible bundles inside this rolled-back replay, never edges.
+      const supported=['memory','entity','entity_link','task','workspace_file','episode','knowledge_entry','kb_chunk','crm_event','memory_verification','brain_verification','correction_audit']
+      const incompatible=beforeBundles.filter(bundle=>bundle.sources.some(source=>!supported.includes(source.source_kind)))
+      // Current workflow edge-deletion refusal is covered by workflow-input-evidence;
+      // its later stale/held bundles still require whole-bundle replay cleanup.
+      console.info('Historical 588 replay bundle metadata', {compatible:beforeBundles.length-incompatible.length,
+        incompatible:incompatible.length,workflowBundles:incompatible.filter(bundle=>bundle.sources.some(source=>source.source_kind==='workflow_run')).length,
+        outputKinds:[...new Set(incompatible.map(bundle=>bundle.derivation.resource_kind))].sort()})
+      const removed=(await client.query(`DELETE FROM scope_derivations d WHERE EXISTS(
+        SELECT 1 FROM scope_derivation_sources s WHERE s.workspace_id=d.workspace_id AND s.derivation_id=d.id
+          AND NOT(s.source_kind=ANY($1::text[]))) RETURNING d.id`,[supported])).rows
+      expect(removed.map(row=>row.id).sort()).toEqual(incompatible.map(bundle=>bundle.derivation.id).sort())
+      const removedIds=new Set(incompatible.map(bundle=>bundle.derivation.id))
+      expect((await client.query(bundleSql)).rows).toEqual(beforeBundles.filter(bundle=>!removedIds.has(bundle.derivation.id)))
       await client.query("INSERT INTO correction_audit(id,workspace_id,primitive,row_id,action,reason) VALUES($1,$2,'memory',$3,'retract','Legacy reason')",[id,f.workspaceId,f.memory.id])
       // Later migrations renamed these functions' parameters; move the current
       // definitions aside (rolled back below) so the historical replay can create its own.
@@ -268,11 +341,14 @@ describe('[COMP:api/reflection-evidence] [COMP:api/conversation-feedback-evidenc
       await client.query(migration)
       expect((await client.query("SELECT read_scope_source($1,'correction_audit',$2) AS source",[f.workspaceId,id])).rows[0].source).toBeNull()
       expect((await client.query('SELECT reason,source_scope FROM correction_audit WHERE id=$1',[id])).rows[0]).toEqual({reason:'Legacy reason',source_scope:null})
-    } finally {await client.query('ROLLBACK');client.release()}
+    } finally {
+      try {await client.query('ROLLBACK');if(beforeBundles)expect((await client.query(bundleSql)).rows).toEqual(beforeBundles)}
+      finally {client.release()}
+    }
   })
   it('keeps metadata readers private and refuses cyclic or missing chains',async()=>{
     const f=await fixture(),id=await f.receipt()
-    expect((await pool.query("SELECT has_function_privilege('assurance_app','read_verification_scope(uuid,text,uuid)','EXECUTE') AS allowed")).rows[0].allowed).toBe(false)
+    expect((await pool.query("SELECT has_function_privilege('app_user','read_verification_scope(uuid,text,uuid)','EXECUTE') AS allowed")).rows[0].allowed).toBe(false)
     await pool.query('UPDATE memories SET superseded_by=id WHERE id=$1',[f.memory.id])
     expect(await f.read(id)).toBeNull()
   })

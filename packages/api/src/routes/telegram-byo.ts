@@ -1,3 +1,9 @@
+import { hasTelegramWorkspaceConversationBinding, telegramConfiguredConversation } from '../telegram-conversation-admission.js'
+import { runChannelMediaReceipt, type ChannelMediaReceiptStore } from '../ingest/channel-media-receipt.js'
+import { createDeliveryAudienceEnvelopeResolver } from '../context-scope/delivery-authority.js'
+import { resolveLiveAccessCeilingSystem } from '../context-scope/resolve-turn-scope.js'
+import { mayReadGroupContext } from '../channel-room/turn.js'
+import type { ChannelMediaScope } from '../ingest/channel-media-intake.js'
 import { dispatchIncomingMessageEvent } from '../message-events.js'
 import { channelConfirmations, confirmationMessage, roomInteractionScope, type ChannelInteractionScope } from './channel-interactions.js'
 import { isWorkspaceAdmin, postPassiveChannelMessage, resolveRoomBinding } from '../channel-room/room.js'
@@ -32,8 +38,8 @@ import type { ChannelQuestionStore } from '../workflow/channel-questions.js'
  *      resolves the sender, runs the query loop.
  */
 
-import { Router } from 'express'
-import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, describeTelegramDownloadFailure, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
+import { Router, type Request, type Response } from 'express'
+import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, describeTelegramDownloadFailure, TelegramApiError, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
 import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, ChatSeenEvent } from '@use-brian/channels'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { getWorkspaceMembershipWithClearanceSystem, getWorkspaceRoleSystem } from '../db/workspace-store.js'
@@ -67,6 +73,9 @@ import { admitChannelMessage } from './channel-message-admission.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { isDeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
 import { cacheInboundImage } from './channel-file-cache.js'
+import { mediaByteLimit, type ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
+import { archiveUnroutedInbound, resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
+import { archiveProviderMessageId } from '../chat-archive/normalize.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { buildFileContentBlocks } from './route-helpers.js'
 import { handleConnectCommand } from './_connect-command.js'
@@ -114,8 +123,13 @@ const DECISION_LABELS: Record<string, string> = {
   allow: 'Allowed', deny: 'Denied', always_allow: 'Always allowed', always_deny: 'Always denied',
 }
 
+type TelegramMediaDownload = Awaited<ReturnType<ReturnType<typeof createTelegramAdapter>['downloadMedia']>>
+type TelegramMediaDownloads = Map<string, Promise<TelegramMediaDownload>>
+
 type TelegramByoRouteOptions = {
   discussionStore?: TelegramDiscussionStore
+  /** Original media is staged before provider-message archive capture, independently of reply routing. */
+  archiveMedia?: ChatArchiveLiveMedia
   questionStore?: ChannelQuestionStore
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
@@ -208,7 +222,9 @@ type TelegramByoRouteOptions = {
    * Route inbound document / video through universal intake. Audio uses this
    * path when the hosted inline recording hook is absent (the OSS default).
    */
+  mediaReceiptStore?: ChannelMediaReceiptStore
   ingestChannelMediaRef?: (input: {
+    scope?: ChannelMediaScope
     source: { url: string }
     mime?: string
     fileName: string | null
@@ -327,11 +343,14 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     message_id: number
     chat?: { id: number; type: string; is_forum?: boolean }
     from?: { id: number }
+    reply_to_message?: RawTelegramGroupMessage
     sender_chat?: { id: number; title?: string }
     is_automatic_forward?: boolean
     message_thread_id?: number
     caption?: string
     text?: string
+    entities?: Array<{ type: string; offset: number; length: number }>
+    caption_entities?: Array<{ type: string; offset: number; length: number }>
     media_group_id?: string
     photo?: Array<{ file_id: string }>
     document?: { file_id: string; mime_type?: string; file_name?: string; file_size?: number }
@@ -339,12 +358,28 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
   }
   type MediaGroupEntry = {
     rawMessages: RawTelegramGroupMessage[]
-    timer: ReturnType<typeof setTimeout>
+    mediaDownloads: TelegramMediaDownloads
+    archivedMessageIds: Set<string>
+    pendingArchiveCaptures: number
+    timer?: ReturnType<typeof setTimeout>
   }
   const mediaGroupBuffers = new Map<string, MediaGroupEntry>()
   const MEDIA_GROUP_BUFFER_MS = 500
 
   router.post<{ channelId: string }>('/:channelId', async (req, res) => {
+    const releaseAlbumCaptures: Array<() => void> = []
+    try {
+      await processWebhook(req, res, releaseAlbumCaptures)
+    } finally {
+      for (const release of releaseAlbumCaptures) release()
+    }
+  })
+
+  async function processWebhook(
+    req: Request<{ channelId: string }>,
+    res: Response,
+    releaseAlbumCaptures: Array<() => void>,
+  ): Promise<void> {
     // URL slug semantics:
     //   - Post channel-integrations-split: workspace `channels` id.
     //   - Legacy (pre-split): assistant id baked into the Telegram-side
@@ -415,6 +450,35 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     const channel = await getChannelForWebhook(integration.channelId)
     if (!channel || channel.status !== 'active') return
 
+    let botUsername = integration.botUsername
+    if (!botUsername) {
+      try {
+        const info = await validateTelegramCredentials(credentials.bot_token)
+        botUsername = info.botUsername
+        options.integrationStore.setBotUsername(integration.id, botUsername).catch((err) => {
+          console.error('[telegram-byo] bot_username backfill persist failed:', err)
+        })
+      } catch (err) {
+        console.error('[telegram-byo] bot_username backfill via getMe failed:', err)
+      }
+    }
+
+    const storedConfig = (integration.config ?? {}) as ChannelIntegrationConfig
+
+    // Translate the stored JSONB config into the adapter's structured
+    // `RequireMentionConfig` so per-chat/topic overrides are respected inside
+    // `parseMessage`. Non-mention fields (ackReaction, etc.) pass through.
+    const baseRequireMention = storedConfig.requireMention ?? true
+    const requireMentionResolved: RequireMentionConfig = storedConfig.requireMentionOverrides?.length
+      ? {
+          default: baseRequireMention,
+          overrides: storedConfig.requireMentionOverrides.map((o) => ({
+            chatId: o.chatId,
+            topicId: o.topicId ?? null,
+          })),
+        }
+      : baseRequireMention
+
     // ChatFullInfo, not Update.chat, carries linked_chat_id. Resolve it for
     // nested discussion replies (including callbacks) on every request: no
     // warm-process history or stale link cache is required. On lookup failure
@@ -432,15 +496,153 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       }
     }
 
+    // One ingress decision protects every content sink, including events-only
+    // installations. Explicit invocation admits this message, never ambient
+    // traffic or a quoted root from an unowned conversation.
+    const providerMessage = threadUpdate.message ?? threadUpdate.channel_post
+    const explicitAdapter = createTelegramAdapter({ token: credentials.bot_token,
+      botUsername: botUsername ?? undefined, config: { requireMention: true, normalizePassive: true, discussionChatIds } })
+    const explicitlyAddressed = (message: RawTelegramGroupMessage) => {
+      // Bare commands are delivered to co-resident bots too. Outside an
+      // owned conversation only a self-qualified command, mention or reply
+      // authorizes this installation; the ordinary parser remains unchanged.
+      const content = message.text ?? message.caption ?? ''
+      const qualified = (entity: { type: string; offset: number; length: number }) =>
+        entity.type !== 'bot_command' || content.slice(entity.offset, entity.offset + entity.length).includes('@')
+      const parsed = explicitAdapter.parseIncoming({ message: { ...message, media_group_id: undefined,
+        entities: message.entities?.filter(qualified), caption_entities: message.caption_entities?.filter(qualified) } })
+      return parsed !== null && !parsed.captureOnly
+    }
+    let conversationOwned = true
+    let updateAdmitted = true
+    if (threadMessage?.chat && threadMessage.chat.type !== 'private') {
+      const chatId = String(threadMessage.chat.id)
+      const topicId = threadMessage.chat.is_forum ? threadMessage.message_thread_id : undefined
+      const scope = telegramConfiguredConversation(storedConfig, chatId, topicId)
+      const discussionRoot = threadMessage.is_automatic_forward ? threadMessage.message_id
+        : threadMessage.reply_to_message?.is_automatic_forward ? threadMessage.reply_to_message.message_id
+        : discussionChatIds.includes(chatId) ? threadMessage.message_thread_id : undefined
+      const conversationId = topicId != null ? `${chatId}:topic:${topicId}`
+        : discussionRoot != null ? `${chatId}:discussion:${discussionRoot}` : chatId
+      conversationOwned = scope === 'owned'
+      if (scope === 'unbound') {
+        try {
+          conversationOwned = await hasTelegramWorkspaceConversationBinding(channel.workspaceId, chatId, conversationId, topicId)
+        } catch (err) {
+          console.error('[telegram-byo] conversation ownership lookup failed; dropping update:', err)
+          return
+        }
+      }
+      updateAdmitted = conversationOwned || !!threadUpdate.callback_query || explicitlyAddressed(threadMessage)
+      // Albums can carry their sole mention on a later member. Until then
+      // retain only the ephemeral bot/conversation/sender-scoped buffer.
+      if (!updateAdmitted && !providerMessage?.media_group_id) return
+    }
+
     // Workflow events observe provider messages, not conversational callbacks
     // or the later album/reassembly callbacks. This pass never sends replies.
     const eventConfig = (integration.config ?? {}) as ChannelIntegrationConfig
-    const eventIncoming = createTelegramAdapter({
+    const eventAdapter = createTelegramAdapter({
       token: credentials.bot_token,
-      botUsername: integration.botUsername ?? undefined,
-      config: { normalizePassive: true, discussionChatIds },
-    }).parseIncoming(req.body)
-    if (eventIncoming && eventIncoming.userId !== String(integration.botUserId ?? '')) {
+      botUsername: botUsername ?? undefined,
+      config: { requireMention: requireMentionResolved, normalizePassive: true, discussionChatIds },
+    })
+    const parsedEventIncoming = eventAdapter.parseIncoming(req.body)
+    const eventIncoming = parsedEventIncoming && !conversationOwned
+      ? { ...parsedEventIncoming, replyToMessageId: undefined,
+          raw: { ...(parsedEventIncoming.raw as object), reply_to_message: undefined } }
+      : parsedEventIncoming
+    const mediaDownloads: TelegramMediaDownloads = new Map()
+    let archiveInboundAlreadyPersisted = false
+    // Register an in-flight album member before downloading it. An earlier
+    // member's 500ms timer must wait until this handler enrolls the member in
+    // the conversational buffer or exits, including post-staging routing waits.
+    const archiveAlbumKey = options.archiveMedia && eventIncoming && threadMessage?.media_group_id
+      ? `${integration.channelId}:${threadMessage.chat?.id}:${threadMessage.message_thread_id ?? 0}:${threadMessage.sender_chat?.id ?? threadMessage.from?.id}:${threadMessage.media_group_id}`
+      : null
+    let preparingAlbum: MediaGroupEntry | undefined
+    if (archiveAlbumKey) {
+      preparingAlbum = mediaGroupBuffers.get(archiveAlbumKey)
+      if (!preparingAlbum) {
+        preparingAlbum = { rawMessages: [], mediaDownloads: new Map(), archivedMessageIds: new Set(), pendingArchiveCaptures: 0 }
+        mediaGroupBuffers.set(archiveAlbumKey, preparingAlbum)
+      }
+      preparingAlbum.pendingArchiveCaptures++
+      const pendingAlbum = preparingAlbum
+      releaseAlbumCaptures.push(() => {
+        pendingAlbum.pendingArchiveCaptures--
+        if (!pendingAlbum.pendingArchiveCaptures && !pendingAlbum.rawMessages.length && !pendingAlbum.timer
+          && mediaGroupBuffers.get(archiveAlbumKey) === pendingAlbum) {
+          mediaGroupBuffers.delete(archiveAlbumKey)
+        }
+      })
+    }
+    const archiveWorkspaceId = channel.workspaceId
+    const archiveConnectorInstanceId = integration.connectorInstanceId
+    // Reused for initially admitted updates and members admitted only when an
+    // explicit album invocation arrives. No caller may stage ambient traffic.
+    async function archiveAdmittedMessage(incoming: IncomingMessage, downloads: TelegramMediaDownloads): Promise<boolean> {
+      const archiveMedia = options.archiveMedia
+      if (!archiveMedia) return false
+      const workspaceId = archiveWorkspaceId
+      const owner = await query<{ ownerUserId: string }>(
+        'SELECT owner_user_id AS "ownerUserId" FROM workspaces WHERE id = $1',
+        [workspaceId],
+      )
+      const ownerUserId = owner.rows[0]?.ownerUserId
+      if (ownerUserId) {
+        if (incoming.mediaType) {
+          incoming.archiveMediaAvailability = 'missing'
+          if (incoming.mediaUrl && incoming.messageId) {
+            const kind = incoming.mediaType === 'photo' ? 'image'
+              : incoming.mediaType === 'voice' || incoming.mediaType === 'audio' ? 'voice'
+                : incoming.mediaType === 'video' ? 'video' : 'file'
+            const mime = incoming.mediaMime
+              ?? (incoming.mediaType === 'voice' ? 'audio/ogg; codecs=opus' : 'application/octet-stream')
+            incoming.mediaName ??= `${incoming.mediaType}_${incoming.messageId}`
+              + (kind === 'image' ? '.jpg' : '')
+            try {
+              const limit = Math.min(TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES, mediaByteLimit(kind))
+              if ((incoming.mediaSizeBytes ?? 0) > limit) throw new Error('telegram_archive_media_over_limit')
+              const instanceId = await resolveChatArchiveInstanceId({
+                source: 'telegram', ownerUserId, workspaceId,
+                connectorInstanceId: archiveConnectorInstanceId,
+                assistantId: '', assistantName: '', conversationId: incoming.channelId,
+              })
+              if (!instanceId) throw new Error('telegram_archive_binding_unavailable')
+              const download = eventAdapter.downloadMedia(incoming.mediaUrl, { mimeHint: mime })
+              downloads.set(incoming.mediaUrl, download)
+              const media = await download
+              if (media.buffer.length > limit) throw new Error('telegram_archive_media_over_limit')
+              incoming.archiveMediaRef = await archiveMedia.storeBuffer({
+                workspaceId, instanceId, ownerUserId, source: 'telegram',
+                providerMessageId: archiveProviderMessageId(
+                  'telegram', incoming.channelId, incoming.messageId,
+                ), kind,
+                filename: incoming.mediaName, mime: media.mime, bytes: media.buffer,
+              })
+              incoming.mediaSizeBytes = media.buffer.length
+              incoming.archiveMediaAvailability = undefined
+            } catch {
+              // Provider failures can contain token-bearing download URLs.
+              // Keep an explicit unavailable asset without logging those URLs.
+              incoming.archiveMediaAvailability = 'failed'
+              console.warn('[telegram-byo] archive media staging failed; recording unavailable attachment')
+            }
+          }
+        }
+        await archiveUnroutedInbound({
+          source: 'telegram', workspaceId, connectorInstanceId: archiveConnectorInstanceId,
+          conversationId: incoming.channelId, message: incoming,
+        })
+        return true
+      }
+      return false
+    }
+    if (updateAdmitted && eventIncoming) {
+      archiveInboundAlreadyPersisted = await archiveAdmittedMessage(eventIncoming, mediaDownloads)
+    }
+    if (updateAdmitted && eventIncoming && eventIncoming.userId !== String(integration.botUserId ?? '')) {
       const raw = eventIncoming.raw as { from?: { username?: string }; sender_chat?: unknown; chat?: { type?: string } }
       const chatSender = !!raw.sender_chat || raw.chat?.type === 'channel'
       const matches = (entry: string) => {
@@ -511,43 +713,12 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       workspaceId: assistant.workspaceId ?? null,
     })
 
-    // 4. Build a per-request adapter with this integration's bot token.
-    //    botUsername is required for group @mention detection; legacy rows
-    //    predate the column so self-heal by calling getMe once and
-    //    persisting the result before constructing the adapter.
-    let botUsername = integration.botUsername
-    if (!botUsername) {
-      try {
-        const info = await validateTelegramCredentials(credentials.bot_token)
-        botUsername = info.botUsername
-        options.integrationStore.setBotUsername(integration.id, botUsername).catch((err) => {
-          console.error('[telegram-byo] bot_username backfill persist failed:', err)
-        })
-      } catch (err) {
-        console.error('[telegram-byo] bot_username backfill via getMe failed:', err)
-      }
-    }
-
-    const storedConfig = (integration.config ?? {}) as ChannelIntegrationConfig
-
-    // Translate the stored JSONB config into the adapter's structured
-    // `RequireMentionConfig` so per-chat/topic overrides are respected inside
-    // `parseMessage`. Non-mention fields (ackReaction, etc.) pass through.
-    const baseRequireMention = storedConfig.requireMention ?? true
-    const requireMentionResolved: RequireMentionConfig = storedConfig.requireMentionOverrides?.length
-      ? {
-          default: baseRequireMention,
-          overrides: storedConfig.requireMentionOverrides.map((o) => ({
-            chatId: o.chatId,
-            topicId: o.topicId ?? null,
-          })),
-        }
-      : baseRequireMention
+    // 4. Build the per-request chat adapter after workspace admission.
     const discussionStore = options.discussionStore ?? createTelegramDiscussionStore()
-    // Persist before suppression/address gates, including privacy-mode reply snapshots.
+    // Only owned conversations may import surrounding discussion snapshots.
     // A storage failure drops the update, never silently fabricates source context.
     try {
-      await observeTelegramDiscussion(discussionStore, integration.id, req.body)
+      if (conversationOwned && updateAdmitted) await observeTelegramDiscussion(discussionStore, integration.id, req.body)
     } catch (err) {
       console.error('[telegram-byo] discussion context persistence failed:', err)
       return
@@ -600,7 +771,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // timer (e.g. the GM Bro 5:33 PM business-card media group, where
       // both photos vanished entirely from `session_messages`).
       onMessage: (msg) => {
-        handleIncoming(msg).catch((err) => {
+        handleIncoming(msg, undefined, undefined, mediaDownloads, archiveInboundAlreadyPersisted).catch((err) => {
           reportIncomingFailure('message', msg.channelId, err)
         })
       },
@@ -853,7 +1024,15 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // wiring above can reference it before its declaration. Closes over
     // the bound aliases, `ownerId`, `channelId`, `credentials`,
     // `tgConfig`, and `adapter` from the enclosing request scope.
-    async function handleIncoming(incoming: IncomingMessage, actionData?: string, workflowCallback?: { data: string; messageId: string }): Promise<void> {
+    async function handleIncoming(
+      incoming: IncomingMessage,
+      actionData?: string,
+      workflowCallback?: { data: string; messageId: string },
+      preparedDownloads: TelegramMediaDownloads = mediaDownloads,
+      inboundArchived = false,
+    ): Promise<void> {
+      if (!conversationOwned) incoming = { ...incoming, replyToMessageId: undefined,
+        raw: { ...(incoming.raw as object), reply_to_message: undefined } }
       // 4b. Sender access. A blocklist match is a hard denial. An allowlist
       //     match is carried through identity resolution because it is also an
       //     explicit conversation-only guest grant in private DMs and groups.
@@ -1257,6 +1436,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           incoming = answer.incoming
         }
         return processMessage({
+          groupRoom: roomBinding !== null,
           backgroundModel: options.backgroundModel,
           decisionRuntime: options.decisionRuntime,
           adapter,
@@ -1274,6 +1454,8 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
             && integrationConfig.allowGuestConnectorTools === true,
           archiveConnectorInstanceId: boundIntegration.connectorInstanceId,
           ...options,
+          mediaDownloads: preparedDownloads,
+          archiveInboundAlreadyPersisted: inboundArchived,
           interactionScope,
           workflowCallback,
           conversationalAnswer: actionData !== undefined,
@@ -1282,7 +1464,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
             : undefined,
           questionStore: options.questionStore,
           integrationId: boundIntegration.id,
-          discussionStore,
+          discussionStore: conversationOwned ? discussionStore : { ...discussionStore, read: async () => null },
         })
       })
     }
@@ -1300,81 +1482,116 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       const key = `${integration.channelId}:${incomingMsg.chat?.id}:${incomingMsg.message_thread_id ?? 0}:${incomingMsg.sender_chat?.id ?? incomingMsg.from?.id}:${groupId}`
       const existing = mediaGroupBuffers.get(key)
       const rawMessages = existing?.rawMessages ?? []
+      const groupDownloads = existing?.mediaDownloads ?? new Map()
+      for (const [fileId, download] of mediaDownloads) groupDownloads.set(fileId, download)
+      const archivedMessageIds = existing?.archivedMessageIds ?? new Set<string>()
+      if (archiveInboundAlreadyPersisted && eventIncoming?.messageId) archivedMessageIds.add(eventIncoming.messageId)
       rawMessages.push(incomingMsg)
       if (existing?.timer) clearTimeout(existing.timer)
 
-      const timer = setTimeout(() => {
-        mediaGroupBuffers.delete(key)
-        // Synthesize a merged IncomingMessage from the accumulated raw
-        // messages. The first message carries the caption (Telegram
-        // convention); every message contributes one media file.
-        // Addressing can ride ANY member's caption, not just the first —
-        // Telegram attaches it to whichever item the user typed it under.
-        // Prefer an addressed member so one captioned file isn't demoted to
-        // capture-only by its uncaptioned neighbours.
-        const parsedMembers = rawMessages
-          .map((m) => adapter.parseIncoming({ message: { ...m, media_group_id: undefined } }))
-          .filter((p): p is IncomingMessage => p !== null)
-        const base = parsedMembers.find((p) => !p.captureOnly) ?? parsedMembers[0]
-        // Reachable only for an album with no parsable member at all, now that
-        // unaddressed media returns a capture-only message instead of null.
-        // This line silently swallowed every uncaptioned album posted in a
-        // group until 2026-08-07 — four .md files in, nothing out, nothing
-        // logged. Never return from here without saying so.
-        if (!base) {
-          console.warn(
-            `[telegram-byo] media group ${groupId} produced no parsable message from ${rawMessages.length} member(s); dropping`,
-          )
-          return
-        }
-        const files = rawMessages
-          .map((m): { url: string; mimeType: string; name: string; sizeBytes?: number } | null => {
-            if (m.photo?.length) {
-              return {
-                url: m.photo[m.photo.length - 1].file_id,
-                mimeType: 'image/jpeg',
-                name: `photo_${m.message_id}.jpg`,
+      const admittedAlbumArchiveAdapter = createTelegramAdapter({
+        token: credentials.bot_token, botUsername: botUsername ?? undefined,
+        config: { normalizePassive: true, discussionChatIds },
+      })
+      const flush = async () => {
+        try {
+          const entry = mediaGroupBuffers.get(key)
+          if (entry?.pendingArchiveCaptures) {
+            entry.timer = setTimeout(flush, MEDIA_GROUP_BUFFER_MS)
+            return
+          }
+          mediaGroupBuffers.delete(key)
+          rawMessages.sort((a, b) => a.message_id - b.message_id)
+          // Synthesize a merged IncomingMessage from the accumulated raw
+          // messages. The first message carries the caption (Telegram
+          // convention); every message contributes one media file.
+          // Addressing can ride ANY member's caption, not just the first —
+          // Telegram attaches it to whichever item the user typed it under.
+          // Prefer an addressed member so one captioned file isn't demoted to
+          // capture-only by its uncaptioned neighbours.
+          if (!conversationOwned && !rawMessages.some(explicitlyAddressed)) return
+          const parsedMembers = rawMessages
+            .map((m) => adapter.parseIncoming({ message: { ...m, media_group_id: undefined } }))
+            .filter((p): p is IncomingMessage => p !== null)
+          const base = parsedMembers.find((p) => !p.captureOnly) ?? parsedMembers[0]
+          // Reachable only for an album with no parsable member at all, now that
+          // unaddressed media returns a capture-only message instead of null.
+          // This line silently swallowed every uncaptioned album posted in a
+          // group until 2026-08-07 — four .md files in, nothing out, nothing
+          // logged. Never return from here without saying so.
+          if (!base) {
+            console.warn(
+              `[telegram-byo] media group ${groupId} produced no parsable message from ${rawMessages.length} member(s); dropping`,
+            )
+            return
+          }
+          // A later explicit caption admits this finite cohort, not future room
+          // traffic. Archive every original input only after that decision.
+          for (const rawMessage of rawMessages) {
+            if (archivedMessageIds.has(String(rawMessage.message_id))) continue
+            // The cohort has already passed ownership/explicit invocation.
+            // A sibling-topic mention gate must not discard its other files.
+            const parsed = admittedAlbumArchiveAdapter.parseIncoming({ message: { ...rawMessage, media_group_id: undefined } })
+            if (!parsed) continue
+            const member = conversationOwned ? parsed : { ...parsed, replyToMessageId: undefined,
+              raw: { ...(parsed.raw as object), reply_to_message: undefined } }
+            if (await archiveAdmittedMessage(member, groupDownloads)) archivedMessageIds.add(String(rawMessage.message_id))
+          }
+          const files = rawMessages
+            .map((m): { url: string; mimeType: string; name: string; sizeBytes?: number } | null => {
+              if (m.photo?.length) {
+                return {
+                  url: m.photo[m.photo.length - 1].file_id,
+                  mimeType: 'image/jpeg',
+                  name: `photo_${m.message_id}.jpg`,
+                }
               }
-            }
-            if (m.document) {
-              return {
-                url: m.document.file_id,
-                mimeType: m.document.mime_type ?? 'application/octet-stream',
-                name: m.document.file_name ?? `document_${m.message_id}`,
-                ...(m.document.file_size ? { sizeBytes: m.document.file_size } : {}),
+              if (m.document) {
+                return {
+                  url: m.document.file_id,
+                  mimeType: m.document.mime_type ?? 'application/octet-stream',
+                  name: m.document.file_name ?? `document_${m.message_id}`,
+                  ...(m.document.file_size ? { sizeBytes: m.document.file_size } : {}),
+                }
               }
-            }
-            if (m.video) {
-              return {
-                url: m.video.file_id,
-                mimeType: m.video.mime_type ?? 'video/mp4',
-                name: `video_${m.message_id}.mp4`,
-                ...(m.video.file_size ? { sizeBytes: m.video.file_size } : {}),
+              if (m.video) {
+                return {
+                  url: m.video.file_id,
+                  mimeType: m.video.mime_type ?? 'video/mp4',
+                  name: `video_${m.message_id}.mp4`,
+                  ...(m.video.file_size ? { sizeBytes: m.video.file_size } : {}),
+                }
               }
-            }
-            return null
+              return null
+            })
+            .filter((f): f is { url: string; mimeType: string; name: string; sizeBytes?: number } => f !== null)
+          const merged: IncomingMessage = {
+            ...base,
+            raw: { ...(base.raw as object), media_group_id: groupId },
+            // Multi-file shape supersedes the single mediaUrl/mediaType — the
+            // processMessage media branch checks `files` first. Clearing
+            // mediaSizeBytes too keeps the over-limit guard from judging the
+            // whole album by whichever member happened to be parsed as base;
+            // per-file sizes ride on `files[].sizeBytes`.
+            mediaUrl: undefined,
+            mediaType: undefined,
+            mediaMime: undefined,
+            mediaName: undefined,
+            mediaSizeBytes: undefined,
+            files,
+          }
+          handleIncoming(merged, undefined, undefined, groupDownloads,
+            rawMessages.every((message) => archivedMessageIds.has(String(message.message_id))),
+          ).catch((err) => {
+            reportIncomingFailure('media group', merged.channelId, err)
           })
-          .filter((f): f is { url: string; mimeType: string; name: string; sizeBytes?: number } => f !== null)
-        const merged: IncomingMessage = {
-          ...base,
-          // Multi-file shape supersedes the single mediaUrl/mediaType — the
-          // processMessage media branch checks `files` first. Clearing
-          // mediaSizeBytes too keeps the over-limit guard from judging the
-          // whole album by whichever member happened to be parsed as base;
-          // per-file sizes ride on `files[].sizeBytes`.
-          mediaUrl: undefined,
-          mediaType: undefined,
-          mediaMime: undefined,
-          mediaName: undefined,
-          mediaSizeBytes: undefined,
-          files,
+        } catch (err) {
+          reportIncomingFailure('media group', String(incomingMsg.chat?.id ?? ''), err)
         }
-        handleIncoming(merged).catch((err) => {
-          reportIncomingFailure('media group', merged.channelId, err)
-        })
-      }, MEDIA_GROUP_BUFFER_MS)
-
-      mediaGroupBuffers.set(key, { rawMessages, timer })
+      }
+      const timer = setTimeout(flush, MEDIA_GROUP_BUFFER_MS)
+      if (existing) existing.timer = timer
+      else mediaGroupBuffers.set(key, { rawMessages, mediaDownloads: groupDownloads, archivedMessageIds, pendingArchiveCaptures: 0, timer })
       return
     }
 
@@ -1383,7 +1600,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // route through `handleIncoming` (see comment on the `onMessage` field
     // above for the prior bug this replaces).
     adapter.handleWebhook(req.body)
-  })
+  }
 
   return router
 }
@@ -1391,6 +1608,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 // ── Per-message handler ─────────────────────────────────────────
 
 type ProcessMessageParams = {
+  groupRoom?: boolean
   recordingIntake?: () => Promise<void>
   discussionStore: TelegramDiscussionStore
   interactionScope: ChannelInteractionScope
@@ -1404,7 +1622,7 @@ type ProcessMessageParams = {
   decisionRuntime?: import('@use-brian/core').DecisionExecutionPort
   adapter: ReturnType<typeof createTelegramAdapter>
   incoming: IncomingMessage
-  assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
+  assistant: { id: string; name: string; ownerUserId: string; defaultModelAlias: string; workspaceId: string | null; systemPrompt: string | null; compartments?: string[] | null; defaultCompartments?: string[]; defaultWorkspaceGroupId?: string | null; defaultProjectId?: string | null; teamScopeMode?: 'legacy' | 'all' | 'assigned'; projectScopeMode?: 'all' | 'assigned'; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
   channelUserId: string
   ownerId: string
   isIdentified: boolean
@@ -1415,6 +1633,8 @@ type ProcessMessageParams = {
   /** Explicit per-integration opt-in for connector tools on that guest lane. */
   externalGuestConnectorTools: boolean
   archiveConnectorInstanceId?: string | null
+  archiveInboundAlreadyPersisted?: boolean
+  mediaDownloads?: TelegramMediaDownloads
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
@@ -1467,6 +1687,7 @@ type ProcessMessageParams = {
     model?: string
   }
   /** Universal channel-media intake for document/video (large-content-artifacts §Phase 0.3). */
+  mediaReceiptStore?: ChannelMediaReceiptStore
   ingestChannelMediaRef?: TelegramByoRouteOptions['ingestChannelMediaRef']
   recordingIngest?: ChannelRecordingIngest
   /** Web app origin for the oversize-document handoff copy. */
@@ -1486,7 +1707,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     externalGuestConnectorTools,
   } = params
 
-  // Admission must precede ALL media side effects, including the hosted audio
+  // Admission must precede brain-intake media side effects, including the hosted audio
   // lane. Use the common interpreter so native conversational choices retain
   // precedence over labels that happen to look like workflow commands.
   const abortController = new AbortController()
@@ -1512,6 +1733,23 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     },
   })
   if (admission?.kind === 'handled' || abortController.signal.aborted) return
+  let groupScope: ChannelMediaScope | undefined
+  if (params.groupRoom && incoming.isGroupChat && assistant.workspaceId) {
+    const audience = await createDeliveryAudienceEnvelopeResolver({ integrationStore: params.integrationStore })({
+      workspaceId: assistant.workspaceId, assistantId: assistant.id, userId: channelUserId,
+      channelType: 'telegram', channelId: incoming.channelId, channelIntegrationId: params.integrationId,
+      recipientType: 'group', groupSpeaker: false,
+    })
+    if (!audience.allowed) throw new Error('context_not_available')
+    const access = await resolveLiveAccessCeilingSystem({ userId: channelUserId, assistant: { ...assistant, compartments: assistant.compartments ?? null },
+      workspaceId: assistant.workspaceId, memberMode: 'assistant', ignoreSessionBinding: true })
+    if (!(await mayReadGroupContext(access, audience.ceiling))) {
+      if (!incoming.captureOnly) await adapter.sendMessage(incoming.channelId, { text: 'This assistant cannot read this group context.' })
+      return
+    }
+    groupScope = { sensitivity: audience.ceiling.clearance,
+      compartments: audience.ceiling.compartments ?? [], projectIds: audience.ceiling.projectIds ?? [] }
+  }
   if (params.recordingIntake) {
     await params.recordingIntake()
     return
@@ -1556,126 +1794,138 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     }
   }
 
-  // ── Channel-media intake (large-content-artifacts §Phase 0.3) ──
-  // Route documents/video through universal intake. In OSS, where the hosted
-  // billing-aware inline hook is absent, audio falls through here as well and
-  // is queued for the open recording worker.
-  // Fire-and-forget beside the one-turn content-block path below.
-  const handleUniversalResult = async (
-    result: Awaited<ReturnType<NonNullable<TelegramByoRouteOptions['ingestChannelMediaRef']>>>,
-  ) => {
-    if (result?.status === 'pending_confirmation') {
-      await adapter.sendMessage(incoming.channelId, { text: result.message })
-      return
+  const intakeAttachments = async () => {
+    // ── Channel-media intake (large-content-artifacts §Phase 0.3) ──
+    // Route documents/video through universal intake. In OSS, where the hosted
+    // billing-aware inline hook is absent, audio falls through here as well and
+    // is queued for the open recording worker.
+    // Finish intake and its receipt before continuing the conversational turn.
+    const handleUniversalResult = async (
+      result: Awaited<ReturnType<NonNullable<TelegramByoRouteOptions['ingestChannelMediaRef']>>>,
+    ) => {
+      if (result?.status === 'pending_confirmation') {
+        await adapter.sendMessage(incoming.channelId, { text: result.message })
+        return
+      }
+      if (result?.status === 'ingested' && result.kind === 'document') {
+        await adapter.sendMessage(incoming.channelId, { text: buildDocumentFiledReply(result.fileName) })
+        return
+      }
+      if (result?.status === 'rejected' && result.reason === 'doc_too_large') {
+        await adapter.sendMessage(incoming.channelId, {
+          text: buildOversizeDocReply(params.appUrl ?? 'https://app.sidan.ai', result.limitMb ?? 25, result.sizeMb ?? 0),
+        })
+      }
     }
-    if (result?.status === 'ingested' && result.kind === 'document') {
-      await adapter.sendMessage(incoming.channelId, { text: buildDocumentFiledReply(result.fileName) })
-      return
-    }
-    if (result?.status === 'rejected' && result.reason === 'doc_too_large') {
-      await adapter.sendMessage(incoming.channelId, {
-        text: buildOversizeDocReply(params.appUrl ?? 'https://app.sidan.ai', result.limitMb ?? 25, result.sizeMb ?? 0),
-      })
-    }
-  }
 
-  /**
-   * One reply for a whole album. Pre-flight confirmations and oversize
-   * handoffs still go out per member (each names its own numbers, and a
-   * confirmation is a question that cannot be merged), but the filed/failed
-   * tally collapses into a single message.
-   */
-  const replyForAlbum = async (
-    results: Array<Awaited<ReturnType<NonNullable<TelegramByoRouteOptions['ingestChannelMediaRef']>>>>,
-  ) => {
-    const summary = summarizeAlbumIntake(results)
-    for (const message of summary.confirmations) {
-      await adapter.sendMessage(incoming.channelId, { text: message })
+    /**
+     * One reply for a whole album. Pre-flight confirmations and oversize
+     * handoffs still go out per member (each names its own numbers, and a
+     * confirmation is a question that cannot be merged), but the filed/failed
+     * tally collapses into a single message.
+     */
+    const replyForAlbum = async (
+      results: Array<Awaited<ReturnType<NonNullable<TelegramByoRouteOptions['ingestChannelMediaRef']>>>>,
+    ) => {
+      const summary = summarizeAlbumIntake(results)
+      for (const message of summary.confirmations) {
+        await adapter.sendMessage(incoming.channelId, { text: message })
+      }
+      for (const item of summary.oversize) {
+        await adapter.sendMessage(incoming.channelId, {
+          text: buildOversizeDocReply(params.appUrl ?? 'https://app.sidan.ai', item.limitMb, item.sizeMb),
+        })
+      }
+      if (summary.filed > 0 || summary.failed > 0) {
+        await adapter.sendMessage(incoming.channelId, {
+          text: buildAlbumFiledReply(summary.filed, summary.filedNames, summary.failed),
+        })
+      }
     }
-    for (const item of summary.oversize) {
-      await adapter.sendMessage(incoming.channelId, {
-        text: buildOversizeDocReply(params.appUrl ?? 'https://app.sidan.ai', item.limitMb, item.sizeMb),
-      })
-    }
-    if (summary.filed > 0 || summary.failed > 0) {
-      await adapter.sendMessage(incoming.channelId, {
-        text: buildAlbumFiledReply(summary.filed, summary.filedNames, summary.failed),
-      })
-    }
-  }
 
-  if (
-    !externalGuest &&
-    incoming.mediaUrl &&
-    shouldUseUniversalTelegramIntake(incoming.mediaType, Boolean(params.recordingIngest)) &&
-    params.ingestChannelMediaRef &&
-    assistant.workspaceId
-  ) {
-    const ingest = params.ingestChannelMediaRef
-    const workspaceId = assistant.workspaceId
-    const singleIngest = adapter
-      .resolveFileUrl(incoming.mediaUrl)
-      .then((url) =>
-        ingest({
-          source: { url },
-          ...(incoming.mediaMime ? { mime: incoming.mediaMime } : {}),
-          fileName: incoming.mediaName ?? null,
-          sizeBytes: incoming.mediaSizeBytes ?? null,
-          sender: { id: channelUserId, name: null },
-          conversationId: incoming.channelId,
-          workspaceId,
-          assistantId: assistant.id,
-          actingUserId: ownerId,
-        }),
-      )
-      .then(handleUniversalResult)
-      .catch((err) => console.error('[telegram-byo] media→brain ingest failed:', err))
-    // Fire-and-forget is safe when a full turn follows, but a capture-only
-    // message returns immediately — await so the reply is sent before the
-    // request ends.
-    if (incoming.captureOnly) await singleIngest
-  }
-
-  // Albums use `incoming.files` rather than the single-media fields. Persist
-  // every document/video there as well as supplying it to the immediate turn.
-  // Results are folded into ONE reply (`summarizeAlbumIntake`) rather than one
-  // per file, and a member that throws is counted as `failed` rather than
-  // vanishing — a partially-filed album must never read as a whole one.
-  if (
-    !externalGuest
-    && incoming.files?.length
-    && params.ingestChannelMediaRef
-    && assistant.workspaceId
-  ) {
-    const ingest = params.ingestChannelMediaRef
-    const workspaceId = assistant.workspaceId
-    const ingestable = incoming.files.filter(
-      (f) => classifyMedia(f.mimeType, f.name) !== 'unsupported',
-    )
-    const albumIngest = Promise.all(
-      ingestable.map((file) =>
-        adapter.resolveFileUrl(file.url)
-          .then((url) => ingest({
+    if (
+      !externalGuest &&
+      incoming.mediaUrl &&
+      shouldUseUniversalTelegramIntake(incoming.mediaType, Boolean(params.recordingIngest)) &&
+      params.ingestChannelMediaRef &&
+      assistant.workspaceId
+    ) {
+      const ingest = params.ingestChannelMediaRef
+      const workspaceId = assistant.workspaceId
+      const singleIngest = adapter
+        .resolveFileUrl(incoming.mediaUrl)
+        .then((url) =>
+          ingest({
             source: { url },
-            mime: file.mimeType,
-            fileName: file.name,
-            sizeBytes: file.sizeBytes ?? null,
+            ...(incoming.mediaMime ? { mime: incoming.mediaMime } : {}),
+            fileName: incoming.mediaName ?? null,
+            sizeBytes: incoming.mediaSizeBytes ?? null,
             sender: { id: channelUserId, name: null },
             conversationId: incoming.channelId,
             workspaceId,
             assistantId: assistant.id,
             actingUserId: ownerId,
-          }))
-          .catch((err) => {
-            console.error('[telegram-byo] album media→brain ingest failed:', err)
-            return null
+            ...(groupScope ? { scope: groupScope } : {}),
           }),
-      ),
-    ).then((results) => replyForAlbum(results))
-      .catch((err) => console.error('[telegram-byo] album reply failed:', err))
-    // A capture-only turn returns immediately below, so its reply must be
-    // awaited here or the request ends before anything is sent.
-    if (incoming.captureOnly) await albumIngest
+        )
+        .then(handleUniversalResult)
+
+      // Keep the durable claim around both the file write and receipt send.
+      await singleIngest
+    }
+
+    // Albums use `incoming.files` rather than the single-media fields. Persist
+    // every document/video there as well as supplying it to the immediate turn.
+    // Results are folded into ONE reply (`summarizeAlbumIntake`) rather than one
+    // per file, and a member that throws is counted as `failed` rather than
+    // vanishing — a partially-filed album must never read as a whole one.
+    if (
+      !externalGuest
+      && incoming.files?.length
+      && params.ingestChannelMediaRef
+      && assistant.workspaceId
+    ) {
+      const ingest = params.ingestChannelMediaRef
+      const workspaceId = assistant.workspaceId
+      const ingestable = incoming.files.filter(
+        (f) => classifyMedia(f.mimeType, f.name) !== 'unsupported',
+      )
+      const albumIngest = Promise.all(
+        ingestable.map((file) =>
+          adapter.resolveFileUrl(file.url)
+            .then((url) => ingest({
+              source: { url },
+              mime: file.mimeType,
+              fileName: file.name,
+              sizeBytes: file.sizeBytes ?? null,
+              sender: { id: channelUserId, name: null },
+              conversationId: incoming.channelId,
+              workspaceId,
+              assistantId: assistant.id,
+              actingUserId: ownerId,
+              ...(groupScope ? { scope: groupScope } : {}),
+            }))
+            .catch((err) => {
+              console.error('[telegram-byo] album media→brain ingest failed:', err)
+              return null
+            }),
+        ),
+      ).then((results) => replyForAlbum(results))
+
+      // Complete the aggregate receipt before completing the durable claim.
+      await albumIngest
+    }
+
+  }
+  const attachmentUpdate = incoming.raw as { media_group_id?: string } | undefined
+  const operationKey = attachmentUpdate?.media_group_id
+    ? `album:${attachmentUpdate.media_group_id}` : incoming.messageId ? `message:${incoming.messageId}` : null
+  if (params.groupRoom && incoming.isGroupChat && assistant.workspaceId && operationKey && params.ingestChannelMediaRef
+      && (incoming.mediaType === 'document' || incoming.files?.some(f => classifyMedia(f.mimeType, f.name) === 'document'))) {
+    await runChannelMediaReceipt({ workspaceId: assistant.workspaceId, channelType: 'telegram',
+      conversationId: incoming.channelId, operationKey }, intakeAttachments, params.mediaReceiptStore)
+  } else {
+    await intakeAttachments()
   }
 
   // ── Capture-only: media arrived in a group without addressing the bot ──
@@ -1746,9 +1996,11 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       // docs/architecture/media/transcription.md → "The download leg".
       let voice: { buffer: Buffer; mime: string } | undefined
       try {
-        voice = await adapter.downloadVoice(incoming.mediaUrl)
+        voice = await (params.mediaDownloads?.get(incoming.mediaUrl) ?? adapter.downloadVoice(incoming.mediaUrl))
       } catch (err) {
-        console.error('[telegram-byo] voice download failed:', err)
+        console.error('[telegram-byo] voice download failed:', {
+          kind: 'media_download_failed', telegramErrorCode: err instanceof TelegramApiError && typeof err.errorCode === 'number' ? err.errorCode : undefined,
+        })
         transcribeFailure = describeTelegramDownloadFailure(err)
       }
       if (voice) try {
@@ -1835,7 +2087,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     try {
       const downloads = await Promise.all(
         incoming.files.map((f) =>
-          adapter.downloadMedia(f.url, { mimeHint: f.mimeType }),
+          params.mediaDownloads?.get(f.url) ?? adapter.downloadMedia(f.url, { mimeHint: f.mimeType }),
         ),
       )
       const cacheIds = await Promise.all(
@@ -1858,7 +2110,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       mediaContentBlocks = built.contentBlocks
       attachmentContext = built.attachmentContext
     } catch (err) {
-      console.error('[telegram-byo] media-group download/parse failed:', err)
+      console.error('[telegram-byo] media-group download/parse failed:', {
+        kind: 'media_download_or_parse_failed', telegramErrorCode: err instanceof TelegramApiError && typeof err.errorCode === 'number' ? err.errorCode : undefined,
+      })
     }
   } else if (
     incoming.mediaUrl &&
@@ -1866,9 +2120,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     incoming.mediaType !== 'voice'
   ) {
     try {
-      const dl = await adapter.downloadMedia(incoming.mediaUrl, {
+      const dl = await (params.mediaDownloads?.get(incoming.mediaUrl) ?? adapter.downloadMedia(incoming.mediaUrl, {
         mimeHint: incoming.mediaMime,
-      })
+      }))
       const fileName = incoming.mediaName ?? dl.name
       const cacheId = await cacheImage({ buffer: dl.buffer, mime: dl.mime, fileName })
       const built = await buildFileContentBlocks([
@@ -1877,7 +2131,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       mediaContentBlocks = built.contentBlocks
       attachmentContext = built.attachmentContext
     } catch (err) {
-      console.error('[telegram-byo] media download/parse failed:', err)
+      console.error('[telegram-byo] media download/parse failed:', {
+        kind: 'media_download_or_parse_failed', telegramErrorCode: err instanceof TelegramApiError && typeof err.errorCode === 'number' ? err.errorCode : undefined,
+      })
     }
   }
 
@@ -1976,6 +2232,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     replyRaw,
     incomingChannelMessageId: incoming.messageId ?? null,
     archiveIncoming: incoming,
+    archiveInboundAlreadyPersisted: params.archiveInboundAlreadyPersisted,
     archiveConnectorInstanceId: params.archiveConnectorInstanceId,
     modelAlias: assistant.defaultModelAlias,
     adaptiveResearchEnabled: true,
@@ -2136,6 +2393,7 @@ export function telegramIncomingFailureText(channelId: string, err: unknown): st
     if (err.detail === 'evidence_exceeds_audience') return TELEGRAM_GROUP_NEEDS_MORE_ACCESS_NOTICE
     return TELEGRAM_GROUP_NOT_APPROVED_NOTICE
   }
+  if (isDeliveryAudienceUnverifiedError(err)) return channelUserErrorText(err)
   return TELEGRAM_RETRY_NOTICE
 }
 

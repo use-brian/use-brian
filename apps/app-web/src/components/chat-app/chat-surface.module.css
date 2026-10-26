@@ -1,0 +1,141 @@
+/* Fresh narrow chats keep the input at the bottom while the greeting uses
+   the remaining space. Scoped to Chat, including narrow desktop split panes. */
+.sidePaneResize { display: contents; }
+
+@media (max-width: 767px), (pointer: coarse) {
+  .composerFrame :is([data-chat-composer-settings] button, [data-chat-composer-actions] button, [data-chat-assistant-control], .actionTarget),
+  .sidePane > header button,
+  .sidePane > [data-chat-pane-actions] button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+@container chat-reading (max-width: 959px) {
+  .sidePane {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    width: 100% !important;
+    max-width: 100%;
+    border-left: 0;
+  }
+  .sidePaneResize { display: none; }
+}
+
+@container chat-reading (max-width: 559px) {
+  .welcomeLayout {
+    min-height: 100%;
+    margin-block: 0;
+    padding-block: 0.75rem 0.25rem;
+  }
+  .welcomeComposer { margin-top: auto; }
+  .welcomeGreeting {
+    flex: 1 1 0;
+    min-height: 0;
+    padding-top: clamp(2rem, 18dvh, 10rem);
+    padding-bottom: 1.5rem;
+  }
+}
+
+:global([data-chat-keyboard-constrained]) .welcomeLayout {
+  min-height: 100%;
+  margin-block: 0;
+  padding-block: 0.25rem;
+}
+:global([data-chat-keyboard-constrained]) .welcomeComposer { margin-top: auto; }
+:global([data-chat-keyboard-constrained]) .welcomeGreeting { display: none; }
+
+@media (max-height: 480px) {
+  .welcomeLayout {
+    min-height: 100%;
+    margin-block: 0;
+    padding-block: 0.25rem;
+  }
+  .welcomeComposer { margin-top: auto; }
+  .welcomeGreeting { display: none; }
+}
+
+/* Paint is smaller than the touch area. Shared controls keep their own scale. */
+.composerFrame:has(textarea:focus) { border-color: var(--ring); }
+.actionTarget,
+.actionTarget:hover {
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+}
+.actionTarget::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  width: 32px;
+  height: 32px;
+  margin: auto;
+  border-radius: 50%;
+  pointer-events: none;
+  transition: background-color 150ms;
+}
+.primaryAction::before { background: var(--foreground); }
+.primaryAction:hover::before { background: color-mix(in oklab, var(--foreground) 85%, transparent); }
+.secondaryAction::before { background: var(--muted); }
+.secondaryAction:hover::before { background: color-mix(in oklab, var(--muted) 80%, transparent); }
+.effortControl [data-slot="select-trigger"] {
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+  border-color: transparent;
+}
+.effortControl [data-slot="select-trigger"]::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0 1px;
+  height: 28px;
+  margin-block: auto;
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--muted) 60%, transparent);
+  pointer-events: none;
+  transition: background-color 150ms;
+}
+.effortControl [data-slot="select-trigger"]:hover::before { background: var(--muted); }
+.actionTarget:focus-visible,
+.effortControl [data-slot="select-trigger"]:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.actionTarget:focus-visible::before,
+.effortControl [data-slot="select-trigger"]:focus-visible::before {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* The shared action rule is important in base. Keep one indicator on the
+   painted disc instead of adding another outline around its touch area. */
+@layer base {
+  .composerFrame .actionTarget:focus-visible {
+    outline: none !important;
+    box-shadow: none !important;
+  }
+}
+@media (forced-colors: active) {
+  .actionTarget:focus-visible::before,
+  .effortControl [data-slot="select-trigger"]:focus-visible::before {
+    outline-color: Highlight;
+  }
+}
+
+@container chat-reading (max-width: 559px) {
+  .composerFrame {
+    border-radius: 16px;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 4%);
+  }
+  .composerFrame textarea::placeholder {
+    font-size: 16px;
+    line-height: 24px;
+  }
+  .welcomeComposer [data-chat-scope-band] { padding-bottom: 4px; }
+  .welcomeComposer [data-chat-context-summary] > svg { width: 14px; height: 14px; }
+  .welcomeComposer [data-chat-work-entry] { margin-top: 4px; }
+  .welcomeComposer [data-chat-work-entry] summary > svg { width: 12px; height: 12px; }
+}

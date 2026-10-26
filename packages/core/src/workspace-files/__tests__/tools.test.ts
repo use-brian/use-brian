@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest'
-import { createFileTools, type FileToolEvent } from '../tools.js'
+import { describe, it, expect, vi } from 'vitest'
+import { createHash } from 'node:crypto'
+import { createFileTools, MAX_FILE_READ_BYTES, type FileToolEvent } from '../tools.js'
 import type { FilesApi, FilesContext, FilesError, FilesResult } from '../api.js'
 import type { WorkspaceFile, WorkspaceFileIndexRow, WorkspaceFileMetaPatch } from '../types.js'
 import { ctxFor, errorMessage } from '../tool-helpers.js'
@@ -38,7 +39,7 @@ describe('[COMP:files/tools] departmental mutation context', () => {
 // (quota / not-found / conflict) are returned via the FilesResult
 // envelope, matching the production contract.
 
-type FakeFile = WorkspaceFile & { content: string }
+type FakeFile = WorkspaceFile & { content: string; rawBytes?: Uint8Array }
 
 function buildFakeApi(): FilesApi & {
   files: Map<string, FakeFile>
@@ -201,6 +202,7 @@ function buildFakeApi(): FilesApi & {
         // Fake mirror keeps the raw bytes (base64) so tests can assert the
         // original was preserved, not a text summary.
         content: Buffer.from(params.bytes).toString('base64'),
+        rawBytes: Buffer.from(params.bytes),
       }
       files.set(id, file)
       return { ok: true, value: { ...file } }
@@ -242,7 +244,7 @@ function buildFakeApi(): FilesApi & {
     async readBytes(ctx, idOrPath) {
       const f = findByIdOrPath(ctx, idOrPath)
       if (!f) return { ok: false, error: { kind: 'not_found', reference: idOrPath } }
-      return { ok: true, value: { file: { ...f }, bytes: Buffer.from(f.content, 'utf-8') } }
+      return { ok: true, value: { file: { ...f }, bytes: f.rawBytes ?? Buffer.from(f.content, 'utf-8') } }
     },
 
     async search(ctx, params) {
@@ -418,6 +420,66 @@ describe('[COMP:files/tools] fileRead', () => {
     const result = await fileRead.execute({ file: '/n.md' }, ctx)
     expect(result.isError).toBeFalsy()
     expect((result.data as { content: string }).content).toBe('hello')
+  })
+})
+
+describe('[COMP:files/tools] fileReadBytes', () => {
+  it('round-trips binary bytes with a checksum, id-pinned read and no storage location', async () => {
+    const api = buildFakeApi()
+    const original = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0xff, 0xfe, 0x80])
+    const saved = await api.writeBytes(ctxFor(ctx), { path: '/photo.png', bytes: original, mime: 'image/png' })
+    if (!saved.ok) throw new Error('fixture save failed')
+    const read = vi.spyOn(api, 'readBytes')
+    const actor = { ...ctx, clearance: 'confidential' as const, compartments: ['design'], projectIds: ['project'] }
+    const result = await createFileTools(api).fileReadBytes.execute({ file: '/photo.png' }, actor)
+    expect(result.isError).toBeFalsy()
+    const data = result.data as { encoding: string; base64: string; sha256: string; file: Record<string, unknown> }
+    expect(data.encoding).toBe('base64')
+    expect(Buffer.from(data.base64, 'base64')).toEqual(original)
+    expect(data.sha256).toBe(createHash('sha256').update(original).digest('hex'))
+    expect(data.file).toMatchObject({ id: saved.value.id, mime: 'image/png', size_bytes: original.length })
+    expect(data.file).not.toHaveProperty('storageUri')
+    expect(data.file).not.toHaveProperty('storage_uri')
+    expect(read).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: ctx.workspaceId, userId: ctx.userId, clearance: 'confidential', compartments: ['design'], projectIds: ['project'] }), saved.value.id)
+  })
+
+  it('refuses oversized metadata without fetching the blob', async () => {
+    const api = buildFakeApi()
+    await api.write(ctxFor(ctx), { path: '/large.bin', content: 'small' })
+    api.files.values().next().value!.sizeBytes = MAX_FILE_READ_BYTES + 1
+    const read = vi.spyOn(api, 'readBytes')
+    const result = await createFileTools(api).fileReadBytes.execute({ file: '/large.bin' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('10 MiB')
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  it('withholds an unexpectedly oversized payload instead of exporting a prefix', async () => {
+    const api = buildFakeApi()
+    await api.write(ctxFor(ctx), { path: '/changed.bin', content: 'small' })
+    api.files.values().next().value!.rawBytes = new Uint8Array(MAX_FILE_READ_BYTES + 1)
+    const result = await createFileTools(api).fileReadBytes.execute({ file: '/changed.bin' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(result.data).not.toHaveProperty('base64')
+  })
+
+  it('withholds bytes if canonical read admission fails after metadata lookup', async () => {
+    const api = buildFakeApi()
+    await api.write(ctxFor(ctx), { path: '/revoked.bin', content: 'private' })
+    vi.spyOn(api, 'readBytes').mockResolvedValue({ ok: false, error: { kind: 'not_found', reference: '/revoked.bin' } })
+    const result = await createFileTools(api).fileReadBytes.execute({ file: '/revoked.bin' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(result.data).not.toHaveProperty('base64')
+    expect(result.data).not.toContain('private')
+  })
+
+  it('does not read when workspace or tool policy denies the export', async () => {
+    const api = buildFakeApi()
+    const stat = vi.spyOn(api, 'stat')
+    const tool = createFileTools(api, { resolvePolicy: async () => 'block' }).fileReadBytes
+    expect((await tool.execute({ file: '/photo.png' }, ctx)).isError).toBe(true)
+    expect((await tool.execute({ file: '/photo.png' }, ctxNoWorkspace)).isError).toBe(true)
+    expect(stat).not.toHaveBeenCalled()
   })
 })
 

@@ -8,12 +8,30 @@
 /** The slice of a CDP AXNode this builder reads. */
 export type CdpAXNode = {
   nodeId: string
+  childIds?: string[]
   ignored?: boolean
   role?: { value?: unknown }
   name?: { value?: unknown }
   value?: { value?: unknown }
   backendDOMNodeId?: number
   properties?: Array<{ name?: string; value?: { value?: unknown } }>
+}
+
+/** Website-sharing text excludes complete editable subtrees, not only values. */
+export function readablePageNames(nodes: CdpAXNode[]): Array<{ role: string; name: string }> {
+  const byId = new Map(nodes.map(node => [node.nodeId, node]))
+  const excluded = new Set<string>()
+  const exclude = (id: string) => {
+    if (excluded.has(id)) return
+    excluded.add(id)
+    for (const child of byId.get(id)?.childIds ?? []) exclude(child)
+  }
+  for (const node of nodes) {
+    const role = String(node.role?.value ?? '').toLowerCase()
+    const editable = node.properties?.some(p => ['editable', 'settable'].includes(p.name ?? '') && p.value?.value !== false)
+    if (editable || ['textbox', 'textfield', 'textfieldwithcombobox', 'searchbox', 'combobox', 'spinbutton'].includes(role)) exclude(node.nodeId)
+  }
+  return nodes.filter(n => !n.ignored && !excluded.has(n.nodeId)).map(n => ({ role: String(n.role?.value ?? ''), name: typeof n.name?.value === 'string' ? n.name.value : '' }))
 }
 
 type SnapshotNode = {

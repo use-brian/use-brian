@@ -93,11 +93,11 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
   // respond. Shared by both the `/pages/:token` and `/published/:pageId` routes.
   // A token sub-page (`link.rootPageId` set) gets the token-scoped breadcrumb
   // (root → current); everything else gets the published-ancestor chain.
-  async function respondWithPage(res: Response, link: ResolvedLink): Promise<void> {
+  async function respondWithPage(res: Response, link: ResolvedLink,token?:string): Promise<void> {
     const page = await getPageSystem(link.pageId)
     try {
       const shareRootId = link.rootPageId ?? link.pageId
-      const rendered = await renderPublicPage(opts, link.workspaceId, page ?? { blocks: [] }, shareRootId)
+      const rendered = await renderPublicPage(opts, link.workspaceId, page ?? { blocks: [] }, shareRootId,token?{kind:'link',token}:{kind:'published'})
       const [comments, breadcrumb, recording] = await Promise.all([
         listPublicThreadsForPage(link.pageId),
         link.rootPageId
@@ -138,7 +138,7 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
       res.status(404).json({ error: 'This shared page is unavailable' })
       return
     }
-    await respondWithPage(res, link)
+    await respondWithPage(res, link,req.params.token)
   })
 
   // GET /public/pages/:token/media/:blockId — 302 to a fresh signed GCS URL.

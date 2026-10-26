@@ -46,10 +46,13 @@ import { createInterface } from 'node:readline/promises'
 import { resolveMessageStoreLaunch } from './message-store-launch.mjs'
 import { bridgeEnv } from './bridge-env.mjs'
 import { resolveApiPort } from './launch-ports.mjs'
-import { adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups } from './rig-admin.mjs'
+import { adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups, adminStateDirectory, stopOwnedAdminGroups } from './rig-admin.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const adminOnly = process.argv.includes('--admin-only')
+const referenceApplications = process.argv.includes('--reference-applications')
+if (referenceApplications && !adminOnly) throw new Error('--reference-applications requires --admin-only')
+const applicationComposition = referenceApplications ? 'reference' : 'normal'
 const adminRunId = adminOnly ? randomBytes(16).toString('hex') : null
 if (adminOnly) {
   const clean = adminRigEnvironment(ROOT, process.env)
@@ -353,7 +356,7 @@ function run(label, cmd, args, extraEnv = {}, cwd = ROOT) {
     if (!shuttingDown && code) { console.error(`[launch] ${label} exited with code ${code}; shutting down.`); shutdown(1) }
   })
   children.push(child)
-  if(adminOnly)recordAdminGroups(ROOT,adminRunId,children.map(item=>item.pid).filter(Boolean))
+  if(adminOnly)recordAdminGroups(ROOT,adminRunId,children.map(item=>item.pid).filter(Boolean),applicationComposition)
   return child
 }
 function waitForPort(port, label, timeoutMs = 60_000) {
@@ -479,10 +482,18 @@ function shutdown(code = 0) {
       try { process.kill(-c.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') console.warn('[launch] child group shutdown failed:', error.code) }
     } else c.kill('SIGTERM')
   }
-  setTimeout(() => process.exit(code), 500)
+  setTimeout(() => {
+    if(adminOnly){try{stopOwnedAdminGroups(ROOT,undefined,(pid,signal)=>process.kill(pid,signal===0?0:'SIGKILL'))}catch(error){console.warn('[launch] owned forced cleanup refused:',error.message)}}
+    process.exit(code)
+  }, 1500)
 }
 process.on('SIGINT', () => shutdown(0))
 process.on('SIGTERM', () => shutdown(0))
+if(adminOnly){
+ const deadline=Date.parse(env.BRIAN_ADMIN_DEADLINE_UTC);
+ console.log('[launch] administrative runtime deadline '+env.BRIAN_ADMIN_DEADLINE_UTC)
+ setTimeout(()=>shutdown(0),Math.max(1,deadline-Date.now()))
+}
 
 // ── boot sequence ──────────────────────────────────────────────────
 console.log('[launch] building workspace packages (turbo-cached)...')
@@ -557,8 +568,15 @@ if (useLocalBrowserRelay) {
   await waitForPort(browserRelayPort, 'browser relay')
 }
 
+if(adminOnly){
+ run('mailbox',process.execPath,[join(ROOT,'scripts/rig-mailbox.mjs'),join(adminStateDirectory(ROOT,env),'mailbox'),env.SMTP_PORT])
+ await waitForPort(Number(env.SMTP_PORT),'synthetic SMTP capture')
+ run('auth-web','pnpm',['--filter','@use-brian/auth-web','dev'])
+ await waitForPort(3005,'application sign-in portal')
+}
+
 console.log(`[launch] starting api (:${PORTS.api}), doc-sync (:${PORTS.docSync}), app-web (:${PORTS.appWeb}) ...`)
-run('api', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/index.ts', ...(adminOnly ? ['--admin-only', '--no-workers'] : [])])
+run('api', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/index.ts', ...(adminOnly ? ['--admin-only', '--no-workers'] : []), ...(referenceApplications ? ['--reference-applications'] : [])])
 run('doc-sync', 'pnpm', ['--filter', '@use-brian/doc-sync', 'exec', 'tsx', 'src/index.ts'],
   { PORT: String(PORTS.docSync) })
 pruneTurbopackCache()

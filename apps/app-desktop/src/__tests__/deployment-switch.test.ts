@@ -251,6 +251,44 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
 });
 
 describe("[COMP:app-desktop/main] deployment switching", () => {
+  it("admits credentialed API reads only for current bundled top frames after a target switch", async () => {
+    const select = (target: AccountTarget) => state.handlers.get("Use Brian:select-account")!(sender(),
+      deploymentAccountKey({ target, tokens: tokens(target.kind) }));
+    const upstream = { "access-control-allow-origin": ["null"], "access-control-allow-credentials": ["true"] };
+    const hookFor = (target: AccountTarget) => targetJar(target).webRequest.onHeadersReceived.mock.calls.at(-1)[0];
+    const reply = (hook: Function, input: Record<string, unknown>) => {
+      const callback = vi.fn();
+      hook({ method: "GET", url: `${local.apiUrl}/api/workspaces/example/member-directory`, responseHeaders: upstream, ...input }, callback);
+      return callback.mock.calls[0][0];
+    };
+
+    expect(await select(cloud)).toEqual({ ok: true });
+    const cloudHook = hookFor(cloud);
+    const cloudReply = reply(cloudHook, { url: `${cloud.apiUrl}/api/assistants` });
+    expect(cloudReply.responseHeaders["access-control-allow-credentials"]).toEqual(["true"]);
+
+    expect(await select(local)).toEqual({ ok: true });
+    const win = state.windows.at(-1);
+    await vi.waitFor(() => expect(win.webContents.getURL()).toMatch(/^file:.*\/renderer\/index\.html/));
+    const localHook = hookFor(local);
+    expect(win.options.webPreferences.additionalArguments).toContain("--usebrian-local-target");
+    const trusted = { webContentsId: win.webContents.id, webContents: win.webContents, frame: win.webContents.mainFrame };
+    expect(reply(localHook, trusted).responseHeaders["Access-Control-Allow-Credentials"]).toEqual(["true"]);
+    expect(reply(localHook, { method: "OPTIONS" }).responseHeaders["Access-Control-Allow-Credentials"]).toEqual(["true"]);
+
+    for (const untrusted of [
+      {}, { ...trusted, frame: {} }, { ...trusted, frame: null },
+      { ...trusted, webContentsId: 999 }, { method: "OPTIONS", frame: null },
+      { method: "OPTIONS", webContentsId: win.webContents.id },
+    ]) {
+      const headers = reply(localHook, untrusted).responseHeaders;
+      expect(Object.keys(headers).some(name => name.toLowerCase() === "access-control-allow-credentials")).toBe(false);
+    }
+    expect(reply(localHook, { ...trusted, url: "https://untrusted.example/api/assistants" })).toEqual({});
+    await win.webContents.loadURL("https://untrusted.example/");
+    expect(reply(localHook, trusted).responseHeaders).not.toHaveProperty("Access-Control-Allow-Credentials");
+  });
+
   it("allows presentation changes only from a current main frame without changing sessions", async () => {
     const key = deploymentAccountKey({ target: local, tokens: tokens("local") });
     const update = state.handlers.get("Use Brian:update-account-presentation")!;

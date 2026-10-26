@@ -76,7 +76,7 @@ describe('[COMP:api/doc-auto-title] runDocAutoTitle', () => {
       title: 'Quarterly Revenue Growth',
       icon: null,
       usage: { inputTokens: 50, outputTokens: 4 },
-      model: 'gemini-3.1-flash-lite',
+      model: 'gemini-3.5-flash-lite',
     })
     // No emoji from the model → the icon arg is null.
     expect(setAutoTitle).toHaveBeenCalledWith(USER_ID, PAGE_ID, 'Quarterly Revenue Growth', null)

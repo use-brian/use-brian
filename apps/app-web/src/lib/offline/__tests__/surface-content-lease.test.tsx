@@ -34,6 +34,7 @@ import {
   surfaceContentRemaining,
   useSurfaceContentCache,
   useSurfaceContentRenewal,
+  useLeasedResource,
   writeSurfaceContentCache,
 } from "@/lib/offline/surface-content-cache";
 
@@ -96,6 +97,76 @@ describe("[COMP:app-web/surface-content-cache] Content lease for protected lists
     await act(async () => { vi.advanceTimersByTime(29_000); });
     await flush();
     expect(latest()).toBeDefined();
+  });
+
+  it('renews from a slow initial response before the existing rows expire', async () => {
+    let calls = 0;
+    const fetch = vi.fn(() => new Promise<string[]>(resolve => setTimeout(() => resolve(['Fictional row']), ++calls === 1 ? 16_000 : 8_000)));
+    function List() {
+      const resource = useLeasedResource(KEY, fetch);
+      return <div>{resource.data?.join() ?? 'cold skeleton'}</div>;
+    }
+    container = document.createElement('div');root = createRoot(container);
+    await act(async () => root!.render(<List/>));
+    await act(async () => vi.advanceTimersByTime(16_000));await flush();
+    expect(container.textContent).toBe('Fictional row');
+    for (let second = 0; second < 45; second++) {
+      await act(async () => vi.advanceTimersByTime(1000));await flush();
+      expect(container.textContent).toBe('Fictional row');
+    }
+  });
+
+  it('hides expired rows without cancelling a renewal with its own valid deadline', async () => {
+    let finish!: (rows:string[])=>void;
+    const fetch=vi.fn().mockResolvedValueOnce(['Fictional row']).mockImplementation(()=>new Promise<string[]>(resolve=>{finish=resolve;}));
+    function List(){const resource=useLeasedResource<string[]>(KEY,fetch);return <div>{resource.data?.join() ?? 'cold skeleton'}</div>;}
+    container=document.createElement('div');root=createRoot(container);
+    await act(async()=>root!.render(<List/>));await flush();
+    await act(async()=>vi.advanceTimersByTime(15_000));await flush();
+    await act(async()=>vi.advanceTimersByTime(15_001));await flush();
+    expect(container.textContent).toBe('cold skeleton');
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await act(async()=>finish(['Renewed row']));await flush();
+    expect(container.textContent).toBe('Renewed row');
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts the new key renewal schedule while the old key read is unresolved',async()=>{
+    const oldRead=()=>new Promise<string[]>(()=>{});
+    const nextRead=vi.fn().mockRejectedValueOnce(new Error('transient')).mockResolvedValue(['New scope row']);
+    function List({cacheKey}:{cacheKey:string}){
+      const resource=useLeasedResource<string[]>(cacheKey,cacheKey==='old'?oldRead:nextRead);
+      return <div>{resource.data?.join() ?? 'cold skeleton'}</div>;
+    }
+    container=document.createElement('div');root=createRoot(container);
+    await act(async()=>root!.render(<List cacheKey="old"/>));await flush();
+    await act(async()=>vi.advanceTimersByTime(15_000));await flush();
+    await act(async()=>root!.render(<List cacheKey="next"/>));await flush();
+    await act(async()=>vi.advanceTimersByTime(15_000));await flush();
+    expect(container.textContent).toBe('New scope row');expect(nextRead).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves the 15-second start cadence for manually leased editor readers',async()=>{
+    const refresh=vi.fn(()=>new Promise<void>(resolve=>setTimeout(resolve,8000)));
+    function Manual(){useSurfaceContentRenewal(refresh);return null;}
+    container=document.createElement('div');root=createRoot(container);
+    await act(async()=>root!.render(<Manual/>));
+    await act(async()=>vi.advanceTimersByTime(15_000));await flush();expect(refresh).toHaveBeenCalledTimes(1);
+    await act(async()=>vi.advanceTimersByTime(8000));await flush();
+    await act(async()=>vi.advanceTimersByTime(7000));await flush();expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not postpone a renewal when optimistic edits replace the leased value',async()=>{
+    const fetch=vi.fn().mockResolvedValueOnce(['Fictional row']).mockImplementation(()=>new Promise<string[]>(resolve=>setTimeout(()=>resolve(['Renewed row']),8000)));
+    function List(){const resource=useLeasedResource<string[]>(KEY,fetch);return <div>{resource.data?.join() ?? 'cold skeleton'}</div>;}
+    container=document.createElement('div');root=createRoot(container);
+    await act(async()=>root!.render(<List/>));await flush();
+    await act(async()=>vi.advanceTimersByTime(10_000));
+    await act(async()=>mutateSurfaceCache<string[]>(KEY,rows=>[...rows,'Local edit']));await flush();
+    await act(async()=>vi.advanceTimersByTime(5000));await flush();expect(fetch).toHaveBeenCalledTimes(2);
+    for(let second=0;second<18;second++){
+      await act(async()=>vi.advanceTimersByTime(1000));await flush();expect(container.textContent).not.toBe('cold skeleton');
+    }
   });
 
   it("evicts an open list when renewal fails, and an optimistic edit does not extend it", async () => {

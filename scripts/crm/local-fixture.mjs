@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import pg from 'pg'
+import { prepareRuntimeRole, activateRuntimeRole } from './runtime-role.mjs'
 
 const ossRoot = fileURLToPath(new URL('../../', import.meta.url))
 const markerName = 'assurance-fixture.json'
@@ -62,8 +63,10 @@ async function availablePort() {
 }
 
 /** Creates only a new cluster. No caller-supplied database or data directory. */
-export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false } = {}) {
+export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false, beforeApply, beforeApplyFile, runtimeRole = 'app_user' } = {}) {
   validateAmbientDatabase(env)
+  if (runtimeRole !== 'app_user') throw new Error('Unsupported fixture runtime role')
+  if ((beforeApply === undefined) !== (beforeApplyFile === undefined) || (beforeApply !== undefined && (typeof beforeApply !== 'function' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.sql$/.test(beforeApplyFile)))) throw new Error('Upgrade callback requires one explicit pending migration filename')
   const runtime = cleanRuntimeEnvironment(env)
   const executable = (name) => pgBin ? join(resolve(pgBin), name) : name
   const version = await runCommand(executable('postgres'), ['--version'], { env: runtime })
@@ -81,7 +84,7 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
   const port = await availablePort()
   const makeUrl = (username, secret, database) => `postgresql://${username}:${secret}@127.0.0.1:${port}/${database}`
   const adminUrl = makeUrl('assurance_owner', password, 'brian_assurance')
-  const appUrl = makeUrl('assurance_app', appPassword, 'brian_assurance')
+  const appUrl = makeUrl(runtimeRole, appPassword, 'brian_assurance')
   const marker = join(directory, markerName)
   await writeFile(marker, JSON.stringify({ token, port, database: 'brian_assurance', directory }), { mode: 0o600 })
   const fixtureEnv = {
@@ -118,25 +121,37 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
       await writeFile(join(data,'postgresql.auto.conf'),"archive_mode=on\narchive_command='"+command.replaceAll("'","''")+"'\n",{mode:0o600})
       fixtureEnv.BRIAN_ASSURANCE_WAL_CONFIG=config
     }
-    await runCommand(executable('pg_ctl'), ['-D', data, '-l', join(directory, 'postgres.log'), '-o', `-h 127.0.0.1 -p ${port} -k ''`, '-w', 'start'], { env: runtime })
+    // A watchdog may interrupt pg_ctl after PostgreSQL has daemonized.
+    // Disposal must attempt to stop this owned cluster in that window too.
     started = true
+    await runCommand(executable('pg_ctl'), ['-D', data, '-l', join(directory, 'postgres.log'), '-o', `-h 127.0.0.1 -p ${port} -k ''`, '-w', 'start'], { env: runtime })
     const admin = new pg.Client({ connectionString: makeUrl('assurance_owner', password, 'postgres') })
     await admin.connect()
     try {
       await admin.query('CREATE DATABASE brian_assurance')
-      await admin.query('CREATE ROLE app_user NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS')
+
     } finally { await admin.end() }
-    await runCommand(process.execPath, ['--import', import.meta.resolve('tsx'), 'packages/api/scripts/migrate.ts'], { env: fixtureEnv, logPath: join(directory, 'migrations.log') })
     const connection = new pg.Client({ connectionString: adminUrl })
     await connection.connect()
     try {
-      // Passwords are generated hex, never user input or command arguments.
-      await connection.query(`CREATE ROLE assurance_app LOGIN PASSWORD '${appPassword}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`)
-      await connection.query('GRANT app_user TO assurance_app')
-      await connection.query(`GRANT USAGE ON SCHEMA public TO assurance_app;
-        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO assurance_app;
-        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO assurance_app;
-        ALTER ROLE assurance_app SET app.current_user_id = '00000000-0000-0000-0000-000000000000'`)
+      await prepareRuntimeRole(connection)
+      if (beforeApply) {
+        let boundarySeen = false
+        const { tsImport } = await import('tsx/esm/api')
+        const { runMigrations } = await tsImport('../../packages/api/scripts/migrate.ts', import.meta.url)
+        await runMigrations({ databaseUrl: adminUrl, migrationDirs, beforeApply: async migration => {
+          if (migration.file !== beforeApplyFile) return
+          if (boundarySeen) throw new Error('Upgrade boundary executed twice')
+          boundarySeen = true
+          // Only this explicit new-disposable upgrade boundary may activate early.
+          await activateRuntimeRole(connection, { password: appPassword })
+          await beforeApply({ ...migration, adminUrl, appUrl, env: fixtureEnv })
+        } })
+        if (!boundarySeen) throw new Error('Upgrade boundary missing or already applied: ' + beforeApplyFile)
+      } else {
+        await runCommand(process.execPath, ['--import', import.meta.resolve('tsx'), 'packages/api/scripts/migrate.ts'], { env: fixtureEnv, logPath: join(directory, 'migrations.log') })
+      }
+      await activateRuntimeRole(connection, { password: appPassword })
     } finally { await connection.end() }
     return { directory, env: fixtureEnv, adminUrl, appUrl, dispose }
   } catch (error) {
@@ -164,12 +179,21 @@ export async function assertLocalFixture(env = process.env) {
   return marker
 }
 
-async function main(args) {
-  if (args.includes('--help')) {
-    console.log('Usage: node scripts/crm/local-fixture.mjs [--pg-bin DIR] [--migration-dir DIR] [--wal-archive-fixture] -- COMMAND [ARGS...]\nCreates a disposable loopback PostgreSQL 18 database using actual migrations. Requires pgvector/pg_trgm. Never uses an ambient DB.')
-    return
+/** Preserve ordinary migrations; marked synthetic runs must validate before skipping dotenv. */
+export async function loadMigrationEnvironment(loadWorkspaceDotenv, env = process.env) {
+  if (env.BRIAN_ASSURANCE_FIXTURE !== undefined || env.BRIAN_ASSURANCE_TOKEN !== undefined) {
+    await assertLocalFixture(env)
+    return 'fixture'
   }
+  await loadWorkspaceDotenv()
+  return 'workspace'
+}
+
+/** Explicit maintained fixture CLI selection; never accepts arbitrary role names. */
+export function parseLocalFixtureArguments(values) {
+  const args=[...values]
   let pgBin
+  let runtimeRole='app_user'
   let walArchive=false
   const migrationDirs = []
   while (args[0] && args[0] !== '--') {
@@ -178,14 +202,39 @@ async function main(args) {
     const value = args.shift()
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${option}`)
     if (option === '--pg-bin') pgBin = value
+    else if (option === '--runtime-role') {
+      if (value !== 'app_user') throw new Error('Unsupported fixture runtime role')
+      runtimeRole=value
+    }
     else if (option === '--migration-dir') migrationDirs.push(value)
     else throw new Error(`Unknown option ${option}`)
   }
   if (args.shift() !== '--' || !args.length) throw new Error('Supply an explicit test command after --; see --help')
-  const fixture = await createLocalFixture({ pgBin, migrationDirs, walArchive })
+  return {pgBin,migrationDirs,walArchive,runtimeRole,command:args}
+}
+
+async function main(args) {
+  if (args.includes('--help')) {
+    console.log('Usage: node scripts/crm/local-fixture.mjs [--pg-bin DIR] [--migration-dir DIR] [--wal-archive-fixture] [--runtime-role app_user] -- COMMAND [ARGS...]\nCreates a disposable loopback PostgreSQL 18 database using actual migrations. Requires pgvector/pg_trgm. Never uses an ambient DB.')
+    return
+  }
+  const {pgBin,migrationDirs,walArchive,runtimeRole,command:argsCommand}=parseLocalFixtureArguments(args)
+  let interrupted = false
+  // Group termination also stops the active child. Keep this owner alive long
+  // enough for that failure to unwind through PostgreSQL disposal.
+  const onInterrupt = () => { interrupted = true }
+  process.on('SIGTERM', onInterrupt)
+  process.on('SIGINT', onInterrupt)
+  let fixture
   try {
-    await runCommand(args[0], args.slice(1), { env: fixture.env, inherit: true })
-  } finally { await fixture.dispose() }
+    fixture = await createLocalFixture({ pgBin, migrationDirs, walArchive, runtimeRole })
+    if (interrupted) throw new Error('Disposable fixture interrupted')
+    await runCommand(argsCommand[0], argsCommand.slice(1), { env: fixture.env, inherit: true })
+    if (interrupted) throw new Error('Disposable fixture interrupted')
+  } finally {
+    try { await fixture?.dispose() }
+    finally { process.off('SIGTERM', onInterrupt); process.off('SIGINT', onInterrupt) }
+  }
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

@@ -1,3 +1,4 @@
+import { applicationDecimalAdd, applicationDecimalCompare } from "@use-brian/shared";
 /**
  * CRM operator surface — pure view logic (no React, no IO). Owns:
  *
@@ -739,7 +740,7 @@ export function sortDeals(
         if (a.amount === null && b.amount === null) return 0;
         if (a.amount === null) return 1;
         if (b.amount === null) return -1;
-        return (a.amount - b.amount) * (sign ?? -1);
+        return applicationDecimalCompare(a.amount, b.amount) * (sign ?? -1);
       });
       break;
     case "close":
@@ -762,7 +763,7 @@ export type PipelineStageSummary = {
   stage: CrmPipelineStage;
   rows: CrmDealRow[];
   /** Explicit per-currency totals. Mixed currencies are never combined. */
-  currencyTotals: Record<string, number>;
+  currencyTotals: Record<string, number | string>;
 };
 
 /**
@@ -838,11 +839,11 @@ export function groupDealsByPipelineStage(
     const inStage = rows.filter(
       (row) => resolveDealPipelineStage(row, pipeline)?.id === stage.id,
     );
-    const currencyTotals: Record<string, number> = {};
+    const currencyTotals: Record<string, number | string> = {};
     for (const row of inStage) {
       if (row.amount === null) continue;
       const code = currencyCode(row);
-      currencyTotals[code] = Math.round(((currencyTotals[code] ?? 0) + row.amount) * 100) / 100;
+      currencyTotals[code] = addCrmAmounts(currencyTotals[code] ?? 0, row.amount);
     }
     return {
       stage,
@@ -852,9 +853,17 @@ export function groupDealsByPipelineStage(
   });
 }
 
+/** Existing numeric summaries retain two-place display; exact inputs stay exact. */
+export function addCrmAmounts(left: number | string, right: number | string): number | string {
+  const exact = applicationDecimalAdd(left,right)
+  if (typeof left === "string" || typeof right === "string" || applicationDecimalCompare(exact,Number.MAX_SAFE_INTEGER) > 0) return exact
+  return Math.round(Number(exact) * 100) / 100
+}
+
 /** Currency-explicit compact label for working views. */
-export function formatAmount(amount: number, currency = "USD", compact = true): string {
+export function formatAmount(amount: number | string, currency = "USD", compact = true): string {
   const code = currency.trim().toUpperCase() || "USD";
+  if (typeof amount === "string") return `${code} ${amount}`;
   if (!compact) {
     return `${code} ${amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
   }
@@ -866,7 +875,7 @@ export function formatAmount(amount: number, currency = "USD", compact = true): 
 }
 
 export function formatCurrencyTotals(
-  values: Record<string, number>,
+  values: Record<string, number | string>,
   compact = false,
 ): string {
   return Object.entries(values)

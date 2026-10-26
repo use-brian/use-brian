@@ -1,3 +1,4 @@
+import type { SessionStateRecord } from '@use-brian/core'
 /**
  * Unit tests for the cross-assistant (callee) executor.
  * Component tag: [COMP:api/inter-assistant-executor].
@@ -13,6 +14,17 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+// These unit fixtures replace database/scope ports and have no canonical policy
+// metadata. Keep their fixture assistant and inject only metadata construction;
+// actual current assistants/epochs are enforced by the complete real SQL matrix.
+vi.mock('../../context-scope/execution-context.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../context-scope/execution-context.js')>()
+  return { ...actual,resolveExecutionContextSystem: (input: Parameters<typeof actual.resolveExecutionContextSystem>[0],
+    deps: Parameters<typeof actual.resolveExecutionContextSystem>[1] = {}) => actual.resolveExecutionContextSystem(input,{
+      ...deps,pinPolicyEpoch: async () => async () => true,resolveAssistant: async () => input.assistant,
+    }) }
+})
 import { z } from 'zod'
 
 const mockQueryLoop = vi.fn()
@@ -329,24 +341,6 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       }))
     })
 
-  it('carries validated caller sources into the receiver write accumulator and returned evidence',async()=>{
-    const primary={...calleeAssistant,workspaceId:'workspace-1',kind:'primary',clearance:'internal',compartments:['product']}
-    mockFindAssistant.mockImplementation(async id=>({...primary,id}) as never)
-    const evidence={sensitivity:'internal' as const,compartments:['product'],projectIds:[],sources:[{
-      workspaceId:'workspace-1',userId:'owner-1',assistantId:null,sensitivity:'internal' as const,
-      compartments:['product'],projectIds:[],resourceKind:'memory',resourceId:'source-1',version:'1',
-    }]}
-    const validate=vi.spyOn(callerEvidence,'validateCallerScopeEvidence').mockImplementation(async value=>structuredClone(value))
-    const returned=vi.fn()
-    try {
-      yieldsText('Scoped result')
-      await expect(executor()({...baseParams,callerAccessCeiling:{workspaceId:'workspace-1',userId:'owner-1',clearance:'internal',compartments:['product'],mutationCompartments:['product'],projectIds:[],visibilityAssistantIds:null},callerScopeEvidence:evidence,onScopeEvidence:returned})).resolves.toBe('Scoped result')
-      expect(mockQueryLoop.mock.calls.at(-1)?.[0].context.scopeAccumulator.evidence).toMatchObject(evidence)
-      expect(returned).toHaveBeenCalledWith(expect.objectContaining({sources:expect.arrayContaining(evidence.sources)}))
-      expect(validate).toHaveBeenCalledWith(evidence,expect.objectContaining({userId:'owner-1',compartments:['product']}))
-      expect(validate.mock.calls.length).toBeGreaterThan(1)
-    } finally {validate.mockRestore()}
-  })
   it('refuses evidence without a verified caller ceiling before any session or model work',async()=>{
     await expect(executor()({...baseParams,callerScopeEvidence:{compartments:['product']}})).rejects.toMatchObject({reason:'caller_evidence_unavailable'})
     expect(mockSession).not.toHaveBeenCalled();expect(mockQueryLoop).not.toHaveBeenCalled()
@@ -387,7 +381,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       workspaceId: 'workspace-1', userId: 'owner-1', clearance: 'internal',
       compartments: ['product'], mutationCompartments: ['product'], projectIds: null, visibilityAssistantIds: ['caller-1'],
     } })).resolves.toBe('shared response')
-    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({ visibilityAssistantIds: [] }), 60)
+    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({ visibilityAssistantIds: [] }), 60, expect.objectContaining({execution:expect.any(Object),accumulator:expect.any(Object)}))
   })
   it('withholds a tool result after revocation and preserves the uncertain-operation warning', async () => {
     const primary = { ...calleeAssistant, workspaceId: 'workspace-1', kind: 'primary', clearance: 'confidential', compartments: null }
@@ -448,7 +442,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     } })).resolves.toBe('bounded')
     expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({
       clearance: 'internal', compartments: ['product'], visibilityAssistantIds: ['caller-1'],
-    }), 60)
+    }), 60, expect.objectContaining({execution:expect.any(Object),accumulator:expect.any(Object)}))
   })
   it('refuses a serialized request after caller access shrinks, before callee reads', async () => {
     mockFindAssistant.mockResolvedValue({ ...calleeAssistant, id: 'caller-1', workspaceId: 'workspace-1',
@@ -491,7 +485,15 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     yieldsText('Bounded response')
     await runWithAgentAccess({workspaceId:'workspace-1',userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']},()=>callee({...baseParams,callerUserId:'actor-1'}))
     expect(mockResolveReadCeilings).toHaveBeenCalledWith('actor-1','workspace-1','confidential',null)
-    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']}), 60)
+    const indexedAuthority=scopedMemory.getIndexRanked.mock.calls[0]?.[2]
+    const originalContext=mockQueryLoop.mock.calls.at(-1)?.[0].context
+    expect(indexedAuthority.execution).toBe(originalContext.executionContext)
+    expect(indexedAuthority.accumulator).toBe(originalContext.scopeAccumulator)
+    expect(scopedMemory.getIdentity).toHaveBeenCalledWith(expect.any(Object),{execution:originalContext.executionContext,accumulator:originalContext.scopeAccumulator})
+    expect(indexedAuthority.execution.identity.kind).toBe('delegated')
+    expect(indexedAuthority.execution.security.access.userId).toBe('actor-1')
+    expect(indexedAuthority.execution.lifecycle.sessionId).toBe(originalContext.sessionId)
+    expect(scopedMemory.getIndexRanked).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1',clearance:'internal',compartments:['product'],mutationCompartments:[],projectIds:[],visibilityAssistantIds:['caller-1']}), 60, expect.objectContaining({execution:expect.any(Object),accumulator:expect.any(Object)}))
     expect(mockInjectMcp).toHaveBeenCalledWith(expect.objectContaining({contextScope:expect.objectContaining({effectiveCompartments:['product'],effectiveProjectIds:[]})}))
     expect(mockQueryLoop.mock.calls.at(-1)?.[0].context).toMatchObject({userId:'actor-1',visibilityAssistantIds:['caller-1'],clearance:'internal',compartments:['product'],mutationCompartments:[]})
     expect(mockSession).toHaveBeenCalledWith(expect.objectContaining({userId:'actor-1'}))
@@ -596,7 +598,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       clearance: 'public',
       compartments: [],
       clientSelfMemory: { compartment: 'client:client-17' },
-    }), 60)
+    }), 60, undefined)
     expect(scopedMemory.getWorkspaceIndex).not.toHaveBeenCalled()
     const loopArgs = mockQueryLoop.mock.calls.at(-1)?.[0]
     expect(loopArgs.maxTurns).toBe(2)
@@ -2192,9 +2194,9 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
     await callee({ ...baseParams, depth: { tier: 'deep' }, callerChannelType: 'workflow', workflowId: 'wf-1' })
 
     expect(mockRunPreflight).toHaveBeenCalledTimes(1)
-    expect(mockRunPreflight.mock.calls[0][0]).toMatchObject({ model: 'gemini-3-pro-research', researchMode: true, forceResearch: true })
+    expect(mockRunPreflight.mock.calls[0][0]).toMatchObject({ model: 'gemini-4-argon-research', researchMode: true, forceResearch: true })
     const loopArg = mockQueryLoop.mock.calls[0][0] as { model: string; systemPrompt: string }
-    expect(loopArg.model).toBe('gemini-3-pro-research')
+    expect(loopArg.model).toBe('gemini-4-argon-research')
     expect(loopArg.systemPrompt).toContain('HK SME stat: 62% adoption')
     expect(loopArg.systemPrompt).toContain('Pre-Researched Context')
   })
@@ -2668,7 +2670,7 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
   const wsCallee = { ...calleeAssistant, workspaceId: 'ws-1', name: 'Brian' }
   const deliverTarget = { channelType: 'telegram' as const, channelId: '-100123:topic:2' }
 
-  function stateStore(rowsBySession: Record<string, Array<Record<string, unknown>>>) {
+  function stateStore(rowsBySession: Record<string, SessionStateRecord[]>) {
     return {
       upsert: vi.fn(),
       resolve: vi.fn(),
@@ -2677,13 +2679,17 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
       purgeResolvedOlderThan: vi.fn(),
     }
   }
-  function row(key: string, summary: string, detail: string | null = null) {
+  function row(key: string, summary: string, detail: string | null = null): SessionStateRecord {
     const t = new Date()
+    // This historical unit fixture has no canonical reader binding. It must
+    // remain held; the healthy positive case now runs through the real SQL
+    // adapter, executor and source decision in persistent-consumers.
     return {
       id: `id-${key}`, sessionId: 'trainer-sess', userId: 'owner-1', assistantId: 'trainer-1',
       key, status: 'open', summary, detail, source: 'tool', createdAt: t, updatedAt: t, resolvedAt: null,
     }
   }
+
   function calleeWith(store: ReturnType<typeof stateStore> | undefined) {
     return createCalleeExecutor({
       provider: {} as never,
@@ -2705,7 +2711,7 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
     yieldsText('report')
   })
 
-  it('injects the delivery conversation\'s open commitments (bodies included) into the callee prompt', async () => {
+  it('holds unbound historical delivery rows while forwarding the exact canonical context', async () => {
     mockListConversationSessions.mockResolvedValueOnce([
       { id: 'trainer-sess', assistantId: 'trainer-1', assistantName: 'Health Personal Trainer' },
     ])
@@ -2722,11 +2728,14 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
     expect(mockListConversationSessions).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: 'ws-1', channelType: 'telegram', channelId: '-100123:topic:2' }),
     )
-    expect(store.listRecentBySession).toHaveBeenCalledWith('trainer-sess', expect.any(Number))
+    expect(store.listRecentBySession).toHaveBeenCalledWith('trainer-sess', expect.any(Number), expect.objectContaining({
+      execution: mockQueryLoop.mock.calls[0][0].context.executionContext,
+      accumulator: mockQueryLoop.mock.calls[0][0].context.scopeAccumulator,
+    }))
     const sp = systemPromptOf()
-    expect(sp).toContain('# Open commitments (delivery conversation)')
-    expect(sp).toContain('`diet:2026-08-17`')
-    expect(sp).toContain('squat 5x5 @ 80kg')
+    expect(sp).not.toContain('# Open commitments (delivery conversation)')
+    expect(sp).not.toContain('`diet:2026-08-17`')
+    expect(sp).not.toContain('squat 5x5 @ 80kg')
     // The per-run # Context (date, memory) rides the trusted runtime channel,
     // never the cacheable stable prompt the commitments block sits in.
     expect(sp).not.toContain('# Context')
@@ -2761,7 +2770,10 @@ describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments 
     yieldsText('report')
     const empty = stateStore({ 'trainer-sess': [] })
     await calleeWith(empty)({ ...baseParams, callerChannelType: 'workflow', deliverTarget })
-    expect(empty.listRecentBySession).toHaveBeenCalledWith('trainer-sess', expect.any(Number))
+    expect(empty.listRecentBySession).toHaveBeenCalledWith('trainer-sess', expect.any(Number), expect.objectContaining({
+      execution: mockQueryLoop.mock.calls[0][0].context.executionContext,
+      accumulator: mockQueryLoop.mock.calls[0][0].context.scopeAccumulator,
+    }))
     expect(systemPromptOf()).not.toContain('# Open commitments (delivery conversation)')
   })
 

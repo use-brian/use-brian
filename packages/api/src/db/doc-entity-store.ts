@@ -18,34 +18,44 @@
  * path; if any worker later needs to read across workspaces it should
  * be added explicitly (TODO marker in the relevant method).
  *
- * Schema validation
- * =================
- * The Zod schemas in `doc-schemas.ts` validate the wire shape on
- * write (creation + patch). Validating individual cell values against
- * the entity-type's `properties` (e.g. a `select` cell whose `value`
- * isn't one of the declared option ids) is intentionally deferred to
- * the chat-tool layer (P1H) — the store treats `data` as opaque JSONB
- * once the cell discriminator is type-checked. That keeps the store
- * fast on bulk writes; the tool surface is the right place to surface
- * a useful error.
+ * Schema validation and revisions
+ * ===============================
+ * Strict wire validation is supplemented by canonical SQL schema/value/reference
+ * triggers (application_record_contract). Every writer advances revisions and
+ * normalized opt-in uniqueness in its transaction. App roles enforce current RLS;
+ * a workspace ID is never substituted for an authenticated actor.
  *
  * [COMP:api/doc-entity-store]
  */
 
+import type { PoolClient, QueryResult, QueryResultRow } from 'pg'
+import { canonicalGenericResource, queryCanonicalGenericRecords } from '../application-platform/generic-reader.js'
+import { readCanonicalGenericRecord } from '../application-platform/field-evidence.js'
 import type {
-  DocEntityFilter,
   DocEntityInstance,
-  DocEntitySort,
   DocEntityStore,
   DocEntityType,
   CellValue,
   PropertyDef,
+  DocEntityOperationOptions,
 } from '@use-brian/core'
 import {
   docEntityInstanceSchema,
   docEntityTypeSchema,
+  cellValueSchema,
+  validateDocApplicationSchema,
+  applicationAuthorityCreationScope,
+  bindScopeSources,
+  boundScopeSources,
 } from '@use-brian/core'
-import { getPool, queryWithRLS, rollbackAndRelease } from './client.js'
+import { getAppPool, applyRLSGucs, queryWithRLS, rollbackAndRelease } from './client.js'
+import { currentAgentAccess } from './agent-access-context.js'
+import { ApplicationPlatformError, applicationQuerySchema } from '@use-brian/shared'
+import { applicationResourceRefSchema, type ApplicationResourceRef } from '@use-brian/shared'
+import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
+import type { ApplicationOperationContext } from '@use-brian/core'
+import { getApplicationExecutionBinding } from '../application-platform/execution-context.js'
 
 // ── Row projections ────────────────────────────────────────────────────
 
@@ -72,8 +82,12 @@ const ENTITY_INSTANCE_SELECT = `
   created_at      AS "createdAt",
   created_by      AS "createdBy",
   last_edited_at  AS "lastEditedAt",
-  last_edited_by  AS "lastEditedBy"
+  last_edited_by  AS "lastEditedBy",
+  record_version::text AS "recordVersion"
 `
+// Metadata retains the legacy wire shape; protected values come only from the
+// canonical field reader, never from this SQL selection.
+const ENTITY_INSTANCE_METADATA_SELECT = ENTITY_INSTANCE_SELECT.replace('  data,\n', '')
 
 type EntityTypeRow = {
   id: string
@@ -99,6 +113,7 @@ type EntityInstanceRow = {
   createdBy: string | null
   lastEditedAt: Date
   lastEditedBy: string | null
+  recordVersion?: string
 }
 
 function rowToType(row: EntityTypeRow): DocEntityType {
@@ -128,158 +143,21 @@ function rowToInstance(row: EntityInstanceRow): DocEntityInstance {
     createdBy: row.createdBy,
     lastEditedAt: row.lastEditedAt.toISOString(),
     lastEditedBy: row.lastEditedBy,
+    ...(row.recordVersion ? { recordVersion: row.recordVersion } : {}),
   }
 }
 
-// ── Filter / sort helpers ─────────────────────────────────────────────
-
-/**
- * The filter operator vocabulary maps directly to JSONB expressions on
- * `entity_instances.data`. We never interpolate the field name into the
- * SQL string raw — it's parameterised. Numeric / date comparisons cast
- * the JSON text via `(data->>'<field>')::numeric` (or text-comparison
- * for ISO dates, which sort lex-correctly).
- */
-
-const ALLOWED_FIELD_RE = /^[A-Za-z0-9_]{1,128}$/
-
-function assertValidFieldName(field: string): void {
-  if (!ALLOWED_FIELD_RE.test(field)) {
-    throw new Error(
-      `Invalid filter/sort field name: ${JSON.stringify(field)}. Property names must match /^[A-Za-z0-9_]{1,128}$/.`,
-    )
-  }
-}
-
-type WhereBuild = {
-  clauses: string[]
-  values: unknown[]
-  nextIdx: number
-}
-
-function buildFilterClause(
-  filter: DocEntityFilter,
-  build: WhereBuild,
-): void {
-  assertValidFieldName(filter.field)
-  const field = filter.field
-
-  // Treat numeric values as numeric comparisons via the ::numeric cast;
-  // strings + dates fall through to text comparison. `contains` is for
-  // substring search on text properties (case-insensitive ILIKE).
-  switch (filter.op) {
-    case 'eq': {
-      if (typeof filter.value === 'number') {
-        build.values.push(filter.value)
-        build.clauses.push(
-          `(data->>'${field}')::numeric = $${build.nextIdx++}`,
-        )
-      } else if (typeof filter.value === 'boolean') {
-        build.values.push(String(filter.value))
-        build.clauses.push(`data->>'${field}' = $${build.nextIdx++}`)
-      } else if (filter.value === null) {
-        build.clauses.push(`data->>'${field}' IS NULL`)
-      } else {
-        build.values.push(String(filter.value))
-        build.clauses.push(`data->>'${field}' = $${build.nextIdx++}`)
-      }
-      return
-    }
-    case 'neq': {
-      if (typeof filter.value === 'number') {
-        build.values.push(filter.value)
-        build.clauses.push(
-          `(data->>'${field}')::numeric <> $${build.nextIdx++}`,
-        )
-      } else if (filter.value === null) {
-        build.clauses.push(`data->>'${field}' IS NOT NULL`)
-      } else {
-        build.values.push(String(filter.value))
-        build.clauses.push(`data->>'${field}' <> $${build.nextIdx++}`)
-      }
-      return
-    }
-    case 'gt':
-    case 'gte':
-    case 'lt':
-    case 'lte': {
-      const op =
-        filter.op === 'gt'
-          ? '>'
-          : filter.op === 'gte'
-          ? '>='
-          : filter.op === 'lt'
-          ? '<'
-          : '<='
-      if (typeof filter.value === 'number') {
-        build.values.push(filter.value)
-        build.clauses.push(
-          `(data->>'${field}')::numeric ${op} $${build.nextIdx++}`,
-        )
-      } else {
-        // Text comparison — works for ISO-8601 dates (lex-sortable).
-        build.values.push(String(filter.value))
-        build.clauses.push(`data->>'${field}' ${op} $${build.nextIdx++}`)
-      }
-      return
-    }
-    case 'in': {
-      const arr = Array.isArray(filter.value)
-        ? filter.value.map((v) => String(v))
-        : []
-      build.values.push(arr)
-      build.clauses.push(
-        `data->>'${field}' = ANY($${build.nextIdx++}::text[])`,
-      )
-      return
-    }
-    case 'contains': {
-      // `contains` on a `multi_select` cell — the cell's `value` is an
-      // array of option ids. JSONB containment via `@>` on the array.
-      // For a `text` field this becomes a substring ILIKE.
-      // We can't tell from the filter alone which kind the field is, so
-      // we default to substring ILIKE (the more common case in v1).
-      build.values.push(`%${String(filter.value)}%`)
-      build.clauses.push(`data->>'${field}' ILIKE $${build.nextIdx++}`)
-      return
-    }
-  }
-}
-
-function buildOrderBy(sort: DocEntitySort[] | undefined): string {
-  if (!sort || sort.length === 0) return 'ORDER BY created_at DESC, id DESC'
-  const parts: string[] = []
-  for (const s of sort) {
-    assertValidFieldName(s.field)
-    const dir = s.direction === 'asc' ? 'ASC' : 'DESC'
-    parts.push(`data->>'${s.field}' ${dir}`)
-  }
-  // Always include a stable tie-breaker for cursor pagination.
-  parts.push('created_at DESC', 'id DESC')
-  return `ORDER BY ${parts.join(', ')}`
-}
-
-// ── Cursor encoding ───────────────────────────────────────────────────
-//
-// Phase-1 cursor is opaque to callers: a base64-encoded `<createdAt>|<id>`
-// pair. Stable tie-breaker (id) so identical timestamps don't loop.
-
-function encodeCursor(createdAt: Date, id: string): string {
-  const raw = `${createdAt.toISOString()}|${id}`
-  return Buffer.from(raw, 'utf8').toString('base64url')
-}
-
-function decodeCursor(
-  cursor: string,
-): { createdAt: string; id: string } | null {
-  try {
-    const raw = Buffer.from(cursor, 'base64url').toString('utf8')
-    const idx = raw.lastIndexOf('|')
-    if (idx <= 0) return null
-    return { createdAt: raw.slice(0, idx), id: raw.slice(idx + 1) }
-  } catch {
-    return null
-  }
+/** Managed metadata cannot form a second serialization path around cell masks. */
+function projectedInstance(row: Omit<EntityInstanceRow, 'data'>,schema: DocEntityType,projection: import('@use-brian/shared').ApplicationRecordProjection): DocEntityInstance {
+  const instance = rowToInstance({ ...row,data: projection.values as Record<string,CellValue> })
+  const readable = new Set(projection.fields)
+  const visible = (kind: PropertyDef['config']['kind']) => schema.properties.some(property => property.config.kind === kind && readable.has(property.name))
+  return bindScopeSources({ ...instance,
+    createdAt: visible('created_time') ? instance.createdAt : null,
+    lastEditedAt: visible('last_edited_time') ? instance.lastEditedAt : null,
+    createdBy: visible('created_by') ? instance.createdBy : null,
+    lastEditedBy: visible('last_edited_by') ? instance.lastEditedBy : null,
+  },boundScopeSources(projection))
 }
 
 // ── Factory ───────────────────────────────────────────────────────────
@@ -288,11 +166,75 @@ function decodeCursor(
  * Build a `DocEntityStore` backed by PostgreSQL. Stateless — safe to
  * call once at boot and share across requests.
  */
-export function createDbDocEntityStore(): DocEntityStore {
+export function createDbDocEntityStore(boundActor?: { actorUserId: string; transaction?: PoolClient }): DocEntityStore {
+  let transactionRole: Promise<void> | undefined
+  async function canonicalQuery<T extends QueryResultRow>(userId: string, text: string, values?: unknown[]): Promise<QueryResult<T>> {
+    try {
+      if (!boundActor?.transaction) return await queryWithRLS<T>(userId,text,values)
+      const client = boundActor.transaction
+      transactionRole ??= client.query(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+        FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=current_user`).then(result => {
+        if (result.rows[0]?.bypass !== false) throw new ApplicationPlatformError('access_unavailable', 'A non-owner application transaction is required.')
+      })
+      await transactionRole
+      await applyRLSGucs(client,userId)
+      return await client.query<T>(text,values)
+    } catch (error) {
+      if ((error as { code?: string }).code === '42501') throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
+      throw error
+    }
+  }
+  function actor(workspaceId: string, options?: DocEntityOperationOptions, creator?: string | null): string {
+    const ambient = currentAgentAccess()
+    const actorUserId = options?.actorUserId ?? boundActor?.actorUserId ?? ambient?.userId ?? creator
+    if (!actorUserId) throw new ApplicationPlatformError('authentication_required', 'A current authenticated actor is required.')
+    if (ambient?.workspaceId && ambient.workspaceId !== workspaceId || ambient?.userId && ambient.userId !== actorUserId) {
+      throw new ApplicationPlatformError('access_unavailable', 'The resource is unavailable.')
+    }
+    return actorUserId
+  }
+  async function canonicalTransaction<T>(userId: string, operation: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = boundActor?.transaction ?? await getAppPool().connect(), own = !boundActor?.transaction
+    try {
+      if (own) await client.query('BEGIN')
+      const role = await client.query(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+        FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='public.entity_instances'::regclass WHERE r.rolname=current_user`)
+      if (role.rows[0]?.bypass !== false) throw new ApplicationPlatformError('access_unavailable', 'A non-owner application transaction is required.')
+      await applyRLSGucs(client, userId)
+      const value = await operation(client)
+      if (own) await client.query('COMMIT')
+      return value
+    } catch (error) {
+      if ((error as { code?: string }).code === '42501') {
+        const refusal = new ApplicationPlatformError('access_unavailable', 'The record is unavailable.')
+        Object.defineProperty(refusal, 'cause', { value: error })
+        throw refusal
+      }
+      throw error
+    } finally { if (own) await rollbackAndRelease(client) }
+  }
+  async function projectCanonicalRow(client: PoolClient, row: Omit<EntityInstanceRow, 'data'>): Promise<DocEntityInstance> {
+    const schemas = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE workspace_id=$1 AND id=$2`,
+      [row.workspaceId, row.entityTypeId])
+    if (!schemas.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The schema is unavailable.')
+    const projection = await readCanonicalGenericRecord({ transaction: client, workspaceId: row.workspaceId }, canonicalGenericResource(rowToType(schemas.rows[0])), row.id)
+    if (projection.ref.version !== row.recordVersion) throw new ApplicationPlatformError('access_unavailable', 'The record changed.')
+    return projectedInstance(row,rowToType(schemas.rows[0]),projection)
+  }
+  async function projectCanonicalType(client: PoolClient,row: EntityTypeRow): Promise<DocEntityType> {
+    const catalog = z.object({ schemaVersion: z.string(),fields: z.array(z.string()).max(128) }).strict().safeParse(
+      (await client.query<{ value: unknown }>('SELECT read_generic_application_catalog_state($1,$2) AS value',[row.workspaceId,row.id])).rows[0]?.value)
+    if (!catalog.success || catalog.data.schemaVersion !== String(row.schemaVersion)) {
+      throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
+    }
+    const keys = new Set(catalog.data.fields)
+    return { ...rowToType(row),properties: row.properties.filter(property => keys.has(property.name)) }
+  }
   return {
     // ── EntityType CRUD ───────────────────────────────────────────────
 
-    async createEntityType(input) {
+    async createEntityType(input, options) {
+      validateDocApplicationSchema(input.properties)
       const schemaVersion = input.schemaVersion ?? 1
 
       // Validate the wire shape before write. The zod schema asserts the
@@ -312,8 +254,8 @@ export function createDbDocEntityStore(): DocEntityStore {
         createdBy: input.createdBy,
       })
 
-      const result = await queryWithRLS<EntityTypeRow>(
-        input.createdBy ?? input.workspaceId,
+      const result = await canonicalQuery<EntityTypeRow>(
+        actor(input.workspaceId, options, input.createdBy),
         `INSERT INTO entity_types
            (workspace_id, name, icon, properties, schema_version, created_by)
          VALUES ($1, $2, $3, $4::jsonb, $5, $6)
@@ -330,38 +272,30 @@ export function createDbDocEntityStore(): DocEntityStore {
       return rowToType(result.rows[0])
     },
 
-    async getEntityType(workspaceId, id) {
-      const result = await queryWithRLS<EntityTypeRow>(
-        workspaceId,
-        `SELECT ${ENTITY_TYPE_SELECT} FROM entity_types
-         WHERE id = $1 AND workspace_id = $2`,
-        [id, workspaceId],
-      )
-      return result.rows[0] ? rowToType(result.rows[0]) : null
+    async getEntityType(workspaceId, id, options) {
+      return canonicalTransaction(actor(workspaceId,options),async client => {
+        const result = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE id=$1 AND workspace_id=$2`,[id,workspaceId])
+        return result.rows[0] ? projectCanonicalType(client,result.rows[0]) : null
+      })
     },
 
-    async getEntityTypeByName(workspaceId, name) {
-      const result = await queryWithRLS<EntityTypeRow>(
-        workspaceId,
-        `SELECT ${ENTITY_TYPE_SELECT} FROM entity_types
-         WHERE workspace_id = $1 AND name = $2`,
-        [workspaceId, name],
-      )
-      return result.rows[0] ? rowToType(result.rows[0]) : null
+    async getEntityTypeByName(workspaceId, name, options) {
+      return canonicalTransaction(actor(workspaceId,options),async client => {
+        const result = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE workspace_id=$1 AND name=$2`,[workspaceId,name])
+        return result.rows[0] ? projectCanonicalType(client,result.rows[0]) : null
+      })
     },
 
-    async listEntityTypes(workspaceId) {
-      const result = await queryWithRLS<EntityTypeRow>(
-        workspaceId,
-        `SELECT ${ENTITY_TYPE_SELECT} FROM entity_types
-         WHERE workspace_id = $1
-         ORDER BY created_at DESC, id DESC`,
-        [workspaceId],
-      )
-      return result.rows.map(rowToType)
+    async listEntityTypes(workspaceId, options) {
+      return canonicalTransaction(actor(workspaceId,options),async client => {
+        const result = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC`,[workspaceId])
+        const types: DocEntityType[] = []
+        for (const row of result.rows) types.push(await projectCanonicalType(client,row))
+        return types
+      })
     },
 
-    async updateEntityType(workspaceId, id, patch) {
+    async updateEntityType(workspaceId, id, patch, options) {
       const sets: string[] = []
       const values: unknown[] = []
       let idx = 1
@@ -375,6 +309,7 @@ export function createDbDocEntityStore(): DocEntityStore {
         values.push(patch.icon)
       }
       if (patch.properties !== undefined) {
+        validateDocApplicationSchema(patch.properties)
         // Re-validate the property list — partial updates that swap the
         // schema must still produce a well-formed `PropertyDef[]`.
         docEntityTypeSchema.parse({
@@ -396,76 +331,65 @@ export function createDbDocEntityStore(): DocEntityStore {
       }
 
       if (sets.length === 0) {
-        // No-op — read back the current row so the API contract is
-        // consistent (always returns the EntityType, never null on a
-        // round-trip update).
-        const cur = await queryWithRLS<EntityTypeRow>(
-          workspaceId,
-          `SELECT ${ENTITY_TYPE_SELECT} FROM entity_types
-           WHERE id = $1 AND workspace_id = $2`,
-          [id, workspaceId],
-        )
-        if (!cur.rows[0]) {
-          throw new Error(
-            `updateEntityType: entity_type ${id} not found in workspace ${workspaceId}`,
-          )
-        }
-        return rowToType(cur.rows[0])
+        // A read-only update returns the same current catalog projection as
+        // getEntityType, including fields consumed by later legacy callers.
+        return canonicalTransaction(actor(workspaceId,options),async client => {
+          const current = await client.query<EntityTypeRow>(
+            `SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE id=$1 AND workspace_id=$2`,[id,workspaceId])
+          if (!current.rows[0]) throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
+          return projectCanonicalType(client,current.rows[0])
+        })
       }
 
       values.push(id, workspaceId)
-      const result = await queryWithRLS<EntityTypeRow>(
-        workspaceId,
+      const idIndex = idx++
+      const workspaceIndex = idx++
+      const expected = options?.expectedSchemaVersion
+      if (expected !== undefined && (!Number.isSafeInteger(expected) || expected < 1)) {
+        throw new ApplicationPlatformError('schema_version_conflict', 'A valid expected schema version is required.')
+      }
+      const versionClause = expected === undefined ? '' : ` AND schema_version = $${idx}`
+      if (expected !== undefined) values.push(expected)
+      const result = await canonicalQuery<EntityTypeRow>(
+        actor(workspaceId, options),
         `UPDATE entity_types SET ${sets.join(', ')}
-         WHERE id = $${idx++} AND workspace_id = $${idx}
+         WHERE id = $${idIndex} AND workspace_id = $${workspaceIndex}${versionClause}
          RETURNING ${ENTITY_TYPE_SELECT}`,
         values,
       )
       if (!result.rows[0]) {
-        throw new Error(
-          `updateEntityType: entity_type ${id} not found in workspace ${workspaceId}`,
-        )
+        throw new ApplicationPlatformError(expected === undefined ? 'access_unavailable' : 'schema_version_conflict',
+          'The schema is unavailable or its version changed.')
       }
       return rowToType(result.rows[0])
     },
 
-    async renameProperty(workspaceId, entityTypeId, oldName, newName) {
+    async renameProperty(workspaceId, entityTypeId, oldName, newName, options) {
       // Atomic schema-rename + data-migration. Two writes that must
       // commit together — a partial rename strands every cell value
       // behind a key the schema no longer lists (or vice-versa). Run both
       // in one transaction.
       //
-      // SYSTEM operation: a workspace-schema change, scoped by explicit
-      // `WHERE workspace_id = $` clauses (not by per-user RLS), authorized at
-      // the chat-tool layer (`renameProperty` tool). It runs on the system
-      // pool (owner, bypasses RLS) — there is no acting USER here, so scoping
-      // it by `app.current_user_id` would be meaningless (a workspace id is not
-      // a user id; the per-user policy would hide the rows).
-      //
-      // The validation (oldName exists, newName free) lives in the chat-tool
-      // layer; the store performs the rewrite and re-validates the resulting
-      // `PropertyDef[]` shape.
-      const client = await getPool().connect()
+      const ownTransaction = !boundActor?.transaction
+      const client = boundActor?.transaction ?? await getAppPool().connect()
       try {
-        await client.query('BEGIN')
+        if (ownTransaction) await client.query('BEGIN')
+        await applyRLSGucs(client, actor(workspaceId, options))
+        await client.query('SET CONSTRAINTS application_record_value_valid, application_schema_value_valid DEFERRED')
 
         // 1. Read the current type (workspace-scoped) so we can rewrite
         //    the matching PropertyDef and re-validate the new list.
         const cur = await client.query<EntityTypeRow>(
           `SELECT ${ENTITY_TYPE_SELECT} FROM entity_types
-           WHERE id = $1 AND workspace_id = $2`,
+           WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
           [entityTypeId, workspaceId],
         )
         if (!cur.rows[0]) {
-          throw new Error(
-            `renameProperty: entity_type ${entityTypeId} not found in workspace ${workspaceId}`,
-          )
+          throw new ApplicationPlatformError('access_unavailable', 'The schema is unavailable.')
         }
         const currentProps = cur.rows[0].properties
         if (!currentProps.some((p) => p.name === oldName)) {
-          throw new Error(
-            `renameProperty: property "${oldName}" not found on entity_type ${entityTypeId}`,
-          )
+          throw new ApplicationPlatformError('invalid_schema', 'The property rename is unavailable.')
         }
         if (currentProps.some((p) => p.name === newName)) {
           throw new Error(
@@ -489,6 +413,9 @@ export function createDbDocEntityStore(): DocEntityStore {
           createdBy: null,
         })
 
+        if (options?.expectedSchemaVersion !== undefined && cur.rows[0].schemaVersion !== options.expectedSchemaVersion) {
+          throw new ApplicationPlatformError('schema_version_conflict', 'The schema changed. Refresh the preview.')
+        }
         // 2. Write the schema back + bump schema_version (a property
         //    rename is a schema change — clients keying caches on
         //    (entityTypeId, schemaVersion) must invalidate).
@@ -507,26 +434,27 @@ export function createDbDocEntityStore(): DocEntityStore {
         //    bind values, never interpolated into the SQL string.
         await client.query(
           `UPDATE entity_instances
-             SET data = (data - $1) || jsonb_build_object($2, data -> $1),
+             SET data = (data - $1) || jsonb_build_object($2::text, data -> $1::text),
                  last_edited_at = now()
            WHERE entity_type_id = $3 AND workspace_id = $4 AND data ? $1`,
           [oldName, newName, entityTypeId, workspaceId],
         )
 
-        await client.query('COMMIT')
+        if (ownTransaction) await client.query('COMMIT')
         return rowToType(updated.rows[0])
       } catch (err) {
-        await client.query('ROLLBACK').catch(() => {})
+        if (ownTransaction) await client.query('ROLLBACK').catch(() => {})
+        if ((err as { code?: string }).code === '42501') throw new ApplicationPlatformError('access_unavailable','The schema is unavailable.')
         throw err
       } finally {
-        await rollbackAndRelease(client)
+        if (ownTransaction) await rollbackAndRelease(client)
       }
     },
 
-    async deleteEntityType(workspaceId, id) {
+    async deleteEntityType(workspaceId, id, options) {
       // Instances cascade-delete via the FK on `entity_instances.entity_type_id`.
-      await queryWithRLS(
-        workspaceId,
+      await canonicalQuery(
+        actor(workspaceId, options),
         `DELETE FROM entity_types
          WHERE id = $1 AND workspace_id = $2`,
         [id, workspaceId],
@@ -535,14 +463,10 @@ export function createDbDocEntityStore(): DocEntityStore {
 
     // ── EntityInstance CRUD ───────────────────────────────────────────
 
-    async createEntity(input) {
-      // Validate the wire shape of every cell against the doc-schema
-      // discriminated union. We do NOT cross-check `data` keys against
-      // the entity-type's `properties` here — that's a tool-layer
-      // concern (P1H surfaces a useful error to the chat model). See the
-      // file header for the rationale.
+    async createEntity(input, options) {
+      // Wire shape is checked here; canonical SQL also checks the locked declared schema.
       docEntityInstanceSchema.parse({
-        id: '00000000-0000-0000-0000-000000000000',
+        id: input.id ?? '00000000-0000-0000-0000-000000000000',
         entityTypeId: input.entityTypeId,
         workspaceId: input.workspaceId,
         data: input.data,
@@ -556,45 +480,48 @@ export function createDbDocEntityStore(): DocEntityStore {
         lastEditedBy: input.lastEditedBy,
       })
 
-      const result = await queryWithRLS<EntityInstanceRow>(
-        input.createdBy ?? input.workspaceId,
-        `INSERT INTO entity_instances
-           (entity_type_id, workspace_id, data, source_app, created_by, last_edited_by,
-            sensitivity, compartments, project_ids)
-         VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9)
-         RETURNING ${ENTITY_INSTANCE_SELECT}`,
-        [
-          input.entityTypeId,
-          input.workspaceId,
-          JSON.stringify(input.data),
-          input.sourceApp,
-          input.createdBy,
-          input.lastEditedBy,
-          input.sensitivity ?? 'internal',
-          input.compartments ?? [],
-          input.projectIds ?? [],
-        ],
-      )
-      return rowToInstance(result.rows[0])
+      return canonicalTransaction(actor(input.workspaceId, options, input.createdBy), async client => {
+        const result = await client.query<Omit<EntityInstanceRow, 'data'>>(
+          `INSERT INTO entity_instances
+             (id, entity_type_id, workspace_id, data, source_app, created_by, last_edited_by,
+              sensitivity, compartments, project_ids)
+           VALUES ($10, $1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9)
+           RETURNING ${ENTITY_INSTANCE_METADATA_SELECT}`,
+          [
+            input.entityTypeId,
+            input.workspaceId,
+            JSON.stringify(input.data),
+            input.sourceApp,
+            input.createdBy,
+            input.lastEditedBy,
+            input.sensitivity ?? 'internal',
+            input.compartments ?? [],
+            input.projectIds ?? [],
+            input.id ?? randomUUID(),
+          ],
+        )
+        return projectCanonicalRow(client, result.rows[0])
+      })
     },
 
-    async getEntity(workspaceId, id) {
-      const result = await queryWithRLS<EntityInstanceRow>(
-        workspaceId,
-        `SELECT ${ENTITY_INSTANCE_SELECT} FROM entity_instances
-         WHERE id = $1 AND workspace_id = $2`,
-        [id, workspaceId],
-      )
-      return result.rows[0] ? rowToInstance(result.rows[0]) : null
+    async getEntity(workspaceId, id, options) {
+      return canonicalTransaction(actor(workspaceId, options), async client => {
+        const result = await client.query<Omit<EntityInstanceRow, 'data'>>(
+          `SELECT ${ENTITY_INSTANCE_METADATA_SELECT} FROM public.entity_instances
+           WHERE id=$1 AND workspace_id=$2 AND NOT scope_review_state_held('entity_instance',id)`, [id, workspaceId])
+        const row = result.rows[0]
+        if (!row) return null
+        return projectCanonicalRow(client, row)
+      })
     },
 
-    async updateEntity(workspaceId, id, patch) {
+    async updateEntity(workspaceId, id, patch, options) {
       const sets: string[] = []
       const values: unknown[] = []
       let idx = 1
 
       if (patch.data !== undefined) {
-        sets.push(`data = $${idx++}::jsonb`)
+        sets.push(`data = data || $${idx++}::jsonb`)
         values.push(JSON.stringify(patch.data))
       }
       if (patch.lastEditedBy !== undefined) {
@@ -625,85 +552,119 @@ export function createDbDocEntityStore(): DocEntityStore {
       // of `now()` on insert, but UPDATE needs an explicit set.
       sets.push(`last_edited_at = now()`)
 
-      values.push(id, workspaceId)
-      const result = await queryWithRLS<EntityInstanceRow>(
-        workspaceId,
-        `UPDATE entity_instances SET ${sets.join(', ')}
-         WHERE id = $${idx++} AND workspace_id = $${idx}
-         RETURNING ${ENTITY_INSTANCE_SELECT}`,
-        values,
-      )
-      if (!result.rows[0]) {
-        throw new Error(
-          `updateEntity: entity_instance ${id} not found in workspace ${workspaceId}`,
-        )
+      if (patch.data !== undefined) {
+        for (const cell of Object.values(patch.data)) cellValueSchema.parse(cell)
       }
-      return rowToInstance(result.rows[0])
+      const expected = options?.expectedRecordVersion
+      if (expected !== undefined && !/^[1-9]\d*$/.test(expected)) {
+        throw new ApplicationPlatformError('record_version_conflict', 'A valid expected record version is required.')
+      }
+      values.push(id, workspaceId)
+      const idIndex = idx++
+      const workspaceIndex = idx++
+      const versionClause = expected === undefined ? '' : ` AND record_version = $${idx}::bigint`
+      if (expected !== undefined) values.push(expected)
+      return canonicalTransaction(actor(workspaceId, options), async client => {
+        const previousIntent = (await client.query<{ value: string | null }>("SELECT current_setting('app.application_native_write_intent',true) AS value")).rows[0]?.value
+        await client.query("SELECT set_config('app.application_native_write_intent',$1,true)",
+          [JSON.stringify({ id: id.toLowerCase(),fields: Object.keys(patch.data ?? {}) })])
+        const result = await client.query<Omit<EntityInstanceRow, 'data'>>(
+          `UPDATE entity_instances SET ${sets.join(', ')}
+           WHERE id = $${idIndex} AND workspace_id = $${workspaceIndex}${versionClause}
+           RETURNING ${ENTITY_INSTANCE_METADATA_SELECT}`,
+          values,
+        )
+        await client.query("SELECT set_config('app.application_native_write_intent',$1,true)",[previousIntent ?? ''])
+        if (!result.rows[0]) {
+          throw new ApplicationPlatformError(expected === undefined ? 'access_unavailable' : 'record_version_conflict',
+            'The record is unavailable or its version changed.')
+        }
+        return projectCanonicalRow(client, result.rows[0])
+      })
     },
 
-    async deleteEntity(workspaceId, id) {
-      await queryWithRLS(
-        workspaceId,
-        `DELETE FROM entity_instances
-         WHERE id = $1 AND workspace_id = $2`,
-        [id, workspaceId],
-      )
+    async deleteEntity(workspaceId, id, options) {
+      const expected = options?.expectedRecordVersion
+      if (expected !== undefined && !/^[1-9]\d*$/.test(expected)) {
+        throw new ApplicationPlatformError('record_version_conflict', 'A valid expected record version is required.')
+      }
+      await canonicalTransaction(actor(workspaceId, options), async client => {
+        const result = await client.query(
+          `DELETE FROM entity_instances
+           WHERE id = $1 AND workspace_id = $2${expected === undefined ? '' : ' AND record_version=$3::bigint'}`,
+          expected === undefined ? [id, workspaceId] : [id, workspaceId, expected],
+        )
+        if (expected !== undefined && result.rowCount !== 1) throw new ApplicationPlatformError('record_version_conflict', 'The record is unavailable or its version changed.')
+      })
     },
 
     // ── Query ─────────────────────────────────────────────────────────
 
-    async queryEntities(workspaceId, entityTypeId, filters, sort, limit, cursor) {
-      const cap = Math.min(Math.max(limit ?? 100, 1), 500)
-      const build: WhereBuild = {
-        clauses: [],
-        values: [],
-        nextIdx: 1,
-      }
-      build.values.push(workspaceId)
-      build.clauses.push(`workspace_id = $${build.nextIdx++}`)
-      build.values.push(entityTypeId)
-      build.clauses.push(`entity_type_id = $${build.nextIdx++}`)
-
-      if (filters && filters.length > 0) {
-        for (const f of filters) buildFilterClause(f, build)
-      }
-
-      // Cursor: tie-breaker pagination. The cursor encodes the last
-      // row's (created_at, id) — we ask for everything strictly less
-      // than that pair (under DESC order).
-      if (cursor) {
-        const decoded = decodeCursor(cursor)
-        if (decoded) {
-          build.values.push(decoded.createdAt)
-          const createdAtIdx = build.nextIdx++
-          build.values.push(decoded.id)
-          const idIdx = build.nextIdx++
-          build.clauses.push(
-            `(created_at, id) < ($${createdAtIdx}::timestamptz, $${idIdx})`,
-          )
-        }
-      }
-
-      build.values.push(cap + 1) // fetch one extra to detect more pages
-      const limitIdx = build.nextIdx++
-
-      const result = await queryWithRLS<EntityInstanceRow>(
-        workspaceId,
-        `SELECT ${ENTITY_INSTANCE_SELECT} FROM entity_instances
-         WHERE ${build.clauses.join(' AND ')}
-         ${buildOrderBy(sort)}
-         LIMIT $${limitIdx}`,
-        build.values,
-      )
-
-      const rows = result.rows.map(rowToInstance)
-      let nextCursor: string | undefined
-      if (rows.length > cap) {
-        rows.pop()
-        const last = result.rows[result.rows.length - 2]
-        nextCursor = encodeCursor(last.createdAt, last.id)
-      }
-      return { rows, nextCursor }
+    async queryEntities(workspaceId, entityTypeId, filters, sort, limit, cursor, options) {
+      return canonicalTransaction(actor(workspaceId, options), async client => {
+        const schemas = await client.query<EntityTypeRow>(`SELECT ${ENTITY_TYPE_SELECT} FROM public.entity_types WHERE workspace_id=$1 AND id=$2`, [workspaceId, entityTypeId])
+        if (!schemas.rows[0]) throw new ApplicationPlatformError('access_unavailable', 'The schema is unavailable.')
+        const definition = canonicalGenericResource(rowToType(schemas.rows[0]))
+        const query = applicationQuerySchema.safeParse({ filters, sort, limit, cursor })
+        if (!query.success) throw new ApplicationPlatformError('invalid_value', 'The declared query is invalid.')
+        const { result } = await queryCanonicalGenericRecords({ transaction: client, workspaceId }, definition, query.data)
+        const metadata = await client.query<Omit<EntityInstanceRow, 'data'>>(`SELECT ${ENTITY_INSTANCE_METADATA_SELECT} FROM public.entity_instances
+          WHERE workspace_id=$1 AND entity_type_id=$2 AND id=ANY($3::uuid[])`, [workspaceId, entityTypeId, result.records.map(record => record.ref.id)])
+        const byId = new Map(metadata.rows.map(row => [row.id, row]))
+        const rows = result.records.map(record => {
+          const row = byId.get(record.ref.id)
+          if (!row || row.recordVersion !== record.ref.version) throw new ApplicationPlatformError('access_unavailable', 'The record changed.')
+          return projectedInstance(row,rowToType(schemas.rows[0]),record)
+        })
+        const sources = boundScopeSources(result)
+        bindScopeSources(rows, sources)
+        return bindScopeSources({ rows, ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) }, sources)
+      })
     },
   }
+}
+
+export const canonicalApplicationRecordMutationSchema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('create'), type: z.string(), id: z.string().uuid().optional(), data: z.record(cellValueSchema) }).strict(),
+  z.object({ operation: z.literal('patch'), type: z.string(), id: z.string().uuid(), expectedVersion: z.string().regex(/^[1-9]\d*$/), data: z.record(cellValueSchema) }).strict(),
+  z.object({ operation: z.literal('delete'), type: z.string(), id: z.string().uuid(), expectedVersion: z.string().regex(/^[1-9]\d*$/) }).strict(),
+])
+export type CanonicalApplicationRecordMutation = z.infer<typeof canonicalApplicationRecordMutationSchema>
+
+/** Same store/SQL constraints for human and exact app releases; never an owner pool. */
+export async function applyCanonicalApplicationRecordMutation(context: ApplicationOperationContext<PoolClient>, typeId: string,
+  raw: CanonicalApplicationRecordMutation): Promise<ApplicationResourceRef> {
+  const input = canonicalApplicationRecordMutationSchema.parse(raw), access = context.execution.security.access
+  const id = input.id ?? randomUUID(), data = 'data' in input ? input.data : {}
+  if (Object.keys(data).length > 128) throw new ApplicationPlatformError('invalid_value', 'The change is too large.')
+  const application = getApplicationExecutionBinding(context.execution)
+  if (application) {
+    const creation = input.operation === 'create' ? applicationAuthorityCreationScope(application.state.layers,
+      { workspaceId: access.workspaceId, origin: { kind: 'generic', entityTypeId: typeId }, typeKey: input.type, id, version: 'new' }, Object.keys(data), access)
+      : { sensitivity: 'internal', compartments: [], projectIds: [] }
+    const result = await context.transaction.query<{ ref: unknown }>('SELECT application_generic_write($1,$2,$3,$4,$5,$6,$7,$8,$9) AS ref',
+      [typeId, input.type, input.operation, id, 'expectedVersion' in input ? input.expectedVersion : null, JSON.stringify(data),
+        creation.sensitivity, creation.compartments, creation.projectIds])
+    return applicationResourceRefSchema.parse(result.rows[0]?.ref)
+  }
+  const store = createDbDocEntityStore({ actorUserId: access.userId, transaction: context.transaction })
+  let version: string
+  if (input.operation === 'create') {
+    const record = await store.createEntity({ id, entityTypeId: typeId, workspaceId: access.workspaceId, data: input.data, sourceApp: 'api',
+      createdBy: access.userId, lastEditedBy: access.userId, sensitivity: 'internal',
+      compartments: [...context.execution.security.writeDefaults.compartments], projectIds: [...context.execution.security.writeDefaults.projectIds] })
+    version = record.recordVersion!
+  } else {
+    const record = await store.getEntity(access.workspaceId, id)
+    if (!record || record.entityTypeId !== typeId) throw new ApplicationPlatformError('access_unavailable', 'The record is unavailable.')
+    if (input.operation === 'patch') {
+      const next = await store.updateEntity(access.workspaceId, id, { data: input.data, lastEditedBy: access.userId },
+        { actorUserId: access.userId, expectedRecordVersion: input.expectedVersion })
+      version = next.recordVersion!
+    } else {
+      await store.deleteEntity(access.workspaceId, id, { actorUserId: access.userId, expectedRecordVersion: input.expectedVersion })
+      version = String(BigInt(record.recordVersion!) + 1n)
+    }
+  }
+  return { workspaceId: access.workspaceId, origin: { kind: 'generic', entityTypeId: typeId }, typeKey: input.type, id, version }
 }

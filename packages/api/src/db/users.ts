@@ -84,6 +84,8 @@ export async function findOrCreateUser(params: {
   name?: string
   avatarUrl?: string
   timezone?: string
+  /** Set only by the verified native sign-in adapter; grants no data authority. */
+  onboarding?: 'workspace' | 'application'
 }): Promise<{ user: User; isNew: boolean }> {
   // Try to find existing
   const existing = await query<User>(
@@ -175,7 +177,7 @@ export async function findOrCreateUser(params: {
   // end-users contained in the customer's single workspace.
   // See docs/architecture/platform/workspaces.md → "Primary assistant" and
   // docs/architecture/features/public-api.md → "Identity & sessions".
-  if (params.authProvider === 'channel') {
+  if (params.authProvider === 'channel' || params.onboarding === 'application') {
     return { user, isNew: true }
   }
 

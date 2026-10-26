@@ -77,11 +77,11 @@ describe('[COMP:mcp/tool-search] buildToolIndex', () => {
 
 describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
   function makeSearchTools(overrides?: Map<string, McpToolSetting>) {
-    const index = buildToolIndex([
-      { kind: 'remote', server: cgovServer, serverUrl: cgovServer.url, callMcpTool: async () => ({}) },
-      { kind: 'remote', server: notionServer, serverUrl: notionServer.url, callMcpTool: async () => ({}) },
-    ])
     const callMcpTool = vi.fn(async () => ({ result: 'ok' }))
+    const index = buildToolIndex([
+      { kind: 'remote', server: cgovServer, serverUrl: cgovServer.url, callMcpTool },
+      { kind: 'remote', server: notionServer, serverUrl: notionServer.url, callMcpTool },
+    ])
     const tools = createMcpSearchTools({
       index,
       settingsStore: makeFakeSettingsStore(overrides),
@@ -118,7 +118,7 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     const tools = createMcpSearchTools({
       index: buildToolIndex([{
         kind: 'remote', server: protonServer, serverUrl: protonServer.url,
-        callMcpTool: async () => ({}),
+        callMcpTool,
       }]),
       settingsStore: makeFakeSettingsStore(),
       assistantId: 'a1',
@@ -689,7 +689,7 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
 
   it('mcp_call surfaces MCP errors cleanly', async () => {
     const index = buildToolIndex([
-      { kind: 'remote', server: notionServer, serverUrl: notionServer.url, callMcpTool: async () => ({}) },
+      { kind: 'remote', server: notionServer, serverUrl: notionServer.url, callMcpTool: async () => { throw new Error('connection refused') } },
     ])
     const tools = createMcpSearchTools({
       index,
@@ -705,6 +705,78 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     }, ctx)
     expect(result.isError).toBe(true)
     expect(String(result.data)).toContain('connection refused')
+  })
+
+  it('keeps exact-source dispatch distinct for equal URLs and ignores the legacy generic transport', async () => {
+    const first = vi.fn(async () => ({ source: 'first' })), second = vi.fn(async () => ({ source: 'second' }))
+    const generic = vi.fn(async () => ({ source: 'wrong generic transport' }))
+    const server = { name: 'First source', url: 'https://shared-source.example/mcp', tools: [{ name: 'readRow', description: 'Read a source row.', inputSchema: { type: 'object' } }] }
+    const tools = createMcpSearchTools({ index: buildToolIndex([
+      { kind: 'remote', server, serverUrl: server.url, callMcpTool: first },
+      { kind: 'remote', server: { ...server, name: 'Second source' }, serverUrl: server.url, callMcpTool: second },
+    ]), assistantId: 'a1', userId: 'u1', settingsStore: makeFakeSettingsStore(), callMcpTool: generic, keepDynamicToolsDirect: true,
+      hooks: { preToolUse: async () => ({ action: 'modify', headers: { 'X-Trace': 'source-call' } }) } })
+    expect(JSON.stringify((await tools[1].execute({ server: 'Second source', tool: 'readRow', args: {} }, ctx)).data)).toContain('second')
+    expect(second).toHaveBeenCalledWith(server.url, 'readRow', {}, { 'X-Trace': 'source-call' })
+    expect(first).not.toHaveBeenCalled(); expect(generic).not.toHaveBeenCalled()
+    await tools.find(tool => tool.name === 'mcp_First_source_readRow')!.execute({}, ctx)
+    expect(first).toHaveBeenCalledTimes(1); expect(generic).not.toHaveBeenCalled()
+  })
+
+  it('refuses a lost private dispatcher rather than using a generic URL credential', async () => {
+    const index = buildToolIndex([{ kind: 'remote', server: notionServer, serverUrl: notionServer.url, callMcpTool: async () => ({}) }])
+    for (const entry of index.entries) delete (entry as unknown as { dispatch?: unknown }).dispatch
+    const generic = vi.fn(async () => ({ secret: 'must not be read' }))
+    const [, call] = createMcpSearchTools({ index, settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1', callMcpTool: generic })
+    const result = await call.execute({ server: 'Notion', tool: 'search_pages', args: { query: 'fixture' } }, ctx)
+    expect(result.isError).toBe(true); expect(result.data).toContain('source transport is unavailable')
+    expect(generic).not.toHaveBeenCalled()
+  })
+
+  it('does not serialize private transport callbacks into tool search results', async () => {
+    const callback = vi.fn(async () => ({ secret: 'not search metadata' }))
+    const index = buildToolIndex([{ kind: 'remote', server: notionServer, serverUrl: notionServer.url, callMcpTool: callback }])
+    const [search] = createMcpSearchTools({ index, settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1' })
+    const metadata = JSON.stringify(await search.execute({ query: 'search pages' }, ctx))
+    expect(metadata).not.toMatch(/dispatch|callMcpTool|not search metadata/)
+    expect(callback).not.toHaveBeenCalled()
+  })
+
+  it('advertises stable source IDs, refuses ambiguous labels and keeps the actual hook actor separate from policy ownership', async () => {
+    const first = vi.fn(async () => ({ source: 'first' })), second = vi.fn(async () => ({ source: 'second' }))
+    const sourceIds = ['connector:11111111-1111-4111-8111-111111111111','connector:22222222-2222-4222-8222-222222222222']
+    const server = { name: 'Shared source label', url: 'https://shared-source.example/mcp', tools: [{ name: 'readRow', description: 'Read a row.', inputSchema: { type: 'object' } }] }
+    const preToolUse = vi.fn(async () => undefined), postToolUse = vi.fn(async () => undefined)
+    const index = buildToolIndex([first,second].map((callMcpTool, i) => ({ kind: 'remote' as const, sourceId: sourceIds[i], server, serverUrl: server.url, callMcpTool })))
+    const tools = createMcpSearchTools({ index, assistantId: 'a1', userId: 'credential-owner', settingsStore: makeFakeSettingsStore(),
+      keepDynamicToolsDirect: true, hooks: { preToolUse, postToolUse } })
+    const actual = { ...ctx, userId: 'actual-initiator' }
+    const search = String((await tools[0].execute({ query: 'read row' }, actual)).data)
+    for (const id of sourceIds) expect(search).toContain(id)
+    expect(search).toContain('Shared source label')
+    expect((await tools[1].execute({ server: 'Shared source label', tool: 'readRow', args: {} }, actual)).isError).toBe(true)
+    expect(first).not.toHaveBeenCalled(); expect(second).not.toHaveBeenCalled()
+    expect(JSON.stringify((await tools[1].execute({ server: sourceIds[1], tool: 'readRow', args: {} }, actual)).data)).toContain('second')
+    expect(preToolUse).toHaveBeenCalledWith(expect.objectContaining({ sourceId: sourceIds[1], serverName: 'Shared source label', userId: 'actual-initiator' }))
+    expect(postToolUse).toHaveBeenCalledWith(expect.objectContaining({ sourceId: sourceIds[1], serverName: 'Shared source label', userId: 'actual-initiator' }))
+    expect(tools.some(tool => tool.name === 'mcp_Shared_source_label_readRow')).toBe(false)
+    expect(() => buildToolIndex([first,second].map(callMcpTool => ({ kind: 'remote' as const, sourceId: sourceIds[0], server, serverUrl: server.url, callMcpTool })))).toThrow('Duplicate remote source identity')
+  })
+
+  it('keeps unique saved labels/direct aliases compatible and shares policy denial with the stable ID', async () => {
+    const sourceId = 'connector:33333333-3333-4333-8333-333333333333', callback = vi.fn(async () => ({ source: 'one' }))
+    const source = { kind: 'remote' as const, sourceId, server: notionServer, serverUrl: notionServer.url, callMcpTool: callback }
+    const tools = createMcpSearchTools({ index: buildToolIndex([source]), assistantId: 'a1', userId: 'u1', settingsStore: makeFakeSettingsStore(), keepDynamicToolsDirect: true })
+    expect((await tools[1].execute({ server: 'Notion', tool: 'search_pages', args: { query: 'fixture' } }, ctx)).isError).toBeFalsy()
+    expect(tools.some(tool => tool.name === 'mcp_Notion_search_pages')).toBe(true)
+    const overrides = new Map<string, McpToolSetting>()
+    overrides.set('Notion:search_pages', { id: 'deny', assistantId: 'a1', userId: 'u1', serverName: 'Notion', toolName: 'search_pages',
+      policy: 'block', classification: 'read', timesAllowed: 0, timesDenied: 0 })
+    const [, call] = createMcpSearchTools({ index: buildToolIndex([source]), assistantId: 'a1', userId: 'u1', settingsStore: makeFakeSettingsStore(overrides) })
+    callback.mockClear()
+    expect((await call.execute({ server: 'Notion', tool: 'search_pages', args: { query: 'fixture' } }, ctx)).isError).toBe(true)
+    expect((await call.execute({ server: sourceId, tool: 'search_pages', args: { query: 'fixture' } }, ctx)).isError).toBe(true)
+    expect(callback).not.toHaveBeenCalled()
   })
 })
 

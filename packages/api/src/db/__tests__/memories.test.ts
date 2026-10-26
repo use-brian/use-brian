@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('../client.js', () => ({
-  query: vi.fn(),
+vi.mock('../client.js', () => {
+  const query = vi.fn()
+  return {
+  query,
+  queryGated: (_context: unknown,...args: unknown[]) => query(...args),
   queryWithRLS: vi.fn(),
   getPool: vi.fn(),
   applyRLSGucs: vi.fn(),
-}))
+} })
 
 import {
   createMemory,
@@ -208,6 +211,20 @@ describe('[COMP:memory/bi-temporal-reads] reads filter valid_to IS NULL (SQL sha
 })
 
 describe('[COMP:api/memory-store] updateMemory access scoping', () => {
+  it('rejects a stale trusted predecessor version inside the locked transaction before any successor write', async () => {
+    const statements:string[]=[]
+    const client={query:vi.fn(async(sql:string)=>{
+      statements.push(sql)
+      if(sql.startsWith('SELECT workspace_id AS'))return{rows:[{workspaceId:'w_1'}]}
+      if(adm(sql))return adm(sql)
+      if(sql.includes('FROM memories')&&sql.includes('FOR UPDATE'))return{rows:[{id:'m_1',workspaceId:'w_1',scopeVersion:'2'}]}
+      return{rows:[]}
+    })}
+    await expect(updateMemory('m_1',{detail:'Fictional stale edit'},{workspaceId:'w_1',userId:'u_1',assistantId:'a_1',assistantKind:'standard'},client as never,
+      {expectedVersion:'1',writeFields:['detail'],assistantId:'a_1',sessionId:'s_1',contextFingerprint:'a'.repeat(64)})).rejects.toMatchObject({message:'scope_source_changed'})
+    expect(statements.some(sql=>/^INSERT INTO memories/.test(sql)||sql.startsWith('UPDATE memories'))).toBe(false)
+  })
+
   // WS3 read/write-asymmetry regression: getMemoryById scopes reads with
   // buildAccessPredicate, but updateMemory superseded by id on the owner pool
   // (RLS-bypassing) with no scope — so a full-UUID edit from the model tool or

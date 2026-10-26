@@ -22,6 +22,8 @@ import {
   fitMessagesToBudget, resolveInputTokenLimit, MODEL_CONTEXT_FIT_RATIO,
   isContextOverflowError,
   sanitize as sanitizeAnalytics,
+  ContextScopeAccumulator, executionToolContext, scopeEvidenceFromRows,
+  boundScopeSources, bindScopeSources, DerivedScopeError,
 } from '@use-brian/core'
 import type {
   Message, LLMProvider, MemoryStore, AnalyticsLogger,
@@ -29,9 +31,10 @@ import type {
   EpisodicStore, EpisodicMemoryRecord, UsageStore,
   SessionStateStore,
   CurrentAuthorityBoundary,
+  ExecutionContext, SessionContextAuthority,
 } from '@use-brian/core'
 import {
-  setCompactSummaryAndBoundary, toStampedMessages, findSessionById,
+  setCompactSummaryAndBoundary, readCompactSummary, toStampedMessages,
 } from '../db/sessions.js'
 
 /**
@@ -46,6 +49,7 @@ import type { Session, SessionMessage } from '../db/sessions.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
+import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
 
 /**
  * Hard cap on the persisted `sessions.compact_summary` text. Acts as a
@@ -314,6 +318,8 @@ export type ProactiveCompactionParams = {
   persistSessionSummary?: boolean
   /** Sticky live turn authority for every derived read/write boundary. */
   authority?: CurrentAuthorityBoundary
+  /** The already-resolved R1 actor and complete host-owned model evidence. */
+  modelContext?: { execution: ExecutionContext; accumulator: ContextScopeAccumulator }
 }
 
 export type ProactiveCompactionResult = {
@@ -364,7 +370,7 @@ export async function runProactiveCompaction(
   params: ProactiveCompactionParams,
 ): Promise<ProactiveCompactionResult> {
   const {
-    sessionMessages, timezone, senderNames, assistantVoices, session,
+    sessionMessages: suppliedRows, timezone, senderNames, assistantVoices, session,
     tier, provider, systemPrompt,
     assistantId, userId, ownerId, channelType,
     memoryStore, episodicStore, sessionStateStore, analytics,
@@ -372,14 +378,50 @@ export async function runProactiveCompaction(
     usageStore, userMessageId,
     workspaceId, chatEpisodeIngestor,
   } = params
+  let sessionMessages = suppliedRows
   const persistLongTermContext = params.persistLongTermContext !== false
   const persistSessionSummary = params.persistSessionSummary !== false
-  const compactionModel = params.model ?? 'gemini-flash'
-  const guarded = <T>(operation: () => Promise<T>): Promise<T> => params.authority
-    ? params.authority.execute(operation)
-    : operation()
+  const compactionModel = params.model ?? 'gemini-3.6-flash-pro'
+  const binding = params.modelContext
+  const modelContext = binding ? {
+    ...executionToolContext(binding.execution, { appId: 'Use Brian' }),
+    scopeAccumulator: binding.accumulator,
+  } : undefined
+  const assertModelInput = async () => {
+    if (!modelContext) {
+      if (sessionMessages.some((row) => boundScopeSources(row).length > 0)) {
+        throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+      }
+      return
+    }
+    if (params.modelContext !== binding || binding!.execution !== modelContext.executionContext
+      || binding!.accumulator !== modelContext.scopeAccumulator
+      || !(modelContext.scopeAccumulator instanceof ContextScopeAccumulator)) {
+      throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+    }
+    await modelContext.executionContext!.security.authority.assertCurrent()
+    await assertSourceModelInputAuthority(modelContext)
+  }
+  const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
+    await assertModelInput()
+    try {
+      const result = await (params.authority ? params.authority.execute(operation) : operation())
+      await assertModelInput()
+      return result
+    } catch (error) {
+      if (error instanceof DerivedScopeError) throw Object.assign(error, { reason: 'authority_changed' as const, retrySafe: false })
+      throw error
+    }
+  }
 
   await params.authority?.assertCurrent()
+  const priorSummary = persistSessionSummary ? await readCompactSummary(session.id, binding) : null
+  if (priorSummary) sessionMessages = suppliedRows.filter(row => row.sequenceNum >= priorSummary.boundarySequence)
+  else if (persistSessionSummary && binding && session.compactBoundarySequence !== null) {
+    throw Object.assign(new DerivedScopeError('scope_source_changed'), { reason: 'authority_changed' as const, retrySafe: false })
+  }
+  if (modelContext) modelContext.scopeAccumulator.note(scopeEvidenceFromRows(sessionMessages))
+  await assertModelInput()
 
   const breaker = params.circuitBreaker ?? defaultCompactionBreaker
   const sessionId = session.id
@@ -394,12 +436,9 @@ export async function runProactiveCompaction(
   // model sees prior context on every turn. `findRecentSplit` treats
   // role='system' as a non-anchor, so a prepended system row at index 0
   // never gets chosen as the tail anchor.
-  const summaryPrepended = persistSessionSummary
-    && typeof session.compactSummary === 'string'
-    && session.compactSummary.length > 0
-  const summaryOffset = summaryPrepended ? 1 : 0
-  const stampedWithSummary: Message[] = summaryPrepended
-    ? [{ role: 'system', content: session.compactSummary as string }, ...stamped]
+  const summaryPrepended = priorSummary !== null
+  const stampedWithSummary: Message[] = priorSummary
+    ? [bindScopeSources({ role: 'system', content: priorSummary.summary }, boundScopeSources(priorSummary)), ...stamped]
     : stamped
 
   // 3. Fast path: no compaction needed — return the pass-through with
@@ -449,34 +488,22 @@ export async function runProactiveCompaction(
   }
 
   try {
-    // 4. Split on the stamped-with-summary array. Because stamped is
-    // 1:1 with sessionMessages, `splitIdx - summaryOffset` maps cleanly
-    // back to a DB row index — no reference-set tricks required.
-    //
-    // findRecentSplit always anchors on a plain user TEXT message, so
-    // the split never falls between an assistant tool_use and its user
-    // tool_result pair (which is a "user with only tool_result" row,
-    // not a plain user text). That means pairing each half separately
-    // below is safe — no cross-boundary repair is ever needed.
-    const splitIdx = findRecentSplit(stampedWithSummary, {
+    // 4. Split only real DB rows. A prepended summary must not change the
+    // current-user anchor, unconditional head snap or sequence-number mapping.
+    const firstRecentDbIdx = findRecentSplit(stamped, {
       tailBudgetTokens: recentTailBudgetTokens(tier, channelClass),
     })
-    const firstRecentDbIdx = Math.max(0, splitIdx - summaryOffset)
 
     const stampedCompactable = stamped.slice(0, firstRecentDbIdx)
     const stampedRecent = stamped.slice(firstRecentDbIdx)
 
-    // Exclude the prepended summary from the LLM-facing compactable
-    // slice. We never passed it into `stampedCompactable` in the first
-    // place (summary lives only in stampedWithSummary[0]), so this is
-    // just the stamped compactable directly. Kept as its own name to
-    // make the "don't summarize a summary" intent visible at the call
-    // site.
-    const compactableForLLM = stampedCompactable
+    // The prior certified summary represents older, no-longer-loaded rows.
+    // Preserve its content and evidence without treating it as a DB anchor.
+    const compactableForLLM = priorSummary ? [stampedWithSummary[0], ...stampedCompactable] : stampedCompactable
 
     // Degenerate: nothing new to summarize. Return the pass-through
     // unchanged — no boundary update, no LLM spend.
-    if (compactableForLLM.length === 0) {
+    if (stampedCompactable.length === 0) {
       const passthrough = summaryPrepended
         ? [stampedWithSummary[0], ...ensureToolResultPairing(stamped)]
         : ensureToolResultPairing(stamped)
@@ -497,19 +524,19 @@ export async function runProactiveCompaction(
     // yet saved via saveMemory. Runs regex + cheap LLM pass.
     // Best-effort: extraction failure must not block compaction, except
     // authority loss, which always aborts the turn.
-    if (persistLongTermContext) {
+    if (persistLongTermContext && modelContext) {
       try {
-        // System-level read — pre-compaction extraction runs across the
-        // entire memory set for the (assistant, user) pair, so it uses
-        // the privileged-service-exception path (no per-viewer
-        // projection).
-        const existingIndex = await guarded(() => memoryStore.getIndexSystem(assistantId, userId))
+        const existingIndex = await guarded(() => memoryStore.getIndex(modelContext.executionContext!.security.access))
+        modelContext.scopeAccumulator.note(scopeEvidenceFromRows(existingIndex))
+        await assertModelInput()
         const existingSummaries = existingIndex.map((m) => m.summary)
         const extracted = await guarded(() => extractMemoriesBeforeCompaction({
           provider,
           model: compactionModel,
           messages: compactableForLLM,
           existingMemories: existingSummaries,
+          assertInputAuthority: assertModelInput,
+          sourceEvidence: modelContext.scopeAccumulator.evidence.sources,
         }))
         for (const fact of extracted.facts) {
           // Post-Phase-4 (retire-memory-type): no `type` field on the
@@ -525,6 +552,11 @@ export async function runProactiveCompaction(
             sensitivity: 'internal',
             createdByUserId: userId,
             createdByAssistantId: assistantId,
+            workspaceId: modelContext.executionContext!.security.access.workspaceId,
+            compartments: modelContext.scopeAccumulator.compartments,
+            projectIds: modelContext.scopeAccumulator.projectIds,
+            derivation: { producer: 'compaction:extraction', sources: modelContext.scopeAccumulator.evidence.sources ?? [] },
+            derivationTarget: { userId, assistantId: modelContext.executionContext!.assistant.kind === 'primary' ? null : assistantId },
           }))
         }
         if (extracted.facts.length > 0) {
@@ -557,6 +589,7 @@ export async function runProactiveCompaction(
       systemPrompt,
       profile,
       channelClass,
+      assertInputAuthority: assertModelInput,
     }))
     await guarded(() => recordOverheadUsage({
       usageStore, userId: ownerId, actorUserId: userId,
@@ -583,15 +616,15 @@ export async function runProactiveCompaction(
     // fails (someone else compacted the same session between our read
     // and write), discard our summary and fall through with the
     // pass-through — the other compaction already trimmed the history.
-    const claimed = persistSessionSummary
+    const published = persistSessionSummary
       ? await guarded(() => setCompactSummaryAndBoundary(
-          sessionId,
-          summaryText,
-          newCursor,
-          session.compactBoundarySequence,
+          sessionId, summaryText, newCursor, priorSummary?.boundarySequence ?? null,
+          binding ? { authority: binding, derivation: {
+            producer: 'compaction:session-summary', sources: boundScopeSources(compactResult.boundaryMessage),
+          } } : undefined,
         ))
-      : true
-    if (!claimed) {
+      : null
+    if (persistSessionSummary && !published) {
       console.warn(`[compaction] lost race for session ${sessionId} (cursor moved by concurrent turn)`)
       analytics?.logEvent({
         userId, assistantId, sessionId,
@@ -604,12 +637,13 @@ export async function runProactiveCompaction(
       // Reload the session to pick up the winner's summary; re-prepend
       // and return as pass-through. We skip episodic persistence too
       // since the winner has already done it.
-      const refreshed = await guarded(() => findSessionById(sessionId))
-      const refreshedSummary = refreshed?.compactSummary ?? null
-      const pairedAll = ensureToolResultPairing(stamped)
-      const messagesForFallback: Message[] = refreshedSummary
-        ? [{ role: 'system', content: refreshedSummary }, ...pairedAll]
-        : pairedAll
+      const winner = await guarded(() => readCompactSummary(sessionId, binding))
+      if (!winner) throw Object.assign(new DerivedScopeError('scope_source_changed'), { reason: 'authority_changed' as const, retrySafe: false })
+      const winnerTail = stamped.filter((_, index) => sessionMessages[index].sequenceNum >= winner.boundarySequence)
+      const pairedAll = ensureToolResultPairing(winnerTail)
+      const messagesForFallback: Message[] = [
+        bindScopeSources({ role: 'system', content: winner.summary }, boundScopeSources(winner)), ...pairedAll,
+      ]
       return { messages: messagesForFallback, compacted: false, episodes: [] }
     }
 
@@ -664,12 +698,15 @@ export async function runProactiveCompaction(
       try {
         housekeepingStats = await houseKeepEpisodic({
           episodicStore, memoryStore,
-          sessionId, assistantId, userId,
-          authority: params.authority,
+          sessionId, assistantId, userId, contextAuthority: binding,
+          authority: {
+            assertCurrent: async () => { await params.authority?.assertCurrent(); await assertModelInput() },
+            execute: guarded,
+          },
         })
       } catch (err) {
         if (isAuthorityChangedError(err)) throw err
-        console.error('[compaction] episodic housekeeping failed:', err)
+        console.error('[compaction] episodic housekeeping failed')
       }
     }
 
@@ -679,7 +716,7 @@ export async function runProactiveCompaction(
     if (persistLongTermContext && sessionStateStore) {
       try {
         const cutoff = new Date(Date.now() - SESSION_STATE_RESOLVED_TTL_MS)
-        const purged = await guarded(() => sessionStateStore.purgeResolvedOlderThan(sessionId, cutoff))
+        const purged = await guarded(() => sessionStateStore.purgeResolvedOlderThan(sessionId, cutoff, binding))
         if (purged > 0) {
           analytics?.logEvent({
             userId, assistantId, sessionId,
@@ -689,7 +726,7 @@ export async function runProactiveCompaction(
         }
       } catch (err) {
         if (isAuthorityChangedError(err)) throw err
-        console.error('[compaction] session-state decay failed:', err)
+        console.error('[compaction] session-state decay failed')
       }
     }
 
@@ -701,6 +738,7 @@ export async function runProactiveCompaction(
             userId, assistantId, sessionId,
             topicLabel: ep.topicLabel,
             summary: ep.summary,
+            authority: binding, derivation: { producer: 'compaction:episodic-memory', sources: boundScopeSources(ep) },
             messageSpan: {
               fromSequence: ep.messageSpan.fromSequence,
               toSequence: ep.messageSpan.toSequence,
@@ -709,7 +747,7 @@ export async function runProactiveCompaction(
           }))
         } catch (err) {
           if (isAuthorityChangedError(err)) throw err
-          console.error('[compaction] Failed to persist episodic row for topic', ep.topicLabel, err)
+          console.error('[compaction] Failed to persist episodic row')
         }
       }
       analytics?.logEvent({
@@ -735,7 +773,7 @@ export async function runProactiveCompaction(
     // tail repaired (in case the split broke a tool_use / tool_result
     // pair across the boundary).
     const compactedMessages: Message[] = [
-      { role: 'system', content: summaryText },
+      bindScopeSources({ role: 'system', content: summaryText }, boundScopeSources(published ?? compactResult.boundaryMessage)),
       ...ensureToolResultPairing(stampedRecent),
     ]
 
@@ -804,7 +842,8 @@ function extractSummaryText(content: Message['content']): string {
  */
 function capSummary(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
-  return text.slice(0, maxChars) + '\n\n[summary truncated at cap]'
+  const marker = '\n\n[summary truncated at cap]'
+  return text.slice(0, Math.max(0, maxChars - marker.length)) + marker.slice(0, maxChars)
 }
 
 type HouseKeepParams = {
@@ -813,6 +852,7 @@ type HouseKeepParams = {
   sessionId: string
   assistantId: string
   userId: string
+  contextAuthority?: SessionContextAuthority
   authority?: CurrentAuthorityBoundary
 }
 
@@ -834,8 +874,8 @@ type HouseKeepStats = {
  * Promotions write a `context`-type memory with source
  * 'episodic-graduation' carrying the episodic row's own summary as
  * `detail`. The summary itself is derived so the memory index stays
- * scannable. The original episodic row is deleted after successful
- * memory creation so the topic doesn't live in both tiers.
+ * scannable. The original episodic parent/payload remain as certified ancestry while
+ * retirement removes the topic from active episodic recall.
  *
  * Idempotent-on-failure: per-row errors are logged and skipped so
  * a single bad row never blocks the rest of the pass.
@@ -845,9 +885,24 @@ type HouseKeepStats = {
 export async function houseKeepEpisodic(
   params: HouseKeepParams,
 ): Promise<HouseKeepStats> {
-  const guarded = async <T>(operation: () => Promise<T>): Promise<T> =>
-    params.authority ? params.authority.execute(operation) : operation()
-  const rows = await guarded(() => params.episodicStore.listBySession(params.sessionId))
+  const context = params.contextAuthority
+  if (!context) throw Object.assign(new DerivedScopeError('scope_evidence_missing'), { reason: 'authority_changed' as const, retrySafe: false })
+  const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
+    await context.execution.security.authority.assertCurrent()
+    try {
+      const value = await (params.authority ?? context.execution.security.authority).execute(operation)
+      await context.execution.security.authority.assertCurrent()
+      return value
+    } catch (error) {
+      if (error instanceof DerivedScopeError) throw Object.assign(error, { reason: 'authority_changed' as const, retrySafe: false })
+      throw error
+    }
+  }
+  const rows = await guarded(() => params.episodicStore.listBySession(params.sessionId, context))
+  // Each deterministic maturity decision consumes only its own admitted row.
+  // Siblings are not model inputs or ancestors of one another's publication.
+  // The canonical promoter still includes the complete actual turn closure.
+  await context.execution.security.authority.assertCurrent()
   const toEvict: EpisodicMemoryRecord[] = []
   const toPromote: EpisodicMemoryRecord[] = []
   const toKeep: EpisodicMemoryRecord[] = []
@@ -862,31 +917,17 @@ export async function houseKeepEpisodic(
     }
   }
 
-  // Promote: write memory first, delete episodic on success. If the
-  // memory write fails we deliberately keep the episodic row so the
-  // content isn't lost — next compaction will retry the promotion.
+  // Publication and retirement are one canonical transaction. Retain the
+  // original certified parent/payload so the new memory's source stays current.
   let promoted = 0
   for (const row of toPromote) {
     try {
-      await guarded(() => params.memoryStore.create({
-        assistantId: params.assistantId,
-        userId: params.userId,
-        scope: 'shared',
-        summary: `Recurring topic: ${row.topicLabel}`,
-        detail: row.summary,
-        confidence: 0.7,
-        source: 'episodic-graduation',
-        sourceSessionId: params.sessionId,
-        tags: ['episodic-graduation', row.topicLabel],
-        sensitivity: 'internal',
-        createdByUserId: params.userId,
-        createdByAssistantId: params.assistantId,
-      }))
-      await guarded(() => params.episodicStore.deleteById(row.id))
-      promoted++
+      if (!params.episodicStore.promote) throw new DerivedScopeError('scope_evidence_missing')
+      const result = await guarded(() => params.episodicStore.promote!(row.id, context))
+      if (result.created) promoted++
     } catch (err) {
-      if (isAuthorityChangedError(err)) throw err
-      console.error('[compaction] Failed to promote episodic row', row.id, err)
+      if (err instanceof DerivedScopeError || isAuthorityChangedError(err)) throw Object.assign(err, { reason: 'authority_changed' as const, retrySafe: false })
+      console.error('[compaction] Failed to promote episodic row')
     }
   }
 
@@ -895,20 +936,20 @@ export async function houseKeepEpisodic(
   let evicted = 0
   for (const row of toEvict) {
     try {
-      await guarded(() => params.episodicStore.deleteById(row.id))
+      await guarded(() => params.episodicStore.deleteById(row.id, context))
       evicted++
     } catch (err) {
       if (isAuthorityChangedError(err)) throw err
-      console.error('[compaction] Failed to evict episodic row', row.id, err)
+      console.error('[compaction] Failed to evict episodic row')
     }
   }
 
   // Bump survival on kept rows (batched).
   try {
-    await guarded(() => params.episodicStore.incrementSurvivalCount(toKeep.map((r) => r.id)))
+    await guarded(() => params.episodicStore.incrementSurvivalCount(toKeep.map((r) => r.id), context))
   } catch (err) {
     if (isAuthorityChangedError(err)) throw err
-    console.error('[compaction] Failed to bump survival_count:', err)
+    console.error('[compaction] Failed to bump survival_count')
   }
 
   return { promoted, evicted, kept: toKeep.length }

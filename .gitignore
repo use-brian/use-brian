@@ -43,3 +43,6 @@ apps/app-web/desktop/public/excalidraw/
 /oss-m.png
 /touched.txt
 /ungated.json
+
+# Guarded application-platform verification reports and pre-change logs.
+/output/application-platform/

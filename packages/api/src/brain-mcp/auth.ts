@@ -130,7 +130,7 @@ export type BrainAuthOptions = {
       workspaceId: string
       status: string
       grantedScopes: {
-        data: BrainKeyScope
+        data: import('@use-brian/brian-app').AppDataScope
         store?: AppStoreScope
         agent?: AppAgentScope
       } | null
@@ -212,6 +212,7 @@ export async function authenticateBrainRequest(
     if (oatParts) {
       const row = await opts.authorizationStore.getByIdSystem(oatParts.id)
       if (!row) return null
+      if ((row.audience ?? 'brain') !== 'brain' || row.applicationClientId) return null
       if (row.revokedAt) return null
       if (!row.accessTokenHash || !row.accessTokenExpiresAt) return null
       if (row.accessTokenExpiresAt.getTime() <= Date.now()) return null
@@ -262,6 +263,7 @@ export async function authenticateBrainRequest(
       // so revoking a grant takes effect on the next call rather than on the
       // next token expiry.
       if (!app || app.status !== 'active' || !app.grantedScopes) return null
+      if (app.grantedScopes.data === 'none' || parsed.payload.scope === 'none') return null
       if (app.workspaceId !== parsed.payload.workspaceId) return null
       if (parsed.payload.maxClearance !== null && !isSensitivity(parsed.payload.maxClearance)) return null
       // The narrower of what was granted and what the token claims: a token

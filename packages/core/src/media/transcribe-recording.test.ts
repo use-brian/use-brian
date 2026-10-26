@@ -214,7 +214,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
   function makeMockFetch(windowTexts: Array<{ text: string; finishReason: string }>) {
     let gen = 0
     const calls: string[] = []
-    const generateBodies: Array<{ prompt: string; temperature: number }> = []
+    const generateBodies: Array<{ prompt: string; temperature?: number }> = []
     const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url)
       calls.push(u)
@@ -234,7 +234,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
         }
         generateBodies.push({
           prompt: req.contents?.[0]?.parts?.[0]?.text ?? '',
-          temperature: req.generationConfig?.temperature ?? -1,
+          temperature: req.generationConfig?.temperature,
         })
         const w = windowTexts[Math.min(gen, windowTexts.length - 1)]
         gen++
@@ -472,12 +472,16 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
       'middle part.',
       'closing.',
     ])
-    // The continuation resumed from the last emitted line at normal temperature.
+    // The continuation resumes from the last emitted line without sampling overrides.
     expect(generateBodies()[1].prompt).toContain('AFTER 0:03:20')
-    expect(generateBodies()[1].temperature).toBe(0)
+    expect(generateBodies()[1].temperature).toBeUndefined()
   })
 
-  it('retries a degenerate window with the temperature nudge and recovers coverage', async () => {
+  it.each([
+    { model: 'gemini-2.5-flash', retryTemperature: 0.3 },
+    { model: 'gemini-3.6-flash', retryTemperature: undefined },
+    { model: 'gemini-3.8-flash', retryTemperature: undefined },
+  ])('recovers a degenerate window with compatible sampling for $model', async ({ model, retryTemperature }) => {
     const degenerateWindow = {
       text: [
         '[0:00:00] Speaker 1: Hello and welcome to the call.',
@@ -501,6 +505,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
       buffer: Buffer.from('x'),
       mime: 'audio/mp4',
       durationMs: 120_000,
+      model,
       fetchFn,
     })
 
@@ -513,10 +518,10 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
       'We can offer a 10 percent discount.',
       'Great, we will finalize by Friday.',
     ])
-    // First window is greedy; the retry carries the nudge.
-    expect(generateBodies()[0].temperature).toBe(0)
+    // Every family keeps the prompt nudge; only older models get a temperature bump.
+    expect(generateBodies()[0].temperature).toBe(retryTemperature === undefined ? undefined : 0)
     expect(generateBodies()[0].prompt).not.toContain('repeating a filler word')
-    expect(generateBodies()[1].temperature).toBe(0.3)
+    expect(generateBodies()[1].temperature).toBe(retryTemperature)
     expect(generateBodies()[1].prompt).toContain('repeating a filler word')
     expect(generateBodies()[1].prompt).toContain('AFTER 0:00:08') // resumes from last clean line
   })
@@ -560,7 +565,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
     ])
     // The retry resumed from the last CLEAN utterance, not the hallucinated tail.
     expect(generateBodies()[1].prompt).toContain('AFTER 0:00:02')
-    expect(generateBodies()[1].temperature).toBe(0.3)
+    expect(generateBodies()[1].temperature).toBeUndefined()
   })
 
   it('retries a transient socket reset on a leg instead of failing the whole run', async () => {

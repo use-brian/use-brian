@@ -14,7 +14,7 @@ async function inject(path: string, result: 'short' | 'valid' | 'static' | 'miss
   const overlay = path.split('-')[0]
   const extra = path.endsWith('extra')
   const instances = ['primary', 'extra'].map((id, i) => ({ id, provider: 'shopify', connectorId: 'shopify', label: id, name: id,
-    connected: true, custom: false, url: null, createdAt: new Date(i), healthStatus: 'ok' }))
+    connected: true, custom: false, url: null, createdAt: new Date(i), healthStatus: 'ok', compartments: [], projectIds: [] }))
   const credentials = { type: 'oauth', client_id: 'shopify_oauth', client_secret: packShopifyTokens({ shopDomain: 'fixture.myshopify.com', accessToken: 'durable',
     ...(result === 'static' ? {} : { refreshToken: 'refresh', expiresAt: new Date(Date.now() + (result === 'short' ? 56000 : 3600000)).toISOString() }) }) }
   const refresh = vi.fn(async () => { if (result === 'error') throw new Error('connector_rotation_uncertain'); return result === 'missing' ? null : credentials })
@@ -27,7 +27,7 @@ async function inject(path: string, result: 'short' | 'valid' | 'static' | 'miss
     connectorInstanceStore: { listByWorkspaceSystem: vi.fn(async () => overlay === 'workspace' ? instances : []),
       getCredentialsSystem: load, updateCredentialsSystem: persist,
       ...(durable ? { refreshShopifyCredentialsSystem: refresh } : {}) } as never,
-    ...(overlay === 'grant' ? { connectorGrantStore: { listForTargetSystem: vi.fn(async () => instances.map(instance => ({ instance, grantedByUserId: 'grantor' }))) } as never } : {}),
+    ...(overlay === 'grant' ? { connectorGrantStore: { listForTargetSystem: vi.fn(async () => instances.map(instance => ({ instance, grantedByUserId: 'grantor', compartments: [], projectIds: [] }))) } as never } : {}),
   })
   const name = extra ? [...tools.keys()].find(name => name.startsWith('shopifyGetShop__extra'))! : 'shopifyGetShop'
   expect(tools.has(name)).toBe(true)

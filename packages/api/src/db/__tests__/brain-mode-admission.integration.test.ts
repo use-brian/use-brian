@@ -11,9 +11,6 @@ const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/
 // serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
 await assertLocalFixture()
 const pool = getPool()
-// The disposable role is created after migrations; grant only migration628's
-// authorized entry point, mirroring its production app_user grant.
-await pool.query('GRANT EXECUTE ON FUNCTION hold_memory_successor_descendants(uuid,uuid,bigint) TO assurance_app')
 afterAll(async () => { await getAppPool().end(); await pool.end() })
 async function fixture(mode = 'simple', ready = true) {
   const userId = randomUUID(), workspaceId = randomUUID(), assistantId = randomUUID()

@@ -15,7 +15,7 @@
  *    them free of `useT()`, which keeps them server-renderable with no client
  *    JS - a `loading.tsx` must not itself wait on a chunk to download.
  *  - **Geometry first.** Each mirrors the real surface's measurements (the
- *    `h-11 border-b` chrome row every surface tops out with, the `w-64`
+ *    `h-11 border-b` chrome row every surface tops out with, the `w-56`
  *    sidebar, the `sm:grid-cols-2 lg:grid-cols-3` card grid). A skeleton that
  *    does not match its surface produces a layout jump on swap-in, which feels
  *    worse than the blank it replaced.
@@ -33,29 +33,32 @@ import type { WorkspaceSurface } from "@/lib/doc-page-url";
 import { cn } from "@/lib/utils";
 
 /** The distinct skeleton shapes a workspace surface can wear. */
-export type SurfaceSkeletonKind = "page" | "list" | "grid" | "rail" | "brain";
+export type SurfaceSkeletonKind = "page" | "list" | "grid" | "rail" | "brain" | "none";
 
 /**
  * Which skeleton shape a surface loads behind. Pure so a test can pin that
  * every `WorkspaceSurface` is classified - an unmapped surface would silently
  * fall back to the page shape and paint the wrong frame.
  *
- * `null` (the workspace root, mid-redirect to `/p`) is the page shape, because
- * that redirect always lands on the doc surface.
+ * Home and Chat have no content-shaped loading frame: a fresh conversation
+ * needs only its welcome and composer, not placeholder rows.
  */
 export function surfaceSkeletonKind(
   surface: WorkspaceSurface | null,
 ): SurfaceSkeletonKind {
   switch (surface) {
+    case "chat":
+    case null:
+    case undefined:
+      return "none";
     case "brain":
       return "brain";
-    // Studio and Chat both open as "narrow left rail + wide detail pane".
-    // Shopify joins them: it gained an operator topbar and a sidebar panel on
+    // Studio opens as "narrow left rail + wide detail pane".
+    // Shopify joins it: it gained an operator topbar and a sidebar panel on
     // 2026-08-10, and was briefly classified "page" from when it was a centred
     // column. A skeleton that outlives its layout paints the wrong frame, which
     // is worse than the blank it replaced.
     case "studio":
-    case "chat":
     case "shopify":
     // Live is master-detail: narrow roster rail + wide watch pane.
     case "live":
@@ -74,14 +77,12 @@ export function surfaceSkeletonKind(
     case "goals":
     case "approvals":
       return "list";
-    // `p`, `inbox` (redirects to `/p`), and the root land on the doc surface.
+    // `p` and `inbox` (redirects to `/p`) land on the doc surface.
     // `apps` is one full-bleed pane under a chrome row (the custom-app frame),
     // which is the page shape too.
     case "p":
     case "inbox":
     case "apps":
-    case null:
-    case undefined:
       return "page";
   }
 }
@@ -99,6 +100,8 @@ export function SurfaceSkeletonFor({
   chrome?: boolean;
 }) {
   switch (surfaceSkeletonKind(surface)) {
+    case "none":
+      return null;
     case "brain":
       return <BrainSurfaceSkeleton />;
     case "rail":
@@ -114,12 +117,12 @@ export function SurfaceSkeletonFor({
 
 /**
  * The chrome row every folded-in surface opens with (Brain / Studio topbars,
- * the operator topbar): `h-11`, bottom-bordered, collapse + history icons on
+ * the operator topbar): 44px phone / 36px desktop, bottom-bordered, history on
  * the left, a breadcrumb, and trailing controls.
  */
 function SurfaceChromeSkeleton({ trailing = 2 }: { trailing?: number }) {
   return (
-    <div className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border px-3">
+    <div data-surface-chrome-skeleton className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background px-2 md:h-9 md:px-4">
       <Skeleton className="size-5 rounded-md" />
       <Skeleton className="size-5 rounded-md" />
       <Skeleton className="ml-1.5 h-3.5 w-28" />
@@ -135,13 +138,12 @@ function SurfaceChromeSkeleton({ trailing = 2 }: { trailing?: number }) {
 /**
  * Doc page surface (`/p`) - chrome row, then the centered reading column:
  * icon + title block, then body paragraphs at the real `--doc-content-width`
- * measure. This is also the workspace-level fallback, because `/p` is where
- * the workspace root lands.
+ * measure. Used for document-shaped destinations; Home and Chat stay quiet.
  */
-function PageSurfaceSkeleton() {
+function PageSurfaceSkeleton({ chrome = true }: { chrome?: boolean }) {
   return (
     <div className="flex h-full w-full flex-col animate-fade-in">
-      <SurfaceChromeSkeleton trailing={3} />
+      {chrome && <SurfaceChromeSkeleton trailing={3} />}
       <div className="flex-1 overflow-hidden px-4 pt-10 md:px-10 lg:px-16">
         <div className="doc-page-content space-y-6">
           <div className="space-y-3">
@@ -359,30 +361,32 @@ export function BrainSurfaceSkeleton() {
  */
 export function AppShellSkeleton() {
   return (
-    <div className="flex h-dvh w-full overflow-hidden bg-background animate-fade-in">
-      <aside className="hidden h-full w-64 shrink-0 flex-col gap-1 border-r border-sidebar-border doc-sidebar-surface p-2 md:flex">
-        <div className="flex items-center gap-2 px-1 pb-2 pt-1">
-          <Skeleton className="size-6 rounded-md" />
-          <Skeleton className="h-3.5 w-28" />
+    <div className="flex h-dvh w-full flex-col overflow-hidden bg-sidebar-accent/40 animate-fade-in">
+      <div data-workspace-window-header className="[&>div]:border-transparent [&>div]:bg-transparent">
+        <SurfaceChromeSkeleton trailing={3} />
+      </div>
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div aria-hidden className="hidden h-full w-14 shrink-0 flex-col items-center gap-1 px-2 pt-[13px] md:flex">
+          <div className="flex h-16 w-full shrink-0 items-center justify-center"><Skeleton className="size-7 rounded-lg" /></div>
+          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="size-9 rounded-xl" />)}
         </div>
-        <div className="flex items-center gap-1 px-1 pb-3">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="size-7 rounded-lg" />
-          ))}
+        <aside aria-hidden data-doc-context-sidebar className="doc-sidebar-surface mb-2 mt-3 hidden h-[calc(100%-1.25rem)] w-56 shrink-0 flex-col rounded-l-2xl border-y border-l border-r border-sidebar-border md:flex">
+          <div className="flex h-16 shrink-0 items-center gap-1 px-4">
+            <Skeleton className="h-3.5 w-28" />
+          </div>
+          <div className="space-y-2 p-2">
+            {Array.from({ length: 9 }).map((_, i) => (
+              <Skeleton
+                key={i}
+                className="h-6 rounded-md"
+                style={{ width: `${52 + ((i * 11) % 44)}%` }}
+              />
+            ))}
+          </div>
+        </aside>
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background md:mb-2 md:mt-3 md:mr-2 md:pt-2 md:rounded-r-2xl md:border-y md:border-r md:border-border">
+          <PageSurfaceSkeleton chrome={false} />
         </div>
-        <Skeleton className="mx-1 mb-2 h-3 w-16" />
-        <div className="space-y-1 px-1">
-          {Array.from({ length: 9 }).map((_, i) => (
-            <Skeleton
-              key={i}
-              className="h-6 rounded-md"
-              style={{ width: `${52 + ((i * 11) % 44)}%` }}
-            />
-          ))}
-        </div>
-      </aside>
-      <div className="relative flex h-full min-w-0 flex-1 flex-col">
-        <PageSurfaceSkeleton />
       </div>
     </div>
   );

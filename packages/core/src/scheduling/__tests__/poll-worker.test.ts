@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createPollWorker, isSessionResumeJob, type JobExecutor, type SessionResumeHandler } from '../poll-worker.js'
 import type { JobStore, ScheduledJob } from '../types.js'
+import { backgroundLaneStats, configureBackgroundLane, runInBackgroundLane } from '../background-lane.js'
 
 function makeFakeJobStore(dueJobs: ScheduledJob[] = []): JobStore & {
   updates: Array<{ id: string; updates: unknown }>
@@ -441,5 +442,121 @@ describe('pinned schedule dispatch claims', () => {
       expect(store.failedCalls).toEqual([])
       expect(store.updates).toEqual([])
     } finally { worker.stop() }
+  })
+})
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => { resolve = done })
+  return { promise, resolve }
+}
+
+describe('[COMP:scheduling/poll-worker] stop and restart admission', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it.each(['discovery', 'claim'] as const)('stops a queued background-lane %s before its database call', async boundary => {
+    const previousLimit = backgroundLaneStats().limit
+    expect(backgroundLaneStats().inFlight).toBe(0)
+    configureBackgroundLane({ limit: 1 })
+    const job = makeJob({ requiresScheduleClaim: true }), store = makeFakeJobStore([job])
+    const entered = deferred<void>(), release = deferred<void>()
+    let blocker: Promise<void> | undefined
+    const holdLane = () => { blocker = runInBackgroundLane(async () => { entered.resolve(); await release.promise }) }
+    store.getDueJobs = vi.fn(async () => {
+      if (boundary === 'claim') holdLane()
+      return [job]
+    })
+    store.claimDueJob = vi.fn(async () => ({ ...job, scheduleClaimId: 'claim' }))
+    store.finishScheduleClaim = vi.fn(async () => ({ applied: true, disabled: false, failures: 0 }))
+    const executor = vi.fn(async () => 'ok'), worker = createPollWorker({ store, executor })
+    try {
+      if (boundary === 'discovery') holdLane()
+      worker.start(); await entered.promise; await vi.advanceTimersByTimeAsync(0)
+      expect(backgroundLaneStats().queued).toBe(1)
+      worker.stop(); release.resolve(); await blocker; await vi.advanceTimersByTimeAsync(0)
+      if (boundary === 'discovery') expect(store.getDueJobs).not.toHaveBeenCalled()
+      expect(store.claimDueJob).not.toHaveBeenCalled()
+      expect(executor).not.toHaveBeenCalled()
+      expect(backgroundLaneStats()).toMatchObject({ inFlight: 0, queued: 0 })
+    } finally {
+      worker.stop(); release.resolve(); await blocker; await vi.advanceTimersByTimeAsync(0)
+      configureBackgroundLane({ limit: previousLimit })
+    }
+  })
+
+  it.each(['executor', 'resume'] as const)('stops %s dispatch after a delayed due-list read', async kind => {
+    const job = kind === 'resume' ? makeResumeJob() : makeJob()
+    const store = makeFakeJobStore([job]), entered = deferred<void>(), release = deferred<void>()
+    store.getDueJobs = vi.fn(async () => { entered.resolve(); await release.promise; return [job] })
+    const executor = vi.fn(async () => 'ok'), resumeHandler = vi.fn(async () => {})
+    const worker = createPollWorker({ store, executor, resumeHandler })
+    try {
+      worker.start(); await entered.promise; worker.stop(); release.resolve()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(executor).not.toHaveBeenCalled()
+      expect(resumeHandler).not.toHaveBeenCalled()
+      expect(store.completedCalls).toEqual([])
+      expect(store.failedCalls).toEqual([])
+      expect(store.updates).toEqual([])
+    } finally { release.resolve(); worker.stop() }
+  })
+
+  it('leaves a stopped native claim unconsumed without dispatch or outcome writes', async () => {
+    const job = makeJob({ requiresScheduleClaim: true }), store = makeFakeJobStore([job])
+    const entered = deferred<void>(), release = deferred<void>()
+    store.claimDueJob = vi.fn(async () => { entered.resolve(); await release.promise; return { ...job, scheduleClaimId: 'old-claim' } })
+    store.finishScheduleClaim = vi.fn(async () => ({ applied: true, disabled: false, failures: 0 }))
+    const executor = vi.fn(async () => 'ok'), worker = createPollWorker({ store, executor })
+    try {
+      worker.start(); await entered.promise; worker.stop(); release.resolve()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(executor).not.toHaveBeenCalled()
+      expect(store.finishScheduleClaim).not.toHaveBeenCalled()
+    } finally { release.resolve(); worker.stop() }
+  })
+
+  it.each(['native', 'legacy', 'resume'] as const)('finishes dispatched %s bookkeeping but stops the next candidate', async kind => {
+    const job = kind === 'resume' ? makeResumeJob() : makeJob({ requiresScheduleClaim: kind === 'native' })
+    const second = makeJob({ id: 'next-job', requiresScheduleClaim: kind === 'native' })
+    const store = makeFakeJobStore([job, second]), entered = deferred<void>(), release = deferred<void>()
+    store.claimDueJob = vi.fn(async id => ({ ...(id === job.id ? job : second), scheduleClaimId: id + '-claim' }))
+    store.finishScheduleClaim = vi.fn(async () => ({ applied: true, disabled: false, failures: 0 }))
+    const executor = vi.fn(async () => { entered.resolve(); await release.promise; return 'ok' })
+    const resumeHandler = vi.fn(async () => { entered.resolve(); await release.promise })
+    const worker = createPollWorker({ store, executor, resumeHandler })
+    try {
+      worker.start(); await entered.promise; worker.stop(); release.resolve()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(executor).toHaveBeenCalledTimes(kind === 'resume' ? 0 : 1)
+      expect(resumeHandler).toHaveBeenCalledTimes(kind === 'resume' ? 1 : 0)
+      if (kind === 'native') {
+        expect(store.claimDueJob).toHaveBeenCalledTimes(1)
+        expect(store.finishScheduleClaim).toHaveBeenCalledExactlyOnceWith(job.id, job.id + '-claim', expect.objectContaining({ success: true }))
+      } else expect(store.completedCalls).toEqual([job.id])
+    } finally { release.resolve(); worker.stop() }
+  })
+
+  it('drains an old claim before a fresh immediate restart pass without dispatching the old result', async () => {
+    const old = makeJob({ id: 'old-job', requiresScheduleClaim: true })
+    const fresh = makeJob({ id: 'fresh-job', requiresScheduleClaim: true })
+    const store = makeFakeJobStore(), entered = deferred<void>(), release = deferred<void>()
+    store.getDueJobs = vi.fn().mockResolvedValueOnce([old]).mockResolvedValue([fresh])
+    store.claimDueJob = vi.fn(async id => {
+      if (id === old.id) { entered.resolve(); await release.promise }
+      return { ...(id === old.id ? old : fresh), scheduleClaimId: id + '-claim' }
+    })
+    store.finishScheduleClaim = vi.fn(async () => ({ applied: true, disabled: false, failures: 0 }))
+    const executor = vi.fn(async () => 'ok'), worker = createPollWorker({ store, executor })
+    try {
+      worker.start(); await entered.promise; worker.stop(); worker.start()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(store.getDueJobs).toHaveBeenCalledTimes(1)
+      expect(executor).not.toHaveBeenCalled()
+      release.resolve(); await vi.advanceTimersByTimeAsync(0)
+      expect(store.getDueJobs).toHaveBeenCalledTimes(2)
+      expect(executor).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: fresh.id }))
+      expect(store.finishScheduleClaim).toHaveBeenCalledExactlyOnceWith(fresh.id, fresh.id + '-claim', expect.objectContaining({ success: true }))
+    } finally { release.resolve(); worker.stop() }
   })
 })

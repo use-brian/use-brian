@@ -14,8 +14,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * settings modal, Add workspace opens an in-popover create form
  * (`CreateWorkspaceForm` -> `POST /api/workspaces`) so creation never
  * leaves the switcher and behaves identically on web and the desktop
- * shell, switching the active workspace enters `/w/<id>` so its first ordered
- * mini app decides the destination, and Log out clears the local session. Only account
+ * shell, switching the active workspace enters `/w/<id>` and opens Chat, and Log out clears the local session. Only account
  * management (Add another account, switching accounts) still bounces to
  * the **main web app** / the primary (`usebrian.ai`) — rewriting the shared
  * `.usebrian.ai` cookies is the primary's job (sub-app rule).
@@ -57,8 +56,8 @@ import {
   updateWorkspace,
   useWorkspaceFetch,
   useWorkspaces,
-  type Workspace,
 } from "@/contexts/workspace-context";
+import { Tooltip } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/skeleton";
 import { getUserInfo } from "@/lib/user";
 import { signOutActiveAccount } from "@/lib/account-logout";
@@ -71,10 +70,9 @@ import {
   usesScalableWorkspacePicker,
 } from "@/lib/workspace-picker";
 import { getAccountsDir, type AccountDirEntry } from "@/lib/accounts";
-import { TeamAvatar } from "@/components/team-avatar";
+import { WorkspacePickerTrigger, IdentityAccountSection, IdentityWorkspaceSection, IdentityMenuAction } from "@use-brian/chat-ui";
 import { DesktopAccounts } from "@/components/desktop-accounts";
 import { openDesktopAddAccount } from "@/components/desktop-add-account";
-import { UserAvatar } from "@/components/ui/user-avatar";
 import {
   CreateWorkspaceForm,
   type CreatedWorkspace,
@@ -82,7 +80,6 @@ import {
 import {
   Popover,
   PopoverContent,
-  PopoverTrigger,
 } from "@/components/ui/popover";
 import {
   useWorkspaceContext,
@@ -118,7 +115,7 @@ function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 
-export function WorkspaceSwitcher() {
+export function WorkspaceSwitcher({ iconOnly = false }: { iconOnly?: boolean }) {
   const t = useT().workspaceSwitcher;
   const router = useRouter();
   const ctx = useWorkspaceContext();
@@ -418,62 +415,24 @@ export function WorkspaceSwitcher() {
   // a "Loading..." sentence (N4). Anything in hand paints as rows.
   const showListSkeleton = loading && listEmpty;
 
+  const trigger = (
+    <WorkspacePickerTrigger ref={triggerRef} workspace={{ id: ctx.workspaceId, name: ctx.name, iconSeed: ctx.iconSeed, iconUrl: ctx.iconUrl }} open={open} label={format(t.switcherAriaLabel, { name: ctx.name })} iconOnly={iconOnly} />
+  );
+
   return (
     <>
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger
-        ref={triggerRef}
-        aria-label={format(t.switcherAriaLabel, { name: ctx.name })}
-        className={cn(
-          "inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md",
-          // 44px on a phone (responsive contract M3): the second tap of every
-          // admin flow, inside the drawer head.
-          "min-h-11 px-1.5 py-1 text-sm hover:bg-muted transition-colors sm:min-h-0",
-        )}
-      >
-        <TeamAvatar
-          id={ctx.workspaceId}
-          name={ctx.name}
-          iconSeed={ctx.iconSeed}
-          iconUrl={ctx.iconUrl}
-          size="xs"
-        />
-        <span className="min-w-0 max-w-[140px] truncate text-[13px] font-semibold">
-          {ctx.name}
-        </span>
-        <svg
-          width="10"
-          height="10"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          aria-hidden
-          className={cn(
-            "transition-transform text-muted-foreground/60 shrink-0",
-            open && "rotate-180",
-          )}
-        >
-          <path d="M6 9l6 6 6-6" />
-        </svg>
-      </PopoverTrigger>
+      {iconOnly ? <Tooltip label={format(t.switcherAriaLabel, { name: ctx.name })} side="right">{trigger}</Tooltip> : trigger}
 
       <PopoverContent
         role="menu"
         side="bottom"
         align="start"
         sideOffset={8}
-        // Anchor to the full-width sidebar head ROW, not the trigger button.
-        // In the desktop shell the head is indented past the macOS traffic
-        // lights (`--doc-titlebar-lights`, ~76px), so anchoring to the button
-        // would land the popup's left edge mid-sidebar and leave a partial,
-        // clipped strip of sidebar showing on the left. The head row's border
-        // box starts at the window/sidebar left edge (x=0), so aligning to it
-        // makes the popup open flush-left and fully cover the sidebar beneath.
-        // Falls back to the trigger if the head ancestor isn't found.
+        // Rail icons anchor directly to their button. The labelled variant
+        // retains its full-head anchor for other hosts.
         anchor={() =>
-          triggerRef.current?.closest("[data-doc-sidebar-head]") ??
-          triggerRef.current
+          (iconOnly ? null : triggerRef.current?.closest("[data-doc-sidebar-head]")) ?? triggerRef.current
         }
         // Never wider than the phone (responsive contract M5); the popover
         // primitive clamps the height.
@@ -540,23 +499,8 @@ export function WorkspaceSwitcher() {
 
           {/* Signed-in accounts — active row checkmarked, others click to switch */}
           {desktopBridge()?.listAccounts ? <DesktopAccounts /> : accountRows.length > 0 && (
-            <div className="flex flex-col gap-0.5">
-              {accountRows.map((acct) => (
-                <AccountRow
-                  key={acct.id || acct.email}
-                  account={acct}
-                  isActive={isActiveAccount(acct)}
-                  switching={switching === acct.id}
-                  onSwitch={() => handleSwitchAccount(acct.id)}
-                  t={t}
-                />
-              ))}
-              {accountError && (
-                <div className="px-2 pt-1 text-[12px] text-destructive">
-                  {accountError}
-                </div>
-              )}
-            </div>
+            <IdentityAccountSection accounts={accountRows} activeId={activeAccountId} isActiveAccount={isActiveAccount} switchingId={switching}
+              onSwitch={handleSwitchAccount} switchLabel={account => format(t.switchAccountAria, { email: account.email })} error={accountError} />
           )}
 
           {/* Workspace list + Add workspace */}
@@ -579,51 +523,8 @@ export function WorkspaceSwitcher() {
           {error && (
             <div className="px-2 py-1 text-xs text-destructive">{error}</div>
           )}
-          {scalableWorkspaceList ? (
-            <label className="relative block">
-              <span className="sr-only">{t.searchPlaceholder}</span>
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                aria-hidden
-                className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground"
-              >
-                <circle cx="11" cy="11" r="7" />
-                <path d="m20 20-3.5-3.5" />
-              </svg>
-              <input
-                type="search"
-                value={workspaceQuery}
-                onChange={(event) => setWorkspaceQuery(event.target.value)}
-                placeholder={t.searchPlaceholder}
-                className="h-11 w-full rounded-md border border-border bg-background pl-8 pr-2 text-[16px] outline-none placeholder:text-muted-foreground sm:h-8 md:text-xs"
-              />
-            </label>
-          ) : null}
-          <ul
-            className={cn(
-              "flex flex-col gap-0.5",
-              scalableWorkspaceList && "max-h-60 overflow-y-auto pr-1",
-            )}
-          >
-            {switcherRows.map((ws) => (
-              <li key={ws.id}>
-                <WorkspaceRow
-                  workspace={ws}
-                  isActive={ws.id === ctx.workspaceId}
-                  onSelect={() => switchTo(ws.id)}
-                />
-              </li>
-            ))}
-            {scalableWorkspaceList && switcherRows.length === 0 ? (
-              <li className="px-2 py-3 text-xs text-muted-foreground">
-                {t.empty}
-              </li>
-            ) : null}
+          <IdentityWorkspaceSection workspaces={switcherRows} activeId={ctx.workspaceId} onSelect={switchTo}
+            searchable={scalableWorkspaceList} query={workspaceQuery} onQueryChange={setWorkspaceQuery} searchLabel={t.searchPlaceholder} emptyLabel={t.empty}>
             {scalableWorkspaceList ? (
               <li>
                 <button
@@ -657,20 +558,13 @@ export function WorkspaceSwitcher() {
                 <span>{t.addWorkspace}</span>
               </button>
             </li>
-          </ul>
+          </IdentityWorkspaceSection>
 
           <div className="border-t border-border" />
 
           {/* Footer — add another account (→ main app) + log out */}
           <div className="flex flex-col">
-            <button
-              type="button"
-              role="menuitem"
-              onClick={handleAddAccount}
-              className="min-h-11 text-left px-2 py-1.5 text-sm hover:bg-muted rounded transition-colors sm:min-h-0"
-            >
-              {t.addAnotherAccount}
-            </button>
+            <IdentityMenuAction onClick={handleAddAccount}>{t.addAnotherAccount}</IdentityMenuAction>
             {!desktopBridge()?.runLocal && desktopBridge()?.chooseDeployment && (
               <button type="button" role="menuitem"
                 onClick={() => { setOpen(false); requestSidebarClose(); desktopBridge()?.chooseDeployment?.(); }}
@@ -699,114 +593,6 @@ export function WorkspaceSwitcher() {
       onClose={() => setSettingsOpen(false)}
     />
     </>
-  );
-}
-
-/**
- * One row in the account switcher: the active account (checkmark, not
- * clickable) or a switchable account (click to switch, spinner while the
- * switch redirect navigates away). Removal lives on the web app, so there's
- * no remove affordance here.
- */
-function AccountRow({
-  account,
-  isActive,
-  switching,
-  onSwitch,
-  t,
-}: {
-  account: AccountDirEntry;
-  isActive: boolean;
-  switching: boolean;
-  onSwitch: () => void;
-  t: ReturnType<typeof useT>["workspaceSwitcher"];
-}) {
-  return (
-    <button
-      type="button"
-      role="menuitem"
-      onClick={isActive ? undefined : onSwitch}
-      disabled={isActive || switching}
-      aria-current={isActive ? "true" : undefined}
-      aria-label={
-        isActive
-          ? undefined
-          : format(t.switchAccountAria, { email: account.email })
-      }
-      className={cn(
-        "w-full inline-flex items-center gap-2 rounded px-2 py-1.5 text-left transition-colors min-w-0 min-h-11 sm:min-h-0",
-        isActive ? "bg-muted/60 cursor-default" : "hover:bg-muted cursor-pointer",
-      )}
-    >
-      <UserAvatar
-        size={24}
-        name={account.name}
-        email={account.email}
-        avatarUrl={account.avatarUrl}
-      />
-      <span className="flex-1 truncate text-xs text-muted-foreground">
-        {account.email || account.name}
-      </span>
-      {switching ? (
-        <Spinner />
-      ) : isActive ? (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden className="shrink-0 text-primary">
-          <path d="M5 12l5 5L20 7" />
-        </svg>
-      ) : null}
-    </button>
-  );
-}
-
-function Spinner() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      className="shrink-0 animate-spin text-muted-foreground"
-      aria-hidden
-    >
-      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" fill="none" opacity="0.25" />
-      <path d="M12 3a9 9 0 0 1 9 9" stroke="currentColor" strokeWidth="2.5" fill="none" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function WorkspaceRow({
-  workspace,
-  isActive,
-  onSelect,
-}: {
-  workspace: Workspace;
-  isActive: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="menuitem"
-      onClick={onSelect}
-      className={cn(
-        "w-full inline-flex items-center gap-2 px-2 py-1.5 rounded text-sm transition-colors text-left min-h-11 sm:min-h-0",
-        isActive ? "bg-muted" : "hover:bg-muted",
-      )}
-      aria-current={isActive ? "true" : undefined}
-    >
-      <TeamAvatar
-        id={workspace.id}
-        name={workspace.name}
-        iconSeed={workspace.iconSeed}
-        iconUrl={workspace.iconUrl}
-        size="sm"
-      />
-      <span className="flex-1 truncate">{workspace.name}</span>
-      {isActive && (
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden className="text-primary">
-          <path d="M5 12l5 5L20 7" />
-        </svg>
-      )}
-    </button>
   );
 }
 

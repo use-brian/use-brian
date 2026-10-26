@@ -43,7 +43,7 @@ const SECTIONS: WorkSectionKey[] = ["needsYou", "myWork", "needsAssignment"];
 
 type WorkT = ReturnType<typeof useT>["briefs"]["work"];
 
-export function BriefWork({ workspaceId, scope, onContinueInChat, emptyState, title, hideWhenEmpty }: {
+export function BriefWork({ workspaceId, scope, onContinueInChat, emptyState, title, hideWhenEmpty, embedded = false }: {
   workspaceId: string;
   scope: WorkScope;
   /** Draft-only pickup into a composer. Omitted: no chat action is offered. */
@@ -53,6 +53,8 @@ export function BriefWork({ workspaceId, scope, onContinueInChat, emptyState, ti
   title?: string;
   /** Render nothing for an authoritative empty queue (Chat: the composer above is the empty state). */
   hideWhenEmpty?: boolean;
+  /** The Chat disclosure already supplies the visible title and container. */
+  embedded?: boolean;
 }) {
   const t = useT().briefs.work;
   const headingId = useId();
@@ -82,14 +84,14 @@ export function BriefWork({ workspaceId, scope, onContinueInChat, emptyState, ti
   if (hideWhenEmpty && data && total === 0 && !error && !actionError) return null;
 
   return (
-    <section aria-labelledby={headingId} aria-busy={loading || undefined} className="rounded-xl border border-border p-4" data-testid="brief-work">
-      <h3 id={headingId} className="font-medium">{title ?? t.title}</h3>
+    <section aria-labelledby={embedded ? undefined : headingId} aria-label={embedded ? title ?? t.title : undefined} aria-busy={loading || undefined} className={embedded ? "text-sm" : "rounded-xl border border-border p-4"} data-testid="brief-work">
+      {!embedded && <h3 id={headingId} className="font-medium">{title ?? t.title}</h3>}
       {loading && !data ? (
         <div aria-label={t.loading} className="mt-3 space-y-2"><Skeleton className="h-14 w-full rounded-lg" /><Skeleton className="h-14 w-full rounded-lg" /></div>
       ) : null}
       {error ? (
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-          <p role={data ? "status" : "alert"} className={data ? "text-muted-foreground" : "text-destructive"}>{data ? t.stale : t.unavailable}</p>
+          <p role={data ? "status" : "alert"} className={data || embedded ? "text-muted-foreground" : "text-destructive"}>{data ? t.stale : t.unavailable}</p>
           <Button variant="outline" size="sm" onClick={() => void refresh()}>{t.retry}</Button>
         </div>
       ) : null}

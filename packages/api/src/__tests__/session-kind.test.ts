@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { classifySession, isTuningSession, type SessionKindRow } from '../session-kind.js'
+import { classifySession, isTuningSession, normalizeSessionVisibility, type SessionKindRow } from '../session-kind.js'
 
 /**
  * Every session shape in the wild (docs/plans/unified-sessions.md section 2.1)
@@ -82,6 +82,20 @@ describe('[COMP:api/session-kind] classifySession', () => {
   it('keeps the anchor reference', () => {
     expect(classifySession({ channelType: 'web', anchorKind: 'office_file', anchorRef: 'art-1', visibility: 'workspace' }).anchor)
       .toEqual({ kind: 'office_file', ref: 'art-1' })
+  })
+
+  it('normalizes only the legacy storage spelling without classifying an authority audience', () => {
+    const owner: 'personal' = normalizeSessionVisibility('owner')
+    const absent: undefined = normalizeSessionVisibility(undefined)
+    const empty: null = normalizeSessionVisibility(null)
+    expect([owner, absent, empty]).toEqual(['personal', undefined, null])
+    for (const value of ['personal', 'workspace', 'unknown']) {
+      expect(normalizeSessionVisibility(value)).toBe(value)
+    }
+    const row = { channelType: 'web', anchorKind: null, visibility: 'owner' }
+    expect(classifySession({ ...row, mode: 'draft' }).audience).toBe('workspace')
+    expect(classifySession(row, { providerGroup: true }).audience).toBe('workspace')
+    expect(normalizeSessionVisibility(row.visibility)).toBe('personal')
   })
 
   it('recognizes the tuning sentinel', () => {

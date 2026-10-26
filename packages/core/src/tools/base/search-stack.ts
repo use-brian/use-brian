@@ -12,9 +12,11 @@
  * MCP results (see docs/historical/old-security-model.md).
  *
  * Pattern: one file per provider, a thin composer, no hidden coupling.
- * Adding a new provider is a new file + one entry in the array.
+ * Add a provider file and stack entry; filtered requests also require a
+ * capability declaration in search-filters.ts.
  */
 
+import { searchFiltersSchema, hasSearchFilters, unsupportedSearchFilters, matchesSearchDomains, type SearchFilters } from './search-filters.js'
 import { sanitizeDeep } from '../../security/sanitize.js'
 import { SearchProviderError, type SearchFailureKind } from './_fetch-error.js'
 
@@ -61,7 +63,7 @@ export type SearchProvider = {
   /** Optional provider-specific cap for exact-provider query panels. */
   panelConcurrency?: number
   /** Execute the search. Should throw on API error so the stack can fall through. */
-  search: (query: string, maxResults: number, signal?: AbortSignal) => Promise<SearchResult[]>
+  search: (query: string, maxResults: number, signal?: AbortSignal, filters?: SearchFilters) => Promise<SearchResult[]>
 }
 
 // ── Stack composer ────────────────────────────────────────────────
@@ -91,6 +93,10 @@ export type SearchStackOutcome = {
    * emptiness is a meaningful "no results" answer, not a failure artifact.
    */
   trustedEmpty: boolean
+  /** Filter capability exclusions, separate from provider/network failures. */
+  excludedProviders?: Array<{ provider: string; reasons: string[] }>
+  /** Provider that returned a trustworthy filtered empty response. */
+  emptyProvider?: string
 }
 
 /**
@@ -102,19 +108,30 @@ export type SearchStackOutcome = {
  */
 export function createSearchStack(
   providers: SearchProvider[],
-): (query: string, maxResults: number, signal?: AbortSignal) => Promise<SearchStackOutcome> {
-  return async (query, maxResults, signal) => {
+): (query: string, maxResults: number, signal?: AbortSignal, filters?: SearchFilters) => Promise<SearchStackOutcome> {
+  return async (query, maxResults, signal, inputFilters) => {
+    const filters = searchFiltersSchema.parse(inputFilters ?? {})
+    const filtered = hasSearchFilters(filters)
+    const excludedProviders: NonNullable<SearchStackOutcome['excludedProviders']> = []
+    let emptyProvider: string | undefined
+    const filterMetadata = () => filtered ? { excludedProviders, ...(emptyProvider ? { emptyProvider } : {}) } : {}
     const failures: SearchStackOutcome['failures'] = []
     let trustedEmpty = false
     for (const provider of providers) {
       if (!provider.available()) continue
       if (signal?.aborted) break
+      const reasons = unsupportedSearchFilters(provider.name, filters)
+      if (reasons.length) {
+        excludedProviders.push({ provider: provider.name, reasons })
+        continue
+      }
       try {
-        const results = await provider.search(query, maxResults, signal)
+        const raw = await provider.search(query, maxResults, signal, ...(filtered ? [filters] : []))
+        const results = raw.filter((result) => matchesSearchDomains(result.url, filters))
         if (results.length > 0) {
-          return { provider: provider.name, results: sanitizeDeep(results) as SearchResult[], failures, trustedEmpty }
+          return { provider: provider.name, results: sanitizeDeep(results) as SearchResult[], failures, trustedEmpty, ...filterMetadata() }
         }
-        if (provider.trustEmpty !== false) trustedEmpty = true
+        if (provider.trustEmpty !== false) { trustedEmpty = true; emptyProvider = provider.name }
       } catch (err) {
         // Fall through to the next provider, but RECORD the failure — a
         // caller that only sees an empty array cannot tell a total provider
@@ -133,6 +150,6 @@ export function createSearchStack(
         })
       }
     }
-    return { provider: null, results: [], failures, trustedEmpty }
+    return { provider: null, results: [], failures, trustedEmpty, ...filterMetadata() }
   }
 }

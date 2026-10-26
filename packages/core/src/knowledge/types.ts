@@ -13,6 +13,9 @@
 
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
+import type { SessionContextAuthority } from '../memory/session-state-types.js'
+import type {DerivedWriteEvidence} from '../security/derived-scope.js'
+import type {KnowledgeWriteActor} from '../workflow/knowledge-event-trigger.js'
 
 export type KnowledgeSearchResult = {
   id: string
@@ -26,6 +29,7 @@ export type KnowledgeSearchResult = {
 }
 
 export type KnowledgeEntryDetail = {
+  scopeVersion?: string
   id: string
   path: string
   title: string
@@ -42,9 +46,9 @@ export type KnowledgeEntryDetail = {
 }
 
 export type KnowledgeStoreInterface = {
-  search(ctx: AccessContext, query: string, limit?: number): Promise<KnowledgeSearchResult[]>
-  listByPath(ctx: AccessContext, pathPrefix: string): Promise<KnowledgeSearchResult[]>
-  getById(ctx: AccessContext, id: string): Promise<KnowledgeEntryDetail | null>
+  search(ctx: AccessContext, query: string, limit?: number, authority?: SessionContextAuthority): Promise<KnowledgeSearchResult[]>
+  listByPath(ctx: AccessContext, pathPrefix: string, authority?: SessionContextAuthority): Promise<KnowledgeSearchResult[]>
+  getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<KnowledgeEntryDetail | null>
   create(params: {
     workspaceId: string
     path: string
@@ -56,7 +60,10 @@ export type KnowledgeStoreInterface = {
     compartments?: string[]
     projectIds?: string[]
     createdBy?: string | null
-  }): Promise<{ id: string; path: string }>
+    actorId?: string | null
+    writtenBy?: KnowledgeWriteActor
+    derivation?: DerivedWriteEvidence
+  }, authority?:SessionContextAuthority): Promise<{ id: string; path: string; sensitivity?:Sensitivity }>
   listSummaries(ctx: AccessContext): Promise<Array<{ id: string; path: string; summary: string | null; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[] }>>
   /**
    * Body-only update of a MANUAL entry (repo-synced entries go through the
@@ -68,7 +75,8 @@ export type KnowledgeStoreInterface = {
     workspaceId: string,
     id: string,
     content: string,
-    scope?: { compartments?: string[]; projectIds?: string[] },
+    scope?: { compartments?: string[]; projectIds?: string[]; actorId?: string; writtenBy?:KnowledgeWriteActor; derivation?:DerivedWriteEvidence; expectedVersion?:string },
+    authority?:SessionContextAuthority,
   ): Promise<{ id: string; path: string } | null>
   hasEntriesForAssistant(assistantId: string): Promise<boolean>
   listSourcesForAssistant(assistantId: string): Promise<Array<{
@@ -127,6 +135,9 @@ export type KnowledgeRepoWriteResult =
         | 'file_exists'
         | 'error'
       message: string
+      /** Source dispatch may have executed, including a confirmed write whose mirror failed. */
+      retrySafe?: false
+      operationMayHaveExecuted?: true
     }
 
 export type KnowledgeRepoWriter = {
@@ -138,8 +149,11 @@ export type KnowledgeRepoWriter = {
    */
   commitEntryUpdate(params: {
     workspaceId: string
+    /** Original trusted invocation; serialized lookalikes cannot authorize publication. */
+    authority?: SessionContextAuthority
     entry: {
       id: string
+      scopeVersion?: string
       path: string
       content: string
       sourceId: string
@@ -163,6 +177,8 @@ export type KnowledgeRepoWriter = {
    */
   commitEntryCreate(params: {
     workspaceId: string
+    /** Original trusted invocation; serialized lookalikes cannot authorize publication. */
+    authority?: SessionContextAuthority
     sourceId: string
     path: string
     fileContent: string

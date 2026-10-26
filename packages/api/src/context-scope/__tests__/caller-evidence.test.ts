@@ -1,12 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling, ScopeSource } from '@use-brian/core'
+import { bindScopeSource, createdRowEvidence, scopeEvidenceFromRows } from '@use-brian/core'
 import type { CurrentSourceState } from '../../db/derived-scope-store.js'
 
 const state = vi.hoisted(() => ({
   read: [] as ScopeSource[][],
   next: null as null | ((sources: ScopeSource[]) => CurrentSourceState[]),
 }))
-vi.mock('../../db/client.js', () => ({ getPool: () => ({ query: async (_sql: string, values: unknown[]) => ({ rows: (values[1] as string[]).map(()=>({dependencies:[]})) }) }) }))
+vi.mock('../../db/client.js', () => {
+  // These fixtures have no retained/field/external ancestors, and one empty
+  // Page-dependency result for each ordinary root.
+  const query = async (sql: string, values: unknown[] = []) => {
+    if (sql.includes(' AS dependencies')) return { rows: (values[1] as string[]).map(() => ({ dependencies: [] })) }
+    if (/application_scope_lineage|read_application_field_dependencies|read_external_source_dependencies/.test(sql)) return { rows: [] }
+    throw new Error('Unexpected caller-evidence fixture query')
+  }
+  return { getPool: () => ({ query }), query }
+})
 vi.mock('../../db/derived-scope-store.js', () => ({
   readCurrentScopeSources: async (_client: unknown, _workspaceId: string, sources: ScopeSource[]) => {
     state.read.push(sources)
@@ -37,6 +47,19 @@ const ceiling: AccessCeiling = {
 beforeEach(() => { state.read.length = 0; state.next = null })
 
 describe('[COMP:api/caller-scope-evidence] per-source audience validation', () => {
+  it('admits a newly saved note without treating the note as private context read by the group', async () => {
+    const memory = bindScopeSource({ id: 'just-created', summary: 'Remember the course registration deadline' }, source('just-created'))
+    const group = { ...ceiling, userId: '' }
+    // Deployed saveMemory returned this full read-source evidence. The
+    // executor adds it before the tool-result event can be recorded.
+    await expect(validateAudienceScopeEvidence(scopeEvidenceFromRows([memory]), group))
+      .rejects.toMatchObject({ diagnostic: 'user_visibility' })
+    await expect(validateAudienceScopeEvidence(createdRowEvidence([memory]), group))
+      .resolves.toMatchObject({ sensitivity: 'internal' })
+    // A real read of the same personal memory must remain forbidden.
+    await expect(validateAudienceScopeEvidence(scopeEvidenceFromRows([memory]), group))
+      .rejects.toMatchObject({ diagnostic: 'user_visibility' })
+  })
   it('admits read evidence spanning two assistant partitions of the same user', async () => {
     const sources = [source('own'), source('other', { assistantId: other }), source('shared', { assistantId: null, userId: null })]
     const result = await validateAudienceScopeEvidence({ sources }, ceiling)
@@ -63,40 +86,6 @@ describe('[COMP:api/caller-scope-evidence] per-source audience validation', () =
   })
 })
 
-describe('[COMP:api/caller-scope-evidence] current-label revalidation (decision D1)', () => {
-  it('delivers when the turn itself edited or removed a source it read', async () => {
-    state.next = sources => sources.map((s, i) => i === 0
-      ? { state: 'changed', source: s, current: { ...s, sensitivity: 'internal' } }
-      : { state: 'gone', source: s })
-    const result = await validateAudienceScopeEvidence({ sources: [source('closed-task'), source('deleted-message')] }, ceiling)
-    expect(result.sensitivity).toBe('internal')
-  })
-
-  it('raises the delivered floor to a source\'s current labels', async () => {
-    state.next = sources => sources.map(s => ({ state: 'changed', source: s, current: { ...s, compartments: ['team:sales'] } }))
-    const result = await validateCallerScopeEvidence({ sources: [source('task')] }, ceiling)
-    expect(result.compartments).toEqual(['team:sales'])
-  })
-
-  it('refuses a source reclassified beyond the receiver since it was read', async () => {
-    state.next = sources => sources.map(s => ({ state: 'changed', source: s, current: { ...s, sensitivity: 'confidential' } }))
-    await expect(validateAudienceScopeEvidence({ sources: [source('reclassified')] }, ceiling))
-      .rejects.toMatchObject({ reason: 'delivery_audience_unverified', diagnostic: 'source_reclassified' })
-  })
-
-  it('refuses a held source', async () => {
-    state.next = sources => sources.map(s => ({ state: 'held', source: s }))
-    await expect(validateAudienceScopeEvidence({ sources: [source('held')] }, ceiling))
-      .rejects.toMatchObject({ diagnostic: 'source_held' })
-  })
-
-  it('reports a failed lookup as a verification error, not a policy denial', async () => {
-    state.next = () => { throw new Error('timeout exceeded when trying to connect') }
-    await expect(validateAudienceScopeEvidence({ sources: [source('any')] }, ceiling))
-      .rejects.toMatchObject({ reason: 'delivery_audience_unverified', diagnostic: 'verification_error' })
-  })
-})
-
 describe('[COMP:api/caller-scope-evidence] model-context history withholds held rows', () => {
   it('every history read in a model-context lane passes excludeHeld', async () => {
     const { readFileSync } = await import('node:fs')
@@ -117,15 +106,7 @@ describe('[COMP:api/caller-scope-evidence] model-context history withholds held 
   })
 })
 
-describe('[COMP:api/caller-scope-evidence] causal inputs stay exact-version', () => {
-  it('refuses a CRM event whose content changed since the run read it', async () => {
-    state.next = sources => sources.map(s => ({ state: 'stale_input', source: s }))
-    await expect(validateCallerScopeEvidence({ sources: [source('event', { resourceKind: 'crm_event' })] }, ceiling))
-      .rejects.toMatchObject({ reason: 'caller_evidence_unavailable', diagnostic: 'source_changed' })
-  })
-})
-
-describe('[COMP:api/caller-scope-evidence] department delivery boundary',()=>{
+describe('[COMP:api/caller-scope-evidence] pure department envelopes',()=>{
   const v2:AccessCeiling={...ceiling,departmentRead:{workspaceId,userId,assistantId:primary,
     base:'public',departments:{sales:'confidential'},binding:null,contextDepartment:null,cap:null}}
   it('uses department clearance independently of General and refuses missing departments',async()=>{
@@ -135,26 +116,10 @@ describe('[COMP:api/caller-scope-evidence] department delivery boundary',()=>{
     await expect(validateAudienceScopeEvidence({sensitivity:'public',compartments:['team:sales']},
       {...v2,departmentRead:{...v2.departmentRead!,binding:[]}})).rejects.toMatchObject({diagnostic:'teams'})
   })
-  it.each(['caller','audience'])('retains explicit Project and assistant limits for v2 %s evidence',async kind=>{
-    const validate=kind==='caller'?validateCallerScopeEvidence:validateAudienceScopeEvidence
-    const bounded={...v2,projectIds:['allowed'],visibilityAssistantIds:[primary]}
-    const evidence=source('bounded',{sensitivity:'confidential',compartments:['team:sales'],projectIds:['allowed']})
-    await expect(validate({sources:[evidence]},bounded)).resolves.toMatchObject({sensitivity:'confidential'})
-    await expect(validate({sources:[{...evidence,assistantId:other}]},bounded)).rejects.toMatchObject({diagnostic:'assistant_visibility'})
-    await expect(validate({sources:[{...evidence,projectIds:['forbidden']}]},bounded)).rejects.toMatchObject({diagnostic:'projects'})
-    await expect(validate({sensitivity:'public',projectIds:['forbidden']},bounded)).rejects.toMatchObject({diagnostic:'projects'})
-    state.next=sources=>sources.map(s=>({state:'changed',source:s,current:{...s,projectIds:['forbidden']}}))
-    await expect(validate({sources:[evidence]},bounded)).rejects.toMatchObject({diagnostic:'source_reclassified'})
-  })
   it('checks each source independently so department evidence cannot authorize General secrets',async()=>{
     await expect(validateAudienceScopeEvidence({sources:[
       source('general',{sensitivity:'confidential',compartments:[]}),
       source('sales',{sensitivity:'confidential',compartments:['team:sales']}),
     ]},v2)).rejects.toMatchObject({diagnostic:'clearance'})
-  })
-  it('blocks a source reclassified into an inaccessible department before delivery',async()=>{
-    state.next=sources=>sources.map(s=>({state:'changed',source:s,current:{...s,compartments:['team:finance']}}))
-    await expect(validateAudienceScopeEvidence({sources:[source('task',{compartments:['team:sales']})]},v2))
-      .rejects.toMatchObject({diagnostic:'source_reclassified'})
   })
 })

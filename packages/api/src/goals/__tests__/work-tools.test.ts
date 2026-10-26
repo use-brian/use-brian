@@ -7,7 +7,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
  * is fed back, and without a verifier the tool refuses to stamp (fail-safe).
  */
 
+vi.mock('../../workspace-access/goal-source-admission.js',()=>({retainedTaskGoalCaller:vi.fn().mockResolvedValue(undefined),retainedTaskGoalForHost:vi.fn().mockResolvedValue(undefined),admitRetainedGoalBoundary:vi.fn()}))
+
 vi.mock('../../db/goals.js', () => ({
+  getRetainedGoalById:vi.fn().mockResolvedValue(null),
+  confirmRetainedGoal:vi.fn(),
   getGoalByIdSystem: vi.fn(),
   stampGoalCompletionSystem: vi.fn(),
   updateGoalSystem: vi.fn(),

@@ -16,7 +16,7 @@ describe('[COMP:brain/client-self-memory] memory access predicate', () => {
   it('adds holding protection without changing the ordinary authority parameters', () => {
     const predicate = buildMemoryAccessPredicate(ordinary)
     const universal = buildAccessPredicate(ordinary)
-    expect(predicate).toEqual({ ...universal, sql: `(${universal.sql}) AND scope_held = false` })
+    expect(predicate).toEqual({ ...universal, sql: `(${universal.sql}) AND scope_held = false AND public.application_memory_field_ancestry_allows(workspace_id,id,scope_version::text)` })
   })
 
   it('adds one exact internal self branch without widening the ordinary ceiling', () => {
@@ -41,7 +41,7 @@ describe('[COMP:brain/client-self-memory] memory access predicate', () => {
       'client:studio-client:alice',
     ])
     expect(predicate.nextIdx).toBe(12)
-    expect(predicate.sql).toMatch(/\) AND m\.scope_held = false$/)
+    expect(predicate.sql).toMatch(/\) AND m\.scope_held = false AND public\.application_memory_field_ancestry_allows\(m\.workspace_id,m\.id,m\.scope_version::text\)$/)
   })
 
   it('refuses an operator compartment in the client-only branch', () => {

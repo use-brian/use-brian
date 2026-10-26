@@ -113,6 +113,7 @@ vi.mock("@/components/ui/switch", async () => {
 
 import {
   DockRecorderButton,
+  DockRecorderOptions,
   DockRecorderNotice,
   pickCaptureSource,
 } from "../dock-recorder";
@@ -402,5 +403,35 @@ describe("[COMP:app-web/dock-recorder] desktop capture-source picker", () => {
     pickerMocks.confirmDialog.mockResolvedValue(false);
 
     await expect(pickCaptureSource("screen", pickerCopy)).resolves.toBeNull();
+  });
+});
+
+
+describe("[COMP:app-web/dock-recorder-options] rehosted next-capture preferences", () => {
+  it("uses the same controller callbacks without starting a capture", () => {
+    const rec = recorder({ computerAudioAvailable: true, interactionAvailable: true });
+    mount(rec);
+    act(() => root!.render(<DockRecorderOptions rec={rec} />));
+    act(() => container!.querySelector<HTMLButtonElement>('[aria-label="Include computer audio"]')!.click());
+    expect(rec.setIncludeComputerAudio).toHaveBeenCalledExactlyOnceWith(true);
+    act(() => container!.querySelector<HTMLButtonElement>('[aria-label="Stream transcript and notes to a page"]')!.click());
+    expect(rec.setLivePageEnabled).toHaveBeenCalledExactlyOnceWith(true);
+    act(() => container!.querySelector<HTMLButtonElement>('[aria-label="Interaction"]')!.click());
+    expect(rec.setInteractionEnabled).toHaveBeenCalledExactlyOnceWith(true);
+    expect(rec.onPressStart).not.toHaveBeenCalled();
+    expect(rec.onPressEnd).not.toHaveBeenCalled();
+  });
+
+  it("freezes preferences while the composer is unavailable", () => {
+    const rec = recorder({ computerAudioAvailable: true, interactionAvailable: true });
+    mount(rec);
+    act(() => root!.render(<DockRecorderOptions rec={rec} disabled />));
+    const switches = [...container!.querySelectorAll<HTMLButtonElement>('[role="switch"]')];
+    expect(switches).toHaveLength(3);
+    expect(switches.every(button => button.disabled)).toBe(true);
+    act(() => switches.forEach(button => button.click()));
+    expect(rec.setIncludeComputerAudio).not.toHaveBeenCalled();
+    expect(rec.setLivePageEnabled).not.toHaveBeenCalled();
+    expect(rec.setInteractionEnabled).not.toHaveBeenCalled();
   });
 });

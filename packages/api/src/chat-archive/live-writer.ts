@@ -276,6 +276,7 @@ export function createLiveChatArchiveWriter(deps: {
         ownerUserId: input.ownerUserId,
         source: input.source,
         messages: [normalizeOutboundChatMessage({
+          source: input.source,
           providerMessageId: input.providerMessageId || `session:${input.sessionMessageId}`,
           conversationId: input.conversationId,
           assistantId: input.assistantId,

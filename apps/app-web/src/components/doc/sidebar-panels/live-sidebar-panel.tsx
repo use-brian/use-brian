@@ -236,6 +236,10 @@ export function LiveRosterList({
 
       <button
         type="button"
+        data-inbox-trigger
+        aria-haspopup="dialog"
+        aria-controls="workspace-inbox"
+        aria-expanded={inboxOpen}
         aria-pressed={inboxOpen}
         onClick={onToggleInbox}
         className={cn(

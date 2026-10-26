@@ -3,32 +3,10 @@
 /**
  * Left sidebar for the Doc surface — Notion-style nested sub-pages.
  *
- * Top to bottom:
- *  - Workspace switcher (existing pill).
- *  - Organization and Projects, always labelled in a workspace context row.
- *  - Top nav — a horizontal Notion-style icon toolbar, left to right: Home
- *    (→ the workspace's persisted operator app — Page / Tasks / Feed — via
- *    `homeHref`; the Home hub's app-bar in the content pane switches between
- *    them, see `operator-app-bar.tsx`), then the SURFACE rows Brain
- *    (→ `/w/[id]/brain`), Studio (→ `/studio`), Workflow (→ `/workflow`),
- *    then Live (the all-activity surface, occupying the former Inbox slot). Workspace search lives in the shared top-right header. Inbox itself is nested as the first row of
- *    Live's surface-aware sidebar panel with its unread-count badge.
- *    Items are compact icons with hover/focus tooltips; the active destination
- *    has a `.doc-nav-active` highlight. Phones show labels. Studio shows
- *    a dismissable cold-start "Set up" nudge
- *    while the workspace has no connected connector.
- *  - Teamspace sections (docs/architecture/features/teamspaces.md) — one
- *    collapsible section per teamspace the viewer belongs to (icon +
- *    name), each rendering ITS OWN nested tree (`buildTree` over that
- *    teamspace's saved + draft rows via `groupRowsByTeamspace`; draft
- *    rows keep their save/prune affordances). Section hover reveals `⋯`
- *    (Add members / Settings / Leave / Delete, gated by `canManage` /
- *    `isDefault`) and `+` (new page in that teamspace). Drag a row ONTO
- *    another to nest it; drop in the gap BETWEEN rows to reorder; drop
- *    on a SECTION HEADER to file the page at that section's root.
- *  - A subtle "New teamspace" affordance under the teamspace block.
- *  - Private — the caller's `teamspaceId === null` pages, same tree
- *    treatment, `+` only (creates with `teamspaceId: null`).
+ * A persistent icon rail switches workspace areas; its avatar opens the menu
+ * directly, and the contextual panel keeps per-surface navigation. Home is Chat,
+ * and App store discovers and pins mini-apps. Phones use labelled drawer rows.
+ * Spec: docs/architecture/features/workspace-navigation.md.
  *
  * The tree DnD lives in a `<DndContext>` *scoped to this sidebar* —
  * deliberately separate from the page-renderer's block-reorder context
@@ -46,14 +24,13 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { inboxCacheKey, surfaceDataKey, useIntentPrefetch } from "@/lib/surface-prefetch";
+import { inboxCacheKey, surfaceDataKey } from "@/lib/surface-prefetch";
 import { listContextProjects } from "@/lib/api/context-scopes";
 import {
   markSurfaceCacheStale,
   readSurfaceCache,
   useCachedResource,
 } from "@/lib/surface-cache";
-import { Tooltip } from "@/components/ui/tooltip";
 import {
   DndContext,
   type DragEndEvent,
@@ -64,20 +41,15 @@ import {
   useSensors,
 } from "@dnd-kit/core";
 import {
-  Activity,
-  FolderKanban,
-  Brain,
   ChevronRight,
-  GitBranch,
-  Home,
   MoreHorizontal,
   Pencil,
   Plus,
-  SlidersHorizontal,
   Trash2,
   UserPlus,
   Users,
   Compass,
+  Bell,
 } from "lucide-react";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 import type { CustomHomeApp } from "@/lib/api/home-apps";
@@ -85,7 +57,9 @@ import {
   sidebarSurfaceForHome,
   type HomeAppEntry,
 } from "@/lib/operator-apps";
-import { OperatorAppBar } from "./operator-app-bar";
+import { WorkspaceAppTitleHost } from "@/components/chrome/workspace-topbar";
+import { WorkspaceAppRail } from "./workspace-app-rail";
+import { WorkspaceSearchSlot } from "@/components/workspace-search/workspace-search-provider";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -95,21 +69,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { format, useT } from "@/lib/i18n/client";
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
-import { useTheme, THEME_PRESETS, currentPresetId } from "@/lib/theme";
-import { useCustomThemes } from "@/lib/custom-themes";
-import { CreateThemeDialog } from "@/components/doc/create-theme-dialog";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { openWorkspaceSettings } from "@/components/settings-modal/settings-modal";
 import { requestSidebarClose } from "@/lib/sidebar-close";
-import type { DocTheme } from "@/lib/api/doc-themes";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { type ViewListRow } from "@/lib/api/views";
 import type { Teamspace } from "@/lib/api/teamspaces";
 import {
@@ -122,11 +84,9 @@ import {
   type TreeNode,
 } from "@/lib/sidebar-tree";
 import { parseSectionDropId, sectionDropId } from "@/lib/sidebar-sections";
-import { surfaceShortcutLabel } from "@/lib/surface-shortcuts";
 import { fetchInbox, type InboxPayload } from "@/lib/api/inbox";
 import { DOC_COMMENTS_CHANGED_EVENT } from "@/lib/comment-events";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
-import { HomeDock } from "./home-dock";
 import { SidebarTreeNode, parseDropId } from "./sidebar-tree-node";
 import { BrainSidebarPanel } from "./sidebar-panels/brain-sidebar-panel";
 import { StudioSidebarPanel } from "./sidebar-panels/studio-sidebar-panel";
@@ -141,18 +101,17 @@ import { ChatSidebarPanel } from "./sidebar-panels/chat-sidebar-panel";
 import { OfficeSidebarPanel } from "./sidebar-panels/office-sidebar-panel";
 import { ShopifySidebarPanel } from "./sidebar-panels/shopify-sidebar-panel";
 import { LiveSidebarPanel } from "./sidebar-panels/live-sidebar-panel";
-import { LiveActiveBadge } from "@/components/live/live-active-badge";
 import { useLiveRoster } from "@/components/live/use-live-roster";
 import { summarizeRosterItems } from "@/lib/live-roster";
 import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /**
- * Height of the workspace status row: 28px plus the bottom safe-area inset.
+ * Height of the workspace status row: 28px desktop / 44px phone plus safe area.
  * Shared by the slot this sidebar reserves and by the overlay
  * `WorkspaceChrome` lays over it, so the two halves cannot drift.
  */
 export const WORKSPACE_STATUS_ROW_HEIGHT_CLASS =
-  "h-[calc(1.75rem+env(safe-area-inset-bottom))]";
+  "h-[calc(2.75rem+env(safe-area-inset-bottom))] md:h-[calc(1.75rem+env(safe-area-inset-bottom))]";
 
 export type SidebarMove = ContextAwareReparentMove;
 
@@ -164,6 +123,8 @@ function sectionsKey(workspaceId: string): string {
 
 type Props = {
   workspaceId: string;
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
   saved: ViewListRow[];
   drafts: ViewListRow[];
   /** Teamspaces the viewer belongs to (General first) — one section each. */
@@ -200,7 +161,7 @@ type Props = {
   onToggleInbox: () => void;
   /**
    * The active top-level surface (`surfaceFromPathname`) — highlights the
-   * matching nav row (Brain / Studio / Workflow, and Home for `'p'`). `null`
+   * matching rail destination (Home is Chat). `null`
    * when no surface matches (e.g. the workspace root).
    */
   activeSurface: WorkspaceSurface | null;
@@ -217,23 +178,11 @@ type Props = {
   studioNudge: boolean;
   /** Dismiss the Studio nudge (persists per workspace in localStorage). */
   onDismissStudioNudge: () => void;
-  /**
-   * The Home destination — the workspace's persisted operator app's route
-   * (Page by default; Tasks / Feed after a visit), resolved by the chrome
-   * from `lib/operator-apps.ts`. The Home icon navigates here so it resumes
-   * the user's last operator app.
-   */
-  homeHref: string;
-  /**
-   * Whether the Feed operator app is available (hosted edition only — the
-   * OSS edition 404s the surface). Gates the Feed entry in the operator
-   * app-bar; the routes stay deep-linkable regardless.
-   */
-  /** The workspace's Home app-bar config — which apps the strip renders, in
+  /** Workspace curation for App store, in
    *  order (`workspaces.home_apps`). Carried by `WorkspaceChrome` from the
    *  sidebar-data provider, which owns the fetch + live repair. */
   homeApps: readonly HomeAppEntry[];
-  /** The workspace's custom apps, for resolving `custom:<id>` strip entries. */
+  /** Custom app metadata and current renderability for App store. */
   customApps: readonly CustomHomeApp[];
 };
 
@@ -241,31 +190,9 @@ function collapseKey(workspaceId: string): string {
   return `doc:sidebar:collapsed:${workspaceId}`;
 }
 
-/** Compact desktop icons; labelled 44px phone destinations. */
-function navItemCls(active: boolean): string {
-  const base = "inline-flex h-7 shrink-0 items-center justify-center rounded-md md:w-7 max-md:h-11 max-md:w-full max-md:justify-start max-md:gap-2.5 max-md:px-3 max-md:text-[13px]";
-  return active
-    ? `${base} doc-nav-active text-sidebar-accent-foreground`
-    : `${base} text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground`;
-}
-
-/** Context names stay visible; wrapping preserves long translated labels. */
-function contextNavItemCls(active: boolean): string {
-  const base = "inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-xs max-md:min-h-11 [&>span]:break-words";
-  return active
-    ? `${base} doc-nav-active text-sidebar-accent-foreground`
-    : `${base} text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground`;
-}
-
-/** The phone-only label beside a nav icon (desktop uses a tooltip). */
-function PhoneNavLabel({ children }: { children: React.ReactNode }) {
-  return <span className="whitespace-nowrap md:hidden">{children}</span>;
-}
-
 export function DocSidebar(props: Props) {
   const copy = useT();
   const t = copy.docPage;
-  const liveTitle = copy.liveApp.title;
   // Teamspace management still requires a connection; pages can be created locally.
   const offline = useIsOffline();
   const { workspaceId, saved, drafts, activeId } = props;
@@ -278,22 +205,12 @@ export function DocSidebar(props: Props) {
     activeOperatorApp,
     props.suggestedOpen,
   );
-  // Hover/focus on a surface icon starts that surface's route prefetch AND its
-  // landing fetch, so the click lands on work already in flight. See
-  // `lib/surface-prefetch.ts`.
-  const intentPrefetch = useIntentPrefetch();
-
   // Live is a persistent workspace signal, not only a destination. Keep its
   // roster subscription in the never-unmounting chrome so the top-level badge
   // updates while the user works on any surface. The Live sidebar receives the
   // same snapshot below instead of starting a second copy of this loader.
   const liveRoster = useLiveRoster(workspaceId);
   const liveActiveCount = summarizeRosterItems(liveRoster.items).active;
-  const liveActiveLabel = copy.liveApp.activeWorkBadgeAria.replace(
-    "{count}",
-    String(liveActiveCount),
-  );
-
   // ── Inbox unread badge (pending assistant replies + unread mentions) ──
   // Reads the SAME slot the Inbox flyout fills (`inboxCacheKey`, instant-
   // navigation contract N2), so one request serves the badge and the flyout:
@@ -333,10 +250,6 @@ export function DocSidebar(props: Props) {
       window.removeEventListener("focus", mark);
     };
   }, [inboxKey]);
-
-  // The current primary destination owns the navigation highlight.
-  const surfaceActive = (surface: WorkspaceSurface) => props.activeSurface === surface;
-  const homeActive = activeOperatorApp !== null;
 
   // ── Persisted expand/collapse state (per workspace) ─────────────────
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -592,14 +505,22 @@ export function DocSidebar(props: Props) {
     );
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-sidebar-border doc-sidebar-surface text-sidebar-foreground">
-      {/* Workspace switcher. In the desktop shell this row is the title-bar
-          head: it drops below the macOS traffic lights and is an OS window-drag
-          handle (the switcher button itself opts back out) — see the
-          `.is-canvas-desktop` block in globals.css. */}
-      <div data-doc-chrome data-doc-sidebar-head className="flex items-center gap-1 px-2 pt-2.5 pb-1">
-        <div className="min-w-0 flex-1">
-          <WorkspaceSwitcher />
+    <aside className="relative flex h-full w-full shrink-0 text-sidebar-foreground md:w-[calc(3.5rem+var(--workspace-sidebar-width,14rem))]">
+      {/* One responsive menu/settings owner, anchored over the desktop rail head or
+          the phone drawer head. It stays mounted while the panel collapses. */}
+      <div data-workspace-menu-host data-doc-chrome className="absolute left-0 top-0 z-20 flex h-14 w-16 items-center justify-center md:top-3 md:h-16 md:w-14">
+        <WorkspaceSwitcher iconOnly />
+      </div>
+      <WorkspaceAppRail workspaceId={workspaceId} activeSurface={props.activeSurface} activeApp={activeOperatorApp} homeApps={props.homeApps} customApps={props.customApps} liveCount={liveActiveCount} studioNudge={props.studioNudge} onDismissStudioNudge={props.onDismissStudioNudge} />
+      <div id="workspace-context-sidebar" data-doc-context-sidebar className={`doc-sidebar-surface flex h-full min-w-0 flex-1 flex-col border-r border-sidebar-border md:mb-2 md:mt-3 md:h-[calc(100%-1.25rem)] md:w-[var(--workspace-sidebar-width,14rem)] md:flex-none md:rounded-l-2xl md:border-y md:border-l ${props.sidebarCollapsed ? "md:hidden" : ""}`}>
+      <div data-doc-chrome data-workspace-context-heading className="flex h-14 md:h-16 shrink-0 items-center gap-1 px-2 md:px-4">
+        <WorkspaceAppTitleHost className="pl-14 md:pl-0" />
+        <div className="flex shrink-0 items-center gap-0.5">
+          <button type="button" data-inbox-trigger aria-haspopup="dialog" aria-controls="workspace-inbox" aria-expanded={props.inboxOpen} aria-label={t.iconInboxAria} aria-pressed={props.inboxOpen} title={t.iconInboxAria} onClick={props.onToggleInbox} className="relative flex size-11 items-center justify-center rounded-md text-sidebar-foreground/55 hover:bg-sidebar-accent hover:text-sidebar-foreground md:size-8">
+            <Bell className="size-[18px]" aria-hidden />
+            {inboxCount > 0 && <span aria-label={format(t.iconInboxBadgeAria, { count: inboxCount })} className="absolute right-1 top-1 size-1.5 rounded-full bg-primary" />}
+          </button>
+          {!props.sidebarCollapsed && <div className="hidden md:block"><WorkspaceSearchSlot placement="sidebar" /></div>}
         </div>
         {/* Invite members, first-class in the drawer head on a phone
             (responsive contract M1; plan §6 decision 1): hamburger, Invite,
@@ -622,136 +543,9 @@ export function DocSidebar(props: Props) {
         </button>
       </div>
 
-      <div data-doc-chrome className="shrink-0 px-2">
-        <HomeDock workspaceId={workspaceId} />
-      </div>
+      <WorkspaceAppRail mobile workspaceId={workspaceId} activeSurface={props.activeSurface} activeApp={activeOperatorApp} homeApps={props.homeApps} customApps={props.customApps} liveCount={liveActiveCount} studioNudge={props.studioNudge} onDismissStudioNudge={props.onDismissStudioNudge} />
 
-      {/* Workspace context stays fully labelled above main navigation. */}
-      <div data-doc-chrome data-workspace-context-nav className="mx-2 flex shrink-0 flex-wrap items-center gap-1 pt-1">
-        <Tooltip label={copy.organization.title}>
-          <Link href={`/w/${workspaceId}/organization`}
-            {...intentPrefetch(`/w/${workspaceId}/organization`)}
-            aria-label={copy.organization.title}
-            aria-current={surfaceActive("organization") ? "page" : undefined}
-            className={contextNavItemCls(surfaceActive("organization"))}>
-            <Users className="size-[17px] shrink-0" aria-hidden />
-            <span>{copy.organization.title}</span>
-          </Link>
-        </Tooltip>
-
-        <Tooltip label={copy.contextScope.projectsTitle}>
-          <Link href={`/w/${workspaceId}/projects`}
-            {...intentPrefetch(`/w/${workspaceId}/projects`)}
-            aria-label={copy.contextScope.projectsTitle}
-            aria-current={surfaceActive("projects") ? "page" : undefined}
-            className={contextNavItemCls(surfaceActive("projects"))}>
-            <FolderKanban className="size-[17px] shrink-0" aria-hidden />
-            <span>{copy.contextScope.projectsTitle}</span>
-          </Link>
-        </Tooltip>
-      </div>
-
-      {/* Main destinations use compact desktop icons and labelled phone rows. */}
-      <nav data-doc-chrome aria-label={copy.contextScope.workspaceNavigation} className="flex shrink-0 flex-col items-stretch gap-0.5 overflow-x-auto px-2 pt-0.5 pb-0.5 md:flex-row md:items-center">
-        {/* Home — first of the ⌘/Ctrl+1/2/3/4 surface shortcuts (wired in
-            WorkspaceChrome). The chip label is browser-dependent
-            (`surfaceShortcutLabel`): ⌘n on mac, ⌃n on mac Firefox (which
-            reserves ⌘+digit for tab switching), Ctrl+n elsewhere. */}
-        <Tooltip label={t.iconHome} shortcut={surfaceShortcutLabel(1)}>
-          <Link
-            href={props.homeHref}
-            {...intentPrefetch(props.homeHref)}
-            aria-label={t.iconHomeAria}
-            className={navItemCls(homeActive)}
-          >
-            <Home className="size-[17px] shrink-0" />
-            <PhoneNavLabel>{t.iconHome}</PhoneNavLabel>
-          </Link>
-        </Tooltip>
-
-        {/* Surface destinations (consolidation §4) — Brain / Studio / Workflow,
-            with ⌘/Ctrl+2/3/4 shortcuts (wired in WorkspaceChrome). Studio shows
-            the cold-start nudge dot until the workspace connects its first tool. */}
-        <Tooltip label={t.iconBrain} shortcut={surfaceShortcutLabel(2)}>
-          <Link
-            href={`/w/${workspaceId}/brain`}
-            {...intentPrefetch(`/w/${workspaceId}/brain`)}
-            aria-label={t.iconBrainAria}
-            className={navItemCls(surfaceActive("brain"))}
-          >
-            <Brain className="size-[17px] shrink-0" />
-            <PhoneNavLabel>{t.iconBrain}</PhoneNavLabel>
-          </Link>
-        </Tooltip>
-        <Tooltip label={t.iconStudio} shortcut={surfaceShortcutLabel(3)}>
-          <Link
-            // The final route, not the `/studio` redirect (instant-navigation
-            // contract N6): one navigation, one skeleton, and the prefetch
-            // warms the section that actually renders.
-            href={`/w/${workspaceId}/studio/connectors`}
-            {...intentPrefetch(`/w/${workspaceId}/studio/connectors`)}
-            aria-label={t.iconStudioAria}
-            className={navItemCls(surfaceActive("studio")) + " relative"}
-          >
-            <SlidersHorizontal className="size-[17px] shrink-0" />
-            <PhoneNavLabel>{t.iconStudio}</PhoneNavLabel>
-            {props.studioNudge ? (
-              <span
-                aria-label={t.studioSetupNudgeAria}
-                className="absolute -right-0.5 -top-0.5 size-2 rounded-full bg-primary ring-2 ring-sidebar"
-              />
-            ) : null}
-          </Link>
-        </Tooltip>
-        <Tooltip label={t.iconWorkflow} shortcut={surfaceShortcutLabel(4)}>
-          <Link
-            href={`/w/${workspaceId}/workflow`}
-            {...intentPrefetch(`/w/${workspaceId}/workflow`)}
-            aria-label={t.iconWorkflowAria}
-            className={navItemCls(surfaceActive("workflow"))}
-          >
-            <GitBranch className="size-[17px] shrink-0" />
-            <PhoneNavLabel>{t.iconWorkflow}</PhoneNavLabel>
-          </Link>
-        </Tooltip>
-        {/* Live — a top-level workspace surface in the former Inbox slot. Its
-            sidebar body owns the unchanged Inbox flyout trigger, followed by
-            the live roster; it is not a configurable Home mini app. */}
-        <Tooltip label={liveTitle}>
-          <Link
-            href={`/w/${workspaceId}/live`}
-            {...intentPrefetch(`/w/${workspaceId}/live`)}
-            aria-label={liveActiveCount > 0 ? liveActiveLabel : liveTitle}
-            className={navItemCls(surfaceActive("live")) + " relative"}
-          >
-            <Activity className="size-[17px] shrink-0" />
-            <PhoneNavLabel>{liveTitle}</PhoneNavLabel>
-            <LiveActiveBadge
-              count={liveActiveCount}
-              label={liveActiveLabel}
-            />
-          </Link>
-        </Tooltip>
-
-        {/* Feed has NO top-row icon: it re-parented into the Home operator
-            app-bar (Page / Tasks / Feed — `operator-app-bar.tsx`), still
-            gated on connected distribution profiles there. The routes stay
-            deep-linkable regardless. Goals board (`/goals`) deliberately has
-            NO nav slot either — like Approvals, it is attention-routed: the
-            home-dock Autopilot card + the Brain task panel are its entry
-            points (docs/architecture/features/goals.md). */}
-
-      </nav>
-
-      {/* Home owns the mini-app switcher; other surfaces keep their local navigation. */}
-      <OperatorAppBar
-        workspaceId={workspaceId}
-        active={activeOperatorApp}
-        homeApps={props.homeApps}
-        customApps={props.customApps}
-      />
-
-      <div className="doc-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-4">
+      <div className="doc-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-4 pt-2 md:px-3">
         {/* Surface-aware body. Suggested borrows `/p` for its content pane but
             resolves this body from the sticky Home app, so first load keeps the
             selected app's navigation visible. Page shows the page tree; Office
@@ -892,219 +686,14 @@ export function DocSidebar(props: Props) {
         )}
       </div>
 
-      {/* Palette picker — quick access pinned to the bottom-left corner. The
-          canonical control also lives in Settings → Appearance; both call
-          `setPalette` from the theme provider. A single compact flat row (no
-          label-over-box "double boxing"). */}
-      <div className="border-t border-sidebar-border px-2 py-1.5">
-        <PalettePicker />
+      {/* The single persistent footer overlays this phone-only reserved slot.
+          Desktop theme and sync controls occupy the leftmost app rail. */}
+      <div data-doc-sidebar-footer-slot aria-hidden className="shrink-0 md:hidden">
+        <div className="h-11" />
+        <div className={WORKSPACE_STATUS_ROW_HEIGHT_CLASS} />
       </div>
-
-      {/* Reserved row for the workspace status overlay (sync label + intake
-          chip). `WorkspaceChrome` pins that overlay to the bottom-left corner
-          at this sidebar's width, so while the sidebar is open the label reads
-          as its last row; collapsed, this slot leaves with the sidebar and the
-          label floats over the surface. Empty on purpose. */}
-      <div
-        data-doc-sidebar-status-slot
-        aria-hidden
-        className={`shrink-0 border-t border-sidebar-border ${WORKSPACE_STATUS_ROW_HEIGHT_CLASS}`}
-      />
+      </div>
     </aside>
-  );
-}
-
-/**
- * Bottom-left theme picker — a single **compact flat row** (no label-over-box
- * "double boxing"): the active theme's colour dot + name + chevron; clicking
- * opens the dropdown menu. The menu lists theme PRESETS ("Default" / "Default
- * Dark" flip light↔dark), then any workspace custom themes, then "Create your
- * own". Each row carries a **mini colour dot** illustrating the theme. Custom
- * themes additionally reveal **edit** + **delete** on hover: edit hands off to
- * Settings → Preferences (rename / refine / delete live there); delete confirms
- * then removes via the provider. A preset entry sets the palette (`data-palette`
- * + `doc:palette`) and the mode (`.dark` + `doc:theme`).
- */
-// Sentinel select value for the trailing "Create your own…" action — selecting
-// it opens the generate dialog instead of applying a theme.
-const CREATE_THEME_VALUE = "__create_theme__";
-
-// Colour stops for the two built-in presets' dots, mirroring the `--primary` /
-// `--background` notion tokens in globals.css (light vs dark). Decorative only —
-// if those notion tokens change, update here.
-const PRESET_DOT_COLORS: Record<string, string[]> = {
-  default: ["#2383E2", "#FFFFFF"],
-  "default-dark": ["#529CCA", "#191919"],
-};
-
-// The selected theme reads as a persistent highlighted row (the focused look)
-// instead of a right-aligned tick — that keeps the right edge free so the
-// per-row hover actions sit flush right rather than dodging a check gutter.
-const SELECTED_ROW_CLS =
-  "data-[selected]:bg-accent data-[selected]:font-medium data-[selected]:text-accent-foreground";
-
-/** A mini circle illustrating a theme — vertical colour stops inside a bordered
- *  round swatch. Same visual language as the Settings swatch. */
-function ThemeDot({ colors }: { colors: string[] }) {
-  if (colors.length === 0) return null;
-  return (
-    <span className="flex h-3.5 w-3.5 shrink-0 overflow-hidden rounded-full border border-border/60">
-      {colors.map((c, i) => (
-        <span key={`${i}-${c}`} className="flex-1" style={{ background: c }} />
-      ))}
-    </span>
-  );
-}
-
-/** Dot colours for a custom theme: primary / accent / background from its light
- *  token map (the same triple the Settings swatch uses). */
-function customDotColors(theme: DocTheme): string[] {
-  const { primary, "accent-2": accent, background } = theme.tokens.light;
-  return [primary, accent, background].filter(Boolean) as string[];
-}
-
-function PalettePicker() {
-  const t = useT();
-  const { palette, resolved, customThemeId, setPalette, setMode } = useTheme();
-  const { themes, applyTheme, deleteTheme } = useCustomThemes();
-  const [createOpen, setCreateOpen] = useState(false);
-  // Controlled so the per-row edit / delete buttons can close the menu before
-  // handing off to Settings / the confirm dialog.
-  const [open, setOpen] = useState(false);
-
-  // Value→label map for the trigger display: built-in presets + custom themes.
-  const itemLabels: Record<string, string> = {
-    default: t.settings.general.paletteNotion,
-    "default-dark": t.settings.general.paletteDefaultDark,
-    [CREATE_THEME_VALUE]: t.settings.general.createYourOwn,
-  };
-  for (const theme of themes) itemLabels[`custom:${theme.id}`] = theme.name;
-
-  // The active value: a custom theme (custom:<id>) or the matching built-in preset.
-  const activeValue =
-    palette === "custom" && customThemeId
-      ? `custom:${customThemeId}`
-      : currentPresetId(palette, resolved) ?? "default";
-
-  // Dot colours for the active theme shown in the flat trigger.
-  const activeDot = activeValue.startsWith("custom:")
-    ? (() => {
-        const th = themes.find((x) => x.id === activeValue.slice("custom:".length));
-        return th ? customDotColors(th) : [];
-      })()
-    : PRESET_DOT_COLORS[activeValue] ?? [];
-
-  const onValueChange = (v: string | null) => {
-    if (!v) return;
-    if (v === CREATE_THEME_VALUE) {
-      setCreateOpen(true);
-      return;
-    }
-    if (v.startsWith("custom:")) {
-      const theme = themes.find((th) => th.id === v.slice("custom:".length));
-      if (theme) applyTheme(theme);
-      return;
-    }
-    const preset = THEME_PRESETS.find((p) => p.id === v);
-    if (!preset) return;
-    setPalette(preset.palette);
-    if (preset.mode) setMode(preset.mode);
-  };
-
-  // Revising a theme's look (rename / refine / delete) lives in Settings — the
-  // picker is a quick switcher, so the pencil hands off to that surface.
-  const onEditTheme = () => {
-    setOpen(false);
-    openWorkspaceSettings("preferences");
-  };
-
-  const onDeleteTheme = async (theme: DocTheme) => {
-    setOpen(false);
-    const ok = await confirmDialog({
-      description: t.settings.general.customThemeDeleteConfirm,
-      confirmLabel: t.settings.general.customThemeDelete,
-      cancelLabel: t.common.cancel,
-      variant: "destructive",
-    });
-    if (ok) await deleteTheme(theme.id);
-  };
-
-  return (
-    <>
-      <Select
-        open={open}
-        onOpenChange={setOpen}
-        value={activeValue}
-        onValueChange={onValueChange}
-        items={itemLabels}
-      >
-        <SelectTrigger className="h-11 w-full justify-between gap-2 rounded-md border-0 bg-transparent px-2 text-[16px] font-normal text-sidebar-foreground shadow-none hover:bg-sidebar-accent dark:bg-transparent dark:hover:bg-sidebar-accent md:h-8 md:text-xs">
-          <span className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-            <ThemeDot colors={activeDot} />
-            <SelectValue />
-          </span>
-        </SelectTrigger>
-        <SelectContent align="start" className="min-w-[var(--anchor-width)]">
-          {THEME_PRESETS.map((p) => (
-            <SelectItem key={p.id} value={p.id} indicator={false} className={SELECTED_ROW_CLS}>
-              <ThemeDot colors={PRESET_DOT_COLORS[p.id] ?? []} />
-              <span className="truncate">{itemLabels[p.id]}</span>
-            </SelectItem>
-          ))}
-          {themes.length > 0 ? <SelectSeparator /> : null}
-          {themes.map((theme) => (
-            <div key={theme.id} className="group/theme relative">
-              <SelectItem value={`custom:${theme.id}`} indicator={false} className={SELECTED_ROW_CLS}>
-                <ThemeDot colors={customDotColors(theme)} />
-                <span className="truncate">{theme.name}</span>
-              </SelectItem>
-              {/* Hover-revealed actions, flush to the right edge (no tick gutter
-                  to dodge now). The container carries the row's highlight bg so
-                  it masks the name end on hover — the title runs full-width at
-                  rest. Siblings of the item, not children, so a click can't
-                  select the row; the handlers also close the menu first. */}
-              {/* Always visible on a phone (responsive contract M2), hover-
-                  revealed from `md`. */}
-              <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded bg-popover pl-1.5 opacity-100 transition-opacity md:bg-accent md:opacity-0 md:focus-within:opacity-100 md:group-hover/theme:opacity-100">
-                <button
-                  type="button"
-                  aria-label={`${t.settings.general.customThemeEdit}: ${theme.name}`}
-                  title={t.settings.general.customThemeEdit}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    onEditTheme();
-                  }}
-                  className="flex size-9 items-center justify-center rounded text-muted-foreground hover:bg-foreground/10 hover:text-foreground md:size-auto md:p-1"
-                >
-                  <Pencil className="size-3.5" />
-                </button>
-                <button
-                  type="button"
-                  aria-label={`${t.settings.general.customThemeDelete}: ${theme.name}`}
-                  title={t.settings.general.customThemeDelete}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    void onDeleteTheme(theme);
-                  }}
-                  className="flex size-9 items-center justify-center rounded text-muted-foreground hover:bg-destructive/10 hover:text-destructive md:size-auto md:p-1"
-                >
-                  <Trash2 className="size-3.5" />
-                </button>
-              </div>
-            </div>
-          ))}
-          <SelectSeparator />
-          <SelectItem value={CREATE_THEME_VALUE} indicator={false}>
-            {t.settings.general.createYourOwn}
-          </SelectItem>
-        </SelectContent>
-      </Select>
-      <CreateThemeDialog open={createOpen} onOpenChange={setCreateOpen} />
-    </>
   );
 }
 

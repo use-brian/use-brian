@@ -15,6 +15,7 @@
  */
 
 export type PairRequest = {
+  automatic?: boolean
   relayUrl?: string | null
   pairingToken?: string | null
 }

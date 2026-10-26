@@ -1,8 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
-import { resolveExecutionContextSystem } from '../execution-context.js'
+import { resolveExecutionContextSystem as resolveContext } from '../execution-context.js'
 import type { ResolvedTurnScope } from '../resolve-turn-scope.js'
 import type { AuthorityLease } from '../authority-lease.js'
+
+// Unit scope/identity tests inject only metadata and assistant ports. The real
+// PostgreSQL matrix exercises production factories with no authority substitutes.
+const resolveExecutionContextSystem: typeof resolveContext = (input, deps) => resolveContext(input, {
+  pinPolicyEpoch: async () => async () => true, resolveAssistant: async () => input.assistant, ...deps,
+})
 
 const authority: AuthorityLease = {
   markOperationMayHaveExecuted() {},
@@ -57,6 +63,24 @@ function base() {
 }
 
 describe('[COMP:api/execution-context] trusted execution resolution', () => {
+  it('rejects a policy change across trusted ceiling construction without creating a lease', async () => {
+    let current = true
+    const createLease = vi.fn(() => authority)
+    await expect(resolveExecutionContextSystem(base(), {
+      pinPolicyEpoch: async () => async () => current,
+      resolveScope: async () => { current = false; return scope },
+      createLease,
+    })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(createLease).not.toHaveBeenCalled()
+  })
+
+  it('resolves a current assistant inside the metadata bracket', async () => {
+    const current = { ...base().assistant, clearance: 'public' as const }
+    const resolveScope = vi.fn(async () => scope)
+    await resolveExecutionContextSystem(base(), { resolveAssistant: async () => current, resolveScope, createLease: () => authority })
+    expect(resolveScope).toHaveBeenCalledWith(expect.objectContaining({ assistant: current }), expect.anything())
+  })
+
   it('resolves scope before constructing a context and keeps empty grants finite', async () => {
     const resolveScope = vi.fn(async () => scope)
     const result = await resolveExecutionContextSystem(base(), {
@@ -121,6 +145,7 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
     })
     expect(createLease).toHaveBeenCalledWith(
       expect.objectContaining({ clearance: 'public', compartments: [], projectIds: [] }),
+      expect.any(Function),
       expect.any(Function),
     )
   })
@@ -227,4 +252,15 @@ describe('[COMP:api/execution-context] trusted execution resolution', () => {
       for (const anchor of anchors) expect(content, `${path} must retain ${anchor}`).toContain(anchor)
     }
   })
+})
+
+
+it('[COMP:api/execution-context] caps a higher bot to the shared room before exposing prompt and tool authority', async () => {
+  const result = await resolveExecutionContextSystem({ ...base(), sharedAudience: true,
+    maximumAccess: { workspaceId: 'workspace-1', userId: 'actor-1', clearance: 'internal',
+      compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: null },
+  }, { resolveScope: async () => ({ ...scope, access: { ...scope.access, clearance: 'confidential',
+      compartments: null, mutationCompartments: null, projectIds: null } }), createLease: () => authority })
+  expect(result.executionContext.security.ceiling).toMatchObject({ clearance: 'internal', compartments: [], projectIds: [] })
+  expect(result.executionContext.security.access.sharedAudience).toBe(true)
 })

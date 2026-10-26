@@ -192,14 +192,17 @@ describe('[COMP:api/channel-paste-promotion] Channel paste promotion', () => {
 describe('[COMP:api/telegram-byo-route] External guest connector access', () => {
   const projectId = '11111111-1111-4111-8111-111111111111'
   const dataTurnScope = {
-    access: { compartments: [], projectIds: [] },
+    access: { workspaceId: 'workspace-1', userId: 'guest-1', assistantId: 'assistant-1', assistantKind: 'standard',
+      clearance: 'public', compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: ['assistant-1'] },
     effectiveCompartments: [],
     effectiveProjectIds: [],
+    writeCompartments: [], writeProjectIds: [], activeTeam: null, activeProject: null,
   } as unknown as ResolvedTurnScope
   const assistantTurnScope = {
-    access: { compartments: ['team:sales'], projectIds: [projectId] },
+    access: { ...dataTurnScope.access, clearance: 'confidential', compartments: ['team:sales'], mutationCompartments: ['team:sales'], projectIds: [projectId] },
     effectiveCompartments: ['team:sales'],
     effectiveProjectIds: [projectId],
+    writeCompartments: ['team:sales'], writeProjectIds: [projectId], activeTeam: null, activeProject: null,
   } as unknown as ResolvedTurnScope
   const scopeInput = {
     dataTurnScope,
@@ -229,19 +232,19 @@ describe('[COMP:api/telegram-byo-route] External guest connector access', () => 
     expect(connectorToolsAllowedForChannelTurn(true, true)).toBe(true)
   })
 
-  it('keeps the guest data scope when connector access is not opted in', async () => {
-    const resolveScope = vi.fn()
+  it('keeps the narrower sender data scope and resolves the native floor even without assistant mode', async () => {
+    const resolveScope = vi.fn().mockResolvedValue(dataTurnScope)
 
     const resolved = await resolveConnectorTurnScopeForChannelTurn({
       ...scopeInput,
       useAssistantConnectorAuthority: false,
     }, resolveScope)
 
-    expect(resolved).toBe(dataTurnScope)
-    expect(resolveScope).not.toHaveBeenCalled()
+    expect(resolved).toEqual(dataTurnScope)
+    expect(resolveScope).toHaveBeenCalledWith(expect.objectContaining({ memberMode: 'member', userId: 'guest-1' }))
   })
 
-  it('resolves assistant-only connector authority and preserves finite Calendar bounds', async () => {
+  it('never widens a guest data ceiling through the legacy assistant connector switch', async () => {
     const resolveScope = vi.fn().mockResolvedValue(assistantTurnScope)
 
     const resolved = await resolveConnectorTurnScopeForChannelTurn({
@@ -249,11 +252,11 @@ describe('[COMP:api/telegram-byo-route] External guest connector access', () => 
       useAssistantConnectorAuthority: true,
     }, resolveScope)
 
-    expect(resolved).toBe(assistantTurnScope)
+    expect(resolved.access).toEqual(dataTurnScope.access)
     expect(resolveScope).toHaveBeenCalledWith(expect.objectContaining({
       userId: 'guest-1',
       workspaceId: 'workspace-1',
-      memberMode: 'assistant',
+      memberMode: 'member',
       session: scopeInput.session,
     }))
 
@@ -263,7 +266,30 @@ describe('[COMP:api/telegram-byo-route] External guest connector access', () => 
       projectIds: [projectId],
     }
     expect(connectorExposureAllowed(dataTurnScope, calendarGrant)).toBe(false)
-    // The assistant's Sales reach is the Calendar connector's audience.
-    expect(connectorExposureAllowed(resolved, calendarGrant)).toBe(true)
+    expect(connectorExposureAllowed(resolved, calendarGrant)).toBe(false)
+  })
+  it('preserves a real member and assistant finite Department/Project intersection', async () => {
+    const resolved = await resolveConnectorTurnScopeForChannelTurn({ ...scopeInput, dataTurnScope: assistantTurnScope,
+      useAssistantConnectorAuthority: true }, vi.fn().mockResolvedValue(assistantTurnScope))
+    expect(connectorExposureAllowed(resolved, { compartments: ['team:sales'], projectIds: [projectId] })).toBe(true)
+    expect(connectorExposureAllowed(resolved, { compartments: ['team:other'], projectIds: [projectId] })).toBe(false)
+    expect(connectorExposureAllowed(resolved, { compartments: ['team:sales'], projectIds: ['other'] })).toBe(false)
+  })
+  it('withholds protected room/assistant scope from a sender outside its Department', async () => {
+    const broadRoom = { ...assistantTurnScope, access: { ...assistantTurnScope.access, compartments: null, mutationCompartments: null, projectIds: null },
+      effectiveCompartments: null, effectiveProjectIds: null }
+    const resolved = await resolveConnectorTurnScopeForChannelTurn({ ...scopeInput, dataTurnScope: broadRoom,
+      useAssistantConnectorAuthority: false }, vi.fn().mockResolvedValue(dataTurnScope))
+    expect(resolved.effectiveCompartments).toEqual([]); expect(resolved.effectiveProjectIds).toEqual([])
+    expect(resolved.writeCompartments).toEqual([]); expect(resolved.writeProjectIds).toEqual([])
+    expect(connectorExposureAllowed(resolved, { compartments: ['team:sales'], projectIds: [] })).toBe(false)
+  })
+  it('refuses a substituted actor/assistant or missing native membership instead of using assistant authority', async () => {
+    for (const access of [{ ...dataTurnScope.access, userId: 'owner' }, { ...dataTurnScope.access, assistantId: 'other' }]) {
+      await expect(resolveConnectorTurnScopeForChannelTurn({ ...scopeInput, useAssistantConnectorAuthority: true },
+        vi.fn().mockResolvedValue({ ...dataTurnScope, access }))).rejects.toThrow('connector_actor_mismatch')
+    }
+    await expect(resolveConnectorTurnScopeForChannelTurn({ ...scopeInput, useAssistantConnectorAuthority: true },
+      vi.fn().mockRejectedValue(new Error('authority_unavailable')))).rejects.toThrow('authority_unavailable')
   })
 })

@@ -11,6 +11,7 @@
  * viewer projection per `permissions.md` § Privileged-service exception.
  */
 
+import type { SessionContextAuthority } from './session-state-types.js'
 import type { AccessContext } from '../security/access-context.js'
 import type { ScopeSource } from '../security/derived-scope.js'
 import type { Sensitivity } from '../security/sensitivity.js'
@@ -89,7 +90,7 @@ export type SoulSynthesisInput = {
 export type MemoryStore = {
   create(params: {
     assistantId: string
-    userId: string
+    userId: string | null
     scope?: string
     tags?: string[]
     summary: string
@@ -104,6 +105,8 @@ export type MemoryStore = {
     projectIds?: string[]
     /** Trusted complete model-input evidence; never a tool input field. */
     derivation?: DerivedWriteEvidence
+    /** Original host execution and accumulator; never accepted from model input. */
+    authority?: SessionContextAuthority
     /** Trusted narrower destination visibility, intersected with every source. */
     derivationTarget?: { userId: string | null; assistantId: string | null }
     /**
@@ -142,18 +145,23 @@ export type MemoryStore = {
     compartments?: string[]
     projectIds?: string[]
     derivation?: DerivedWriteEvidence
-  }, access?: AccessContext): Promise<MemoryRecord | null>
+  }, access?: AccessContext, operation?: {
+    /** Host-only authority and version from the admitted predecessor, never model input. */
+    authority: SessionContextAuthority
+    expectedVersion: string
+    writeFields: readonly ('summary' | 'detail' | 'tags' | 'confidence')[]
+  }): Promise<MemoryRecord | null>
 
-  getById(ctx: AccessContext, id: string): Promise<MemoryRecord | null>
+  getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<MemoryRecord | null>
 
   search(ctx: AccessContext, params: {
     query: string
     limit?: number
     /** Match memories whose ID starts with this prefix (for truncated index IDs) */
     idPrefix?: string
-  }): Promise<MemoryRecord[]>
+  }, authority?:SessionContextAuthority): Promise<MemoryRecord[]>
 
-  getIdentity(ctx: AccessContext): Promise<MemoryRecord[]>
+  getIdentity(ctx: AccessContext, authority?: SessionContextAuthority): Promise<MemoryRecord[]>
 
   /**
    * `validOnly=true` filters out bi-temporally tombstoned rows
@@ -162,7 +170,7 @@ export type MemoryStore = {
    * preserves the legacy behavior for compaction / inter-assistant / chat /
    * public-api callers, which still surface superseded rows today.
    */
-  getIndex(ctx: AccessContext, validOnly?: boolean): Promise<Array<{
+  getIndex(ctx: AccessContext, validOnly?: boolean, authority?:SessionContextAuthority): Promise<Array<{
     id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
   }>>
 
@@ -204,6 +212,7 @@ export type MemoryStore = {
   getIndexRanked(
     ctx: AccessContext,
     limit: number,
+    authority?:SessionContextAuthority,
   ): Promise<{
     rows: Array<{
       id: string
@@ -374,7 +383,7 @@ export type MemoryStore = {
    * `validOnly=true` filters out bi-temporally tombstoned rows; see
    * `getIndex` for the policy split.
    */
-  getWorkspaceIndex(ctx: AccessContext, validOnly?: boolean): Promise<Array<{
+  getWorkspaceIndex(ctx: AccessContext, validOnly?: boolean, authority?:SessionContextAuthority): Promise<Array<{
     id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
   }>>
 
@@ -412,7 +421,7 @@ export type MemoryStore = {
     query: string
     limit?: number
     idPrefix?: string
-  }): Promise<MemoryRecord[]>
+  }, authority?:SessionContextAuthority): Promise<MemoryRecord[]>
 
   /** Enumerate (assistant_id, workspace_id) pairs with team memories. */
   listWorkspaceMemoryGroups(): Promise<Array<{ assistantId: string; workspaceId: string }>>
@@ -488,7 +497,7 @@ export type MemoryStore = {
     workspaceId?: string | null
     assistantId?: string | null
     limit?: number
-  }): Promise<MemoryRecord[]>
+  }, authority?:SessionContextAuthority): Promise<MemoryRecord[]>
 
   // ── Cross-instance coordination ─────────────────────────────────
 

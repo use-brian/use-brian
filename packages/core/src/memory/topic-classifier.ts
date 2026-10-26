@@ -22,6 +22,10 @@
  * Cost: ~1 Flash call per user turn (~$0.0001 each at current pricing).
  */
 
+import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
+import { DerivedScopeError } from '../security/derived-scope.js'
+import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
+import type { SessionContextAuthority } from './session-state-types.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
 import type { DecisionAnswer, DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
@@ -69,7 +73,20 @@ export type TopicClassifierOptions = {
   decisionRuntime?: DecisionExecutionPort
   workspaceId?: string
   runId?: string
+  /** Host-only canonical invocation; the complete options object must be privately bound. */
+  authority?: SessionContextAuthority
+  /** Rechecks local, field and independent source rights, including provider retries. */
+  assertInputAuthority?: () => Promise<void>
+  /** Cancels classifier transports with the containing turn. */
+  signal?: AbortSignal
 }
+
+type BoundedTopicClassifierOptions = TopicClassifierOptions & {
+  signal: AbortSignal
+  deadlineAt: number
+}
+
+const TOPIC_CLASSIFIER_TIMEOUT_MS = 2_000
 
 const CLASSIFIER_SYSTEM_PROMPT =
   'You are a topic classifier for a conversational assistant. ' +
@@ -153,30 +170,33 @@ function normalizeLabel(label: string): string {
 /**
  * Classify the topic of the current user turn. Always returns a
  * classification — falls back to `(uncategorized) / continue / 0.0` on
- * any error. Callers should treat confidence === 0 as "no signal".
+ * ordinary provider/parse error. Authority refusals propagate. Callers should treat confidence === 0 as "no signal".
  */
 async function classifyTopicWithLlm(
-  opts: TopicClassifierOptions,
+  opts: BoundedTopicClassifierOptions,
 ): Promise<TopicClassification> {
   let usage: TokenUsage | null = null
   let servedModel = opts.model
   try {
+    await assertInputAuthority(opts.assertInputAuthority)
+    opts.signal.throwIfAborted()
     const response = await collectStream(
       opts.provider.stream({
         model: opts.model,
+        assertInputAuthority: opts.assertInputAuthority,
+        signal: opts.signal,
         systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: buildClassifierPrompt(opts) }],
-        // Gemini Flash 3 preview consumes "thinking tokens" before emitting
-        // visible output. A 200-token cap was regularly exhausted before the
-        // JSON object finished, yielding truncated output like `{"topic_label":`
-        // which failed to parse and fell back to (uncategorized). 2000 is
-        // safely over the worst-case thinking budget for a classification
-        // this small.
+        // Keep room for complete JSON on providers with mandatory reasoning,
+        // while requesting their smallest reasoning budget for this task.
         maxTokens: 2000,
         temperature: 0.1,
+        thinkingLevel: 'low',
       }),
     )
 
+    await assertInputAuthority(opts.assertInputAuthority)
+    opts.signal.throwIfAborted()
     usage = response.usage
     servedModel = response.model || opts.model
 
@@ -222,7 +242,9 @@ async function classifyTopicWithLlm(
     }
 
     return { topic_label, state, confidence, related_topics, usage, model: servedModel }
-  } catch {
+  } catch (error) {
+    if (isInputAuthorityError(error)) throw error
+    await assertInputAuthority(opts.assertInputAuthority)
     // Call itself threw — no usage to attribute, caller records nothing.
     return { ...FALLBACK, usage, model: usage ? servedModel : undefined }
   }
@@ -303,11 +325,11 @@ function decideTopic(
 /**
  * Classify the topic of the current user turn. Always returns a
  * classification - falls back to `(uncategorized) / continue / 0.0` on any
- * error. Existing known labels can terminate in the decision provider; new
+ * ordinary provider/parse error. Authority refusals propagate. Existing known labels can terminate in the decision provider; new
  * labels and cross-topic payloads use one LLM completion.
  */
-export async function classifyTopic(
-  opts: TopicClassifierOptions,
+async function classifyTopicCurrent(
+  opts: BoundedTopicClassifierOptions,
 ): Promise<TopicClassification> {
   if (!opts.decisionRuntime) return classifyTopicWithLlm(opts)
 
@@ -322,6 +344,8 @@ export async function classifyTopic(
       llm: { provider: opts.provider, modelId: opts.model },
       request: {
         runId: opts.runId ?? `memory-topic-${Date.now()}`,
+        signal: opts.signal,
+        deadlineAt: opts.deadlineAt,
         operation: TOPIC_OPERATION,
         state: {
           recentUserTurns: opts.recentUserTurns.slice(-8),
@@ -354,6 +378,7 @@ export async function classifyTopic(
         ],
       },
       operation: {
+        assertInputAuthority: opts.assertInputAuthority,
         decide: (response, { profile }) => decideTopic(response, knownTopics, profile?.policy),
         validateResult: validateTopicResult,
         safeFailure: () => ({ ...FALLBACK }),
@@ -363,6 +388,8 @@ export async function classifyTopic(
             provider: context.llm.provider,
             model: context.llm.modelId,
             decisionRuntime: undefined,
+            signal: context.signal,
+            deadlineAt: Math.min(opts.deadlineAt, context.deadlineAt ?? opts.deadlineAt),
           })
           return {
             result,
@@ -378,8 +405,88 @@ export async function classifyTopic(
         },
       },
     })
+    await assertInputAuthority(opts.assertInputAuthority)
+    if (cascade.failureKind === 'timeout') {
+      console.warn('[topic-classifier] decision deadline exceeded; using uncategorized fallback')
+    }
     return cascade.result
-  } catch {
+  } catch (error) {
+    if (isInputAuthorityError(error)) throw error
+    await assertInputAuthority(opts.assertInputAuthority)
     return { ...FALLBACK }
   }
+}
+
+/** Current, complete input evidence survives every classifier decision and fallback. */
+export async function classifyTopic(opts: TopicClassifierOptions): Promise<TopicClassification> {
+  const inputs = boundScopeSources(opts)
+  if (opts.authority) {
+    if (inputs.length === 0 || typeof opts.assertInputAuthority !== 'function') {
+      throw new DerivedScopeError('scope_evidence_missing')
+    }
+    opts.authority.accumulator.note({ sources: inputs })
+  } else if (inputs.length > 0) {
+    throw new DerivedScopeError('scope_evidence_missing')
+  }
+  // Recovery may not turn an earlier refusal into success if a later probe
+  // happens to pass. One invocation has one continuous authority window.
+  let refusal: unknown
+  let pending: Promise<void> | undefined
+  const check = async () => {
+    if (refusal) throw refusal
+    if (pending) return pending
+    pending = (async () => {
+      if (opts.authority) {
+        await assertInputAuthority(() => opts.authority!.execution.security.authority.assertCurrent())
+        if (opts.authority.execution.lifecycle.abortSignal.aborted) {
+          throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+        }
+      }
+      await assertInputAuthority(opts.assertInputAuthority)
+    })().catch(error => { refusal = error; throw error })
+    try { await pending } finally { pending = undefined }
+  }
+  await check()
+  // Snapshot only after admission. Every later prompt/decision/fallback uses
+  // this same data, rather than mutable options across asynchronous providers.
+  const input = structuredClone({ recentUserTurns: opts.recentUserTurns, replyToText: opts.replyToText,
+    currentMessage: opts.currentMessage, knownTopicsThisSession: opts.knownTopicsThisSession })
+  const observed = opts.authority ? structuredClone(opts.authority.accumulator.evidence.sources ?? []) : inputs
+  const controller = new AbortController()
+  const signal = AbortSignal.any([
+    controller.signal,
+    ...(opts.signal ? [opts.signal] : []),
+    ...(opts.authority ? [opts.authority.execution.lifecycle.abortSignal] : []),
+  ])
+  const deadlineAt = Date.now() + TOPIC_CLASSIFIER_TIMEOUT_MS
+  const timeoutError = new Error('topic classifier deadline exceeded')
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort(timeoutError)
+      reject(timeoutError)
+    }, TOPIC_CLASSIFIER_TIMEOUT_MS)
+  })
+  let result: TopicClassification
+  try {
+    result = await Promise.race([
+      classifyTopicCurrent({ ...opts, ...input, assertInputAuthority: check, signal, deadlineAt }),
+      deadline,
+    ])
+  } catch (error) {
+    if (isInputAuthorityError(error)) throw error
+    if (error !== timeoutError) throw error
+    // A deadline may interrupt an authority check. Await that same check;
+    // never admit the fallback through a second, independently healthy probe.
+    await check()
+    console.warn('[topic-classifier] deadline exceeded; using uncategorized fallback', {
+      timeoutMs: TOPIC_CLASSIFIER_TIMEOUT_MS,
+    })
+    result = { ...FALLBACK }
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    controller.abort()
+  }
+  await check()
+  return bindScopeSources(result, observed)
 }

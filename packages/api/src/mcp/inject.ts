@@ -18,7 +18,9 @@
  * See docs/architecture/integrations/mcp.md → "Runtime".
  */
 
-import type { AccessContext, CachedFile } from '@use-brian/core'
+import type { AccessContext, CachedFile, ExecutionContext, ContextScopeAccumulator } from '@use-brian/core'
+import { getSharedConnectorSourceRuntimeFactory, type ConnectorSourceRuntimeFactory, type ConnectorSourceRuntime } from '../application-platform/source-runtime.js'
+import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, legacyMcpToolName, createGoogleCalendarTools, createGmailTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createSearchConsoleTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate, GOOGLE_MAPS_TOOL_NAMES } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, KnowledgeWriteCaptureRule, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
@@ -49,7 +51,7 @@ import {
   gateToolsOnActionGrants,
 } from '../safety/assert-action-allowed.js'
 import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, classifyConnectorAuthError, type HealthReporter } from './connector-health.js'
-import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
+import { buildConnectorAuthHeaders, mergeValidatedHeaders, mergeHostConnectorIdentityHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
 import {
   refreshGoogleAccessToken,
   unpackGoogleRefreshCredential,
@@ -156,7 +158,11 @@ import {
   matchKnowledgeCaptureRules,
   type KnowledgeCaptureRuleStore,
 } from '../knowledge/capture-rules.js'
-import { CONNECTOR_SCOPE_RESTRICTION } from './discovery-diagnostics.js'
+import { CONNECTOR_SCOPE_RESTRICTION, CONNECTOR_SOURCE_RESTRICTION } from './discovery-diagnostics.js'
+import { createConnectorRuntimeAuthority } from '../application-platform/connector-runtime-authority.js'
+import type { ToolContext } from '@use-brian/core'
+import { createHash } from 'node:crypto'
+import { AuthorityChangedError } from '../context-scope/authority-lease.js'
 import {
   connectorExposureAllowed,
   type ConnectorContextBinding,
@@ -567,6 +573,10 @@ export async function injectMcpTools(params: {
   emailInboxProvider?: EmailInboxProvider | null
   /** Trusted turn grant used to withhold unbounded/cross-scope connectors. */
   contextScope?: ConnectorTurnGrant
+  /** Host-only protected source adapter, current execution and exact turn accumulator. */
+  connectorSourceRuntimeFactory?: ConnectorSourceRuntimeFactory
+  executionContext?: ExecutionContext
+  scopeAccumulator?: ContextScopeAccumulator
 }): Promise<McpInjectionResult> {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
@@ -577,15 +587,102 @@ export async function injectMcpTools(params: {
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
     keepBuiltinsDirect = false, keepDynamicToolsDirect = false, restrictSearchToToolNames,
     engineHooks, actorIdentity, filesApi, readCachedFile,
-    introspectionTools, emailInboxProvider, contextScope,
+    introspectionTools, emailInboxProvider, contextScope, connectorSourceRuntimeFactory: suppliedSourceRuntimeFactory, executionContext, scopeAccumulator,
   } = params
 
+  const connectorSourceRuntimeFactory = suppliedSourceRuntimeFactory ?? getSharedConnectorSourceRuntimeFactory()
+  const usingSharedSourceFactory = !suppliedSourceRuntimeFactory && !!connectorSourceRuntimeFactory
+  const legacySourceAuthorities = new Set<() => Promise<void>>()
   const unavailable: string[] = []
+  const originalTools = new Map(tools)
+  const runtimeActorId = contextScope?.access?.userId ?? actorIdentity?.userId
+  const protectedSources = new Set<ConnectorSourceRuntime>()
+  const noteProtectedUnavailable = () => {
+    if (!unavailable.includes(CONNECTOR_SOURCE_RESTRICTION)) unavailable.push(CONNECTOR_SOURCE_RESTRICTION)
+  }
+  const sourceRuntimes = new Map<string, Promise<ConnectorSourceRuntime | null>>()
+  const sourceRuntime = (instanceId: string | null | undefined, headers: Record<string, string>) => {
+    if (!instanceId || !assistantTeamId || !connectorSourceRuntimeFactory) return Promise.resolve(null)
+    if (executionContext && (executionContext.assistant.id !== assistantId || executionContext.security.access.userId !== runtimeActorId)) throw new AuthorityChangedError()
+    let pending = sourceRuntimes.get(instanceId)
+    if (!pending) {
+      pending = connectorSourceRuntimeFactory({ instanceId, workspaceId: assistantTeamId, execution: executionContext, accumulator: scopeAccumulator, headers, onLegacyAdmission: check => { legacySourceAuthorities.add(check) } })
+        .then(runtime => { if (runtime) protectedSources.add(runtime); return runtime })
+        .catch(error => {
+          noteProtectedUnavailable()
+          throw error
+        })
+      sourceRuntimes.set(instanceId, pending)
+    }
+    return pending
+  }
+  const pinnedBindings = new Map<string, { instanceId: string; instance: string; grant?: string }>()
+  const pinnedAuth = new Map<string, string>()
+  let bindingsInvalid = false
+  const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+  const instanceBinding = (instance: Record<string, unknown>) => digest([instance.id,instance.scope,instance.userId,instance.workspaceId,
+    instance.provider,instance.connected,instance.url,instance.sensitivity,instance.compartments,instance.projectIds,instance.config,
+    instance.healthStatus === 'auth_failed'])
+  const exposureBinding = (grant: Record<string, unknown>) => digest([grant.id,grant.connectorInstanceId,grant.targetType,grant.targetId,
+    grant.grantedByUserId,grant.compartments,grant.projectIds])
+  const authBinding = (headers: Record<string, string>) => digest(Object.entries(headers).sort(([left],[right]) => left.localeCompare(right)))
+  const bindingCacheKey = (id: string | null | undefined) => digest([...pinnedBindings].filter(([, binding]) => binding.instanceId === id)
+    .sort(([left],[right]) => left.localeCompare(right)))
+  function pinBinding(binding: ConnectorContextBinding) {
+    if (!assistantTeamId || !runtimeActorId || !connectorInstanceStore) return
+    const row = binding as unknown as Record<string, unknown>
+    const instance = (row.instance ?? row) as Record<string, unknown>
+    if (typeof instance.id !== 'string' || typeof row.id !== 'string') return
+    const key = `${row.instance ? 'grant' : 'instance'}:${row.id}`
+    const pinned = { instanceId: instance.id, instance: instanceBinding(instance), ...(row.instance ? { grant: exposureBinding(row) } : {}) }
+    const prior = pinnedBindings.get(key)
+    if (prior && JSON.stringify(prior) !== JSON.stringify(pinned)) bindingsInvalid = true
+    else pinnedBindings.set(key, pinned)
+  }
+  async function assertBindingsCurrent(mayHaveExecuted = false) {
+    if (bindingsInvalid) throw new AuthorityChangedError(mayHaveExecuted)
+    if (usingSharedSourceFactory && (protectedSources.size > 0 || legacySourceAuthorities.size > 0)
+      && getSharedConnectorSourceRuntimeFactory() !== connectorSourceRuntimeFactory) {
+      bindingsInvalid = true; throw new AuthorityChangedError(mayHaveExecuted)
+    }
+    try {
+      const grants = [...pinnedBindings.values()].some(binding => binding.grant)
+        ? await connectorGrantStore!.listForTargetSystem('workspace', assistantTeamId!) : []
+      await Promise.all([...pinnedBindings].map(async ([key, expected]) => {
+        const current = await connectorInstanceStore!.getSystem(expected.instanceId)
+        if (!current || instanceBinding(current as unknown as Record<string, unknown>) !== expected.instance) throw new AuthorityChangedError(mayHaveExecuted)
+        if (expected.grant) {
+          const grant = grants.find(grant => `grant:${grant.id}` === key)
+          if (!grant || exposureBinding(grant as unknown as Record<string, unknown>) !== expected.grant) throw new AuthorityChangedError(mayHaveExecuted)
+        }
+      }))
+      await Promise.all([...pinnedAuth].map(async ([id, expected]) => {
+        const headers = buildConnectorAuthHeaders(await connectorInstanceStore!.getAuthCredentialsSystem(id))
+        if (authBinding(headers) !== expected) throw new AuthorityChangedError(mayHaveExecuted)
+      }))
+      await Promise.all([...legacySourceAuthorities].map(check => check()))
+      await Promise.all([...protectedSources].map(source => source.assertCurrent()))
+    } catch (error) {
+      if (error instanceof SourceProtocolError) noteProtectedUnavailable()
+      bindingsInvalid = true
+      throw new AuthorityChangedError(mayHaveExecuted)
+    }
+  }
+  let runtimeAuthority: Awaited<ReturnType<typeof createConnectorRuntimeAuthority>> | undefined
+  if (assistantTeamId) {
+    try {
+      runtimeAuthority = await createConnectorRuntimeAuthority({ workspaceId: assistantTeamId, assistantId,
+        initiatingUserId: runtimeActorId, identityUserId: actorIdentity?.userId })
+    } catch {
+      return { enrichConfirmation: async (_tool, input) => input, unavailable: [CONNECTOR_SCOPE_RESTRICTION], searchableSources: [] }
+    }
+  }
   // Discovery visits the same bindings in multiple lanes. Report once per
   // injection, without exposing connector identity, scope values, or counts.
   let scopeRejectionReported = false
   const exposureAllowed = (binding: ConnectorContextBinding): boolean => {
-    const allowed = connectorExposureAllowed(contextScope, binding)
+    const allowed = (runtimeAuthority?.allows(binding) ?? true) && connectorExposureAllowed(contextScope, binding)
+    if (allowed) pinBinding(binding)
     if (!allowed && !scopeRejectionReported) {
       scopeRejectionReported = true
       unavailable.push(CONNECTOR_SCOPE_RESTRICTION)
@@ -736,46 +833,48 @@ export async function injectMcpTools(params: {
 
   const DISCOVERY_TIMEOUT = 8_000
 
-  // Per-URL auth headers for outbound custom-MCP requests. Execution
-  // dispatches by serverUrl alone (tool-search's mcp_call carries no
-  // per-entry credentials — see the top-level callMcpTool below), so the
-  // join key is the URL. First instance to register a URL wins, matching
-  // the by-URL discovery dedupe in addGrantedCustomMcp.
-  const headersByUrl = new Map<string, Record<string, string>>()
+  // Each discovered source owns its transport. Equal URLs do not share credentials.
+  const headersByConnector = new Map<(typeof active)[number], Record<string, string>>()
 
   async function loadAuthHeaders(instanceId: string | null | undefined): Promise<Record<string, string>> {
     if (!instanceId || !connectorInstanceStore) return {}
     try {
       const creds = await connectorInstanceStore.getAuthCredentialsSystem(instanceId)
-      return buildConnectorAuthHeaders(creds)
+      const headers = buildConnectorAuthHeaders(creds)
+      if (runtimeActorId) {
+        const current = authBinding(headers), prior = pinnedAuth.get(instanceId)
+        if (prior && prior !== current) bindingsInvalid = true
+        else pinnedAuth.set(instanceId, current)
+      }
+      return headers
     } catch (err) {
       console.error('[mcp-inject] auth-header resolution failed:', err)
       return {}
     }
   }
 
-  function registerAuthHeaders(url: string, headers: Record<string, string>): void {
-    if (Object.keys(headers).length > 0 && !headersByUrl.has(url)) {
-      headersByUrl.set(url, headers)
-    }
+  async function invokeRemoteMcp(url: string, tool: string, input: Record<string, unknown>, headers?: Record<string, string>, instanceId?: string | null) {
+    await runtimeAuthority?.assertCurrent()
+    await assertBindingsCurrent()
+    const source = await sourceRuntime(instanceId, headers ?? {})
+    return source ? source.call(tool, input, headers) : callRemoteMcpTool(url, tool, input, headers)
   }
 
   const discoveredServers: Array<{
     server: McpServerConfig
     connectorUrl: string
+    instanceId: string | null
+    headers: Record<string, string>
     policy: NonNullable<RemoteSource['policy']>
   }> = []
 
-  // Resolve per-connector auth headers up front and register them in the
-  // deterministic `active` array order (stable: custom ASC, label ASC, then
-  // team-native). When two instances share a serverUrl, the winner is the
-  // first in that order, not whichever DB read resolved first — discovery
-  // and the mcp_call dispatcher then agree on one header set per URL.
+  // Resolve per-instance headers once, keeping the same selected identity on
+  // discovery and invocation even when different instances share an endpoint.
   const resolvedHeaders = await Promise.all(active.map((c) => loadAuthHeaders(c.instanceId)))
   // Reserved-namespace identity headers, built once per turn (the actor is
   // constant for the turn). Only attached to connectors that opted in, and
   // merged LAST so neither user config nor auth can shadow the assertion.
-  const actorHeaders = actorIdentity ? actorIdentityHeaders(actorIdentity) : null
+  const actorHeaders = actorIdentity ? actorIdentityHeaders({ ...actorIdentity, assistantId }) : null
   // Media capability token — a separate reserved header gated on its OWN opt-in
   // (`sendMediaToken`), independent of `sendActorIdentity`. It is a bearer
   // capability (possession fetches the user's latest recording), so it only
@@ -796,29 +895,34 @@ export async function injectMcpTools(params: {
     // it per call. See docs/architecture/engine/tool-hooks.md.
     let merged = mergeValidatedHeaders(resolvedHeaders[i], c.preflightHeaders)
     if (actorHeaders && c.sendActorIdentity) {
-      merged = mergeValidatedHeaders(merged, actorHeaders)
+      merged = mergeHostConnectorIdentityHeaders(merged, actorHeaders)
     }
     if (mediaTokenHeader && c.sendMediaToken) {
-      merged = mergeValidatedHeaders(merged, mediaTokenHeader)
+      merged = mergeHostConnectorIdentityHeaders(merged, mediaTokenHeader)
     }
-    registerAuthHeaders(c.url, merged ?? {})
+    headersByConnector.set(c, { ...merged })
   })
 
   const discoveries = await Promise.allSettled(
     active.map(async (connector) => {
-      const authHeaders = headersByUrl.get(connector.url) ?? {}
+      const authHeaders = headersByConnector.get(connector) ?? {}
 
       // `updatedAt` in the key: credential/URL edits bump the row's
       // updated_at, so a stale-auth discovery never outlives an edit.
-      const cacheKey = `${userId}:${connector.connectorId}:${connector.url}:${connector.updatedAt?.getTime() ?? 0}`
+      const cacheKey = `${runtimeAuthority?.cacheKey ?? userId}:${assistantId}:${connector.instanceId}:${bindingCacheKey(connector.instanceId)}:${connector.connectorId}:${connector.url}:${connector.updatedAt?.getTime() ?? 0}`
+      await runtimeAuthority?.assertCurrent()
+      await assertBindingsCurrent()
+      const protectedSource = await sourceRuntime(connector.instanceId, authHeaders)
 
       // Check cache first
-      const cached = getCachedDiscovery(cacheKey)
+      const cached = protectedSource ? null : getCachedDiscovery(cacheKey)
       if (cached) {
         console.debug(`[mcp-inject] ${connector.name}: cache hit (${cached.tools.length} tools)`)
         return {
           server: cached,
           connectorUrl: connector.url,
+          instanceId: connector.instanceId,
+          headers: authHeaders,
           policy: {
             settingsStore: connector.policyStore,
             userId: connector.policyUserId,
@@ -830,19 +934,23 @@ export async function injectMcpTools(params: {
 
       // Discover with timeout
       const server = await Promise.race([
-        discoverMcpServer(connector.url, connector.name, authHeaders),
+        protectedSource ? protectedSource.discover(connector.name) : discoverMcpServer(connector.url, connector.name, authHeaders),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error(`Discovery timeout for ${connector.name}`)), DISCOVERY_TIMEOUT),
         ),
       ])
+      await runtimeAuthority?.assertCurrent()
+      await assertBindingsCurrent()
 
-      setCachedDiscovery(cacheKey, server)
+      if (!protectedSource) setCachedDiscovery(cacheKey, server)
       console.debug(
         `[mcp-inject] ${connector.name}: discovered ${server.tools.length} tools`,
       )
       return {
         server,
         connectorUrl: connector.url,
+        instanceId: connector.instanceId,
+        headers: authHeaders,
         policy: {
           settingsStore: connector.policyStore,
           userId: connector.policyUserId,
@@ -857,6 +965,7 @@ export async function injectMcpTools(params: {
     if (result.status === 'fulfilled') {
       discoveredServers.push(result.value)
     } else {
+      if (result.reason instanceof SourceProtocolError) noteProtectedUnavailable()
       console.error('[mcp-inject] server discovery failed:', result.reason)
     }
   }
@@ -870,20 +979,21 @@ export async function injectMcpTools(params: {
   // (`keepBuiltinsDirect: true`) still gets `mcp_search` / `mcp_call`
   // here for custom MCP only — built-ins stay direct so the workflow
   // executor's per-tool `requiresConfirmation` inspection still works.
-  const remoteSources: RemoteSource[] = discoveredServers.map(({ server, connectorUrl, policy }) => ({
+  const remoteInstanceIds = new Set(discoveredServers.flatMap(source => source.instanceId ? [source.instanceId] : []))
+  const remoteSources: RemoteSource[] = discoveredServers.map(({ server, connectorUrl, instanceId, headers, policy }) => ({
     kind: 'remote' as const,
     server,
     serverUrl: connectorUrl,
-    callMcpTool: (url: string, toolName: string, input: Record<string, unknown>) =>
-      callRemoteMcpTool(url, toolName, input, headersByUrl.get(url)),
+    ...(instanceId ? { sourceId: `connector:${instanceId}` } : {}),
+    callMcpTool: (_url: string, toolName: string, input: Record<string, unknown>, overrides?: Record<string, string>) =>
+      invokeRemoteMcp(connectorUrl, toolName, input, mergeValidatedHeaders(headers, overrides), instanceId),
     policy,
   }))
 
   // Discover a custom remote MCP shared to this workspace via a grant and add
   // it to the search index. Per-instance auth credentials (bearer / custom
-  // header) are resolved off the granted instance row and joined by URL —
-  // same as the personal / team-native custom paths above. Deduped by URL so
-  // a server reachable through more than one path is indexed once. See
+  // header) stay bound to the exact instance like the personal/team-native paths.
+  // Duplicate exposure of one instance is indexed once; equal URLs stay distinct. See
   // docs/architecture/integrations/mcp.md → "Workspace connector scoping".
   async function addGrantedCustomMcp(
     url: string,
@@ -892,28 +1002,36 @@ export async function injectMcpTools(params: {
     instanceId?: string | null,
     updatedAt?: Date | null,
     policyServerName?: string,
+    config?: Record<string, unknown>,
   ): Promise<void> {
-    if (remoteSources.some((s) => s.serverUrl === url)) return
+    if (instanceId ? remoteInstanceIds.has(instanceId) : remoteSources.some(source => source.serverUrl === url)) return
     try {
-      const authHeaders = await loadAuthHeaders(instanceId)
-      registerAuthHeaders(url, authHeaders)
-      const cacheKey = `${cacheUserId}:${url}:${updatedAt?.getTime() ?? 0}`
-      let server = getCachedDiscovery(cacheKey)
+      let authHeaders = mergeValidatedHeaders(await loadAuthHeaders(instanceId), preflightHeadersToRecord(config)) ?? {}
+      if (actorHeaders && config?.sendActorIdentity === true) authHeaders = mergeHostConnectorIdentityHeaders(authHeaders, actorHeaders)
+      if (mediaTokenHeader && config?.sendMediaToken === true) authHeaders = mergeHostConnectorIdentityHeaders(authHeaders, mediaTokenHeader)
+      const cacheKey = `${runtimeAuthority?.cacheKey ?? cacheUserId}:${assistantId}:${instanceId}:${bindingCacheKey(instanceId)}:${url}:${updatedAt?.getTime() ?? 0}`
+      await runtimeAuthority?.assertCurrent()
+      await assertBindingsCurrent()
+      const protectedSource = await sourceRuntime(instanceId, authHeaders)
+      let server = protectedSource ? null : getCachedDiscovery(cacheKey)
       if (!server) {
         server = await Promise.race([
-          discoverMcpServer(url, name, authHeaders),
+          protectedSource ? protectedSource.discover(name) : discoverMcpServer(url, name, authHeaders),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error(`Discovery timeout for ${name}`)), DISCOVERY_TIMEOUT),
           ),
         ])
-        setCachedDiscovery(cacheKey, server)
+        await runtimeAuthority?.assertCurrent()
+        await assertBindingsCurrent()
+        if (!protectedSource) setCachedDiscovery(cacheKey, server)
       }
       remoteSources.push({
         kind: 'remote',
         server,
         serverUrl: url,
-        callMcpTool: (u: string, toolName: string, input: Record<string, unknown>) =>
-          callRemoteMcpTool(u, toolName, input, headersByUrl.get(u)),
+        ...(instanceId ? { sourceId: `connector:${instanceId}` } : {}),
+        callMcpTool: (_url: string, toolName: string, input: Record<string, unknown>, overrides?: Record<string, string>) =>
+          invokeRemoteMcp(url, toolName, input, mergeValidatedHeaders(authHeaders, overrides), instanceId),
         policy: {
           settingsStore,
           userId: cacheUserId,
@@ -921,8 +1039,10 @@ export async function injectMcpTools(params: {
           appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
         },
       })
+      if (instanceId) remoteInstanceIds.add(instanceId)
       console.debug(`[mcp-inject] granted custom MCP ${name}: discovered ${server.tools.length} tools`)
     } catch (err) {
+      if (err instanceof SourceProtocolError) noteProtectedUnavailable()
       console.error(`[mcp-inject] granted custom MCP discovery failed (${name}):`, err)
     }
   }
@@ -1380,7 +1500,7 @@ export async function injectMcpTools(params: {
           const enabled = !assistantConnectorStore
             || await assistantConnectorStore.isEnabled(assistantId, governanceId, p)
           if (enabled) {
-            await addGrantedCustomMcp(g.instance.url, g.instance.label ?? p, g.grantedByUserId, g.instance.id, g.instance.updatedAt)
+            await addGrantedCustomMcp(g.instance.url, g.instance.label ?? p, g.grantedByUserId, g.instance.id, g.instance.updatedAt, undefined, g.instance.config)
           }
         }
         // Any other unknown provider — skipped.
@@ -2074,13 +2194,7 @@ export async function injectMcpTools(params: {
       assistantId,
       appLevelAssistantId: APP_LEVEL_ASSISTANT_ID,
       userId,
-      // The execution dispatcher — every remote mcp_call lands here with
-      // only the serverUrl, so per-connector auth joins via headersByUrl.
-      // A preflight hook may pass `overrides`, merged over the stored-
-      // credential headers (override wins, re-validated) just before the
-      // wire call. See docs/architecture/engine/tool-hooks.md.
-      callMcpTool: (serverUrl, toolName, input, overrides) =>
-        callRemoteMcpTool(serverUrl, toolName, input, mergeValidatedHeaders(headersByUrl.get(serverUrl), overrides)),
+      // The index owns each source's exact dispatcher and validated overrides.
       hooks: engineHooks,
       keepDynamicToolsDirect,
     })
@@ -2112,8 +2226,56 @@ export async function injectMcpTools(params: {
     )
   }
 
+  if (runtimeAuthority) {
+    const authority = runtimeAuthority
+    for (const [name, tool] of tools) {
+      if (originalTools.get(name) === tool) continue
+      const assertActor = (context: ToolContext, mayHaveExecuted = false) => {
+        if (protectedSources.size > 0 && (context.executionContext !== executionContext || context.scopeAccumulator !== scopeAccumulator)) {
+          throw new AuthorityChangedError(mayHaveExecuted)
+        }
+        const canonical = context.executionContext?.security.access
+        if (context.executionContext?.lifecycle.abortSignal.aborted || canonical && (canonical.userId !== context.userId
+          || canonical.assistantId !== context.assistantId || canonical.workspaceId !== context.workspaceId)) {
+          throw new AuthorityChangedError(mayHaveExecuted)
+        }
+        if (runtimeActorId && (context.userId !== runtimeActorId || context.assistantId !== assistantId
+          || context.workspaceId !== assistantTeamId)) throw new AuthorityChangedError(mayHaveExecuted)
+      }
+      const invoke = <T>(context: ToolContext, operation: () => Promise<T>): Promise<T> => {
+        assertActor(context)
+        const admitted = async () => {
+          await assertBindingsCurrent()
+          let result: T
+          try { result = await operation() } catch (error) { await assertBindingsCurrent(true); throw error }
+          await assertBindingsCurrent(true)
+          assertActor(context, true)
+          return result
+        }
+        return context.executionContext
+          ? context.executionContext.security.authority.execute(() => authority.execute(admitted))
+          : authority.execute(admitted)
+      }
+      tools.set(name, { ...tool,
+        execute: (input, context) => invoke(context, () => tool.execute(input, context)),
+        ...(tool.resolveConfirmation ? { resolveConfirmation: (context: ToolContext, input?: unknown) => {
+          return invoke(context, () => tool.resolveConfirmation!(context, input))
+        } } : {}),
+        ...(tool.describeConfirmation ? { describeConfirmation: (input: unknown, context: ToolContext) => {
+          return invoke(context, () => tool.describeConfirmation!(input, context))
+        } } : {}),
+      })
+    }
+    await authority.assertCurrent()
+    await assertBindingsCurrent()
+  }
   return {
-    enrichConfirmation: enricher,
+    enrichConfirmation: runtimeAuthority ? (tool, input) => runtimeAuthority!.execute(async () => {
+      await assertBindingsCurrent()
+      const enriched = await enricher(tool, input)
+      await assertBindingsCurrent()
+      return enriched
+    }) : enricher,
     unavailable,
     searchableSources,
     restrictedSearchToolNames: [...restrictedSearchToolNames],

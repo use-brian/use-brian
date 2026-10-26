@@ -631,16 +631,19 @@ export function createCrmOperationsService(
         })
       }
 
-      return store.transaction(context, async (tx) => {
-        if (context.authority.integration && !isCrmConfigCommand(command)) await tx.authorizeIntegration(command)
-        if (isCrmConfigCommand(command)) {
-          const saved = await tx.configureCatalog(command)
-          if (saved.changed) await audit(tx, context.actor, {
-            action: `crm.${saved.subjectKind}.${saved.created ? 'created' : 'updated'}`,
-            subjectKind: saved.subjectKind, subjectId: recordId(saved.record, saved.subjectKind),
+      if (isCrmConfigCommand(command)) {
+        const transaction=store.configurationTransaction?.bind(store)??store.transaction.bind(store)
+        return transaction(context,async tx=>{
+          const saved=await tx.configureCatalog(command)
+          if(saved.changed)await audit(tx,context.actor,{
+            action:`crm.${saved.subjectKind}.${saved.created?'created':'updated'}`,
+            subjectKind:saved.subjectKind,subjectId:recordId(saved.record,saved.subjectKind),
           })
-          return result(command.kind, saved.record, { created: saved.created, duplicate: !saved.changed })
-        }
+          return result(command.kind,saved.record,{created:saved.created,duplicate:!saved.changed})
+        })
+      }
+      return store.transaction(context, async (tx) => {
+        if (context.authority.integration) await tx.authorizeIntegration(command)
         if (command.kind === 'release_address_suppression') {
           const saved = await tx.releaseAddressSuppression(command)
           if (saved.changed) await audit(tx, context.actor, { action: 'crm.address_suppression.released',subjectKind: 'address_suppression',

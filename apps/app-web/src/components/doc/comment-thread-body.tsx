@@ -1065,7 +1065,6 @@ export function CommentThreadBody({
               // A thread always has a backing assistant — keep the research
               // toggle on replies so it doesn't vanish after the first message
               // (it disables with AI-reply off, like the model picker).
-              showResearch
               aiReply={aiReply}
               onAiReplyChange={setAiReply}
               className="flex-1"

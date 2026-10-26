@@ -1,6 +1,7 @@
 import { debugDocumentFlow } from '../../engine/document-flow-debug.js'
 import { Buffer } from 'node:buffer'
 import { renderSystemContext } from '../system-context.js'
+import { assertInputAuthority, isInputAuthorityError } from '../input-authority.js'
 import { z } from 'zod'
 import type {
   ContentBlock,
@@ -125,6 +126,7 @@ export function createCodexAppServerProvider(
 
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
       const session = createSession({
+        assertInputAuthority: request.assertInputAuthority,
         model: request.model,
         systemPrompt: request.systemPrompt,
         runtimeSystemContext: request.runtimeSystemContext,
@@ -139,6 +141,7 @@ export function createCodexAppServerProvider(
       })
       try {
         yield* session.send(request.messages, {
+          assertInputAuthority: request.assertInputAuthority,
           ...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),
         })
       } finally {
@@ -240,7 +243,7 @@ class CodexProviderRuntime {
     if (this.#sessions.get(threadId) === session) this.#sessions.delete(threadId)
   }
 
-  async #handleToolCall(params: unknown): Promise<DynamicToolCallResponse> {
+  async #handleToolCall(params: unknown): Promise<unknown> {
     const parsed = DynamicToolCallParamsSchema.safeParse(params)
     if (!parsed.success) {
       throw new CodexProviderProtocolError('Codex emitted an invalid dynamic tool call')
@@ -313,6 +316,7 @@ class CodexProviderSession implements ProviderSession {
   #sendActive = false
   #disposed = false
   #closedReason: Error | undefined
+  #inputCheck: (() => Promise<void>) | undefined
 
   constructor(
     runtime: CodexProviderRuntime,
@@ -330,6 +334,7 @@ class CodexProviderSession implements ProviderSession {
       runtimeSystemContext: undefined,
     }
     this.#allowedTools = validateTools(options.tools ?? [])
+    this.#inputCheck = options.assertInputAuthority
     this.#toolBatchQuietMs = toolBatchQuietMs
     this.#toolResultTimeoutMs = toolResultTimeoutMs
     this.#sessionIdleUnsubscribeMs = sessionIdleUnsubscribeMs
@@ -355,8 +360,8 @@ class CodexProviderSession implements ProviderSession {
     if (this.#sendActive) {
       throw new CodexProviderProtocolError('Concurrent sends are not supported in one Codex session')
     }
-    if (this.#disposed) throw new Error('Codex provider session is disposed')
     if (this.#closedReason) throw this.#closedReason
+    if (this.#disposed) throw new Error('Codex provider session is disposed')
     if (this.#options.signal?.aborted) throw abortError('Codex app-server turn aborted')
 
     this.#sendActive = true
@@ -366,6 +371,8 @@ class CodexProviderSession implements ProviderSession {
     queue.push({ type: 'message_start', model: this.#options.model })
 
     try {
+      this.#inputCheck = opts.assertInputAuthority ?? this.#inputCheck
+      await this.#assertInputAuthority()
       const resumable = Array.from(this.#parked.values()).some((entry) => entry.surfaced)
       const ended = this.#detachedEnd
       if (ended) {
@@ -395,6 +402,26 @@ class CodexProviderSession implements ProviderSession {
     } finally {
       if (this.#activeQueue === queue) this.#activeQueue = undefined
       this.#sendActive = false
+    }
+  }
+
+  /** Refusal is terminal for this session; cleanup never waits on its own write gate. */
+  async #assertInputAuthority(check = this.#inputCheck): Promise<void> {
+    if (this.#closedReason) throw this.#closedReason
+    if (this.#disposed) throw new Error('Codex provider session is disposed')
+    try {
+      await assertInputAuthority(check)
+      this.#options.signal?.throwIfAborted()
+    } catch (error) {
+      if (isInputAuthorityError(error)) {
+        this.#closedReason = asError(error)
+        this.#detached = []
+        this.#detachedEnd = undefined
+        this.#activeQueue?.fail(this.#closedReason)
+        this.#failParked('Brian session is no longer available.')
+        void this.dispose()
+      }
+      throw error
     }
   }
 
@@ -443,18 +470,18 @@ class CodexProviderSession implements ProviderSession {
             ...(this.#options.outputSchema ? { outputSchema: this.#options.outputSchema } : {}),
           },
           TurnStartResponseSchema,
-          { signal: this.#options.signal },
+          { signal: this.#options.signal, assertInputAuthority: () => this.#assertInputAuthority() },
         )
       } catch (error) {
         // Structured-output schemas are advisory at the provider boundary.
         // Only an invalid-params rejection is retried, once, without the schema;
         // auth, quota, transport, and model errors retain their real failure.
-        if (!(this.#options.outputSchema && isInvalidParamsError(error))) throw error
+        if (isInputAuthorityError(error) || !(this.#options.outputSchema && isInvalidParamsError(error))) throw error
         response = await this.#transport.rpc.request(
           'turn/start',
           params,
           TurnStartResponseSchema,
-          { signal: this.#options.signal },
+          { signal: this.#options.signal, assertInputAuthority: () => this.#assertInputAuthority() },
         )
       }
     } catch (error) {
@@ -507,7 +534,7 @@ class CodexProviderSession implements ProviderSession {
         selectedCapabilityRoots: [],
       },
       ThreadStartResponseSchema,
-      { signal: this.#options.signal },
+      { signal: this.#options.signal, assertInputAuthority: () => this.#assertInputAuthority() },
     )
     if (response.model !== this.#options.model) {
       throw new CodexProviderProtocolError('Codex silently substituted the requested model')
@@ -533,16 +560,18 @@ class CodexProviderSession implements ProviderSession {
         'thread/inject_items',
         { threadId: this.#threadId, items: batch },
         ThreadInjectItemsResponseSchema,
-        { signal: this.#options.signal },
+        { signal: this.#options.signal, assertInputAuthority: () => this.#assertInputAuthority() },
       )
     }
   }
 
-  async onToolCall(call: DynamicToolCallParams): Promise<DynamicToolCallResponse> {
+  async onToolCall(call: DynamicToolCallParams): Promise<unknown> {
     await this.whenTurnReady()
     if (this.#disposed || this.#closedReason) {
       return failedToolResponse('Brian session is no longer available.')
     }
+    const originalCheck = this.#inputCheck
+    await this.#assertInputAuthority(originalCheck)
     if (!this.#threadId || call.threadId !== this.#threadId) {
       throw new CodexProviderProtocolError('Codex dynamic tool call targeted the wrong thread')
     }
@@ -603,7 +632,12 @@ class CodexProviderSession implements ProviderSession {
       this.#detached.push(...chunks)
     }
 
-    return response
+    const result = await response
+    if (!originalCheck && !this.#inputCheck) return result
+    return this.#transport.rpc.guardResponse(result, async () => {
+      await this.#assertInputAuthority(originalCheck)
+      if (this.#inputCheck !== originalCheck) await this.#assertInputAuthority()
+    })
   }
 
   async whenTurnReady(): Promise<void> {

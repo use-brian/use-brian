@@ -37,6 +37,8 @@ vi.mock('../client.js', () => ({
   // Two-role model: renameProperty is a workspace-schema (system) operation,
   // scoped by WHERE workspace_id → runs on the system pool (owner).
   getPool: () => fakePool,
+  getAppPool: () => fakePool,
+  applyRLSGucs: vi.fn(),
   // `renameProperty`'s `finally` calls this; emulate the real helper's
   // ROLLBACK + release so the connection is released cleanly.
   rollbackAndRelease: async (client: { release: () => void }) => {
@@ -45,7 +47,8 @@ vi.mock('../client.js', () => ({
 }))
 
 import { createDbDocEntityStore } from '../doc-entity-store.js'
-import { queryWithRLS } from '../client.js'
+import { boundScopeSources } from '@use-brian/core'
+import { applyRLSGucs, queryWithRLS } from '../client.js'
 import type {
   DocEntityInstance,
   DocEntityType,
@@ -112,7 +115,28 @@ beforeEach(() => {
   clientResponder = null
 })
 
-const store = createDbDocEntityStore()
+const store = createDbDocEntityStore({ actorUserId: USER_ID })
+
+// SQL-shape fixture only. Admission itself is covered by the guarded real
+// application/native-field integration matrix, not these database doubles.
+function canonicalReadFixture(options: { missing?: boolean; missingSchema?: boolean; changes?: DocEntityInstance['data']; schemaRows?: unknown[] } = {}) {
+  clientResponder = text => {
+    if (text.includes('pg_catalog.pg_roles')) return { rows: [{ bypass: false }], rowCount: 1 }
+    if (text.trim().startsWith('INSERT INTO entity_instances') || text.trim().startsWith('UPDATE entity_instances')) {
+      return { rows: options.missing ? [] : [entityInstanceRow({ recordVersion: '1' })], rowCount: options.missing ? 0 : 1 }
+    }
+    if (text.trim().startsWith('DELETE FROM entity_instances')) return { rows: [], rowCount: 1 }
+    if (text.includes('FROM public.entity_types')) return { rows: options.missingSchema ? [] : options.schemaRows ?? [entityTypeRow()], rowCount: options.missingSchema ? 0 : options.schemaRows?.length ?? 1 }
+    if (text.includes('read_generic_application_catalog_state(')) return { rows: [{ value: { schemaVersion: '1',fields: SAMPLE_PROPERTIES.map(property => property.name) } }],rowCount: 1 }
+    if (text.includes('FROM public.entity_instances')) return { rows: options.missing ? [] : [entityInstanceRow({ recordVersion: '1' })], rowCount: options.missing ? 0 : 1 }
+    if (text.includes('read_generic_application_record(')) return { rows: [{ value: {
+      id: ENTITY_ID, recordVersion: '1', values: { ...entityInstanceRow().data, ...options.changes }, absentFields: ['genre'], policyVersion: 'a'.repeat(64),
+      sources: [{ workspaceId: WORKSPACE_ID, resourceKind: 'application_field', resourceId: ENTITY_ID, version: 'fixture-version',
+        userId: null, assistantId: null, sensitivity: 'internal', compartments: [], projectIds: [] }],
+    } }], rowCount: 1 }
+    return { rows: [], rowCount: 0 }
+  }
+}
 
 describe('[COMP:api/doc-entity-store] EntityType CRUD', () => {
   it('createEntityType inserts with default schemaVersion=1', async () => {
@@ -178,44 +202,37 @@ describe('[COMP:api/doc-entity-store] EntityType CRUD', () => {
     expect(mockQueryWithRLS).not.toHaveBeenCalled()
   })
 
-  it('getEntityType returns the row', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityTypeRow()],
-      rowCount: 1,
-    } as never)
+  it('getEntityType returns the projected row', async () => {
+    canonicalReadFixture()
     const t = await store.getEntityType(WORKSPACE_ID, ENTITY_TYPE_ID)
     expect(t?.id).toBe(ENTITY_TYPE_ID)
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain('SELECT')
-    expect(sql).toContain('FROM entity_types')
-    expect(params).toEqual([ENTITY_TYPE_ID, WORKSPACE_ID])
+    const query = clientQueries.find(query => query.text.includes('FROM public.entity_types'))!
+    expect(query.text).toContain('SELECT')
+    expect(query.text).toContain('FROM public.entity_types')
+    expect(query.values).toEqual([ENTITY_TYPE_ID, WORKSPACE_ID])
+    expect(clientQueries.some(query => query.text.includes('read_generic_application_catalog_state'))).toBe(true)
   })
 
   it('getEntityType returns null when missing', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    canonicalReadFixture({ missingSchema: true })
     expect(await store.getEntityType(WORKSPACE_ID, ENTITY_TYPE_ID)).toBeNull()
   })
 
   it('getEntityTypeByName uses the (workspace, name) UNIQUE constraint', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityTypeRow()],
-      rowCount: 1,
-    } as never)
+    canonicalReadFixture()
     const t = await store.getEntityTypeByName(WORKSPACE_ID, 'Movie')
     expect(t?.name).toBe('Movie')
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain('workspace_id = $1 AND name = $2')
-    expect(params).toEqual([WORKSPACE_ID, 'Movie'])
+    const query = clientQueries.find(query => query.text.includes('FROM public.entity_types'))!
+    expect(query.text).toContain('workspace_id=$1 AND name=$2')
+    expect(query.values).toEqual([WORKSPACE_ID, 'Movie'])
   })
 
-  it('listEntityTypes returns all rows for the workspace', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityTypeRow(), entityTypeRow({ id: 'other', name: 'Recipe' })],
-      rowCount: 2,
-    } as never)
+  it('listEntityTypes projects all rows for the workspace', async () => {
+    canonicalReadFixture({ schemaRows: [entityTypeRow(),entityTypeRow({ id: 'other',name: 'Recipe' })] })
     const list = await store.listEntityTypes(WORKSPACE_ID)
     expect(list).toHaveLength(2)
     expect(list[0].name).toBe('Movie')
+    expect(clientQueries.filter(query => query.text.includes('read_generic_application_catalog_state'))).toHaveLength(2)
   })
 
   it('updateEntityType bumps schema_version when properties change', async () => {
@@ -246,22 +263,20 @@ describe('[COMP:api/doc-entity-store] EntityType CRUD', () => {
   })
 
   it('updateEntityType with no patch returns the current row', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityTypeRow()],
-      rowCount: 1,
-    } as never)
+    canonicalReadFixture()
     const t = await store.updateEntityType(WORKSPACE_ID, ENTITY_TYPE_ID, {})
     expect(t.id).toBe(ENTITY_TYPE_ID)
-    const [, sql] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    // No-op falls back to a plain SELECT.
+    const sql = clientQueries.find(query => query.text.includes('FROM public.entity_types'))!.text
     expect(sql).toContain('SELECT')
+    expect(clientQueries.some(query => query.text.includes('read_generic_application_catalog_state'))).toBe(true)
+    expect(clientQueries.some(query => query.text.trim().startsWith('UPDATE'))).toBe(false)
   })
 
   it('updateEntityType throws when row is missing', async () => {
     mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     await expect(
       store.updateEntityType(WORKSPACE_ID, ENTITY_TYPE_ID, { name: 'X' }),
-    ).rejects.toThrow(/not found/)
+    ).rejects.toMatchObject({ code: 'access_unavailable' })
   })
 
   it('deleteEntityType emits the DELETE (cascade handled by FK)', async () => {
@@ -349,7 +364,7 @@ describe('[COMP:api/doc-entity-store] renameProperty', () => {
     expect(instanceUpdate).toBeDefined()
     // Key-rename expression: drop old key, merge in new key with old value.
     expect(instanceUpdate!.text).toContain(
-      '(data - $1) || jsonb_build_object($2, data -> $1)',
+      '(data - $1) || jsonb_build_object($2::text, data -> $1::text)',
     )
     // Only touches rows of this type, in this workspace, that HAVE the key
     // — rows without the key are left untouched by the `data ? $1` guard.
@@ -371,10 +386,9 @@ describe('[COMP:api/doc-entity-store] renameProperty', () => {
     const texts = clientQueries.map((q) => q.text.trim())
     expect(texts).toContain('BEGIN')
     expect(texts).toContain('COMMIT')
-    // System operation on the owner pool: no GUC scoping at all (no
-    // system_bypass, and no current_user_id — scoped by WHERE workspace_id).
+    // Current actor is applied through the shared GUC helper on the app pool.
     expect(texts.some((t) => t.includes('system_bypass'))).toBe(false)
-    expect(texts.some((t) => t.includes('app.current_user_id'))).toBe(false)
+    expect(vi.mocked(applyRLSGucs)).toHaveBeenCalledWith(fakeClient, USER_ID)
     // The schema UPDATE comes before the data-migration UPDATE.
     const typeIdx = texts.findIndex((t) => t.startsWith('UPDATE entity_types'))
     const instIdx = texts.findIndex((t) =>
@@ -392,7 +406,7 @@ describe('[COMP:api/doc-entity-store] renameProperty', () => {
         : { rows: [], rowCount: 0 }
     await expect(
       store.renameProperty(WORKSPACE_ID, ENTITY_TYPE_ID, 'rating', 'score'),
-    ).rejects.toThrow(/not found/)
+    ).rejects.toMatchObject({ code: 'access_unavailable' })
     expect(clientQueries.map((q) => q.text.trim())).toContain('ROLLBACK')
     // Never wrote anything.
     expect(
@@ -404,7 +418,7 @@ describe('[COMP:api/doc-entity-store] renameProperty', () => {
     respondWithRename()
     await expect(
       store.renameProperty(WORKSPACE_ID, ENTITY_TYPE_ID, 'nonexistent', 'score'),
-    ).rejects.toThrow(/not found/)
+    ).rejects.toMatchObject({ code: 'invalid_schema' })
     expect(clientQueries.map((q) => q.text.trim())).toContain('ROLLBACK')
     expect(
       clientQueries.some((q) => q.text.trim().startsWith('UPDATE')),
@@ -425,10 +439,7 @@ describe('[COMP:api/doc-entity-store] renameProperty', () => {
 
 describe('[COMP:api/doc-entity-store] EntityInstance CRUD', () => {
   it('createEntity inserts with the JSONB data column', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityInstanceRow()],
-      rowCount: 1,
-    } as never)
+    canonicalReadFixture()
 
     const created = await store.createEntity({
       entityTypeId: ENTITY_TYPE_ID,
@@ -444,7 +455,7 @@ describe('[COMP:api/doc-entity-store] EntityInstance CRUD', () => {
 
     expect(created.id).toBe(ENTITY_ID)
     expect(created.data.title).toEqual({ kind: 'text', value: 'Inception' })
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    const { text: sql, values: params } = clientQueries.find(query => query.text.trim().startsWith('INSERT INTO entity_instances'))! as { text: string; values: unknown[] }
     expect(sql).toContain('INSERT INTO entity_instances')
     expect(params[0]).toBe(ENTITY_TYPE_ID)
     expect(params[1]).toBe(WORKSPACE_ID)
@@ -472,31 +483,29 @@ describe('[COMP:api/doc-entity-store] EntityInstance CRUD', () => {
   })
 
   it('getEntity returns the row', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityInstanceRow()],
-      rowCount: 1,
-    } as never)
+    canonicalReadFixture()
     const e = await store.getEntity(WORKSPACE_ID, ENTITY_ID)
     expect(e?.id).toBe(ENTITY_ID)
+    expect(e?.data).toEqual(entityInstanceRow().data)
+    expect(boundScopeSources(e!)).toMatchObject([{ resourceKind: 'application_field', version: 'fixture-version' }])
+    expect(applyRLSGucs).toHaveBeenCalledWith(fakeClient, USER_ID)
+    expect(clientQueries.find(query => query.text.includes('FROM public.entity_instances'))?.text).not.toContain('  data,')
   })
 
   it('getEntity returns null when missing', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    canonicalReadFixture({ missing: true })
     expect(await store.getEntity(WORKSPACE_ID, ENTITY_ID)).toBeNull()
   })
 
   it('updateEntity emits jsonb cast + bumps last_edited_at', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityInstanceRow()],
-      rowCount: 1,
-    } as never)
+    canonicalReadFixture({ changes: { title: { kind: 'text', value: 'Dune' } } })
     await store.updateEntity(WORKSPACE_ID, ENTITY_ID, {
       data: { title: { kind: 'text', value: 'Dune' } },
       lastEditedBy: USER_ID,
     })
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    const { text: sql, values: params } = clientQueries.find(query => query.text.trim().startsWith('UPDATE entity_instances'))! as { text: string; values: unknown[] }
     expect(sql).toContain('UPDATE entity_instances')
-    expect(sql).toContain('data = $1::jsonb')
+    expect(sql).toContain('data = data || $1::jsonb')
     expect(sql).toContain('last_edited_at = now()')
     expect(JSON.parse(params[0] as string)).toEqual({
       title: { kind: 'text', value: 'Dune' },
@@ -504,198 +513,42 @@ describe('[COMP:api/doc-entity-store] EntityInstance CRUD', () => {
   })
 
   it('updateEntity throws when row is missing', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    canonicalReadFixture({ missing: true })
     await expect(
       store.updateEntity(WORKSPACE_ID, ENTITY_ID, { lastEditedBy: USER_ID }),
-    ).rejects.toThrow(/not found/)
+    ).rejects.toMatchObject({ code: 'access_unavailable' })
   })
 
   it('deleteEntity emits the DELETE scoped to workspace', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    canonicalReadFixture()
     await store.deleteEntity(WORKSPACE_ID, ENTITY_ID)
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    const { text: sql, values: params } = clientQueries.find(query => query.text.trim().startsWith('DELETE FROM entity_instances'))! as { text: string; values: unknown[] }
     expect(sql).toContain('DELETE FROM entity_instances')
     expect(params).toEqual([ENTITY_ID, WORKSPACE_ID])
   })
 })
 
-describe('[COMP:api/doc-entity-store] queryEntities filters', () => {
-  beforeEach(() => {
-    mockQueryWithRLS.mockResolvedValue({
-      rows: [],
-      rowCount: 0,
-    } as never)
+describe('[COMP:api/doc-entity-store] declared query admission', () => {
+  it('refuses an unavailable schema without probing its records or inventing empty evidence', async () => {
+    canonicalReadFixture({ missingSchema: true })
+    await expect(store.queryEntities(WORKSPACE_ID,ENTITY_TYPE_ID)).rejects.toMatchObject({ code: 'access_unavailable' })
+    expect(clientQueries.some(query => query.text.includes('FROM public.entity_instances'))).toBe(false)
+    expect(clientQueries.some(query => query.text.includes('read_generic_application_query_candidates'))).toBe(false)
   })
-
-  it('always scopes by workspace + entity type', async () => {
-    await store.queryEntities(WORKSPACE_ID, ENTITY_TYPE_ID)
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain('workspace_id = $1')
-    expect(sql).toContain('entity_type_id = $2')
-    expect(params[0]).toBe(WORKSPACE_ID)
-    expect(params[1]).toBe(ENTITY_TYPE_ID)
+  it('refuses an undeclared filter before issuing the record query', async () => {
+    canonicalReadFixture()
+    await expect(store.queryEntities(WORKSPACE_ID,ENTITY_TYPE_ID,[{field:"title'; DROP TABLE records; --",op:'eq',value:'x'}])).rejects.toMatchObject({code:'invalid_value'})
+    expect(clientQueries.some(query => query.text.includes('read_generic_application_query_candidates'))).toBe(false)
   })
-
-  it('eq with a number casts to ::numeric', async () => {
-    await store.queryEntities(WORKSPACE_ID, ENTITY_TYPE_ID, [
-      { field: 'rating', op: 'eq', value: 9.1 },
-    ])
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain("(data->>'rating')::numeric = $3")
-    expect(params[2]).toBe(9.1)
-  })
-
-  it('eq with a string compares text', async () => {
-    await store.queryEntities(WORKSPACE_ID, ENTITY_TYPE_ID, [
-      { field: 'title', op: 'eq', value: 'Inception' },
-    ])
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain("data->>'title' = $3")
-    expect(params[2]).toBe('Inception')
-  })
-
-  it('neq', async () => {
-    await store.queryEntities(WORKSPACE_ID, ENTITY_TYPE_ID, [
-      { field: 'rating', op: 'neq', value: 0 },
-    ])
-    const [, sql] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain("(data->>'rating')::numeric <> $3")
-  })
-
-  it('gt / gte / lt / lte', async () => {
-    for (const [op, sym] of [
-      ['gt', '>'],
-      ['gte', '>='],
-      ['lt', '<'],
-      ['lte', '<='],
-    ] as const) {
-      mockQueryWithRLS.mockClear()
-      mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-      await store.queryEntities(WORKSPACE_ID, ENTITY_TYPE_ID, [
-        { field: 'rating', op, value: 5 },
-      ])
-      const [, sql] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-      expect(sql).toContain(`(data->>'rating')::numeric ${sym}`)
-    }
-  })
-
-  it('in uses ANY(text[])', async () => {
-    await store.queryEntities(WORKSPACE_ID, ENTITY_TYPE_ID, [
-      { field: 'genre', op: 'in', value: ['g1', 'g2'] },
-    ])
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain("data->>'genre' = ANY($3::text[])")
-    expect(params[2]).toEqual(['g1', 'g2'])
-  })
-
-  it('contains uses ILIKE substring match', async () => {
-    await store.queryEntities(WORKSPACE_ID, ENTITY_TYPE_ID, [
-      { field: 'title', op: 'contains', value: 'inc' },
-    ])
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain("data->>'title' ILIKE $3")
-    expect(params[2]).toBe('%inc%')
-  })
-
-  it('rejects an invalid field name (defense against SQL injection)', async () => {
-    await expect(
-      store.queryEntities(WORKSPACE_ID, ENTITY_TYPE_ID, [
-        { field: "title'; DROP TABLE entity_instances; --", op: 'eq', value: 'x' },
-      ]),
-    ).rejects.toThrow(/Invalid filter/)
-  })
-
-  it('multiple filters AND together', async () => {
-    await store.queryEntities(WORKSPACE_ID, ENTITY_TYPE_ID, [
-      { field: 'rating', op: 'gte', value: 5 },
-      { field: 'title', op: 'contains', value: 'in' },
-    ])
-    const [, sql] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql.match(/ AND /g)?.length).toBeGreaterThanOrEqual(2)
-  })
-
-  it('honors sort direction', async () => {
-    await store.queryEntities(
-      WORKSPACE_ID,
-      ENTITY_TYPE_ID,
-      undefined,
-      [{ field: 'rating', direction: 'asc' }],
-    )
-    const [, sql] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain("ORDER BY data->>'rating' ASC")
-  })
-
-  it('returns nextCursor when more rows are available', async () => {
-    const rows: ReturnType<typeof entityInstanceRow>[] = []
-    // Limit = 2, store fetches 3 to detect "more available" → returns 2 rows + cursor.
-    for (let i = 0; i < 3; i++) {
-      rows.push(
-        entityInstanceRow({
-          id: `id-${i}`,
-          createdAt: new Date(`2026-05-${10 + i}T00:00:00Z`),
-        }),
-      )
-    }
-    mockQueryWithRLS.mockReset()
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows,
-      rowCount: 3,
-    } as never)
-    const result = await store.queryEntities(
-      WORKSPACE_ID,
-      ENTITY_TYPE_ID,
-      undefined,
-      undefined,
-      2,
-    )
-    expect(result.rows).toHaveLength(2)
-    expect(result.nextCursor).toBeDefined()
-    // Cursor encodes the LAST returned row's (createdAt, id) — `id-1`.
-    const decoded = Buffer.from(result.nextCursor!, 'base64url').toString('utf8')
-    expect(decoded).toContain('id-1')
-  })
-
-  it('round-trips a cursor into a WHERE predicate', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    const cursor = Buffer.from(
-      '2026-05-27T00:00:00.000Z|id-1',
-      'utf8',
-    ).toString('base64url')
-    await store.queryEntities(
-      WORKSPACE_ID,
-      ENTITY_TYPE_ID,
-      undefined,
-      undefined,
-      10,
-      cursor,
-    )
-    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    expect(sql).toContain('(created_at, id) <')
-    // The createdAt + id come AFTER workspaceId + entityTypeId.
-    expect(params).toEqual(
-      expect.arrayContaining(['2026-05-27T00:00:00.000Z', 'id-1']),
-    )
-  })
-
-  it('omits nextCursor when fewer rows than limit are returned', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({
-      rows: [entityInstanceRow()],
-      rowCount: 1,
-    } as never)
-    const result = await store.queryEntities(
-      WORKSPACE_ID,
-      ENTITY_TYPE_ID,
-      undefined,
-      undefined,
-      10,
-    )
-    expect(result.rows).toHaveLength(1)
-    expect(result.nextCursor).toBeUndefined()
+  it('refuses a cursor that belongs to another query', async () => {
+    canonicalReadFixture()
+    await expect(store.queryEntities(WORKSPACE_ID,ENTITY_TYPE_ID,undefined,undefined,50,'invalid')).rejects.toMatchObject({code:'invalid_value'})
   })
 })
 
 describe('[COMP:api/doc-entity-store] RLS routing', () => {
-  it('every read/write goes through queryWithRLS with the workspace context', async () => {
+  it('every read/write binds the authenticated actor on its RLS path', async () => {
+    canonicalReadFixture()
     mockQueryWithRLS.mockResolvedValue({
       rows: [entityTypeRow()],
       rowCount: 1,
@@ -703,10 +556,11 @@ describe('[COMP:api/doc-entity-store] RLS routing', () => {
     await store.getEntityType(WORKSPACE_ID, ENTITY_TYPE_ID)
     await store.listEntityTypes(WORKSPACE_ID)
     await store.deleteEntityType(WORKSPACE_ID, ENTITY_TYPE_ID)
-    // Each call carries the workspaceId as the RLS userId; the RLS
-    // policy resolves workspace membership for the acting principal.
+    // Workspace IDs are query scope, never authenticated RLS principals.
     for (const call of mockQueryWithRLS.mock.calls) {
-      expect(call[0]).toBe(WORKSPACE_ID)
+      expect(call[0]).toBe(USER_ID)
     }
+    expect(applyRLSGucs).toHaveBeenCalledTimes(2)
+    for (const call of vi.mocked(applyRLSGucs).mock.calls) expect(call).toEqual([fakeClient,USER_ID])
   })
 })

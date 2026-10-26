@@ -43,6 +43,7 @@ READY_TIMEOUT="${BRIAN_RIG_TIMEOUT:-300}"
 CORE_ONLY=1
 FRESH=0
 ADMIN_ONLY=0
+REFERENCE_APPLICATIONS=0
 
 say() { printf '[rig] %s\n' "$*"; }
 warn() { printf '[rig] warning: %s\n' "$*" >&2; }
@@ -53,6 +54,7 @@ usage() {
 Usage: scripts/rig-up.sh [options]
 
   --admin-only       isolated administrative fixture, no paid providers/workers
+  --reference-applications  fixed reference modules (requires --admin-only)
   --full             also start the channel connectors + browser relay
                      (default: core only — brain, api, doc-sync, app-web)
   --fresh            re-create the database from empty before booting
@@ -69,6 +71,7 @@ USAGE
 while [ $# -gt 0 ]; do
   case "$1" in
     --admin-only) ADMIN_ONLY=1 ;;
+    --reference-applications) REFERENCE_APPLICATIONS=1 ;;
     --full) CORE_ONLY=0 ;;
     --fresh) FRESH=1 ;;
     --timeout) shift; [ $# -gt 0 ] || die "--timeout needs a value"; READY_TIMEOUT="$1" ;;
@@ -78,6 +81,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+[ "$REFERENCE_APPLICATIONS" = 0 ] || [ "$ADMIN_ONLY" = 1 ] || die "--reference-applications requires --admin-only"
+APPLICATION_COMPOSITION=normal
+[ "$REFERENCE_APPLICATIONS" = 0 ] || APPLICATION_COMPOSITION=reference
 
 if [ "$ADMIN_ONLY" = 1 ]; then
   [ "$CORE_ONLY" = 1 ] && [ "$FRESH" = 0 ] || die "--admin-only cannot be combined with --full or --fresh"
@@ -95,6 +102,9 @@ if [ "$ADMIN_ONLY" = 1 ]; then
     CONTAINER="usebrian-admin-test-$admin_pg_port"
     VOLUME="usebrian-admin-test-$admin_pg_port-data"
   fi
+  if [ "$admin_pg_port" != 5443 ]; then STATE="$ROOT/.rig/admin-$admin_pg_port"; fi
+  LOG="$STATE/stack.log"; MIGRATE_LOG="$STATE/migrate.log"; PIDFILE="$STATE/stack.pid"
+  SESSION_FILE="$STATE/session.json"; API_PORT_FILE="$STATE/api-port"
   RIG_LABEL="com.usebrian.rig=admin-test"
   IMAGE=pgvector/pgvector:pg18
   export USEBRIAN_ADMIN_ONLY=1
@@ -161,13 +171,23 @@ eval "$(node "$ROOT/scripts/rig-env.mjs")" || die "could not resolve DATABASE_UR
        This script creates, stops and can delete that database — it refuses to aim at a
        remote or shared server. Point DATABASE_URL at 127.0.0.1 or unset it."
 
+# Verify canonical runtime without changing migration-owned function permissions.
+verify_admin_role() {
+  [ "$ADMIN_ONLY" = 1 ] || return 0
+  node "$ROOT/scripts/crm/runtime-role.mjs" verify | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
+}
+
 # ── already up? ─────────────────────────────────────────────────────────────
 if pid="$(rig_pid)"; then
+  if [ "$ADMIN_ONLY" = 1 ]; then
+    node "$ROOT/scripts/rig-admin.mjs" --verify-composition "$ROOT" "$APPLICATION_COMPOSITION" "$pid" || die "administrative runtime composition refused"
+  fi
   recorded_api_port="$(node "$ROOT/scripts/launch-ports.mjs" "$API_PORT_FILE" --recorded)" || die "invalid recorded API port"
   [ "$API_PORT" = "$recorded_api_port" ] || die "rig is running on :$recorded_api_port; run scripts/rig-down.sh --keep-db before changing its API port"
 fi
 if [ "$FRESH" = "0" ] && pid="$(rig_pid)" && api_healthy; then
-  say "rig is already up (launcher pid $pid) — refreshing the owner session only."
+  verify_admin_role
+  say "rig is already up (launcher pid $pid); canonical runtime verified, refreshing owner session."
   mint_only=1
 else
   mint_only=0
@@ -177,7 +197,9 @@ else
     [ "$ADMIN_ONLY" = 1 ] && down_args+=(--admin-only)
     "$ROOT/scripts/rig-down.sh" "${down_args[@]}" >/dev/null
   fi
-  for p in "$API_PORT" "$WEB_PORT" "$DOC_SYNC_PORT"; do
+  checked_ports=("$API_PORT" "$WEB_PORT" "$DOC_SYNC_PORT")
+  if [ "$ADMIN_ONLY" = 1 ]; then checked_ports+=(3005 "$((admin_pg_port + 1000))"); fi
+  for p in "${checked_ports[@]}"; do
     pids="$(port_pids "$p")"
     if [ -n "$pids" ]; then
       for opid in $pids; do
@@ -290,6 +312,11 @@ if [ "$mint_only" = "0" ]; then
   # 280_oss_connectors.sql) then no-op — the stack boots and the connector
   # tables are simply absent. The platform `.env` sets it for the hosted tree,
   # so clearing it is not optional.
+  if [ "$ADMIN_ONLY" = 1 ]; then
+    node "$ROOT/scripts/crm/runtime-role.mjs" prepare | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
+    # Recognized narrowing commits independently before unchanged migration gates.
+    node "$ROOT/scripts/crm/runtime-role.mjs" transition | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
+  fi
   say "applying open migrations ..."
   if ! ( cd "$ROOT" && env DATABASE_URL="$RIG_DB_URL" MIGRATION_DIRS= \
            pnpm --filter @use-brian/api migrate ) >"$MIGRATE_LOG" 2>&1; then
@@ -300,23 +327,8 @@ if [ "$mint_only" = "0" ]; then
   say "migrations ok (${applied:-0} newly applied; log: ${MIGRATE_LOG#"$ROOT/"})"
 
   if [ "$ADMIN_ONLY" = 1 ]; then
-    docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q <<'SQL'
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'admin_fixture_app') THEN
-    CREATE ROLE admin_fixture_app LOGIN PASSWORD 'fixture-only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
-  END IF;
-  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'admin_fixture_app' AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls)) THEN
-    RAISE EXCEPTION 'Administrative fixture app role has unsafe privileges';
-  END IF;
-END $$;
-GRANT USAGE ON SCHEMA public TO admin_fixture_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO admin_fixture_app;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO admin_fixture_app;
-GRANT EXECUTE ON FUNCTION crm_delivery_source_visible(uuid,text,uuid,text,uuid),
-  crm_delivery_envelope_visible(uuid,uuid,uuid,text,text[],uuid[],uuid),
-  crm_delivery_source_navigation(uuid,text,uuid,text,uuid) TO admin_fixture_app;
-ALTER ROLE admin_fixture_app SET app.current_user_id = '00000000-0000-0000-0000-000000000000';
-SQL
+    node "$ROOT/scripts/crm/runtime-role.mjs" activate | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
+    verify_admin_role
   fi
 
   # ── the stack (the maintained launcher, headless) ─────────────────────────
@@ -332,12 +344,15 @@ SQL
   printf '%s\n' "$API_PORT" >"$API_PORT_FILE"
   launch_args=()
   [ "$ADMIN_ONLY" = 1 ] && launch_args+=(--admin-only)
+  [ "$REFERENCE_APPLICATIONS" = 0 ] || launch_args+=(--reference-applications)
   nohup env "${launch_env[@]}" \
     node "$ROOT/scripts/launch.mjs" "${launch_args[@]}" >>"$LOG" 2>&1 </dev/null &
   echo $! >"$PIDFILE"
   launcher_pid="$(cat "$PIDFILE")"
   say "launcher pid $launcher_pid (log: ${LOG#"$ROOT/"})"
 fi
+
+
 
 # ── readiness: the port, then a real database round-trip ────────────────────
 # "Up is not alive": /health is registered before the pool is used and answers

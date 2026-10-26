@@ -1,3 +1,4 @@
+import { resolveGeminiThinkingLevel } from '../providers/gemini.js'
 /**
  * AI answer engines — the shared ask framework.
  *
@@ -508,7 +509,8 @@ export function createEngineAskers(
 
   // ── askGemini — grounded generateContent ───────────────────────────────
   if (env.ENGINES_GEMINI_API_KEY) {
-    const model = env.ENGINES_GEMINI_MODEL || 'gemini-2.5-flash'
+    const model = env.ENGINES_GEMINI_MODEL || 'gemini-3.8-flash'
+    const thinkingLevel = resolveGeminiThinkingLevel(model, 'low')
     askers.push(
       makeAsker({
         name: 'askGemini',
@@ -528,7 +530,10 @@ export function createEngineAskers(
             {
               contents: [{ parts: [{ text: question }] }],
               tools: [{ google_search: {} }],
-              generationConfig: { maxOutputTokens: MAX_ANSWER_TOKENS },
+              generationConfig: {
+                maxOutputTokens: MAX_ANSWER_TOKENS,
+                ...(thinkingLevel ? { thinkingConfig: { thinkingLevel } } : {}),
+              },
             },
             opts.policy,
           )) as {

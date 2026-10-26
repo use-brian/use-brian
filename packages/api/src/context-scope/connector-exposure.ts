@@ -11,8 +11,35 @@
  * [COMP:api/connector-context]
  */
 
-import { intersectScopeGrants, scopeGrantContains, type ScopeGrant, type DepartmentReadGrant } from '@use-brian/core'
+import { intersectAccessCeilings, pinAccessCeiling, intersectScopeGrants, scopeGrantContains, type ScopeGrant, type DepartmentReadGrant } from '@use-brian/core'
 import { currentAgentAccess } from '../db/agent-access-context.js'
+import { query } from '../db/client.js'
+import { loadDepartmentSnapshot, resolveDepartmentReadGrant } from './department-resolver.js'
+import { resolveTurnScopeSystem, type ResolvedTurnScope, type ResolveTurnScopeInput } from './resolve-turn-scope.js'
+
+/** Connector audience membership cannot be widened by the legacy workspace read-universe switch. */
+export async function resolveConnectorNativeTurnScopeSystem(input: ResolveTurnScopeInput,
+  resolveScope: (input: ResolveTurnScopeInput) => Promise<ResolvedTurnScope> = resolveTurnScopeSystem): Promise<ResolvedTurnScope> {
+  const scope = await resolveScope({ ...input, memberMode: 'member' })
+  if (!scope.access.workspaceId) return scope
+  const reader = { workspaceId: scope.access.workspaceId, userId: input.userId, assistantId: input.assistant.id,
+    contextDepartment: scope.activeGroupId ?? null }
+  const { snapshot, principal } = await loadDepartmentSnapshot(query as Parameters<typeof loadDepartmentSnapshot>[0], reader)
+  if (principal.kind !== 'user') throw new Error('authority_unavailable')
+  return { ...scope, access: { ...scope.access, departmentRead: resolveDepartmentReadGrant(snapshot, principal, reader, new Date()) } }
+}
+
+/** Keep every audience/credential restriction while imposing the actual initiator's native floor. */
+export function narrowConnectorTurnScope(turn: ResolvedTurnScope, initiator: ResolvedTurnScope): ResolvedTurnScope {
+  if (turn.access.assistantId !== initiator.access.assistantId) throw new Error('connector_actor_mismatch')
+  const access = intersectAccessCeilings(pinAccessCeiling(turn.access), pinAccessCeiling(initiator.access))
+  return { ...turn, access: { ...turn.access, ...access }, effectiveCompartments: access.compartments,
+    effectiveProjectIds: access.projectIds,
+    writeCompartments: turn.writeCompartments.filter(label => scopeGrantContains(access.mutationCompartments, [label])),
+    writeProjectIds: turn.writeProjectIds.filter(id => scopeGrantContains(access.projectIds, [id])),
+    activeTeam: turn.activeTeam && scopeGrantContains(access.mutationCompartments, [turn.activeTeam.compartmentKey]) ? turn.activeTeam : null,
+    activeProject: turn.activeProject && scopeGrantContains(access.projectIds, [turn.activeProject.id]) ? turn.activeProject : null }
+}
 
 export type ConnectorContextBinding = {
   compartments: readonly string[]
@@ -23,7 +50,7 @@ export type ConnectorTurnGrant = {
   effectiveCompartments: ScopeGrant
   effectiveProjectIds: ScopeGrant
   /** Present on the canonical TurnScope. Missing preserves legacy membership reach. */
-  access?: { mutationCompartments?: ScopeGrant; departmentRead?: DepartmentReadGrant }
+  access?: { userId?: string; mutationCompartments?: ScopeGrant; departmentRead?: DepartmentReadGrant }
 }
 
 function axisAudienceAllowed(

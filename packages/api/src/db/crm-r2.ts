@@ -11,7 +11,7 @@
  */
 
 import {
-  stitchMailboxThreads,
+  bindScopeSources,boundScopeSources,stitchMailboxThreads, validateCrmCustomFieldValue as validateCustomFieldValue,
   CRM_CUSTOM_FIELD_TYPES, CRM_CONFIG_ENTITY_KINDS, CRM_PIPELINE_STAGE_CATEGORIES, CrmOperationsError,
   type AccessContext,
   type EntityRecord,
@@ -20,10 +20,12 @@ import {
   type CrmOperationsCommandResult,
 } from '@use-brian/core'
 import type { PoolClient } from 'pg'
+import { applicationDecimalText,ApplicationPlatformError } from '@use-brian/shared'
+import { runLegacyCanonicalCrmRead,readLegacyCanonicalCrmConfiguration,mapCanonicalCrmRows,queryLegacyCanonicalCrmSql,queryLegacyCanonicalCrmPrivateSql } from './crm-reader.js'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate, mutationActorAccess } from './access-predicate.js'
 import { applyRLSGucs, getAppPool, getPool, query, queryGated, queryWithRLS } from './client.js'
 import { crmReferenceScope, prepareCrmParticipantMutation, readCrmMutationSource, readCrmReference, runCrmWriteTransaction, updateDeal } from './crm.js'
-import { getEntityById, updateEntity } from './entities-store.js'
+import { assertNativeEntityFieldWrites, getEntityById, updateEntity } from './entities-store.js'
 
 export const CRM_FIELD_TYPES = CRM_CUSTOM_FIELD_TYPES
 export type CrmFieldType = (typeof CRM_FIELD_TYPES)[number]
@@ -165,61 +167,7 @@ export async function getCrmConfig(
   workspaceId: string,
   includeArchived = false,
 ): Promise<CrmConfig> {
-  await ensureCrmDefaultPipeline(workspaceId)
-  const [pipelineRows, stageRows, fieldRows] = await Promise.all([
-    queryWithRLS<{ id: string; name: string; isDefault: boolean; position: number; archivedAt: Date | null }>(
-      userId,
-      `SELECT id, name, is_default AS "isDefault", position, archived_at AS "archivedAt"
-         FROM crm_pipelines WHERE workspace_id = $1
-           ${includeArchived ? '' : 'AND archived_at IS NULL'}
-        ORDER BY archived_at NULLS FIRST, position, created_at`,
-      [workspaceId],
-    ),
-    queryWithRLS<ConfigStageRow>(
-      userId,
-      `SELECT id, pipeline_id AS "pipelineId", name, legacy_key AS "legacyKey",
-              category, position, probability, required_fields AS "requiredFields",
-              archived_at AS "archivedAt"
-         FROM crm_pipeline_stages WHERE workspace_id = $1
-           ${includeArchived ? '' : 'AND archived_at IS NULL'}
-        ORDER BY archived_at NULLS FIRST, pipeline_id, position`,
-      [workspaceId],
-    ),
-    queryWithRLS<ConfigFieldRow>(
-      userId,
-      `SELECT id, entity_kind AS "entityKind", field_key AS "fieldKey", label,
-              field_type AS "fieldType", options, is_required AS "isRequired", position,
-              archived_at AS "archivedAt"
-         FROM crm_field_definitions
-        WHERE workspace_id = $1 ${includeArchived ? '' : 'AND archived_at IS NULL'}
-        ORDER BY archived_at NULLS FIRST, entity_kind, position, created_at`,
-      [workspaceId],
-    ),
-  ])
-  const stagesByPipeline = new Map<string, CrmPipelineStage[]>()
-  for (const row of stageRows.rows) {
-    const stages = stagesByPipeline.get(row.pipelineId) ?? []
-    stages.push({
-      ...row,
-      requiredFields: row.requiredFields ?? [],
-      archivedAt: row.archivedAt?.toISOString() ?? null,
-    })
-    stagesByPipeline.set(row.pipelineId, stages)
-  }
-  return {
-    pipelines: pipelineRows.rows.map((p) => ({
-      ...p,
-      archivedAt: p.archivedAt?.toISOString() ?? null,
-      stages: stagesByPipeline.get(p.id) ?? [],
-    })),
-    fields: fieldRows.rows.map((f) => ({
-      ...f,
-      archivedAt: f.archivedAt?.toISOString() ?? null,
-      options: Array.isArray(f.options)
-        ? f.options.filter((v): v is string => typeof v === 'string')
-        : [],
-    })),
-  }
+  return readLegacyCanonicalCrmConfiguration(mutationActorAccess(userId,workspaceId),includeArchived,()=>ensureCrmDefaultPipeline(workspaceId))
 }
 
 export async function createCrmPipeline(input: {
@@ -228,7 +176,7 @@ export async function createCrmPipeline(input: {
   workspaceId: string
   name: string
 }): Promise<CrmPipeline> {
-  return withCrmConfigTransaction(input.userId, input.workspaceId, async (client) => {
+  return withCrmConfigTransaction<CrmPipeline>(input.userId, input.workspaceId, async (client) => {
     const inserted = await client.query<{ id: string; name: string; isDefault: boolean; position: number }>(
       `INSERT INTO crm_pipelines (workspace_id, name, is_default, position, created_by)
        VALUES ($1,$2,false,
@@ -238,7 +186,7 @@ export async function createCrmPipeline(input: {
       [input.workspaceId, input.name, input.userId],
     )
     return { ...inserted.rows[0], stages: [] }
-  }, input.client)
+  }, input.client,{kind:'create_pipeline',name:input.name,isDefault:false},saved=>saved.record as unknown as CrmPipeline)
 }
 
 export async function createCrmStage(input: {
@@ -272,7 +220,7 @@ export async function createCrmStage(input: {
       requiredFields: row.requiredFields ?? [],
       archivedAt: row.archivedAt?.toISOString() ?? null,
     } : null
-  }, input.client)
+  }, input.client,{kind:'create_pipeline_stage',pipelineId:input.pipelineId,name:input.name,category:input.category,probability:input.probability,requiredFields:input.requiredFields??[]},saved=>saved.record as unknown as CrmPipelineStage)
 }
 
 export async function updateCrmStage(input: {
@@ -305,7 +253,7 @@ export async function updateCrmStage(input: {
       requiredFields: row.requiredFields ?? [],
       archivedAt: row.archivedAt?.toISOString() ?? null,
     } : null
-  }, input.client)
+  }, input.client,{kind:'update_pipeline_stage',stageId:input.stageId,name:input.name,category:input.category,probability:input.probability,requiredFields:input.requiredFields},saved=>saved.record as unknown as CrmPipelineStage)
 }
 
 /** All configuration entry points share allocation and lifecycle serialization. */
@@ -314,7 +262,7 @@ export async function lockCrmConfiguration(client: PoolClient, workspaceId: stri
   if (isolation.rows[0]?.transaction_isolation !== 'read committed') {
     throw new CrmOperationsError('invalid_input', 'CRM configuration requires a READ COMMITTED transaction so allocation rechecks see commits after a lock wait.')
   }
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('crm-config:' || $1::text, 0))", [workspaceId])
+  await client.query('SELECT application_lock_canonical_crm_configuration($1)',[workspaceId])
 }
 
 export async function lockCrmConfigurationMember(client: PoolClient, workspaceId: string, userId: string | null): Promise<void> {
@@ -326,32 +274,37 @@ export async function lockCrmConfigurationMember(client: PoolClient, workspaceId
   }
 }
 
+type NativeCrmConfigurationSaved={record:Record<string,unknown>;created:boolean;changed:boolean;subjectKind:string;reviewId:string}
+/** Existing explicit native mutations are confirmed typed commands, not raw writes. */
+export async function executeProtectedCrmConfiguration(client:PoolClient,workspaceId:string,command:unknown,expectedRevision?:string,actingAssistantId?:string):Promise<NativeCrmConfigurationSaved|null> {
+  if((await client.query<{protected:boolean}>('SELECT application_native_crm_configuration_protected($1) AS protected',[workspaceId])).rows[0]?.protected!==true)return null
+  const result=await client.query<{saved:NativeCrmConfigurationSaved}>("SELECT application_execute_native_crm_configuration($1,coalesce($2::uuid,nullif(current_setting('app.v2_assistant_id',true),'')::uuid),$3,$4) AS saved",
+    [workspaceId,actingAssistantId??null,JSON.parse(JSON.stringify(command)),expectedRevision??null])
+  return result.rows[0].saved
+}
 async function withCrmConfigTransaction<T>(
   userId: string | null,
   workspaceId: string,
   work: (client: PoolClient) => Promise<T>,
   transactionClient?: PoolClient,
+  command?:unknown,
+  project?:(saved:NativeCrmConfigurationSaved)=>T,
 ): Promise<T> {
-  if (transactionClient) {
-    await lockCrmConfiguration(transactionClient, workspaceId)
-    return work(transactionClient)
+  const execute=async(client:PoolClient)=>{
+    if(command&&project) {const saved=await executeProtectedCrmConfiguration(client,workspaceId,command);if(saved)return project(saved)}
+    await lockCrmConfiguration(client,workspaceId)
+    return work(client)
   }
-  if (!userId) throw new CrmOperationsError('not_authorized', 'Machine configuration requires a canonical transaction.')
-  const client = await getPool().connect()
+  if(transactionClient)return execute(transactionClient)
+  if(!userId)throw new CrmOperationsError('not_authorized','Machine configuration requires a canonical transaction.')
+  const protectedResource=(await query<{protected:boolean}>('SELECT application_native_crm_configuration_protected($1) AS protected',[workspaceId])).rows[0]?.protected===true
+  const client=await (protectedResource?getAppPool():getPool()).connect()
   try {
-    await client.query('BEGIN')
-    await applyRLSGucs(client, userId)
-    await lockCrmConfigurationMember(client, workspaceId, userId)
-    await lockCrmConfiguration(client, workspaceId)
-    const value = await work(client)
-    await client.query('COMMIT')
-    return value
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw error
-  } finally {
-    client.release()
-  }
+    await client.query('BEGIN');await applyRLSGucs(client,userId)
+    await lockCrmConfigurationMember(client,workspaceId,userId)
+    const value=await execute(client)
+    await client.query('COMMIT');return value
+  } catch(error) {await client.query('ROLLBACK');throw error} finally{client.release()}
 }
 
 function assertExactOrder(actual: string[], requested: string[]): void {
@@ -446,7 +399,7 @@ export async function updateCrmPipeline(input: {
       )
     }
     return true
-  }, input.client)
+  }, input.client,{kind:'update_pipeline',pipelineId:input.pipelineId,name:input.name,isDefault:input.isDefault,archived:input.archived},()=>true)
 }
 
 export async function reorderCrmPipelines(input: {
@@ -474,7 +427,7 @@ export async function reorderCrmPipelines(input: {
         [id, input.workspaceId, position],
       )
     }
-  }, input.client)
+  }, input.client,{kind:'reorder_pipelines',orderedIds:input.orderedIds},()=>undefined)
 }
 
 export async function setCrmStageArchived(input: {
@@ -532,7 +485,7 @@ export async function setCrmStageArchived(input: {
       [stage.pipelineId],
     )
     return true
-  }, input.client)
+  }, input.client,{kind:'update_pipeline_stage',stageId:input.stageId,archived:input.archived},()=>true)
 }
 
 export async function reorderCrmStages(input: {
@@ -563,7 +516,7 @@ export async function reorderCrmStages(input: {
         [id, input.workspaceId, input.pipelineId, position],
       )
     }
-  }, input.client)
+  }, input.client,{kind:'reorder_pipeline_stages',pipelineId:input.pipelineId,orderedIds:input.orderedIds},()=>undefined)
 }
 
 export async function createCrmFieldDefinition(input: {
@@ -601,7 +554,7 @@ export async function createCrmFieldDefinition(input: {
         ? row.options.filter((v): v is string => typeof v === 'string')
         : [],
     } : null
-  }, input.client)
+  }, input.client,{kind:'create_record_field',entityKind:input.entityKind,fieldKey:input.fieldKey,label:input.label,fieldType:input.fieldType,options:input.options??[],isRequired:input.isRequired??false},saved=>saved.record as unknown as CrmFieldDefinition)
 }
 
 export async function archiveCrmFieldDefinition(
@@ -635,7 +588,7 @@ export async function archiveCrmFieldDefinition(
       [workspaceId, row.entityKind],
     )
     return true
-  }, transactionClient)
+  }, transactionClient,{kind:'set_record_field_archived',fieldId,archived:true},()=>true)
 }
 
 export async function updateCrmFieldDefinition(input: {
@@ -713,7 +666,7 @@ export async function updateCrmFieldDefinition(input: {
         : [],
       archivedAt: row.archivedAt?.toISOString() ?? null,
     } : null
-  }, input.client)
+  }, input.client,{kind:'update_record_field',fieldId:input.fieldId,label:input.label,options:input.options,isRequired:input.isRequired},saved=>saved.record as unknown as CrmFieldDefinition)
 }
 
 export async function restoreCrmFieldDefinition(
@@ -746,7 +699,7 @@ export async function restoreCrmFieldDefinition(
       [fieldId, workspaceId, row.entityKind],
     )
     return true
-  }, transactionClient)
+  }, transactionClient,{kind:'set_record_field_archived',fieldId,archived:false},()=>true)
 }
 
 export async function reorderCrmFields(input: {
@@ -777,7 +730,7 @@ export async function reorderCrmFields(input: {
         [id, input.workspaceId, input.entityKind, position],
       )
     }
-  }, input.client)
+  }, input.client,{kind:'reorder_record_fields',entityKind:input.entityKind,orderedIds:input.orderedIds},()=>undefined)
 }
 
 function sameFieldShape(existing: Pick<CrmFieldDefinition, 'fieldType' | 'options'>, preset: CrmPresetField): boolean {
@@ -880,10 +833,12 @@ function entityToCrmRecordRow(entity: EntityRecord): CrmRecordRow {
 export async function getCrmR2Record(
   ctx: AccessContext,
   entityId: string,
+  transactionClient?: PoolClient,
 ): Promise<CrmRecordRow | null> {
-  const entity = await getEntityById(ctx, entityId)
-  if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
-  return entityToCrmRecordRow(entity)
+  const result=await queryLegacyCanonicalCrmSql<{id:string;kind:CrmEntityKind;name:string;attributes:Record<string,unknown>;aliases:string[];archivedAt:Date|null;updatedAt:Date}>(ctx,
+    [{type:'record',fields:'all',ids:[entityId]}],`SELECT e.id,e.kind,e.display_name AS name,e.attributes,e.aliases,
+     NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",e.updated_at AS "updatedAt" FROM entities e WHERE e.id=$1`,[entityId],transactionClient)
+  return mapCanonicalCrmRows(result.rows,row=>({...row,archivedAt:row.archivedAt?.toISOString()??null,updatedAt:row.updatedAt.toISOString()}))[0]??null
 }
 
 export type CrmRecordRelationships = {
@@ -901,7 +856,7 @@ async function listRelatedKind(
   const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
   const kindIndex = ap.nextIdx
   const firstRelationshipIndex = kindIndex + 1
-  const result = await queryGated<{
+  const result = await queryLegacyCanonicalCrmSql<{
     id: string
     kind: CrmEntityKind
     name: string
@@ -910,7 +865,7 @@ async function listRelatedKind(
     archivedAt: Date | null
     updatedAt: Date
   }>(
-    ctx,
+    ctx,[{type:kind,fields:'all'},...(kind==='person'&&relationshipSql(firstRelationshipIndex).includes('crm_deal_contacts')?[{type:'deal' as const,fields:['participants'],ids:[relationshipParams.at(-1) as string]}]:[])],
     `SELECT e.id, e.kind, e.display_name AS name, e.attributes, e.aliases,
             NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",
             e.updated_at AS "updatedAt"
@@ -922,7 +877,7 @@ async function listRelatedKind(
       ORDER BY e.updated_at DESC, e.id DESC`,
     [...ap.params, kind, ...relationshipParams],
   )
-  return result.rows.map((row) => ({
+  return mapCanonicalCrmRows(result.rows,(row) => ({
     id: row.id,
     kind: row.kind,
     name: row.name,
@@ -941,6 +896,11 @@ export async function listCrmRecordRelationships(
   ctx: AccessContext,
   record: CrmRecordRow,
 ): Promise<CrmRecordRelationships> {
+  return runLegacyCanonicalCrmRead(ctx,async()=>{
+  const current=await getCrmR2Record(ctx,record.id)
+  if(!current||current.kind!==record.kind)throw new ApplicationPlatformError('access_unavailable','The relationship anchor is unavailable.')
+  record=current
+  const bind=(value:CrmRecordRelationships)=>bindScopeSources(value,[...boundScopeSources(current),...Object.values(value).flatMap(rows=>boundScopeSources(rows))])
   if (record.kind === 'person') {
     const companyId = typeof record.attributes.company_id === 'string'
       ? record.attributes.company_id
@@ -961,7 +921,7 @@ export async function listCrmRecordRelationships(
         [record.id],
       ),
     ])
-    return { contacts: [], companies, deals }
+    return bind({ contacts: [], companies, deals })
   }
 
   if (record.kind === 'company') {
@@ -983,7 +943,7 @@ export async function listCrmRecordRelationships(
         ))`,
       [record.id, visibleContactIds],
     )
-    return { contacts, companies: [], deals }
+    return bind({ contacts, companies: [], deals })
   }
 
   const contactId = typeof record.attributes.contact_id === 'string'
@@ -1008,7 +968,8 @@ export async function listCrmRecordRelationships(
       ? listRelatedKind(ctx, 'company', (index) => `e.id = $${index}`, [companyId])
       : Promise.resolve([]),
   ])
-  return { contacts, companies, deals: [] }
+  return bind({ contacts, companies, deals: [] })
+  })
 }
 
 export async function listCrmR2Records(
@@ -1016,7 +977,7 @@ export async function listCrmR2Records(
   options: { includeArchived?: boolean } = {},
 ): Promise<CrmRecordRow[]> {
   const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
-  const result = await queryGated<{
+  const result = await queryLegacyCanonicalCrmSql<{
     id: string
     kind: CrmEntityKind
     name: string
@@ -1025,7 +986,7 @@ export async function listCrmR2Records(
     archivedAt: Date | null
     updatedAt: Date
   }>(
-    ctx,
+    ctx,[{type:'person',fields:'all'},{type:'company',fields:'all'},{type:'deal',fields:'all'}],
     `SELECT e.id, e.kind, e.display_name AS name, e.attributes, e.aliases,
             NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",
             e.updated_at AS "updatedAt"
@@ -1042,7 +1003,7 @@ export async function listCrmR2Records(
       LIMIT 1500`,
     [...ap.params, ['person', 'company', 'deal']],
   )
-  return result.rows.map((r) => ({
+  return mapCanonicalCrmRows(result.rows,(r) => ({
     id: r.id,
     kind: r.kind,
     name: r.name,
@@ -1278,7 +1239,7 @@ export async function listCrmRecordPage(
           OR (${sort.sql} = $${valueIndex}::${sort.cursorCast} AND e.id ${comparison} $${idIndex}::uuid))`)
   }
   values.push(limit + 1)
-  const result = await queryGated<{
+  const result = await queryLegacyCanonicalCrmSql<{
     id: string
     kind: CrmEntityKind
     name: string
@@ -1287,7 +1248,7 @@ export async function listCrmRecordPage(
     archivedAt: Date | null
     updatedAt: Date
     sortValue: Date | string | number | null
-  }>(ctx,
+  }>(ctx,[{type:options.kind,fields:'all'},...(options.kind==='deal'&&options.search?.trim()?[{type:'person' as const,fields:['name']},{type:'company' as const,fields:['name']}]:[])],
     `SELECT e.id, e.kind, e.display_name AS name, e.attributes, e.aliases,
             NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",
             e.updated_at AS "updatedAt", ${sort.sql} AS "sortValue"
@@ -1299,7 +1260,7 @@ export async function listCrmRecordPage(
   )
   const hasMore = result.rows.length > limit
   const pageRows = result.rows.slice(0, limit)
-  const items = pageRows.map((row) => ({
+  const items = mapCanonicalCrmRows(bindScopeSources(pageRows,boundScopeSources(result.rows)),(row) => ({
     id: row.id,
     kind: row.kind,
     name: row.name,
@@ -1312,7 +1273,7 @@ export async function listCrmRecordPage(
   const cursorValue = last?.sortValue instanceof Date
     ? last.sortValue.toISOString()
     : last?.sortValue ?? null
-  return {
+  return bindScopeSources({
     items,
     hasMore,
     nextCursor: hasMore && last ? encodeCrmCursor({
@@ -1322,19 +1283,20 @@ export async function listCrmRecordPage(
       value: cursorValue,
       id: last.id,
     }) : null,
-  }
+  },boundScopeSources(result))
 }
 
 export type CrmSummary = {
   totals: { deals: number; contacts: number; companies: number }
   attention: { overdue: number; stale: number; noAmount: number; orphaned: number }
-  stages: Array<{ stageId: string; count: number; values: Record<string, number> }>
+  stages: Array<{ stageId: string; count: number; values: Record<string, number|string> }>
 }
 
 export async function getCrmSummary(
   ctx: AccessContext,
   pipelineId?: string | null,
 ): Promise<CrmSummary> {
+  return runLegacyCanonicalCrmRead(ctx,async()=>{
   const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
   const aggregateValues: unknown[] = [...ap.params, ['person', 'company', 'deal']]
   const pipelinePredicate = pipelineId
@@ -1349,10 +1311,10 @@ export async function getCrmSummary(
     )
     ELSE COALESCE(e.attributes->>'stage','lead') NOT IN ('won','lost')
   END)`
-  const aggregate = await queryGated<{
+  const aggregate = await queryLegacyCanonicalCrmSql<{
     deals: string; contacts: string; companies: string
     overdue: string; stale: string; noAmount: string; orphaned: string
-  }>(ctx,
+  }>(ctx,[{type:'person',fields:['archivedAt','companyId']},{type:'company',fields:['archivedAt']},{type:'deal',fields:['archivedAt','pipelineId','pipelineStageId','stage','amount','closeDate','updatedAt','currencyCode']}],
     `SELECT
        COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate})::text AS deals,
        COUNT(*) FILTER (WHERE e.kind = 'person')::text AS contacts,
@@ -1381,9 +1343,9 @@ export async function getCrmSummary(
     stageValues.push(pipelineId)
     pipelineSql = `AND e.attributes->>'pipeline_id' = $${stageValues.length}`
   }
-  const stages = await queryGated<{
+  const stages = await queryLegacyCanonicalCrmSql<{
     stageId: string; currency: string; stageCount: string; value: string | null
-  }>(ctx,
+  }>(ctx,[{type:'person',fields:['archivedAt','companyId']},{type:'company',fields:['archivedAt']},{type:'deal',fields:['archivedAt','pipelineId','pipelineStageId','stage','amount','closeDate','updatedAt','currencyCode']}],
     `SELECT e.attributes->>'pipeline_stage_id' AS "stageId",
             COALESCE(NULLIF(upper(e.attributes->>'currency_code'),''),'USD') AS currency,
             SUM(COUNT(*)) OVER (
@@ -1398,19 +1360,20 @@ export async function getCrmSummary(
       GROUP BY e.attributes->>'pipeline_stage_id', currency`,
     stageValues,
   )
-  const stageMap = new Map<string, { stageId: string; count: number; values: Record<string, number> }>()
+  const stageMap = new Map<string, { stageId: string; count: number; values: Record<string, number|string> }>()
   for (const row of stages.rows) {
     const summary = stageMap.get(row.stageId) ?? { stageId: row.stageId, count: 0, values: {} }
     summary.count = Number(row.stageCount)
-    if (row.value !== null) summary.values[row.currency] = Number(row.value)
+    if (row.value !== null) summary.values[row.currency] = decimalResult(decimalParts(row.value).units,decimalParts(row.value).scale)
     stageMap.set(row.stageId, summary)
   }
   const row = aggregate.rows[0]
-  return {
+  return bindScopeSources({
     totals: { deals: Number(row?.deals ?? 0), contacts: Number(row?.contacts ?? 0), companies: Number(row?.companies ?? 0) },
     attention: { overdue: Number(row?.overdue ?? 0), stale: Number(row?.stale ?? 0), noAmount: Number(row?.noAmount ?? 0), orphaned: Number(row?.orphaned ?? 0) },
     stages: [...stageMap.values()],
-  }
+  },[...boundScopeSources(aggregate),...boundScopeSources(stages)])
+  })
 }
 
 export async function lookupCrmRecords(input: {
@@ -1430,7 +1393,7 @@ export async function lookupCrmRecords(input: {
       OR COALESCE(e.canonical_id,'') ILIKE $${values.length})`
   }
   values.push(limit)
-  const result = await queryGated<{ id: string; name: string; hint: string | null }>(input.ctx,
+  const result = await queryLegacyCanonicalCrmSql<{ id: string; name: string; hint: string | null }>(input.ctx,[{type:input.kind,fields:['name','aliases','archivedAt',input.kind==='person'?'email':input.kind==='company'?'domain':'source']}],
     `SELECT e.id, e.display_name AS name,
             CASE WHEN e.kind = 'person' THEN COALESCE(e.attributes->>'email', e.canonical_id)
                  WHEN e.kind = 'company' THEN COALESCE(e.attributes->>'domain', e.canonical_id)
@@ -1451,12 +1414,14 @@ export async function setCrmArchived(input: {
   archived: boolean
 }, transactionClient?: PoolClient): Promise<EntityRecord | null> {
   if (!transactionClient) return runCrmWriteTransaction(input.ctx.userId, tx => setCrmArchived(input, tx.client))
+  const fieldIntent=['archivedAt']
+  await assertNativeEntityFieldWrites(input.ctx.userId,input.entityId,{},transactionClient,fieldIntent)
   const old = await readCrmMutationSource(input.ctx, input.entityId, ['person', 'company', 'deal'], transactionClient)
   if (!old) return null
-  const attributes = { ...old.attributes }
+  const attributes:Record<string,unknown> = {}
   if (input.archived) attributes.crm_archived_at = new Date().toISOString()
   else delete attributes.crm_archived_at
-  return updateEntity(input.ctx.userId, input.entityId, { attributes }, input.ctx, transactionClient)
+  return updateEntity(input.ctx.userId, input.entityId, { attributes }, input.ctx, transactionClient,{fieldIntent})
 }
 
 export async function setCrmDealPipelineStage(input: {
@@ -1465,6 +1430,8 @@ export async function setCrmDealPipelineStage(input: {
   stageId: string
 }, transactionClient?: PoolClient): Promise<{ entity: EntityRecord; fromStageId: string | null; toStage: CrmPipelineStage } | null> {
   if (!transactionClient) return runCrmWriteTransaction(input.ctx.userId, tx => setCrmDealPipelineStage(input, tx.client))
+  const fieldIntent=['pipelineId','pipelineStageId','stage']
+  await assertNativeEntityFieldWrites(input.ctx.userId,input.entityId,{},transactionClient,fieldIntent)
   const entity = await readCrmMutationSource(input.ctx, input.entityId, ['deal'], transactionClient)
   if (!entity) return null
   const selected = await transactionClient.query<ConfigStageRow>(
@@ -1496,41 +1463,15 @@ export async function setCrmDealPipelineStage(input: {
   const legacy = stage.legacyKey
     ?? (stage.category === 'won' ? 'won' : stage.category === 'lost' ? 'lost' : 'lead')
   const attributes = {
-    ...entity.attributes,
     pipeline_id: stage.pipelineId,
     pipeline_stage_id: stage.id,
     stage: legacy,
   }
-  const updated = await updateEntity(input.ctx.userId, input.entityId, { attributes }, input.ctx, transactionClient)
+  const updated = await updateEntity(input.ctx.userId, input.entityId, { attributes }, input.ctx, transactionClient,{fieldIntent})
   return updated ? { entity: updated, fromStageId, toStage: stage } : null
 }
 
-export function validateCustomFieldValue(
-  definition: Pick<CrmFieldDefinition, 'fieldType' | 'options' | 'isRequired'>,
-  value: unknown,
-): boolean {
-  if (value === null || value === undefined || value === '') return !definition.isRequired
-  switch (definition.fieldType) {
-    case 'text': return typeof value === 'string' && value.length <= 10_000
-    case 'number': return typeof value === 'number' && Number.isFinite(value)
-    case 'date': {
-      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
-      const [year, month, day] = value.split('-').map(Number)
-      const parsed = new Date(Date.UTC(year, month - 1, day))
-      return parsed.getUTCFullYear() === year
-        && parsed.getUTCMonth() === month - 1
-        && parsed.getUTCDate() === day
-    }
-    case 'boolean': return typeof value === 'boolean'
-    case 'single_select': return typeof value === 'string' && definition.options.includes(value)
-    case 'multi_select':
-      return Array.isArray(value)
-        && value.every((v) => typeof v === 'string' && definition.options.includes(v))
-    case 'entity_reference':
-      return typeof value === 'string'
-        && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
-  }
-}
+export { validateCrmCustomFieldValue as validateCustomFieldValue } from '@use-brian/core'
 
 async function customDefinitionsForWrite(ctx: AccessContext, entityKind: CrmEntityKind, client?: PoolClient): Promise<CrmFieldDefinition[]> {
   mutationActorAccess(ctx.userId, ctx.workspaceId, ctx)
@@ -1561,10 +1502,10 @@ async function validateCustomFieldWrite(input: CustomFieldWrite, transactionClie
     const definition = byKey.get(key)
     if (!definition) {
       const valid = definitions.map((field) => field.fieldKey).join(', ') || '(none configured)'
-      throw new Error(`Unknown custom field '${key}'. Valid fields: ${valid}. Call listCrmFields before retrying.`)
+      throw new ApplicationPlatformError('invalid_value',`Unknown custom field '${key}'. Valid fields: ${valid}. Call listCrmFields before retrying.`)
     }
     if (!validateCustomFieldValue(definition, value)) {
-      throw new Error(`Invalid ${definition.fieldType} value for custom field '${key}'`)
+      throw new ApplicationPlatformError('invalid_value',`Invalid ${definition.fieldType} value for custom field '${key}'`)
     }
     if (definition.fieldType === 'entity_reference' && value !== null && value !== undefined && value !== '') {
       const target = await readCrmReference(input.ctx.userId, input.ctx.workspaceId, value as string, definition.options, input.ctx, transactionClient)
@@ -1578,7 +1519,7 @@ async function validateCustomFieldWrite(input: CustomFieldWrite, transactionClie
   if (input.requireAll) {
     for (const definition of definitions.filter((field) => field.isRequired)) {
       if (!validateCustomFieldValue(definition, input.values[definition.fieldKey])) {
-        throw new Error(`Required custom field is missing: '${definition.fieldKey}'`)
+        throw new ApplicationPlatformError('invalid_value',`Required custom field is missing: '${definition.fieldKey}'`)
       }
     }
   }
@@ -1589,40 +1530,50 @@ export async function validateCrmCustomFieldValues(input: CustomFieldWrite, tran
   return (await validateCustomFieldWrite(input, transactionClient)).definitions
 }
 
+/** Canonical initial custom values; this restriction is never row-creation authority. */
+export async function prepareCrmInitialCustomFields(input:CustomFieldWrite & {standardFields:readonly string[]},client:PoolClient) {
+  mutationActorAccess(input.ctx.userId,input.ctx.workspaceId,input.ctx)
+  const fields=[...input.standardFields,...Object.keys(input.values).map(key=>`custom.${key}`)]
+  const admitted=await client.query<{allowed:boolean}>('SELECT application_native_entity_creation_fields_allowed($1,$2,$3) AS allowed',
+    [input.ctx.workspaceId,input.entityKind,fields])
+  if(admitted.rows[0]?.allowed!==true) throw new ApplicationPlatformError('access_unavailable','The current native creation fields are unavailable.')
+  const {references}=await validateCustomFieldWrite({...input,requireAll:true},client)
+  const values=Object.fromEntries(Object.entries(input.values).filter(([,value])=>value!==null && value!==undefined && value!==''))
+  return {values,references}
+}
+
+/** Re-read the actual locked source; callers cannot supply their own source snapshot. */
+export async function prepareCrmCustomFieldPatch(input:{ctx:AccessContext;entityId:string;values:Record<string,unknown>},client:PoolClient) {
+  const fieldIntent=Object.keys(input.values).map(key=>`custom.${key}`)
+  await assertNativeEntityFieldWrites(input.ctx.userId,input.entityId,{},client,fieldIntent)
+  const entity=await readCrmMutationSource(input.ctx,input.entityId,['person','company','deal'],client)
+  if(!entity) return null
+  const {definitions,references}=await validateCustomFieldWrite({ctx:input.ctx,entityKind:entity.kind as CrmEntityKind,values:input.values},client)
+  const current=entity.attributes.custom_fields
+  const values=current && typeof current==='object' && !Array.isArray(current)?{...(current as Record<string,unknown>)}:{}
+  for(const [key,value] of Object.entries(input.values)) {
+    if(value===null || value===undefined || value==='') delete values[key]
+    else values[key]=value
+  }
+  for(const definition of definitions.filter(field=>field.isRequired)) {
+    if(!validateCustomFieldValue(definition,values[definition.fieldKey])) throw new ApplicationPlatformError('invalid_value',`Required custom field is missing: '${definition.fieldKey}'`)
+  }
+  return {entity,values,references,fieldIntent}
+}
+
 export async function updateCrmCustomFields(input: {
   ctx: AccessContext
   entityId: string
   values: Record<string, unknown>
 }, transactionClient?: PoolClient): Promise<EntityRecord | null> {
-  if (!transactionClient) {
-    return runCrmWriteTransaction(input.ctx.userId, tx => updateCrmCustomFields(input, tx.client))
-  }
-  const old = await readCrmMutationSource(input.ctx, input.entityId, ['person', 'company', 'deal'], transactionClient)
-  if (!old) return null
-  const { definitions, references } = await validateCustomFieldWrite({
-    ctx: input.ctx,
-    entityKind: old.kind as CrmEntityKind,
-    values: input.values,
-  }, transactionClient)
-  const current = old.attributes.custom_fields
-  const custom = current && typeof current === 'object' && !Array.isArray(current)
-    ? { ...(current as Record<string, unknown>) }
-    : {}
-  for (const [key, value] of Object.entries(input.values)) {
-    if (value === null || value === undefined || value === '') delete custom[key]
-    else custom[key] = value
-  }
-  for (const definition of definitions.filter((field) => field.isRequired)) {
-    if (!validateCustomFieldValue(definition, custom[definition.fieldKey])) {
-      throw new Error(`Required custom field is missing: '${definition.fieldKey}'`)
-    }
-  }
-  const attributes = { ...old.attributes, custom_fields: custom }
-  const inherited = crmReferenceScope(old, references)
-  return updateEntity(input.ctx.userId, input.entityId, {
-    attributes, sensitivity: inherited.sensitivity,
-    inheritCompartments: inherited.compartments, inheritProjectIds: inherited.projectIds,
-  }, input.ctx, transactionClient)
+  if(!transactionClient) return runCrmWriteTransaction(input.ctx.userId,tx=>updateCrmCustomFields(input,tx.client))
+  const prepared=await prepareCrmCustomFieldPatch(input,transactionClient)
+  if(!prepared) return null
+  const inherited=crmReferenceScope(prepared.entity,prepared.references)
+  return updateEntity(input.ctx.userId,input.entityId,{
+    attributes:{...prepared.entity.attributes,custom_fields:prepared.values},sensitivity:inherited.sensitivity,
+    inheritCompartments:inherited.compartments,inheritProjectIds:inherited.projectIds,
+  },input.ctx,transactionClient,{fieldIntent:prepared.fieldIntent})
 }
 
 export type CrmDealParticipant = {
@@ -1637,14 +1588,11 @@ export async function listCrmDealParticipants(
   ctx: AccessContext,
   dealId: string,
 ): Promise<CrmDealParticipant[] | null> {
-  const deal = await updateEntity(ctx.userId, dealId, {}, ctx)
+  return runLegacyCanonicalCrmRead(ctx,async()=>{
+  const deal = await getCrmR2Record(ctx,dealId)
   if (!deal || deal.kind !== 'deal') return null
-  const source = buildAccessPredicate(ctx, { alias: 'd', startIdx: 3 })
-  const sourceMember = buildCurrentMemberSourcePredicate(ctx.userId, { alias: 'd', startIdx: source.nextIdx, operation: 'read' })
-  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: sourceMember.nextIdx })
-  const member = buildCurrentMemberSourcePredicate(ctx.userId, { alias: 'e', startIdx: ap.nextIdx, operation: 'read' })
-  const result = await queryGated<CrmDealParticipant>(
-    ctx,
+  const result = await queryLegacyCanonicalCrmSql<CrmDealParticipant>(
+    ctx,[{type:'deal',fields:['participants'],ids:[dealId]},{type:'person',fields:['name','email','self']}],
     `SELECT dc.contact_id AS "contactId", dc.role, dc.is_primary AS "isPrimary",
             e.display_name AS name,
             COALESCE(e.attributes->>'email', e.canonical_id) AS email
@@ -1653,15 +1601,14 @@ export async function listCrmDealParticipants(
        JOIN entities e ON e.id = dc.contact_id
       WHERE dc.workspace_id = $1 AND dc.deal_id = $2
         AND d.kind='deal' AND d.valid_to IS NULL AND d.retracted_at IS NULL AND NOT d.scope_held
-        AND ${source.sql} AND ${sourceMember.sql}
         AND e.kind = 'person' AND e.valid_to IS NULL
         AND e.retracted_at IS NULL AND NOT e.scope_held AND e.workspace_id=dc.workspace_id
         AND NOT COALESCE((e.attributes->>'self')::boolean, false)
-        AND ${ap.sql} AND ${member.sql}
       ORDER BY dc.is_primary DESC, dc.created_at`,
-    [ctx.workspaceId, dealId, ...source.params, ...sourceMember.params, ...ap.params, ...member.params],
+    [ctx.workspaceId, dealId],
   )
-  return result.rows
+  return bindScopeSources(result.rows,[...boundScopeSources(deal),...boundScopeSources(result)])
+  })
 }
 
 export async function addCrmDealParticipant(input: {
@@ -1670,21 +1617,20 @@ export async function addCrmDealParticipant(input: {
   contactId: string
   role?: string | null
   isPrimary?: boolean
-}): Promise<boolean> {
+}, transactionClient?: PoolClient): Promise<boolean> {
   if (input.isPrimary) {
     return setCrmDealPrimaryContact({
       ctx: input.ctx,
       dealId: input.dealId,
       contactId: input.contactId,
       ...(input.role !== undefined ? { role: input.role } : {}),
-    })
+    }, transactionClient)
   }
-  const client = await getAppPool().connect()
+  const client = transactionClient ?? await getAppPool().connect()
   try {
-    await client.query('BEGIN')
-    await applyRLSGucs(client, input.ctx.userId)
+    if (!transactionClient) { await client.query('BEGIN'); await applyRLSGucs(client, input.ctx.userId) }
     const deal = await prepareCrmParticipantMutation(input.ctx, input.dealId, input.contactId, client)
-    if (!deal) { await client.query('ROLLBACK'); return false }
+    if (!deal) { if (!transactionClient) await client.query('ROLLBACK'); return false }
     await client.query(
       `INSERT INTO crm_deal_contacts
          (workspace_id, deal_id, contact_id, role, is_primary, created_by)
@@ -1694,13 +1640,13 @@ export async function addCrmDealParticipant(input: {
       [input.ctx.workspaceId, input.dealId, input.contactId, input.role ?? null,
         false, input.ctx.userId],
     )
-    await client.query('COMMIT')
+    if (!transactionClient) await client.query('COMMIT')
     return true
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
+    if (!transactionClient) await client.query('ROLLBACK').catch(() => {})
     throw err
   } finally {
-    client.release()
+    if (!transactionClient) client.release()
   }
 }
 
@@ -1711,17 +1657,17 @@ export async function setCrmDealPrimaryContact(input: {
   dealId: string
   contactId: string | null
   role?: string | null
-}): Promise<boolean> {
-  const client = await getAppPool().connect()
+}, transactionClient?: PoolClient): Promise<boolean> {
+  const client = transactionClient ?? await getAppPool().connect()
   try {
-    await client.query('BEGIN')
-    await applyRLSGucs(client, input.ctx.userId)
-    if (!await prepareCrmParticipantMutation(input.ctx, input.dealId, input.contactId, client)) {
-      await client.query('ROLLBACK'); return false
+    if (!transactionClient) { await client.query('BEGIN'); await applyRLSGucs(client, input.ctx.userId) }
+    await assertNativeEntityFieldWrites(input.ctx.userId, input.dealId, {}, client, ['contactId'])
+    const source = await prepareCrmParticipantMutation(input.ctx, input.dealId, input.contactId, client)
+    if (!source) { if (!transactionClient) await client.query('ROLLBACK'); return false }
+    if ((source.attributes.contact_id ?? null) !== input.contactId) {
+      const deal = await updateDeal(input.ctx.userId, input.dealId, { contactId: input.contactId }, undefined, input.ctx, client)
+      if (!deal) { if (!transactionClient) await client.query('ROLLBACK'); return false }
     }
-    const deal = await updateDeal(input.ctx.userId, input.dealId,
-      { contactId: input.contactId }, undefined, input.ctx, client)
-    if (!deal) { await client.query('ROLLBACK'); return false }
     await client.query(
       `UPDATE crm_deal_contacts
           SET is_primary = false
@@ -1740,13 +1686,13 @@ export async function setCrmDealPrimaryContact(input: {
           input.ctx.userId, input.role !== undefined],
       )
     }
-    await client.query('COMMIT')
+    if (!transactionClient) await client.query('COMMIT')
     return true
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
+    if (!transactionClient) await client.query('ROLLBACK').catch(() => {})
     throw err
   } finally {
-    client.release()
+    if (!transactionClient) client.release()
   }
 }
 
@@ -1754,30 +1700,27 @@ export async function removeCrmDealParticipant(input: {
   ctx: AccessContext
   dealId: string
   contactId: string
-}): Promise<boolean> {
-  const client = await getAppPool().connect()
+}, transactionClient?: PoolClient): Promise<boolean> {
+  const client = transactionClient ?? await getAppPool().connect()
   try {
-    await client.query('BEGIN')
-    await applyRLSGucs(client, input.ctx.userId)
+    if (!transactionClient) { await client.query('BEGIN'); await applyRLSGucs(client, input.ctx.userId) }
     const deal = await prepareCrmParticipantMutation(input.ctx, input.dealId, input.contactId, client)
-    if (!deal) { await client.query('ROLLBACK'); return false }
+    if (!deal) { if (!transactionClient) await client.query('ROLLBACK'); return false }
     const result = await client.query<{ contactId: string }>(
       `DELETE FROM crm_deal_contacts
         WHERE workspace_id=$1 AND deal_id=$2 AND contact_id=$3 RETURNING contact_id AS "contactId"`,
       [input.ctx.workspaceId, input.dealId, input.contactId],
     )
-    if (!result.rows[0]) { await client.query('ROLLBACK'); return false }
+    if (!result.rows[0]) { if (!transactionClient) await client.query('ROLLBACK'); return false }
     if (deal.attributes.contact_id === input.contactId) {
-      const attributes = { ...deal.attributes }
-      delete attributes.contact_id
-      if (!await updateEntity(input.ctx.userId, input.dealId, { attributes }, input.ctx, client)) {
-        await client.query('ROLLBACK'); return false
+      if (!await updateEntity(input.ctx.userId, input.dealId, { attributes:{} }, input.ctx, client,{fieldIntent:['contactId']})) {
+        if (!transactionClient) await client.query('ROLLBACK'); return false
       }
     }
-    await client.query('COMMIT')
+    if (!transactionClient) await client.query('COMMIT')
     return true
-  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error }
-  finally { client.release() }
+  } catch (error) { if (!transactionClient) await client.query('ROLLBACK').catch(() => {}); throw error }
+  finally { if (!transactionClient) client.release() }
 }
 
 export type CrmActivity = {
@@ -1837,42 +1780,33 @@ function bareAddress(value: string): string {
   return (angle?.[1] ?? value).trim().toLowerCase()
 }
 
-async function contactEmailsForEntity(ctx: AccessContext, entity: EntityRecord): Promise<string[]> {
+async function contactEmailsForEntity(ctx: AccessContext, entity: Pick<EntityRecord,'id'|'kind'|'attributes'>): Promise<string[]> {
   const ids = new Set<string>()
   if (entity.kind === 'person') ids.add(entity.id)
   if (entity.kind === 'deal') {
     const primary = entity.attributes.contact_id
     if (typeof primary === 'string') ids.add(primary)
-    const participants = await queryWithRLS<{ contactId: string }>(
-      ctx.userId,
+    const participants = await queryLegacyCanonicalCrmSql<{ contactId: string }>(
+      ctx,[{type:'deal',fields:['participants'],ids:[entity.id]}],
       `SELECT contact_id AS "contactId" FROM crm_deal_contacts
         WHERE workspace_id = $1 AND deal_id = $2`,
       [ctx.workspaceId, entity.id],
     )
     for (const row of participants.rows) ids.add(row.contactId)
   }
-  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
-  const member = buildCurrentMemberSourcePredicate(ctx.userId, { alias: 'e', startIdx: ap.nextIdx, operation: 'read' })
-  const values: unknown[] = [...ap.params, ...member.params]
-  let relationshipSql = ''
-  if (entity.kind === 'company') {
-    relationshipSql = `e.attributes->>'company_id' = $${member.nextIdx}`
-    values.push(entity.id)
-  } else {
-    relationshipSql = `e.id = ANY($${member.nextIdx}::uuid[])`
-    values.push([...ids])
-  }
-  const rows = await queryGated<{ email: string }>(
-    ctx,
+  const relationshipSql=entity.kind==='company'?"e.attributes->>'company_id' = $2":'e.id = ANY($2::uuid[])'
+  const values:unknown[]=[ctx.workspaceId,entity.kind==='company'?entity.id:[...ids]]
+  const rows = await queryLegacyCanonicalCrmSql<{ email: string }>(
+    ctx,[{type:'person',fields:['companyId','email']}],
     `SELECT COALESCE(e.attributes->>'email', e.canonical_id) AS email
        FROM entities e
-      WHERE ${ap.sql} AND ${member.sql} AND e.kind = 'person' AND e.valid_to IS NULL
+      WHERE e.workspace_id=$1 AND e.kind = 'person' AND e.valid_to IS NULL
         AND e.retracted_at IS NULL AND NOT e.scope_held
         AND ${relationshipSql}
         AND COALESCE(e.attributes->>'email', e.canonical_id) IS NOT NULL`,
     values,
   )
-  return [...new Set(rows.rows.map((r) => bareAddress(r.email)).filter(Boolean))]
+  return bindScopeSources([...new Set(rows.rows.map((r) => bareAddress(r.email)).filter(Boolean))],boundScopeSources(rows))
 }
 
 const CRM_EMAIL_THREAD_MESSAGE_LIMIT = 100
@@ -1986,15 +1920,16 @@ export async function getCrmEmailReviewContext(input: {
   toolName: string
   account?: string | null
 }): Promise<CrmEmailReviewContext | null> {
-  const entity = await getEntityById(input.ctx, input.entityId)
+  return runLegacyCanonicalCrmRead(input.ctx,async()=>{
+  const entity = await getCrmR2Record(input.ctx,input.entityId)
   if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
   const addresses = await contactEmailsForEntity(input.ctx, entity)
   if (!addresses.includes(bareAddress(input.recipient))) return null
 
   const instancePrefix = mailboxInstancePrefix(input.toolName)
   if (instancePrefix === undefined) return { thread: null }
-  const instances = await queryWithRLS<{ id: string }>(
-    input.ctx.userId,
+  const instances = await queryLegacyCanonicalCrmPrivateSql<{ id: string }>(
+    input.ctx,
     `SELECT id
        FROM connector_instance
       WHERE scope = 'user' AND user_id = $1 AND provider = 'imap'
@@ -2008,8 +1943,8 @@ export async function getCrmEmailReviewContext(input: {
   if (instances.rows.length !== 1) return { thread: null }
   const instanceId = instances.rows[0].id
 
-  const anchor = await queryWithRLS<CrmEmailArchiveThreadRow>(
-    input.ctx.userId,
+  const anchor = await queryLegacyCanonicalCrmPrivateSql<CrmEmailArchiveThreadRow>(
+    input.ctx,
     `SELECT id, provider_message_id AS "providerMessageId", folder,
             from_addr AS "fromAddr", to_addrs AS "toAddrs", cc_addrs AS "ccAddrs",
             sent_at AS "sentAt", subject, left(body_text, $5) AS "bodyText",
@@ -2030,8 +1965,8 @@ export async function getCrmEmailReviewContext(input: {
     ...anchorRow.referencesIds,
   ].filter((value): value is string => Boolean(value)))]
 
-  const candidates = await queryWithRLS<CrmEmailArchiveThreadRow>(
-    input.ctx.userId,
+  const candidates = await queryLegacyCanonicalCrmPrivateSql<CrmEmailArchiveThreadRow>(
+    input.ctx,
     `SELECT id, provider_message_id AS "providerMessageId", folder,
             from_addr AS "fromAddr", to_addrs AS "toAddrs", cc_addrs AS "ccAddrs",
             sent_at AS "sentAt", subject, left(body_text, $7) AS "bodyText",
@@ -2062,6 +1997,7 @@ export async function getCrmEmailReviewContext(input: {
       candidates.rows.length === CRM_EMAIL_THREAD_CANDIDATE_LIMIT,
     ),
   }
+  })
 }
 
 export async function listCrmTimeline(input: {
@@ -2069,45 +2005,41 @@ export async function listCrmTimeline(input: {
   entityId: string
   limit?: number
 }): Promise<CrmActivity[] | null> {
+  return runLegacyCanonicalCrmRead(input.ctx,async()=>{
   const ctx = mutationActorAccess(input.ctx.userId, input.ctx.workspaceId, input.ctx)
-  const entity = await updateEntity(ctx.userId, input.entityId, {}, ctx)
+  const entity = await getCrmR2Record(ctx,input.entityId)
   if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
   const limit = Math.min(Math.max(input.limit ?? 50, 1), 100)
   const addresses = await contactEmailsForEntity(input.ctx, entity)
-  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 4 })
-  const member = buildCurrentMemberSourcePredicate(ctx.userId, { alias: 'e', startIdx: ap.nextIdx, operation: 'read' })
   const mailSource = buildAccessPredicate(ctx, { alias: 'source', startIdx: 6 })
   const mailMember = buildCurrentMemberSourcePredicate(ctx.userId, { alias: 'source', startIdx: mailSource.nextIdx, operation: 'read' })
-  const historyScope = buildAccessPredicate(ctx, { alias: 'a', startIdx: member.nextIdx })
-  const historyMember = buildCurrentMemberSourcePredicate(ctx.userId, { alias: 'a', startIdx: historyScope.nextIdx, operation: 'read' })
   const [activities, mail] = await Promise.all([
-    queryWithRLS<{
+    queryLegacyCanonicalCrmSql<{
       id: string; activityType: string; direction: string; occurredAt: Date
       subject: string | null; summary: string; sourceKind: string | null
       metadata: Record<string, unknown>
     }>(
-      input.ctx.userId,
+      ctx,[{type:'record',fields:'all',ids:[input.entityId],history:true}],
       `SELECT a.id, a.activity_type AS "activityType", a.direction,
               a.occurred_at AS "occurredAt", a.subject, a.summary,
               a.source_kind AS "sourceKind", a.metadata
          FROM crm_activities a JOIN entities e ON e.id=a.entity_id AND e.workspace_id=a.workspace_id
-        WHERE a.workspace_id = $1 AND a.entity_id = $2 AND ${ap.sql} AND ${member.sql}
-          AND ${historyScope.sql} AND ${historyMember.sql} AND crm_activity_scope_allows(a,false)
+        WHERE a.workspace_id = $1 AND a.entity_id = $2
           AND e.valid_to IS NULL AND e.retracted_at IS NULL AND NOT e.scope_held
           AND e.kind IN ('person','company','deal')
         ORDER BY a.occurred_at DESC, a.id DESC LIMIT $3`,
-      [input.ctx.workspaceId, input.entityId, limit, ...ap.params, ...member.params, ...historyScope.params, ...historyMember.params],
+      [input.ctx.workspaceId, input.entityId, limit],
     ),
     addresses.length === 0
       ? Promise.resolve({ rows: [] as Array<{
           id: string; folder: string; subject: string; fromAddr: string
           toAddrs: string[]; sentAt: Date | null; summary: string
         }> })
-      : queryWithRLS<{
+      : queryLegacyCanonicalCrmPrivateSql<{
           id: string; folder: string; subject: string; fromAddr: string
           toAddrs: string[]; sentAt: Date | null; summary: string
         }>(
-          input.ctx.userId,
+          input.ctx,
           `SELECT id, folder, subject, from_addr AS "fromAddr", to_addrs AS "toAddrs",
                   sent_at AS "sentAt", left(body_text, 280) AS summary
              FROM email_archive_messages
@@ -2149,9 +2081,10 @@ export async function listCrmTimeline(input: {
       metadata: { folder: row.folder, from: row.fromAddr, to: row.toAddrs },
     }
   })
-  return [...explicit, ...email]
+  return bindScopeSources([...explicit, ...email]
     .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
-    .slice(0, limit)
+    .slice(0, limit),[...boundScopeSources(entity),...boundScopeSources(addresses),...boundScopeSources(activities)])
+  })
 }
 
 export type CrmSavedView = {
@@ -2163,8 +2096,8 @@ export type CrmSavedView = {
 }
 
 export async function listCrmSavedViews(userId: string, workspaceId: string): Promise<CrmSavedView[]> {
-  const result = await queryWithRLS<CrmSavedView>(
-    userId,
+  const result = await queryLegacyCanonicalCrmPrivateSql<CrmSavedView>(
+    mutationActorAccess(userId,workspaceId),
     `SELECT id, name, section, query_state AS "queryState", position
        FROM crm_saved_views WHERE workspace_id = $1 AND owner_user_id = $2
       ORDER BY position, created_at`,
@@ -2180,8 +2113,8 @@ export async function createCrmSavedView(input: {
   section: string
   queryState: Record<string, unknown>
 }): Promise<CrmSavedView> {
-  const result = await queryWithRLS<CrmSavedView>(
-    input.userId,
+  const result = await queryLegacyCanonicalCrmPrivateSql<CrmSavedView>(
+    mutationActorAccess(input.userId,input.workspaceId),
     `INSERT INTO crm_saved_views
        (workspace_id, owner_user_id, name, section, query_state, position)
      VALUES ($1,$2,$3,$4,$5::jsonb,
@@ -2199,8 +2132,8 @@ export async function deleteCrmSavedView(
   workspaceId: string,
   viewId: string,
 ): Promise<boolean> {
-  const result = await queryWithRLS(
-    userId,
+  const result = await queryLegacyCanonicalCrmPrivateSql(
+    mutationActorAccess(userId,workspaceId),
     `DELETE FROM crm_saved_views
       WHERE id = $1 AND workspace_id = $2 AND owner_user_id = $3`,
     [viewId, workspaceId, userId],
@@ -2299,20 +2232,39 @@ export function findCrmDuplicateGroups(
 }
 
 export type CrmReport = {
-  byStage: Array<{ stageId: string; name: string; category: CrmStageCategory; count: number; values: Record<string, number> }>
-  openValue: Record<string, number>
-  weightedForecast: Record<string, number>
+  byStage: Array<{ stageId: string; name: string; category: CrmStageCategory; count: number; values: Record<string, number|string> }>
+  openValue: Record<string, number|string>
+  weightedForecast: Record<string, number|string>
   wonCount: number
   lostCount: number
   winRate: number | null
   missingOwnerCount: number
   missingAmountCount: number
-  bySource: Array<{ source: string; count: number; won: number; values: Record<string, number> }>
+  bySource: Array<{ source: string; count: number; won: number; values: Record<string, number|string> }>
   stageVelocityDays: Array<{ stageId: string; medianDays: number | null; samples: number }>
 }
 
-function addCurrency(target: Record<string, number>, currency: string, amount: number): void {
-  target[currency] = Math.round(((target[currency] ?? 0) + amount) * 100) / 100
+function decimalParts(value:string|number):{units:bigint;scale:number} {
+  const text=typeof value==='number'?applicationDecimalText(value):value,match=/^(-?)(0|[1-9]\d*)(?:\.(\d{1,20}))?$/.exec(text)
+  if(!match||text.length>100)throw new ApplicationPlatformError('invalid_value','The report amount requires review.')
+  return {units:BigInt(match[2]+(match[3]??''))*(match[1]? -1n:1n),scale:(match[3]??'').length}
+}
+function decimalResult(units:bigint,scale:number):number|string {
+  const negative=units<0n,digits=(negative?-units:units).toString().padStart(scale+1,'0'),fraction=scale?digits.slice(-scale).replace(/0+$/,''):''
+  const text=(negative?'-':'')+(scale?digits.slice(0,-scale):digits)+(fraction?'.'+fraction:'')
+  const number=Number(text)
+  try{const check=decimalParts(applicationDecimalText(number)),original=decimalParts(text),common=Math.max(check.scale,original.scale)
+    if(check.units*10n**BigInt(common-check.scale)===original.units*10n**BigInt(common-original.scale))return number
+  }catch{}
+  return text
+}
+function addCurrency(target:Record<string,number|string>,currency:string,amount:number|string):void {
+  const a=decimalParts(target[currency]??0),b=decimalParts(amount),scale=Math.max(a.scale,b.scale)
+  target[currency]=decimalResult(a.units*10n**BigInt(scale-a.scale)+b.units*10n**BigInt(scale-b.scale),scale)
+}
+function weightedAmount(amount:number|string,probability:number):number|string {
+  if(!Number.isInteger(probability)||probability<0||probability>100)throw new ApplicationPlatformError('invalid_value','The stage probability requires review.')
+  const value=decimalParts(amount);return decimalResult(value.units*BigInt(probability),value.scale+2)
 }
 
 /** Pure deterministic report reducer; missing history remains null. */
@@ -2329,13 +2281,13 @@ export function buildCrmReport(
   for (const stage of allStages) {
     stageRows.set(stage.id, { stageId: stage.id, name: stage.name, category: stage.category, count: 0, values: {} })
   }
-  const openValue: Record<string, number> = {}
-  const weightedForecast: Record<string, number> = {}
+  const openValue: Record<string, number|string> = {}
+  const weightedForecast: Record<string, number|string> = {}
   let wonCount = 0
   let lostCount = 0
   let missingOwnerCount = 0
   let missingAmountCount = 0
-  const sources = new Map<string, { source: string; count: number; won: number; values: Record<string, number> }>()
+  const sources = new Map<string, { source: string; count: number; won: number; values: Record<string, number|string> }>()
 
   for (const deal of deals.filter((r) => r.kind === 'deal' && !r.archivedAt)) {
     const stageId = typeof deal.attributes.pipeline_stage_id === 'string'
@@ -2357,10 +2309,11 @@ export function buildCrmReport(
     const currency = typeof deal.attributes.currency_code === 'string'
       ? deal.attributes.currency_code.toUpperCase()
       : 'USD'
-    const amount = typeof deal.attributes.amount === 'number'
-      ? deal.attributes.amount
-      : Number(deal.attributes.amount ?? 0)
-    const validAmount = Number.isFinite(amount) && amount >= 0 ? amount : 0
+    const amount=deal.attributes.amount??0
+    if(typeof amount!=='string'&&typeof amount!=='number')throw new ApplicationPlatformError('invalid_value','The report amount requires review.')
+    const parsedAmount=decimalParts(amount)
+    if(parsedAmount.units<0n)throw new ApplicationPlatformError('invalid_value','The report amount requires review.')
+    const validAmount=decimalResult(parsedAmount.units,parsedAmount.scale)
     const stageRow = stageRows.get(stage.id)
     if (stageRow) {
       stageRow.count++
@@ -2368,7 +2321,7 @@ export function buildCrmReport(
     }
     if (stage.category === 'open') {
       addCurrency(openValue, currency, validAmount)
-      addCurrency(weightedForecast, currency, validAmount * stage.probability / 100)
+      addCurrency(weightedForecast, currency, weightedAmount(validAmount,stage.probability))
     } else if (stage.category === 'won') wonCount++
     else lostCount++
     if (deal.attributes.owner_id == null) missingOwnerCount++
@@ -2430,33 +2383,29 @@ export function buildCrmReport(
 }
 
 export async function getCrmReport(ctx: AccessContext): Promise<CrmReport> {
+  return runLegacyCanonicalCrmRead(ctx,async()=>{
   ctx = mutationActorAccess(ctx.userId, ctx.workspaceId, ctx)
-  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
-  const member = buildCurrentMemberSourcePredicate(ctx.userId, { alias: 'e', startIdx: ap.nextIdx + 1, operation: 'read' })
-  const historyScope = buildAccessPredicate(ctx, { alias: 'a', startIdx: member.nextIdx })
-  const historyMember = buildCurrentMemberSourcePredicate(ctx.userId, { alias: 'a', startIdx: historyScope.nextIdx, operation: 'read' })
   const [records, config, history] = await Promise.all([
     listCrmR2Records(ctx),
     getCrmConfig(ctx.userId, ctx.workspaceId),
-    queryGated<{ entityId: string; occurredAt: Date; metadata: Record<string, unknown> }>(
-      ctx,
+    queryLegacyCanonicalCrmSql<{ entityId: string; occurredAt: Date; metadata: Record<string, unknown> }>(
+      ctx,[{type:'deal',fields:'all',history:true}],
       `SELECT entity_id AS "entityId", occurred_at AS "occurredAt", metadata
          FROM crm_activities a
          JOIN entities e ON e.id = a.entity_id AND e.workspace_id=a.workspace_id
-        WHERE ${ap.sql} AND ${member.sql} AND NOT e.scope_held
-          AND ${historyScope.sql} AND ${historyMember.sql} AND crm_activity_scope_allows(a,false)
-          AND a.workspace_id = $${ap.nextIdx}
+        WHERE NOT e.scope_held AND a.workspace_id = $1
           AND e.kind = 'deal' AND e.valid_to IS NULL AND e.retracted_at IS NULL
           AND a.activity_type = 'stage_change'
         ORDER BY a.occurred_at`,
-      [...ap.params, ctx.workspaceId, ...member.params, ...historyScope.params, ...historyMember.params],
+      [ctx.workspaceId],
     ),
   ])
-  return buildCrmReport(records, config, history.rows.map((r) => ({
+  return bindScopeSources(buildCrmReport(records, config, history.rows.map((r) => ({
     entityId: r.entityId,
     occurredAt: r.occurredAt.toISOString(),
     metadata: r.metadata ?? {},
-  })))
+  }))),[...boundScopeSources(records),...boundScopeSources(config),...boundScopeSources(history)])
+  })
 }
 
 export function crmRowsToCsv(

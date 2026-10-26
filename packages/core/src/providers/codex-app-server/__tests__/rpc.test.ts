@@ -1,4 +1,4 @@
-import { PassThrough } from 'node:stream'
+import { PassThrough, Writable } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import {
@@ -43,7 +43,86 @@ async function waitForOutbound(harness: Harness, count = 1): Promise<void> {
   await vi.waitFor(() => expect(harness.outbound).toHaveLength(count))
 }
 
+function queuedHarness() {
+  const inbound = new PassThrough(), outbound: Array<Record<string, unknown>> = []
+  let release!: () => void
+  const output = new Writable({ write(chunk, _encoding, done) {
+    outbound.push(JSON.parse(chunk.toString()))
+    if (outbound.length === 1) release = () => done()
+    else done()
+  } })
+  return { peer: new CodexRpcPeer({ input: inbound,output }),inbound,outbound,release: () => release() }
+}
+
 describe('[COMP:providers/codex-rpc] Codex app-server JSONL RPC', () => {
+  it('withholds a refused request without poisoning independent requests on the peer', async () => {
+    const harness = createHarness()
+    try {
+      await expect(harness.peer.request('turn/start', { input: 'Fictional private input' },z.object({}), {
+        assertInputAuthority: async () => { throw new Error('Permission withdrawn') },
+      })).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
+      expect(harness.outbound).toEqual([])
+      expect(harness.peer.closed).toBe(false)
+      const next = harness.peer.request('model/list',{},z.object({ ok: z.boolean() }))
+      await waitForOutbound(harness)
+      harness.inbound.write(`${JSON.stringify({ id: (harness.outbound[0] as { id: number }).id,result: { ok: true } })}\n`)
+      await expect(next).resolves.toEqual({ ok: true })
+      expect(JSON.stringify(harness.outbound)).not.toContain('assertInputAuthority')
+    } finally { harness.peer.close() }
+  })
+
+  it('checks queued requests after backpressure and drops a newly refused payload', async () => {
+    const harness = queuedHarness(); let revoked = false
+    const check = vi.fn(async () => { if (revoked) throw new Error('Permission withdrawn') })
+    try {
+      const first = harness.peer.notify('fixture/barrier',{})
+      await vi.waitFor(() => expect(harness.outbound).toHaveLength(1))
+      const blocked = expect(harness.peer.request('turn/start',{ input: 'Withheld private input' },z.object({}), { assertInputAuthority: check }))
+        .rejects.toMatchObject({ reason: 'authority_changed' })
+      expect(check).not.toHaveBeenCalled()
+      revoked = true; harness.release()
+      await first; await blocked
+      expect(harness.outbound).toHaveLength(1)
+      expect(check).toHaveBeenCalledOnce()
+      expect(harness.peer.closed).toBe(false)
+    } finally { harness.peer.close() }
+  })
+
+  it('checks opaque tool responses at the queued write and returns a fixed safe error', async () => {
+    const harness = queuedHarness(); let revoked = false, bound = false
+    try {
+      const first = harness.peer.notify('fixture/barrier',{})
+      await vi.waitFor(() => expect(harness.outbound).toHaveLength(1))
+      harness.peer.onRequest('item/tool/call', () => {
+        bound = true
+        return harness.peer.guardResponse({ content: 'Withheld fictional cost' },async () => { if (revoked) throw new Error('Permission withdrawn') })
+      })
+      harness.inbound.write(`${JSON.stringify({ id: 'guarded-tool',method: 'item/tool/call',params: {} })}\n`)
+      await vi.waitFor(() => expect(bound).toBe(true))
+      revoked = true; harness.release(); await first
+      await vi.waitFor(() => expect(harness.outbound).toHaveLength(2))
+      expect(harness.outbound[1]).toEqual({ id: 'guarded-tool',error: { code: -32603,message: 'Request handler failed' } })
+      expect(JSON.stringify(harness.outbound)).not.toContain('Withheld fictional cost')
+      expect(harness.peer.closed).toBe(false)
+    } finally { harness.peer.close() }
+  })
+
+  it('drops a cancelled queued request without sending it or closing the peer', async () => {
+    const harness = queuedHarness(), controller = new AbortController()
+    try {
+      const first = harness.peer.notify('fixture/barrier',{})
+      await vi.waitFor(() => expect(harness.outbound).toHaveLength(1))
+      const cancelled = expect(harness.peer.request('turn/start',{ input: 'Cancelled private input' },z.object({}), { signal: controller.signal }))
+        .rejects.toMatchObject({ name: 'AbortError' })
+      controller.abort(); await cancelled
+      harness.release(); await first
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(harness.outbound).toHaveLength(1)
+      expect(harness.peer.pendingRequestCount).toBe(0)
+      expect(harness.peer.closed).toBe(false)
+    } finally { harness.peer.close() }
+  })
+
   it('correlates a validated response with its request', async () => {
     const harness = createHarness()
     const response = harness.peer.request(

@@ -7,8 +7,8 @@
  * Yjs + `y-indexeddb`; this covers the metadata writes around them.
  *
  * While the `online` flag (kept fresh by `use-offline-sync`) is up,
- * `offlineWrite` runs the SDK call directly — identical to calling it inline.
- * Offline, it queues.
+ * `offlineWrite` uses the same pinned canonical metadata executor and durable
+ * uncertainty claim as replay. Offline, it queues pending intent.
  *
  * Metadata includes locally-created pages. Their durable creation outbox
  * registers pages before this queue replays. Failed writes remain pending.
@@ -16,21 +16,14 @@
  * [COMP:app-web/offline-writes]
  */
 
-import {
-  renameView,
-  setViewIcon,
-  setViewFullWidth,
-  setViewClearance,
-} from "@/lib/api/views";
+import type { ViewMetadata } from "@/lib/api/views";
 import { idbGet, idbUpdate } from "./idb";
+import { getUserInfo } from "@/lib/user";
+import { enqueueWrite, serializeQueue, parseQueue, type QueuedWrite } from "./write-queue";
 import {
-  enqueueWrite,
-  serializeQueue,
-  parseQueue,
-  type QueuedWrite,
-} from "./write-queue";
-
-const QUEUE_KEY = "offline:write-queue";
+  currentOfflineWriteAuthority, sameOfflineWriteAuthority, offlineWriteQueueKey,
+  offlineWriteUnavailable, prepareQueuedMetadataWrite, type OfflineWriteAuthority,
+} from "./application-write-authority";
 
 // ── Connectivity flag (kept fresh by use-offline-sync) ─────────
 // Defaults online so writes go straight through before the hook mounts.
@@ -54,35 +47,46 @@ export function subscribeOnline(listener: (online: boolean) => void): () => void
 
 // ── The persisted queue ────────────────────────────────────────
 let queue: QueuedWrite[] = [];
-let loaded = false;
+let loadedKey: string | null = null;
 const countListeners = new Set<(count: number) => void>();
 
 function emitCount(): void {
-  for (const l of countListeners) l(queue.length);
+  const authority = currentOfflineWriteAuthority();
+  const count = authority && loadedKey === offlineWriteQueueKey(authority) ? queue.length : 0;
+  for (const l of countListeners) l(count);
 }
 
-/** Subscribe to the pending-write count (for the "N pending" badge). */
+/** Subscribe to the current principal/workspace outbox count. */
 export function subscribePendingCount(listener: (count: number) => void): () => void {
   countListeners.add(listener);
-  listener(queue.length);
-  return () => {
-    countListeners.delete(listener);
-  };
+  const authority = currentOfflineWriteAuthority();
+  listener(authority && loadedKey === offlineWriteQueueKey(authority) ? queue.length : 0);
+  return () => { countListeners.delete(listener); };
 }
 
-async function ensureLoaded(): Promise<void> {
-  if (loaded) return;
-  const raw = await idbGet<string>(QUEUE_KEY);
-  queue = raw ? parseQueue(raw) : [];
-  loaded = true;
-  emitCount();
+async function ensureLoaded(authority: OfflineWriteAuthority | null): Promise<string | null> {
+  const key = authority ? offlineWriteQueueKey(authority) : null;
+  const raw = key ? await idbGet<string>(key) : null;
+  // Do not publish another account's pending state after an asynchronous read.
+  if (!authority || sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) {
+    queue = raw ? parseQueue(raw) : [];
+    loadedKey = key;
+    emitCount();
+  }
+  return key;
 }
 
-async function updateQueue(update: (current: QueuedWrite[]) => QueuedWrite[]): Promise<void> {
-  const raw = await idbUpdate<string>(QUEUE_KEY, (value) => serializeQueue(update(value ? parseQueue(value) : [])));
-  queue = parseQueue(raw);
-  loaded = true;
-  emitCount();
+async function updateQueue(key: string, update: (current: QueuedWrite[]) => QueuedWrite[]): Promise<void> {
+  const raw = await idbUpdate<string>(key, (value) => serializeQueue(update(value ? parseQueue(value) : [])));
+  if (key === loadedKey) { queue = parseQueue(raw); emitCount(); }
+}
+
+/** Scoped recovery port. Unbound legacy entries are never adopted by the active account. */
+export async function readPendingWrites(): Promise<QueuedWrite[]> {
+  const authority = currentOfflineWriteAuthority();
+  const key = await ensureLoaded(authority);
+  if (!key || !sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority())) return [];
+  return structuredClone(queue);
 }
 
 function randomId(): string {
@@ -93,45 +97,80 @@ function randomId(): string {
   }
 }
 
-export interface OfflineWriteSpec<R> {
-  /** Op kind (must have an entry in EXECUTORS for replay). */
+export interface OfflineWriteSpec {
+  /** Op kind (must have a canonical metadata replay route). */
   kind: string;
   /** Coalesce key, or null to keep individually. */
   coalesceKey: string | null;
   /** Serializable args the replay executor needs. */
   payload: unknown;
-  /** The live SDK call (used online). */
-  exec: () => Promise<R>;
   /** Apply the server result (online). */
-  onResult?: (result: R) => void;
+  onResult?: (result: ViewMetadata) => void;
   /** Apply an optimistic local update (offline — there's no server result). */
   optimistic?: () => void;
 }
 
 /**
- * Run a write now (online) — calling `exec` then `onResult`, propagating
- * errors so the caller's existing try/catch surfaces them — OR, when offline,
+ * Run a pinned, durably claimed write now (online), then call `onResult`,
+ * propagating errors to the existing UI boundary; OR, when offline,
  * enqueue it for replay and apply the optimistic update without throwing.
  */
-export async function offlineWrite<R>(spec: OfflineWriteSpec<R>): Promise<void> {
-  const payload = spec.payload as { id?: string; name?: string; icon?: string | null; fullWidth?: boolean; clearance?: "public" | "internal" | "confidential" };
-  const { readLocalPage, patchLocalPage } = await import("./offline-pages");
+export async function offlineWrite(spec: OfflineWriteSpec): Promise<void> {
+  const authorUserId = getUserInfo()?.id;
+  const initialAuthority = currentOfflineWriteAuthority();
+  const queuedPayload = structuredClone(spec.payload);
+  const payload = queuedPayload as { id?: string; name?: string; icon?: string | null; fullWidth?: boolean; clearance?: "public" | "internal" | "confidential" };
+  const { readLocalPage, readCachedPage, patchLocalPage } = await import("./offline-pages");
   const local = payload?.id ? await readLocalPage(payload.id) : null;
-  await ensureLoaded();
+  const cached = !local && payload?.id ? await readCachedPage(payload.id) : null;
+  const authority = initialAuthority ?? currentOfflineWriteAuthority(local?.view.workspaceId ?? cached?.workspaceId);
+  if (authorUserId !== getUserInfo()?.id) throw offlineWriteUnavailable();
+  const key = await ensureLoaded(authority);
+  if (authorUserId !== getUserInfo()?.id || authority
+    && !sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) {
+    throw offlineWriteUnavailable();
+  }
   const pendingForPage = payload?.id && queue.some((op) => (op.payload as { id?: string })?.id === payload.id);
   if (online && !local && !pendingForPage) {
-    const result = await spec.exec();
-    spec.onResult?.(result);
+    if (!authority || !key || authority.viewerId !== authorUserId) throw offlineWriteUnavailable();
+    const op: QueuedWrite = { id: randomId(), kind: spec.kind, coalesceKey: spec.coalesceKey,
+      payload: queuedPayload, enqueuedAt: Date.now(), attempts: 0, authority, effect: "pending" };
+    const dispatch = await prepareQueuedMetadataWrite(op);
+    // Online effects need the same durable uncertainty boundary as replay.
+    // No arbitrary closure can refresh into another actor after admission.
+    const claimed = { ...op, effect: "uncertain" as const };
+    let acquired = false;
+    await updateQueue(key, current => {
+      if (current.some(value => (value.payload as { id?: string })?.id === payload.id)) {
+        return enqueueWrite(current, op);
+      }
+      acquired = true;
+      return [...current, claimed];
+    });
+    if (!acquired) {
+      if (sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) spec.optimistic?.();
+      return;
+    }
+    const result = await dispatch();
+    await updateQueue(key, current => current.filter(value => JSON.stringify(value) !== JSON.stringify(claimed)));
+    if (sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) spec.onResult?.(result);
     return;
   }
-  await updateQueue((current) => enqueueWrite(current, {
+  if (!authority || !key || authority.viewerId !== authorUserId
+    || !sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) {
+    throw offlineWriteUnavailable();
+  }
+  await updateQueue(key, (current) => enqueueWrite(current, {
     id: randomId(),
     kind: spec.kind,
-    payload: spec.payload,
+    payload: queuedPayload,
     coalesceKey: spec.coalesceKey,
     enqueuedAt: Date.now(),
     attempts: 0,
+    authority,
+    effect: "pending",
   }));
+  if (!sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) return;
   if (payload?.id) {
     const patch = spec.kind === "view.rename" ? { name: payload.name, nameOrigin: "user" as const }
       : spec.kind === "view.icon" ? { icon: payload.icon }
@@ -143,44 +182,42 @@ export async function offlineWrite<R>(spec: OfflineWriteSpec<R>): Promise<void> 
 }
 
 // ── Replay ──────────────────────────────────────────────────────
-// Maps a queued op's kind + payload back to the real SDK call. Keep in sync with
-// the `offline*` wrappers below.
-type RenamePayload = { id: string; name: string };
-type IconPayload = { id: string; icon: string | null };
-type FullWidthPayload = { id: string; fullWidth: boolean };
-type ClearancePayload = { id: string; clearance: "public" | "internal" | "confidential" };
-
-const EXECUTORS: Record<string, (payload: unknown) => Promise<unknown>> = {
-  "view.rename": (p) => renameView((p as RenamePayload).id, (p as RenamePayload).name),
-  "view.icon": (p) => setViewIcon((p as IconPayload).id, (p as IconPayload).icon),
-  "view.fullWidth": (p) => setViewFullWidth((p as FullWidthPayload).id, (p as FullWidthPayload).fullWidth),
-  "view.clearance": (p) => setViewClearance((p as ClearancePayload).id, (p as ClearancePayload).clearance),
-};
-
 let flushing: Promise<void> | null = null;
-/** Replay one snapshot; concurrently appended/coalesced writes are preserved. */
+/** Replay one scoped snapshot. Each mutation receives a fresh server admission. */
 export function flushWriteQueue(): Promise<void> {
   if (flushing) return flushing;
   flushing = flush().finally(() => { flushing = null; });
   return flushing;
 }
 async function flush(): Promise<void> {
-  await ensureLoaded();
-  // Re-read on every attempt, including after another tab writes to IndexedDB.
-  queue = parseQueue((await idbGet<string>(QUEUE_KEY)) ?? "[]");
-  emitCount();
-  for (const op of queue.slice()) {
+  const authority = currentOfflineWriteAuthority();
+  const key = await ensureLoaded(authority);
+  if (!authority || !key) return;
+  const snapshot = parseQueue((await idbGet<string>(key)) ?? "[]");
+  for (const op of snapshot) {
+    if (!sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority())
+      || !sameOfflineWriteAuthority(op.authority, authority) || op.effect !== "pending") return;
     try {
       const { readLocalPage } = await import("./offline-pages");
       const id = (op.payload as { id?: string })?.id;
       if (id && await readLocalPage(id)) return;
-      const fn = EXECUTORS[op.kind];
-      if (!fn) throw new Error(`Unknown queued write: ${op.kind}`);
-      await fn(op.payload);
-      await updateQueue((current) => current.filter((q) =>
-        q.id !== op.id || JSON.stringify(q) !== JSON.stringify(op)));
+      const dispatch = await prepareQueuedMetadataWrite(op);
+      const claimed = { ...op, effect: "uncertain" as const };
+      let acquired = false;
+      // The IDB transaction is the cross-tab claim. No effect is sent unless its
+      // exact payload/version was durably marked uncertain first.
+      await updateQueue(key, (current) => current.map((q) => {
+        if (JSON.stringify(q) !== JSON.stringify(op)) return q;
+        acquired = true;
+        return claimed;
+      }));
+      if (!acquired) return;
+      await dispatch();
+      await updateQueue(key, (current) => current.filter((q) =>
+        JSON.stringify(q) !== JSON.stringify(claimed)));
     } catch {
-      // Authored changes must never disappear after repeated network failures.
+      // Preserve authored intent and uncertainty. A reconnect never retries a
+      // possibly committed effect, including after reload or account change.
       return;
     }
   }

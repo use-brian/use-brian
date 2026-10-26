@@ -24,7 +24,13 @@ export function buildMemoryAccessPredicate(
   options?: AccessPredicateOptions,
 ): AccessPredicate {
   const ordinary = buildAccessPredicate(ctx, options)
-  const holding = `${options?.alias ? `${options.alias}.` : ''}scope_held = false`
+  const prefix = options?.alias ? `${options.alias}.` : ''
+  // A system/share projection has no current proof for protected ancestors. Native
+  // viewers run on the app role and use the same reader floor as raw SQL.
+  const fieldAuthority = ctx.systemRead
+    ? `public.application_memory_unproven_ancestry_allows(${prefix}workspace_id,${prefix}id,${prefix}scope_version::text)`
+    : `public.application_memory_field_ancestry_allows(${prefix}workspace_id,${prefix}id,${prefix}scope_version::text)`
+  const holding = `${prefix}scope_held = false AND ${fieldAuthority}`
   const self = ctx.clientSelfMemory
   if (!self) return { ...ordinary, sql: `(${ordinary.sql}) AND ${holding}` }
   if (!self.compartment.startsWith('client:')) {

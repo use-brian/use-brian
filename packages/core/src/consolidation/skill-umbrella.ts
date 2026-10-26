@@ -28,10 +28,11 @@
 
 import { z } from 'zod'
 import {
-  boundScopeSource,
+  boundScopeSources,
+  deriveResourceScope,
+  DerivedScopeError,
   resourceScopeKey,
   type DerivedWriteEvidence,
-  type ScopeSource,
 } from '../security/index.js'
 
 // ── Workspace skill shape — slice of WS-A's WorkspaceSkill ───────
@@ -182,7 +183,7 @@ export type SkillCuratorAction =
         | 'commit_failed'
         | 'recent_undo'
         | 'malformed_llm_output'
-        | 'scope_evidence_missing'
+        | DerivedScopeError['code']
       memberRowIds: string[]
       detail?: string
     }
@@ -536,13 +537,21 @@ async function executeProposal(params: {
 }): Promise<{ action: SkillCuratorAction | null; error?: string }> {
   const { workspaceId: _workspaceId, cluster, proposal, store } = params
   const memberByRowId = new Map(cluster.map((s) => [s.rowId, s]))
-  const sources = cluster
-    .map((skill) => boundScopeSource(skill))
-    .filter((source): source is ScopeSource => source !== undefined)
-  if (sources.length !== cluster.length) {
+  const observations = cluster.map((skill) => boundScopeSources(skill))
+  if (observations.some((sources) => sources.length === 0)) {
     return { action: null, error: 'scope_evidence_missing' }
   }
-  const derivation: DerivedWriteEvidence = { producer: 'skill:umbrella', sources }
+  const derivation: DerivedWriteEvidence = {
+    producer: 'skill:umbrella',
+    sources: observations.flat(),
+  }
+  // Revalidate the complete observation set at the write boundary as well.
+  try {
+    deriveResourceScope(derivation)
+  } catch (error) {
+    if (error instanceof DerivedScopeError) return { action: null, error: error.code }
+    throw error
+  }
 
   if (proposal.move === 'REJECT') {
     return {
@@ -789,12 +798,19 @@ export async function runSkillUmbrellaPass(
   const scopedBuckets = new Map<string, UmbrellaSkill[]>()
   const missingScope: string[] = []
   for (const skill of eligible) {
-    const source = boundScopeSource(skill)
-    if (!source) {
+    const sources = boundScopeSources(skill)
+    if (sources.length === 0) {
       missingScope.push(skill.rowId)
       continue
     }
-    const key = resourceScopeKey(source)
+    let key: string
+    try {
+      key = resourceScopeKey(deriveResourceScope({ producer: 'skill:umbrella', sources }))
+    } catch (error) {
+      if (!(error instanceof DerivedScopeError)) throw error
+      actions.push({ kind: 'skipped', reason: error.code, memberRowIds: [skill.rowId] })
+      continue
+    }
     const bucket = scopedBuckets.get(key) ?? []
     bucket.push(skill)
     scopedBuckets.set(key, bucket)

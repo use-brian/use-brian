@@ -1,8 +1,12 @@
 export {
   DEAL_STAGES,
+  crmAmountSchema,
+  decodeCrmAmount,
+  type CrmAmount,
   type DealStage,
   type CrmExternalRef,
   CRM_CUSTOM_FIELD_TYPES,
+  validateCrmCustomFieldValue,
   type CrmCustomFieldType,
   type CrmCustomFieldEntityKind,
   type CrmCustomFieldDefinition,

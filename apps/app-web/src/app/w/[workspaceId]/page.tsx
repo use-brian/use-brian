@@ -1,36 +1,15 @@
 "use client";
 
 /**
- * The workspace root — opens the workspace's configured default mini app.
- *
- * This used to be a server component that hard-redirected to `/p`. It cannot
- * be any more: which apps a workspace shows is configuration
- * (`workspaces.home_apps`, migration 385) and Page may be deselected, so a
- * fixed `/p` would drop those workspaces onto a surface that is not on their
- * strip. Generic workspace entry opens the FIRST configured app, regardless of
- * the sticky app used by the explicit Home button (`defaultHomePath`,
- * `lib/operator-apps.ts`). Ordinary app-open does not invoke the Suggested
- * interruption; that remains part of explicit Home navigation.
- *
- * Resolution is client-side because the ordered config lives in the persistent
- * sidebar-data provider. The server-fetched workspace detail seeds it on the
- * first render; an older/unseeded host waits for the provider's config read
- * rather than redirecting from its provisional default strip.
- *
- * The desktop quick-capture (`?capture=1`) and recorder (`?record=1`) hints
- * always land on `/p` regardless of config: both are doc-surface affordances
- * (open a fresh draft, start the dock recorder), so honouring them anywhere
- * else would silently drop what the user was capturing.
- * Stripe's one-shot `checkout` / `session_id` handoff is also preserved onto
- * the resolved default path so the workspace plan gate can reconcile it there.
- *
- * Spec: docs/architecture/features/home-apps.md → "Home resolution".
+ * Ordinary workspace entry opens the Chat mini-app immediately. Explicit
+ * capture, recorder, native handoff and checkout-return parameters retain
+ * their existing destinations. No workspace app-list read gates Home.
+ * Spec: docs/architecture/features/workspace-navigation.md.
  * [COMP:app-web/workspace-root]
  */
 
 import { Suspense, useEffect } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useSidebarData } from "@/components/doc/doc-sidebar-data";
 import { SurfaceSkeletonFor } from "@/components/chrome/surface-skeleton";
 import { surfaceFromPathname } from "@/lib/doc-page-url";
 import { defaultHomePath } from "@/lib/operator-apps";
@@ -42,11 +21,7 @@ function WorkspaceRootRedirect() {
   const workspaceId = params?.workspaceId ?? "";
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { homeApps, homeAppsLoading } = useSidebarData();
-  const defaultPath =
-    workspaceId && !homeAppsLoading
-      ? defaultHomePath(workspaceId, homeApps)
-      : null;
+  const defaultPath = workspaceId ? defaultHomePath(workspaceId) : null;
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -73,15 +48,13 @@ function WorkspaceRootRedirect() {
     );
   }, [defaultPath, router, searchParams, workspaceId]);
 
-  // A seeded config paints the destination frame immediately. An older host
-  // with no seed paints the neutral shell until the ordered config resolves;
-  // it must not imply Page and then redirect there from provisional state.
+  // Chat paints immediately; Home never waits for catalogue configuration.
   return <SurfaceSkeletonFor surface={surfaceFromPathname(defaultPath ?? "")} />;
 }
 
 export default function WorkspaceRootPage() {
   return (
-    <Suspense fallback={<SurfaceSkeletonFor surface={null} />}>
+    <Suspense fallback={<SurfaceSkeletonFor surface="chat" />}>
       <WorkspaceRootRedirect />
     </Suspense>
   );

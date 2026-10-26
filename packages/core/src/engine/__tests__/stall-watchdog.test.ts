@@ -165,6 +165,23 @@ async function collect(events: AsyncIterable<QueryEvent>): Promise<QueryEvent[]>
 }
 
 describe('[COMP:engine/stall-watchdog] query loop under stallIdleMs', () => {
+  it('honors Argon initial reasoning before the ordinary loop watchdog can abort it', async () => {
+    const provider: LLMProvider = {
+      ...hangingProvider(),
+      async *stream() {
+        await sleep(80)
+        yield { type: 'text_delta', text: 'Finished.' } as StreamChunk
+        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } } as StreamChunk
+      },
+    }
+    const events = await collect(queryLoop({ ledger: NOOP_TURN_LEDGER, provider,
+      model: 'gemini-4-argon-research', systemPrompt: 'sys', messages: [{ role: 'user', content: 'hello' }],
+      tools: new Map(), context: baseContext, stateless: true, maxTurns: 1, stallIdleMs: 20,
+    }))
+    expect(events.some(e => e.type === 'error')).toBe(false)
+    expect(events.some(e => e.type === 'text_delta')).toBe(true)
+  })
+
   it('a provider that goes silent past the idle window ends the loop with a typed StalledError', async () => {
     const events = await collect(queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider: hangingProvider(),

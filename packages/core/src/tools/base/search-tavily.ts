@@ -13,6 +13,7 @@
  */
 
 import type { SearchProvider, SearchResult } from './search-stack.js'
+import { compileSearchFilters } from './search-filters.js'
 import { retryAfterMs, SearchProviderError } from './_fetch-error.js'
 import { clampResultCount } from './search-stack.js'
 import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
@@ -37,9 +38,10 @@ export function createTavilyProvider(pool?: ExternalCredentialPool): SearchProvi
 
   available: () => Boolean(pool || process.env.TAVILY_API_KEY),
 
-  async search(query, maxResults, signal): Promise<SearchResult[]> {
+  async search(query, maxResults, signal, filters): Promise<SearchResult[]> {
+    const filterParams = compileSearchFilters('tavily', filters)
     const lease = await resolveToolCredential(pool, 'tavily', process.env.TAVILY_API_KEY)
-    if (!lease) return []
+    if (!lease) throw new SearchProviderError({ provider: 'tavily', kind: 'bad_key', detail: 'No eligible search credential is configured.' })
 
     const res = await fetch(TAVILY_ENDPOINT, {
       method: 'POST',
@@ -52,6 +54,7 @@ export function createTavilyProvider(pool?: ExternalCredentialPool): SearchProvi
         query,
         max_results: clampResultCount(maxResults),
         search_depth: 'basic',
+        ...filterParams,
         // include_raw_content: false — deferred to a webSearchDeep variant
         // if/when the snippet-only loop proves too expensive. See plan.
       }),

@@ -18,7 +18,7 @@ import { classifyResearchIntent, detectOperateSiteIntent } from '../research-cla
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
-function makeProvider(rawText: string, responseModel = 'gemini-3.1-flash-lite'): LLMProvider {
+function makeProvider(rawText: string, responseModel = 'gemini-3.5-flash-lite'): LLMProvider {
   async function* stream(): AsyncIterable<StreamChunk> {
     yield { type: 'message_start', model: responseModel }
     yield { type: 'text_delta', text: rawText }
@@ -30,7 +30,7 @@ function makeProvider(rawText: string, responseModel = 'gemini-3.1-flash-lite'):
   }
   return {
     name: 'mock',
-    models: ['gemini-3.1-flash-lite'],
+    models: ['gemini-3.5-flash-lite'],
     stream: vi.fn(() => stream()),
     createSession: vi.fn(),
   } as unknown as LLMProvider
@@ -186,7 +186,7 @@ describe('[COMP:workers/research-classifier] classifyResearchIntent', () => {
       message: 'cx sc credit card 而家個迎新係點',
     })
     expect(provider.stream).toHaveBeenCalledTimes(1)
-    expect(result.model).toBe('gemini-3.1-flash-lite')
+    expect(result.model).toBe('gemini-3.5-flash-lite')
   })
 
   it('still short-circuits genuinely short CJK small talk', async () => {
@@ -207,7 +207,7 @@ describe('[COMP:workers/research-classifier] classifyResearchIntent', () => {
     expect(result.research).toBe(false)
     expect(result.operateSite).toBe(true)
     expect(result.reason).toBe('operate_site_classifier')
-    expect(result.model).toBe('gemini-3.1-flash-lite')
+    expect(result.model).toBe('gemini-3.5-flash-lite')
   })
 
   it('returns a research verdict with operateSite false', async () => {
@@ -290,9 +290,48 @@ describe('[COMP:workers/research-classifier] background-lane model injection', (
     const provider = makeProvider('{"research":true,"reason":"deep topic"}')
     return classifyResearchIntent({ provider, message: LONG }).then((r) => {
       expect(provider.stream).toHaveBeenCalledWith(
-        expect.objectContaining({ model: 'gemini-3.1-flash-lite' }),
+        expect.objectContaining({ model: 'gemini-3.5-flash-lite' }),
       )
-      expect(r.model).toBe('gemini-3.1-flash-lite')
+      expect(r.model).toBe('gemini-3.5-flash-lite')
     })
+  })
+})
+
+
+describe('[COMP:workers/research-classifier] automatic effort assessment', () => {
+  it.each(['focused', 'standard', 'deep'] as const)('assesses short research requests with %s effort', async (effort) => {
+    const provider = makeProvider(JSON.stringify({ research: true, effort }))
+    const result = await classifyResearchIntent({ provider, message: 'Research battery suppliers' })
+    expect(result).toMatchObject({ research: true, effort, operateSite: false })
+    expect(provider.stream).toHaveBeenCalledOnce()
+  })
+
+  it('keeps invalid or absent effort on the bounded standard profile', async () => {
+    const provider = makeProvider('{"research":true,"effort":"unlimited"}')
+    expect(await classifyResearchIntent({ provider, message: 'Compare battery suppliers' })).toMatchObject({ research: true, effort: 'standard' })
+  })
+
+  it.each(['research_focused', 'research_deep'] as const)('preserves effort from the provider-neutral %s verdict', async (value) => {
+    const provider = makeProvider('{"research":false}')
+    const decisionRuntime = executionFixture({
+      llm: provider,
+      primary: fixtureDecisionProvider(async (request) => ({
+        providerId: 'fixture-decision',
+        model: request.model,
+        answers: [{ kind: 'choice', questionId: 'intent', value, evidence: { source: 'native_distribution', probabilities: { [value]: 1 } } }],
+      })),
+    })
+    const result = await classifyResearchIntent({ provider, message: 'Compare battery suppliers', decisionRuntime })
+    expect(result).toMatchObject({ research: true, effort: value === 'research_focused' ? 'focused' : 'deep' })
+    expect(provider.stream).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('[COMP:workers/research-classifier] short semantic requests', () => {
+  it('assesses short requests without requiring a research keyword', async () => {
+    const provider = makeProvider('{"research":true,"effort":"focused"}')
+    expect(await classifyResearchIntent({ provider, message: 'Best CRM for a nonprofit?' })).toMatchObject({ research: true, effort: 'focused' })
+    expect(provider.stream).toHaveBeenCalledOnce()
   })
 })

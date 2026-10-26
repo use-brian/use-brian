@@ -17,6 +17,7 @@ export {
   isSafeBundlePath,
   isSafeNetOrigin,
   type AppDataScope,
+  type AppApplicationScope,
   type AppStoreScope,
   type AppAgentScope,
   type AppManifest,

@@ -1,4 +1,4 @@
-import type { SessionStateRecord, SessionStateStore } from '@use-brian/core'
+import { bindScopeSources,boundScopeSources,type SessionStateRecord,type SessionStateStore } from '@use-brian/core'
 import {
   upsertSessionState,
   resolveSessionState,
@@ -9,7 +9,7 @@ import {
 } from './session-state-queries.js'
 
 function toRecord(r: SessionStateRow): SessionStateRecord {
-  return {
+  return bindScopeSources({
     id: r.id,
     sessionId: r.sessionId,
     userId: r.userId,
@@ -22,7 +22,7 @@ function toRecord(r: SessionStateRow): SessionStateRecord {
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
     resolvedAt: r.resolvedAt,
-  }
+  },boundScopeSources(r))
 }
 
 /**
@@ -39,6 +39,8 @@ export function createDbSessionStateStore(): SessionStateStore {
         summary: params.summary,
         detail: params.detail ?? null,
         source: params.source,
+        authority: params.authority,
+        derivation: params.derivation,
       })
       return toRecord(row)
     },
@@ -48,18 +50,18 @@ export function createDbSessionStateStore(): SessionStateStore {
       return row ? toRecord(row) : null
     },
 
-    async listOpenBySession(sessionId) {
-      const rows = await listOpenSessionState(sessionId)
+    async listOpenBySession(sessionId, authority) {
+      const rows = await listOpenSessionState(sessionId, authority)
       return rows.map(toRecord)
     },
 
-    async listRecentBySession(sessionId, limit) {
-      const rows = await listRecentSessionState(sessionId, limit)
+    async listRecentBySession(sessionId, limit, authority) {
+      const rows = await listRecentSessionState(sessionId, limit, authority)
       return rows.map(toRecord)
     },
 
-    async purgeResolvedOlderThan(sessionId, olderThan) {
-      return purgeResolvedSessionState(sessionId, olderThan)
+    async purgeResolvedOlderThan(sessionId, olderThan, authority) {
+      return purgeResolvedSessionState(sessionId, olderThan, authority)
     },
   }
 }

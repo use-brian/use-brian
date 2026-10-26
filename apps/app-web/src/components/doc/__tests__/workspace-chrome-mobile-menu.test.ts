@@ -31,34 +31,33 @@ describe("[COMP:app-web/doc-shell] mobile workspace menu", () => {
     );
   });
 
-  it("contains the status row in the sidebar and floats it when the sidebar collapses", () => {
+  it("mounts one icon-based workspace menu outside the collapsible panel", () => {
+    expect(sidebarSource.match(/<WorkspaceSwitcher\b/g)).toHaveLength(1);
+    expect(sidebarSource).toContain("<WorkspaceSwitcher iconOnly />");
+    expect(sidebarSource.indexOf("<WorkspaceSwitcher")).toBeLessThan(sidebarSource.indexOf("data-doc-context-sidebar"));
+    expect(sidebarSource).not.toContain("railAvatar");
+  });
+
+  it("keeps theme and status on the desktop rail when the contextual panel collapses", () => {
     const footer = source.match(
       /data-workspace-footer\s+className=\{cn\(\s*"([^"]+)"/,
     )?.[1];
 
     expect(footer).toBeDefined();
-    // Pinned to the bottom-left corner at the sidebar's width, out of flow so
-    // the surface runs to the bottom edge instead of sitting above a bar.
     expect(footer).toContain("absolute bottom-0 left-0");
-    // `w-64` is the sidebar <aside>'s own width in both layouts (the phone
-    // drawer wrapper is wider than the aside it holds).
-    expect(footer).toMatch(/(?:^|\s)w-64(?:\s|$)/);
-    expect(footer).not.toMatch(/\bshrink-0\b/);
-    // Transparent: the sidebar's reserved slot supplies the surface and the
-    // hairline, so a collapsed sidebar leaves a bare floating label.
-    expect(footer).not.toMatch(/\bbg-|\bborder-/);
-    // Click-through except for the label and the intake chip.
+    expect(footer).toContain("md:w-14");
+    expect(footer).toContain("md:z-40");
     expect(footer).toContain("pointer-events-none");
-    expect(footer).toContain("[&>*]:pointer-events-auto");
-
-    // The sidebar reserves the row, and both halves share one height.
-    expect(sidebarSource).toContain("data-doc-sidebar-status-slot");
-    expect(sidebarSource).toMatch(
-      /data-doc-sidebar-status-slot[\s\S]{0,200}WORKSPACE_STATUS_ROW_HEIGHT_CLASS/,
-    );
-    expect(source).toMatch(
-      /data-workspace-footer[\s\S]{0,400}WORKSPACE_STATUS_ROW_HEIGHT_CLASS/,
-    );
+    expect(footer).not.toMatch(/\bbg-|\bborder-/);
+    // One persistent picker/live region. Collapsing does not conditionally
+    // mount either control or change its desktop anchor.
+    expect(source.match(/<WorkspaceThemePicker \/>/g)).toHaveLength(1);
+    expect(source.match(/data-workspace-sync-status/g)).toHaveLength(1);
+    expect(sidebarSource).not.toContain("<PalettePicker");
+    expect(sidebarSource).toContain("data-doc-sidebar-footer-slot");
+    const railSource = readFileSync(new URL("../workspace-app-rail.tsx", import.meta.url), "utf8");
+    expect(railSource).toContain("data-workspace-rail-footer-slot");
+    expect(source).toContain("WORKSPACE_STATUS_ROW_HEIGHT_CLASS");
   });
 
   it("hides only the healthy phone label when the drawer is closed", () => {
@@ -69,7 +68,8 @@ describe("[COMP:app-web/doc-shell] mobile workspace menu", () => {
       "offlineState.offline || offlineState.pending > 0 || offlineState.paused > 0 || offlineState.reconnecting",
     );
     // Only the label is gated: uploading and updating remain independently reachable.
-    expect(status).toMatch(/<\/div>\s*<DesktopUpdateChip \/>\s*<BrainIntakeTray/);
+    expect(status).toMatch(/data-workspace-activity-footer[\s\S]*?<DesktopUpdateChip \/>\s*<BrainIntakeTray/);
+    expect(source).toContain('!sidebarOpen && "max-md:hidden"');
   });
 
   it("uses an emerald dot for the healthy Online sync state", () => {

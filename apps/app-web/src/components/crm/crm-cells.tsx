@@ -12,6 +12,7 @@
  * [COMP:app-web/crm-surface]
  */
 
+import { applicationDecimalSchema } from "@use-brian/shared";
 import { useState } from "react";
 import { CalendarDays } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -114,9 +115,9 @@ export function AmountCell({
   onCommit,
   disabled,
 }: {
-  value: number | null;
+  value: number | string | null;
   currencyCode?: string;
-  onCommit: CellCommit<number | null>;
+  onCommit: CellCommit<number | string | null>;
   disabled?: boolean;
 }) {
   const t = useT().crmPage;
@@ -126,8 +127,8 @@ export function AmountCell({
   function commit(raw: string) {
     setEditing(false);
     const trimmed = raw.trim();
-    const next = trimmed.length === 0 ? null : Number(trimmed);
-    if (next !== null && (!Number.isFinite(next) || next < 0)) return;
+    const next = trimmed.length === 0 ? null : trimmed;
+    if (next !== null && (!applicationDecimalSchema.safeParse(next).success || next.startsWith("-"))) return;
     if (next === value) return;
     setBusy(true);
     void onCommit(next).finally(() => setBusy(false));

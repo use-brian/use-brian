@@ -130,7 +130,7 @@ import {
 } from '../context-scope/delivery-authority.js'
 import { createWorkflowPublicationAuthorizer, type AuthorizeWorkflowPublication } from '../workflow/publication-consent.js'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
-import { renderCharterBlock, resolveCharter } from '@use-brian/shared'
+import { renderCharterBlock, resolveCharter, sanitizeDeliveryText } from '@use-brian/shared'
 import {
   applyPublicResearchToolCeiling,
   resolveApiKeyClientPrincipal,
@@ -1459,14 +1459,74 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       calleeAssistant.workspaceId !== null &&
       calleeAssistant.workspaceId !== undefined
 
+    const scopeAccumulator = new ContextScopeAccumulator({
+      compartments: turnScope.writeCompartments,
+      projectIds: turnScope.writeProjectIds,
+    })
+    scopeAccumulator.note(inheritedEvidence)
+    const abortController = new AbortController()
+    // The delegated turn's own invocation is the source a browser task (or
+    // any other source-bound child) is pinned to. Without it the task has no
+    // source and is refused outright (`profile_authority_denied`); with it the
+    // child renews only while this invocation's leases still hold.
+    const ambientInvocationId = randomUUID()
+    const ambientAuthority = {
+      assertCurrent: assertCurrentAuthority,
+      execute: executeWithCurrentAuthority,
+      snapshotSource: () => ({ version: 1 as const, kind: 'invocation' as const, invocationId: ambientInvocationId }),
+    }
+    const { executionContext } = await resolveExecutionContextSystem({
+      userId: calleeActorUserId,
+      assistant: calleeAssistant,
+      workspaceId: calleeAssistant.workspaceId,
+      session,
+      identity: externalClient
+        ? {
+            kind: 'programmatic',
+            principal: {
+              kind: 'brain_key',
+              credentialId: externalClient.key.id,
+              actorUserId: calleeActorUserId,
+            },
+            credentialOwnerUserId: calleeOwnerUserId,
+          }
+        : {
+            kind: 'delegated',
+            actorUserId: calleeActorUserId,
+            delegationId: params.workflowRunId ?? session.id,
+            parentCeiling: pinAccessCeiling(turnScope.access),
+          },
+      ownership: calleeAssistant.workspaceId
+        ? { kind: 'workspace', workspaceId: calleeAssistant.workspaceId }
+        : { kind: 'personal', ownerUserId: calleeOwnerUserId },
+      lifecycle: {
+        abortSignal: abortController.signal,
+        sessionId: session.id,
+        channelType: 'assistant-call',
+        channelId: params.callerAssistantId,
+      },
+      surface: externalClient?.clientSelfMemory
+        ? { clientSelfMemory: externalClient.clientSelfMemory }
+        : undefined,
+      attribution: {
+        billingUserId: calleeOwnerUserId,
+        ...(externalClient ? { credentialOwnerUserId: calleeOwnerUserId } : {}),
+      },
+      sessionAuthority: session,
+    }, {
+      resolveScope: async () => turnScope,
+      createSessionLease: () => ambientAuthority,
+    })
+
+
     const calleeCtx = {
       ...automaticContextAccess(turnScope.access, turnScope.activeProjectId),
       clientSelfMemory: externalClient?.clientSelfMemory,
     }
     const [soulContext, identityMemories, rankedIndex] = await Promise.all([
       (options.memoryStore.getSoulContext?.(calleeCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-      options.memoryStore.getIdentity(calleeCtx),
-      options.memoryStore.getIndexRanked(calleeCtx, PER_TURN_INDEX_CAP),
+      options.memoryStore.getIdentity(calleeCtx,!externalClient&&executionContext.ownership.kind==='workspace'?{execution:executionContext,accumulator:scopeAccumulator}:undefined),
+      options.memoryStore.getIndexRanked(calleeCtx, PER_TURN_INDEX_CAP,externalClient?undefined:{execution:executionContext,accumulator:scopeAccumulator}),
     ])
     const memoryIndex = rankedIndex.rows
     const soul = soulContext.content
@@ -1478,7 +1538,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     if (includeWorkspaceMemories && calleeAssistant.workspaceId) {
       ;[workspaceIdentityMemories, teamMemoryIndex, priorRunMemories] = await Promise.all([
         options.memoryStore.getWorkspaceIdentity(calleeCtx),
-        options.memoryStore.getWorkspaceIndex(calleeCtx),
+        options.memoryStore.getWorkspaceIndex(calleeCtx,undefined,externalClient?undefined:{execution:executionContext,accumulator:scopeAccumulator}),
         params.workflowId
           ? options.memoryStore
               .getWorkspaceMemoriesByCategory(calleeCtx, `workflow:${params.workflowId}`)
@@ -1489,13 +1549,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           : Promise.resolve([]),
       ])
     }
-    const scopeAccumulator = new ContextScopeAccumulator({
-      compartments: turnScope.writeCompartments,
-      projectIds: turnScope.writeProjectIds,
-    })
-    scopeAccumulator.note(inheritedEvidence)
     scopeAccumulator.note(soulContext.evidence)
     noteAutomaticScopeEvidence(scopeAccumulator, [
+      identityMemories,rankedIndex.rows,teamMemoryIndex,
       ...identityMemories,
       ...memoryIndex,
       ...workspaceIdentityMemories,
@@ -1660,6 +1716,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         })
         if (conversationSessions.length > 0) {
           const block = await buildDeliveryConversationStateBlock({
+            authority: { execution: executionContext, accumulator: scopeAccumulator },
             store: options.sessionStateStore,
             sessions: conversationSessions.map((s) => ({
               sessionId: s.id,
@@ -1753,9 +1810,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         accumulator: scopeAccumulator,
         envelope: delegatedEnvelope,
       }),
+      authority: !externalClient&&executionContext.ownership.kind==='workspace'?{execution:executionContext,accumulator:scopeAccumulator}:undefined,
     })
     const userMessageSource = boundScopeSource(userMessageRow)
     if (userMessageSource) scopeAccumulator.noteSource(userMessageSource)
+
 
     const messages: Message[] = []
     if (params.sessionKey) {
@@ -1765,6 +1824,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       })
       noteAutomaticScopeEvidence(scopeAccumulator, priorRows)
       const compacted = await executeWithCurrentAuthority(() => runProactiveCompaction({
+        modelContext: { execution: executionContext, accumulator: scopeAccumulator },
+        authority: executionContext.security.authority,
         sessionMessages: priorRows,
         timezone: calleeActor.timezone || 'UTC',
         session,
@@ -1804,68 +1865,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // ASSISTANT_CALL_DEFAULT_BUDGET (15 turns, no wall-clock unless
     // `ASSISTANT_CALL_TIMEOUT_MS` sets one).
     const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
-    // Raw live-stream accumulation — kept ONLY as the wall-clock-timeout
-    // partialOutput (operator-facing, never delivered). The returned consult
-    // text is selected from finalised turn references instead: deltas re-stream on
-    // empty-turn retries and include text the turn-boundary leak sanitiser
-    // strips, so summing them duplicates/leaks (the 2026-07-02 "No recorded
-    // GitHub activity" ×3 triplication, run 26d50608). See
-    // docs/architecture/channels/inter-assistant.md → "Final-text assembly".
-    let responseText = ''
+    // Timeout diagnostics use the same finalized-turn selection as replies.
+    // Unfinished deltas and narration alongside tool calls are not retained.
     const turnOutput = createTurnOutputCollector({ format: 'compact' })
-    const abortController = new AbortController()
-    // The delegated turn's own invocation is the source a browser task (or
-    // any other source-bound child) is pinned to. Without it the task has no
-    // source and is refused outright (`profile_authority_denied`); with it the
-    // child renews only while this invocation's leases still hold.
-    const ambientInvocationId = randomUUID()
-    const ambientAuthority = {
-      assertCurrent: assertCurrentAuthority,
-      execute: executeWithCurrentAuthority,
-      snapshotSource: () => ({ version: 1 as const, kind: 'invocation' as const, invocationId: ambientInvocationId }),
-    }
-    const { executionContext } = await resolveExecutionContextSystem({
-      userId: calleeActorUserId,
-      assistant: calleeAssistant,
-      workspaceId: calleeAssistant.workspaceId,
-      session,
-      identity: externalClient
-        ? {
-            kind: 'programmatic',
-            principal: {
-              kind: 'brain_key',
-              credentialId: externalClient.key.id,
-              actorUserId: calleeActorUserId,
-            },
-            credentialOwnerUserId: calleeOwnerUserId,
-          }
-        : {
-            kind: 'delegated',
-            actorUserId: calleeActorUserId,
-            delegationId: params.workflowRunId ?? session.id,
-            parentCeiling: pinAccessCeiling(turnScope.access),
-          },
-      ownership: calleeAssistant.workspaceId
-        ? { kind: 'workspace', workspaceId: calleeAssistant.workspaceId }
-        : { kind: 'personal', ownerUserId: calleeOwnerUserId },
-      lifecycle: {
-        abortSignal: abortController.signal,
-        sessionId: session.id,
-        channelType: 'assistant-call',
-        channelId: params.callerAssistantId,
-      },
-      surface: externalClient?.clientSelfMemory
-        ? { clientSelfMemory: externalClient.clientSelfMemory }
-        : undefined,
-      attribution: {
-        billingUserId: calleeOwnerUserId,
-        ...(externalClient ? { credentialOwnerUserId: calleeOwnerUserId } : {}),
-      },
-      sessionAuthority: session,
-    }, {
-      resolveScope: async () => turnScope,
-      createSessionLease: () => ambientAuthority,
-    })
     // Liveness, not wall-clock (2026-08-19). The step is bounded by cost
     // (`budget.maxTurns` / `maxToolCalls`) and by the query loop's stall
     // watchdog (`stallIdleMs`: no provider chunk / tool activity / loop event
@@ -1930,7 +1932,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       ? MODEL_MAP.research
       : params.modelAlias
         ? MODEL_MAP[params.modelAlias] ?? MODEL_MAP.standard
-        : 'gemini-flash'
+        : 'gemini-3.6-flash-pro'
     const customLlmRuntime = calleeAssistant.workspaceId && turnOptions.resolveWorkspaceCustomLlm
       ? await turnOptions.resolveWorkspaceCustomLlm({
           workspaceId: calleeAssistant.workspaceId,
@@ -2255,9 +2257,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             }
           }
         }
-        if (event.type === 'text_delta') {
-          responseText += event.text
-        } else if (event.type === 'error' && isStalledError(event.error)) {
+        if (event.type === 'error' && isStalledError(event.error)) {
           // The stall watchdog fired: typed below as a timeout-class exit
           // (progress timeout), carrying the partial text.
           stalledError = event.error
@@ -2403,6 +2403,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
               accumulator: scopeAccumulator,
               envelope: delegatedEnvelope,
             }),
+            authority: !externalClient&&executionContext.ownership.kind==='workspace'?{execution:executionContext,accumulator:scopeAccumulator}:undefined,
           })
           // Record the callee turn's LLM cost. Without this, every A2A /
           // workflow `assistant_call` / scheduled-job turn ran the model but
@@ -2468,12 +2469,16 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         throw err
       }
       await assertCurrentAuthority()
+      const selectedPartial = turnOutput.select()
+      const partialOutput = selectedPartial.kind === 'text'
+        ? sanitizeDeliveryText(selectedPartial.text).trim() || undefined
+        : undefined
       if (timedOut) {
         throw Object.assign(
           new Error(
             `assistant_call step exceeded its explicit ${wallClockMs}ms wall-clock budget and was aborted`,
           ),
-          { reason: 'timeout', partialOutput: responseText.trim() || undefined },
+          { reason: 'timeout', partialOutput },
         )
       }
       if (stalledError || isStalledError(err)) {
@@ -2482,7 +2487,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           new Error(
             `assistant_call step ${stall.message} (idle window ${Math.round(stallIdleMs / 1000)}s) and was aborted`,
           ),
-          { reason: 'timeout', partialOutput: responseText.trim() || undefined },
+          { reason: 'timeout', partialOutput },
         )
       }
       throw err

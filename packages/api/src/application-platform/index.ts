@@ -1,0 +1,6 @@
+export { ApplicationPlatformService } from './service.js'
+export { createCanonicalNativeApplicationModule } from './native-adapters.js'
+export { createCanonicalGenericApplicationModule } from './generic-adapter.js'
+export { resolveApplicationExecutionContext } from './execution-context.js'
+export { authenticateApplicationRequest } from './request-auth.js'
+export { ApplicationManagementService } from './management.js'

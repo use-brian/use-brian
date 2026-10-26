@@ -3,6 +3,7 @@ import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { MODEL_HIDDEN_PARAM_MARKER } from '../engine/query-loop.js'
 import { decideMemoryScope } from '../classification/rules/memory-scope/index.js'
 import type { MemoryStore } from './types.js'
+import type { SessionContextAuthority } from './session-state-types.js'
 import { createHash } from 'node:crypto'
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
@@ -27,12 +28,25 @@ import { notFoundMessage } from '../tools/tool-failure.js'
  * for legacy callers (safe-failure: hides more, never widens by
  * mistake).
  */
+/** Resolve trusted host objects outside the tool's model-facing arguments. */
+function memoryAuthority(context:ToolContext):SessionContextAuthority|undefined {
+  return context.executionContext&&context.scopeAccumulator
+    ? {execution:context.executionContext,accumulator:context.scopeAccumulator}:undefined
+}
+
+/** Legacy callbacks cannot preserve protected field/source lineage or recipient authority. */
+function protectedMemoryFanout(context:ToolContext,rows:readonly unknown[]=[]):boolean{
+ return [...context.scopeAccumulator?.evidence.sources??[],...scopeEvidenceFromRows(rows).sources??[]]
+  .some(source=>source.resourceKind==='external_source'||source.resourceKind==='application_field')
+}
+
 function viewerCtx(context: ToolContext): AccessContext {
   return {
     workspaceId: context.workspaceId ?? '',
     userId: context.userId,
     assistantId: context.assistantId,
     assistantKind: context.assistantKind ?? 'standard',
+    sharedAudience: context.sharedAudience || context.executionContext?.security.access.sharedAudience,
     clearance: context.clearance,
     compartments: context.compartments,
     projectIds: context.projectIds,
@@ -207,7 +221,7 @@ export function createMemoryTools(
       id: z.string().optional().describe('Memory ID to update (full UUID returned by a prior save, or an 8-char prefix like `02eca923` from the memory index). Omit to create new.'),
       summary: z.string().optional().describe('One-line summary (shown in memory index). Required when creating a new memory; on update, omit to preserve the existing summary (only pass it when the core concept of the memory shifts).'),
       detail: z.string().max(16000, 'Memory detail too long — split into multiple memories or move long-form content to the knowledge base').optional().describe('Full detail (fetched on demand via getMemory)'),
-      scope: z.enum(['user', 'team']).optional().describe('Visibility. Omit for the kind-aware default (personal → user, app → team). user = this user only; team = shared with every team member. Pass user explicitly only for per-member facts.'),
+      scope: z.enum(['user', 'team']).optional().describe('Visibility. Shared conversations default to team; private conversations use the kind-aware default (personal → user, app → team). user = this user only; team = shared with every team member. Personal saves require a private conversation.'),
       tags: z
         .array(z.string())
         .optional()
@@ -240,6 +254,11 @@ export function createMemoryTools(
     isReadOnly: false,
 
     async execute(input, context) {
+      const sharedAudience = context.sharedAudience === true
+        || context.executionContext?.security.access.sharedAudience === true
+      if (sharedAudience && input.scope === 'user') {
+        return { data: 'Personal memories cannot be saved from a shared conversation. Send the request in a direct message; nothing was saved.', isError: true }
+      }
       const opRejection = rejectOperationalStatePayload(input.summary, input.detail)
       if (opRejection) {
         return { data: opRejection, isError: true }
@@ -258,6 +277,10 @@ export function createMemoryTools(
         }
       }
 
+      if(input.entityId&&protectedMemoryFanout(context))return{
+        data:'CRM note links are unavailable for this retained context. Nothing was saved. Save without entityId to keep an unlinked memory.',isError:true,
+      }
+
       if (input.id) {
         // Resolve full UUID from prefix if needed — mirrors getMemory's
         // fallback at lines 111-121. The memory index shows 8-char prefixes
@@ -270,7 +293,7 @@ export function createMemoryTools(
             query: '',
             limit: 1,
             idPrefix: input.id,
-          })
+          },...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[]))
           if (results[0]) resolvedId = results[0].id
         }
         // Pass the viewer context so the update is scoped to memories this
@@ -279,7 +302,7 @@ export function createMemoryTools(
         // workspace's memory by id (WS3 read/write-asymmetry fix). Ingested
         // third-party content reaches this tool, so the scope is load-bearing.
 
-        const existing = await store.getById(viewerCtx(context), resolvedId)
+        const existing = await store.getById(viewerCtx(context), resolvedId,...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[]))
         if (!existing) return { data: memoryNotFound(input.id), isError: true }
 
         // Update existing — only include defined fields, then carry the old
@@ -325,7 +348,11 @@ export function createMemoryTools(
         // retry sensibly instead of seeing a Postgres internal error.
         let updated
         try {
-          updated = await store.update(resolvedId, updates, viewerCtx(context))
+          const authority = memoryAuthority(context)
+          updated = await store.update(resolvedId, updates, viewerCtx(context), ...(authority ? [{
+            authority, expectedVersion: existing.scopeVersion!,
+            writeFields: (['summary', 'detail', 'tags'] as const).filter(field => input[field] !== undefined),
+          }] as const : []))
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (msg.includes('invalid input syntax for type uuid')) {
@@ -334,7 +361,7 @@ export function createMemoryTools(
           throw err
         }
         if (!updated) return { data: memoryNotFound(input.id), isError: true }
-        opts?.onEvent?.({ type: 'memory_updated', memoryId: resolvedId })
+        if(!protectedMemoryFanout(context,[existing,updated]))opts?.onEvent?.({ type: 'memory_updated', memoryId: resolvedId })
         return { data: `Updated memory [${updated.id}]: ${updated.summary}`, scopeEvidence: scopeEvidenceFromRows([updated]) }
       }
 
@@ -351,7 +378,8 @@ export function createMemoryTools(
       }
 
       // Determine effective scope. When the model omits `scope`, fall back
-      // to the kind-appropriate default: team-owned distribution assistants
+      // to shared scope for a shared audience, otherwise the kind-appropriate
+      // default: team-owned distribution assistants
       // ('app' kind) default to 'team' so voice/brand memory is visible to
       // every member. Personal assistants default to 'user' (status quo).
       // The model can still pass 'user' explicitly to opt back into personal
@@ -372,9 +400,14 @@ export function createMemoryTools(
         assistantKind: context.assistantKind ?? 'standard',
         workspaceId: context.workspaceId,
         sensitivity: stampedSensitivityForScope,
-        emittedScope: input.scope,
+        emittedScope: input.scope ?? (sharedAudience ? 'team' : undefined),
       })
       const effectiveScope = scopeDecision.scope
+      // Never turn a denied shared write (for example confidential team
+      // content) into a personal memory belonging to the current speaker.
+      if (sharedAudience && effectiveScope !== 'team') {
+        return { data: 'This memory cannot be saved for the shared conversation. Send the request in a direct message; nothing was saved.', isError: true }
+      }
       // Preserved error path: if the model emitted 'team' without a
       // workspace, decideMemoryScope force-routes to 'user' via the
       // `memory-scope-no-workspace-blocks-team` rule. Surface that as a
@@ -514,6 +547,7 @@ export function createMemoryTools(
             isError: true,
           }
         }
+        if(protectedMemoryFanout(context,[entity]))return{data:'This source does not support CRM note links. Nothing was saved. Save without entityId to keep an unlinked memory.',isError:true}
         noteEntity = { id: entity.id, displayName: entity.displayName, kind: entity.kind }
         const entityEvidence = scopeEvidenceFromRows([entity])
         context.scopeAccumulator?.note(entityEvidence)
@@ -548,9 +582,11 @@ export function createMemoryTools(
       // (the synthesis engine anchors extracted memories to the source
       // Episode, same as Pipeline B); chat-driven saveMemory has no episode.
       const createSources = context.scopeAccumulator?.evidence.sources
+      const memoryAuthorityValue=memoryAuthority(context)
       const memory = await store.create({
+        ...(memoryAuthorityValue?{authority:memoryAuthorityValue}:{}),
         assistantId: context.assistantId,
-        userId: context.userId,
+        userId: sharedAudience ? null : context.userId,
         scope: dbScope,
         tags: effectiveTags,
         summary: input.summary,
@@ -575,7 +611,7 @@ export function createMemoryTools(
       // longer carries a type. Use the first tag as a coarse stand-in
       // for analytics (or 'untyped' when no tag); the precise category
       // signal moves to tag-based reporting.
-      opts?.onEvent?.({ type: 'memory_created', source: 'model', memoryType: effectiveTags?.[0] ?? 'untyped' })
+      if(!protectedMemoryFanout(context,[memory]))opts?.onEvent?.({ type: 'memory_created', source: 'model', memoryType: effectiveTags?.[0] ?? 'untyped' })
 
       // ── CRM-note link write (WU-6.12) ─────────────────────────────
       // Edge writes are best-effort per WU-1.7 ("edges fire async /
@@ -630,13 +666,15 @@ export function createMemoryTools(
       // memory describes without forcing an entityId anchor.
       const generalLinksSummary = await applyExplicitLinks({
         entityLinks: opts?.entityLinksStore,
+        ...(protectedMemoryFanout(context,[memory]) ? { authority: memoryAuthority(context) } : {}),
         workspaceId: context.workspaceId ?? '',
         userId: context.userId,
         assistantId: context.assistantId,
         sourceKind: 'memory',
         sourceId: memory.id,
         source: 'model',
-        links: context.workspaceId ? input.links : undefined,
+        links: context.workspaceId ? input.links?.filter(link => !protectedMemoryFanout(context,[memory])
+          || !!memoryAuthority(context) && link.targetKind === 'memory') : undefined,
         compartments: memory.compartments,
         projectIds: memory.projectIds,
       })
@@ -645,7 +683,7 @@ export function createMemoryTools(
       // the model fabricating the remaining 28 chars when it decided it
       // needed the full id — observed in prod 2026-04-23 with id prefixes
       // `02eca923` → hallucinated `02eca923-3b10-4822-8789-994119d88320`.
-      return { data: `Saved memory [${memory.id}]: ${memory.summary}${formatLinksSummary(generalLinksSummary)}`, scopeEvidence: createdRowEvidence([memory]) }
+      return { data: `Saved memory [${memory.id}]: ${memory.summary}${formatLinksSummary(generalLinksSummary)}${protectedMemoryFanout(context,[memory])&&input.links?.some(link=>link.targetKind!=='memory'||!memoryAuthority(context))?' (unsupported relationship links were not created)':''}`, scopeEvidence: createdRowEvidence([memory]) }
     },
   })
 
@@ -671,18 +709,18 @@ export function createMemoryTools(
       if (input.id) {
         // Handle truncated IDs from the memory index (8-char prefix)
         const ctx = viewerCtx(context)
-        let memory = await store.getById(ctx, input.id).catch(() => null)
+        let memory = await store.getById(ctx, input.id,...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[])).catch(() => null)
         if (!memory && input.id.length < 36) {
           // Prefix search — the memory index shows [id:abcd1234] (8 chars)
           const results = await store.search(ctx, {
             query: '',
             limit: 1,
             idPrefix: input.id,
-          })
+          },...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[]))
           memory = results[0] ?? null
         }
         if (!memory) {
-          opts?.onEvent?.({ type: 'memory_retrieved', source: 'id', resultCount: 0 })
+          if(!protectedMemoryFanout(context))opts?.onEvent?.({ type: 'memory_retrieved', source: 'id', resultCount: 0 })
           return { data: memoryNotFound(input.id), isError: true }
         }
 
@@ -690,9 +728,9 @@ export function createMemoryTools(
         // memory row, and a `tool_call`-kind row in the per-turn buffer.
         // The buffer is flushed by the chat route once the assistant
         // message id is known; see `recall-buffer.ts`.
-        store.trackRecall(memory.id).catch((err) => console.debug('Memory recall tracking failed:', err))
-        opts?.recallBuffer?.push(memory.id, 'tool_call')
-        opts?.onEvent?.({ type: 'memory_retrieved', source: 'id', resultCount: 1 })
+        if(!protectedMemoryFanout(context,[memory]))store.trackRecall(memory.id).catch((err) => console.debug('Memory recall tracking failed:', err))
+        if(!protectedMemoryFanout(context,[memory]))opts?.recallBuffer?.push(memory.id, 'tool_call')
+        if(!protectedMemoryFanout(context,[memory]))opts?.onEvent?.({ type: 'memory_retrieved', source: 'id', resultCount: 1 })
 
         return {
           data: {
@@ -714,12 +752,12 @@ export function createMemoryTools(
           store.search(ctx, {
             query: input.query,
             limit: 5,
-          }),
+          },...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[])),
           context.workspaceId
             ? store.searchTeam(ctx, {
                 query: input.query,
                 limit: 5,
-              })
+              },...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[]))
             : Promise.resolve([]),
         ])
 
@@ -734,15 +772,15 @@ export function createMemoryTools(
         // Track recalls for all results — aggregate counters + per-turn
         // buffer rows. See note above for the buffer's role.
         for (const m of results) {
-          store.trackRecall(m.id, queryHash).catch((err) => console.debug('Memory recall tracking failed:', err))
+          if(!protectedMemoryFanout(context,[personalResults,teamResults]))store.trackRecall(m.id, queryHash).catch((err) => console.debug('Memory recall tracking failed:', err))
         }
-        if (opts?.recallBuffer) {
+        if (opts?.recallBuffer&&!protectedMemoryFanout(context,[personalResults,teamResults])) {
           opts.recallBuffer.pushMany(results.map((m) => m.id), 'tool_call')
         }
 
-        opts?.onEvent?.({ type: 'memory_retrieved', source: 'search', resultCount: results.length, query: input.query })
+        if(!protectedMemoryFanout(context,[personalResults,teamResults]))opts?.onEvent?.({ type: 'memory_retrieved', source: 'search', resultCount: results.length, query: input.query })
 
-        if (results.length === 0) return { data: 'No matching memories found.' }
+        if (results.length === 0) return { data: 'No matching memories found.',scopeEvidence:scopeEvidenceFromRows([personalResults,teamResults]) }
 
         return {
           data: results.map((m) => ({
@@ -751,7 +789,7 @@ export function createMemoryTools(
             detail: m.detail,
             tags: m.tags,
           })),
-          scopeEvidence: scopeEvidenceFromRows(results),
+          scopeEvidence: scopeEvidenceFromRows([personalResults,teamResults,results]),
         }
       }
 
@@ -774,14 +812,15 @@ export function createMemoryTools(
   async function resolveMemoryId(
     id: string,
     ctx: AccessContext,
+    authority?:SessionContextAuthority,
   ): Promise<import('./types.js').MemoryRecord | null> {
-    let memory = await store.getById(ctx, id).catch(() => null)
+    let memory = await store.getById(ctx, id,...(authority?[authority] as const:[])).catch(() => null)
     if (!memory && id.length < 36) {
       const results = await store.search(ctx, {
         query: '',
         limit: 1,
         idPrefix: id,
-      })
+      },...(authority?[authority] as const:[]))
       memory = results[0] ?? null
     }
     return memory
@@ -809,7 +848,7 @@ export function createMemoryTools(
       if (strIds.length === 0) return null
 
       const resolved = await Promise.all(
-        strIds.map((id) => resolveMemoryId(id, viewerCtx(context))),
+        strIds.map((id) => resolveMemoryId(id, viewerCtx(context),memoryAuthority(context))),
       )
       return resolved.map((memory, i) =>
         memory ? `• ${memory.summary}` : `• (not found: ${strIds[i]})`,
@@ -820,7 +859,7 @@ export function createMemoryTools(
       // The confirmation gate already passed (tool-executor.ts:120-180).
       // Resolve each id, skip not-found entries, and delete the rest.
       const resolved = await Promise.all(
-        input.ids.map((id) => resolveMemoryId(id, viewerCtx(context))),
+        input.ids.map((id) => resolveMemoryId(id, viewerCtx(context),memoryAuthority(context))),
       )
 
       const deleted: string[] = []
@@ -836,7 +875,7 @@ export function createMemoryTools(
         try {
           await store.deleteMemory(memory.id)
           deleted.push(memory.summary)
-          opts?.onEvent?.({ type: 'memory_deleted', memoryId: memory.id })
+          if(!protectedMemoryFanout(context,[memory]))opts?.onEvent?.({ type: 'memory_deleted', memoryId: memory.id })
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (msg.includes('invalid input syntax for type uuid')) {

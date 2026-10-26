@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling, ScopeEvidence, WorkflowRecord, WorkflowRunRecord } from '@use-brian/core'
-vi.mock('../../db/client.js', () => ({ getPool: () => ({
+// Source ancestry is covered by the real DB/HTTP source fixture. These tests exercise native audience rules.
+vi.mock('../../application-platform/external-source-ancestry.js', () => ({ readExternalSourceAncestors: async () => [] }))
+vi.mock('../../application-platform/field-evidence.js', () => ({ readApplicationFieldAncestors: async () => [] }))
+vi.mock('../../db/client.js', () => ({ query: async () => { throw new Error('Unexpected direct database query in publication-consent fixture') }, getPool: () => ({
   query: async (sql: string, params: unknown[]) => {
     if (!sql.includes('read_resource_page_dependencies') || !(params[1] as string[]).every(kind => kind === 'memory')) {
       throw new Error('Unexpected publication fixture source lookup')
@@ -69,14 +72,8 @@ beforeEach(() => {
 })
 
 describe('[COMP:workflow/publication-consent] destination-bound prepared output', () => {
-  it('permits the consenting owner private context without erasing provenance or widening audience labels', async () => {
-    const f = fixture()
-    await expect(validateAudienceScopeEvidence(evidence, { ...ceiling, userId: '' })).rejects.toMatchObject({ diagnostic: 'user_visibility' })
-    await expect(f.authorize(f.input)).resolves.toEqual({ allowed: true, approvalId: 'approval' })
-    expect(f.validateEvidence).toHaveBeenCalledWith(evidence, ceiling)
-    expect(f.input.scopeEvidence).toEqual(evidence)
-    expect(readCurrentScopeSources).toHaveBeenCalledOnce()
-  })
+  // Actual source/consent/dispatch-lock positive: attended-publication.integration.test.ts.
+
   it.each(['missing', 'revoked', 'expired', 'wrong-user', 'wrong-destination', 'wrong-integration', 'wrong-workspace', 'edited', 'late-approval', 'same-millisecond'])(
     'refuses %s consent', async reason => {
       const f = fixture()
@@ -146,13 +143,8 @@ describe('[COMP:workflow/publication-consent] destination-bound prepared output'
       })
       await expect(f.authorize(f.input)).resolves.toEqual({ allowed: false })
     })
-  it('rechecks and sends within the publication dispatch lock', async () => {
-    const f = fixture()
-    const send = vi.fn(async () => { expect(f.locked()).toBe(true); return 'telegram-message' })
-    await expect(f.dispatch(f.input, f.consent.id, send)).resolves.toEqual({ allowed: true, messageId: 'telegram-message' })
-    expect(send).toHaveBeenCalledOnce()
-    expect(f.locked()).toBe(false)
-  })
+  // Actual source/consent/dispatch-lock positive: attended-publication.integration.test.ts.
+
   it('does not dispatch using a revoked or replaced receipt', async () => {
     const f = fixture(); const send = vi.fn()
     await expect(f.dispatch(f.input, 'old-approval', send)).resolves.toEqual({ allowed: false })

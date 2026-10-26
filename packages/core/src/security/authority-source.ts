@@ -17,11 +17,12 @@ export const AuthoritySourceSchema = z.discriminatedUnion('kind', [
     executingAssistantId: z.string().min(1), authorityUserId: z.string().min(1), workspaceId: z.string().min(1),
     contextGroupId: z.string().nullable(), contextProjectId: z.string().nullable(),
     contextLockedAt: z.string().datetime(),
-    visibility: z.literal('owner'), mode: z.null(),
+    visibility: z.enum(['owner','personal']), mode: z.null(),
     effectiveClearance: z.enum(['public', 'internal', 'confidential']).nullable(),
     contextCompartments: z.array(z.string()),
     memberMode: z.enum(['enforce', 'assistant', 'member', 'external']),
     ignoreSessionBinding: z.boolean(), systemRead: z.boolean(),
+    nativeCredential:z.object({userId:z.string().uuid(),sessionId:z.string().uuid(),authVersion:z.number().int().nonnegative()}).strict().optional(),
   }).strict(),
 ])
 export type AuthoritySource = z.infer<typeof AuthoritySourceSchema>

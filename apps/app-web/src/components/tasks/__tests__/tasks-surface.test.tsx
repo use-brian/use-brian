@@ -236,6 +236,33 @@ describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
     expect(titleButton?.textContent).toBe("🚀Unassigned task");
   });
 
+  it("shows saved task tags in the table without hiding them behind View", async () => {
+    taskApi.fetchWorkspaceTasks.mockResolvedValue([
+      { ...rows[0], tags: ["Operations", "Needs review"] }, rows[1],
+    ]);
+    await renderSurface();
+    const tags = container!.querySelector('ul[aria-label="Tags"]');
+    expect([...tags!.querySelectorAll("li")].map((item) => item.textContent))
+      .toEqual(["Operations", "Needs review"]);
+    expect(container!.querySelectorAll('ul[aria-label="Tags"]')).toHaveLength(1);
+  });
+
+  it("switches view from the compact phone chooser without mutating tasks", async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+    try {
+      await renderSurface();
+      const trigger = container!.querySelector<HTMLButtonElement>(`button[aria-label="${en.tasksPage.viewMenu}"]`)!;
+      await act(async () => trigger.click());
+      const board = [...document.querySelectorAll<HTMLElement>('[role=menuitemradio]')].find(item => item.textContent === en.tasksPage.viewBoard)!;
+      await act(async () => board.click());
+      expect(navigation.replace).toHaveBeenCalledWith("/w/workspace-1/tasks?view=board", { scroll: false });
+      navigation.search = "view=board";
+      await renderSurface();
+      expect(container!.querySelector('[data-testid="task-board"]')).not.toBeNull();
+      expect(taskApi.bulkTasks).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("opens task rules from the Tasks top bar", async () => {
     await renderSurface();
 

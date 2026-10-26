@@ -292,8 +292,7 @@ function CreateDialog({ workspaceId, data, config, open, initialKind, onOpenChan
       record.tags = tags.split(",").map((tag) => tag.trim()).filter(Boolean);
     }
     else {
-      const amount = Number(primary);
-      if (primary.trim() && Number.isFinite(amount)) record.amount = amount;
+      if (primary.trim()) record.amount = primary.trim();
       record.currencyCode = secondary.trim().toUpperCase() || "USD";
       record.companyId = companyId || null;
       record.contactId = contactId || null;

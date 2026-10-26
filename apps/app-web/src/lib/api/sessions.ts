@@ -48,6 +48,8 @@ const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 export type DocSession = {
   id: string;
   title: string;
+  /** Current admitted immutable revision identity; never an allow token. */
+  titleRevisionId?: string | null;
   channelId: string;
   /** ISO string — server emits a Date which JSON-serialises here. */
   lastActive: string;
@@ -140,6 +142,8 @@ export type DocSessionMessage = {
 type RawListRow = {
   id: string;
   title: string;
+  /** Current admitted immutable revision identity; never an allow token. */
+  titleRevisionId?: string | null;
   channelId: string;
   lastActive: string | Date;
   appOrigin?: string | null;
@@ -225,6 +229,7 @@ export async function fetchLatestSession(opts: {
     return {
       id: first.id,
       title: first.title,
+      ...(first.titleRevisionId !== undefined ? {titleRevisionId: first.titleRevisionId} : {}),
       channelId: first.channelId,
       lastActive: toIso(first.lastActive),
       appOrigin: first.appOrigin ?? null,
@@ -269,6 +274,7 @@ async function listSessions(opts: {
     return data.map((r) => ({
       id: r.id,
       title: r.title,
+      ...(r.titleRevisionId !== undefined ? {titleRevisionId: r.titleRevisionId} : {}),
       channelId: r.channelId,
       lastActive: toIso(r.lastActive),
       appOrigin: r.appOrigin ?? null,
@@ -349,6 +355,7 @@ function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
   return {
     id: r.id,
     title: r.title,
+      ...(r.titleRevisionId !== undefined ? {titleRevisionId: r.titleRevisionId} : {}),
     channelId: r.channelId,
     lastActive: toIso(r.lastActive),
     // Shared chats are always `app_origin='chat'` (the isSharedChatSession
@@ -402,6 +409,7 @@ export async function getChatSessionSummary(
     return {
       id: r.id,
       title: r.title,
+      ...(r.titleRevisionId !== undefined ? {titleRevisionId: r.titleRevisionId} : {}),
       channelId: r.channelId,
       lastActive: toIso(r.lastActive),
       appOrigin: r.appOrigin ?? null,
@@ -510,6 +518,7 @@ export async function listAuditSessions(opts: {
         return data.map<AuditSession>((r) => ({
           id: r.id,
           title: r.title,
+      ...(r.titleRevisionId !== undefined ? {titleRevisionId: r.titleRevisionId} : {}),
           channelId: r.channelId,
           lastActive: toIso(r.lastActive),
           appOrigin: r.appOrigin ?? null,
@@ -534,6 +543,7 @@ export async function listAuditSessions(opts: {
     byId.set(s.id, {
       id: s.id,
       title: s.title,
+      ...(s.titleRevisionId !== undefined ? {titleRevisionId: s.titleRevisionId} : {}),
       channelId: s.channelId,
       lastActive: s.lastActive,
       appOrigin: s.appOrigin,

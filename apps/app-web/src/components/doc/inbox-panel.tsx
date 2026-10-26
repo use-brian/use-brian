@@ -2,10 +2,10 @@
 
 // [COMP:app-web/inbox-panel]
 /**
- * Inbox panel — a Notion-style flyout anchored to the **left bar**.
+ * Inbox: a compact sidebar popover on desktop and a full-width phone sheet.
  *
  * The sidebar **Inbox** row toggles this panel instead of navigating to a
- * standalone `/w/[id]/inbox` page: it slides out immediately to the right of
+ * standalone `/w/[id]/inbox` page: it opens immediately to the right of
  * the sidebar, overlays the page (never tears down the editor), and dismisses
  * on outside-click or Escape. The user stays on whatever page they were on.
  *
@@ -52,6 +52,7 @@
  */
 
 import * as React from "react";
+import { Dialog } from "@base-ui/react/dialog";
 import { AtSign, Bot, Inbox as InboxIcon, MessageSquare, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import {
@@ -63,11 +64,13 @@ import {
   type InboxPendingReply,
 } from "@/lib/api/inbox";
 import { INBOX_CHANGED_EVENT } from "@/lib/inbox-events";
-import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { mutateSurfaceCache } from "@/lib/surface-cache";
 import { inboxCacheKey } from "@/lib/surface-prefetch";
 import { Avatar } from "@/components/doc/comment-thread-body";
 import { PreviewMarkdown } from "@/components/doc/preview-markdown";
 import { useLeasedResource } from "@/lib/offline/surface-content-cache";
+import { isPhoneViewport } from "@/lib/viewport";
+import { subscribeAppViewport } from "@/lib/app-viewport";
 
 const EMPTY_PENDING: InboxPendingReply[] = [];
 const EMPTY_MENTIONS: InboxMention[] = [];
@@ -76,7 +79,7 @@ type Props = {
   open: boolean;
   workspaceId: string;
   /** Mirrors the shell's sidebar-collapse so the panel anchors flush against
-   *  the left bar whether it's expanded (w-64) or collapsed (w-0). */
+   *  the left bar whether it's expanded (rail + contextual width) or collapsed (56px). */
   sidebarCollapsed: boolean;
   onClose: () => void;
   /** Open a page in the shell (soft nav) — the panel closes itself after. */
@@ -95,6 +98,17 @@ export function InboxPanel({
   onOpenRoom,
 }: Props) {
   const t = useT().docPage;
+  const phone = React.useSyncExternalStore(subscribeAppViewport, isPhoneViewport, () => false);
+  const closeRef = React.useRef<HTMLButtonElement>(null);
+  const portalHost = React.useRef<HTMLDivElement>(null);
+  const opener = React.useRef<HTMLElement | null>(null);
+  const navigated = React.useRef(false);
+  React.useLayoutEffect(() => {
+    if (!open) return;
+    navigated.current = false;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body && !active.closest("[data-inbox-panel]")) opener.current = active;
+  }, [open]);
   // The key is armed on the first open and never disarmed: a `null` key while
   // closed would blank the rows mid slide-out, and an always-on key would
   // fetch on mount for a panel that may never open.
@@ -127,22 +141,14 @@ export function InboxPanel({
   const state: "loading" | "ready" | "error" =
     inbox.data !== undefined ? "ready" : inbox.error !== undefined ? "error" : "loading";
 
-  // Escape closes the panel (only while open).
-  React.useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
   const openPage = (pageId: string) => {
+    navigated.current = true;
     onOpenPage(pageId);
     onClose();
   };
 
   const openRoom = (sessionId: string) => {
+    navigated.current = true;
     onOpenRoom(sessionId);
     onClose();
   };
@@ -188,50 +194,44 @@ export function InboxPanel({
 
   return (
     <>
-      {/* Click-catcher — dismiss on outside click. Transparent on desktop
-          (Notion-style; no scrim over the page), a subtle scrim on mobile
-          where the panel reads as a drawer. */}
-      <button
-        type="button"
-        aria-label={t.inboxCloseAria}
-        tabIndex={-1}
-        onClick={onClose}
-        className={[
-          "fixed inset-0 z-30 bg-foreground/20 backdrop-blur-[1px] transition-opacity duration-200 md:bg-transparent md:backdrop-blur-none",
-          open ? "opacity-100" : "pointer-events-none opacity-0",
-        ].join(" ")}
-      />
-
-      {/* Panel — anchored flush to the right edge of the left bar. Slides in
-          from the left; on mobile it sits at the screen edge (the sidebar
-          drawer is closed when this opens). */}
-      <aside
-        aria-hidden={!open}
-        aria-label={t.inboxTitle}
-        className={[
-          "absolute inset-y-0 left-0 z-40 flex w-[min(380px,86vw)] flex-col",
-          "border-r border-sidebar-border bg-background text-foreground shadow-xl",
-          "transition-[transform,opacity] duration-200 ease-out",
-          sidebarCollapsed ? "md:left-0" : "md:left-64",
-          open ? "translate-x-0 opacity-100" : "pointer-events-none -translate-x-4 opacity-0",
-        ].join(" ")}
+    <div ref={portalHost} className="contents" />
+    <Dialog.Root open={open} modal={phone} onOpenChange={(next) => { if (!next) onClose(); }}>
+      <Dialog.Portal container={portalHost}>
+      {/* The shell has a persistent, usually closed file-import Dialog root.
+          Keep Inbox's own backdrop when Base UI classifies it as nested. */}
+      <Dialog.Backdrop forceRender data-inbox-backdrop className="fixed inset-0 z-40 bg-black/20 transition-opacity duration-150 data-ending-style:opacity-0 data-starting-style:opacity-0 md:bg-transparent motion-reduce:transition-none" />
+      {/* Inline in the shell: its app-width and sidebar-size variables also
+          bound the panel correctly while a native browser pane is docked. */}
+      <Dialog.Popup
+        id="workspace-inbox"
+        data-inbox-panel
+        aria-modal={phone || undefined}
+        initialFocus={closeRef}
+        finalFocus={() => {
+          if (navigated.current) return false;
+          // A nonmodal exit may already have focused the next control. Do not
+          // steal that focus when the closing animation finishes.
+          const active = document.activeElement;
+          const visible = (element: HTMLElement | null) => element?.isConnected && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
+          if (active instanceof HTMLElement && active !== document.body && active !== opener.current &&
+            !active.closest("[data-inbox-panel]") && !active.hasAttribute("data-base-ui-focus-guard") && visible(active)) return false;
+          return [
+            opener.current,
+            ...document.querySelectorAll<HTMLElement>("[data-inbox-trigger]"),
+            document.querySelector<HTMLElement>("[data-doc-mobile-menu]"),
+          ].find(visible) ?? false;
+        }}
+        style={{ "--inbox-offset": sidebarCollapsed ? "4rem" : "calc(3.5rem + var(--workspace-sidebar-width, 14rem) + 0.5rem)" } as React.CSSProperties}
+        className="fixed bottom-0 left-0 z-50 flex max-h-[min(80dvh,40rem)] w-[var(--native-app-width,100%)] min-w-0 flex-col overflow-hidden rounded-t-2xl border border-border bg-popover pb-[env(safe-area-inset-bottom)] text-popover-foreground shadow-lg outline-none transition-opacity duration-150 data-ending-style:opacity-0 data-starting-style:opacity-0 md:absolute md:bottom-auto md:left-[var(--inbox-offset)] md:top-5 md:max-h-[min(80dvh,40rem,calc(100%-1.75rem))] md:w-[380px] md:max-w-[calc(100%-var(--inbox-offset)-0.5rem)] md:rounded-2xl md:pb-0 motion-reduce:transition-none"
       >
-        <header className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div className="flex items-center gap-2">
-            <InboxIcon className="size-[18px] text-foreground/70" />
-            <h2 className="text-[15px] font-semibold text-foreground">{t.inboxTitle}</h2>
-          </div>
-          <button
-            type="button"
-            aria-label={t.inboxCloseAria}
-            onClick={onClose}
-            className="flex size-11 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground md:size-7"
-          >
-            <X className="size-4" />
-          </button>
+        <header className="flex h-13 shrink-0 items-center justify-between border-b border-border pl-4 pr-2 md:h-12">
+          <Dialog.Title className="text-sm font-semibold">{t.inboxTitle}</Dialog.Title>
+          <Dialog.Close ref={closeRef} aria-label={t.inboxCloseAria} className="flex size-11 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground md:size-8">
+            <X className="size-4" aria-hidden />
+          </Dialog.Close>
         </header>
-
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        <Dialog.Description className="sr-only">{t.inboxDescription}</Dialog.Description>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2">
           {state === "loading" ? (
             <div className="space-y-2" aria-busy data-inbox-skeleton>
               {[0, 1, 2].map((i) => (
@@ -239,15 +239,15 @@ export function InboxPanel({
               ))}
             </div>
           ) : state === "error" ? (
-            <p className="px-1 text-sm text-destructive">{t.inboxError}</p>
+            <p role="alert" className="px-2 py-4 text-sm text-destructive">{t.inboxError}</p>
           ) : isEmpty ? (
-            <div className="flex flex-col items-center gap-2 rounded-xl border border-border/60 bg-muted/20 px-6 py-12 text-center">
-              <InboxIcon className="size-7 text-muted-foreground/60" />
+            <div data-inbox-empty role="status" className="flex min-h-48 flex-col items-center justify-center gap-2 px-5 py-8 text-center">
+              <InboxIcon className="mb-1 size-6 text-muted-foreground/70" aria-hidden />
               <p className="text-sm font-medium text-foreground">{t.inboxEmptyTitle}</p>
-              <p className="max-w-xs text-[13px] text-muted-foreground">{t.inboxEmptyHint}</p>
+              <p className="max-w-60 text-xs leading-5 text-muted-foreground">{t.inboxEmptyHint}</p>
             </div>
           ) : (
-            <div className="flex flex-col gap-6">
+            <div className="flex flex-col gap-3 pb-1">
               {pending.length > 0 ? (
                 <section className="flex flex-col gap-2">
                   <SectionHeading>{t.inboxPendingHeading}</SectionHeading>
@@ -257,16 +257,16 @@ export function InboxPanel({
                         <button
                           type="button"
                           onClick={() => openPendingReply(row)}
-                          className="flex w-full items-start gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left hover:border-border hover:bg-accent"
+                          className="flex min-h-8 max-md:min-h-14 w-full items-start gap-2.5 rounded-lg px-2 py-2.5 text-left hover:bg-accent"
                         >
-                          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
                             <Bot className="size-4" />
                           </span>
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[14px] font-medium text-foreground">
+                            <span className="block line-clamp-2 text-sm font-medium text-foreground">
                               {row.pageTitle || t.inboxTitle}
                             </span>
-                            <span className="block truncate text-[13px] text-muted-foreground">
+                            <span className="block line-clamp-2 text-xs leading-5 text-muted-foreground">
                               {row.quote?.trim() ? (
                                 <PreviewMarkdown text={row.quote.trim()} />
                               ) : (
@@ -311,14 +311,14 @@ export function InboxPanel({
                             onClick={() => openMention(m)}
                             // No unread tint any more: the list is unread-only,
                             // so tinting every row would say nothing.
-                            className="flex w-full items-start gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left hover:border-border hover:bg-accent"
+                            className="flex min-h-8 max-md:min-h-14 w-full items-start gap-2.5 rounded-lg px-2 py-2.5 text-left hover:bg-accent"
                           >
                             {m.actorName ? (
                               <span className="mt-0.5">
                                 <Avatar id={m.actorUserId} name={m.actorName} size={28} />
                               </span>
                             ) : (
-                              <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                              <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
                                 {isRoom ? (
                                   <MessageSquare className="size-4" />
                                 ) : (
@@ -327,7 +327,7 @@ export function InboxPanel({
                               </span>
                             )}
                             <span className="min-w-0 flex-1">
-                              <span className="block truncate text-[14px] text-foreground">
+                              <span className="block line-clamp-2 text-sm text-foreground">
                                 {label}
                                 {!isRoom ? (
                                   <span className="text-muted-foreground">
@@ -337,7 +337,7 @@ export function InboxPanel({
                                 ) : null}
                               </span>
                               {m.preview ? (
-                                <span className="block truncate text-[13px] text-muted-foreground">
+                                <span className="block line-clamp-2 text-xs leading-5 text-muted-foreground">
                                   <PreviewMarkdown text={m.preview} />
                                 </span>
                               ) : null}
@@ -352,14 +352,16 @@ export function InboxPanel({
             </div>
           )}
         </div>
-      </aside>
+      </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
     </>
   );
 }
 
 function SectionHeading({ children }: { children: React.ReactNode }) {
   return (
-    <h3 className="px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+    <h3 className="px-2 pt-2 text-xs font-medium text-muted-foreground">
       {children}
     </h3>
   );

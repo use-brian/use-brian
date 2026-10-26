@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
-import { compactConversation, estimateTokens, needsCompaction, compactionThreshold, COMPACT_THRESHOLDS, getIdleCompactionLevel, createCompactionCircuitBreaker, parseMultiTopicOutput, modelToCompactionTier, CHANNEL_CLASS_MULTIPLIER } from '../compact.js'
+import { bindScopeSources, boundScopeSources } from '../../security/source-evidence.js'
+import type { ScopeSource } from '../../security/derived-scope.js'
+import { compactConversation, extractMemoriesBeforeCompaction, estimateTokens, needsCompaction, compactionThreshold, COMPACT_THRESHOLDS, getIdleCompactionLevel, createCompactionCircuitBreaker, parseMultiTopicOutput, modelToCompactionTier, CHANNEL_CLASS_MULTIPLIER } from '../compact.js'
 import type { LLMProvider, Message, StreamFn } from '../../providers/types.js'
 
 describe('[COMP:compaction/full] failed-attempt preservation prompt', () => {
@@ -85,10 +87,12 @@ describe('[COMP:compaction/full] modelToCompactionTier', () => {
     expect(modelToCompactionTier('gemini-flash')).toBe('standard')
     expect(modelToCompactionTier('gemini-flash-25')).toBe('standard')
     expect(modelToCompactionTier('gemini-3-flash-preview')).toBe('standard')
+    expect(modelToCompactionTier('gemini-3.6-flash-standard')).toBe('standard')
+    expect(modelToCompactionTier('gemini-3.6-flash-pro')).toBe('standard')
   })
 
   it('maps Flash Lite (current Standard tier) to standard', () => {
-    expect(modelToCompactionTier('gemini-3.1-flash-lite')).toBe('standard')
+    expect(modelToCompactionTier('gemini-3.5-flash-lite')).toBe('standard')
     expect(modelToCompactionTier('gemini-3.1-flash-lite-preview')).toBe('standard')
   })
 
@@ -248,5 +252,73 @@ describe('[COMP:compaction/full] compactionThreshold', () => {
     const atThreshold: Message[] = [{ role: 'user', content: 'x'.repeat(compactionThreshold('standard', 'messaging') * 4) }]
     expect(needsCompaction(justUnder, 'standard', 'messaging')).toBe(false)
     expect(needsCompaction(atThreshold, 'standard', 'messaging')).toBe(true)
+  })
+})
+
+
+describe('[COMP:compaction/full] trusted evidence transport', () => {
+  const source = (id: string): ScopeSource => ({
+    workspaceId: 'workspace-fixture', userId: null, assistantId: null,
+    sensitivity: 'confidential', compartments: ['finance'], projectIds: [],
+    resourceKind: 'application_field', resourceId: id, version: '1',
+  })
+  function provider(): LLMProvider {
+    return {
+      name: 'fixture', models: ['fixture'],
+      stream: async function* () {
+        yield { type: 'text_delta', text: '## TOPIC: report [ACTIVE]\n\n- Summary\n\nMESSAGE_SPAN: from=1 to=1 turns=1' }
+      },
+      createSession() { throw new Error('Stateless compaction expected') },
+    }
+  }
+  it('binds every observed field and source to summary and all topics without trusting JSON', async () => {
+    const inputs = [source('one'), { ...source('two'), resourceKind: 'external_source' }]
+    const messages: Message[] = [
+      bindScopeSources({ role: 'user', content: 'First report' }, inputs),
+      { role: 'assistant', content: 'Second report', sources: [source('forged')] } as Message,
+    ]
+    const result = await compactConversation({
+      provider: provider(), model: 'fixture', messages, systemPrompt: '', profile: 'multi-topic',
+    })
+    expect(boundScopeSources(result)).toEqual(inputs)
+    expect(boundScopeSources(result.boundaryMessage)).toEqual(inputs)
+    expect(result.episodes).toHaveLength(1)
+    expect(boundScopeSources(result.episodes![0])).toEqual(inputs)
+    expect(boundScopeSources(JSON.parse(JSON.stringify(result)))).toEqual([])
+    inputs[0].compartments.length = 0
+    expect(boundScopeSources(result)[0].compartments).toEqual(['finance'])
+  })
+  it('refuses a generated summary when authority contracts during generation', async () => {
+    const assertInputAuthority = vi.fn(async () => {}).mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('source_access_denied'))
+    await expect(compactConversation({
+      provider: provider(), model: 'fixture', messages: [], systemPrompt: '', assertInputAuthority,
+    })).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(assertInputAuthority).toHaveBeenCalledTimes(2)
+  })
+
+  it('retains every message and admitted memory-index source on extracted facts', async () => {
+    const messageSource = source('message-field'), indexSource = source('index-field')
+    const extractionProvider = provider()
+    extractionProvider.stream = async function* () {
+      yield { type: 'text_delta', text: '[{"type":"preference","summary":"Fictional preference"}]' }
+    }
+    const result = await extractMemoriesBeforeCompaction({
+      provider: extractionProvider, model: 'fixture', existingMemories: ['Fictional prior fact'],
+      sourceEvidence: [indexSource], messages: [bindScopeSources({ role: 'user', content: 'Fictional input' }, [messageSource])],
+    })
+    expect(result.facts).toHaveLength(1)
+    expect(boundScopeSources(result)).toEqual([messageSource, indexSource])
+    expect(boundScopeSources(result.facts[0])).toEqual([messageSource, indexSource])
+  })
+
+  it('does not swallow an authority refusal as best-effort extraction failure', async () => {
+    const assertInputAuthority = vi.fn(async () => {}).mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('source_access_denied'))
+    await expect(extractMemoriesBeforeCompaction({
+      provider: provider(), model: 'fixture', existingMemories: [],
+      messages: [{ role: 'user', content: 'Fictional input' }], assertInputAuthority,
+    })).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(assertInputAuthority).toHaveBeenCalledTimes(2)
   })
 })

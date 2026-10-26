@@ -23,6 +23,7 @@ import {
   type WorkflowRunStore,
   type WorkspaceDirectoryStore,
 } from '@use-brian/core'
+import { runWithCanonicalPublicShare,type CanonicalPublicShareAuthority } from '../application-platform/public-share-context.js'
 import { getChildPageLabelsSystem, type ChildPageLabel } from '../db/saved-views-store.js'
 
 export type PublicRenderDeps = {
@@ -64,6 +65,7 @@ export async function renderPublicPage(
   workspaceId: string,
   page: Page,
   shareRootId: string,
+  authority:CanonicalPublicShareAuthority={kind:'published'},
 ): Promise<PublicRender> {
   const accessContext = buildPublicAccessContext(workspaceId)
   const bindingDeps: BindingDeps = {
@@ -78,7 +80,7 @@ export async function renderPublicPage(
     workspaceId,
     accessContext,
   }
-  const payload = await renderPage(page, bindingDeps)
+  const payload = await runWithCanonicalPublicShare(workspaceId,shareRootId,authority,()=>renderPage(page,bindingDeps))
   const blocks = await resolveChildPageLabels(neutralizeBlocksForPublic(page.blocks), shareRootId)
   return {
     blocks,

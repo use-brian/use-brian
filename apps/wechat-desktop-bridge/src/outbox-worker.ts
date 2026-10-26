@@ -123,15 +123,23 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
         if (abort.signal.aborted) break
         results.push(await handleItem(item))
       }
-      try {
-        await deps.bridge.ack(results)
-      } catch (err) {
-        if ((err as { name?: string })?.name === 'FatalConfigError') {
-          deps.onFatal?.(err)
-          return
+      // Sending and acknowledging are separate effects. Keep the completed
+      // results until acknowledged: re-polling an expired lease would execute
+      // the already-completed text/file sends again.
+      for (;;) {
+        try {
+          await deps.bridge.ack(results)
+          break
+        } catch (err) {
+          if ((err as { name?: string })?.name === 'FatalConfigError') {
+            deps.onFatal?.(err)
+            return
+          }
+          if (abort.signal.aborted) return
+          log.warn('outbox acknowledgement unavailable; retrying the retained results without resending')
+          await sleep(ERROR_BACKOFF_MS, abort.signal)
+          if (abort.signal.aborted) return
         }
-        // Unacked items reappear after the lease; the next round will settle them.
-        log.warn(`outbox ack failed: ${errorMessage(err)}`)
       }
     }
   }

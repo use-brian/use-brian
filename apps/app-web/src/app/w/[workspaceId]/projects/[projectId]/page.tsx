@@ -68,8 +68,8 @@ export default function ProjectDetailPage({
   const capability = useCachedResource(projectSharedCapabilityCacheKey(workspaceId), () => getProjectSharedCapability(workspaceId));
   const bundleKey = projectDetailCacheKey(workspaceId, projectId);
   // Content lease: protected counts and previews expire with the viewer's authority.
-  const bundle = useCachedResource<ProjectBundle>(bundleKey, () => leaseSurfaceContent(() => fetchProjectBundle(workspaceId, projectId)), { expiresInMs: surfaceContentRemaining });
-  useSurfaceContentRenewal(bundle.refresh);
+  const bundle = useCachedResource<ProjectBundle>(bundleKey, () => leaseSurfaceContent(() => fetchProjectBundle(workspaceId, projectId)), { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true });
+  useSurfaceContentRenewal(bundle.refresh, true, bundle.data);
   const assistantList = useLeasedResource(assistantsCacheKey(workspaceId), () => listAssistants(workspaceId));
   const { refresh: refreshBundle } = bundle;
   const project = bundle.data?.project ?? null;

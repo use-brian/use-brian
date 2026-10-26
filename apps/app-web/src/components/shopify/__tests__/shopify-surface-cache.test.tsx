@@ -76,7 +76,8 @@ let root: Root | null = null;
 async function settle(ticks = 3) {
   for (let i = 0; i < ticks; i += 1) {
     await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0);
+      else await new Promise((resolve) => window.setTimeout(resolve, 0));
     });
   }
 }
@@ -162,7 +163,7 @@ describe("[COMP:app-web/shopify-surface-cache] Shopify surface first paint", () 
   });
 
   it("unmounts open tabs and their store data when the 15-second renewal finds the store unreachable", async () => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
     try {
       api.listTools.mockResolvedValue(CONNECTED);
       await mount();

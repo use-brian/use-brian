@@ -49,6 +49,8 @@ export type RemoteSource = {
   kind: 'remote'
   server: McpServerConfig
   serverUrl: string
+  /** Stable host-selected identity, separate from the human label. */
+  sourceId?: string
   callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>, headerOverrides?: Record<string, string>) => Promise<unknown>
   /** Source-specific policy authority for workspace-owned/granted connectors. */
   policy?: {
@@ -104,6 +106,9 @@ type IndexedToolBase = {
 type RemoteIndexedTool = IndexedToolBase & {
   kind: 'remote'
   serverUrl: string
+  /** Host-only exact-source transport. Never serialize this into search/model output. */
+  dispatch: RemoteSource['callMcpTool']
+  displayName?: string
   /** Original MCP metadata (kept for any code that legacy-typed on `.tool`). */
   toolInfo: McpToolInfo
   policy?: RemoteSource['policy']
@@ -146,17 +151,24 @@ function tokenize(name: string, description: string): string[] {
 export function buildToolIndex(sources: ToolSource[]): McpToolIndex {
   const entries: IndexedTool[] = []
   const serverSummaries = new Map<string, string>()
+  const sourceIds = new Set<string>()
 
   for (const source of sources) {
     if (source.kind === 'remote') {
       const { server } = source
-      serverSummaries.set(server.name, summarizeCapabilities(server.tools.map((t) => t.name)))
+      const identity = source.sourceId ?? server.name
+      if (!identity || identity.length > 256) throw new Error('Invalid remote source identity')
+      if (source.sourceId && sourceIds.has(source.sourceId)) throw new Error('Duplicate remote source identity')
+      if (source.sourceId) sourceIds.add(source.sourceId)
+      serverSummaries.set(identity, `${source.sourceId ? `${server.name}: ` : ''}${summarizeCapabilities(server.tools.map((t) => t.name))}`)
 
       for (const tool of server.tools) {
         entries.push({
           kind: 'remote',
-          server: server.name,
+          server: identity,
+          ...(source.sourceId ? { displayName: server.name } : {}),
           serverUrl: source.serverUrl,
+          dispatch: source.callMcpTool,
           toolName: tool.name,
           description: tool.description,
           inputSchema: (tool.inputSchema ?? {}) as Record<string, unknown>,
@@ -325,7 +337,8 @@ function formatToolResult(entry: IndexedTool): string {
     }
   }
 
-  return `[${entry.server}] ${entry.toolName}: ${entry.description}${schemaStr}`
+  const label = entry.kind === 'remote' && entry.displayName ? ` (${entry.displayName})` : ''
+  return `[${entry.server}]${label} ${entry.toolName}: ${entry.description}${schemaStr}`
 }
 
 // ── Tool factories ────────────────────────────────────────────
@@ -343,12 +356,8 @@ export function createMcpSearchTools(params: {
   assistantId: string
   appLevelAssistantId?: string
   userId: string
-  /**
-   * Default remote dispatcher. Used when an entry has `kind: 'remote'` but
-   * no per-entry `callMcpTool` was provided at index-build time (every
-   * remote entry today carries one, so this is a fallback for safety).
-   */
-  callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>, headerOverrides?: Record<string, string>) => Promise<unknown>
+  /** @deprecated Bind transport on each RemoteSource. Missing indexed dispatch refuses; this legacy option cannot replace it. */
+  callMcpTool?: RemoteSource['callMcpTool']
   /**
    * Optional tool-use interception (remote MCP only). `preToolUse` fires
    * right before the wire call (inject/overwrite headers, rewrite args, or
@@ -363,7 +372,7 @@ export function createMcpSearchTools(params: {
   keepDynamicToolsDirect?: boolean
 }): Tool[] {
   const {
-    index, settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool,
+    index, settingsStore, assistantId, appLevelAssistantId, userId,
     hooks, keepDynamicToolsDirect = false,
   } = params
 
@@ -378,6 +387,16 @@ export function createMcpSearchTools(params: {
     } else if (!ambiguousEntryKeys.has(key)) {
       entryByKey.set(key, entry)
     }
+  }
+  // Older saved calls may name a label, but an ambiguous label never picks an instance.
+  const legacyEntryByKey = new Map<string, IndexedTool>()
+  const ambiguousLegacyKeys = new Set<string>()
+  for (const entry of index.entries) {
+    if (entry.kind !== 'remote' || !entry.displayName || entry.displayName === entry.server
+      || ambiguousEntryKeys.has(`${entry.server}:${entry.toolName}`)) continue
+    const key = `${entry.displayName}:${entry.toolName}`
+    if (legacyEntryByKey.has(key)) { legacyEntryByKey.delete(key); ambiguousLegacyKeys.add(key) }
+    else if (!ambiguousLegacyKeys.has(key)) legacyEntryByKey.set(key, entry)
   }
 
   // ── Session-level policy tracking ─────────────────────────────
@@ -470,7 +489,8 @@ export function createMcpSearchTools(params: {
       }
 
       // Resolve entry
-      const toolEntry = entryByKey.get(`${server}:${tool}`)
+      const requestedKey = `${server}:${tool}`
+      const toolEntry = entryByKey.get(requestedKey) ?? (ambiguousEntryKeys.has(requestedKey) ? undefined : legacyEntryByKey.get(requestedKey))
       if (!toolEntry) {
         const available = Array.from(index.serverSummaries.keys()).join(', ')
         return {
@@ -479,7 +499,7 @@ export function createMcpSearchTools(params: {
         }
       }
 
-      const toolKey = `${server}:${tool}`
+      const toolKey = `${toolEntry.server}:${tool}`
 
       // Fast-reject tools already blocked in this session — no need
       // to re-evaluate policy (deny-first).
@@ -506,7 +526,7 @@ export function createMcpSearchTools(params: {
 
       return dispatchRemote({
         entry: toolEntry,
-        server,
+        server: toolEntry.server,
         tool,
         toolKey,
         args: args ?? {},
@@ -517,7 +537,6 @@ export function createMcpSearchTools(params: {
         assistantId,
         appLevelAssistantId,
         userId,
-        callMcpTool,
         hooks,
       })
     },
@@ -534,13 +553,13 @@ export function createMcpSearchTools(params: {
   const claimedNames = new Set(['mcp_search', 'mcp_call'])
   const aliasCounts = new Map<string, number>()
   for (const entry of index.entries) {
-    const legacyName = legacyMcpToolName(entry.server, entry.toolName)
+    const legacyName = legacyMcpToolName(entry.kind === 'remote' ? entry.displayName ?? entry.server : entry.server, entry.toolName)
     for (const alias of new Set([entry.toolName, legacyName])) {
       aliasCounts.set(alias, (aliasCounts.get(alias) ?? 0) + 1)
     }
   }
   for (const entry of index.entries) {
-    const legacyName = legacyMcpToolName(entry.server, entry.toolName)
+    const legacyName = legacyMcpToolName(entry.kind === 'remote' ? entry.displayName ?? entry.server : entry.server, entry.toolName)
     const aliases = [...new Set([entry.toolName, legacyName])]
       .filter((alias) => aliasCounts.get(alias) === 1)
     for (const name of aliases) {
@@ -573,7 +592,7 @@ export function createMcpSearchTools(params: {
       const fallbackPolicy = defaultPolicy(classification)
       directTools.push(buildTool({
         name,
-        description: `[${entry.server}] ${entry.description}`,
+        description: `[${entry.displayName ?? entry.server}] ${entry.description}`,
         inputSchema: z.record(z.unknown()),
         isConcurrencySafe: classification === 'read',
         isReadOnly: classification === 'read',
@@ -581,7 +600,7 @@ export function createMcpSearchTools(params: {
         allowPersistentApproval: true,
         async resolveConfirmation() {
           return await resolveRemoteEffectivePolicy({
-            server: entry.server,
+            server: entry.displayName ?? entry.server,
             tool: entry.toolName,
             description: entry.description,
             settingsStore,
@@ -605,7 +624,6 @@ export function createMcpSearchTools(params: {
             assistantId,
             appLevelAssistantId,
             userId,
-            callMcpTool,
             hooks,
             skipConfirmation: true,
           })
@@ -686,26 +704,25 @@ async function dispatchRemote(params: {
   assistantId: string
   appLevelAssistantId?: string
   userId: string
-  callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>, headerOverrides?: Record<string, string>) => Promise<unknown>
   hooks?: EngineHooks
   skipConfirmation?: boolean
 }) {
   const {
     entry, server, tool, toolKey, args, context,
     blockedTools, allowedTools,
-    settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool, hooks,
+    settingsStore, assistantId, appLevelAssistantId, userId, hooks,
     skipConfirmation = false,
   } = params
 
   // Check classification + policy (strictest of L1 app-level + L2 assistant-level)
   const classification = classifyTool(tool, entry.description)
   const effectivePolicy = await resolveRemoteEffectivePolicy({
-    server, tool, description: entry.description, settingsStore,
+    server: entry.displayName ?? server, tool, description: entry.description, settingsStore,
     assistantId, appLevelAssistantId, userId, policy: entry.policy,
   })
   const policyStore = entry.policy?.settingsStore ?? settingsStore
   const policyUserId = entry.policy?.userId ?? userId
-  const policyServerName = entry.policy?.serverName ?? server
+  const policyServerName = entry.policy?.serverName ?? entry.displayName ?? server
 
   if (effectivePolicy === 'block') {
     blockedTools.add(toolKey)
@@ -730,7 +747,7 @@ async function dispatchRemote(params: {
       notify({
         toolCallId: confirmId,
         toolName: tool,
-        serverName: server,
+        serverName: entry.displayName ?? server,
         input: args,
         classification,
         description: entry.description,
@@ -816,10 +833,11 @@ async function dispatchRemote(params: {
       directive = await hooks.preToolUse({
         source: 'remote_mcp',
         serverUrl: entry.serverUrl,
-        serverName: server,
+        serverName: entry.displayName ?? server,
+        ...(entry.displayName ? { sourceId: entry.server } : {}),
         toolName: tool,
         input: args,
-        userId,
+        userId: context.userId,
         assistantId,
         sessionId: context.sessionId,
         workspaceId: context.workspaceId,
@@ -844,9 +862,12 @@ async function dispatchRemote(params: {
 
   const startedAt = Date.now()
   try {
+    if (typeof entry.dispatch !== 'function') {
+      return { data: 'ERROR: this source transport is unavailable. Refresh the connector before retrying.', isError: true }
+    }
     const result = headerOverride
-      ? await callMcpTool(entry.serverUrl, tool, effInput, headerOverride)
-      : await callMcpTool(entry.serverUrl, tool, effInput)
+      ? await entry.dispatch(entry.serverUrl, tool, effInput, headerOverride)
+      : await entry.dispatch(entry.serverUrl, tool, effInput)
 
     // Track usage
     policyStore.recordUsage({
@@ -862,10 +883,11 @@ async function dispatchRemote(params: {
         await hooks.postToolUse({
           source: 'remote_mcp',
           serverUrl: entry.serverUrl,
-          serverName: server,
+          serverName: entry.displayName ?? server,
+          ...(entry.displayName ? { sourceId: entry.server } : {}),
           toolName: tool,
           input: effInput,
-          userId,
+          userId: context.userId,
           assistantId,
           sessionId: context.sessionId,
           workspaceId: context.workspaceId,

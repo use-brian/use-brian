@@ -150,42 +150,41 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     expect(homePath("w1")).toBe("/w/w1/chat");
   });
 
-  it("persists the selection per workspace (the sticky Home contract)", () => {
+  it("retains legacy app selection without changing Chat Home", () => {
     writeOperatorApp("w1", "tasks");
     expect(readOperatorApp("w1", ["page", "tasks"])).toBe("tasks");
-    expect(homePath("w1", ["page", "tasks"])).toBe("/w/w1/tasks");
+    expect(homePath("w1", ["page", "tasks"])).toBe("/w/w1/chat");
     // Another workspace is unaffected.
     expect(readOperatorApp("w2", ["page", "tasks"])).toBe("page");
   });
 
-  it("opens a workspace through its FIRST configured app, ignoring sticky Home", () => {
+  it("opens Chat regardless of configured ordering or remembered custom apps", () => {
     writeOperatorApp("w1", "page");
     expect(defaultHomePath("w1", ["chat", "page", "tasks"])).toBe(
       "/w/w1/chat",
     );
     expect(defaultHomePath("w2", ["custom:app-1", "page"])).toBe(
-      "/w/w2/apps/app-1",
+      "/w/w2/chat",
     );
   });
 
-  it("remembers a custom app as the sticky Home selection", () => {
+  it("retains a legacy custom selection while Home stays on Chat", () => {
     writeOperatorApp("w1", "custom:app-1");
     expect(readOperatorApp("w1", ["page", "custom:app-1"])).toBe("custom:app-1");
-    expect(homePath("w1", ["page", "custom:app-1"])).toBe("/w/w1/apps/app-1");
+    expect(homePath("w1", ["page", "custom:app-1"])).toBe("/w/w1/chat");
   });
 
-  it("falls back to the FIRST enabled entry, not a hard-coded Page (T12)", () => {
+  it("keeps legacy fallback separate from the fixed Home destination", () => {
     // Feed cached, then an admin drops Feed from the workspace's strip.
     writeOperatorApp("w1", "feed");
     expect(readOperatorApp("w1", ["page", "tasks"])).toBe("page");
-    expect(homePath("w1", ["page", "tasks"])).toBe("/w/w1/p");
-    // Page itself may be deselected — Home must then resolve to whatever IS
-    // enabled rather than sending the user to a hidden surface.
+    expect(homePath("w1", ["page", "tasks"])).toBe("/w/w1/chat");
+    // Legacy selection follows curation; Home remains the Chat mini-app.
     expect(readOperatorApp("w1", ["chat", "tasks"])).toBe("chat");
     expect(homePath("w1", ["chat", "tasks"])).toBe("/w/w1/chat");
     // A removed custom app cannot keep winning Home either.
     writeOperatorApp("w2", "custom:gone");
-    expect(homePath("w2", ["tasks"])).toBe("/w/w2/tasks");
+    expect(homePath("w2", ["tasks"])).toBe("/w/w2/chat");
     // Still resolves while enabled.
     expect(readOperatorApp("w1", OPERATOR_APP_KEYS)).toBe("feed");
   });

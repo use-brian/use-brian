@@ -109,21 +109,11 @@ let sequence = 1
 describe('[COMP:api/session-schema] Unified session schema', () => {
   before(async () => {
     db = await openAsOwner()
-    assert.ok((await migratePglite(db, migrationsDir)) > 0)
+    assert.ok((await migratePglite(db, migrationsDir, { through: '8053_application_native_reader_source_completion.sql' })) > 0)
     assert.deepEqual(
       (await db.query('SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user')).rows,
       [{ rolsuper: false, rolbypassrls: false }],
     )
-    // The application role is subject to RLS (the hosted DATABASE_URL_APP role).
-    await db.exec(`
-      RESET ROLE;
-      CREATE ROLE app_rls NOSUPERUSER NOBYPASSRLS;
-      GRANT USAGE ON SCHEMA public TO app_rls;
-      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_rls;
-      GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO app_rls;
-      GRANT app_rls TO migration_owner;
-      SET ROLE migration_owner;
-    `)
     await db.query(
       `INSERT INTO users (id, auth_provider, auth_provider_id)
        SELECT u, 'test', 'session-schema-' || u FROM unnest($1::uuid[]) AS u`,
@@ -157,6 +147,19 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
         `INSERT INTO session_state (session_id, user_id, assistant_id, key, status, summary, source)
          VALUES ($1, $2, $3, 'k', 'open', 's', 'tool')`, [id, shape.insert.user_id, ASSISTANT])
     }
+    // These plaintext rows genuinely predate persistent evidence. Apply the
+    // full current chain without manufacturing a revision or source graph.
+    assert.ok((await migratePglite(db, migrationsDir)) > 0)
+    // The application role is subject to RLS (the hosted DATABASE_URL_APP role).
+    await db.exec(`
+      RESET ROLE;
+      CREATE ROLE app_rls NOSUPERUSER NOBYPASSRLS;
+      GRANT USAGE ON SCHEMA public TO app_rls;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_rls;
+      GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO app_rls;
+      GRANT app_rls TO migration_owner;
+      SET ROLE migration_owner;
+    `)
     // The starter leaves: on a workspace row user_id is "created by" and grants nothing (D9).
     await db.query('DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [W, REMOVED])
   })
@@ -187,7 +190,7 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
         const messages = await asUser(userId, 'SELECT id FROM session_messages WHERE session_id = $1', [id])
         assert.equal(messages.length > 0, expected, `${shape.name}: read as ${principal}`)
         const state = await asUser(userId, 'SELECT id FROM session_state WHERE session_id = $1', [id])
-        assert.equal(state.length > 0, expected, `${shape.name}: session state as ${principal}`)
+        assert.equal(state.length, 0, `${shape.name}: uncertified historical state stays held as ${principal}`)
         // A personal session's owner posts under RLS; nobody posts into someone
         // else's personal session. Workspace posts go through the gated room
         // path, never through a per-user message policy.
@@ -200,6 +203,18 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
       }
     })
   }
+
+  it('keeps historical state held and rejects a new plaintext state without evidence', async () => {
+    const state = (await db.query<{ summary: string; scope_revision_id: string | null }>(
+      'SELECT summary, scope_revision_id FROM session_state WHERE session_id=$1', [ids.get('personal web chat')])).rows
+    assert.deepEqual(state, [{ summary: 's', scope_revision_id: null }])
+    await assert.rejects(db.query(
+      `INSERT INTO session_state(session_id,user_id,assistant_id,key,status,summary,source)
+       VALUES($1,$2,$3,'uncertified-new','open','Uncertified new state','tool')`,
+      [ids.get('personal web chat'), MEMBER, ASSISTANT]), /scope_evidence_missing/)
+    assert.deepEqual(await asUser(MEMBER, 'SELECT id FROM session_state'), [])
+    assert.equal((await db.query('SELECT id FROM session_state WHERE key=$1', ['uncertified-new'])).rows.length, 0)
+  })
 
   it('keeps one room per provider conversation, whoever speaks', async () => {
     await assert.rejects(db.query(

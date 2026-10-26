@@ -3,7 +3,8 @@ import { createDbCrmOperationsStore } from '../crm-operations-store.js'
 
 const canonical = vi.hoisted(() => ({ read: vi.fn(), update: vi.fn() }))
 vi.mock('../crm.js', () => ({ readCrmMutationSource: canonical.read }))
-vi.mock('../entities-store.js', () => ({ updateEntity: canonical.update }))
+// These are composition units; real field admission is covered by the PostgreSQL suites.
+vi.mock('../entities-store.js', () => ({ updateEntity: canonical.update,assertNativeEntityFieldWrites:vi.fn().mockResolvedValue(undefined) }))
 
 const WORKSPACE_ID = '11111111-1111-4111-8111-111111111111'
 const USER_ID = '22222222-2222-4222-8222-222222222222'
@@ -131,8 +132,8 @@ describe('[COMP:crm/pipeline-tools] catalog-backed deal stages', () => {
     expect(moved).not.toHaveProperty('compartments')
     expect(canonical.read).toHaveBeenCalledWith(expect.objectContaining({ userId: USER_ID, workspaceId: WORKSPACE_ID }), 'deal-1', ['deal'], f.client)
     expect(canonical.update).toHaveBeenCalledWith(USER_ID, 'deal-1', { attributes: {
-      amount: 1200, pipeline_id: 'pipeline-custom', pipeline_stage_id: 'stage-review', stage: 'lead',
-    } }, expect.objectContaining({ userId: USER_ID }), f.client)
+      pipeline_id: 'pipeline-custom', pipeline_stage_id: 'stage-review', stage: 'lead',
+    } }, expect.objectContaining({ userId: USER_ID }), f.client,{fieldIntent:['pipelineId','pipelineStageId','stage']})
     expect(f.query.mock.calls.find(call => call[0].includes('FROM crm_pipelines p'))?.[0]).toContain('FOR SHARE OF p,s')
     expect(f.query.mock.calls.find(call => call[0].includes('INSERT INTO crm_activities'))?.[1]).toEqual(expect.arrayContaining([USER_ID]))
     expect(f.query.mock.calls.at(-1)?.[0]).toBe('COMMIT')

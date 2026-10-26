@@ -12,6 +12,8 @@
  * [COMP:views/bindings]
  */
 
+import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
+import type { ScopeSource } from '../security/derived-scope.js'
 import type {
   CompanyListRow,
   ContactListRow,
@@ -522,7 +524,7 @@ async function buildContactsTable(
       ])
     }
   }
-  return {
+  return bindScopeSources({
     type: 'table',
     columns: columns.map((field) => ({
       field,
@@ -535,7 +537,7 @@ async function buildContactsTable(
       return out
     }),
     rowAction: { id: 'open-entity', params: { entity: 'contacts' } },
-  }
+  },[...boundScopeSources(rows),...rows.flatMap(row=>boundScopeSources(row)),...boundScopeSources(labelMap)])
 }
 
 // ── Companies bindings ────────────────────────────────────────────────
@@ -598,7 +600,7 @@ function dealCell(
     case 'stage':
       return statusBadge(row.stage, dealStageTone(row.stage))
     case 'amount':
-      return numberCell(row.amount, 'currency', 'USD')
+      return typeof row.amount === 'string' ? row.amount : numberCell(row.amount, 'currency', 'USD')
     case 'close_date':
       return dateCell(row.closeDate, 'absolute')
     case 'updated_at':
@@ -631,7 +633,16 @@ async function resolveDealLabels(
     if (ids.length > 0) requests.push({ entity: 'contact', ids })
   }
   if (requests.length === 0) return new Map()
-  return deps.crmStore.batchLabels(bindingCtx(deps), requests)
+  const refs=requests.flatMap(request=>request.ids.map(id=>({entity:request.entity,id}))),labels=new Map<string,string>()
+  const sources:import('../security/derived-scope.js').ScopeSource[]=[]
+  for(let offset=0;offset<refs.length;offset+=100) {
+    const batch=refs.slice(offset,offset+100),groups:typeof requests=[]
+    for(const entity of ['company','contact'] as const){const ids=batch.filter(ref=>ref.entity===entity).map(ref=>ref.id);if(ids.length)groups.push({entity,ids})}
+    const result=await deps.crmStore.batchLabels(bindingCtx(deps),groups)
+    for(const [key,label]of result)labels.set(key,label)
+    sources.push(...boundScopeSources(result))
+  }
+  return bindScopeSources(labels,sources)
 }
 
 async function buildDealsTable(
@@ -645,7 +656,7 @@ async function buildDealsTable(
     companyId: config.filters?.companyId,
   })
   const labelMap = await resolveDealLabels(rows, columns, deps)
-  return {
+  return bindScopeSources({
     type: 'table',
     columns: columns.map((field) => ({
       field,
@@ -655,7 +666,7 @@ async function buildDealsTable(
     })),
     rows: rows.map((r) => buildDealRow(r, columns, labelMap)),
     rowAction: { id: 'open-entity', params: { entity: 'deals' } },
-  }
+  },[...boundScopeSources(rows),...rows.flatMap(row=>boundScopeSources(row)),...boundScopeSources(labelMap)])
 }
 
 async function buildDealsBoard(
@@ -682,7 +693,7 @@ async function buildDealsBoard(
     title: s,
     cards: cardsByStage[s],
   }))
-  return {
+  return bindScopeSources({
     type: 'board',
     groupBy: 'stage',
     columns: boardColumns,
@@ -694,7 +705,7 @@ async function buildDealsBoard(
         { type: 'text', text: '{{amount}}', variant: 'caption' },
       ],
     },
-  }
+  },[...boundScopeSources(rows),...rows.flatMap(row=>boundScopeSources(row)),...boundScopeSources(labelMap)])
 }
 
 // ── Workflow runs bindings ────────────────────────────────────────────
@@ -829,9 +840,9 @@ function customCell(
 ): A2UIRowValue {
   switch (prop.config.kind) {
     case 'created_time':
-      return dateCell(new Date(instance.createdAt), 'datetime')
+      return instance.createdAt === null ? null : dateCell(new Date(instance.createdAt), 'datetime')
     case 'last_edited_time':
-      return dateCell(new Date(instance.lastEditedAt), 'datetime')
+      return instance.lastEditedAt === null ? null : dateCell(new Date(instance.lastEditedAt), 'datetime')
     case 'created_by':
       return instance.createdBy
         ? personCell(instance.createdBy, memberMap.get(instance.createdBy))
@@ -908,18 +919,24 @@ async function buildCustomEntityTable(
   // an empty table rather than throw, so the rest of the page still loads.
   if (!store) return { type: 'table', columns: [], rows: [], rowAction }
 
-  const entityType = await store.getEntityType(deps.workspaceId, config.entityTypeId)
+  const entityType = await store.getEntityType(deps.workspaceId, config.entityTypeId, { actorUserId: deps.userId })
   if (!entityType) return { type: 'table', columns: [], rows: [], rowAction }
 
   const properties = entityType.properties
   const visible = config.columns ?? properties.map((p) => p.name)
-  const { rows: instances } = await store.queryEntities(
-    deps.workspaceId,
-    config.entityTypeId,
-    undefined,
-    undefined,
-    500,
-  )
+  const instances: EntityInstance[] = []
+  const sources: ScopeSource[] = []
+  let cursor: string | undefined
+  // Preserve the existing 500-row view window using bounded canonical queries.
+  for (let page = 0; page < 5; page += 1) {
+    const result = await store.queryEntities(deps.workspaceId, config.entityTypeId,
+      undefined, undefined, 100, cursor, { actorUserId: deps.userId })
+    instances.push(...result.rows)
+    sources.push(...boundScopeSources(result))
+    for (const row of result.rows) sources.push(...boundScopeSources(row))
+    cursor = result.nextCursor
+    if (!cursor) break
+  }
 
   // Pre-resolve select / multi_select option ids → display names.
   const optionNames = new Map<string, string>()
@@ -959,7 +976,7 @@ async function buildCustomEntityTable(
     return out
   })
 
-  return { type: 'table', columns: customColumns(properties, visible), rows, rowAction }
+  return bindScopeSources({ type: 'table', columns: customColumns(properties, visible), rows, rowAction },sources)
 }
 
 // ── Public dispatcher ─────────────────────────────────────────────────
@@ -1000,5 +1017,5 @@ export async function buildPayload(
       root = await buildCustomEntityTable(config, deps)
       break
   }
-  return { a2ui: '0.8', root }
+  return bindScopeSources({ a2ui: '0.8', root },boundScopeSources(root))
 }

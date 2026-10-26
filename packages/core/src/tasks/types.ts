@@ -13,6 +13,8 @@
  */
 
 import type { AccessContext } from '../security/access-context.js'
+import type { SessionContextAuthority } from '../memory/session-state-types.js'
+import type { DerivedWriteEvidence } from '../security/derived-scope.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type { TaskHome, TaskResponsibility } from './responsibility.js'
 
@@ -66,6 +68,10 @@ export type TaskExternalRef = Record<string, unknown>
 export type TaskAttributes = Record<string, unknown>
 
 export type TaskRecord = {
+  /** Content-free create outcome; automatic downstream work was not dispatched. */
+  sourceContinuation?: {state:'held';reason:'source_authority_required';goalDraft?:'requested'|'held'}
+  /** Stable canonical lineage identity. Legacy id continues to name the physical version. */
+  logicalId?: string
   id: string
   workspaceId: string
   title: string
@@ -97,7 +103,7 @@ export type TaskRecord = {
  */
 export type TaskListRow = Pick<
   TaskRecord,
-  'id' | 'workspaceId' | 'title' | 'status' | 'assigneeId' | 'executorAssistantId' | 'followUpMemberId' | 'home' | 'due' | 'tags' | 'parentId' | 'attributes' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
+  'id' | 'logicalId' | 'workspaceId' | 'title' | 'status' | 'assigneeId' | 'executorAssistantId' | 'followUpMemberId' | 'home' | 'due' | 'tags' | 'parentId' | 'attributes' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type TaskListFilters = {
@@ -195,6 +201,9 @@ export type TaskStore = {
     writtenBy?: TaskWriteActor
     /** Trusted human assignment behind this write, if any. */
     assignment?: TaskAssignmentProvenance
+    /** Original host execution and complete source evidence, never tool input. */
+    authority?: SessionContextAuthority
+    derivation?: DerivedWriteEvidence
   }): Promise<TaskRecord>
 
   /**
@@ -202,7 +211,7 @@ export type TaskStore = {
    * universal access predicate hides cross-workspace, cross-visibility,
    * or above-clearance rows — the caller sees `null` regardless of why.
    */
-  getById(ctx: AccessContext, id: string): Promise<TaskRecord | null>
+  getById(ctx: AccessContext, id: string, authority?: SessionContextAuthority): Promise<TaskRecord | null>
 
   /**
    * Resolve a historical bi-temporal id to its current live row while applying
@@ -229,6 +238,8 @@ export type TaskStore = {
     id: string,
     fields: TaskUpdateFields,
     opts?: {
+      /** Compare the locked canonical source version; stale predecessor IDs conflict. */
+      expectedVersion?: string
       writtenBy?: TaskWriteActor
       /** Trusted human assignment behind this write, if any. */
       assignment?: TaskAssignmentProvenance

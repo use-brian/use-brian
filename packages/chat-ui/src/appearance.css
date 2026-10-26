@@ -1,0 +1,66 @@
+/* Shared app/extension chat presentation. Colors always come from app tokens. */
+[data-brian-chat-composer] {
+  position: relative;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 20px;
+  background: var(--background);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
+}
+[data-brian-chat-composer]:has(textarea:focus) { border-color: var(--ring); }
+[data-brian-chat-user] {
+  max-width: 85%;
+  border-radius: 16px 16px 6px 16px;
+  padding: 8px 14px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 16px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
+}
+[data-brian-chat-answer] { font-size: 16px; line-height: 1.65; overflow-wrap: anywhere; }
+[data-brian-chat-action] {
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--background);
+}
+[data-brian-chat-action].hidden { display: none; }
+[data-brian-chat-action]::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  width: 32px;
+  height: 32px;
+  margin: auto;
+  border-radius: 50%;
+  background: var(--foreground);
+  pointer-events: none;
+  transition: background-color 150ms;
+}
+[data-brian-chat-action="stop"], [data-brian-chat-action="secondary"] { color: var(--foreground); }
+[data-brian-chat-action="stop"]::before, [data-brian-chat-action="secondary"]::before { background: var(--muted); }
+[data-brian-chat-action]:hover::before { opacity: .85; }
+[data-brian-chat-action]:disabled { opacity: .4; pointer-events: none; }
+[data-brian-chat-action]:focus-visible { outline: none !important; box-shadow: none !important; }
+[data-brian-chat-action]:focus-visible::before { outline: 2px solid var(--ring); outline-offset: 2px; }
+@media (min-width: 768px) {
+  [data-brian-chat-composer] { border-radius: 24px; }
+}
+@container chat-reading (max-width: 559px) {
+  [data-brian-chat-composer] { border-radius: 16px; box-shadow: 0 1px 3px rgb(0 0 0 / 4%); }
+}
+@container chat-reading (min-width: 560px) {
+  [data-brian-chat-user], [data-brian-chat-answer] { font-size: 15px; }
+  [data-brian-chat-action] { width: 36px; height: 36px; }
+}

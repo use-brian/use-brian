@@ -8,8 +8,8 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * (docs/plans/feed-web-consolidation.md §7.3): the chat surface where the
  * operator directs planning, ideation, writing, and voice work over `@use-brian/chat-ui` +
  * `POST /api/chat` SSE, with session resume (`channelId='tuning'`), the shared
- * dock recorder, copy/retry, a model-tier picker gated by the workspace plan, and
- * the research-mode toggle gated by the free-research quota.
+ * dock recorder, copy/retry, and a model-tier picker gated by the workspace plan.
+ * Research is assessed automatically for eligible assistants.
  *
  * Port deltas (disposition rules §6):
  *   - Session resume rides `fetchFeedSessionIdByChannel` (feed SDK) +
@@ -17,9 +17,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  *     inline fetches; `extractMessageText` also collapses `<attached_file>`
  *     wrappers to a tidy name on resume (app-web's canonical extractor).
  *   - Plan gating rides `getUsage()` (`@/lib/api/usage`).
- *   - The research-exhausted upsell deep-links `${webAppUrl()}/plans` — the
- *     plans page lives on the marketing origin (composer-controls.tsx
- *     pattern), where feed-web used its own-origin `/plans`.
+ *   - No manual Research toggle; legacy explicit seeds retain quota handling.
  *   - All copy via `useT().feedPage.tuningChat`.
  *
  * [COMP:app-web/feed-tuning-chat]
@@ -65,7 +63,6 @@ import {
   stopTurn,
 } from "@/lib/api/sessions";
 import { getUsage } from "@/lib/api/usage";
-import { webAppUrl } from "@/lib/primary-auth";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import {
   DockRecorderButton,
@@ -371,12 +368,11 @@ export const TuningChatPanel = forwardRef<
   });
   // null = plan not yet loaded; gating effects wait for a concrete value.
   const [workspacePlan, setWorkspacePlan] = useState<string | null>(null);
-  // Research-mode toggle. ON → the next send adds `mode: 'research'`, which
+  // Legacy research seed compatibility. A seed can set `mode: 'research'`, which
   // the server turns into coordinator + max-tier model + a higher turn
   // ceiling, gated by the workspace's free-research quota. The SSE handler
   // trips `researchExhausted` when the server denies a turn.
   const [researchMode, setResearchMode] = useState(false);
-  const [researchQuota, setResearchQuota] = useState<{ used: number; quota: number; isPaid: boolean } | null>(null);
   const [researchExhausted, setResearchExhausted] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -607,7 +603,6 @@ export const TuningChatPanel = forwardRef<
         break;
       case "research_quota":
       case "research_quota_exhausted":
-        setResearchQuota({ used: typeof payload.used === "number" ? payload.used : 0, quota: typeof payload.quota === "number" ? payload.quota : 0, isPaid: event === "research_quota" && payload.isPaid === true });
         if (event === "research_quota_exhausted") { setResearchExhausted(true); setResearchMode(false); }
         break;
       case "error":
@@ -1182,20 +1177,6 @@ export const TuningChatPanel = forwardRef<
           </div>
           <div className="flex flex-wrap items-center gap-0.5 px-2 pb-2 pt-1 md:flex-nowrap">
             {dockRecorder ? <DockRecorderButton rec={dockRecorder} className={inlineRecorderClass} /> : null}
-            <ResearchModeToggle
-              active={researchMode}
-              exhausted={researchExhausted}
-              quota={researchQuota}
-              onToggle={() => {
-                if (researchExhausted) {
-                  // `/plans` lives on the marketing origin (apps/web) —
-                  // deep-link via webAppUrl(), the composer-controls pattern.
-                  if (typeof window !== "undefined") window.location.href = `${webAppUrl()}/plans`;
-                  return;
-                }
-                setResearchMode((v) => !v);
-              }}
-            />
             {/* A desktop rail can be narrower than a phone. Phone controls may
                 wrap to preserve touch targets; desktop controls compress into
                 one row so the tier picker and Send are never orphaned below. */}
@@ -1337,66 +1318,6 @@ function EmptyState({
         </div>
       </div>
     </div>
-  );
-}
-
-/**
- * Composer toggle that flips the next send into deep-research mode. The
- * server turns `mode: 'research'` into coordinator + max-tier model + a
- * higher turn ceiling, gated by the workspace's free-research quota.
- *
- *   - idle      — muted pill with a sparkle, "Research"
- *   - active    — primary-tinted pill, shows remaining count on free plans
- *   - exhausted — amber pill, click routes to the marketing /plans page
- */
-function ResearchModeToggle({
-  active,
-  exhausted,
-  quota,
-  onToggle,
-}: {
-  active: boolean;
-  exhausted: boolean;
-  quota: { used: number; quota: number; isPaid: boolean } | null;
-  onToggle: () => void;
-}) {
-  const t = useT().feedPage.tuningChat;
-  const tooltip = (() => {
-    if (exhausted) return t.researchTooltipExhausted;
-    if (quota?.isPaid) return t.researchTooltipUnlimited;
-    if (quota) {
-      const remaining = Math.max(0, quota.quota - quota.used);
-      return format(t.researchTooltipRemaining, { remaining, quota: quota.quota });
-    }
-    return t.researchTooltip;
-  })();
-
-  return (
-    <button
-      type="button"
-      onClick={onToggle}
-      title={tooltip}
-      aria-label={t.research}
-      aria-pressed={active}
-      className={
-        "inline-flex min-w-0 max-w-full shrink items-center gap-1 px-2 py-1.5 rounded-xl text-[12px] font-medium transition-colors " +
-        (exhausted
-          ? "text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20"
-          : active
-            ? "text-primary bg-primary/15 hover:bg-primary/20"
-            : "text-muted-foreground hover:text-primary hover:bg-muted")
-      }
-    >
-      <svg className="shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-        <path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" />
-      </svg>
-      <span className="hidden min-w-0 truncate sm:block">{t.research}</span>
-      {active && quota && !quota.isPaid && (
-        <span className="ml-0.5 shrink-0 text-[10.5px] opacity-70 tabular-nums">
-          {Math.max(0, quota.quota - quota.used)}/{quota.quota}
-        </span>
-      )}
-    </button>
   );
 }
 

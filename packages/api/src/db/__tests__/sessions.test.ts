@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { bindScopeSources, boundScopeSources } from '@use-brian/core'
 
 // Mock the pg client before importing the sessions module
 vi.mock('../client.js', () => ({
@@ -19,10 +20,12 @@ import {
   truncateMessagesFrom,
   getSessionMessages,
   setCompactSummaryAndBoundary,
+  readCompactSummary,
   listSessionsForWorkspaceSystem,
   listSessionsByChannelForWorkspaceSystem,
   getSessionTranscriptForWorkspaceSystem,
   toStampedMessages,
+  coalesceConsecutiveUserMessages,
   buildSlackSessionChannelId,
   providerChannelIdFromSession,
   getPreferredChannel,
@@ -30,6 +33,7 @@ import {
   findSlackVisibleMessageByChannelId,
 } from '../sessions.js'
 import { query } from '../client.js'
+import { boundScopeSource } from '@use-brian/core'
 
 const mockQuery = vi.mocked(query)
 
@@ -293,6 +297,25 @@ describe('[COMP:api/sessions-route] addSessionMessage', () => {
   })
 })
 
+describe('[COMP:api/sessions-route] shared transcript scope evidence', () => {
+  it('preserves a canonical room message with no user or assistant owner', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'room-message', sessionId: 'room', channelMessageId: '3607',
+      scopeWorkspaceId: 'workspace-1', scopeUserId: null, scopeAssistantId: null, scopeSensitivity: 'internal',
+      scopeCompartments: [], scopeProjectIds: [], scopeVersion: '1', scopeHeld: false }] } as never)
+    const [message] = await getSessionMessages('room', { excludeHeld: true })
+    expect(boundScopeSource(message)).toMatchObject({ workspaceId: 'workspace-1', userId: null, assistantId: null,
+      sensitivity: 'internal', resourceKind: 'session_message', resourceId: 'room-message' })
+  })
+
+  it('still withholds scope evidence for held or incomplete room rows', async () => {
+    const base = { id: 'room-message', sessionId: 'room', channelMessageId: '3607', scopeWorkspaceId: 'workspace-1',
+      scopeUserId: null, scopeAssistantId: null, scopeSensitivity: 'internal', scopeCompartments: [], scopeProjectIds: [], scopeVersion: '1', scopeHeld: false }
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...base, scopeHeld: true }, { ...base, scopeVersion: null }] } as never)
+    const messages = await getSessionMessages('room')
+    expect(messages.map(boundScopeSource)).toEqual([undefined, undefined])
+  })
+})
+
 describe('[COMP:api/sessions-route] getSessionMessages with fromSequence', () => {
   it('loads all rows when fromSequence is not provided', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
@@ -320,31 +343,21 @@ describe('[COMP:api/sessions-route] getSessionMessages with fromSequence', () =>
   })
 })
 
-describe('[COMP:api/sessions-route] setCompactSummaryAndBoundary', () => {
-  it('writes summary + cursor atomically and returns true on rowCount=1', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    const claimed = await setCompactSummaryAndBoundary('s_1', 'compacted text', 510, 499)
-    const [sql, params] = mockQuery.mock.calls[0]
-    expect(sql).toContain('compact_summary = $1')
-    expect(sql).toContain('compact_boundary_sequence = $2')
-    expect(sql).toContain('compaction_count = compaction_count + 1')
-    expect(sql).toContain('last_compacted_at = now()')
-    expect(sql).toContain('compact_boundary_sequence IS NOT DISTINCT FROM $4')
-    expect(params).toEqual(['compacted text', 510, 's_1', 499])
-    expect(claimed).toBe(true)
+describe('[COMP:api/sessions-route] certified compact summary boundary', () => {
+  // Successful publication, null-cursor CAS and actual loser/winner semantics
+  // run against real SQL in attended-consumers. These unit calls have no
+  // canonical execution or reader binding and must not authorize persistence.
+  it('refuses an unbound summary publication before any SQL', async () => {
+    await expect(setCompactSummaryAndBoundary('s_1', 'Fictional summary', 510, 499)).rejects.toThrow('scope_evidence_missing')
+    expect(mockQuery).not.toHaveBeenCalled()
   })
-
-  it('returns false when the concurrency guard fails (rowCount=0)', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    const claimed = await setCompactSummaryAndBoundary('s_1', 'text', 510, 499)
-    expect(claimed).toBe(false)
+  it('does not treat a null cursor as permission to publish without authority', async () => {
+    await expect(setCompactSummaryAndBoundary('s_1', 'Fictional summary', 42, null)).rejects.toThrow('scope_evidence_missing')
+    expect(mockQuery).not.toHaveBeenCalled()
   })
-
-  it('passes null as the expected cursor for never-compacted sessions', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    await setCompactSummaryAndBoundary('s_1', 'text', 42, null)
-    const [, params] = mockQuery.mock.calls[0]
-    expect(params).toEqual(['text', 42, 's_1', null])
+  it('withholds unscoped summary reads without selecting plaintext', async () => {
+    expect(await readCompactSummary('s_1')).toBeNull()
+    expect(mockQuery).not.toHaveBeenCalled()
   })
 })
 
@@ -591,6 +604,32 @@ describe('[COMP:api/sessions-route] toStampedMessages speaker attribution', () =
     const blocks = msg.content as Array<{ type?: string; text?: string }>
     return blocks.find((b) => b.type === 'text')?.text ?? ''
   }
+
+  it('preserves trusted field and independent-source bindings through timestamp formatting', () => {
+    const sources = ['application_field', 'external_source'].map((resourceKind) => ({
+      workspaceId: 'workspace-fixture', userId: null, assistantId: null,
+      sensitivity: 'confidential' as const, compartments: ['finance'], projectIds: [],
+      resourceKind, resourceId: resourceKind, version: '1',
+    }))
+    const source = bindScopeSources(row({ senderUserId: 'u1' }), sources)
+    const [message] = toStampedMessages([source], 'UTC')
+    expect(boundScopeSources(message)).toEqual(sources)
+    expect(boundScopeSources(JSON.parse(JSON.stringify(message)))).toEqual([])
+  })
+
+  it('coalesces complete retained observations and excludes content omitted by the cap', () => {
+    const inputs = ['old', 'first', 'second'].map((resourceId) => bindScopeSources({
+      role: 'user', content: resourceId,
+    }, [{
+      workspaceId: 'workspace-fixture', userId: null, assistantId: null,
+      sensitivity: 'internal', compartments: [], projectIds: [],
+      resourceKind: 'session_message', resourceId, version: '1',
+    }]))
+    const [message] = coalesceConsecutiveUserMessages(inputs, { maxMerged: 2 })
+    expect(boundScopeSources(message)).toEqual(inputs.slice(1).flatMap(boundScopeSources))
+    expect(JSON.stringify(message.content)).not.toContain('old')
+    expect(boundScopeSources(inputs[0])).toHaveLength(1)
+  })
 
   it('stamps time only when no sender map is supplied (personal sessions)', () => {
     const [msg] = toStampedMessages([row({ senderUserId: 'u1' })], 'UTC')

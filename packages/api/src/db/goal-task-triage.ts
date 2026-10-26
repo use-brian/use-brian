@@ -1,6 +1,7 @@
-import type { GoalBrief, GoalStore, TaskRecord } from '@use-brian/core'
+import type { GoalBrief, GoalStore, TaskRecord, SessionContextAuthority } from '@use-brian/core'
 import { getWorkspaceAccessMode } from '../workspace-access/mode-policy.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import {assertTaskGoalSourceCompatible} from '../workspace-access/goal-source-admission.js'
 import { produceTaskGoalDraft } from './goal-task-producer.js'
 
 type TriageBrief = GoalBrief & { outcome: string }
@@ -37,9 +38,11 @@ export async function triageTaskForGoal(
   task: Pick<TaskRecord, 'id' | 'workspaceId' | 'title' | 'attributes' | 'executorAssistantId'>,
   userId: string,
   deps: TaskGoalTriageDeps,
+  authority?: SessionContextAuthority,
 ) {
   const executor = task.executorAssistantId
   if (!executor) return null
+  if(!authority)await assertTaskGoalSourceCompatible(task.workspaceId,task.id)
   const { setupState } = await getWorkspaceAccessMode(task.workspaceId, userId)
   if (setupState !== 'legacy' && setupState !== 'ready') {
     throw new WorkspaceAccessError('access_mode_setup_required', 409)
@@ -47,7 +50,7 @@ export async function triageTaskForGoal(
   if (setupState === 'ready') {
     const assistantId = await deps.resolveAssistantId(userId, task.workspaceId, executor)
     if (!assistantId) throw new WorkspaceAccessError('goal_source_unsupported', 409)
-    return produceTaskGoalDraft({ userId, workspaceId: task.workspaceId, assistantId, taskId: task.id }, async canonical => {
+    return produceTaskGoalDraft({ userId, workspaceId: task.workspaceId, assistantId, taskId: task.id, authority }, async canonical => {
       // Dynamic connector labels may carry private/confidential/cross-scope
       // data even while the task producer's runtime is clipped. Never read them.
       const capabilities = [...deps.publicCoreCapabilities]

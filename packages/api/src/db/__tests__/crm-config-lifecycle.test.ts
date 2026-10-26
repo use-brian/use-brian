@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => {
 vi.mock('../client.js', () => ({
   applyRLSGucs: vi.fn(),
   getPool: vi.fn(() => ({ connect: mocks.connect })),
-  query: vi.fn(),
+  query: vi.fn(async()=>({rows:[{protected:false}]})),
   queryGated: vi.fn(),
   queryWithRLS: mocks.queryWithRLS,
 }))

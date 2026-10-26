@@ -223,8 +223,7 @@ export function InlineAiPrompt({
           researchExhausted={controls.researchExhausted}
           // The Space→AI box authors straight onto the page — a prime doc
           // research surface (now functional), so it carries the toggle too.
-          showResearch
-          selectSide="top"
+            selectSide="top"
           className="mt-1.5 px-1"
         />
       </div>

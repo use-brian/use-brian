@@ -5,6 +5,7 @@ import { AssociationSourceOrderImportSchema, AssociationSourceMembershipImportSc
 import { getPool, getAppPool } from '../client.js'
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { createAssociationWorkspaceModulesStore } from '../../association/workspace-module.js'
+import { loadAssociationOrderScope } from '../../association/source-scope.js'
 import { createAssociationStore } from '../association-store.js'
 import { createCrmIntegrationStore } from '../crm-integration-store.js'
 import { createCrmOperationsService } from '../../crm-operations/service.js'
@@ -46,7 +47,7 @@ async function blocked(fragment: string) {
   }
   throw Error('Expected a database row-lock wait')
 }
-describe('[COMP:crm/association-inventory] Actual admission and committed boundaries', () => {
+describe('[COMP:crm/association-inventory] [COMP:crm/association-source-scope] Actual admission and committed boundaries', () => {
   afterAll(async () => { _resetCoalescerForTests(); await pool.end(); await appPool.end() })
   it.each(['human-home', 'assistant-home', 'department-context'] as const)('[COMP:crm/association-source-scope] admits the %s destination on new operational records and preserves it on replay', async lane => {
     const f = await fixture({ capacity: 10 }, true, { capacity: 10 })
@@ -611,14 +612,53 @@ describe('[COMP:crm/association-inventory] Actual admission and committed bounda
     await commerce.upsertEvent(f.workspaceId, EventInputSchema.parse({ ...eventInput, capacity: 3 }), f.actor)
     expect((await boundaries(f.workspaceId)).filter(r => r.event_type === 'association.inventory.available')).toMatchObject([{ payload: { ticketId: null, revision: 2 } }])
   })
-  it('isolates member reads by workspace and denies application-role boundary writes', async () => {
+  it('[COMP:crm/association-source-scope] keeps private lineage metadata separate from published application and share authority', async () => {
+    const f = await fixture(), client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      expect((await client.query("SELECT has_function_privilege(current_user,'public.read_scope_source(uuid,text,uuid)','EXECUTE') AS allowed")).rows[0].allowed).toBe(true)
+      const before = await loadAssociationOrderScope(client, f.workspaceId, [f.contactId])
+      expect(before.sources).toMatchObject([{ resourceKind: 'entity', resourceId: f.contactId, workspaceId: f.workspaceId }])
+      expect(before.sources[0]).not.toHaveProperty('display_name')
+      expect(before.sources[0]).not.toHaveProperty('attributes')
+      for (const [setting,value] of [
+        ['app.application_id',randomUUID()],['app.application_credential_id',randomUUID()],
+        ['app.application_oauth_id',randomUUID()],['app.application_home_binding_id',randomUUID()],
+        ['app.application_assistant_id',randomUUID()],['app.application_command_key','native.record.create'],
+        ['app.public_share_root',randomUUID()],['app.public_share_mode','published'],['app.public_share_token_hash','fixture-token-hash'],
+      ]) {
+        await client.query('SAVEPOINT published_profile')
+        await client.query('SELECT set_config($1,$2,true)',[setting,value])
+        await expect(loadAssociationOrderScope(client,f.workspaceId,[f.contactId])).rejects.toThrow(/scope_operation_denied|scope_source_changed/)
+        await client.query('ROLLBACK TO SAVEPOINT published_profile')
+      }
+      expect(await loadAssociationOrderScope(client,f.workspaceId,[f.contactId])).toEqual(before)
+    } finally { await client.query('ROLLBACK'); client.release() }
+  })
+  it('[COMP:crm/association-source-scope] admits genuine native member lineage without granting the private metadata function', async () => {
+    const f = await fixture(), client = await appPool.connect()
+    try {
+      await client.query('BEGIN')
+      expect((await client.query("SELECT has_function_privilege(current_user,'public.read_scope_source(uuid,text,uuid)','EXECUTE') AS allowed")).rows[0].allowed).toBe(false)
+      await client.query("SELECT set_config('app.current_user_id',$1,true)",[f.userId])
+      const evidence = await loadAssociationOrderScope(client,f.workspaceId,[f.contactId])
+      expect(evidence.sources).toMatchObject([{ resourceKind: 'entity', resourceId: f.contactId, workspaceId: f.workspaceId, userId: null }])
+      expect(evidence.scope).toMatchObject({ workspaceId: f.workspaceId, sensitivity: 'internal', compartments: [] })
+    } finally { await client.query('ROLLBACK'); client.release() }
+  })
+  it('isolates member reads by workspace and denies noncanonical application-role boundary writes', async () => {
     const f = await fixture(), g = await fixture(), client = await appPool.connect()
     try {
       await client.query('BEGIN')
       await client.query("SELECT set_config('app.current_user_id',$1,true)", [f.userId])
       expect((await client.query('SELECT id FROM association_inventory_boundaries WHERE workspace_id=$1', [f.workspaceId])).rowCount).toBe(2)
       expect((await client.query('SELECT id FROM association_inventory_boundaries WHERE workspace_id=$1', [g.workspaceId])).rowCount).toBe(0)
-      expect((await client.query('UPDATE association_inventory_boundaries SET sold_out=true WHERE workspace_id=$1', [f.workspaceId])).rowCount).toBe(0)
+      const factsSql='SELECT id,workspace_id,event_id,ticket_id,sold_out,revision,capacity,used,created_at,updated_at FROM association_inventory_boundaries WHERE workspace_id=$1 ORDER BY id'
+      const before=(await client.query(factsSql,[f.workspaceId])).rows
+      await client.query('SAVEPOINT forged_inventory_boundary')
+      await expect(client.query('UPDATE association_inventory_boundaries SET sold_out=true WHERE workspace_id=$1', [f.workspaceId])).rejects.toMatchObject({code:'23514'})
+      await client.query('ROLLBACK TO SAVEPOINT forged_inventory_boundary')
+      expect((await client.query(factsSql,[f.workspaceId])).rows).toEqual(before)
     } finally { await client.query('ROLLBACK'); client.release() }
   })
 })

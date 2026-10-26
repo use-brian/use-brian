@@ -76,11 +76,11 @@ describe("[COMP:app-web/recording-chrome] processing tracker", () => {
     expect(mocks.getRecording).toHaveBeenCalledTimes(2);
     expect(current.summary?.status).toBe("processed");
 
-    // Processing polling (every 10s) has stopped. Only the content lease's
-    // authority renewal (every 15s: at 15s and 30s) still reads; a hook still
-    // polling would have made six calls by now.
+    // Processing polling has stopped. The successful status read at 10s also
+    // renews authority, so the next lease read is at 25s; no redundant read
+    // remains scheduled from the initial mount.
     await act(async () => vi.advanceTimersByTimeAsync(20_000));
-    expect(mocks.getRecording).toHaveBeenCalledTimes(4);
+    expect(mocks.getRecording).toHaveBeenCalledTimes(3);
     expect(current.summary?.status).toBe("processed");
   });
 

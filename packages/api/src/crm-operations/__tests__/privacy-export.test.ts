@@ -4,7 +4,7 @@ import {beforeEach,describe,expect,it,vi} from 'vitest'
 import type {CrmOperationsContext} from '@use-brian/core'
 
 const mocks=vi.hoisted(()=>({query:vi.fn(),release:vi.fn(),connect:vi.fn()}))
-vi.mock('../../db/client.js',()=>({getPool:()=>({connect:mocks.connect,query:mocks.query})}))
+vi.mock('../../db/client.js',()=>({query:async()=>{throw new Error('Unexpected direct database query in privacy-export fixture')},getPool:()=>({connect:mocks.connect,query:mocks.query})}))
 import {streamCrmPrivacyExport,sendCrmPrivacyExport} from '../privacy-export.js'
 
 const context:CrmOperationsContext={workspaceId:'11111111-1111-4111-8111-111111111111',actor:{kind:'user',userId:'22222222-2222-4222-8222-222222222222'},authority:{role:'owner',canConfigure:true,canWrite:true,trustedIdentitySources:[]}}

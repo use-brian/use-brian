@@ -10,6 +10,7 @@ import { PlanGate } from "@/components/chrome/plan-gate";
 import { ComputerLivePill } from "@/components/chrome/computer-live-pill";
 import { SupportDiagnosticsIndicator } from "@/components/chrome/support-diagnostics-indicator";
 import { normalizeHomeApps } from "@use-brian/shared/home-apps";
+import { BrowserAssistantBridge } from "@/components/computer/browser-assistant-bridge";
 
 type TeamApiResponse = {
   id: string;
@@ -70,6 +71,7 @@ export default async function WorkspaceLayout(props: {
       }}
     >
       <CustomThemesProvider workspaceId={workspaceId}>
+        <BrowserAssistantBridge />
         {/* `h-dvh`, never `h-screen` (responsive contract M6): on iOS `100vh` is the
             LARGE viewport, so the bottom 50-80px of every column sat under the
             browser toolbar, which never collapsed because nothing here scrolls

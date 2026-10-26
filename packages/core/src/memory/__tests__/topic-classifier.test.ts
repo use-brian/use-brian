@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { classifyTopic } from '../topic-classifier.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
@@ -19,7 +19,158 @@ function mockProvider(response: string): LLMProvider {
   } as unknown as LLMProvider
 }
 
+/** A transport that makes progress until its upstream cancellation fires. */
+function slowProvider(onAbort: (signal: AbortSignal) => void): LLMProvider {
+  const provider = mockProvider('unused')
+  provider.stream = async function* (request) {
+    const signal = request.signal!
+    while (true) {
+      yield { type: 'thinking_delta', text: '.' } as StreamChunk
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', abort)
+          resolve()
+        }, 100)
+        const abort = () => {
+          clearTimeout(timer)
+          onAbort(signal)
+          reject(signal.reason)
+        }
+        signal.addEventListener('abort', abort, { once: true })
+      })
+    }
+  }
+  return provider
+}
+
 describe('[COMP:memory/topic-classifier] classifyTopic', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('requests low thinking and cancels a progressing direct transport after two seconds', async () => {
+    vi.useFakeTimers()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const aborted = vi.fn()
+    const provider = slowProvider(aborted)
+    const stream = vi.spyOn(provider, 'stream')
+    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [] })
+
+    await vi.advanceTimersByTimeAsync(1_999)
+    expect(aborted).not.toHaveBeenCalled()
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: 'low', signal: expect.any(AbortSignal) }))
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(classification).resolves.toMatchObject({ topic_label: '(uncategorized)', state: 'continue', confidence: 0 })
+    expect(aborted).toHaveBeenCalledOnce()
+    expect(aborted.mock.calls[0]![0].aborted).toBe(true)
+    expect(warning).toHaveBeenCalledWith('[topic-classifier] deadline exceeded; using uncategorized fallback', { timeoutMs: 2_000 })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('passes the same total budget through the decision runtime to its LLM transport', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const aborted = vi.fn()
+    const provider = slowProvider(aborted)
+    const decisionRuntime = executionFixture({ mode: 'llm_only', llm: provider })
+    const run = vi.spyOn(decisionRuntime, 'run')
+    const startedAt = Date.now()
+    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], decisionRuntime })
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    await expect(classification).resolves.toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({
+      signal: expect.any(AbortSignal), deadlineAt: startedAt + 2_000,
+    }) }))
+    expect(aborted).toHaveBeenCalledOnce()
+    expect(aborted.mock.calls[0]![0].aborted).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('cancels the transport with the caller and propagates its current authority refusal', async () => {
+    vi.useFakeTimers()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const refusal = Object.assign(new Error('Synthetic turn authority revoked'), { reason: 'authority_changed', retrySafe: false })
+    const controller = new AbortController()
+    const aborted = vi.fn()
+    const classification = classifyTopic({ provider: slowProvider(aborted), model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], signal: controller.signal,
+      assertInputAuthority: async () => { if (controller.signal.aborted) throw refusal } })
+    const rejected = expect(classification).rejects.toBe(refusal)
+
+    await vi.advanceTimersByTimeAsync(100)
+    controller.abort(refusal)
+    await rejected
+    expect(aborted).toHaveBeenCalledOnce()
+    expect(warning).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('cancels decision-provider and follow-up transports at shorter cascade deadlines', async () => {
+    vi.useFakeTimers()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const decisionAborted = vi.fn()
+    const llmAborted = vi.fn()
+    const provider = slowProvider(llmAborted)
+    const decisionRuntime = executionFixture({
+      llm: provider,
+      primary: fixtureDecisionProvider(async (request) => new Promise<never>((_resolve, reject) => {
+        request.signal!.addEventListener('abort', () => {
+          decisionAborted(request.signal)
+          reject(request.signal!.reason)
+        }, { once: true })
+      })),
+    })
+    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], decisionRuntime })
+
+    await vi.advanceTimersByTimeAsync(100)
+    await expect(classification).resolves.toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
+    expect(decisionAborted).toHaveBeenCalledOnce()
+    expect(llmAborted).toHaveBeenCalledOnce()
+    expect(warning).toHaveBeenCalledWith('[topic-classifier] decision deadline exceeded; using uncategorized fallback')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('waits for an in-flight authority refusal when the classification deadline expires', async () => {
+    vi.useFakeTimers()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const refusal = Object.assign(new Error('Synthetic input authority revoked'), { reason: 'authority_changed', retrySafe: false })
+    let rejectAuthority!: (error: Error) => void
+    const pendingAuthority = new Promise<void>((_resolve, reject) => { rejectAuthority = reject })
+    let providerComplete = false
+    const provider = mockProvider('unused')
+    provider.stream = async function* () {
+      yield { type: 'text_delta', text: '{"topic_label":"planning","state":"continue","confidence":0.9}' } as StreamChunk
+      providerComplete = true
+    }
+    const check = vi.fn(async () => { if (providerComplete) await pendingAuthority })
+    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], assertInputAuthority: check })
+    const rejected = expect(classification).rejects.toBe(refusal)
+    let settled = false
+    void classification.then(() => { settled = true }, () => { settled = true })
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(settled).toBe(false)
+    expect(check).toHaveBeenCalledTimes(3)
+    rejectAuthority(refusal)
+    await rejected
+    expect(warning).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('propagates a wrapped provider authority refusal rather than an uncategorized fallback', async () => {
+    const refusal = Object.assign(new Error('Synthetic provider refused current input'), { reason: 'authority_changed', retrySafe: false })
+    const provider = mockProvider('unused')
+    provider.stream = async function* () { throw new Error('Synthetic provider wrapper', { cause: refusal }) }
+    await expect(classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [] })).rejects.toMatchObject({ cause: refusal })
+  })
+
   it('accepts a terminal exact known-label decision without an LLM call', async () => {
     let llmCalls = 0
     const llm = mockProvider('{"topic_label":"wrong","state":"shift","confidence":1}')

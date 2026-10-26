@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from 'vitest'
-import pg from 'pg'
+import { getAppPool, getPool } from '../client.js'
 import {
   createWorkflowRunQueueStore,
   countRecentRunsForWorkflowSystem,
@@ -13,9 +13,9 @@ import {
  * per-workflow serialization + per-workspace cap + lease reclaim, the
  * exhausted/stale reapers, and the storm-guard count/pause pair.
  *
- * Requires the local `Use Brian` PostgreSQL database with migration 302
- * applied. Skips silently when the DB isn't reachable — matches
- * aggregate-store.integration.test.ts.
+ * Requires the maintained disposable PostgreSQL fixture, including the
+ * current committed migrations. Missing fixture setup refuses before tests
+ * or pool access; it never chooses a personal DB or silently skips.
  *
  * Claim scans are global-oldest-first, so every fixture run is backdated to
  * the epoch era — older than anything another suite might leave behind —
@@ -25,33 +25,11 @@ import {
  * [COMP:workflow/run-queue]
  */
 
-let pool: pg.Pool | undefined
+const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
+await assertLocalFixture()
+const pool = getPool()
 
-async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
-  try {
-    const client = await p.connect()
-    try {
-      // Probe the mig-302 columns; skip on a pre-302 database.
-      await client.query('SELECT claimed_at, claim_attempts FROM workflow_runs LIMIT 1')
-      await client.query('SELECT paused_reason FROM workflows LIMIT 1')
-    } finally {
-      client.release()
-    }
-    pool = p
-    return true
-  } catch {
-    await p.end().catch(() => {})
-    return false
-  }
-}
-
-const ok = await canConnect()
-const describeIf = ok ? describe : describe.skip
-
-afterAll(async () => {
-  if (pool) await pool.end()
-})
+afterAll(async () => { await getAppPool().end(); await pool.end() })
 
 const queue = createWorkflowRunQueueStore()
 const DEFAULTS = { leaseSeconds: 120, maxClaimAttempts: 3, workspaceCap: 3 }
@@ -183,7 +161,7 @@ async function rowState(runId: string) {
   }
 }
 
-describeIf('[COMP:workflow/run-queue] claimNextPendingRunSystem (mig 302)', () => {
+describe('[COMP:workflow/run-queue] claimNextPendingRunSystem (mig 302)', () => {
   it('claims FIFO and stamps the lease', async () => {
     const f = await makeFixture()
     try {
@@ -464,7 +442,7 @@ describeIf('[COMP:workflow/run-queue] claimNextPendingRunSystem (mig 302)', () =
   })
 })
 
-describeIf('[COMP:workflow/run-queue] failAbandonedInlineRunsSystem', () => {
+describe('[COMP:workflow/run-queue] failAbandonedInlineRunsSystem', () => {
   // The inverse gate of everything above: these are the runs the queue does NOT
   // own. It may only mark them dead. Regression cover for 2026-07-28, when a
   // crash-looping worker orphaned 216 schedule runs that no sweeper could see.

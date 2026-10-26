@@ -107,6 +107,7 @@ export async function createRecorderEngine(opts?: {
   captureScreen?: boolean;
   /** Browser screen capture: mix display audio when granted, absence is ordinary. */
   opportunisticDisplayAudio?: boolean;
+  beforeDisplayCapture?: () => Promise<void>;
   /** Optional provisional transcript lane; the durable recorder stays authoritative. */
   onLiveWindow?: (window: {
     blob: Blob;
@@ -127,6 +128,7 @@ export async function createRecorderEngine(opts?: {
     includeSystemAudio: opts?.includeSystemAudio === true,
     captureScreen: opts?.captureScreen === true,
     opportunisticDisplayAudio: opts?.opportunisticDisplayAudio === true,
+    beforeDisplayCapture: opts?.beforeDisplayCapture,
   });
   const stream = captureAudio.recordingStream;
   const capturesVideo = captureAudio.capturesVideo;

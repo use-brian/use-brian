@@ -1,18 +1,61 @@
+import { publishNativeSessionMessage } from './session-message-publication.js'
+import { readSessionContextRevisions, writeSessionContextRevision, type SessionContextRevision } from './session-context-revisions.js'
 import { classifySession, sessionKindSql } from '../session-kind.js'
 import type pg from 'pg'
 import {
   bindScopeSource,
+  bindScopeSources,
+  boundScopeSources,
   deriveResourceScope,
+  deriveWriteScope,
   DerivedScopeError,
   maxSensitivity,
+  resourceScopeKey,
   type DerivedWriteEvidence,
   type ResourceScope,
   type ScopeSource,
+  type SessionContextAuthority,
 } from '@use-brian/core'
 import { getPool, getAppPool, applyRLSGucs, query } from './client.js'
-import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs } from './derived-scope-store.js'
+import { readCurrentScopeSources, recordDerivedResource, validateDerivedMemoryInputs, validateDerivedWriteInputs } from './derived-scope-store.js'
 import { admitAnchoredSession, admitSessionCreate, admitPersonalWebSession, type PersonalWebSessionPrincipal } from '../workspace-access/session-create-admission.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
+
+/**
+ * Read immutable obligations in the writer's transaction, before D1 can remove
+ * their native carrier. Owner-only metadata facades reveal no content or allow
+ * decision; an app connection must use its admitted facades instead.
+ */
+async function transcriptAncestorSources(db: Pick<pg.ClientBase, 'query'>,
+  workspaceId: string, roots: readonly ScopeSource[]): Promise<ScopeSource[]> {
+  const permissions = (await db.query<{ external: boolean; field: boolean }>(
+    `SELECT has_function_privilege(current_user,'read_external_source_dependencies(uuid,text[],uuid[],text[])','EXECUTE') AS external,
+      has_function_privilege(current_user,'read_application_field_dependencies(uuid,text[],uuid[],text[])','EXECUTE') AS field`,
+  )).rows[0]
+  const external = permissions?.external ? 'read_external_source_dependencies' : 'read_admitted_external_source_dependencies'
+  const field = permissions?.field ? 'read_application_field_dependencies' : 'read_admitted_application_field_dependencies'
+  const sources = new Map<string, ScopeSource>()
+  for (let offset = 0; offset < roots.length; offset += 100) {
+    const part = roots.slice(offset, offset + 100)
+    const rows = (await db.query<{ kind: string; nodeVersion: string; source: ScopeSource | null }>(
+      `SELECT 'external_source' AS kind,node_version AS "nodeVersion",source FROM ${external}($1,$2,$3,$4)
+       UNION ALL SELECT 'application_field',node_version,source FROM ${field}($1,$2,$3,$4)`,
+      [workspaceId, part.map(source => source.resourceKind), part.map(source => source.resourceId), part.map(source => source.version)],
+    )).rows
+    for (const row of rows) {
+      const source = row.source
+      if (!source || source.workspaceId !== workspaceId || source.resourceKind !== row.kind || source.version !== row.nodeVersion) {
+        throw new DerivedScopeError('scope_source_changed')
+      }
+      const key = `${source.resourceKind}:${source.resourceId}`, previous = sources.get(key)
+      if (previous && (previous.version !== source.version || resourceScopeKey(previous) !== resourceScopeKey(source))) {
+        throw new DerivedScopeError('scope_source_changed')
+      }
+      sources.set(key, source)
+    }
+  }
+  return [...sources.values()]
+}
 
 /**
  * Store-seam emitter for the `session` workspace primitive (Live roster —
@@ -54,6 +97,7 @@ export type Session = {
    */
   appOrigin: string | null
   status: string
+  /** Deprecated scalar slot; semantic reads require readCompactSummary. Always null in native DTOs. */
   compactSummary: string | null
   compactionCount: number
   /**
@@ -165,7 +209,7 @@ function bindStoredMessageScope(row: ScopedSessionMessageRow): SessionMessage {
     scopeWorkspaceId, scopeUserId, scopeAssistantId, scopeSensitivity,
     scopeCompartments, scopeProjectIds, scopeVersion, scopeHeld, ...message
   } = row
-  if (scopeWorkspaceId && scopeAssistantId && scopeSensitivity && scopeCompartments
+  if (scopeWorkspaceId && (scopeAssistantId === null || typeof scopeAssistantId === 'string') && scopeSensitivity && scopeCompartments
     && scopeProjectIds && scopeVersion && scopeHeld === false) {
     return bindScopeSource(message, {
       workspaceId: scopeWorkspaceId, userId: scopeUserId, assistantId: scopeAssistantId,
@@ -396,9 +440,9 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
          AND visibility=$6
        RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
-               app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+               app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
                compaction_count as "compactionCount",
-               compact_boundary_sequence as "compactBoundarySequence", title,
+               compact_boundary_sequence as "compactBoundarySequence", NULL::text AS title,
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
@@ -439,9 +483,9 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
        SET last_active_at = now()
      RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
-               app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+               app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
                compaction_count as "compactionCount",
-               compact_boundary_sequence as "compactBoundarySequence", title,
+               compact_boundary_sequence as "compactBoundarySequence", NULL::text AS title,
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
@@ -491,9 +535,9 @@ export async function findSessionByChannel(params: {
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             channel_type as "channelType", channel_id as "channelId",
-            app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+            app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
             compaction_count as "compactionCount",
-            compact_boundary_sequence as "compactBoundarySequence", title,
+            compact_boundary_sequence as "compactBoundarySequence", NULL::text AS title,
             downgrade_notice_sent as "downgradeNoticeSent",
             downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
             mode, visibility, effective_clearance as "effectiveClearance",
@@ -591,9 +635,9 @@ async function createTransientBrainSession(params: {
       WHERE a.id = $1
      RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
-               app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+               app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
                compaction_count as "compactionCount",
-               compact_boundary_sequence as "compactBoundarySequence", title,
+               compact_boundary_sequence as "compactBoundarySequence", NULL::text AS title,
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
@@ -623,9 +667,9 @@ export async function readSessionById(id: string): Promise<Session | null> {
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             channel_type as "channelType", channel_id as "channelId",
-            app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
+            app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
             compaction_count as "compactionCount",
-            compact_boundary_sequence as "compactBoundarySequence", title,
+            compact_boundary_sequence as "compactBoundarySequence", NULL::text AS title,
             downgrade_notice_sent as "downgradeNoticeSent",
             downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
             mode, visibility, effective_clearance as "effectiveClearance",
@@ -1033,38 +1077,55 @@ export async function sweepStuckSessions(
   }))
 }
 
-/**
- * Atomically write the compact summary text, advance the boundary cursor,
- * and bump compaction_count. The UPDATE is gated on the expected current
- * cursor value so two turns racing to compact the same session don't
- * clobber each other — the loser sees rowCount === 0 and must discard its
- * summary + reload.
- *
- * `newCursor` is the sequence_num of the FIRST recent (non-compactable)
- * row, matching the loader's inclusive `fromSequence` semantics.
- * `expectedCurrentCursor` is the `compact_boundary_sequence` value the
- * caller read at the start of the turn (null = never compacted).
- *
- * Returns true when the row was updated, false when the guard failed
- * (concurrent compaction landed first).
- */
+/** Exact admitted compact-summary payload; its trusted binding is process-private. */
+export type SessionCompactSummary = { id: string; summary: string; boundarySequence: number }
+
+function compactAuthorityChanged(): never {
+  throw Object.assign(new DerivedScopeError('scope_source_changed'), { reason: 'authority_changed' as const, retrySafe: false })
+}
+function compactRecord(row: SessionContextRevision): SessionCompactSummary {
+  const { summary, boundarySequence } = row.content
+  if (typeof summary !== 'string' || typeof boundarySequence !== 'number'
+    || !Number.isSafeInteger(boundarySequence) || boundarySequence < 0) compactAuthorityChanged()
+  return bindScopeSources({ id: row.id, summary, boundarySequence }, boundScopeSources(row))
+}
+
+/** No scalar fallback, and no source access derived from a session DTO. */
+export async function readCompactSummary(sessionId: string, authority?: SessionContextAuthority): Promise<SessionCompactSummary | null> {
+  if (!authority) return null
+  if (authority.execution.lifecycle.sessionId !== sessionId) compactAuthorityChanged()
+  try {
+    const rows = await readSessionContextRevisions(sessionId, 'compact_summary', authority)
+    if (rows.length > 1) compactAuthorityChanged()
+    if (rows.length === 1) {
+      const record = compactRecord(rows[0])
+      authority.accumulator.note({ sources: boundScopeSources(record) })
+      return record
+    }
+    // Content-free presence metadata distinguishes a never-compacted session
+    // from held current/historical content. It grants no payload access.
+    await authority.execution.security.authority.assertCurrent()
+    const marker = (await query<{ present: boolean; cursor: number | null }>(`SELECT
+      (compact_scope_revision_id IS NOT NULL OR compact_summary IS NOT NULL) AS present,
+      compact_boundary_sequence AS cursor FROM sessions WHERE id=$1`, [sessionId])).rows[0]
+    await authority.execution.security.authority.assertCurrent()
+    if (!marker || marker.present || marker.cursor !== null) compactAuthorityChanged()
+    return null
+  } catch (error) {
+    if (error instanceof DerivedScopeError) throw Object.assign(error, { reason: 'authority_changed' as const, retrySafe: false })
+    throw error
+  }
+}
+
+/** Pointer, cursor, immutable payload and complete source receipt commit together. */
 export async function setCompactSummaryAndBoundary(
-  sessionId: string,
-  summary: string,
-  newCursor: number,
-  expectedCurrentCursor: number | null,
-): Promise<boolean> {
-  const result = await query(
-    `UPDATE sessions
-     SET compact_summary = $1,
-         compact_boundary_sequence = $2,
-         compaction_count = compaction_count + 1,
-         last_compacted_at = now()
-     WHERE id = $3
-       AND compact_boundary_sequence IS NOT DISTINCT FROM $4`,
-    [summary, newCursor, sessionId, expectedCurrentCursor],
-  )
-  return (result.rowCount ?? 0) > 0
+  sessionId: string, summary: string, newCursor: number, expectedCurrentCursor: number | null,
+  context?: { authority: SessionContextAuthority; derivation: DerivedWriteEvidence },
+): Promise<SessionCompactSummary | null> {
+  const row = await writeSessionContextRevision({ sessionId, kind: 'compact_summary',
+    content: { summary, boundarySequence: newCursor }, expectedCursor: expectedCurrentCursor,
+    authority: context?.authority, derivation: context?.derivation })
+  return row ? compactRecord(row) : null
 }
 
 /**
@@ -1191,11 +1252,32 @@ export async function getSessionMessages(
      */
     excludeHeld?: boolean
   },
+  /** Host-owned current app transaction; its source receipts never travel on the wire. */
+  admittedClient?: pg.PoolClient,
 ): Promise<SessionMessage[]> {
   const conditions = ['session_id = $1']
   const values: unknown[] = [sessionId]
   let paramIdx = 2
   if (opts?.excludeHeld) conditions.push('scope_held IS NOT TRUE')
+  if (admittedClient) {
+    const role = (await admittedClient.query<{ bypass: boolean }>(`SELECT r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE') AS bypass
+      FROM pg_roles r JOIN pg_class c ON c.oid='session_messages'::regclass WHERE r.rolname=current_user`)).rows[0]
+    if (role?.bypass !== false) throw new DerivedScopeError('scope_source_changed')
+    // These facades authenticate the actual SQL actor. Evaluate them before
+    // protected text selection/ranking; an expired/missing receipt never allows.
+    conditions.push(`scope_held=false
+      AND NOT EXISTS(SELECT 1 FROM read_admitted_application_field_dependencies(workspace_id,ARRAY['session_message'],ARRAY[id],ARRAY[scope_version::text]) d
+        WHERE d.source IS NULL OR d.source->>'version' IS DISTINCT FROM d.node_version)
+      AND NOT EXISTS(SELECT 1 FROM read_admitted_external_source_dependencies(workspace_id,ARRAY['session_message'],ARRAY[id],ARRAY[scope_version::text]) d
+        WHERE d.source IS NULL OR d.source->>'version' IS DISTINCT FROM d.node_version
+          OR external_source_snapshot(workspace_id,(d.source->>'resourceId')::uuid)->>'held' IS DISTINCT FROM 'false')`)
+  } else {
+    // The owner pool has no actor or live external/field proof. Its historical
+    // native read cannot turn independent observations into ordinary text.
+    conditions.push(`(workspace_id IS NULL OR (
+      NOT EXISTS(SELECT 1 FROM read_application_field_dependencies(workspace_id,ARRAY['session_message'],ARRAY[id],ARRAY[scope_version::text]))
+      AND NOT EXISTS(SELECT 1 FROM read_external_source_dependencies(workspace_id,ARRAY['session_message'],ARRAY[id],ARRAY[scope_version::text]))))`)
+  }
 
   if (opts?.afterSequence !== undefined) {
     conditions.push(`sequence_num > $${paramIdx}`)
@@ -1212,7 +1294,8 @@ export async function getSessionMessages(
   const limitClause = opts?.limit ? `LIMIT $${paramIdx}` : ''
   if (opts?.limit) values.push(opts.limit)
 
-  const result = await query<ScopedSessionMessageRow>(
+  const execute = admittedClient ? <T extends pg.QueryResultRow>(sql: string, params: unknown[]) => admittedClient.query<T>(sql, params) : query
+  const result = await execute<ScopedSessionMessageRow>(
     `SELECT id, session_id as "sessionId", role, content,
             sequence_num as "sequenceNum", created_at as "createdAt",
             reply_to_text as "replyToText",
@@ -1421,7 +1504,7 @@ export function toStampedMessages(
       ...base,
       content: [{ type: 'text', text: prefix }, ...content],
     }
-  })
+  }).map((message, index) => bindScopeSources(message, boundScopeSources(dbMessages[index])))
 }
 
 /**
@@ -1496,13 +1579,13 @@ export function coalesceConsecutiveUserMessages<
       group = group.slice(omitted)
     }
     const blocks = group.flatMap((g) => toBlocks(g.content))
-    out.push({
+    out.push(bindScopeSources({
       ...m,
       content: [
         ...(omitted > 0 ? [{ type: 'text', text: omittedNote }] : []),
         ...blocks,
       ],
-    })
+    }, group.flatMap((message) => boundScopeSources(message))))
     i = j
   }
   return out
@@ -1536,10 +1619,15 @@ export async function addSessionMessage(params: {
   scope?: ResourceScope
   /** Complete trusted inputs for model/tool-derived rows. */
   derivation?: DerivedWriteEvidence
+  /** Host-bound transcript audience for mixed visibility inputs; never substitutes for ancestry. */
+  derivationTarget?: ResourceScope
+  /** Actual canonical native invocation for field-aware transcript publication. */
+  authority?: SessionContextAuthority
 }, client?: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> {
-  if (params.scope && params.derivation) {
+  if (params.scope && params.derivation || params.derivationTarget && (!params.derivation || params.scope)) {
     throw new Error('session_message_scope_conflict')
   }
+  if(params.authority&&params.derivation)return publishNativeSessionMessage({...params,derivation:params.derivation,authority:params.authority},client)
   const sql =
     `INSERT INTO session_messages
        (session_id, role, content, sequence_num,
@@ -1561,17 +1649,26 @@ export async function addSessionMessage(params: {
                attachments`
 
   const write = async (db: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> => {
-    let derivation = params.derivation
+    let derivation = params.derivation ? structuredClone(params.derivation) : undefined
     let scope = params.scope
     if (derivation) {
+      // Validate/detach the original input before any asynchronous metadata read.
+      const originalFloor = params.derivationTarget
+        ? deriveWriteScope(derivation, params.derivationTarget, params.derivationTarget.userId)
+        : deriveResourceScope(derivation)
+      const ancestors = await transcriptAncestorSources(db, originalFloor.workspaceId, derivation.sources)
+      derivation = { ...derivation, sources: [...derivation.sources, ...ancestors] }
       // A transcript row records what was SAID, not a derived fact. A source
       // the turn itself edited or removed (list then close a task, forget a
       // memory) must not block saving a reply the user already received
       // (decision D1): lineage keeps only still-current sources, while the row
       // carries the labels of every source it was derived from, raised to the
-      // current labels of any that changed. Held sources and changed causal
-      // inputs still refuse.
-      const certified = deriveResourceScope(derivation)
+      // current labels of any that changed. Independent field/query/external
+      // obligations were expanded above and cannot disappear with that native
+      // row. Held sources and changed causal inputs still refuse.
+      const certified = params.derivationTarget
+        ? deriveWriteScope(derivation, params.derivationTarget, params.derivationTarget.userId)
+        : deriveResourceScope(derivation)
       const states = await readCurrentScopeSources(db, certified.workspaceId, derivation.sources)
       if (states.some((state) => state.state === 'held' || state.state === 'unverifiable' || state.state === 'stale_input')) {
         throw new DerivedScopeError('scope_source_changed')
@@ -1586,7 +1683,10 @@ export async function addSessionMessage(params: {
       scope = labels
       const current = states.filter((state) => state.state === 'current').map((state) => state.source)
       derivation = current.length ? { ...derivation, sources: current } : undefined
-      if (derivation) await validateDerivedMemoryInputs(db, derivation)
+      if (derivation) {
+        if (params.derivationTarget) await validateDerivedWriteInputs(db, derivation)
+        else await validateDerivedMemoryInputs(db, derivation)
+      }
     }
     const values = [
       params.sessionId,
@@ -1618,7 +1718,7 @@ export async function addSessionMessage(params: {
       version: '1',
     }
     if (derivation) {
-      await recordDerivedResource(db, derivation, source)
+      await recordDerivedResource(db, derivation, source, params.derivationTarget?.userId)
     }
     return bindScopeSource(stored, source)
   }

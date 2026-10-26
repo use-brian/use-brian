@@ -13,6 +13,7 @@
  */
 
 import type { SearchProvider, SearchResult } from './search-stack.js'
+import { compileSearchFilters } from './search-filters.js'
 import { retryAfterMs, SearchProviderError } from './_fetch-error.js'
 import { clampResultCount } from './search-stack.js'
 import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
@@ -41,15 +42,17 @@ export function createSerpApiProvider(pool?: ExternalCredentialPool): SearchProv
 
   available: () => Boolean(pool || process.env.SERPAPI_API_KEY),
 
-  async search(query, maxResults, signal): Promise<SearchResult[]> {
+  async search(query, maxResults, signal, filters): Promise<SearchResult[]> {
+    const filterParams = compileSearchFilters('serpapi', filters)
     const lease = await resolveToolCredential(pool, 'serpapi', process.env.SERPAPI_API_KEY)
-    if (!lease) return []
+    if (!lease) throw new SearchProviderError({ provider: 'serpapi', kind: 'bad_key', detail: 'No eligible search credential is configured.' })
 
     const url = new URL(SERPAPI_ENDPOINT)
     url.searchParams.set('engine', 'google')
     url.searchParams.set('q', query)
     url.searchParams.set('num', String(clampResultCount(maxResults)))
     url.searchParams.set('api_key', lease.secret)
+    for (const [key, value] of Object.entries(filterParams)) url.searchParams.set(key, String(value))
 
     const res = await fetch(url, {
       headers: { Accept: 'application/json' },

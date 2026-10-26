@@ -1,15 +1,22 @@
+import {queryLegacyCanonicalCrmSql} from './crm-reader.js'
+import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
+import {readApplicationFieldAncestors} from '../application-platform/field-evidence.js'
+import {z} from 'zod'
+import {readRetainedContextFrame,readRetainedQueryFrame} from './session-context-revisions.js'
+import {validateCallerScopeEvidence} from '../context-scope/caller-evidence.js'
+import {currentApplicationReadTransaction,getApplicationExecutionBinding} from '../application-platform/execution-context.js'
 import { sessionKindSql } from '../session-kind.js'
 import { admitMemorySuccessor } from '../workspace-access/memory-successor-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { beginBrainAdmission, admitBrainCreate } from '../workspace-access/brain-create-admission.js'
 import { captureMemoryVersions, type CaptureOpts } from './brain-row-versions.js'
-import { deriveResourceScope, deriveWriteScope, type AccessContext, type ResourceScope, type EntityLinksStore, type Sensitivity, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/core'
+import { bindScopeSources,boundScopeSources,DerivedScopeError,intersectAccessCeilings,pinAccessCeiling,type SessionContextAuthority,deriveResourceScope, deriveWriteScope, type AccessContext, type ResourceScope, type EntityLinksStore, type Sensitivity, type DerivedWriteEvidence, type ScopeSource } from '@use-brian/core'
 import type pg from 'pg'
 import { assertExecutionResourceScope, buildAccessPredicate } from './access-predicate.js'
-import { currentAgentAccess } from './agent-access-context.js'
+import { currentAgentAccess,runWithAgentAccess } from './agent-access-context.js'
 import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { applyRLSGucs, getPool, query } from './client.js'
+import { applyRLSGucs, getPool, query,queryGated } from './client.js'
 import { emitMentionedEdges } from './edge-hooks.js'
 import { excludeExternalPrincipalsSql } from './external-principal.js'
 import { validateDerivedMemoryInputs, validateDerivedWriteInputs, recordDerivedResource } from './derived-scope-store.js'
@@ -342,7 +349,9 @@ export async function createMemory(
   return memory
 }
 
-function emitCreatedMemoryEdges(memory: Memory, params: Parameters<typeof createMemory>[0], entityLinks?: EntityLinksStore): void {
+export function emitCreatedMemoryEdges(memory: Memory, params: Parameters<typeof createMemory>[0], entityLinks?: EntityLinksStore): void {
+  // The legacy graph port cannot retain the original operation or immutable lineage.
+  if(params.derivation?.sources.some(source=>source.resourceKind==='external_source'||source.resourceKind==='application_field'))return
   // Fire-and-forget `mentioned` edges. Only fires when the graph store
   // is wired AND the memory carries a workspace (edges are
   // workspace-partitioned) AND at least one entity id is supplied.
@@ -411,6 +420,7 @@ export async function updateMemory(
   updates: MemoryUpdateFields,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
+  transition?: {expectedVersion:string;writeFields:readonly string[];assistantId:string;sessionId:string;contextFingerprint:string},
 ): Promise<Memory | null> {
   const ownedClient = transactionClient ? null : await getPool().connect()
   const client = transactionClient ?? ownedClient!
@@ -460,14 +470,20 @@ export async function updateMemory(
         return null
       }
 
+      if (transition) {
+        if (!transactionClient || !access || old.scopeVersion !== transition.expectedVersion) throw new DerivedScopeError('scope_source_changed')
+        await client.query('SELECT prepare_native_memory_successor($1,$2,$3,$4)',
+          [old.workspaceId,old.id,transition.expectedVersion,transition.writeFields])
+      }
+
       assertExecutionResourceScope({...old,workspaceId:old.workspaceId!},'read',access)
       assertExecutionResourceScope({...old,workspaceId:old.workspaceId!},'mutation',access)
 
       const derivation = updates.derivation ? {
         ...updates.derivation,
-        sources: [...updates.derivation.sources, {
-          ...old, workspaceId: old.workspaceId!, resourceKind: 'memory', resourceId: old.id, version: old.scopeVersion,
-        }],
+        sources: [...updates.derivation.sources, ...(updates.derivation.sources.some(source=>source.resourceKind==='memory'&&source.resourceId===old.id) ? [] : [{
+          ...old, workspaceId: old.workspaceId!, resourceKind: 'memory' as const, resourceId: old.id, version: old.scopeVersion,
+        }])],
       } : null
       const floor = derivation ? await validateDerivedWriteInputs(client, derivation) : null
 
@@ -522,7 +538,7 @@ export async function updateMemory(
         || JSON.stringify(next.tags) !== JSON.stringify(old.tags)
         || JSON.stringify(next.compartments) !== JSON.stringify(old.compartments)
         || JSON.stringify(next.projectIds) !== JSON.stringify(old.projectIds)
-      if (changed) {
+      if (changed && !transition) {
         if (ready) {
           await client.query('SELECT hold_memory_successor_descendants($1,$2,$3)', [old.workspaceId, old.id, old.scopeVersion])
         } else {
@@ -570,12 +586,15 @@ export async function updateMemory(
       )
       const newRow = insertResult.rows[0]
 
-      if (derivation) await recordDerivedResource(client, derivation, {
+      if (derivation && !transition) await recordDerivedResource(client, derivation, {
         ...newRow, workspaceId: newRow.workspaceId!, resourceKind: 'memory', resourceId: newRow.id, version: newRow.scopeVersion,
       }, access?.userId ?? null)
 
-      // Tombstone the old row, pointing OLD → NEW.
-      await client.query(
+      // The protected transition pins immutable history before its retirement.
+      if (transition) await client.query('SELECT retire_native_memory_successor($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+        [old.workspaceId,old.id,transition.expectedVersion,newRow.id,transition.writeFields,
+          transition.assistantId,transition.sessionId,transition.contextFingerprint,derivation?.producer,JSON.stringify(derivation?.sources)])
+      else await client.query(
         `UPDATE memories
            SET valid_to = now(),
                superseded_by = $2,
@@ -635,17 +654,110 @@ export async function insertHeldMemoryReplacement(
 /**
  * Get a memory by ID (full detail).
  */
-export async function getMemoryById(ctx: AccessContext, id: string): Promise<Memory | null> {
+/** Native viewer payloads and counts share the actual actor/ceiling transaction. */
+function queryMemoryViewer<T extends pg.QueryResultRow>(ctx: AccessContext,sql: string,params?: unknown[]) {
+  if (ctx.systemRead) {
+    if (!/\bFROM\s+memories\b/i.test(sql)) return queryGated<T>(ctx,sql,params)
+    const values = [...(params ?? [])]
+    const source = buildMemoryAccessPredicate(ctx,{ startIdx: values.length+1 })
+    const relation = `memory_viewer_rows AS MATERIALIZED (SELECT * FROM public.memories WHERE ${source.sql})`
+    const payload = sql.replace(/\bFROM\s+memories\b/gi,'FROM memory_viewer_rows')
+    // Legacy system/share readers have no protected-field actor. Materialize
+    // their permitted rows before any payload search/ranking/count expression.
+    const statement = /^\s*WITH\s/i.test(payload)
+      ? payload.replace(/^(\s*WITH(?:\s+RECURSIVE)?)\s+/i,`$1 ${relation}, `)
+      : `WITH ${relation} ${payload}`
+    return queryGated<T>(ctx,statement,[...values,...source.params])
+  }
+  const canonical = sql.replace(/\bFROM\s+memories\b/gi,'FROM public.memories')
+  return runWithAgentAccess({ workspaceId: ctx.workspaceId,userId: ctx.userId,
+    clearance: ctx.clearance ?? currentAgentAccess()?.clearance ?? 'confidential',
+    compartments: ctx.compartments,projectIds: ctx.projectIds,visibilityAssistantIds: ctx.visibilityAssistantIds,
+    departmentRead: ctx.departmentRead,sharedAudience: ctx.sharedAudience },() => queryGated<T>(ctx,canonical,params))
+}
+
+const MEMORY_QUERY_FIELDS=["id", "assistant_id", "user_id", "app_id", "workspace_id", "scope", "tags", "summary", "detail", "confidence", "sensitivity", "compartments", "project_ids", "scope_version", "scope_held", "source", "source_session_id", "recall_count", "useful_recall_count", "last_recalled_at", "created_at", "updated_at", "created_by_user_id", "created_by_assistant_id", "source_episode_id", "verified_by_user_id", "verified_at", "valid_from", "valid_to", "superseded_by", "retracted_at", "retracted_reason", "retracted_by", "original_scope", "original_sensitivity", "original_summary"] as const
+const MEMORY_INDEX_FIELDS=['id','summary','tags','app_id','scope','confidence','valid_to','scope_held','updated_at',
+ 'workspace_id','user_id','assistant_id','scope_version','sensitivity','compartments','project_ids'] as const
+const MEMORY_RANKED_FIELDS=[...MEMORY_INDEX_FIELDS,'created_at','last_recalled_at','recall_count'] as const
+const memoryQuerySource=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
+ sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),
+ resourceKind:z.enum(['memory','application_field','external_source']),resourceId:z.string().uuid(),version:z.string().min(1)}).strict()
+const memoryQueryCapture=z.object({row:z.record(z.unknown()).nullable(),sources:z.array(memoryQuerySource).min(1),source:memoryQuerySource.optional()}).strict()
+/** A complete metadata cohort precedes current source admission and any payload computation. */
+async function queryMemoryCollection<T extends pg.QueryResultRow>(ctx:AccessContext,sql:string,params:unknown[],authority?:SessionContextAuthority,fields:readonly string[]=MEMORY_QUERY_FIELDS):Promise<pg.QueryResult<T>>{
+ if(!authority)return queryMemoryViewer<T>(ctx,sql,params)
+ if(ctx.systemRead||currentApplicationReadTransaction(ctx)||!ctx.userId)throw new DerivedScopeError('scope_evidence_missing')
+ ctx=structuredClone(ctx);params=structuredClone(params)
+ const e=authority.execution
+  if(!(e.identity.kind==='delegated'||e.identity.kind==='attended'&&e.identity.principal.kind==='workspace_member')||e.ownership.kind!=='workspace'||e.security.access.userId!==ctx.userId
+   ||e.security.access.workspaceId!==ctx.workspaceId||e.assistant.id!==ctx.assistantId)throw new DerivedScopeError('scope_evidence_missing')
+ await e.security.authority.assertCurrent()
+ const discover=async(client?:pg.PoolClient)=>{
+  const statement='SELECT source FROM read_native_memory_query_metadata($1)'
+  const rows=(await(client?client.query<{source:unknown}>(statement,[ctx.workspaceId]):queryMemoryViewer<{source:unknown}>(ctx,statement,[ctx.workspaceId]))).rows
+  if(rows.length>4096)throw new DerivedScopeError('scope_evidence_missing')
+  return rows.map(row=>memoryQuerySource.parse(row.source))
+ }
+ const roots=await discover()
+ const run=async(client:pg.PoolClient)=>{
+
+   const requested=pinAccessCeiling({...authority.execution.security.access,...Object.fromEntries(Object.entries(ctx).filter(([,v])=>v!==undefined))})
+   const ceiling=intersectAccessCeilings(authority.execution.security.ceiling,requested)
+   await runWithAgentAccess({...authority.execution.security.access,...ceiling},()=>applyRLSGucs(client,ctx.userId))
+   if(JSON.stringify(await discover(client))!==JSON.stringify(roots))throw new DerivedScopeError('scope_source_changed')
+  const snapshots=(await client.query<{value:unknown}>('SELECT value FROM read_native_memory_query_projection($1,$2,$3)',
+   [ctx.workspaceId,[...fields],!!authority])).rows.map(row=>memoryQueryCapture.parse(row.value))
+  if(!snapshots.length||snapshots[0].row!==null||snapshots.some(row=>row.sources.some(source=>source.workspaceId!==ctx.workspaceId)))throw new DerivedScopeError('scope_evidence_missing')
+  const sources=snapshots.flatMap(row=>row.sources)
+  await authority.execution.security.authority.assertCurrent();await validateCallerScopeEvidence({sources},ceiling,client)
+  const admitted=snapshots.filter(row=>row.row!==null).map(row=>{if(row.source?.resourceKind!=='memory')throw new DerivedScopeError('scope_evidence_missing');return row.row})
+  const relation=`memory_viewer_rows AS MATERIALIZED (SELECT r.*,to_tsvector('simple',coalesce(r.summary,'')||' '||coalesce(r.detail,'')) AS search_vector
+   FROM jsonb_to_recordset($${params.length+1}::jsonb) AS r(id uuid,assistant_id uuid,user_id uuid,app_id text,workspace_id uuid,scope text,tags text[],summary text,detail text,confidence double precision,sensitivity text,compartments text[],project_ids uuid[],scope_version bigint,scope_held boolean,source text,source_session_id uuid,recall_count integer,useful_recall_count integer,last_recalled_at timestamptz,created_at timestamptz,updated_at timestamptz,created_by_user_id uuid,created_by_assistant_id uuid,source_episode_id uuid,verified_by_user_id uuid,verified_at timestamptz,valid_from timestamptz,valid_to timestamptz,superseded_by uuid,retracted_at timestamptz,retracted_reason text,retracted_by uuid,original_scope text,original_sensitivity text,original_summary text))`
+  const payload=sql.replace(/\bFROM\s+(?:public\.)?memories\b/gi,'FROM memory_viewer_rows')
+  const statement=/^\s*WITH\s/i.test(payload)?payload.replace(/^(\s*WITH(?:\s+RECURSIVE)?)\s+/i,`$1 ${relation}, `):`WITH ${relation} ${payload}`
+  const result=await client.query<T>(statement,[...params,JSON.stringify(admitted)])
+  for(const row of result.rows)bindScopeSources(row,sources)
+  bindScopeSources(result.rows,sources)
+  return{value:result,sources}
+ }
+ return readRetainedQueryFrame(authority,roots,run)
+}
+
+export async function getMemoryById(ctx: AccessContext, id: string, transactionClient?:pg.PoolClient,expectedVersion?:string,authority?:SessionContextAuthority): Promise<Memory | null> {
+  if(authority&&!transactionClient){
+    const e=authority.execution
+    if(ctx.systemRead||ctx.userId!==e.security.access.userId||ctx.workspaceId!==e.security.access.workspaceId||ctx.assistantId!==e.assistant.id)throw new DerivedScopeError('scope_evidence_missing')
+    const root=(await query<{source:ScopeSource|null}>("SELECT read_scope_source($1,'memory',$2) AS source",[ctx.workspaceId,id])).rows[0]?.source
+    if(!root)return null
+    return readRetainedContextFrame(authority,[root],client=>getMemoryById(ctx,id,client,root.version,authority))
+  }
   // valid_to IS NULL hides superseded versions (WU-2.2 / D.7). For
   // historical lookups use getMemoryHistory(id) instead.
   // WU-4.2b: universal projection (workspace + visibility-double +
   // optional clearance ceiling) keeps cross-workspace ID lookups
   // from leaking rows.
   const ap = buildMemoryAccessPredicate(ctx, { startIdx: 2 })
-  const result = await query<Memory>(
-    `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND ${ap.sql} AND valid_to IS NULL`,
-    [id, ...ap.params],
-  )
+  if(transactionClient&&ctx.systemRead)throw new Error('scope_operation_denied')
+  const sql=`SELECT ${MEMORY_SELECT} FROM public.memories WHERE id = $1 AND ${ap.sql} AND valid_to IS NULL`
+  if(transactionClient){
+    if(!authority||!expectedVersion)throw new DerivedScopeError('scope_evidence_missing')
+    const requested=pinAccessCeiling({...authority.execution.security.access,...Object.fromEntries(Object.entries(ctx).filter(([,value])=>value!==undefined))})
+    const ceiling=intersectAccessCeilings(authority.execution.security.ceiling,requested)
+    await runWithAgentAccess({...authority.execution.security.access,...ceiling},()=>applyRLSGucs(transactionClient,ctx.userId))
+    const raw=(await transactionClient.query<{value:unknown}>('SELECT read_native_memory_point_projection($1,$2,$3) AS value',[ctx.workspaceId,id,expectedVersion])).rows[0]?.value
+    if(raw===null||raw===undefined)return null
+    const captured=memoryQueryCapture.parse(raw)
+    if(!captured.row||captured.source?.resourceKind!=='memory'||captured.source.resourceId!==id||captured.source.version!==expectedVersion
+      ||captured.sources.some(source=>source.workspaceId!==ctx.workspaceId))throw new DerivedScopeError('scope_evidence_missing')
+    await authority.execution.security.authority.assertCurrent()
+    await validateCallerScopeEvidence({sources:captured.sources},ceiling,transactionClient)
+    const values=[id,...ap.params,JSON.stringify(captured.row)]
+    const result=await transactionClient.query<Memory>(sql.replace('FROM public.memories',`FROM jsonb_populate_record(NULL::public.memories,$${values.length}::jsonb)`),values)
+    for(const row of result.rows)bindScopeSources(row,captured.sources)
+    return result.rows[0]??null
+  }
+  const result=await queryMemoryViewer<Memory>(ctx,sql,[id,...ap.params])
   return result.rows[0] ?? null
 }
 
@@ -658,7 +770,8 @@ export async function getMemoryById(ctx: AccessContext, id: string): Promise<Mem
  */
 export async function getMemoryByIdSystem(id: string): Promise<Memory | null> {
   const result = await query<Memory>(
-    `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND valid_to IS NULL AND NOT scope_held`,
+    `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND valid_to IS NULL AND NOT scope_held
+       AND public.application_memory_unproven_ancestry_allows(workspace_id,id,scope_version::text)`,
     [id],
   )
   return result.rows[0] ?? null
@@ -673,6 +786,7 @@ export async function getMemoryByIdSystem(id: string): Promise<Memory | null> {
 export async function searchMemories(
   ctx: AccessContext,
   params: { searchQuery: string; limit?: number },
+  authority?:SessionContextAuthority,
 ): Promise<Memory[]> {
   const limit = params.limit ?? 10
   const raw = params.searchQuery.trim()
@@ -691,7 +805,7 @@ export async function searchMemories(
     const ap = buildMemoryAccessPredicate(ctx)
     const tsqIdx = ap.nextIdx
     const limIdx = ap.nextIdx + 1
-    const result = await query<Memory>(
+    const result = await queryMemoryCollection<Memory>(ctx,
       `SELECT ${MEMORY_SELECT},
               ts_rank(search_vector, to_tsquery('simple', $${tsqIdx})) as rank
        FROM memories
@@ -701,6 +815,7 @@ export async function searchMemories(
        ORDER BY rank DESC
        LIMIT $${limIdx}`,
       [...ap.params, prefixTerms, limit],
+    authority,
     )
     if (result.rows.length > 0) return result.rows
   }
@@ -710,7 +825,7 @@ export async function searchMemories(
   const likeIdx = ap.nextIdx
   const tagIdx = ap.nextIdx + 1
   const limIdx = ap.nextIdx + 2
-  const result = await query<Memory>(
+  const result = await queryMemoryCollection<Memory>(ctx,
     `SELECT ${MEMORY_SELECT}
      FROM memories
      WHERE ${ap.sql}
@@ -719,6 +834,7 @@ export async function searchMemories(
      ORDER BY updated_at DESC
      LIMIT $${limIdx}`,
     [...ap.params, `%${raw}%`, raw, limit],
+    authority,
   )
   return result.rows
 }
@@ -730,18 +846,20 @@ export async function searchMemories(
 export async function searchMemoriesByIdPrefix(
   ctx: AccessContext,
   params: { idPrefix: string; limit?: number },
+  authority?:SessionContextAuthority,
 ): Promise<Memory[]> {
   const limit = params.limit ?? 1
   const ap = buildMemoryAccessPredicate(ctx)
   const pfxIdx = ap.nextIdx
   const limIdx = ap.nextIdx + 1
-  const result = await query<Memory>(
+  const result = await queryMemoryCollection<Memory>(ctx,
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE ${ap.sql}
        AND valid_to IS NULL
        AND id::text LIKE $${pfxIdx} || '%'
      LIMIT $${limIdx}`,
     [...ap.params, params.idPrefix, limit],
+    authority,
   )
   return result.rows
 }
@@ -762,7 +880,7 @@ export async function searchMemoriesByIdPrefix(
  * `## Identity` block then renders nothing — same observable result
  * as a pre-Phase-2 user with no identity memories.
  */
-export async function getIdentityMemories(ctx: AccessContext): Promise<Array<
+export async function getIdentityMemories(ctx: AccessContext,authority?:SessionContextAuthority): Promise<Array<
   Omit<Memory, 'userId' | 'assistantId'> & { userId: string | null; assistantId: string | null; scopeSource: ScopeSource }
 >> {
   // Resolve the self entity for this (user, workspace). Phase 2 data
@@ -770,20 +888,7 @@ export async function getIdentityMemories(ctx: AccessContext): Promise<Array<
   // legacy identity rows; future users get one on first
   // `updateSelfProfile` call.
   const access = buildAccessPredicate(ctx, { alias: 'e' })
-  const selfRow = await query<{
-    entityId: string
-    displayName: string
-    attributes: Record<string, unknown>
-    sensitivity: Sensitivity
-    workspaceId: string
-    userId: string | null
-    assistantId: string | null
-    compartments: string[]
-    projectIds: string[]
-    scopeVersion: string
-    updatedAt: Date
-  }>(
-    `SELECT e.id AS "entityId",
+  const statement = `SELECT e.id AS "entityId",
             e.display_name AS "displayName",
             e.attributes,
             e.sensitivity,
@@ -800,10 +905,57 @@ export async function getIdentityMemories(ctx: AccessContext): Promise<Array<
        AND e.retracted_at IS NULL
        AND e.scope_held = false
        AND e.attributes->>'self' = 'true'
-     LIMIT 1`,
-    [...access.params, ctx.userId, ctx.workspaceId],
-  )
-  if (selfRow.rows.length === 0) return []
+     LIMIT 1`
+  const parameters = [...access.params, ctx.userId, ctx.workspaceId]
+  type IdentityRow = {
+    entityId: string
+    displayName: string
+    attributes: Record<string, unknown>
+    sensitivity: Sensitivity
+    workspaceId: string
+    userId: string | null
+    assistantId: string | null
+    compartments: string[]
+    projectIds: string[]
+    scopeVersion: string
+    updatedAt: Date
+  }
+  let selfRow:pg.QueryResult<IdentityRow>
+  if(authority){
+    const e=authority.execution
+    const nativeAttended=e.identity.kind==='attended'&&e.identity.principal.kind==='workspace_member'
+    const nativeDelegated=e.identity.kind==='delegated'&&e.identity.actorUserId===e.security.access.userId
+      &&e.identity.parentCeiling.userId===e.security.access.userId
+      &&e.identity.parentCeiling.workspaceId===e.security.access.workspaceId
+      &&e.security.access.assistantId===e.assistant.id&&!e.surface.systemRead&&!e.security.access.systemRead
+      &&!e.surface.clientSelfMemory&&!getApplicationExecutionBinding(e)
+    if(ctx.systemRead||currentApplicationReadTransaction(ctx)||ctx.userId!==e.security.access.userId
+      ||ctx.workspaceId!==e.security.access.workspaceId||ctx.assistantId!==e.assistant.id
+      ||!nativeAttended&&!nativeDelegated||e.ownership.kind!=='workspace'
+      ||e.ownership.workspaceId!==e.security.access.workspaceId)throw new DerivedScopeError('scope_evidence_missing')
+    await e.security.authority.assertCurrent()
+    // Discover only canonical identity/scope metadata. Self/attribute predicates
+    // run later over admitted CRM snapshots, never over raw profile plaintext.
+    const root=(await query<{source:ScopeSource|null}>(`SELECT read_scope_source($${access.nextIdx+1},'entity',u.entity_id) AS source
+      FROM users u JOIN entities e ON e.id=u.entity_id
+      WHERE ${access.sql} AND u.id=$${access.nextIdx} AND e.workspace_id=$${access.nextIdx+1}
+        AND e.valid_to IS NULL AND e.retracted_at IS NULL AND NOT e.scope_held`,parameters)).rows[0]?.source
+    if(!root)return []
+    selfRow=await readRetainedContextFrame(authority,[root],async client=>{
+      const requested=pinAccessCeiling({...e.security.access,...Object.fromEntries(Object.entries(ctx).filter(([,v])=>v!==undefined))})
+      const ceiling=intersectAccessCeilings(e.security.ceiling,requested)
+      await runWithAgentAccess({...e.security.access,...ceiling},()=>applyRLSGucs(client,ctx.userId))
+      const result=await queryLegacyCanonicalCrmSql<IdentityRow>(ctx,[{type:'person',fields:'all',ids:[root.resourceId]}],statement,parameters,client)
+      if(result.rows.some(row=>row.entityId!==root.resourceId||row.scopeVersion!==root.version))throw new DerivedScopeError('scope_source_changed')
+      await e.security.authority.assertCurrent()
+      await validateCallerScopeEvidence({sources:[root,...boundScopeSources(result)]},ceiling,client)
+      bindScopeSources(result.rows,[root,...boundScopeSources(result)])
+      return result
+    })
+    // Each synthetic row carries the admitted evidence; the caller notes it
+    // after parallel read frames finish, before context building or model input.
+  }else selfRow=await queryMemoryViewer<IdentityRow>(ctx,statement,parameters)
+  if (selfRow.rows.length === 0) return bindScopeSources([],boundScopeSources(selfRow.rows))
   const self = selfRow.rows[0]
 
   // Render each attribute as one Memory row. Skip `self` (the
@@ -866,7 +1018,8 @@ export async function getIdentityMemories(ctx: AccessContext): Promise<Array<
       originalSummary: null,
     })
   }
-  return out
+  for(const row of out)bindScopeSources(row,boundScopeSources(selfRow.rows))
+  return bindScopeSources(out,boundScopeSources(selfRow.rows))
 }
 
 /** Render one self-entity attribute as a natural-language identity line. */
@@ -905,7 +1058,7 @@ function humaniseSelfAttribute(key: string, value: string): string {
 export async function getSelfEntityId(ctx: AccessContext): Promise<string | null> {
   if (!ctx.workspaceId) return null
   const access = buildAccessPredicate(ctx, { alias: 'e' })
-  const result = await query<{ id: string }>(
+  const result = await queryMemoryViewer<{ id: string }>(ctx,
     `SELECT e.id
      FROM users u
      JOIN entities e ON e.id = u.entity_id
@@ -933,11 +1086,12 @@ export async function getMemoryIndex(
   ctx: AccessContext,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _validOnly: boolean = false, // WU-2.6 contract surface; WU-2.2 always-filters at SQL so this is a no-op
+  authority?:SessionContextAuthority,
 ): Promise<Array<{
   id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string
 }>> {
   const ap = buildMemoryAccessPredicate(ctx)
-  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string }>(
+  const result = await queryMemoryCollection<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string }>(ctx,
     `SELECT id, summary, tags, app_id as "appId", sensitivity, compartments,
             project_ids as "projectIds", workspace_id AS "workspaceId", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion"
      FROM memories
@@ -947,6 +1101,7 @@ export async function getMemoryIndex(
        AND confidence > 0
      ORDER BY updated_at DESC`,
     [...ap.params],
+    authority,MEMORY_INDEX_FIELDS,
   )
   return result.rows
 }
@@ -1005,6 +1160,7 @@ export async function getMemoryIndexSystem(
      FROM memories
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2
        AND valid_to IS NULL AND NOT scope_held
+       AND public.application_memory_unproven_ancestry_allows(workspace_id,id,scope_version::text)
        AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)
        AND confidence > 0
      ORDER BY updated_at DESC`,
@@ -1031,6 +1187,7 @@ export async function getMemoryIndexSystem(
 export async function getMemoryIndexRanked(
   ctx: AccessContext,
   limit: number,
+  authority?:SessionContextAuthority,
 ): Promise<{
   rows: Array<{ id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; createdAt: Date;
     workspaceId: string; userId: string | null; assistantId: string | null; scopeVersion: string }>
@@ -1038,10 +1195,10 @@ export async function getMemoryIndexRanked(
 }> {
   const ap = buildMemoryAccessPredicate(ctx)
   const limIdx = ap.nextIdx
-  const result = await query<{
+  const result = await queryMemoryCollection<{
     id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; createdAt: Date; total: string;
     workspaceId: string; userId: string | null; assistantId: string | null; scopeVersion: string
-  }>(
+  }>(ctx,
     `SELECT id, summary, tags, sensitivity, compartments,
             workspace_id AS "workspaceId", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion",
             project_ids as "projectIds",
@@ -1054,6 +1211,7 @@ export async function getMemoryIndexRanked(
      ORDER BY last_recalled_at DESC NULLS LAST, recall_count DESC, updated_at DESC
      LIMIT $${limIdx}`,
     [...ap.params, limit],
+    authority,MEMORY_RANKED_FIELDS,
   )
   const totalCount = result.rows.length > 0 ? Number(result.rows[0].total) : 0
   const rows = result.rows.map((r) => ({
@@ -1061,7 +1219,9 @@ export async function getMemoryIndexRanked(
     compartments: r.compartments, projectIds: r.projectIds, createdAt: r.createdAt,
     workspaceId: r.workspaceId, userId: r.userId, assistantId: r.assistantId, scopeVersion: r.scopeVersion,
   }))
-  return { rows, totalCount }
+  for(const row of rows)bindScopeSources(row,boundScopeSources(result.rows))
+  bindScopeSources(rows,boundScopeSources(result.rows))
+  return bindScopeSources({ rows, totalCount },boundScopeSources(result.rows))
 }
 
 /**
@@ -1107,6 +1267,7 @@ export async function trackRecallOutcome(memoryId: string, useful: boolean): Pro
 export async function listMemories(
   ctx: AccessContext,
   params: { tag?: string; scope?: string; limit?: number; offset?: number } = {},
+  authority?:SessionContextAuthority,
 ): Promise<{ memories: Memory[]; total: number }> {
   const limit = params.limit ?? 20
   const offset = params.offset ?? 0
@@ -1120,21 +1281,22 @@ export async function listMemories(
 
   const where = conditions.join(' AND ')
 
-  const countResult = await query<{ count: string }>(
+  const countResult = await queryMemoryCollection<{ count: string }>(ctx,
     `SELECT count(*)::text FROM memories WHERE ${where}`,
-    values,
+    values,authority,
   )
   const total = parseInt(countResult.rows[0].count, 10)
 
   values.push(limit, offset)
-  const result = await query<Memory>(
+  const result = await queryMemoryCollection<Memory>(ctx,
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE ${where}
      ORDER BY updated_at DESC
      LIMIT $${idx} OFFSET $${idx + 1}`,
-    values,
+    values,authority,
   )
-  return { memories: result.rows, total }
+  bindScopeSources(result.rows,boundScopeSources(countResult.rows))
+  return bindScopeSources({ memories:result.rows,total },[...boundScopeSources(countResult.rows),...boundScopeSources(result.rows)])
 }
 
 /**
@@ -1212,10 +1374,57 @@ export async function deleteMemory(
  * successor — a defensive edge case that should not arise from normal
  * supersession but can if a tombstone was applied directly via SQL.
  */
-export async function getMemoryHistory(id: string): Promise<{
+export async function getMemoryHistory(id: string, access?:AccessContext, authority?:SessionContextAuthority): Promise<{
   chain: Memory[]
   currentId: string | null
 }> {
+  if (authority) {
+    const {execution}=authority
+    if (!access || access.systemRead || access.userId!==execution.security.access.userId
+      || access.workspaceId!==execution.security.access.workspaceId || access.assistantId!==execution.assistant.id) throw new DerivedScopeError('scope_evidence_missing')
+    const highWater=structuredClone(authority.accumulator.evidence)
+    await execution.security.authority.assertCurrent()
+    const metadata=(await query<{id:string;source:ScopeSource;reasons:ScopeSource[][]}>(`WITH RECURSIVE forward(id,next_id,depth) AS (
+      SELECT id,superseded_by,1 FROM memories WHERE id=$1 AND workspace_id=$2
+      UNION ALL SELECT m.id,m.superseded_by,f.depth+1 FROM memories m JOIN forward f ON m.id=f.next_id WHERE m.workspace_id=$2 AND f.depth<100),
+      backward(id,depth) AS (
+      SELECT id,1 FROM memories WHERE id=$1 AND workspace_id=$2
+      UNION ALL SELECT m.id,b.depth+1 FROM memories m JOIN backward b ON m.superseded_by=b.id WHERE m.workspace_id=$2 AND b.depth<100),
+      chain AS (SELECT id FROM forward UNION SELECT id FROM backward)
+      SELECT id,read_scope_source($2,'memory',id) AS source,
+        ARRAY(SELECT a.native_memory_transition->'reasonEvidence'->'sources'
+          FROM correction_audit a WHERE a.workspace_id=$2 AND a.row_id=chain.id
+            AND a.primitive='memory' AND a.action='retract') AS reasons
+      FROM chain`,[id,access.workspaceId])).rows
+    if (metadata.length>=100) throw new DerivedScopeError('scope_evidence_missing')
+    const initial=metadata.map(row=>({...row.source,resourceKind:'memory' as const,resourceId:row.id}))
+    // Immutable reason evidence is discovery metadata, never an admission proof.
+    // Include its external ancestors so the normal retained frame can pin them.
+    const reasons=metadata.flatMap(row=>row.reasons.filter(Boolean).flat())
+    const discovery=[...initial,...reasons,...(highWater.sources??[])]
+    const fields=await readApplicationFieldAncestors(access.workspaceId,discovery)
+    const roots=[...discovery.filter(source=>source.resourceKind==='external_source'),
+      ...await readExternalSourceAncestors(access.workspaceId,[...discovery,...fields])]
+    return readRetainedQueryFrame(authority,roots,async client=>{
+      await validateCallerScopeEvidence(highWater,execution.security.ceiling,client)
+      const chain:Memory[]=[],sources:ScopeSource[]=[]
+      for (const root of initial) {
+        const raw=(await client.query<{value:unknown}>('SELECT read_native_memory_history_projection($1,$2,$3) AS value',
+          [access.workspaceId,root.resourceId,root.version])).rows[0]?.value
+        if (!raw) throw new DerivedScopeError('scope_source_changed')
+        const captured=memoryQueryCapture.parse(raw)
+        if (!captured.row || captured.source?.resourceKind!=='memory' || captured.source.resourceId!==root.resourceId
+          || captured.source.version!==root.version || captured.sources.some(source=>source.workspaceId!==access.workspaceId)) throw new DerivedScopeError('scope_evidence_missing')
+        const row=(await client.query<Memory>(`SELECT ${MEMORY_SELECT} FROM jsonb_populate_record(NULL::public.memories,$1::jsonb)`,[JSON.stringify(captured.row)])).rows[0]
+        if (!row) throw new DerivedScopeError('scope_evidence_missing')
+        bindScopeSources(row,captured.sources);chain.push(row);sources.push(...captured.sources)
+      }
+      await validateCallerScopeEvidence({...highWater,sources:[...(highWater.sources??[]),...sources]},execution.security.ceiling,client)
+      chain.sort((a,b)=>a.validFrom.getTime()-b.validFrom.getTime() || a.createdAt.getTime()-b.createdAt.getTime())
+      bindScopeSources(chain,sources)
+      return {value:bindScopeSources({chain,currentId:chain.find(row=>row.validTo===null)?.id??null},sources),sources}
+    })
+  }
   // Postgres requires UNION ALL inside recursive CTEs; the outer UNION
   // (non-recursive) dedups the seed row that appears in both walks.
   const result = await query<Memory>(
@@ -1309,6 +1518,7 @@ export async function listUnverifiedByWorkspace(
   ctx: AccessContext,
   limit: number,
   cursor?: { createdAt: Date; id: string },
+  authority?:SessionContextAuthority,
 ): Promise<Memory[]> {
   const values: unknown[] = [ctx.workspaceId]
   let cursorClause = ''
@@ -1322,7 +1532,7 @@ export async function listUnverifiedByWorkspace(
   const limitIndex=values.length
   const ap=buildMemoryAccessPredicate(ctx,{startIdx:limitIndex+1})
   values.push(...ap.params)
-  const result = await query<Memory>(
+  const result = await queryMemoryCollection<Memory>(ctx,
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE workspace_id = $1
        AND verified_by_user_id IS NULL
@@ -1332,7 +1542,7 @@ export async function listUnverifiedByWorkspace(
        ${cursorClause}
      ORDER BY created_at DESC, id DESC
      LIMIT $${limitIndex}`,
-    values,
+    values,authority,
   )
   return result.rows
 }
@@ -1349,7 +1559,7 @@ export async function countUnverifiedByWorkspace(
   ctx: AccessContext,
 ): Promise<number> {
   const ap=buildMemoryAccessPredicate(ctx,{startIdx:2})
-  const result = await query<{ count: string }>(
+  const result = await queryMemoryViewer<{ count: string }>(ctx,
     `SELECT count(*)::text AS count FROM memories
      WHERE workspace_id = $1
        AND verified_by_user_id IS NULL
@@ -1437,7 +1647,7 @@ export async function listCronContextCandidatesForPrune(
  */
 export async function countMemories(ctx: AccessContext): Promise<number> {
   const ap = buildMemoryAccessPredicate(ctx)
-  const result = await query<{ count: string }>(
+  const result = await queryMemoryViewer<{ count: string }>(ctx,
     `SELECT count(*)::text FROM memories
      WHERE ${ap.sql} AND valid_to IS NULL`,
     [...ap.params],
@@ -1457,7 +1667,7 @@ export async function getMemoryStats(ctx: AccessContext): Promise<{
   totalRecalls: number
 }> {
   const ap = buildMemoryAccessPredicate(ctx)
-  const result = await query<{ count: string; recalls: string }>(
+  const result = await queryMemoryViewer<{ count: string; recalls: string }>(ctx,
     `SELECT count(*)::text, coalesce(sum(recall_count), 0)::text as recalls
      FROM memories
      WHERE ${ap.sql} AND valid_to IS NULL`,
@@ -1947,7 +2157,7 @@ export async function getWorkspaceIdentityMemories(ctx: AccessContext): Promise<
   // no rows here. Per-individual identity lives on the user's self
   // entity (see `getIdentityMemories`).
   const ap = buildMemoryAccessPredicate(ctx)
-  const result = await query<Memory>(
+  const result = await queryMemoryViewer<Memory>(ctx,
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE ${ap.sql}
        AND scope = 'workspace'
@@ -1963,11 +2173,12 @@ export async function getWorkspaceMemoryIndex(
   ctx: AccessContext,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _validOnly: boolean = false, // WU-2.6 contract surface; WU-2.2 always-filters at SQL so this is a no-op
+  authority?:SessionContextAuthority,
 ): Promise<Array<{
   id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string
 }>> {
   const ap = buildMemoryAccessPredicate(ctx)
-  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string }>(
+  const result = await queryMemoryCollection<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string }>(ctx,
     `SELECT id, summary, tags, app_id as "appId", sensitivity, compartments,
             project_ids as "projectIds", workspace_id AS "workspaceId", user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion"
      FROM memories
@@ -1977,6 +2188,7 @@ export async function getWorkspaceMemoryIndex(
        AND confidence > 0
      ORDER BY updated_at DESC`,
     [...ap.params],
+    authority,MEMORY_INDEX_FIELDS,
   )
   return result.rows
 }
@@ -2005,6 +2217,7 @@ export async function getWorkspaceMemoryIndexSystem(
      FROM memories
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2
        AND valid_to IS NULL AND NOT scope_held
+       AND public.application_memory_unproven_ancestry_allows(workspace_id,id,scope_version::text)
        AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)
        AND confidence > 0
        ${excludeExternalPrincipalsSql('memories.user_id')}
@@ -2030,7 +2243,7 @@ export async function getWorkspaceMemoriesByCategory(
 ): Promise<Memory[]> {
   const ap = buildMemoryAccessPredicate(ctx)
   const tagIdx = ap.nextIdx
-  const result = await query<Memory>(
+  const result = await queryMemoryViewer<Memory>(ctx,
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE ${ap.sql}
        AND $${tagIdx} = ANY(tags)
@@ -2044,6 +2257,7 @@ export async function getWorkspaceMemoriesByCategory(
 export async function searchWorkspaceMemories(
   ctx: AccessContext,
   params: { searchQuery: string; limit?: number },
+  authority?:SessionContextAuthority,
 ): Promise<Memory[]> {
   const limit = params.limit ?? 5
   const raw = params.searchQuery.trim()
@@ -2061,7 +2275,7 @@ export async function searchWorkspaceMemories(
     const ap = buildMemoryAccessPredicate(ctx)
     const tsqIdx = ap.nextIdx
     const limIdx = ap.nextIdx + 1
-    const result = await query<Memory>(
+    const result = await queryMemoryCollection<Memory>(ctx,
       `SELECT ${MEMORY_SELECT},
               ts_rank(search_vector, to_tsquery('simple', $${tsqIdx})) as rank
        FROM memories
@@ -2071,6 +2285,7 @@ export async function searchWorkspaceMemories(
        ORDER BY rank DESC
        LIMIT $${limIdx}`,
       [...ap.params, prefixTerms, limit],
+    authority,
     )
     if (result.rows.length > 0) return result.rows
   }
@@ -2079,7 +2294,7 @@ export async function searchWorkspaceMemories(
   const likeIdx = ap.nextIdx
   const tagIdx = ap.nextIdx + 1
   const limIdx = ap.nextIdx + 2
-  const result = await query<Memory>(
+  const result = await queryMemoryCollection<Memory>(ctx,
     `SELECT ${MEMORY_SELECT}
      FROM memories
      WHERE ${ap.sql}
@@ -2088,6 +2303,7 @@ export async function searchWorkspaceMemories(
      ORDER BY updated_at DESC
      LIMIT $${limIdx}`,
     [...ap.params, `%${raw}%`, raw, limit],
+    authority,
   )
   return result.rows
 }
@@ -2159,18 +2375,20 @@ export async function searchMemoriesByWorkspaceSystem(params: {
 export async function searchWorkspaceMemoriesByIdPrefix(
   ctx: AccessContext,
   params: { idPrefix: string; limit?: number },
+  authority?:SessionContextAuthority,
 ): Promise<Memory[]> {
   const limit = params.limit ?? 1
   const ap = buildMemoryAccessPredicate(ctx)
   const pfxIdx = ap.nextIdx
   const limIdx = ap.nextIdx + 1
-  const result = await query<Memory>(
+  const result = await queryMemoryCollection<Memory>(ctx,
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE ${ap.sql}
        AND valid_to IS NULL
        AND id::text LIKE $${pfxIdx} || '%'
      LIMIT $${limIdx}`,
     [...ap.params, params.idPrefix, limit],
+    authority,
   )
   return result.rows
 }
@@ -2181,6 +2399,7 @@ export async function searchWorkspaceMemoriesByIdPrefix(
 export async function listWorkspaceMemories(
   ctx: AccessContext,
   params: { tag?: string; limit?: number; offset?: number } = {},
+  authority?:SessionContextAuthority,
 ): Promise<{ memories: Memory[]; total: number }> {
   const limit = params.limit ?? 20
   const offset = params.offset ?? 0
@@ -2194,21 +2413,22 @@ export async function listWorkspaceMemories(
 
   const where = conditions.join(' AND ')
 
-  const countResult = await query<{ count: string }>(
+  const countResult = await queryMemoryCollection<{ count: string }>(ctx,
     `SELECT count(*)::text FROM memories WHERE ${where}`,
-    values,
+    values,authority,
   )
   const total = parseInt(countResult.rows[0].count, 10)
 
   values.push(limit, offset)
-  const result = await query<Memory>(
+  const result = await queryMemoryCollection<Memory>(ctx,
     `SELECT ${MEMORY_SELECT} FROM memories
      WHERE ${where}
      ORDER BY updated_at DESC
      LIMIT $${idx} OFFSET $${idx + 1}`,
-    values,
+    values,authority,
   )
-  return { memories: result.rows, total }
+  bindScopeSources(result.rows,boundScopeSources(countResult.rows))
+  return bindScopeSources({ memories:result.rows,total },[...boundScopeSources(countResult.rows),...boundScopeSources(result.rows)])
 }
 
 /**
@@ -2216,7 +2436,7 @@ export async function listWorkspaceMemories(
  */
 export async function countWorkspaceMemories(ctx: AccessContext): Promise<number> {
   const ap = buildMemoryAccessPredicate(ctx)
-  const result = await query<{ count: string }>(
+  const result = await queryMemoryViewer<{ count: string }>(ctx,
     `SELECT count(*)::text FROM memories
      WHERE ${ap.sql} AND valid_to IS NULL`,
     [...ap.params],

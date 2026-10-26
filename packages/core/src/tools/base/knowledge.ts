@@ -22,7 +22,7 @@ import type {
 } from '../../knowledge/types.js'
 import { unifiedDiffLines } from '../../knowledge/text-diff.js'
 import { RANK, researchWriteFloor, type Sensitivity } from '../../security/sensitivity.js'
-import { resolveWriteScope, scopeEvidenceFromRows } from '../../security/context-scope.js'
+import { ContextScopeAccumulator, resolveWriteScope, scopeEvidenceFromRows } from '../../security/context-scope.js'
 
 export type KnowledgeToolOptions = {
   /** Whether any sync source is connected for this workspace. */
@@ -115,7 +115,14 @@ type KnowledgeRepoWriteFailure = Extract<KnowledgeRepoWriteResult, { ok: false }
 type KnowledgeRepoWriteReason = KnowledgeRepoWriteFailure['reason']
 
 /** The writer's own message plus the verdict its `reason` implies. */
-function repoWriteFailure(result: KnowledgeRepoWriteFailure): { data: string; isError: true } {
+function repoWriteFailure(result: KnowledgeRepoWriteFailure): { data: string; isError: true; meta?: { retrySafe: false; operationMayHaveExecuted: true } } {
+  if (result.retrySafe === false || result.operationMayHaveExecuted === true) {
+    return {
+      data: `${result.message} (${result.reason}) Do not retry this write blindly. Check the source to reconcile what exists before considering another write; a failed mirror does not undo a source write.`,
+      isError: true,
+      meta: { retrySafe: false, operationMayHaveExecuted: true },
+    }
+  }
   const verdict = REPO_WRITE_VERDICT[result.reason] ?? REPO_WRITE_VERDICT.error
   return { data: `${result.message} (${result.reason}) ${verdict}`, isError: true }
 }
@@ -191,9 +198,10 @@ export function createKnowledgeTools(
           },
           input.query,
           10,
+          ...(context.executionContext&&context.scopeAccumulator?[{execution:context.executionContext,accumulator:context.scopeAccumulator}] as const:[] as const),
         )
         if (results.length === 0) {
-          return { data: 'No knowledge entries found for this query. Try browseKnowledge to explore the knowledge base structure.' }
+          return { data: 'No knowledge entries found for this query. Try browseKnowledge to explore the knowledge base structure.',scopeEvidence:scopeEvidenceFromRows([results]) }
         }
         return {
           data: results.map((r) => ({
@@ -203,7 +211,7 @@ export function createKnowledgeTools(
             summary: r.summary,
             tags: r.tags,
           })),
-          scopeEvidence: scopeEvidenceFromRows(results),
+          scopeEvidence: scopeEvidenceFromRows([results]),
         }
       } catch (err) {
         return toolFailure(err, {
@@ -242,9 +250,10 @@ export function createKnowledgeTools(
             projectIds: context.projectIds,
           },
           input.path ?? '',
+          ...(context.executionContext&&context.scopeAccumulator?[{execution:context.executionContext,accumulator:context.scopeAccumulator}] as const:[] as const),
         )
         if (entries.length === 0) {
-          return { data: input.path ? `No entries found at path "${input.path}".` : 'The knowledge base is empty.' }
+          return { data: input.path ? `No entries found at path "${input.path}".` : 'The knowledge base is empty.',scopeEvidence:scopeEvidenceFromRows([entries]) }
         }
         return {
           data: entries.map((r) => ({
@@ -253,7 +262,7 @@ export function createKnowledgeTools(
             title: r.title,
             summary: r.summary,
           })),
-          scopeEvidence: scopeEvidenceFromRows(entries),
+          scopeEvidence: scopeEvidenceFromRows([entries]),
         }
       } catch (err) {
         return toolFailure(err, {
@@ -292,6 +301,8 @@ export function createKnowledgeTools(
             projectIds: context.projectIds,
           },
           input.id,
+          context.executionContext && context.scopeAccumulator
+            ? {execution:context.executionContext,accumulator:context.scopeAccumulator} : undefined,
         )
         if (!entry) {
           return {
@@ -339,6 +350,8 @@ export function createKnowledgeTools(
         projectIds: context.projectIds,
       },
       id,
+      context.executionContext && context.scopeAccumulator
+        ? {execution:context.executionContext,accumulator:context.scopeAccumulator} : undefined,
     )
   }
 
@@ -508,6 +521,7 @@ export function createKnowledgeTools(
           body: input.content,
         })
         const result = await opts.repoWriter.commitEntryCreate({
+          ...(context.executionContext && context.scopeAccumulator ? { authority: { execution: context.executionContext, accumulator: context.scopeAccumulator } } : {}),
           workspaceId: context.workspaceId,
           sourceId: target.id,
           path: input.path,
@@ -535,6 +549,8 @@ export function createKnowledgeTools(
       }
 
       try {
+        const consumed=new ContextScopeAccumulator(context.executionContext?.security.provenance)
+        consumed.note(context.scopeAccumulator?.evidence)
         const entry = await store.create({
           workspaceId: context.workspaceId,
           path: input.path,
@@ -545,9 +561,15 @@ export function createKnowledgeTools(
           compartments: writeStamp.compartments,
           projectIds: writeStamp.projectIds,
           createdBy: context.userId,
-        })
-        return { data: { id: entry.id, path: entry.path, sensitivity: stamp, message: 'Knowledge entry created.' } }
+          actorId:context.userId,writtenBy:'system',
+          derivation:{producer:'tool:addKnowledgeEntry',sources:consumed.evidence.sources??[]},
+        },context.executionContext&&context.scopeAccumulator?{execution:context.executionContext,accumulator:context.scopeAccumulator}:undefined)
+        return { data: { id: entry.id, path: entry.path, sensitivity: entry.sensitivity??stamp, message: 'Knowledge entry created.' },scopeEvidence:scopeEvidenceFromRows([entry]) }
       } catch (err) {
+        if(typeof err==='object'&&err!==null&&'operationMayHaveExecuted'in err&&err.operationMayHaveExecuted===true){
+          return{isError:true,meta:{retrySafe:false,operationMayHaveExecuted:true},
+            data:'Knowledge creation may have committed, but current access could not be confirmed. Do not repeat the write. Check the existing entry with current access before deciding what to do next.'}
+        }
         return toolFailure(err, {
           tool: 'addKnowledgeEntry',
           target: `path "${input.path}"`,
@@ -700,9 +722,11 @@ export function createKnowledgeTools(
             isError: true,
           }
         }
+        context.scopeAccumulator?.note(scopeEvidenceFromRows([entry]))
         const result = await opts.repoWriter.commitEntryUpdate({
+          ...(context.executionContext && context.scopeAccumulator ? { authority: { execution: context.executionContext, accumulator: context.scopeAccumulator } } : {}),
           workspaceId: context.workspaceId,
-          entry: { id: entry.id, path: entry.path, content: entry.content, sourceId: entry.sourceId },
+          entry: { id: entry.id, ...(entry.scopeVersion ? { scopeVersion: entry.scopeVersion } : {}), path: entry.path, content: entry.content, sourceId: entry.sourceId },
           newBody: input.content,
           changeSummary: input.changeSummary,
           compartments: successorStamp.compartments,
@@ -726,8 +750,12 @@ export function createKnowledgeTools(
       }
 
       // Manual entry — targeted body-only store update (title / tags /
-      // sensitivity / compartments / related links untouched).
+      // sensitivity / related links preserved; Team/Project floors may grow).
       try {
+        // This mandatory read influenced the replacement even if it was internal.
+        context.scopeAccumulator?.note(scopeEvidenceFromRows([entry]))
+        const consumed=new ContextScopeAccumulator(context.executionContext?.security.provenance)
+        consumed.note(context.scopeAccumulator?.evidence)
         const updated = await store.updateManualEntryContent(
           context.workspaceId,
           entry.id,
@@ -735,7 +763,10 @@ export function createKnowledgeTools(
           {
             compartments: successorStamp.compartments,
             projectIds: successorStamp.projectIds,
+            actorId:context.userId,writtenBy:'system',expectedVersion:entry.scopeVersion,
+            derivation:{producer:'tool:updateKnowledgeEntry',sources:consumed.evidence.sources??[]},
           },
+          context.executionContext&&context.scopeAccumulator?{execution:context.executionContext,accumulator:context.scopeAccumulator}:undefined,
         )
         if (!updated) {
           return {
@@ -749,8 +780,12 @@ export function createKnowledgeTools(
             isError: true,
           }
         }
-        return { data: { id: updated.id, path: updated.path, message: 'Knowledge entry updated.' } }
+        return { data: { id: updated.id, path: updated.path, message: 'Knowledge entry updated.' },scopeEvidence:scopeEvidenceFromRows([updated]) }
       } catch (err) {
+        if(typeof err==='object'&&err!==null&&'operationMayHaveExecuted'in err&&err.operationMayHaveExecuted===true){
+          return{isError:true,meta:{retrySafe:false,operationMayHaveExecuted:true},
+            data:'Knowledge update may have committed, but current access could not be confirmed. Do not repeat the write. Check the existing entry with current access before deciding what to do next.'}
+        }
         return toolFailure(err, {
           tool: 'updateKnowledgeEntry',
           target: `entry "${input.id}"`,

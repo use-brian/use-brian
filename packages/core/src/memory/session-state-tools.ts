@@ -1,3 +1,5 @@
+import { isInputAuthorityError } from '../providers/input-authority.js'
+import { scopeEvidenceFromRows } from '../security/context-scope.js'
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import type { SessionStateStore } from './session-state-types.js'
@@ -55,9 +57,14 @@ export function createSessionStateTools(
     isReadOnly: false,
 
     async execute(input, context) {
-      const existing = await store
-        .listOpenBySession(context.sessionId)
-        .catch(() => [] as Awaited<ReturnType<typeof store.listOpenBySession>>)
+      const authority = context.executionContext && context.scopeAccumulator
+        ? { execution: context.executionContext, accumulator: context.scopeAccumulator } : undefined
+      const existing = await (authority ? store.listOpenBySession(context.sessionId, authority) : store.listOpenBySession(context.sessionId))
+        .catch(error => {
+          if (isInputAuthorityError(error)) throw error
+          return [] as Awaited<ReturnType<typeof store.listOpenBySession>>
+        })
+      authority?.accumulator.note(scopeEvidenceFromRows(existing))
       const wasInsert = !existing.some((r) => r.key === input.key)
 
       const row = await store.upsert({
@@ -68,6 +75,8 @@ export function createSessionStateTools(
         summary: input.summary,
         detail: input.detail ?? null,
         source: 'tool',
+        ...(authority ? { authority, derivation: { producer: 'session_state:tool',
+          sources: authority.accumulator.evidence.sources ?? [] } } : {}),
       })
 
       opts?.onEvent?.({
@@ -78,6 +87,7 @@ export function createSessionStateTools(
       })
 
       return {
+        scopeEvidence: scopeEvidenceFromRows([row]),
         data: wasInsert
           ? `Tracked commitment [${row.key}]: ${row.summary}`
           : `Updated commitment [${row.key}]: ${row.summary}`,
@@ -100,10 +110,14 @@ export function createSessionStateTools(
     isReadOnly: false,
 
     async execute(input, context) {
+      const authority = context.executionContext && context.scopeAccumulator
+        ? { execution: context.executionContext, accumulator: context.scopeAccumulator } : undefined
       const row = await store.resolve({
         sessionId: context.sessionId,
         key: input.key,
         source: 'tool',
+        ...(authority ? { authority, derivation: { producer: 'session_state:tool',
+          sources: authority.accumulator.evidence.sources ?? [] } } : {}),
       })
 
       if (!row) {
@@ -127,7 +141,7 @@ export function createSessionStateTools(
         key: row.key,
         hit: true,
       })
-      return { data: `Resolved commitment [${row.key}]: ${row.summary}` }
+      return { data: `Resolved commitment [${row.key}]: ${row.summary}`, scopeEvidence: scopeEvidenceFromRows([row]) }
     },
   })
 

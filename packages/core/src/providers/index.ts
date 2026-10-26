@@ -38,3 +38,4 @@ export {
 export type { FitResult } from './context-budget.js'
 export { createAccumulator, collectStream } from './accumulator.js'
 export { createGeminiImageProvider, validateFeedImageSource, parseGeminiImageReceipt, type GeminiImageReceipt, type GeneratedImageReceipt } from './gemini-image.js'
+export { assertInputAuthority, isInputAuthorityError } from './input-authority.js'

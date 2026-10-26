@@ -53,7 +53,7 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
     ] as const;
     for (const primitive of brain) {
       expect(routeWorkspaceChange(payload(primitive))).toEqual([
-        { event: BRAIN_REFRESH_EVENT, detail: { workspaceId: "ws-1" } },
+        { event: BRAIN_REFRESH_EVENT, detail: { workspaceId: "ws-1", primitive } },
       ]);
     }
   });
@@ -275,6 +275,14 @@ describe("[COMP:app-web/workspace-events] createRefreshFolder", () => {
     expect(timers.every((t) => t.cleared)).toBe(true);
     fireTimers();
     expect(emitted).toHaveLength(1);
+  });
+
+  it('keeps a mixed brain burst conservative even when the last update is unrelated',()=>{
+    const {folder,emitted,fireTimers}=harness();
+    for(const primitive of ['task','file','task','deal'] as const)
+      folder.fold(routeWorkspaceChange(payload(primitive))[0]);
+    fireTimers();
+    expect(emitted[1].detail).toMatchObject({workspaceId:'ws-1',primitive:null});
   });
 });
 

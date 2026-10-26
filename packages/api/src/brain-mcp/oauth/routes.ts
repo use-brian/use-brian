@@ -52,6 +52,13 @@ export type OAuthRoutesOptions = {
    * surfaces that handle their own auth.
    */
   requireAuth: RequestHandler
+  /** Explicit app audience adapts consent policy while retaining this protocol. */
+  applicationConsent?: {
+    applicationId: string
+    authorize(clientId: string, redirectUri: string): Promise<{ revision: string } | null>
+    choices(userId: string, request: OAuthConsentRequest): Promise<{ workspaces: Array<{ id: string; name: string }>; application: unknown } | null>
+    issue(params: { userId: string; workspaceId: string; request: OAuthConsentRequest; review: string; scope: OAuthScope }): Promise<{ codePlaintext: string } | { error: 'application_not_qualified' } | null>
+  }
 }
 
 // ── Schemas ─────────────────────────────────────────────────────
@@ -80,6 +87,7 @@ const ConsentDecisionBody = z
      * (preserving the client's ask).
      */
     grantedScope: z.enum(['read', 'read_write']).optional(),
+    review: z.string().max(32768).optional(),
   })
   .strict()
 
@@ -146,9 +154,11 @@ async function authenticateClient(
 
 export function oauthRoutes(opts: OAuthRoutesOptions): Router {
   const router = Router()
+  router.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); res.set('Pragma', 'no-cache'); next() })
 
   // ── POST /register — RFC 7591 dynamic client registration ──────
   router.post('/register', async (req, res) => {
+    if (opts.applicationConsent) { res.status(404).json({ error: 'invalid_client' }); return }
     const parsed = RegisterBody.safeParse(req.body)
     if (!parsed.success) {
       res.status(400).json({
@@ -212,11 +222,14 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
       res.redirect(buildErrorRedirect(redirectUri, 'unsupported_response_type', state))
       return
     }
-    if (!codeChallenge || codeChallengeMethod !== 'S256') {
+    if (!codeChallenge || codeChallengeMethod !== 'S256' || opts.applicationConsent
+      && (!/^[A-Za-z0-9_-]{43}$/.test(codeChallenge) || !['read','read_write'].includes(scopeRaw))) {
       res.redirect(buildErrorRedirect(redirectUri, 'invalid_request', state))
       return
     }
     const scope: OAuthScope = scopeRaw === 'read' ? 'read' : 'read_write'
+    const application = opts.applicationConsent ? await opts.applicationConsent.authorize(clientId, redirectUri) : null
+    if (opts.applicationConsent && !application) { res.status(400).json({ error: 'invalid_client' }); return }
 
     const consentReq: OAuthConsentRequest = {
       clientId,
@@ -226,11 +239,13 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
       scope,
       state,
       exp: Math.floor(Date.now() / 1000) + CONSENT_REQUEST_TTL_SECONDS,
+      ...(opts.applicationConsent ? { audience: 'application' as const, applicationId: opts.applicationConsent.applicationId, applicationRevision: application!.revision } : {}),
     }
     const signed = signConsentRequest(consentReq, opts.signingSecret)
 
     const consentUrl = new URL('/oauth/authorize', opts.webAppUrl)
     consentUrl.searchParams.set('req', signed)
+    if (opts.applicationConsent) consentUrl.searchParams.set('application', opts.applicationConsent.applicationId)
     res.redirect(consentUrl.toString())
   })
 
@@ -245,13 +260,20 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
     }
     const signed = String(req.query.req ?? '')
     const consentReq = verifyConsentRequest(signed, opts.signingSecret)
-    if (!consentReq) {
+    if (!consentReq || (consentReq.audience === 'application') !== !!opts.applicationConsent
+      || opts.applicationConsent && consentReq.applicationId !== opts.applicationConsent.applicationId) {
       res.status(400).json({ error: 'invalid_or_expired_request' })
       return
     }
     const client = await opts.clientStore.getByClientIdSystem(consentReq.clientId)
     if (!client || client.revokedAt) {
       res.status(400).json({ error: 'invalid_client' })
+      return
+    }
+    if (opts.applicationConsent) {
+      const choices = await opts.applicationConsent.choices(userId, consentReq)
+      if (!choices) { res.status(403).json({ error: 'application_access_unavailable' }); return }
+      res.json({ clientName: client.clientName, clientUri: client.clientUri, scope: consentReq.scope, ...choices })
       return
     }
     // Workspaces the user can grant against — must be owner/admin to issue
@@ -287,7 +309,8 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
       return
     }
     const consentReq = verifyConsentRequest(parsed.data.req, opts.signingSecret)
-    if (!consentReq) {
+    if (!consentReq || (consentReq.audience === 'application') !== !!opts.applicationConsent
+      || opts.applicationConsent && consentReq.applicationId !== opts.applicationConsent.applicationId) {
       res.status(400).json({ error: 'invalid_or_expired_request' })
       return
     }
@@ -299,8 +322,8 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
     }
 
     // Enforce admin role for the chosen workspace.
-    const role = await opts.workspaceStore.getRole(userId, parsed.data.workspaceId)
-    if (role !== 'owner' && role !== 'admin') {
+    const role = opts.applicationConsent ? null : await opts.workspaceStore.getRole(userId, parsed.data.workspaceId)
+    if (!opts.applicationConsent && role !== 'owner' && role !== 'admin') {
       res.status(403).json({ error: 'workspace_admin_required' })
       return
     }
@@ -317,6 +340,15 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
     }
 
     try {
+      if (opts.applicationConsent) {
+        if (!parsed.data.review) { res.status(400).json({ error: 'application_review_required' }); return }
+        const issued = await opts.applicationConsent.issue({ userId, workspaceId: parsed.data.workspaceId, request: consentReq,
+          review: parsed.data.review, scope: grantedScope })
+        if (!issued) { res.status(409).json({ error: 'application_review_changed' }); return }
+        if ('error' in issued) { res.status(403).json({ error: issued.error }); return }
+        res.json({ redirectUrl: buildSuccessRedirect(consentReq.redirectUri, issued.codePlaintext, consentReq.state) })
+        return
+      }
       const { codePlaintext } = await opts.authorizationStore.createGrantWithCode({
         clientId: consentReq.clientId,
         userId,
@@ -328,6 +360,7 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
       const url = buildSuccessRedirect(consentReq.redirectUri, codePlaintext, consentReq.state)
       res.json({ redirectUrl: url })
     } catch (err) {
+      if (opts.applicationConsent) { res.status(503).json({ error: 'application_access_unavailable' }); return }
       console.error('[brain-oauth] consent failed:', err)
       res.status(500).json({ error: 'server_error' })
     }

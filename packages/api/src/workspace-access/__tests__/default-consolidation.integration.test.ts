@@ -47,6 +47,14 @@ describe('separate reviewed default consolidation (real PG)',()=>{
     expect((await pool.query('SELECT scope_held FROM memories WHERE id=$1',[derived.id])).rows[0].scope_held).toBe(true)
     expect((await pool.query('SELECT access_mode,classification_mode FROM workspace_access_policies WHERE workspace_id=$1',[f.workspaceId])).rows[0]).toEqual({access_mode:'departments',classification_mode:'legacy'})
   })
+  it('refuses an already-default task review without changing its source version',async()=>{
+    const f=await fixture(),id=randomUUID()
+    await pool.query("INSERT INTO tasks(id,workspace_id,user_id,assistant_id,title,created_by_user_id,sensitivity,compartments) VALUES($1,$2,$3,$4,'Already default task',$3,'confidential',ARRAY[$5::text])",[id,f.workspaceId,f.owner,f.assistantId,f.target.compartmentKey])
+    const before=(await pool.query('SELECT scope_version::text version FROM tasks WHERE id=$1',[id])).rows[0].version
+    await expect(f.preview([id],{resourceKind:'task'})).rejects.toMatchObject({code:'scope_review_labels_unsupported'})
+    expect((await pool.query('SELECT scope_version::text version,compartments FROM tasks WHERE id=$1',[id])).rows[0]).toEqual({version:before,compartments:[f.target.compartmentKey]})
+    expect((await pool.query('SELECT classification_mode FROM workspace_access_policies WHERE workspace_id=$1',[f.workspaceId])).rows[0].classification_mode).toBe('legacy')
+  })
   async function derived(f:Awaited<ReturnType<typeof fixture>>,compatible:boolean){
     const parent=await f.create()
     if(compatible)await pool.query('UPDATE memories SET compartments=$2 WHERE id=$1',[parent.id,[f.target.compartmentKey]])

@@ -1,217 +1,59 @@
 "use client";
 
-import { WorkspaceSearchSlot } from "@/components/workspace-search/workspace-search-provider";
-
-/**
- * Operator top bar — the ONE shared chrome row every non-Page operator app
- * surface (plus top-level Live) opens with, so workspace surfaces read as one
- * product under the Page app's top chrome:
- *
- *   [ ☰ ] [ ‹ ] [ › ]  ▣ Tasks   {center}                {right}
- *    │      │     │     └─ ONE non-closable active tab chip (the app's
- *    │      │     │        `APP_ICON` glyph + its `operatorBar` label) in the
- *    │      │     │        doc-topbar TabChip recipe: `bg-background` with a
- *    │      │     │        `-mb-px` bottom-merge so the tab flows into the
- *    │      │     │        surface below. NO multi-tab strip, NO `+` —
- *    │      │     │        `doc-tabs` (browse stacks, panel tabs) stays a
- *    │      │     │        Page-app concept; this chip is chrome that names
- *    │      │     │        where you are.
- *    │      └─ browser history back / forward (`router.back()`/`forward()`;
- *    │         always enabled — the router exposes no can-go signal)
- *    └─ desktop sidebar collapse, wired to the layout-level `useSidebarData()`
- *
- * `center` and `right` are composable slots the mounting surface fills
- * (Tasks: counts + Table|Board toggle; CRM: fallback destination switch +
- * deals view toggle) so the bar never knows surface internals — the
- * brain-topbar slot contract. Painted in the same warm-grey `--sidebar*` palette as
- * `doc-topbar.tsx`, whose class recipes this file copies verbatim.
- *
- * Mobile: the collapse toggle hides (the chrome's fixed hamburger drives the
- * drawer); a leading spacer keeps the row clear of it. The app chip is
- * `hidden sm:flex sm:w-[148px] lg:w-[200px]` BY DEFAULT (responsive contract
- * M8): flex shrink is proportional to basis, so a 200px chip beside a
- * `flex-1 min-w-0` center slot took every pixel of negative space at 390px
- * and rendered the Chat surface's Personal / Workspace toggle 0px wide. A
- * surface may pass `appChipClassName` to tune the chip, but never to re-widen
- * it below `sm` (graded: `invariants/topbar-chip-gate`).
- *
- * Desktop-shell (Electron) parity mirrors brain/studio-topbar: the bar is an
- * OS window-drag handle (`data-doc-chrome`), and it SELF-sets
- * `data-sidebar-collapsed` for the traffic-light clearance — these surfaces
- * don't render inside `DocShell`, so the flag can't come from an ancestor.
- *
- * Spec: docs/architecture/features/doc.md → "Home operator app-bar" →
- * "Operator top bar".
- * [COMP:app-web/operator-topbar]
- */
-
+/** App heading and composable controls hosted by the shared workspace frame.
+ * Spec: docs/architecture/features/workspace-navigation.md → "Shared top bar".
+ * [COMP:app-web/operator-topbar] */
 import { useRouter } from "next/navigation";
-import {
-  ChevronLeft,
-  ChevronRight,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Puzzle,
-  type LucideIcon,
-} from "lucide-react";
+import Link from "next/link";
+import { Puzzle, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { useSidebarData } from "@/components/doc/doc-sidebar-data";
+import { WorkspaceTopbar } from "@/components/chrome/workspace-topbar";
 import { APP_ICON } from "@/components/doc/operator-app-bar";
-import { type OperatorAppKey } from "@/lib/operator-apps";
-
-/** doc-topbar's icon-button recipe (sidebar palette). */
-// 44px on a phone (responsive contract M3), the doc-topbar size from `md`.
-const iconBtnCls =
-  "inline-flex size-11 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-35 md:size-7";
+import type { OperatorAppKey } from "@/lib/operator-apps";
+import { requestSidebarClose } from "@/lib/sidebar-close";
 
 export function OperatorTopbar({
-  app,
-  identity,
-  customApp,
-  appChipClassName,
-  center,
-  centerVisibility = "always",
-  right,
+  app, identity, identityControl, identityHref, customApp, appChipClassName, center,
+  centerVisibility = "always", right,
 }: {
-  /** Which built-in operator app the chip names (icon + `operatorBar` label).
-   *  Ignored when `customApp` is supplied. */
   app?: OperatorAppKey;
-  /** A top-level surface that reuses this chrome without joining the
-   * configurable Home-app vocabulary (Live is the reference). */
   identity?: { label: string; icon: LucideIcon };
-  /**
-   * A CUSTOM (workspace-built) app's identity. Its name and icon are workspace
-   * data from the app's manifest, not i18n — so the chip takes them verbatim
-   * rather than looking them up. `Puzzle` is the fallback for an app whose
-   * manifest names an icon this build's lucide set does not carry.
-   */
+  /** Surface-owned contextual heading control, such as the Chat audience menu. */
+  identityControl?: React.ReactNode;
+  /** Preserve a surface's app-root breadcrumb in its sidebar heading. */
+  identityHref?: string;
   customApp?: { name: string; icon: string | null };
-  /** Optional layout override for the app chip. The default already hides
-   *  the chip below `sm` so the center slot keeps its width on a phone; an
-   *  override must keep that `hidden sm:` gate (M8). */
+  /** Layout tuning must preserve the phone identity gate. */
   appChipClassName?: string;
-  /** Cluster after the tab chip (CRM's section switch). Scrolls instead of
-   *  painting over the right cluster when the bar is cramped. */
   center?: React.ReactNode;
-  /** Keep the center slot as a compact navigation fallback on narrow layouts
-   *  and on desktop only while the persistent sidebar is collapsed. */
   centerVisibility?: "always" | "when-sidebar-unavailable";
-  /** Right-aligned cluster (counts, view toggles). */
   right?: React.ReactNode;
 }) {
   const t = useT();
-  const docCopy = t.docPage;
   const router = useRouter();
-  const { sidebarCollapsed, setSidebarCollapsed } = useSidebarData();
-
+  const { sidebarCollapsed } = useSidebarData();
   const Icon = identity?.icon ?? (customApp ? Puzzle : app ? APP_ICON[app] : Puzzle);
   const label = identity?.label ?? (customApp ? customApp.name : app ? t.operatorBar[app] : "");
-
-  return (
-    <div
-      data-doc-chrome
-      data-doc-topbar
-      data-sidebar-collapsed={sidebarCollapsed ? "true" : "false"}
-      className="flex h-11 shrink-0 items-center gap-0.5 border-b border-sidebar-border bg-sidebar pr-2 pl-1"
-    >
-      {/* Sidebar collapse / expand — desktop only; the chrome's fixed
-          hamburger owns the `<md` drawer, so a spacer clears it. */}
-      <button
-        type="button"
-        onClick={() => setSidebarCollapsed((v) => !v)}
-        aria-label={
-          sidebarCollapsed
-            ? docCopy.topbarSidebarExpandAria
-            : docCopy.topbarSidebarCollapseAria
-        }
-        title={
-          sidebarCollapsed
-            ? docCopy.topbarSidebarExpandAria
-            : docCopy.topbarSidebarCollapseAria
-        }
-        className={cn(iconBtnCls, "hidden md:inline-flex")}
-      >
-        {sidebarCollapsed ? (
-          <PanelLeftOpen className="size-4" aria-hidden />
-        ) : (
-          <PanelLeftClose className="size-4" aria-hidden />
-        )}
-      </button>
-      <div className="w-12 shrink-0 md:hidden" aria-hidden />
-
-      {/* Browser history — back / forward. Hidden below `sm` (the brain /
-          studio topbar rule, responsive contract M8): at 360px the pair plus
-          the hamburger spacer pushed a surface's view toggles past the right
-          edge, and the phone's own back gesture already covers history. */}
-      <button
-        type="button"
-        onClick={() => router.back()}
-        aria-label={docCopy.topbarBackAria}
-        title={docCopy.topbarBackAria}
-        className={cn(iconBtnCls, "max-sm:hidden")}
-      >
-        <ChevronLeft className="size-4" aria-hidden />
-      </button>
-      <button
-        type="button"
-        onClick={() => router.forward()}
-        aria-label={docCopy.topbarForwardAria}
-        title={docCopy.topbarForwardAria}
-        className={cn(iconBtnCls, "mr-1 max-sm:hidden")}
-      >
-        <ChevronRight className="size-4" aria-hidden />
-      </button>
-
-      {/* The app's tab chip — bottom-aligned and full-bar-height so it can
-          merge into the surface below (doc-topbar's active-TabChip recipe:
-          `-mb-px border-b-0 bg-background` covers the bar's border-b). Inert
-          chrome, not a button — there is nothing to switch to here. */}
-      <div className="flex min-w-0 flex-1 items-end gap-1 self-stretch">
-        <div
-          className={cn(
-            // Hidden below `sm` (M8): the phone's 40px hamburger spacer plus
-            // history arrows already name where you are, and the center slot
-            // needs the width more than the chip does.
-            "hidden h-9 min-w-0 items-center gap-1.5 rounded-t-lg pl-3 pr-3 text-sm sm:flex sm:w-[148px] lg:w-[200px]",
-            "relative z-10 -mb-px border border-b-0 border-sidebar-border bg-background font-medium text-foreground",
-            appChipClassName,
-          )}
-        >
-          <span className="grid size-4 shrink-0 place-items-center">
-            <Icon className="size-4 text-muted-foreground" aria-hidden />
-          </span>
-          <span className="min-w-0 flex-1 truncate text-left" title={label}>
-            {label}
-          </span>
-        </div>
-
-        {/* Surface-injected clusters. The center slot scrolls instead of
-            letting content paint over the right cluster when the bar is
-            cramped (the brain-topbar overflow rule). */}
-        <div
-          data-center-visibility={centerVisibility}
-          data-center-desktop-hidden={
-            centerVisibility === "when-sidebar-unavailable" && !sidebarCollapsed
-              ? "true"
-              : "false"
-          }
-          className={cn(
-            "flex min-w-0 flex-1 items-center gap-2 self-center overflow-x-auto pl-2",
-            centerVisibility === "when-sidebar-unavailable" &&
-              !sidebarCollapsed &&
-              "md:hidden",
-          )}
-        >
-          {center}
-        </div>
+  const appIdentity = identityControl ?? (
+      <div data-workspace-app-identity className={cn(
+        "hidden min-w-0 max-w-52 shrink items-center gap-2 px-1 text-sm font-medium text-foreground sm:flex",
+        appChipClassName,
+      )}>
+        <span data-workspace-app-icon className="grid size-4 shrink-0 place-items-center"><Icon className="size-4 text-muted-foreground" aria-hidden /></span>
+        <span className="min-w-0 truncate" title={label}>{label}</span>
       </div>
-      {right && (
-        <div className="flex shrink-0 items-center gap-1 self-center">
-          {right}
-        </div>
-      )}
-      <WorkspaceSearchSlot />
-    </div>
+  );
+  return (
+    <WorkspaceTopbar identity={identityHref ? <Link href={identityHref} onClick={requestSidebarClose} className="flex min-w-0 items-center max-md:min-h-11">{appIdentity}</Link> : appIdentity} sidebarCollapsed={sidebarCollapsed} history={{ onBack: () => router.back(), onForward: () => router.forward() }}>
+
+      <div data-center-visibility={centerVisibility}
+        data-center-desktop-hidden={centerVisibility === "when-sidebar-unavailable" && !sidebarCollapsed ? "true" : "false"}
+        className={cn("flex min-w-0 flex-1 items-center gap-2 overflow-x-auto", centerVisibility === "when-sidebar-unavailable" && !sidebarCollapsed && "md:hidden")}>
+        {center ?? <span data-mobile-app-title className="truncate text-sm font-medium md:hidden">{label}</span>}
+      </div>
+      {right && <div className="ml-auto flex shrink-0 items-center gap-1">{right}</div>}
+    </WorkspaceTopbar>
   );
 }

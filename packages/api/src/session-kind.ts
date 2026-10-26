@@ -9,7 +9,8 @@
  *   - lane      - `conversation` (humans talk here) or `machine` (A2A,
  *                 workflow, public API, inspection, legacy cron).
  *
- * `classifySession` is the only code allowed to compare `visibility`, `mode`,
+ * Session discriminator comparisons live only in this module.
+ * `classifySession` derives kind from `visibility`, `mode`,
  * `app_origin`, the session `channel_type` or the `channel_id` sentinels.
  * Every concern (read, admission, attribution, delivery, live follow,
  * confirmations, lifecycle, billing, ...) is answered once by `sessionPolicy`.
@@ -165,6 +166,15 @@ export function isWebTransport(channelType: string): boolean {
 /** Is this a provider transport (a human on Telegram, Slack, ...)? */
 export function isExternalTransport(transport: Transport): boolean {
   return (EXTERNAL_TRANSPORTS as readonly string[]).includes(transport)
+}
+
+/**
+ * Exact storage identity for retained authority, not the classified audience.
+ * Only the legacy owner spelling changes; missing and unknown values stay so.
+ */
+export function normalizeSessionVisibility<T extends string | null | undefined>(visibility: T): T extends 'owner' ? 'personal' : T
+export function normalizeSessionVisibility(visibility: string | null | undefined): string | null | undefined {
+  return visibility === 'owner' ? 'personal' : visibility
 }
 
 // --- Classifier ------------------------------------------------------------
@@ -394,7 +404,7 @@ function isWebRoom(kind: SessionKind): boolean {
  * makes it a room with one human: it gets the room surfaces while its
  * audience, memory and billing stay personal.
  */
-function isPersonalChat(kind: SessionKind): boolean {
+export function isPersonalChat(kind: SessionKind): boolean {
   return kind.audience === 'personal' && kind.anchor.kind === 'none' && kind.transport === 'web'
     && kind.lane === 'conversation' && kind.surface !== 'doc'
 }

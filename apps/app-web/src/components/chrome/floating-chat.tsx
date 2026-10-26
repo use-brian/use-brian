@@ -4005,7 +4005,6 @@ export function FloatingChat({
             }}
             researchQuota={researchQuota}
             researchExhausted={researchExhausted}
-            showResearch
             meteredOptions={meteredOptions}
             meteredSelectedKey={metered?.key ?? null}
             onMeteredSelect={handleMeteredSelect}

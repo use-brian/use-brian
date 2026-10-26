@@ -46,6 +46,21 @@ describe('[COMP:core/ask-engines] engine ask framework', () => {
     })
   })
 
+  it.each([undefined, 'gemini-2.5-flash'])('uses a current grounded Gemini default while honoring an override (%s)', async override => {
+    const fetchMock = vi.fn().mockResolvedValue(fakeResponse({ candidates: [{ content: { parts: [{ text: 'A grounded answer.' }] }, groundingMetadata: { groundingChunks: [{ web: { uri: 'https://example.com', title: 'Source' } }] } }] }))
+    const [asker] = createEngineAskers({ ENGINES_GEMINI_API_KEY: 'test-key', ENGINES_GEMINI_MODEL: override }, fetchMock)
+    const result = await asker.run({ question: 'A short question?' })
+    expect(result.successfulUnits).toBe(1)
+    expect(asker.model).toBe(override ?? 'gemini-3.8-flash')
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toContain(override ?? 'gemini-3.8-flash')
+    const body = JSON.parse(init.body)
+    expect(body.tools).toEqual([{ google_search: {} }])
+    expect(body.generationConfig.maxOutputTokens).toBe(2048)
+    expect(body.generationConfig.thinkingConfig).toEqual(override ? undefined : { thinkingLevel: 'LOW' })
+    expect(body.generationConfig).not.toHaveProperty('temperature')
+  })
+
   describe('batch / samples / detection', () => {
     it('makes one upstream call per question × sample and counts every success', async () => {
       const fetchMock = vi.fn().mockResolvedValue(perplexityResponse('a'))

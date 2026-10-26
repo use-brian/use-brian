@@ -17,6 +17,7 @@ export function buildOpenChannelHosts(ctx: BootContext): ChannelHostHooks {
 
   const buildIntake = (channel: 'slack' | 'discord' | 'telegram') =>
     async (input: {
+      scope?: import('./ingest/channel-media-intake.js').ChannelMediaScope
       source: { url: string; headers?: Record<string, string> }
       mime?: string
       fileName: string | null
@@ -34,6 +35,7 @@ export function buildOpenChannelHosts(ctx: BootContext): ChannelHostHooks {
         key: buildStorageKey(input.workspaceId, fileId),
         ref: {
           channel,
+          ...(input.scope ? { scope: input.scope, sensitivity: input.scope.sensitivity === 'confidential' ? 'private' as const : input.scope.sensitivity } : {}),
           ...(input.mime ? { mime: input.mime } : {}),
           fileName: input.fileName,
           sender: input.sender,

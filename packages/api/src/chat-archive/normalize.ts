@@ -9,6 +9,30 @@ function sentAt(value: number): string {
   return new Date(millis).toISOString()
 }
 
+/**
+ * Telegram ids are unique per base chat, but archive rows/assets are keyed by
+ * (instance, provider id). Keep the namespace internal to archive boundaries;
+ * live sessions and provider send/reply calls continue to use the raw id.
+ */
+export function archiveProviderMessageId(source: string | undefined, conversationId: string, providerId: string): string {
+  if (source !== 'telegram') return providerId
+  const baseChatId = conversationId.split(':', 1)[0]!
+  return `telegram:v1:${encodeURIComponent(baseChatId)}:${encodeURIComponent(providerId)}`
+}
+
+/** Preserve the external history tool's raw-provider-id contract, including legacy rows. */
+export function rawArchiveProviderMessageId(source: string | undefined, conversationId: string, providerId: string): string {
+  if (source !== 'telegram') return providerId
+  const baseChatId = conversationId.split(':', 1)[0]!
+  const prefix = `telegram:v1:${encodeURIComponent(baseChatId)}:`
+  if (!providerId.startsWith(prefix)) return providerId
+  try {
+    return decodeURIComponent(providerId.slice(prefix.length))
+  } catch {
+    return providerId
+  }
+}
+
 function derivedMessageId(source: string, message: IncomingMessage): string {
   return `derived:${createHash('sha256').update(JSON.stringify({
     source,
@@ -65,7 +89,7 @@ export function normalizeInboundChatMessage(input: {
 }): AnyCanonicalIngestMessage {
   const { source, message } = input
   return {
-    provider_message_id: message.messageId || derivedMessageId(source, message),
+    provider_message_id: archiveProviderMessageId(source, message.channelId, message.messageId || derivedMessageId(source, message)),
     conversation_id: message.channelId,
     sender_id: message.userId,
     sender_display: message.senderDisplay ?? null,
@@ -74,7 +98,8 @@ export function normalizeInboundChatMessage(input: {
     kind: mediaKind(message),
     body_text: message.text.length > 0 ? message.text : null,
     media_ref: mediaRef(message),
-    reply_to_provider_id: message.replyToMessageId ?? null,
+    reply_to_provider_id: message.replyToMessageId
+      ? archiveProviderMessageId(source, message.channelId, message.replyToMessageId) : null,
     // Provider payloads can contain tokens and connector secrets. Live capture
     // needs no reparsing, so the safest sanitized payload is no payload.
     raw_provider_blob: null,
@@ -82,6 +107,7 @@ export function normalizeInboundChatMessage(input: {
 }
 
 export function normalizeOutboundChatMessage(input: {
+  source?: string
   providerMessageId: string
   conversationId: string
   assistantId: string
@@ -118,7 +144,7 @@ export function normalizeOutboundChatMessage(input: {
     ? media.kind
     : document ? 'file' : null
   return {
-    provider_message_id: input.providerMessageId,
+    provider_message_id: archiveProviderMessageId(input.source, input.conversationId, input.providerMessageId),
     conversation_id: input.conversationId,
     sender_id: input.assistantId,
     sender_display: input.assistantName,
@@ -147,7 +173,8 @@ export function normalizeOutboundChatMessage(input: {
           mime: document.mime,
           size_bytes: document.data.byteLength,
         } : null,
-    reply_to_provider_id: input.replyToProviderId ?? null,
+    reply_to_provider_id: input.replyToProviderId
+      ? archiveProviderMessageId(input.source, input.conversationId, input.replyToProviderId) : null,
     raw_provider_blob: null,
   } as AnyCanonicalIngestMessage
 }

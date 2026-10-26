@@ -28,6 +28,9 @@ function fakePool(
     const normalized = sql.replace(/\s+/g, ' ').trim()
     statements.push(normalized)
     if (normalized.includes('SELECT department_read_v2 AS v2')) return { rows: [{ v2: false }], rowCount: 1 }
+    // This isolated legacy transport already has its private metadata capability;
+    // real role/profile routing remains covered by the inventory integration suite.
+    if (normalized.endsWith('AS "privateLineageMetadata"')) return { rows: [{ privateLineageMetadata: true }], rowCount: 1 }
     if (normalized.includes('read_scope_source')) return { rows: [{ snapshot: {
       workspaceId: WID, resourceKind: 'entity', resourceId: CONTACT_ID, version: '1',
       userId: null, assistantId: null, projectIds: [], compartments: [], sensitivity: 'internal',

@@ -2,6 +2,8 @@ import { configDefaults, defineConfig } from 'vitest/config';
 import { resolveCollabSingletonAliases } from '../../scripts/collab-singletons.mjs';
 
 export default defineConfig({
+  // Synthetic tests use explicit environment only; never discover workspace dotenv.
+  envDir: false,
   resolve: { alias: resolveCollabSingletonAliases(new URL('../../packages/doc-model/package.json', import.meta.url)) },
   test: {
     exclude: [...configDefaults.exclude, '**/*.integration.test.ts'],

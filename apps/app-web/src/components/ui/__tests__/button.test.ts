@@ -49,13 +49,22 @@ describe("[COMP:app-web/button] Button", () => {
       )
       .sort();
 
+    // The app delegates the avatar to the shared component; its semantic fill
+    // remains covered alongside the app-local allowlist.
+    const chatUiRoot = new URL("../../../../../../packages/chat-ui/", import.meta.url);
+    expect(readFileSync(new URL("../user-avatar.tsx", import.meta.url), "utf8"))
+      .toContain('export { UserAvatar } from "@use-brian/chat-ui";');
+    expect(readFileSync(new URL("src/index.ts", chatUiRoot), "utf8"))
+      .toContain("export { UserAvatar } from './UserAvatar.js'");
+    expect(readFileSync(new URL("src/UserAvatar.tsx", chatUiRoot), "utf8"))
+      .toContain('"rounded-full bg-primary text-primary-foreground flex items-center justify-center font-bold shrink-0",');
+
     expect(legacyPairs).toEqual([
       'components/brain/filter-strip.tsx:<span className="ml-0.5 min-w-[1.1rem] h-[1.1rem] px-1 inline-flex items-center justify-center rounded-full bg-primary text-primary-foreground text-[10px] font-semibold">',
       'components/chat-app/approval-review-attention.tsx:<span className="absolute -top-0.5 -right-0.5 min-w-4 rounded-full bg-primary px-1 text-[10px] font-semibold leading-4 text-primary-foreground" aria-hidden>',
       'components/chrome/floating-chat.tsx:<span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">',
       'components/doc/sidebar-panels/live-sidebar-panel.tsx:className="inline-flex min-w-5 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-5 text-primary-foreground"',
       'components/live/live-active-badge.tsx:className="absolute -right-0.5 -top-0.5 inline-flex min-w-[15px] items-center justify-center rounded-full bg-primary px-1 text-[9px] font-semibold leading-[15px] text-primary-foreground ring-2 ring-sidebar motion-safe:animate-pulse motion-reduce:animate-none"',
-      'components/ui/user-avatar.tsx:"rounded-full bg-primary text-primary-foreground flex items-center justify-center font-bold shrink-0",',
       'components/workflow/step-editor.tsx:checked ? "border-primary bg-primary text-primary-foreground" : "border-input",',
       'components/workflow/workflow-board.tsx:state === "running" && "bg-primary text-primary-foreground",',
     ]);

@@ -45,9 +45,8 @@ import type {
  * Max output tokens for one plan call. The model usually emits a tiny
  * `{"actions":[]}` (the common, conservative case); the ceiling exists for
  * the occasional full skill body (a `create_umbrella` / `patch_skill`
- * `content`). `gemini-3.1-flash-lite` is a non-thinking model, so the whole
- * budget is available to the JSON output — no reasoning-token drain (cf. the
- * Gemini-3 thinking-truncation class the consolidation worker budgets around).
+ * `content`). The current Flash-Lite model uses minimal reasoning by default;
+ * the cap includes reasoning and the final JSON output.
  */
 export const SKILL_REVIEW_MAX_TOKENS = 8192
 

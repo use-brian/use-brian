@@ -10,7 +10,8 @@
  * which build was running took a SHA256 of a filesystem path.
  *
  * `CURRENT_EXTENSION_BUILD` is the fingerprint of
- * `apps/browser-extension/src/**` plus `static/manifest.json`, produced by
+ * `apps/browser-extension/src/**`, the shared browser-control source, and all
+ * packaged Chromium `static/**` assets, produced by
  * `apps/browser-extension/scripts/build-hash.mjs` — the single implementation,
  * which `pnpm check` shells out to rather than reimplementing. The extension
  * stamps the same value into `dist/build-info.json` at build time and reports
@@ -19,7 +20,7 @@
  * Do not hand-edit. `pnpm check` (`invariants/browser-extension-build-stamp`)
  * prints the value to paste when extension source moves.
  */
-export const CURRENT_EXTENSION_BUILD = 'c791c1618770'
+export const CURRENT_EXTENSION_BUILD = '3ae98f0b9fbe'
 
 /**
  * A reported build is stale unless it matches exactly.

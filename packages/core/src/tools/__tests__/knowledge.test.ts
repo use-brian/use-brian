@@ -267,7 +267,8 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({
         path: 'research/offers/student',
         sensitivity: 'public',
-      }))
+        actorId:ctx.userId,writtenBy:'system',derivation:{producer:'tool:addKnowledgeEntry',sources:[]},
+      }),undefined)
     })
 
     it('rejects an unmatched rule id and an out-of-scope path', async () => {
@@ -301,7 +302,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       )
 
       expect(result.data).toMatchObject({ id: 'new1', path: 'docs/new', sensitivity: 'internal' })
-      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 't1', sensitivity: 'internal' }))
+      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 't1', sensitivity: 'internal', actorId:ctx.userId,writtenBy:'system',derivation:{producer:'tool:addKnowledgeEntry',sources:[]} }),undefined)
     })
 
     it('stamps the entry at the accumulator max when it exceeds the requested tier', async () => {
@@ -317,7 +318,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         { ...ctx, sensitivity: accumulator },
       )
 
-      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential' }))
+      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential', actorId:ctx.userId,writtenBy:'system',derivation:{producer:'tool:addKnowledgeEntry',sources:[]} }),undefined)
     })
 
     it('stamps research-mode findings public despite internal brain-first reads', async () => {
@@ -335,7 +336,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         { ...ctx, sensitivity: accumulator, researchMode: true },
       )
 
-      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'public' }))
+      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'public', actorId:ctx.userId,writtenBy:'system',derivation:{producer:'tool:addKnowledgeEntry',sources:[]} }),undefined)
     })
 
     it('keeps confidential a hard floor even in research mode', async () => {
@@ -351,7 +352,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         { ...ctx, sensitivity: accumulator, researchMode: true },
       )
 
-      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential' }))
+      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({ sensitivity: 'confidential', actorId:ctx.userId,writtenBy:'system',derivation:{producer:'tool:addKnowledgeEntry',sources:[]} }),undefined)
     })
 
     it('a create rejected by the source carries its reason verdict', async () => {
@@ -608,6 +609,23 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(data).toMatch(/retry once with current content/i)
     })
 
+    it.each(['addKnowledgeEntry', 'updateKnowledgeEntry'])('%s preserves uncertain writer outcome without a blind retry verdict', async (toolName) => {
+      if (toolName === 'updateKnowledgeEntry') vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
+      const opts = writeOpts()
+      const failure = { ok: false as const, reason: 'error' as const,
+        message: 'The source outcome requires reconciliation.', retrySafe: false as const, operationMayHaveExecuted: true as const }
+      vi.mocked(opts.repoWriter.commitEntryCreate).mockResolvedValueOnce(failure)
+      vi.mocked(opts.repoWriter.commitEntryUpdate).mockResolvedValueOnce(failure)
+      const tools = createKnowledgeTools(mockStore, opts)
+      const result = await byName(tools, toolName).execute(toolName === 'addKnowledgeEntry'
+        ? { path: 'docs/new', title: 'New', content: 'Body' }
+        : { id: 'e1', content: 'New body', changeSummary: 'update documentation' }, ctx)
+      expect(result).toMatchObject({ isError: true, meta: { retrySafe: false, operationMayHaveExecuted: true } })
+      expect(String(result.data)).toContain('Check the source to reconcile what exists')
+      expect(String(result.data)).not.toMatch(/nothing was committed|retry once/i)
+      expect(toolName === 'addKnowledgeEntry' ? opts.repoWriter.commitEntryCreate : opts.repoWriter.commitEntryUpdate).toHaveBeenCalledTimes(1)
+    })
+
     it('a push_denied is never retried; an error is retried once', async () => {
       const run = async (reason: 'push_denied' | 'error', message: string) => {
         vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
@@ -631,6 +649,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(String(transient.data)).toContain('(error)')
       expect(String(transient.data)).toMatch(/transient/i)
       expect(String(transient.data)).toMatch(/Retry once/i)
+      expect(transient.meta).toBeUndefined()
       // The two must not read the same way to the model.
       expect(String(transient.data)).not.toBe(String(denied.data))
     })
@@ -667,7 +686,8 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         't1',
         'm1',
         'New body',
-        { compartments: [], projectIds: [] },
+        { compartments: [], projectIds: [], actorId:ctx.userId,writtenBy:'system',expectedVersion:undefined,derivation:{producer:'tool:updateKnowledgeEntry',sources:[]} },
+        undefined,
       )
       expect(result.data).toMatchObject({ id: 'm1', path: 'products/vault' })
     })

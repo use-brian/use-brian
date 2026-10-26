@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-vi.mock('../../db/client.js', () => ({ queryWithRLS: vi.fn() }))
+vi.mock('../../db/client.js', () => ({ query: async () => { throw new Error('Unexpected direct database query in download-publication fixture') }, queryWithRLS: vi.fn() }))
 vi.mock('../../db/users.js', () => ({ findAssistantById: vi.fn() }))
 vi.mock('../task-execution-authority.js', () => ({ resolveBrowserTaskExecutionAuthority: vi.fn() }))
 import { prepareBrowserDownload, type DownloadTask } from '../download-publication.js'

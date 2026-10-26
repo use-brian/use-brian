@@ -4,7 +4,6 @@ import type { WorkspaceModule, WorkspaceModuleBlockingWork } from '@use-brian/sh
 import { getAppPool, getPool } from '../db/client.js'
 import {
   createWorkspaceModulesStore,
-  finishWorkspaceModuleDrain,
   lockWorkspaceModule,
   requireWorkspaceModuleAdmission,
   type WorkspaceModuleLifecycleAdapter,
@@ -48,6 +47,15 @@ export function associationPendingOrders(blockingWork: WorkspaceModuleBlockingWo
   return blockingWork.find((row) => row.key === ASSOCIATION_PENDING_ORDERS_BLOCKER)?.count ?? 0
 }
 
-export function finishAssociationDrain(workspaceId: string, pool: Pool = getPool()): Promise<boolean> {
-  return finishWorkspaceModuleDrain(workspaceId, ASSOCIATION_MODULE_KEY, associationModuleLifecycle, pool)
+export async function finishAssociationDrain(workspaceId: string, pool: Pool = getPool()): Promise<boolean> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await client.query<{ finished: boolean }>('SELECT association_finish_module_drain($1) AS finished', [workspaceId])
+    await client.query('COMMIT')
+    return result.rows[0].finished
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined)
+    throw error
+  } finally { client.release() }
 }

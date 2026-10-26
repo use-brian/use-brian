@@ -20,7 +20,7 @@ import type { AssistantConnectorStore } from '../db/assistant-connector-store.js
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { injectMcpTools, type ConfirmationEnricher, type McpInjectionResult } from '../mcp/inject.js'
-import { CONNECTOR_SCOPE_RESTRICTION } from '../mcp/discovery-diagnostics.js'
+import { CONNECTOR_SCOPE_RESTRICTION, CONNECTOR_SOURCE_RESTRICTION } from '../mcp/discovery-diagnostics.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { truncateForInline } from '../files/inline-truncation.js'
 
@@ -274,15 +274,17 @@ export function buildUnavailableCapabilitiesPrompt(
   }
 
   const scopeRestricted = capabilities.includes(CONNECTOR_SCOPE_RESTRICTION)
-  const remediation = scopeRestricted
+  const sourceRestricted = capabilities.includes(CONNECTOR_SOURCE_RESTRICTION)
+  const remediation = (scopeRestricted
     ? 'For the execution-scope restriction, explain that connector authorization alone does not make a provider available in this context. Ask an authorized owner to review the workflow or conversation execution scope. Do not recommend reconnecting, claim the integration is unsupported, or suggest bypassing the scope restriction. Other listed failures retain their own remediation.'
-    : 'Use another available tool when it serves the requested account and identity. Otherwise report the limitation plainly and use any remediation stated above, or point the user to Studio → Connectors.'
+    : sourceRestricted ? '' : 'Use another available tool when it serves the requested account and identity. Otherwise report the limitation plainly and use any remediation stated above, or point the user to Studio → Connectors.')
+    + (sourceRestricted ? ' Explain that this operation needs qualified source setup and the current source account mapping/permissions. Ask an authorized owner to review that setup and supported operation. Do not suggest owner credentials, another staff identity or disabling checks. Unavailable source data is not an empty result. Do not repeat a command whose outcome is uncertain; check its status first.' : '')
 
   const head = `\n\n# Unavailable capabilities\n\nThese capabilities are not available in this run. Do not call, search for, or simulate them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\n${remediation}`
 
   const closedWorld = searchable
     ? ` ${FOLDED_SURFACE}${sourceRoster} ${SEARCH_BEFORE_DENIAL} A listed capability remains unavailable even if searched.`
-    : scopeRestricted
+    : scopeRestricted || sourceRestricted
       ? ' Visible tools describe only this restricted run, not the platform integration catalog. Do not infer that an absent service is disconnected or unsupported.'
       : ` The list and visible tools are the complete integration surface. For any other service, say Use Brian has no integration and offer the nearest supported alternative.`
 
@@ -318,6 +320,7 @@ This chat has a controlled browser: browserNavigate opens a page and returns its
  * set of stores from `apps/api/src/index.ts`).
  */
 export type ChannelMcpStores = {
+  connectorSourceRuntimeFactory?: import('../application-platform/source-runtime.js').ConnectorSourceRuntimeFactory
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: AssistantConnectorStore
@@ -414,6 +417,8 @@ export type ApplyMcpInjectionParams = {
   knowledgeCaptureText?: string
   /** Trusted execution scope used to hide connectors with broader exposure. */
   contextScope?: TurnScope
+  executionContext?: import('@use-brian/core').ExecutionContext
+  scopeAccumulator?: import('@use-brian/core').ContextScopeAccumulator
 }
 
 /**
@@ -469,6 +474,9 @@ export async function applyMcpInjection(
       readCachedFile: stores.readCachedFile,
       introspectionTools: params.introspectionTools,
       contextScope: params.contextScope,
+      connectorSourceRuntimeFactory: stores.connectorSourceRuntimeFactory,
+      executionContext: params.executionContext,
+      scopeAccumulator: params.scopeAccumulator,
     })
   } catch (err) {
     console.error(`[${params.scope}] MCP tool injection failed:`, err)

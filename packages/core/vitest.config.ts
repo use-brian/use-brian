@@ -7,6 +7,8 @@ import { configDefaults, defineConfig } from 'vitest/config'
 // `vitest.integration.config.ts`. Excluding them here keeps the default
 // run unit-only and consistent with @use-brian/api.
 export default defineConfig({
+  // Synthetic tests use explicit environment only; never discover workspace dotenv.
+  envDir: false,
   server: {
     fs: {
       // When this repo is consumed as a submodule of the hosted platform

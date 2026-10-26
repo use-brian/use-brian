@@ -267,6 +267,10 @@ const bridge = {
   // Dock recorder capability. The renderer uses this explicit promise instead
   // of guessing from a user agent; old shells omit it and remain mic-only.
   systemAudioCapture: process.platform === "darwin" || process.platform === "win32",
+  // Await the one-shot, frame-bound intent before requesting display media.
+  // Audio-only intent uses the app frame instead of a physical display.
+  prepareDisplayCapture: (intent) =>
+    ipcRenderer.invoke("Use Brian:prepare-display-capture", intent),
   // Screen-capture source picker (docs/architecture/media/live-capture.md ->
   // "Capture sources"): the renderer lists shareable windows and points the
   // shell's NEXT display-media grant at the picked one. Old shells omit these

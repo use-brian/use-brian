@@ -1,3 +1,4 @@
+import ts from 'typescript'
 import { describe, it, expect } from 'vitest'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -99,6 +100,49 @@ async function walk(dir: string): Promise<string[]> {
   return out
 }
 
+
+/** A top-level canonical source parser vocabulary, never an all-connectors list. */
+function isKnowledgeSourceTypeEnum(node: ts.ArrayLiteralExpression, source: ts.SourceFile): boolean {
+  if (node.elements.length !== 2 || !node.elements.every(ts.isStringLiteral)
+    || node.elements.map(element => (element as ts.StringLiteral).text).sort().join(',') !== 'github,local') return false
+  const call = node.parent
+  if (!ts.isCallExpression(call) || call.arguments[0] !== node || call.arguments.length !== 1
+    || !ts.isPropertyAccessExpression(call.expression) || call.expression.name.text !== 'enum'
+    || !ts.isIdentifier(call.expression.expression)) return false
+  const namespace = call.expression.expression.text
+  const imported = source.statements.some(statement => ts.isImportDeclaration(statement)
+    && ts.isStringLiteral(statement.moduleSpecifier) && statement.moduleSpecifier.text === 'zod'
+    && statement.importClause?.namedBindings && ts.isNamedImports(statement.importClause.namedBindings)
+    && statement.importClause.namedBindings.elements.some(binding => (binding.propertyName?.text ?? binding.name.text) === 'z' && binding.name.text === namespace))
+  if (!imported) return false
+  const field = call.parent
+  if (!ts.isPropertyAssignment(field) || field.name.getText(source).replace(/['"]/g, '') !== 'sourceType'
+    || !ts.isObjectLiteralExpression(field.parent)) return false
+  const shape = field.parent, object = shape.parent
+  if (!ts.isCallExpression(object) || object.arguments[0] !== shape
+    || !ts.isPropertyAccessExpression(object.expression) || object.expression.name.text !== 'object'
+    || !ts.isIdentifier(object.expression.expression) || object.expression.expression.text !== namespace) return false
+  const fields = new Set(shape.properties.filter(ts.isPropertyAssignment).map(property => property.name.getText(source).replace(/['"]/g, '')))
+  if (!['id', 'repo', 'branch', 'rootPath'].every(name => fields.has(name))) return false
+  // Restrict the exception to top-level parser declarations; nested/shadowed namespaces stay checked.
+  for (let ancestor: ts.Node = node; ancestor !== source; ancestor = ancestor.parent) {
+    if (!ancestor.parent || ts.isFunctionLike(ancestor) || ts.isBlock(ancestor) || ts.isClassLike(ancestor)) return false
+  }
+  return true
+}
+
+function withoutKnowledgeSourceTypeEnums(text: string): string {
+  if (!text.includes('sourceType') || !text.includes('github') || !text.includes('local')) return text
+  const source = ts.createSourceFile('source.ts', text, ts.ScriptTarget.Latest, true), spans: Array<[number, number]> = []
+  function inspect(node: ts.Node): void {
+    if (ts.isArrayLiteralExpression(node) && isKnowledgeSourceTypeEnum(node, source)) spans.push([node.getStart(source), node.end])
+    ts.forEachChild(node, inspect)
+  }
+  inspect(source)
+  for (const [start, end] of spans.reverse()) text = text.slice(0, start) + text.slice(start, end).replace(/[^\r\n]/g, ' ') + text.slice(end)
+  return text
+}
+
 function classify(absPath: string, line: string): { kind: Hit['classification']; reason: string } {
   for (const sym of PROVIDER_FAMILY_NARROW_SYMBOLS) {
     if (line.includes(sym)) return { kind: 'narrow', reason: `references ${sym}` }
@@ -120,6 +164,21 @@ function classify(absPath: string, line: string): { kind: Hit['classification'];
 }
 
 describe('[COMP:admin/drift-sweep] all-builtins hardcoded-Set grep audit', () => {
+  it('classifies the canonical source enum without hiding other fields, namespaces or same-line lists', () => {
+    const shape = "id:z.string(),sourceType:z.enum(['github','local']),repo:z.string(),branch:z.string(),rootPath:z.string()"
+    const parser = "import {z} from 'zod'; const values=z.object({" + shape + "})"
+    const hit = (text: string) => ALL_BUILTINS_PATTERNS.some(pattern => pattern.test(withoutKnowledgeSourceTypeEnums(text)))
+    expect(hit(parser)).toBe(false)
+    expect(hit(parser.replace(/\bz\b/g, 'schema').replace('{schema}', '{z as schema}'))).toBe(false)
+    for (const content of [
+      parser + "; const BUILTIN_IDS=['github','local']",
+      parser.replace('sourceType:', 'connectorType:'),
+      parser.replace("from 'zod'", "from 'other'"),
+      "import {z} from 'zod'; function parse(z){return z.object({" + shape + "})}",
+      parser.replace("['github','local']", "['gmail','gcal']"),
+    ]) expect(hit(content), content).toBe(true)
+  })
+
   // Walks the whole packages/ + apps/ tree; the consolidation grew apps/app-web
   // substantially, so the default 5s is too tight under parallel test load.
   it('every hit is either provider-family-narrow, derived from OFFICIAL_CONNECTORS, or an allowlisted follow-up', { timeout: 30000 }, async () => {
@@ -130,7 +189,7 @@ describe('[COMP:admin/drift-sweep] all-builtins hardcoded-Set grep audit', () =>
         const stats = await stat(f)
         if (stats.size > 5_000_000) continue // skip pathological files
         const text = await readFile(f, 'utf8')
-        const lines = text.split('\n')
+        const lines = withoutKnowledgeSourceTypeEnums(text).split('\n')
         lines.forEach((line, idx) => {
           for (const pat of ALL_BUILTINS_PATTERNS) {
             if (pat.test(line)) {

@@ -18,18 +18,15 @@ export function OfficeTopbar({
   right?: React.ReactNode;
 }) {
   const t = useT().office;
-  const officeHref = `/w/${workspaceId}/office`;
   return (
     <OperatorTopbar
       app="office"
+      identityHref={`/w/${workspaceId}/office`}
       center={
         <nav aria-label={t.breadcrumbAria} className="flex min-w-0 items-center gap-1 text-sm">
-          <Link href={officeHref} className="shrink-0 text-muted-foreground hover:text-foreground hover:underline">
-            {t.homeTitle}
-          </Link>
           {breadcrumbs.map((crumb, index) => (
             <span key={`${crumb.label}-${index}`} className="flex min-w-0 items-center gap-1">
-              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />
+              {index > 0 && <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/60" aria-hidden />}
               {crumb.href ? (
                 <Link href={crumb.href} className="min-w-0 truncate text-muted-foreground hover:text-foreground hover:underline">
                   {crumb.label}

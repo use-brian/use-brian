@@ -47,6 +47,11 @@ export type AccessContext = {
   userId: string
   assistantId: string
   assistantKind: AssistantKind
+  /**
+   * Deny-only application provenance. Native fallback requires a current host
+   * to verify its private execution binding; serialized metadata grants nothing.
+   */
+  applicationBound?: true
   /** Additional delegated ceiling; [] permits only assistant-public rows. */
   visibilityAssistantIds?: string[] | null
   /**

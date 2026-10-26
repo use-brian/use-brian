@@ -55,6 +55,7 @@ describe('[COMP:crm/provider-entitlement-service] transaction-bound provider com
         updatedByUserId: null,
       }], rowCount: 1 }
       if (sql.includes('SELECT department_read_v2 AS v2')) return { rows: [{ v2: false }], rowCount: 1 }
+      if (sql.includes('AS "privateLineageMetadata"')) return { rows: [{ privateLineageMetadata: true }], rowCount: 1 }
       if (sql.includes('read_scope_source')) return { rows: [{ snapshot: {
         workspaceId, resourceKind: 'entity', resourceId: contactId, version: '1',
         userId: null, assistantId: null, projectIds: [], compartments: [], sensitivity: 'internal',
