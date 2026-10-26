@@ -5,6 +5,7 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY patches ./patches
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
 COPY packages/channels/package.json packages/channels/tsconfig.json ./packages/channels/
 COPY apps/feishu-connector/package.json apps/feishu-connector/tsconfig.json ./apps/feishu-connector/
@@ -21,6 +22,7 @@ ENV NODE_ENV=production
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches ./patches
 COPY packages/channels/package.json ./packages/channels/
 COPY apps/feishu-connector/package.json ./apps/feishu-connector/
 RUN pnpm install --prod --frozen-lockfile

@@ -10,3 +10,7 @@ onlyBuiltDependencies:
   - electron
   - sharp
   - unrs-resolver
+
+# Backport electron/notarize#306: actually retry ticket stapling after acceptance.
+patchedDependencies:
+  "@electron/notarize@2.5.0": patches/@electron__notarize@2.5.0.patch
