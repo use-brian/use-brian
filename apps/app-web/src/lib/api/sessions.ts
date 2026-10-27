@@ -119,6 +119,8 @@ export type DocSessionMessage = {
    *  migration 390). Null on human rows and pre-390 history — render as the
    *  session's bound assistant. */
   senderAssistantId?: string | null;
+  /** Non-null marks an external provider bot. Empty string uses a neutral label. */
+  publishedSenderName?: string | null;
   /** Sender's display name (`users.name` ?? email), resolved server-side so
    *  the client can attribute *other* members' comments. `null` for assistant
    *  rows and the rare unknown sender (e.g. a deleted user). */
@@ -169,6 +171,7 @@ type RawMessageRow = {
   attachments?: SessionFileAttachment[];
   senderUserId?: string | null;
   senderAssistantId?: string | null;
+  publishedSenderName?: string | null;
   senderName?: string | null;
   senderAvatarUrl?: string | null;
   replyToText?: string | null;
@@ -825,6 +828,7 @@ export async function fetchSessionMessages(
       attachments: Array.isArray(m.attachments) ? m.attachments : [],
       senderUserId: m.senderUserId ?? null,
       senderAssistantId: m.senderAssistantId ?? null,
+      publishedSenderName: m.publishedSenderName ?? null,
       senderName: m.senderName ?? null,
       senderAvatarUrl: m.senderAvatarUrl ?? null,
       replyToText: m.replyToText ?? null,

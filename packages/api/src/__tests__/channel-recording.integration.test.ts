@@ -85,10 +85,11 @@ describe('[COMP:api/channel-recording] native recording ownership and cutover', 
     await expect(admitTelegramRecording({...incoming('project-4'),conversationId:'-1000000004'})).rejects.toThrow()
     await expect(appendChannelRoomMessage({sessionId:work!.session.id,role:'user',content:[{type:'text',text:'revoked'}],channelMessageId:'revoked'})).rejects.toThrow()
   })
-  it('revocation blocks new writes and legacy channel rooms retain their unique identity',async()=>{
-    const legacy=await findOrCreateChannelRoom({workspaceId:workspace,channelIntegrationId:integration,assistantId:assistant,channelType:'telegram',channelId:'-1000000002',starterUserId:speaker})
-    const again=await findOrCreateChannelRoom({workspaceId:workspace,channelIntegrationId:integration,assistantId:assistant,channelType:'telegram',channelId:'-1000000002',starterUserId:owner})
-    expect(again.room.id).toBe(legacy.room.id)
+  it('revocation blocks new writes and legacy channel identities stay quarantined',async()=>{
+    const legacy={workspaceId:workspace,channelIntegrationId:integration,assistantId:assistant,channelType:'telegram',channelId:'-1000000002',starterUserId:speaker}
+    await expect(findOrCreateChannelRoom(legacy)).rejects.toThrow('channel_room_unavailable')
+    await expect(findOrCreateChannelRoom({...legacy,starterUserId:owner})).rejects.toThrow('channel_room_unavailable')
+    expect((await query('SELECT id FROM sessions WHERE workspace_id=$1 AND channel_id=$2 AND recording_privacy_held',[workspace,legacy.channelId])).rows).toHaveLength(1)
     await query("UPDATE channels SET status='revoked' WHERE id=$1",[channel])
     expect(await telegramRecordingEnabled(integration,'-1000000003')).toBe(false)
     await expect(admitTelegramRecording({...incoming('6'),conversationId:'-1000000003'})).rejects.toThrow()

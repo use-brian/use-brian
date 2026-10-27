@@ -2661,11 +2661,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   const turnStream = createTurnStreamPublisher({
     sessionId: session.id,
     publishSessionEvent,
+    shouldPublish: () => !params.recording,
     attribution: () => ({ senderUserId: userId, assistantId: assistant.id }),
   })
   const publishChannelActivity = (event: string, data: Record<string, unknown>): void =>
     publishRoomTurnActivity({
-      mirror: true,
+      mirror: !params.recording,
       sessionId: session.id,
       senderUserId: userId,
       event,
@@ -2695,6 +2696,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     if (flushed) return
     await assertDeliveryAudience()
     flushed = true
+    // A managed recorder is a transcript of the provider conversation. Its
+    // only assistant writer is the successful-delivery receipt observer;
+    // model/tool rounds are private execution state, not published messages.
+    if (params.recording) return
     // Attachments (sendFile) belong to the final reply — the last turn
     // with content. Intermediate tool_use turns never carry them.
     const lastContentIdx = (() => {

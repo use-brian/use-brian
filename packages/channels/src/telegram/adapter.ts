@@ -252,7 +252,25 @@ export type ChatSeenEvent = {
   topicName: string | null
 }
 
+/** Only provider-confirmed, publicly delivered text. Never a model/session payload. */
+export type TelegramTextDelivery = {
+  channelId: string
+  providerMessageId: string
+  text: string
+  botId?: string
+  botUsername?: string
+}
+export type TelegramTextDeliveryObserver = (delivery: TelegramTextDelivery) => void | Promise<void>
+let textDeliveryObserver: TelegramTextDeliveryObserver | undefined
+
+/** The API composition root installs recording once for every Telegram sender. */
+export function configureTelegramTextDeliveryObserver(observer?: TelegramTextDeliveryObserver): void {
+  textDeliveryObserver = observer
+}
+
 export type TelegramAdapterOptions = {
+  /** Overrides the process observer; failure is reported after delivery, never resent. */
+  onTextDelivered?: TelegramTextDeliveryObserver
   /** Correlated questions must not silently move out of a deleted topic. */
   strictTopic?: boolean
   token: string
@@ -770,7 +788,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       messageThreadId?: number
       replyMarkup?: unknown
     },
-  ): Promise<{ message_id: number }> {
+  ): Promise<{ message_id: number; text?: string; threadFallback?: boolean }> {
     try {
       return await api.sendMessage(chatId, text, opts)
     } catch (err) {
@@ -778,7 +796,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
         console.warn(
           `[telegram] sendMessage to chat ${chatId} failed because topic ${opts.messageThreadId} no longer exists; retrying without message_thread_id`,
         )
-        return await api.sendMessage(chatId, text, { ...opts, messageThreadId: undefined })
+        return { ...await api.sendMessage(chatId, text, { ...opts, messageThreadId: undefined }), threadFallback: true }
       }
       throw err
     }
@@ -799,7 +817,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     format: string | undefined,
     replyToMessageId: number | undefined,
     messageThreadId: number | undefined,
-  ): Promise<number> {
+  ): Promise<{ message_id: number; text?: string; threadFallback?: boolean }> {
     if (format === 'markdown') {
       try {
         const html = markdownToTelegramHTML(text)
@@ -808,21 +826,21 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
           replyToMessageId,
           messageThreadId,
         })
-        return result.message_id
+        return { ...result, text: result.text ?? stripMarkdown(text) }
       } catch {
         const plain = stripMarkdown(text)
         const result = await sendMessageWithThreadFallback(api, chatId, plain, {
           replyToMessageId,
           messageThreadId,
         })
-        return result.message_id
+        return { ...result, text: result.text ?? plain }
       }
     }
     const result = await sendMessageWithThreadFallback(api, chatId, text, {
       replyToMessageId,
       messageThreadId,
     })
-    return result.message_id
+    return { ...result, text: result.text ?? text }
   }
 
   return {
@@ -978,6 +996,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
           ? { inline_keyboard: buildInlineKeyboard(response.actions) }
           : undefined
 
+        let delivered: { message_id: number; text?: string; threadFallback?: boolean }
         try {
           // Only quote-reply on the first chunk
           if (chunk.html) {
@@ -985,16 +1004,16 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
               const result = await sendMessageWithThreadFallback(api, chatId, chunk.html, {
                 parseMode: 'HTML', replyToMessageId: discussionRootId ?? (i === 0 ? replyToId : undefined), messageThreadId: topicId,
               })
-              lastMessageId = result.message_id
+              delivered = { ...result, text: result.text ?? stripMarkdown(chunk.text) }
             } catch {
               // Older API servers may not support expandable quotes. Unfold safely.
               const result = await sendMessageWithThreadFallback(api, chatId, chunk.text, {
                 replyToMessageId: discussionRootId ?? (i === 0 ? replyToId : undefined), messageThreadId: topicId,
               })
-              lastMessageId = result.message_id
+              delivered = { ...result, text: result.text ?? chunk.text }
             }
           } else {
-            lastMessageId = await sendWithMarkdownFallback(
+            delivered = await sendWithMarkdownFallback(
               api,
               chatId,
               chunk.text,
@@ -1003,6 +1022,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
               topicId,
             )
           }
+          lastMessageId = delivered.message_id
         } catch (err) {
           // Mid-chunk failure: earlier chunks have already landed, so a silent
           // truncation would leave the user with half a reply and no way to
@@ -1013,6 +1033,21 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
             await api.editMessageText(chatId, lastMessageId, truncated).catch(() => {})
           }
           throw err
+        }
+
+        // This boundary is outside the provider retry/fallback block. A saved
+        // reply failing to record must never cause Telegram to send it again.
+        const observer = options.onTextDelivered ?? textDeliveryObserver
+        if (observer && !response.ephemeral) {
+          const delivery = { channelId: delivered.threadFallback ? chatId : channelId,
+            providerMessageId: String(delivered.message_id), text: delivered.text ?? chunk.text,
+            botId: botIdFromToken, botUsername: options.botUsername }
+          try { await observer(delivery) } catch (error) {
+            console.error('[telegram] delivered text recording failed:', {
+              channelId: delivery.channelId, providerMessageId: delivery.providerMessageId,
+              botId: delivery.botId, error,
+            })
+          }
         }
 
         if (replyMarkup) {

@@ -36,6 +36,8 @@ export type ReadGatedSessionFields = {
   effectiveClearance: string | null
   contextCompartments?: string[]
   contextProjectId?: string | null
+  /** Durable privacy quarantine; administrative status never bypasses it. */
+  recordingPrivacyHeld?: boolean
 }
 
 /** Resolved facts the pure decision needs — callers do the async lookups. */
@@ -65,6 +67,7 @@ export type SessionReadDecision =
  * resume). Pure, with the canonical department READ for v2 workspace facts.
  */
 export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision {
+  if (facts.session.recordingPrivacyHeld === true) return { readable: false, status: 404, error: 'Session not available' }
   const {
     callerUserId,
     session,
@@ -138,6 +141,7 @@ export function decideSessionRead(facts: SessionReadFacts): SessionReadDecision 
 export type LiveSessionTier = 'full' | 'presence' | 'omitted'
 
 export function liveSessionTier(facts: SessionReadFacts): LiveSessionTier {
+  if (facts.session.recordingPrivacyHeld === true) return 'omitted'
   if (workspaceAudience(facts.session)) {
     return decideSessionRead(facts).readable ? 'full' : 'omitted'
   }

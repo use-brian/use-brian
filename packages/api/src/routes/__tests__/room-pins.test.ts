@@ -23,6 +23,7 @@ import request from 'supertest'
 
 vi.mock('../../db/client.js', () => ({
   query: vi.fn(async (sql: string) => {
+    if (sql.includes('session_recording_read_allowed')) return { rows: [{ allowed: true }], rowCount: 1 } as never
     if (sql.includes('FROM assistants')) {
       return { rows: [{ workspaceId: 'ws-1' }], rowCount: 1 }
     }
@@ -268,6 +269,7 @@ describe('[COMP:api/room-pins] assembly resolution is an index, not stuffing (T1
       pin({ kind: 'page', refId: 'bbbbbbbb-0000-0000-0000-000000000002' }),
     ])
     mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('session_recording_read_allowed')) return { rows: [{ allowed: true }], rowCount: 1 } as never
       if (sql.includes('FROM tasks')) {
         return {
           rows: [{ title: 'Ship the Q3 deck', status: 'in_progress', due: new Date('2026-08-02T00:00:00Z'), sensitivity: 'internal' }],
@@ -330,6 +332,7 @@ describe('[COMP:api/room-pins] assembly resolution is an index, not stuffing (T1
       pin({ kind: 'task', refId: 'aaaaaaaa-0000-0000-0000-000000000001' }),
     ])
     mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('session_recording_read_allowed')) return { rows: [{ allowed: true }], rowCount: 1 } as never
       if (sql.includes('FROM tasks')) {
         return {
           rows: [{ title: 'Board compensation review', status: 'todo', due: null, sensitivity: 'confidential' }],
@@ -395,6 +398,7 @@ describe('[COMP:api/room-pins] GET resolves assistant attribution (migration 421
     ])
     mockLabels.mockResolvedValue(new Map([['pin-a', 'Ship the Q3 deck']]))
     mockQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('session_recording_read_allowed')) return { rows: [{ allowed: true }], rowCount: 1 } as never
       if (sql.includes('ANY($1::uuid[])')) {
         return { rows: [{ id: 'a-1', name: 'Brian' }], rowCount: 1 } as never
       }

@@ -19,6 +19,8 @@ type TranscriptDocumentAttachment = {
  */
 export type ChatSurfaceMessage = Message & {
   senderName?: string;
+  /** Non-null marks a final provider delivery, including an unnamed bot. */
+  publishedSenderName?: string | null;
   /** Who posted a human row in a room. Null/absent on personal chats and on
    *  optimistic rows — both cases are the viewer's own message. */
   senderUserId?: string | null;
@@ -59,10 +61,13 @@ function transcriptSenderKey(message: {
   role: string;
   senderName?: string;
   senderAssistantId?: string | null;
+  publishedSenderName?: string | null;
 }): string {
   return message.role === "user"
     ? `user:${message.senderName ?? ""}`
-    : `assistant:${message.senderAssistantId ?? ""}`;
+    : message.publishedSenderName != null
+      ? `published:${message.publishedSenderName}`
+      : `assistant:${message.senderAssistantId ?? ""}`;
 }
 
 /**
@@ -76,6 +81,7 @@ export function computeTranscriptRowMeta(
     timestamp: Date;
     senderName?: string;
     senderAssistantId?: string | null;
+    publishedSenderName?: string | null;
   }>,
 ): TranscriptRowMeta[] {
   return messages.map((message, index) => {
@@ -179,6 +185,8 @@ function sameAssistantRun(
   return (
     earlier.role === "assistant" &&
     later.role === "assistant" &&
+    earlier.publishedSenderName == null &&
+    later.publishedSenderName == null &&
     (earlier.senderAssistantId ?? null) === (later.senderAssistantId ?? null)
   );
 }

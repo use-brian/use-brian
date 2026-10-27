@@ -317,7 +317,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
                 s.user_id as "userId", s.visibility, s.mode,
                 s.effective_clearance as "effectiveClearance",
                 s.context_compartments as "contextCompartments"
-         FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
+         FROM (SELECT * FROM sessions WHERE session_recording_read_allowed(id) AND feed_draft_audience_allowed(id)) s
          WHERE ${workspaceScope
            ? `s.assistant_id IN (SELECT a.id FROM assistants a WHERE a.workspace_id = $1)`
            : `s.assistant_id = $1`} AND s.user_id = $2
@@ -483,7 +483,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
                 s.context_group_id AS "contextGroupId",
                 s.context_project_id AS "contextProjectId",
                 s.context_compartments AS "contextCompartments"
-           FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
+           FROM (SELECT * FROM sessions WHERE session_recording_read_allowed(id) AND feed_draft_audience_allowed(id)) s
            JOIN assistants a ON a.id = s.assistant_id
           WHERE a.workspace_id = $1
             AND ${sessionKindSql.railRoom('s')}
@@ -1249,6 +1249,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         // the client resolves the avatar from its roster. Null on human rows
         // and pre-390 history (rendered as the session's bound assistant).
         senderAssistantId: m.senderAssistantId,
+        publishedSenderName: m.publishedSenderName ?? null,
         // Outbound file attachments (sendFile, migration 273) — rendered
         // as file cards. Omitted when empty to keep the payload lean.
         attachments: m.attachments.length > 0 ? m.attachments : undefined,

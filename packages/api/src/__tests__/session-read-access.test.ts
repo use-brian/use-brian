@@ -36,6 +36,12 @@ function facts(overrides: {
 }
 
 describe('[COMP:api/live-work-roster] decideSessionRead', () => {
+  it('omits a quarantined recording for its creator and a fully cleared administrator', () => {
+    const input = facts({ session: { userId: CALLER, visibility: 'workspace', recordingPrivacyHeld: true }, membershipClearance: 'confidential' })
+    expect(decideSessionRead(input)).toMatchObject({ readable: false, status: 404 })
+    expect(liveSessionTier(input)).toBe('omitted')
+  })
+
   it('owner-only session: readable by its owner', () => {
     const d = decideSessionRead(facts({ session: { userId: CALLER } }))
     expect(d.readable).toBe(true)

@@ -7,7 +7,7 @@ import request from 'supertest'
 
 // The session read gate now loads workspace authority for private sessions too.
 vi.mock('../../db/client.js', () => ({
-  query: vi.fn(async () => ({ rows: [{ workspaceId: 'ws-1' }] })),
+  query: vi.fn(async () => ({ rows: [{ workspaceId: 'ws-1', allowed: true }] })),
 }))
 vi.mock('../../db/workspace-store.js', () => ({
   getWorkspaceMembershipWithReadScopeSystem: vi.fn(async () => ({

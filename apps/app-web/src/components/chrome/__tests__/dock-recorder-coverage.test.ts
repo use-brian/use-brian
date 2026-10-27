@@ -18,7 +18,8 @@
  * added to HOSTS below.
  *
  * Desktop stickiness (floating-recorder-slot.ts): the floating button must
- * stay bottom-right on every dock-hiding surface, not move into a composer.
+ * stay reachable on every dock-hiding surface. Full-page Chat owns it in
+ * the composer at every width and claims the floating slot.
  *
  *  - `WorkspaceChrome` mounts `FloatingRecorderHost` whenever the dock hides;
  *  - a surface that renders its OWN floating recorder claims the slot, so
@@ -121,7 +122,6 @@ describe("[COMP:app-web/dock-recorder] recorder stickiness coverage", () => {
 
   it("inline rehosts on dock-hiding surfaces yield to the floating button at lg", () => {
     for (const rel of [
-      "components/chat-app/chat-surface.tsx",
       "components/feed/tuning-chat-panel.tsx",
       "components/brain/skill-iteration-chat.tsx",
     ]) {
@@ -131,6 +131,16 @@ describe("[COMP:app-web/dock-recorder] recorder stickiness coverage", () => {
       // ...and its message list reserves room for the lifted button.
       expect(source, rel).toContain("var(--floating-recorder-reserve,0px)");
     }
+  });
+
+  it("keeps one Chat recorder in the composer at every width", () => {
+    const source = read("components/chat-app/chat-surface.tsx");
+    expect(source).toContain("useEffect(() => claimFloatingRecorder(), [])");
+    const control = source.slice(source.indexOf("data-chat-recorder"), source.indexOf("{/* The Ask affordance", source.indexOf("data-chat-recorder")));
+    expect(control).toContain("<DockRecorderButton");
+    expect(control).not.toContain("lg:hidden");
+    expect(source).toContain('<DockRecorderStrip rec={dockRecorder} className="mb-1.5" />');
+    expect(source).toContain('<DockRecorderRecovery rec={dockRecorder} className="mb-1.5" />');
   });
 
   it("keeps the floating chat launcher reachable during capture and finishing", () => {

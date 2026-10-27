@@ -128,6 +128,17 @@ describe("[COMP:app-web/chat-transcript] assistant-run history grouping", () => 
     expect(messages.map((message) => message.id)).toEqual(["a1", "a2"]);
   });
 
+  it("retains every delivered reply chunk, including unnamed bots and consecutive sends", () => {
+    const rows = [
+      assistant("a1", "First delivered chunk", { publishedSenderName: "@example_bot" }),
+      assistant("a2", "Second delivered chunk", { publishedSenderName: "@example_bot" }),
+      assistant("a3", "Another published reply", { publishedSenderName: "" }),
+      assistant("a4", "An internal run"),
+    ];
+    expect(coalesceAssistantRunMessages(rows)).toEqual(rows);
+    expect(computeTranscriptRowMeta(rows).map(row => row.startsGroup)).toEqual([true, false, true, true]);
+  });
+
   it("treats null and absent pre-migration assistant ids as the same fallback voice", () => {
     const messages = coalesceAssistantRunMessages([
       assistant("a1", "Working", {

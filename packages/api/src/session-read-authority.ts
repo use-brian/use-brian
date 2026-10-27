@@ -92,6 +92,9 @@ export async function gateSessionRead(
   jwtUserId: string,
   session: GatedSession,
 ): Promise<{ status: number; error: string } | null> {
+  if (session.id && !(await query<{ allowed: boolean }>('SELECT session_recording_read_allowed($1) AS allowed', [session.id])).rows[0]?.allowed) {
+    return { status: 404, error: 'Session not available' }
+  }
   if (!(await getUserAssistant(jwtUserId, session.assistantId))) return { status: 403, error: 'Session not available' }
   const anchor = await anchorReadGate(jwtUserId, session)
   if (anchor !== 'continue') return anchor

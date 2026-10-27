@@ -2246,6 +2246,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     lastStatusUpdate = now
     const latest = toolTimeline.at(-1)
     const response = {
+      ephemeral: true,
       text: latest ? `${latest.done ? '✓' : '⏳'} ${humanizeToolName(latest.name)}` : 'Thinking...',
       collapsibleDetails: latest ? `Watch more\n${formatToolTimeline()}` : undefined,
     }

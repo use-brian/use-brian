@@ -105,6 +105,8 @@ export type OutgoingDocument = {
 
 export type OutgoingMessage = {
   text: string
+  /** Provisional status UI which may be edited/deleted; exclude from durable reply recording. */
+  ephemeral?: boolean
   /** Telegram: plain-text details in a collapsed-by-default, expandable quote. */
   collapsibleDetails?: string
   format?: 'plain' | 'markdown'

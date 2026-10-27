@@ -158,7 +158,7 @@ import {
   registerDockRecorderChatTarget,
   useGlobalDockRecorder,
 } from "@/lib/recorder/dock-recorder-bridge";
-import { useFloatingRecorderClearance } from "@/lib/recorder/floating-recorder-slot";
+import { claimFloatingRecorder } from "@/lib/recorder/floating-recorder-slot";
 import {
   appendReasoning,
   appendStep,
@@ -398,6 +398,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const tAttach = useT().attachments;
   const tRecordings = useT().recordings;
   const interactionT = useT().liveInteraction;
+  const publishedAssistantLabel = useT().comments.assistantName;
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -409,6 +410,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // and a capture keeps running across the surface switch. Null until the
   // dock publishes (primary assistant still resolving).
   const dockRecorder = useGlobalDockRecorder();
+  // Chat owns recorder chrome beside its composer at every width. Release
+  // only the presentation slot on navigation; capture stays on the dock.
+  useEffect(() => claimFloatingRecorder(), []);
 
   // Model tier (`standard | pro | max`) — the shared seam (`chat-model.ts`):
   // persisted on the SAME localStorage key as the dock so one choice carries
@@ -1322,6 +1326,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             ? { userAttachments: parsedUser.attachments }
             : {}),
           ...(r.senderName ? { senderName: r.senderName } : {}),
+          ...(r.publishedSenderName != null ? { publishedSenderName: r.publishedSenderName } : {}),
           // The stored quote is a text snapshot, so a restored reply renders
           // WHAT was quoted with no id, role or author to go with it.
           ...(r.replyToText ? { replyTo: { text: r.replyToText } } : {}),
@@ -3845,14 +3850,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   }, [roomTypers, t]);
 
   /** The answering assistant's display name for a reply-group header. */
-  const assistantNameFor = (senderAssistantId?: string | null) =>
-    ((senderAssistantId
+  const assistantNameFor = (senderAssistantId?: string | null, publishedSenderName?: string | null) =>
+    publishedSenderName != null ? publishedSenderName || publishedAssistantLabel : ((senderAssistantId
       ? assistants.find((x) => x.id === senderAssistantId)
       : undefined) ?? activeAssistant)?.name ?? null;
 
   /** The reply avatar for a given ANSWERING assistant (multi-assistant
    *  rooms, T9) — falls back to the thread's bound assistant. */
-  const avatarFor = (senderAssistantId?: string | null) => {
+  const avatarFor = (senderAssistantId?: string | null, publishedSenderName?: string | null) => {
+    if (publishedSenderName != null) return (
+      <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15">
+        <Sparkles className="size-3.5" aria-hidden />
+      </div>
+    );
     const a =
       (senderAssistantId
         ? assistants.find((x) => x.id === senderAssistantId)
@@ -3890,7 +3900,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const quoteAuthorFor = (message: SurfaceMessage): string | null =>
     message.role === "user"
       ? message.senderName ?? t.replyAuthorYou
-      : assistantNameFor(message.senderAssistantId);
+      : assistantNameFor(message.senderAssistantId, message.publishedSenderName);
 
   /**
    * The quote above a message that replied to something.
@@ -4074,14 +4084,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     chat.state.messages.length === 0 &&
     !chat.state.isStreaming &&
     !remoteActive;
-  // The docked composer bar can reach the bottom-right corner where the
-  // floating record button rests (WorkspaceChrome's FloatingRecorderHost);
-  // registering it lifts the button above Send instead of covering it.
-  const composerBarRef = useRef<HTMLDivElement>(null);
-  const heroComposerBarRef = useRef<HTMLDivElement>(null);
   const visibleViewportRef = useChatVisibleViewport();
-  useFloatingRecorderClearance(composerBarRef, !heroMode);
-  useFloatingRecorderClearance(heroComposerBarRef, heroMode);
 
   const askControl = askVisible && activeAssistant && (
     <button
@@ -4294,16 +4297,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  bottom bar — same node either way. */
   const composerBox = (
     <>
-      {/* Live-recording chrome — the recovery banner, first-use/error notice,
-          and active recorder strip stack ABOVE the composer box below `lg`
-          (at `lg`+ they ride the floating cluster bottom-right). One node
-          rendered in both the hero and the bottom bar, so a running capture
-          survives the swap. */}
+      {/* The shared recorder status stays next to the composer at every
+          width. Its controller survives welcome/thread and route changes. */}
       {dockRecorder ? (
         <>
-          <DockRecorderRecovery rec={dockRecorder} className="mb-1.5 lg:hidden" />
-          <DockRecorderNotice rec={dockRecorder} className="mb-1.5 lg:hidden max-md:[&_button]:min-h-11 max-md:[&_button]:min-w-11" />
-          <DockRecorderStrip rec={dockRecorder} className="mb-1.5 lg:hidden" />
+          <DockRecorderRecovery rec={dockRecorder} className="mb-1.5" />
+          <DockRecorderNotice rec={dockRecorder} className="mb-1.5 max-md:[&_button]:min-h-11 max-md:[&_button]:min-w-11" />
+          <DockRecorderStrip rec={dockRecorder} className="mb-1.5" />
         </>
       ) : null}
     <div
@@ -4581,16 +4581,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 </div>}
               </PopoverContent>
             </Popover>
-            {/* The record affordance below `lg`, beside the paperclip exactly
-                as in the dock's expanded composer. At `lg`+ the floating
-                button bottom-right (FloatingRecorderHost) is the one record
-                control, as on every other surface. Hides itself while a
-                capture is latched (the strip above the box owns the pill). */}
-            {dockRecorder ? (<div className="flex lg:hidden [&>*]:min-h-11 [&_button]:min-h-11 [&_button]:min-w-11 @[560px]/chat-reading:[&>*]:min-h-9 @[560px]/chat-reading:[&_button]:min-h-9 @[560px]/chat-reading:[&_button]:min-w-0 [&_[data-recorder-options-trigger]]:hidden @[560px]/chat-reading:[&_[data-recorder-options-trigger]]:inline-flex">
+            {/* One recorder beside Add at every width. A latched capture
+                uses the shared strip above the composer. */}
+            {dockRecorder ? (<div data-chat-recorder className="flex [&>*]:min-h-11 [&_button]:min-h-11 [&_button]:min-w-11 @[560px]/chat-reading:[&>*]:min-h-9 @[560px]/chat-reading:[&_button]:min-h-9 @[560px]/chat-reading:[&_button]:min-w-0 [&_[data-recorder-options-trigger]]:hidden @[560px]/chat-reading:[&_[data-recorder-options-trigger]]:inline-flex">
               <DockRecorderButton
                 rec={dockRecorder}
                 disabled={!!pendingQuestion || recordingUpload.busy}
-                className="lg:hidden"
               />
             </div>) : null}
             {/* The Ask affordance (D1/T3) — only where a plain send would
@@ -4697,7 +4693,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 {view === "workspace" ? t.workspaceHeroTitle : t.heroTitle}
               </h2>
             </div>
-            <div ref={heroComposerBarRef} data-chat-welcome-composer className={cn("w-full shrink-0 pb-[max(0.5rem,env(safe-area-inset-bottom))] @[560px]/chat-reading:pb-6", styles.welcomeComposer)}>
+            <div data-chat-welcome-composer className={cn("w-full shrink-0 pb-[max(0.5rem,env(safe-area-inset-bottom))] @[560px]/chat-reading:pb-6", styles.welcomeComposer)}>
               <ChatContextBar context={creationContext} disabled={att.uploading} />
               {composerBox}
               {error && <p role="alert" className="mt-3 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">{error}</p>}
@@ -4728,9 +4724,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // The pill is anchored to a viewport rect, so scrolling would strand
           // it over the wrong text. Dismiss rather than chase.
           onScroll={selectionQuote ? () => setSelectionQuote(null) : undefined}
-          // Bottom pad grows by the floating recorder's reserve while it is
-          // lifted above the composer, so the newest message scrolls clear.
-          className="min-h-0 flex-1 overflow-y-auto px-3 pt-4 pb-[calc(1.5rem+var(--floating-recorder-reserve,0px))] @[560px]/chat-reading:px-6 @[560px]/chat-reading:pt-6"
+          className="min-h-0 flex-1 overflow-y-auto px-3 pt-4 pb-6 @[560px]/chat-reading:px-6 @[560px]/chat-reading:pt-6"
         >
           <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-6">
             {activeSessionId && activeContextSession ? <ClientDeliveryOversight key={activeSessionId}
@@ -4947,16 +4941,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                     !meta?.startsGroup && "-mt-3.5",
                   )}
                 >
-                  {avatarFor(m.senderAssistantId)}
+                  {avatarFor(m.senderAssistantId, m.publishedSenderName)}
                   <div className="min-w-0 flex-1 space-y-2.5 pt-0.5">
                     {/* Group header — the answering assistant's name (every
                         Chat conversation, where several assistants may
                         speak, D1) + time. */}
                     {meta?.startsGroup && timeChip && (
                       <span className="flex items-baseline gap-1.5 text-xs text-muted-foreground">
-                        {panePolicy.multiVoice && assistantNameFor(m.senderAssistantId) && (
+                        {(panePolicy.multiVoice || m.publishedSenderName != null) && assistantNameFor(m.senderAssistantId, m.publishedSenderName) && (
                           <span className="font-medium">
-                            {assistantNameFor(m.senderAssistantId)}
+                            {assistantNameFor(m.senderAssistantId, m.publishedSenderName)}
                           </span>
                         )}
                         {timeChip}
@@ -5344,7 +5338,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
         {/* Composer bar — the same composite box the hero centers, docked. */}
         <div data-chat-composer-dock className="shrink-0 bg-gradient-to-t from-background from-80% to-transparent px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 @[560px]/chat-reading:px-6 @[560px]/chat-reading:pb-6 @[560px]/chat-reading:pt-3">
-          <div ref={composerBarRef} className="mx-auto w-full max-w-[52rem]">{composerBox}</div>
+          <div className="mx-auto w-full max-w-[52rem]">{composerBox}</div>
         </div>
       </section>
       <ChatSidePane
