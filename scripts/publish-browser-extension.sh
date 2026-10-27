@@ -412,6 +412,12 @@ if [[ "$YES" != "1" ]]; then
   fi
 fi
 
+# CI must still be publishing the current, successfully tested production SHA
+# after the build finishes. Local releases do not set this optional binding.
+if [[ -n "${CHROME_WEB_STORE_SOURCE_SHA:-}" ]]; then
+  node "$EXTENSION_ROOT/scripts/release.mjs" verify-upload "$CHROME_WEB_STORE_SOURCE_SHA"
+fi
+
 echo "==> Uploading extension $VERSION..."
 UPLOAD_RESPONSE="$(api_call POST "$UPLOAD_URL" upload "$ARTIFACT")"
 UPLOAD_STATE="$(printf '%s' "$UPLOAD_RESPONSE" | json_value uploadState)"
