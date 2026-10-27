@@ -255,7 +255,7 @@ export function BrowserAssistantPanel() {
         <ChatComposer appearance="app" value={draft} onChange={setDraft} onSend={submit}
           sendDisabled={!connected || !assistant || running || !!accountSetup} placeholder="Ask a question or give Brian a task" textareaId="message"
           rowClassName="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-0.5 gap-y-1 px-2 pb-2"
-          textareaClassName="col-span-3 col-start-1 row-start-1 w-full min-w-0 max-h-[min(240px,30dvh)] resize-none overflow-y-auto bg-transparent px-1.5 pt-3 pb-2 text-[16px] leading-6 outline-none placeholder:text-muted-foreground focus-visible:shadow-none"
+          textareaClassName="col-span-3 col-start-1 row-start-1 w-full min-w-0 max-h-[min(240px,30dvh)] resize-none overflow-y-auto bg-transparent px-1.5 pt-3 pb-2 text-[16px] leading-6 outline-none placeholder:whitespace-nowrap placeholder:text-muted-foreground focus-visible:shadow-none"
           slotPreInput={<div className="composer-toolbar col-span-2 col-start-1 row-start-2">
             <details id="assistant-picker" className="assistant-picker" inert={running}>
               <summary title={assistant?.name || 'Choose assistant'} aria-label={assistant ? `Switch assistant: ${assistant.name}` : 'Choose assistant'}>

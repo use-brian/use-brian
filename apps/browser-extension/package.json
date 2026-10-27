@@ -7,7 +7,8 @@
     "build": "pnpm --filter @use-brian/browser-control build && pnpm --filter @use-brian/chat-ui build && rm -rf dist && tsc -p tsconfig.chromium.json && node scripts/assemble.mjs",
     "build:firefox": "pnpm --filter @use-brian/browser-control build && rm -rf dist-firefox && tsc -p tsconfig.firefox.json && node scripts/assemble-firefox.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:layout": "node scripts/test-sidepanel-layout.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",
