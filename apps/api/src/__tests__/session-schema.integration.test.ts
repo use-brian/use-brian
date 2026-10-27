@@ -75,6 +75,7 @@ type Shape = {
   expectAnchor: string
   expectVisibility: 'personal' | 'workspace'
   expectChannelType: string
+  expectRecordingPrivacyHeld?: boolean
   /** Who reads, lists and posts. Personal: the creator only. Workspace: members at clearance. */
   readers: Principal[]
 }
@@ -99,8 +100,10 @@ const SHAPES: Shape[] = [
     expectAnchor: 'office_file', expectVisibility: 'workspace', expectChannelType: 'web', readers: MEMBERS_AT_CLEARANCE },
   { name: 'feed thread', insert: { user_id: MEMBER, channel_type: 'feed_thread', channel_id: 'feed-thread:1', visibility: 'workspace' },
     expectAnchor: 'feed_thread', expectVisibility: 'workspace', expectChannelType: 'web', readers: MEMBERS_AT_CLEARANCE },
-  { name: 'converged channel room', insert: { user_id: MEMBER, channel_type: 'telegram', channel_id: '-1001', visibility: 'workspace', anchor_kind: 'channel' },
-    expectAnchor: 'channel', expectVisibility: 'workspace', expectChannelType: 'telegram', readers: MEMBERS_AT_CLEARANCE },
+  { name: 'converged channel room', insert: { user_id: MEMBER, channel_type: 'slack', channel_id: 'C_SAMPLE', visibility: 'workspace', anchor_kind: 'channel' },
+    expectAnchor: 'channel', expectVisibility: 'workspace', expectChannelType: 'slack', readers: MEMBERS_AT_CLEARANCE },
+  { name: 'legacy Telegram channel room', insert: { user_id: MEMBER, channel_type: 'telegram', channel_id: '-1001', visibility: 'workspace', anchor_kind: 'channel' },
+    expectAnchor: 'channel', expectVisibility: 'workspace', expectChannelType: 'telegram', expectRecordingPrivacyHeld: true, readers: [] },
 ]
 
 const ids = new Map<string, string>()
@@ -168,12 +171,13 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
 
   it('derives anchor, audience and transport on insert', async () => {
     for (const shape of SHAPES) {
-      const row = (await db.query<{ anchor_kind: string; visibility: string; channel_type: string; effective_clearance: string | null }>(
-        'SELECT anchor_kind, visibility, channel_type, effective_clearance FROM sessions WHERE id = $1',
+      const row = (await db.query<{ anchor_kind: string; visibility: string; channel_type: string; effective_clearance: string | null; recording_privacy_held: boolean }>(
+        'SELECT anchor_kind, visibility, channel_type, effective_clearance, recording_privacy_held FROM sessions WHERE id = $1',
         [ids.get(shape.name)])).rows[0]
       assert.equal(row.anchor_kind, shape.expectAnchor, shape.name)
       assert.equal(row.visibility, shape.expectVisibility, shape.name)
       assert.equal(row.channel_type, shape.expectChannelType, shape.name)
+      assert.equal(row.recording_privacy_held, shape.expectRecordingPrivacyHeld ?? false, shape.name)
       // D10: every workspace row carries a clearance.
       if (shape.expectVisibility === 'workspace') assert.equal(row.effective_clearance, 'internal', shape.name)
     }
@@ -203,6 +207,21 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
       }
     })
   }
+
+  it('preserves quarantined recording content and refuses unreviewed release or new messages', async () => {
+    const id = ids.get('legacy Telegram channel room')!
+    const messages = (await db.query<{ content: unknown }>(
+      'SELECT content FROM session_messages WHERE session_id = $1', [id])).rows
+    assert.deepEqual(messages, [{ content: [{ type: 'text', text: 'hi' }] }])
+    await assert.rejects(db.query(
+      'UPDATE sessions SET recording_privacy_held = false WHERE id = $1', [id]),
+    /recording_privacy_review_required/)
+    await assert.rejects(db.query(
+      `INSERT INTO session_messages (session_id, role, content, sequence_num) VALUES ($1, 'user', '[]'::jsonb, $2)`,
+      [id, ++sequence]), /recording_privacy_review_required/)
+    assert.equal((await db.query(
+      'SELECT id FROM session_messages WHERE session_id = $1', [id])).rows.length, 1)
+  })
 
   it('keeps historical state held and rejects a new plaintext state without evidence', async () => {
     const state = (await db.query<{ summary: string; scope_revision_id: string | null }>(
