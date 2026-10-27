@@ -230,6 +230,28 @@ function fetchSharedChatSessions(
   return listWorkspaceSessions({ workspaceId });
 }
 
+/** Project-filtered pages share the session invalidation prefix and viewer key. */
+export function useProjectChatSessionsData(workspaceId: string, projectId: string | null) {
+  const key = chatSharedSessionsCacheKey(workspaceId, projectId);
+  const rows = useCachedResource(key, () => listWorkspaceSessions({ workspaceId, contextProjectId: projectId, strict: true }));
+  const [paging, setPaging] = useState(false);
+  const [exhaustedCursor, setExhaustedCursor] = useState<string | null>(null);
+  const [pageError, setPageError] = useState<unknown>(null);
+  useEffect(() => { setExhaustedCursor(null); setPageError(null); }, [key]);
+  const more = async () => {
+    const last = rows.data?.at(-1);
+    if (!last || paging) return;
+    setPaging(true); setPageError(null);
+    try {
+      const next = await listWorkspaceSessions({ workspaceId, contextProjectId: projectId,
+        before: { id: last.id, lastActive: last.lastActive }, strict: true });
+      mutateSurfaceCache<WorkspaceSession[]>(key, current => [...current, ...next.filter(row => !current.some(old => old.id === row.id))]);
+      setExhaustedCursor(next.length < 50 ? next.at(-1)?.id ?? last.id : null);
+    } catch (error) { setPageError(error); } finally { setPaging(false); }
+  };
+  return { ...rows, error: rows.error ?? pageError, paging, hasMore: rows.data?.at(-1)?.id !== exhaustedCursor, more };
+}
+
 // ── Optimistic patches ───────────────────────────────────────────────────
 
 /**

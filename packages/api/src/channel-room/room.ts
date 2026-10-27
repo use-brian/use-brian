@@ -138,7 +138,7 @@ export async function findOrCreateChannelRoom(params: ChannelRoomBinding & {
 async function findChannelRoom(params: { workspaceId: string; channelType: string; channelId: string }): Promise<Session | null> {
   const row = (await query<{ id: string }>(
     `SELECT s.id FROM sessions s
-      WHERE s.workspace_id = $1 AND s.channel_type = $2 AND s.channel_id = $3 AND ${sessionKindSql.channelRoom('s')}`,
+      WHERE s.workspace_id = $1 AND s.channel_type = $2 AND s.channel_id = $3 AND ${sessionKindSql.channelRoom('s')} AND s.recording_revision IS NULL`,
     [params.workspaceId, params.channelType, params.channelId],
   )).rows[0]
   return row ? readSessionById(row.id) : null
@@ -295,7 +295,7 @@ export async function roomCaptureEnabled(roomId: string): Promise<boolean> {
 /** Switch a room's brain capture (D4). The caller has checked the admin role. */
 export async function setRoomCapture(roomId: string, enabled: boolean): Promise<void> {
   await query(
-    `UPDATE sessions s SET room_capture = $2 WHERE s.id = $1 AND ${sessionKindSql.channelRoom('s')}`,
+    `UPDATE sessions s SET room_capture = $2 WHERE s.id = $1 AND ${sessionKindSql.channelRoom('s')} AND s.recording_revision IS NULL`,
     [roomId, enabled],
   )
 }

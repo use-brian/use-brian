@@ -367,8 +367,12 @@ export function chatSessionsCacheKey(workspaceId: string): string {
   return `chat-sessions:${workspaceId}${viewerSuffix()}`;
 }
 
-export function chatSharedSessionsCacheKey(workspaceId: string): string {
-  return `chat-shared:${workspaceId}${viewerSuffix()}`;
+export function channelRecordingsCacheKey(workspaceId: string, channelId: string): string {
+  return `studio-channels:${workspaceId}${viewerSuffix()}:recordings:${channelId}`;
+}
+
+export function chatSharedSessionsCacheKey(workspaceId: string, projectId?: string | null): string {
+  return `chat-shared:${workspaceId}${viewerSuffix()}${projectId === undefined ? "" : `:project:${projectId ?? "general"}`}`;
 }
 
 /**

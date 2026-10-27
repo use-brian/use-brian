@@ -981,3 +981,26 @@ export async function detachChannelAssistant(
   );
   if (!res.ok) throw new Error(`Detach failed (${res.status})`);
 }
+
+export type ChannelRecording = { id: string; conversationId: string; enabled: boolean;
+  destination: "personal" | "workspace"; projectId: string | null; revision: number; sessionId: string | null };
+export type ChannelRecordings = { ownership: "mine" | "other" | "needs_confirmation"; recordings: ChannelRecording[] };
+export async function getChannelRecordings(workspaceId: string, channelId: string): Promise<ChannelRecordings> {
+  const response = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/channels/${channelId}/recordings`);
+  if (!response.ok) throw new Error("recording_unavailable");
+  return response.json();
+}
+export async function confirmRecordingOwner(workspaceId: string, channelId: string): Promise<void> {
+  const response = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/channels/${channelId}/recording-owner`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmConnectedByMe: true }),
+  });
+  if (!response.ok) throw new Error("recording_unavailable");
+}
+export async function updateChannelRecording(workspaceId: string, channelId: string, row: ChannelRecording,
+  changes: Pick<ChannelRecording, "enabled" | "destination" | "projectId">): Promise<ChannelRecording> {
+  const response = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/channels/${channelId}/recordings/${row.id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ revision: row.revision, ...changes }),
+  });
+  if (!response.ok) throw new Error("recording_unavailable");
+  return response.json();
+}

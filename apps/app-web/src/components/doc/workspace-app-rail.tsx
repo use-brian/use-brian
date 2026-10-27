@@ -80,7 +80,7 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
 
   return (
     <nav data-workspace-app-rail data-doc-chrome aria-label={copy.contextScope.workspaceNavigation} className={cn(
-      mobile ? "flex max-h-[50dvh] min-h-0 shrink-0 flex-col gap-0.5 px-2 pb-2 md:hidden" : "hidden h-full min-h-0 w-14 shrink-0 flex-col items-center gap-1 px-2 pt-[13px] md:flex",
+      mobile ? "flex max-h-[50dvh] min-h-0 shrink-0 flex-col gap-0.5 px-2 pb-2 md:hidden" : "hidden h-full min-h-0 w-14 shrink-0 flex-col items-center gap-1 px-2 pt-px md:flex",
     )}>
       {!mobile && <div data-workspace-menu-slot aria-hidden className="h-16 w-full shrink-0" />}
       <div data-workspace-app-rail-scroll className={cn("flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain", mobile ? "gap-0.5" : "items-center gap-1 [scrollbar-width:none]")}>

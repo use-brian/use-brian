@@ -1,3 +1,4 @@
+import { listChannelRecordings, changeChannelRecording, confirmChannelRecordingOwner } from '../channel-recording.js'
 /**
  * Workspace channels management routes — the Phase D operator surface.
  *
@@ -1061,6 +1062,42 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     }
     const integrations = await loadIntegrations(userId, workspaceId)
     res.json({ channel: serializeChannel(updated, integrations.get(channelId)) })
+  })
+
+  // Owner commands use the same channel visibility gate as channel settings.
+  router.get('/workspaces/:workspaceId/channels/:channelId/recordings', async (req, res) => {
+    const actorId = (req as { userId?: string }).userId
+    if (!actorId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+    if (!await loadChannel(actorId, workspaceId, channelId, res)) return
+    const row = (await query<{ id: string; ownerId: string | null }>(`SELECT id,recording_owner_user_id AS "ownerId" FROM channel_integrations WHERE channel_id=$1 AND channel_type='telegram'`, [channelId])).rows[0]
+    if (!row) { res.status(404).json({ error: 'not_found' }); return }
+    const ownership = row.ownerId === actorId ? 'mine' : row.ownerId ? 'other' : 'needs_confirmation'
+    res.json({ ownership, recordings: ownership === 'mine' ? await listChannelRecordings(row.id, actorId) : [] })
+  })
+  router.post('/workspaces/:workspaceId/channels/:channelId/recording-owner', async (req, res) => {
+    const actorId = (req as { userId?: string }).userId
+    if (!actorId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+    if (!await loadChannel(actorId, workspaceId, channelId, res)) return
+    if (req.body?.confirmConnectedByMe !== true) { res.status(400).json({ error: 'owner_confirmation_required' }); return }
+    const row = (await query<{ id: string }>('SELECT id FROM channel_integrations WHERE channel_id=$1', [channelId])).rows[0]
+    if (!row) { res.status(404).json({ error: 'not_found' }); return }
+    try { await confirmChannelRecordingOwner(row.id, actorId); res.json({ ok: true }) }
+    catch { res.status(409).json({ error: 'recording_destination_unavailable' }) }
+  })
+  router.patch('/workspaces/:workspaceId/channels/:channelId/recordings/:recordingId', async (req, res) => {
+    const actorId = (req as { userId?: string }).userId
+    if (!actorId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId, recordingId } = req.params
+    if (!await loadChannel(actorId, workspaceId, channelId, res)) return
+    const parsed = z.object({ revision: z.number().int().positive(), enabled: z.boolean(),
+      destination: z.enum(['personal','workspace']), projectId: z.string().uuid().nullable() }).strict().safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'invalid_recording_policy' }); return }
+    const row = (await query<{ id: string }>('SELECT id FROM channel_integrations WHERE channel_id=$1', [channelId])).rows[0]
+    if (!row) { res.status(404).json({ error: 'not_found' }); return }
+    try { res.json(await changeChannelRecording({ ...parsed.data, integrationId: row.id, actorId, id: recordingId })) }
+    catch { res.status(409).json({ error: 'recording_destination_unavailable' }) }
   })
 
   // PATCH /workspaces/:workspaceId/channels/:channelId/config — the

@@ -610,7 +610,7 @@ export const sessionKindSql = {
    * surface). The `draft-iter:` sentinel is retired: nothing writes it.
    */
   personalHistory: (alias: string): string =>
-    `${alias}.visibility = 'personal' AND ${alias}.anchor_kind IN ('none', 'inbox')`
+    `${alias}.visibility = 'personal' AND ${alias}.anchor_kind IN ('none', 'inbox', 'channel')`
     + ` AND ${alias}.channel_id <> 'tuning'`,
   /**
    * The ON CONFLICT target of a personal session's identity: the partial
@@ -648,7 +648,7 @@ export const sessionKindSql = {
     `(${param}::text IS NULL OR ${alias}.app_origin = ${param} OR ${alias}.app_origin IS NULL)`,
   /** The ON CONFLICT target of a channel room: `sessions_channel_room_key` (D8). */
   channelRoomConflict: (): string =>
-    `(workspace_id, channel_type, channel_id) WHERE visibility = 'workspace' AND anchor_kind = 'channel'`,
+    `(workspace_id, channel_type, channel_id) WHERE visibility = 'workspace' AND anchor_kind = 'channel' AND recording_revision IS NULL`,
   /** A session with this anchor (migration 741). An empty alias leaves the column unqualified. */
   anchored: (alias: string, kind: AnchorKind): string =>
     `${alias ? `${alias}.` : ''}anchor_kind = '${kind}'`,

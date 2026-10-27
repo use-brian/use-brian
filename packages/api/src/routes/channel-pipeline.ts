@@ -1,3 +1,4 @@
+import { recordingInputScope, type RecordingAdmission } from '../channel-recording.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
 import { isInputAuthorityError } from '@use-brian/core'
 import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
@@ -376,6 +377,8 @@ export type ChannelHooks = {
 // ── Pipeline params ──────────────────────────────────────────────
 
 export type ChannelPipelineParams = AdmittedChannelMessage & {
+  recording?: RecordingAdmission
+
   /**
    * Background-lane model, resolved once at boot against the configured
    * providers. Omitted = fall back to the literal, which is only servable
@@ -1157,10 +1160,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   const sessionChannelId = params.sessionChannelId ?? channelId
   // A group bound to the assistant's workspace is ONE room every sender
   // shares (unified-sessions §4.4, D15); anything else keeps its per-user row.
-  const roomBinding = await resolveRoomBinding({
+  const roomBinding = params.recording ? null : await resolveRoomBinding({
     assistant, channelType, channelIntegrationId: params.channelIntegrationId, isGroupChat,
   })
-  const room = roomBinding
+  const room = params.recording?.session ?? (roomBinding
     ? (await findOrCreateChannelRoom({
         ...roomBinding,
         assistantId: assistant.id,
@@ -1168,7 +1171,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         channelId: sessionChannelId,
         starterUserId: userId,
       })).room
-    : null
+    : null)
+  const privateRecording = params.recording?.policy.destination === 'personal'
   // A sender who is not a member is a GUEST of a room (D1): answered at the
   // room's clearance, never isolated into the conversation-only guest lane.
   const externalGuest = roomTurnShape({
@@ -1216,7 +1220,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   })
   // D4: the room says once, in the group, that it is shared and captured.
   let pendingRoomNotice: string | null = null
-  if (room && await claimRoomDisclosure(room.id)) {
+  if (room && !params.recording && await claimRoomDisclosure(room.id)) {
     const notice = roomDisclosureText({ assistantName: assistant.name, channelType })
     if (hooks.postNotice) {
       await hooks.postNotice(notice).catch((err: unknown) => {
@@ -1292,7 +1296,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   if (audienceEnvelope && !audienceEnvelope.allowed) {
     throw new DeliveryAudienceUnverifiedError(audienceEnvelope.detail, audienceEnvelope.diagnostic)
   }
-  const publicAudienceTurn = audienceEnvelope?.allowed === true
+  const publicAudienceTurn = privateRecording || audienceEnvelope?.allowed === true
     && audienceEnvelope.source === 'public'
   const currentAudienceMaximum = audienceEnvelope?.allowed
     ? async (): Promise<AccessCeiling | null> => {
@@ -1353,7 +1357,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         channelId,
       },
       attribution: { billingUserId },
-      sessionAuthority: session,
+      sessionAuthority: privateRecording ? undefined : session,
       credentialCurrent: params.credentialCurrent,
       ...(audienceEnvelope?.allowed
         ? {
@@ -1396,7 +1400,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     compartments: dataTurnScope.writeCompartments,
     projectIds: dataTurnScope.writeProjectIds,
   })
-  const inputMessageScope = room && assistant.workspaceId
+  const inputMessageScope = params.recording ? recordingInputScope(params.recording) : room && assistant.workspaceId
     ? roomInputScope(room, assistant.workspaceId, audienceEnvelope?.allowed ? audienceEnvelope.ceiling : undefined)
     : sessionMessageInputScope({
         scope: dataTurnScope,
@@ -1404,9 +1408,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         userId,
         sharedAudience: !turnPolicy.context.personalMemory,
       })
-  if (room && inputMessageScope) await admitRoomInputScope(room, inputMessageScope)
+  if (room && !params.recording && inputMessageScope) await admitRoomInputScope(room, inputMessageScope)
   // D16: a room is hydrated once from what the provider still shows.
-  const roomHistory = room && audienceEnvelope?.allowed
+  const roomHistory = !params.recording && room && audienceEnvelope?.allowed
     && await mayReadGroupContext(pinAccessCeiling(dataTurnScope.access), { ...audienceEnvelope.ceiling,
       clearance: (room.effectiveClearance ?? 'internal') as AccessCeiling['clearance'],
       compartments: room.contextCompartments, projectIds: room.contextProjectId ? [room.contextProjectId] : [] })
@@ -1417,7 +1421,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       })
     : null
   const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
-  const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
+  const nativeTranscriptAuthority = !privateRecording && executionContext.ownership.kind === 'workspace'
     && executionContext.identity.kind === 'attended'
     && executionContext.identity.principal.kind === 'workspace_member'
     ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
@@ -1625,7 +1629,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // topic classification. Follow-up detection needs actual dialogue, not an
   // isolated current sentence (2026-08-09 Snapio incident on web; channels
   // share the same classifier contract).
-  const preExistingDbMessages = nativeTranscriptAuthority
+  const preExistingDbMessages = privateRecording ? [] : nativeTranscriptAuthority
     ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, undefined, earlyUserMessageRow ? earlyUserMessageRow.sequenceNum - 1 : undefined)
     : await filterHistoryForAudience(await getSessionMessages(session.id, { excludeHeld: true }))
   const adaptiveRecentConversation = preExistingDbMessages
@@ -1811,7 +1815,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     anchorTimezone,
   })
 
-  const storedReply = nativeClassification ? nativeClassification.reply : await resolveReplyText({
+  const storedReply = privateRecording ? null : nativeClassification ? nativeClassification.reply : await resolveReplyText({
     channelType,
     replyToMessageId: replyToMessageId ?? null,
     session,
@@ -1868,13 +1872,13 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
 
   // Reuse the native authored row; legacy profiles persist their input here.
   const userMessageRow = earlyUserMessageRow ?? await persistInboundMessage()
-  if (room && assistant.workspaceId && createdUserMessage) {
+  if (room && !params.recording && assistant.workspaceId && createdUserMessage) {
     await captureChannelRoomInput({
       room, inputScope: inputMessageScope, workspaceId: assistant.workspaceId,
       senderUserId: userId, senderName: actorDisplayName ?? null, text: messageText ?? '',
     })
   }
-  const storedUserSource = await readSessionMessageScopeSource(
+  const storedUserSource = privateRecording ? null : await readSessionMessageScopeSource(
     assistant.workspaceId,
     userMessageRow.id,
   )
@@ -1977,7 +1981,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // ── Load history ──
   // `fromSequence` skips rows already compacted into the most recent
   // boundary; null (never compacted) loads full history.
-  let dbMessages = nativeTranscriptAuthority
+  let dbMessages = privateRecording ? [] : nativeTranscriptAuthority
     ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, isolatedAudience || room ? null : session.compactBoundarySequence)
     : await filterHistoryForAudience(await getSessionMessages(session.id, {
         excludeHeld: true,
@@ -1985,7 +1989,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         // per-source audience evidence. Rebuild from filtered provider history.
         fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
       }))
-  if (room) {
+  if (room && !privateRecording) {
     const currentHistory = overlayCurrentRoomMessage(dbMessages, { id: userMessageRow.id, content: userContentBlocks })
     if (!currentHistory) {
       // A provider replay must not relabel an older, more restricted input
@@ -2008,7 +2012,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // A room labels each speaker at assembly (members by name, guests by
   // handle, D1), the same seam web rooms use; stored content stays clean.
   let roomSenderNames: Map<string, string> | undefined
-  if (roomShape.attributeSenders) {
+  if (roomShape.attributeSenders && !privateRecording) {
     try {
       const senderIds = [...new Set(dbMessages.map((m) => m.senderUserId).filter((id): id is string => Boolean(id)))]
       const profiles = senderIds.length ? await getUserProfilesByIds(senderIds) : new Map<string, { name: string | null }>()
@@ -2021,8 +2025,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       console.warn(`[${channelType}] room speaker lookup failed; turns stay unlabelled:`, err)
     }
   }
+  // This is current provider-authored input, not a read/declassification of
+  // the connector owner's stored transcript. No stored row enters the model.
   if (!(await deliveryAudienceAdmitsTurn())) return
-  const compactionResult = await runProactiveCompaction({
+  const compactionResult = privateRecording
+    ? { messages: [{ role: 'user' as const, content: structuredClone(userContentBlocks) }] }
+    : await runProactiveCompaction({
     modelContext: { execution: executionContext, accumulator: scopeAccumulator },
     sessionMessages: dbMessages,
     timezone: userTimezone,

@@ -180,7 +180,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
     // Recents is a HISTORY list, not a resume target - it never re-addresses,
     // so legacy null-origin and inbox rows stay visible there.
     expect(sql).toContain('app_origin IS NULL')
-    expect(sql).toContain("anchor_kind IN ('none', 'inbox')")
+    expect(sql).toContain("anchor_kind IN ('none', 'inbox', 'channel')")
     expect(params).toHaveLength(3)
   })
 
@@ -221,7 +221,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
 
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain("s.channel_type = 'web'")
-    expect(sql).toContain("anchor_kind IN ('none', 'inbox')")
+    expect(sql).toContain("anchor_kind IN ('none', 'inbox', 'channel')")
     expect(params).toHaveLength(3)
   })
 })
@@ -245,5 +245,23 @@ describe('[COMP:api/sessions-list] GET /api/sessions/workspace obeys the read ga
 
     expect(res.body.map((s: { id: string }) => s.id)).toEqual(['reachable'])
     expect(String(mockQuery.mock.calls[0]?.[0])).toContain("s.app_origin = 'chat'")
+  })
+})
+
+describe('[COMP:api/sessions-list] Project paging', () => {
+  it('filters the Project before paging and scans past denied rows', async () => {
+    const { getWorkspaceMembershipWithReadScopeSystem } = await import('../../db/workspace-store.js')
+    const { getUserProfilesByIds } = await import('../../db/users.js')
+    vi.mocked(getWorkspaceMembershipWithReadScopeSystem).mockResolvedValue({ role:'member',clearance:'internal',compartments:[],projectIds:null } as never)
+    vi.mocked(getUserProfilesByIds).mockResolvedValue(new Map() as never)
+    const project='66666666-6666-4666-8666-666666666666'
+    const row=(id:string,clearance:string)=>({id,title:id,channelId:id,lastActiveAt:new Date('2026-01-01T00:00:00Z'),status:'idle',starterUserId:USER_ID,
+      assistantId:WS_PRIMARY_ASSISTANT_ID,visibility:'workspace',mode:null,effectiveClearance:clearance,contextGroupId:null,contextProjectId:project,contextCompartments:[]})
+    mockQuery.mockResolvedValueOnce({rows:Array.from({length:100},(_,i)=>row(`hidden-${i}`,'confidential'))} as never)
+      .mockResolvedValueOnce({rows:[row('visible','internal')]} as never)
+    const res=await request(makeApp()).get(`/api/sessions/workspace?workspaceId=${WS_ID}&contextProjectId=${project}`).expect(200)
+    expect(res.body.map((r:{id:string})=>r.id)).toEqual(['visible'])
+    expect(mockQuery.mock.calls[0][1]).toEqual([WS_ID,project,null,null])
+    expect(mockQuery.mock.calls[1][1]).toEqual([WS_ID,project,'2026-01-01T00:00:00.000Z','hidden-99'])
   })
 })

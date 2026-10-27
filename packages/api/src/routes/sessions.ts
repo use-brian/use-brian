@@ -445,20 +445,36 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
-      const result = await query<{
+      const projectFilter = req.query.contextProjectId
+      const before = req.query.before as string | undefined
+      const beforeId = req.query.beforeId as string | undefined
+      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      if ((projectFilter !== undefined && projectFilter !== 'general' && (typeof projectFilter !== 'string' || !uuid.test(projectFilter)))
+        || (!!before !== !!beforeId) || (before && (!Number.isFinite(Date.parse(before)) || !uuid.test(beforeId!)))) {
+        res.status(400).json({ error: 'Invalid session scope or cursor' }); return
+      }
+      type RailRow = {
         id: string; title: string | null; channelId: string
         lastActiveAt: Date; status: string
         starterUserId: string; effectiveClearance: string | null
         assistantId: string; visibility: string | null; mode: string | null
         contextGroupId: string | null; contextProjectId: string | null
         contextCompartments: string[] | null
-        channelType: string; anchorKind: string; roomCapture: boolean
+        channelType: string; anchorKind: string; roomCapture: boolean; recordingRevision: number | null
         appOrigin: string | null
-      }>(
+      }
+      const visible: RailRow[] = []
+      let cursorDate = before ?? null
+      let cursorId = beforeId ?? null
+      const now = new Date()
+      // Scan through denied rows, applying the exact open gate before the
+      // visible page limit. Busy Projects cannot starve another Project.
+      while (visible.length < 50) {
+      const result = await query<RailRow>(
         `SELECT s.id, NULL::text AS title, s.channel_id AS "channelId",
                 s.channel_type AS "channelType", s.anchor_kind AS "anchorKind",
                 s.app_origin AS "appOrigin",
-                s.room_capture AS "roomCapture",
+                s.room_capture AS "roomCapture", s.recording_revision AS "recordingRevision",
                 s.last_active_at AS "lastActiveAt", s.status,
                 s.user_id AS "starterUserId",
                 s.effective_clearance AS "effectiveClearance",
@@ -471,16 +487,17 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
            JOIN assistants a ON a.id = s.assistant_id
           WHERE a.workspace_id = $1
             AND ${sessionKindSql.railRoom('s')}
-          ORDER BY s.last_active_at DESC
-          LIMIT 50`,
-        [workspaceId],
+            AND ($2::text IS NULL OR ($2='general' AND s.context_project_id IS NULL) OR s.context_project_id::text=$2)
+            AND ($3::timestamptz IS NULL OR (s.last_active_at,s.id)<($3::timestamptz,$4::uuid))
+          ORDER BY s.last_active_at DESC,s.id DESC
+          LIMIT 100`,
+        [workspaceId, projectFilter ?? null, cursorDate, cursorId],
       )
 
       // The list never outruns the read gate (L4): the same decision the
       // gate applies (clearance AND current Team/Project/department reach),
       // so a room the caller could not open is not listed, title and all.
-      const now = new Date()
-      const visible = result.rows.filter((r) => decideSessionRead({
+      const admitted = result.rows.filter((r) => decideSessionRead({
         callerUserId: user.id,
         session: {
           userId: r.starterUserId,
@@ -497,6 +514,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         departmentAccess: membership.departmentAccess,
         now,
       }).readable)
+      visible.push(...admitted.slice(0, 50 - visible.length))
+      const last = result.rows.at(-1)
+      if (result.rows.length < 100 || !last) break
+      cursorDate = new Date(last.lastActiveAt).toISOString()
+      cursorId = last.id
+      }
+
 
       // Starter identity for the "Started by" chip. One batched lookup;
       // `users` RLS is own-row only, so this is a system read — membership
@@ -529,7 +553,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         // A converged group on another transport (multiplayer-chat T10): the
         // rail badges it, and its brain capture is an admin setting (D4).
         transport: classifySession(s).transport,
-        ...(classifySession(s).anchor.kind === 'channel' ? { roomCapture: s.roomCapture } : {}),
+        ...(classifySession(s).anchor.kind === 'channel' && s.recordingRevision == null ? { roomCapture: s.roomCapture } : {}),
         humanCount: humans.get(s.id) ?? null,
         policy: clientSessionPolicy(sessionPolicy(classifySession(s), { humanCount: humans.get(s.id) })),
       })))

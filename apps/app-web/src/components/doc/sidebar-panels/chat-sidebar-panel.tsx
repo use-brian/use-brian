@@ -44,7 +44,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Brain, ChevronRight, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
+import { Brain, ChevronRight, Folder, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 import { AssistantAvatar } from "@/components/assistant-avatar";
@@ -68,7 +68,11 @@ import {
   patchPersonalChatSessions,
   patchSharedChatSessions,
   useChatSessionsData,
+  useProjectChatSessionsData,
 } from "@/lib/chat-surface-data";
+import { listContextProjects, type ContextProject } from "@/lib/api/context-scopes";
+import { useCachedResource } from "@/lib/surface-cache";
+import { surfaceDataKey } from "@/lib/surface-prefetch";
 import { isRoomUnread } from "@/lib/chat-seen";
 
 /** The Brain panel's nav-row recipe — active is the `.doc-nav-active` pill.
@@ -127,6 +131,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     shared: sharedRows,
     refreshShared,
   } = useChatSessionsData(workspaceId);
+  const projects = useCachedResource(view === "workspace" ? surfaceDataKey("projects", workspaceId) : null, () => listContextProjects(workspaceId, true));
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The ambient-thread section's disclosure. Collapsed by default: those
@@ -208,7 +213,6 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   );
   const visible = chatRows;
   const visibleAmbient = ambientRows;
-  const visibleShared = sharedRows ?? [];
   const showAmbient = othersOpen;
   const hasWorkingRoom =
     (sharedRows ?? []).some((row) => row.status === "running") ||
@@ -278,7 +282,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       setMenuFor(null);
       const ok = await confirmDialog({
         title: t.deleteTitle,
-        description: t.deleteBody,
+        description: row.transport && row.transport !== "web" ? t.deleteRecordingBody : t.deleteBody,
         confirmLabel: t.deleteConfirm,
         variant: "destructive",
       });
@@ -376,7 +380,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
           )}
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-1.5">
-              <span className="min-w-0 truncate">{row.title}</span>
+              <span className="min-w-0 truncate">{row.title === "New Chat" && row.transport && row.transport !== "web" ? `${t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport}: ${row.channelId}` : row.title}</span>
               {"transport" in row && row.transport && row.transport !== "web" && (
                 <span
                   aria-label={format(t.roomTransportAria, {
@@ -455,11 +459,11 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   /** Start a shared thread from the rail — the explicit create the surface's
    *  topbar also offers, so the Workspace view's rail has its own entry
    *  point. Lands on the fresh thread via the same URL state. */
-  const startWorkspaceChat = useCallback(async () => {
+  const startWorkspaceChat = useCallback(async (projectId: string | null = null) => {
     if (creatingShared) return;
     setCreatingShared(true);
     try {
-      const created = await createWorkspaceSession(workspaceId);
+      const created = await createWorkspaceSession(workspaceId, undefined, { contextGroupId: null, contextProjectId: projectId });
       setError(null);
       router.push(
         `${base}?v=workspace&s=${encodeURIComponent(created.id)}`,
@@ -531,22 +535,15 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       )}
 
       {view === "workspace" && (
-        <div>
-          <div className={sectionHeaderCls}>{t.viewWorkspace}</div>
-          <div className="flex flex-col gap-0.5">
-            {sharedRows === null && <RailRowsSkeleton />}
-            {sharedRows !== null && visibleShared.length === 0 && (
-              <div className="select-none px-2 py-1 text-[12px] text-sidebar-foreground/40">
-                {t.workspaceRailEmpty}
-              </div>
-            )}
-            {visibleShared.map((row) =>
-              renderRow(
-                row,
-                `${base}?v=workspace&s=${encodeURIComponent(row.id)}`,
-              ),
-            )}
-          </div>
+        <div className="flex flex-col gap-2">
+          <ProjectChatGroup workspaceId={workspaceId} project={null} activeSessionId={activeSessionId}
+            renderRow={renderRow} onCreate={startWorkspaceChat} creating={creatingShared} />
+          {projects.loading && <RailRowsSkeleton rows={2} />}
+          {Boolean(projects.error) && <p role="alert" className="px-2 text-xs text-destructive">{t.projectChatsFailed}</p>}
+          {(projects.data ?? []).filter(p => p.status === "active" && p.shared?.status !== "quarantined").map(project => (
+            <ProjectChatGroup key={project.id} workspaceId={workspaceId} project={project} activeSessionId={activeSessionId}
+              renderRow={renderRow} onCreate={startWorkspaceChat} creating={creatingShared} />
+          ))}
         </div>
       )}
 
@@ -587,4 +584,38 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       )}
     </div>
   );
+}
+
+/** Each scope has its own authorized page; a busy General list cannot hide a Project. */
+function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, onCreate, creating }: {
+  workspaceId: string; project: ContextProject | null; activeSessionId: string | null;
+  renderRow: (row: WorkspaceSession, href: string) => React.ReactNode;
+  onCreate: (projectId: string | null) => Promise<void>; creating: boolean;
+}) {
+  const t = useT().chatApp;
+  const [open, setOpen] = useState(project === null);
+  const rows = useProjectChatSessionsData(workspaceId, project?.id ?? null);
+  useEffect(() => { if (rows.data?.some(row => row.id === activeSessionId)) setOpen(true); }, [activeSessionId, rows.data]);
+  const canCreate = !project || !project.shared || project.shared.myRole === "owner" || project.shared.myRole === "participant";
+  return <section>
+    <div className="flex items-center">
+      <button type="button" className="flex min-h-8 max-sm:min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent"
+        aria-expanded={open} onClick={() => setOpen(value => !value)}>
+        <ChevronRight aria-hidden className={cn("size-3 shrink-0", open && "rotate-90")} />
+        {project && <Folder aria-hidden className="size-4 shrink-0" />}
+        <span className="truncate">{project?.name ?? t.generalChats}</span>
+      </button>
+      {canCreate && <button type="button" className="flex min-h-8 min-w-8 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded-md hover:bg-sidebar-accent"
+        aria-label={format(t.newChatInProject, { name: project?.name ?? t.generalChats })}
+        title={format(t.newChatInProject, { name: project?.name ?? t.generalChats })}
+        disabled={creating} onClick={() => void onCreate(project?.id ?? null)}><SquarePen aria-hidden className="size-4" /></button>}
+    </div>
+    {open && <div className={project ? "pl-4" : ""}>
+      {rows.loading && <RailRowsSkeleton />}
+      {Boolean(rows.error) && <p role="alert" className="px-2 text-xs text-destructive">{t.projectChatsFailed}</p>}
+      {rows.data?.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">{t.workspaceRailEmpty}</p>}
+      {rows.data?.map(row => renderRow(row, `/w/${workspaceId}/chat?v=workspace&s=${encodeURIComponent(row.id)}`))}
+      {rows.hasMore && (rows.data?.length ?? 0) >= 50 && <button type="button" className="min-h-8 max-sm:min-h-11 px-2 text-sm text-muted-foreground" disabled={rows.paging} onClick={() => void rows.more()}>{t.moreChats}</button>}
+    </div>}
+  </section>;
 }
