@@ -39,6 +39,7 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
   async function render(mobile = false) {
@@ -47,6 +48,33 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
   const button = (name: string) => document.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!;
   const railLink = (name: string) => container.querySelector<HTMLAnchorElement>(`a[aria-label="${name}"]`);
   async function click(element: HTMLElement) { await act(async () => element.click()); }
+
+  it("reveals a rail item's name after 100ms of hover", async () => {
+    vi.useFakeTimers();
+    await render();
+    const projects = railLink(en.contextScope.projectsTitle)!;
+    const pointerEnter = new Event("pointerover", { bubbles: true });
+    Object.defineProperty(pointerEnter, "pointerType", { value: "mouse" });
+    await act(async () => {
+      projects.dispatchEvent(pointerEnter);
+      projects.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+      projects.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(99); });
+    expect(document.querySelector('[data-app-tooltip][data-open]')).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(document.querySelector('[data-app-tooltip][data-open]')?.textContent).toBe(en.contextScope.projectsTitle);
+  });
+
+  it("reveals names on keyboard focus without waiting for the hover delay", async () => {
+    vi.useFakeTimers();
+    await render();
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+      railLink(en.contextScope.projectsTitle)!.focus();
+    });
+    expect(document.querySelector('[data-app-tooltip][data-open]')?.textContent).toBe(en.contextScope.projectsTitle);
+  });
 
   it("reserves the workspace menu above Home without a duplicate panel toggle", async () => {
     await render();

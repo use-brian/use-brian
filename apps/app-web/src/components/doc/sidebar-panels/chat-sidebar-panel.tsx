@@ -15,8 +15,8 @@
  * new-chat row swaps between the personal link and the explicit
  * shared-session create.
  *
- * "Chats" lists only sessions minted in the Chat app (`app_origin='chat'` +
- * legacy null-origin). The dock's rolling ambient threads — which every dock
+ * "Chats" groups personal web sessions by Project and non-web sessions by
+ * source channel. The dock's rolling ambient web threads — which every dock
  * exchange bumps to the top of an unsplit list — sit in the collapsed
  * "Other conversations" section: demoted, never hidden, so the unified-history
  * promise (any thread readable and continuable here) survives.
@@ -44,13 +44,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Brain, ChevronRight, Folder, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
+import { Brain, ChevronRight, Folder, MessageSquare, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { Skeleton } from "@/components/skeleton";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { promptDialog } from "@/components/ui/prompt-dialog";
+import { Tooltip } from "@/components/ui/tooltip";
+import styles from "./chat-sidebar-panel.module.css";
 import {
   CHAT_SESSION_ACTIVITY_EVENT,
   dispatchChatSessionsRefresh,
@@ -72,15 +74,14 @@ import {
 } from "@/lib/chat-surface-data";
 import { listContextProjects, type ContextProject } from "@/lib/api/context-scopes";
 import { useCachedResource } from "@/lib/surface-cache";
-import { surfaceDataKey } from "@/lib/surface-prefetch";
+import { chatSessionsCacheKey, chatSharedSessionsCacheKey, surfaceDataKey } from "@/lib/surface-prefetch";
 import { isRoomUnread } from "@/lib/chat-seen";
 
-/** The Brain panel's nav-row recipe — active is the `.doc-nav-active` pill.
- *  44px rows below `md` (responsive contract M3: "chat history rows 44px"),
- *  with room on the right for the touch-sized row menu. */
+/** Compact single-line rows, with a 44px phone target (M3). The CSS module
+ *  also keeps touch/hoverless desktops at 44px, with room for the row menu. */
 const rowCls = (active: boolean) =>
   cn(
-    "flex min-h-11 w-full items-center rounded-md px-2 py-1.5 pr-11 text-left text-sm transition-colors md:min-h-0 md:pr-7",
+    "flex min-h-11 w-full items-center rounded-md px-2 py-1 pr-11 text-left text-sm transition-colors md:min-h-8 md:py-0.5 md:pr-7",
     active
       ? "doc-nav-active font-medium text-sidebar-accent-foreground"
       : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
@@ -91,7 +92,7 @@ function RailRowsSkeleton({ rows = 4 }: { rows?: number }) {
   return (
     <div aria-hidden className="flex flex-col gap-0.5">
       {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="flex min-h-11 items-center gap-2 px-2 py-1.5 md:min-h-0">
+        <div key={i} className="flex min-h-11 items-center gap-2 px-2 py-1 md:min-h-8 md:py-0.5">
           <Skeleton className="size-4 shrink-0 rounded-full" />
           <Skeleton className="h-3" style={{ width: `${44 + ((i * 19) % 40)}%` }} />
         </div>
@@ -131,7 +132,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     shared: sharedRows,
     refreshShared,
   } = useChatSessionsData(workspaceId);
-  const projects = useCachedResource(view === "workspace" ? surfaceDataKey("projects", workspaceId) : null, () => listContextProjects(workspaceId, true));
+  const projects = useCachedResource(surfaceDataKey("projects", workspaceId), () => listContextProjects(workspaceId, true));
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The ambient-thread section's disclosure. Collapsed by default: those
@@ -194,24 +195,49 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const base = `/w/${workspaceId}/chat`;
   const onChatSurface = pathname === base;
 
-  // "Chats" carries only sessions minted in the Chat app (`app_origin='chat'`,
-  // plus legacy null-origin rows — the server's own `?appOrigin=` convention).
-  // Everything else is the dock's rolling ambient threads: every dock exchange
-  // bumps their `last_active`, so unsplit they permanently squat at the top of
-  // the list above chats the user deliberately started here. They stay
-  // reachable (and continuable) under the collapsed "Other conversations"
-  // section — demoted, never hidden.
+  // Channel conversations belong in their source groups regardless of origin.
+  // Only ambient web threads are demoted to Other conversations, so dock
+  // activity cannot displace the chats the user deliberately started here.
   const chatRows = useMemo(
     () =>
-      (rows ?? []).filter((r) => r.appOrigin === "chat" || r.appOrigin == null),
+      (rows ?? []).filter((r) => (r.transport && r.transport !== "web") || r.appOrigin === "chat" || r.appOrigin == null),
     [rows],
   );
   const ambientRows = useMemo(
     () =>
-      (rows ?? []).filter((r) => r.appOrigin != null && r.appOrigin !== "chat"),
+      (rows ?? []).filter((r) => (!r.transport || r.transport === "web") && r.appOrigin != null && r.appOrigin !== "chat"),
     [rows],
   );
-  const visible = chatRows;
+  const personalGroups = useMemo(() => {
+    const projectById = new Map((projects.data ?? []).map(project => [project.id, project]));
+    const groups = new Map<string, { id: string; label: string; kind: "general" | "project" | "channel"; rows: DocSession[] }>();
+    for (const row of chatRows) {
+      let kind: "general" | "project" | "channel" = "general";
+      let id = "general";
+      let label = t.generalChats;
+      if (row.transport && row.transport !== "web") {
+        kind = "channel";
+        const channelId = row.transport === "slack" || row.transport === "feishu"
+          ? row.channelId.split(":thread:")[0] : row.channelId;
+        id = JSON.stringify([kind, row.transport, channelId]);
+        const transport = t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport;
+        label = `${transport}: ${channelId}`;
+      } else if (row.contextProjectId) {
+        kind = "project";
+        const project = projectById.get(row.contextProjectId);
+        id = JSON.stringify([kind, project?.id ?? null]);
+        label = project?.name ?? t.otherProjects;
+      }
+      const group = groups.get(id) ?? { id, label, kind, rows: [] };
+      group.rows.push(row);
+      groups.set(id, group);
+    }
+    return [...groups.values()].sort((a, b) => {
+      if (a.kind === "general") return -1;
+      if (b.kind === "general") return 1;
+      return b.rows[0].lastActive.localeCompare(a.rows[0].lastActive);
+    });
+  }, [chatRows, projects.data, t]);
   const visibleAmbient = ambientRows;
   const showAmbient = othersOpen;
   const hasWorkingRoom =
@@ -343,14 +369,24 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       isRoomUnread(workspaceId, row.id, row.lastActive);
     // The working pulse reads every row's turn slot, personal or room.
     const working = activityBySession[row.id]?.working ?? row.status === "running";
+    const title = row.title === "New Chat" && row.transport && row.transport !== "web"
+      ? `${t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport}: ${row.channelId}`
+      : row.title;
+    const attribution = "startedByUserId" in row
+      ? row.startedByName ? format(t.startedBy, { name: row.startedByName }) : t.startedByUnknown
+      : null;
     return (
-    <div key={row.id} className="group relative">
+    <div key={row.id} className={cn(styles.actionHost, "relative")} data-chat-sidebar-row>
+      <Tooltip side="right" label={<span className="block max-w-[min(18rem,calc(100vw-2rem))] break-words font-normal">
+        <span className="block">{title}</span>
+        {attribution && <span className="block opacity-70">{attribution}</span>}
+      </span>}>
       <Link
         href={href}
         aria-current={row.id === activeSessionId ? "page" : undefined}
         className={rowCls(row.id === activeSessionId)}
       >
-        <span className="flex min-w-0 items-center gap-2">
+        <span className="flex min-w-0 flex-1 items-center gap-2">
           {rowAssistant && (
             <span
               className={cn(
@@ -379,8 +415,8 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
             </span>
           )}
           <span className="min-w-0 flex-1">
-            <span className="flex items-center gap-1.5">
-              <span className="min-w-0 truncate">{row.title === "New Chat" && row.transport && row.transport !== "web" ? `${t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport}: ${row.channelId}` : row.title}</span>
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate">{title}</span>
               {"transport" in row && row.transport && row.transport !== "web" && (
                 <span
                   aria-label={format(t.roomTransportAria, {
@@ -400,25 +436,17 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
                 />
               )}
             </span>
-            {"startedByUserId" in row && (
-              <span className="mt-0.5 block truncate text-[11px] text-sidebar-foreground/50">
-                {row.startedByName
-                  ? format(t.startedBy, { name: row.startedByName })
-                  : t.startedByUnknown}
-              </span>
-            )}
+            {attribution && <span className="sr-only">{attribution}</span>}
           </span>
         </span>
       </Link>
+      </Tooltip>
       <button
         type="button"
         aria-label={t.rowActionsAria}
         onClick={() => setMenuFor(menuFor === row.id ? null : row.id)}
-        // Always visible with a 44px hit box on a phone (responsive contract
-        // M2 / M3): the row itself navigates on tap, so a hidden 18px menu
-        // made rename / delete a blind hunt there. Desktop keeps the
-        // hover reveal at its compact size.
-        className="absolute top-1/2 right-0 flex size-11 -translate-y-1/2 items-center justify-center rounded text-sidebar-foreground/50 opacity-100 transition-opacity focus:opacity-100 md:right-1 md:size-6 md:opacity-0 md:group-hover:opacity-100"
+        data-open={menuFor === row.id ? "" : undefined}
+        className={cn(styles.hoverAction, "absolute top-1/2 right-0 flex size-11 -translate-y-1/2 items-center justify-center rounded text-sidebar-foreground/50 transition-opacity md:right-1 md:size-6")}
       >
         <MoreHorizontal className="size-4 md:size-3.5" aria-hidden />
       </button>
@@ -522,20 +550,24 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
           <div className={sectionHeaderCls}>{t.railAria}</div>
           <div className="flex flex-col gap-0.5">
             {rows === null && <RailRowsSkeleton />}
-            {rows !== null && visible.length === 0 && (
+            {rows !== null && personalGroups.length === 0 && (
               <div className="select-none px-2 py-1 text-[12px] text-sidebar-foreground/40">
                 {t.railEmpty}
               </div>
             )}
-            {visible.map((row) =>
-              renderRow(row, `${base}?s=${encodeURIComponent(row.id)}`),
+            {Boolean(projects.error) && personalGroups.some(group => group.kind === "project") && (
+              <p role="alert" className="px-2 text-xs text-destructive">{t.personalProjectsFailed}</p>
             )}
+            {personalGroups.map(group => (
+              <PersonalChatGroup key={group.id} workspaceId={workspaceId} group={group}
+                activeSessionId={activeSessionId} renderRow={renderRow} />
+            ))}
           </div>
         </div>
       )}
 
       {view === "workspace" && (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-0.5">
           <ProjectChatGroup workspaceId={workspaceId} project={null} activeSessionId={activeSessionId}
             renderRow={renderRow} onCreate={startWorkspaceChat} creating={creatingShared} />
           {projects.loading && <RailRowsSkeleton rows={2} />}
@@ -586,6 +618,32 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+/** Personal grouping never requests a shared transcript or changes its binding. */
+function PersonalChatGroup({ workspaceId, group, activeSessionId, renderRow }: {
+  workspaceId: string;
+  group: { id: string; label: string; kind: "general" | "project" | "channel"; rows: DocSession[] };
+  activeSessionId: string | null;
+  renderRow: (row: DocSession, href: string) => React.ReactNode;
+}) {
+  const [open, toggleOpen] = useChatGroupDisclosure(
+    `doc:personal-chat-group:${chatSessionsCacheKey(workspaceId)}:${group.id}`,
+    activeSessionId, group.rows.some(row => row.id === activeSessionId), group.kind === "general",
+  );
+  const Icon = group.kind === "channel" ? MessageSquare : Folder;
+  return <section className="flex flex-col gap-0.5" data-personal-chat-group={group.kind}>
+    <button type="button"
+      className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent md:min-h-8"
+      aria-expanded={open} onClick={toggleOpen} title={group.label}>
+      <ChevronRight aria-hidden className={cn("size-3 shrink-0", open && "rotate-90")} />
+      {group.kind !== "general" && <Icon aria-hidden className="size-4 shrink-0" />}
+      <span className="min-w-0 truncate">{group.label}</span>
+    </button>
+    {open && <div className="flex flex-col gap-0.5 pl-4">
+      {group.rows.map(row => renderRow(row, `/w/${workspaceId}/chat?s=${encodeURIComponent(row.id)}`))}
+    </div>}
+  </section>;
+}
+
 /** Each scope has its own authorized page; a busy General list cannot hide a Project. */
 function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, onCreate, creating }: {
   workspaceId: string; project: ContextProject | null; activeSessionId: string | null;
@@ -593,24 +651,26 @@ function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, on
   onCreate: (projectId: string | null) => Promise<void>; creating: boolean;
 }) {
   const t = useT().chatApp;
-  const [open, setOpen] = useState(project === null);
   const rows = useProjectChatSessionsData(workspaceId, project?.id ?? null);
-  useEffect(() => { if (rows.data?.some(row => row.id === activeSessionId)) setOpen(true); }, [activeSessionId, rows.data]);
+  const [open, toggleOpen] = useChatGroupDisclosure(
+    `doc:chat-group:${chatSharedSessionsCacheKey(workspaceId, project?.id ?? null)}`,
+    activeSessionId, rows.data?.some(row => row.id === activeSessionId) ?? false, project === null,
+  );
   const canCreate = !project || !project.shared || project.shared.myRole === "owner" || project.shared.myRole === "participant";
-  return <section>
-    <div className="flex items-center">
-      <button type="button" className="flex min-h-8 max-sm:min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent"
-        aria-expanded={open} onClick={() => setOpen(value => !value)}>
+  return <section className="flex flex-col gap-0.5" data-workspace-chat-group={project?.id ?? "general"}>
+    <div className={cn(styles.actionHost, "flex items-center rounded-md hover:bg-sidebar-accent")}>
+      <button type="button" className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent md:min-h-8"
+        aria-expanded={open} onClick={toggleOpen}>
         <ChevronRight aria-hidden className={cn("size-3 shrink-0", open && "rotate-90")} />
         {project && <Folder aria-hidden className="size-4 shrink-0" />}
         <span className="truncate">{project?.name ?? t.generalChats}</span>
       </button>
-      {canCreate && <button type="button" className="flex min-h-8 min-w-8 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded-md hover:bg-sidebar-accent"
+      {canCreate && <button type="button" className={cn(styles.hoverAction, "flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/60 transition-opacity hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:min-h-8 md:min-w-8")}
         aria-label={format(t.newChatInProject, { name: project?.name ?? t.generalChats })}
         title={format(t.newChatInProject, { name: project?.name ?? t.generalChats })}
         disabled={creating} onClick={() => void onCreate(project?.id ?? null)}><SquarePen aria-hidden className="size-4" /></button>}
     </div>
-    {open && <div className={project ? "pl-4" : ""}>
+    {open && <div className={cn("flex flex-col gap-0.5", project && "pl-4")}>
       {rows.loading && <RailRowsSkeleton />}
       {Boolean(rows.error) && <p role="alert" className="px-2 text-xs text-destructive">{t.projectChatsFailed}</p>}
       {rows.data?.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">{t.workspaceRailEmpty}</p>}
@@ -618,4 +678,50 @@ function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, on
       {rows.hasMore && (rows.data?.length ?? 0) >= 50 && <button type="button" className="min-h-8 max-sm:min-h-11 px-2 text-sm text-muted-foreground" disabled={rows.paging} onClick={() => void rows.more()}>{t.moreChats}</button>}
     </div>}
   </section>;
+}
+
+/** Shared disclosure behavior; Personal and Work supply separate scoped keys. */
+function useChatGroupDisclosure(storageKey: string, activeSessionId: string | null, containsActive: boolean, defaultOpen: boolean): [boolean, () => void] {
+  const [disclosure, setDisclosure] = useState<{
+    key: string; open: boolean; sessionId: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    setDisclosure(null);
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (typeof saved?.open === "boolean" &&
+        (saved.sessionId === null || typeof saved.sessionId === "string")) {
+        setDisclosure({ key: storageKey, open: saved.open, sessionId: saved.sessionId });
+      }
+    } catch {
+      // Storage is optional: private mode and malformed preferences use defaults.
+    }
+  }, [storageKey]);
+
+  useEffect(() => {
+    if (!activeSessionId) return;
+    // Restoring the remembered chat after mount is still the same selection.
+    // A different chat releases the old collapse, including on back navigation.
+    setDisclosure(current => current && current.sessionId !== activeSessionId
+      ? { ...current, sessionId: null } : current);
+  }, [activeSessionId]);
+
+  const saved = disclosure?.key === storageKey ? disclosure : null;
+  // Only a different selection reveals a collapsed group. Revalidation can
+  // replace every row object without undoing the user's disclosure choice.
+  const open = (saved?.open ?? defaultOpen) ||
+    (containsActive && saved?.sessionId !== activeSessionId);
+  const toggleOpen = () => {
+    const next = { open: !open, sessionId: activeSessionId };
+    setDisclosure({ key: storageKey, ...next });
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(next));
+    } catch {
+      // Keep the current mount usable when persistence is unavailable.
+    }
+  };
+  return [open, toggleOpen];
 }

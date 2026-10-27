@@ -141,7 +141,7 @@ export function WorkspaceThemePicker() {
         onValueChange={onValueChange}
         items={itemLabels}
       >
-        <Tooltip label={triggerLabel} side="right">
+        <Tooltip label={triggerLabel} side="right" sideOffset={4} delay={100} appearance="rail">
           <SelectTrigger data-workspace-theme-picker aria-label={triggerLabel} className="h-11 data-[size=default]:h-11 w-full justify-between gap-2 rounded-md border-0 bg-transparent px-2 text-[16px] font-normal text-sidebar-foreground shadow-none hover:bg-sidebar-accent dark:bg-transparent dark:hover:bg-sidebar-accent md:size-11 md:justify-center md:rounded-xl md:p-0 md:[&>svg]:hidden">
             <span className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden md:flex-none md:overflow-visible">
               <span aria-hidden className="md:scale-125">

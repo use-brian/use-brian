@@ -422,7 +422,7 @@ export function WorkspaceSwitcher({ iconOnly = false }: { iconOnly?: boolean }) 
   return (
     <>
     <Popover open={open} onOpenChange={setOpen}>
-      {iconOnly ? <Tooltip label={format(t.switcherAriaLabel, { name: ctx.name })} side="right">{trigger}</Tooltip> : trigger}
+      {iconOnly ? <Tooltip label={format(t.switcherAriaLabel, { name: ctx.name })} side="right" sideOffset={4} delay={100} appearance="rail">{trigger}</Tooltip> : trigger}
 
       <PopoverContent
         role="menu"

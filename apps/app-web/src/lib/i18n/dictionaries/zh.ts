@@ -8851,6 +8851,8 @@ export const zh: Dictionary = {
 },
   chatApp: {
     deleteRecordingBody: "刪除此已儲存對話記錄？獨立封存、檔案和已學習資訊會保留。此操作不會停止未來記錄，請在 Studio Channels 中管理。",
+    otherProjects: "其他專案",
+    personalProjectsFailed: "無法載入專案名稱。你仍可查看對話。",
     generalChats: "一般",
     newChatInProject: "在 {name} 中開啟新對話",
     projectChatsFailed: "無法載入專案對話。",

@@ -21,6 +21,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { LiveActiveBadge } from "@/components/live/live-active-badge";
 import { APP_ICON } from "./operator-app-bar";
+import styles from "./workspace-app-rail.module.css";
 
 type Props = {
   workspaceId: string;
@@ -59,13 +60,15 @@ function useAppCatalogue({ workspaceId, homeApps, customApps }: CatalogueProps) 
 export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeApps, customApps, liveCount, studioNudge, onDismissStudioNudge, mobile = false }: Props) {
   const { copy, t, prefetch, catalogue, pins, appLabel, appIcon, appHref } = useAppCatalogue({ workspaceId, homeApps, customApps });
   const itemClass = (active: boolean) => cn(
-    "relative flex min-h-0 shrink-0 items-center rounded-xl text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground max-md:min-h-11",
-    mobile ? "w-full gap-3 px-3 text-sm" : "size-9 justify-center",
-    active && "bg-sidebar-accent text-sidebar-accent-foreground before:absolute before:-left-2 before:top-2.5 before:h-4 before:w-0.5 before:rounded-full before:bg-sidebar-foreground",
+    "relative flex min-h-0 shrink-0 items-center transition-colors max-md:min-h-11",
+    mobile
+      ? "w-full gap-3 rounded-xl px-3 text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+      : cn(styles.item, "size-10 justify-center rounded-[12px]"),
+    mobile && active && "bg-sidebar-accent text-sidebar-accent-foreground",
   );
   const label = (text: string) => mobile ? <span className="min-w-0 break-words">{text}</span> : null;
   const wrap = (text: string, child: React.ReactElement, shortcut?: number) => mobile ? child : (
-    <Tooltip label={text} side="right" shortcut={shortcut ? surfaceShortcutLabel(shortcut) : undefined}>{child}</Tooltip>
+    <Tooltip label={text} side="right" sideOffset={4} delay={100} appearance="rail" shortcut={shortcut ? surfaceShortcutLabel(shortcut) : undefined}>{child}</Tooltip>
   );
   function appActive(app: WorkspaceApp) {
     return activeApp === app.id;
@@ -80,13 +83,13 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
 
   return (
     <nav data-workspace-app-rail data-doc-chrome aria-label={copy.contextScope.workspaceNavigation} className={cn(
-      mobile ? "flex max-h-[50dvh] min-h-0 shrink-0 flex-col gap-0.5 px-2 pb-2 md:hidden" : "hidden h-full min-h-0 w-14 shrink-0 flex-col items-center gap-1 px-2 pt-px md:flex",
+      mobile ? "flex max-h-[50dvh] min-h-0 shrink-0 flex-col gap-0.5 px-2 pb-2 md:hidden" : cn(styles.rail, "hidden h-full min-h-0 w-14 shrink-0 flex-col items-center gap-2 px-2 pt-px md:flex"),
     )}>
       {!mobile && <div data-workspace-menu-slot aria-hidden className="h-16 w-full shrink-0" />}
-      <div data-workspace-app-rail-scroll className={cn("flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain", mobile ? "gap-0.5" : "items-center gap-1 [scrollbar-width:none]")}>
+      <div data-workspace-app-rail-scroll className={cn("flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain", mobile ? "gap-0.5" : "items-center gap-2 [scrollbar-width:none]")}>
       {destinations.map(({ name, aria, icon: Icon, href, active, shortcut, live }) => (
         <div key={href} className="shrink-0">
-          {wrap(aria ?? name, <Link href={href} {...prefetch(href)} onClick={navigate} aria-label={live && liveCount > 0 ? format(copy.liveApp.activeWorkBadgeAria, { count: liveCount }) : aria ?? name} aria-current={active ? "page" : undefined} className={itemClass(active)}>
+          {wrap(name, <Link href={href} {...prefetch(href)} onClick={navigate} aria-label={live && liveCount > 0 ? format(copy.liveApp.activeWorkBadgeAria, { count: liveCount }) : aria ?? name} aria-current={active ? "page" : undefined} className={itemClass(active)}>
             <Icon className="size-[19px] shrink-0" aria-hidden />{label(name)}
             {live && <LiveActiveBadge count={liveCount} label={format(copy.liveApp.activeWorkBadgeAria, { count: liveCount })} />}
           </Link>, shortcut)}
@@ -96,7 +99,7 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
         {wrap(t.more, <PopoverTrigger aria-label={t.more} className={cn(itemClass(false), "aria-expanded:bg-sidebar-accent")}><MoreHorizontal className="size-[19px] shrink-0" aria-hidden />{label(t.more)}</PopoverTrigger>)}
       </WorkspaceAppCatalogue>
       <div data-workspace-added-apps-divider className={cn("my-2 shrink-0 border-t border-sidebar-border", !mobile && "w-7")} />
-      <div data-workspace-added-apps className={cn("flex w-full shrink-0 flex-col", mobile ? "gap-0.5" : "items-center gap-1")}>
+      <div data-workspace-added-apps className={cn("flex w-full shrink-0 flex-col", mobile ? "gap-0.5" : "items-center gap-2")}>
       {catalogue.filter(app => pins.includes(app.id)).map((app) => {
         const Icon = appIcon(app);
         const href = appHref(app);

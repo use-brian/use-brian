@@ -8723,6 +8723,8 @@ export const zhCN: Dictionary = {
 },
   chatApp: {
     deleteRecordingBody: "删除此已保存的聊天记录？独立归档、文件和已学习信息会保留。此操作不会停止未来记录，请在 Studio Channels 中管理。",
+    otherProjects: "其他项目",
+    personalProjectsFailed: "无法加载项目名称。你仍可查看对话。",
     generalChats: "常规",
     newChatInProject: "在 {name} 中开启新对话",
     projectChatsFailed: "无法加载项目对话。",

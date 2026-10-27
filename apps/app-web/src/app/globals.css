@@ -270,6 +270,7 @@
   /* Hidden at rest, with a wider native drag target and no hover layout shift. */
   .doc-sidebar-scroll {
     --sidebar-scrollbar-thumb: transparent;
+    scrollbar-gutter: stable;
     scrollbar-color: var(--sidebar-scrollbar-thumb) transparent;
   }
   .doc-sidebar-scroll:is(:focus-visible, :has(:focus-visible)) {

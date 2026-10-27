@@ -99,6 +99,7 @@ import {
   type ToolUsed,
 } from "@use-brian/chat-ui";
 import remarkGfm from "remark-gfm";
+import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowUp,
@@ -4682,13 +4683,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       {/* ── Hero / transcript + composer ──────────────────────────── */}
       {heroMode ? (
         // Fresh pane: the new-chat hero — ONE skeleton for both views
-        // (identity, title, composer mid-screen), so switching the toggle
+        // (brand, question, bottom composer), so switching the toggle
         // reads as changing the audience, not changing apps. Workspace adds
         // the shared-audience explainer, and its first send creates the
         // shared thread before streaming into it (see `send`).
         <section data-chat-welcome className="chat-welcome flex min-h-0 min-w-0 flex-1 flex-col items-center overflow-y-auto px-3 @[560px]/chat-reading:px-6">
-          <div data-chat-welcome-layout className={cn("my-auto flex w-full max-w-[52rem] flex-col py-6 @[560px]/chat-reading:py-12", styles.welcomeLayout)}>
-            <div data-chat-greeting className={cn("flex shrink-0 flex-col items-center pb-6 text-center md:pb-8", styles.welcomeGreeting)}>
+          <div data-chat-welcome-layout className={cn("flex w-full max-w-[52rem] flex-col", styles.welcomeLayout)}>
+            <div data-chat-greeting className={cn("flex flex-col items-center text-center", styles.welcomeGreeting)}>
+              <Image data-chat-welcome-icon src="/icon.png" alt="" aria-hidden="true" width={64} height={64} className={styles.welcomeIcon} />
               <h2 className="max-w-[22rem] text-balance text-[24px] font-medium leading-[1.3] tracking-tight text-foreground md:max-w-xl md:text-[28px]">
                 {view === "workspace" ? t.workspaceHeroTitle : t.heroTitle}
               </h2>
@@ -5336,7 +5338,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             })()
           : null}
 
-        {/* Composer bar — the same composite box the hero centers, docked. */}
+        {/* Composer bar — the same bottom-aligned composite box as the welcome. */}
         <div data-chat-composer-dock className="shrink-0 bg-gradient-to-t from-background from-80% to-transparent px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 @[560px]/chat-reading:px-6 @[560px]/chat-reading:pb-6 @[560px]/chat-reading:pt-3">
           <div className="mx-auto w-full max-w-[52rem]">{composerBox}</div>
         </div>

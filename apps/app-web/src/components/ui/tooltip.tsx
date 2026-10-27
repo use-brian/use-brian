@@ -1,13 +1,12 @@
 "use client";
 
 /**
- * Hover/focus tooltip — a Notion-style label popup with an optional keyboard
- * shortcut chip. Wraps `@base-ui/react/tooltip`, mirroring the project's other
- * base-ui primitives (see `popover.tsx`).
+ * Hover/focus tooltip with an optional keyboard shortcut chip. The persistent
+ * sidebar uses the larger rail appearance; other controls keep the compact
+ * default. Wraps `@base-ui/react/tooltip`, like the other base-ui primitives.
  *
- * Used by the sidebar's horizontal icon nav (`doc-sidebar.tsx`): icon-only
- * buttons reveal their name + shortcut on hover, the way Notion's top toolbar
- * does. Pass the trigger element as the single child; it is rendered as the
+ * Icon-only buttons reveal their name + shortcut on hover. Pass the trigger
+ * element as the single child; it is rendered as the
  * tooltip trigger (base-ui merges the hover/focus handlers onto it).
  *
  * [COMP:app-web/tooltip]
@@ -27,6 +26,7 @@ export function Tooltip({
   side = "bottom",
   sideOffset = 6,
   delay = 350,
+  appearance = "default",
   closeOnClick = true,
   open,
   onOpenChange,
@@ -39,6 +39,8 @@ export function Tooltip({
   side?: "top" | "right" | "bottom" | "left";
   sideOffset?: number;
   delay?: number;
+  /** Larger label popup for the persistent desktop navigation rail. */
+  appearance?: "default" | "rail";
   /** Keep the popup open when the trigger is clicked and retains focus. */
   closeOnClick?: boolean;
   /** Optional controlled state for triggers that also disclose on press. */
@@ -64,9 +66,12 @@ export function Tooltip({
             className="z-50"
           >
             <TooltipPrimitive.Popup
+              data-app-tooltip
               className={cn(
-                "z-50 inline-flex items-center gap-1.5 rounded-md bg-foreground px-2 py-1",
-                "text-xs font-medium text-background shadow-md",
+                "z-50 inline-flex items-center gap-1.5",
+                appearance === "rail"
+                  ? "rounded-[14px] bg-[#1a1d1e] px-3.5 py-1.5 text-sm font-normal leading-5 text-[#f5f5f5] shadow-[0_8px_24px_-4px_rgb(0_0_0/0.22),0_0_0_1px_rgb(255_255_255/0.08)]"
+                  : "rounded-md bg-foreground px-2 py-1 text-xs font-medium text-background shadow-md",
                 "origin-(--transform-origin) duration-100",
                 "data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95",
                 "data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
@@ -74,7 +79,7 @@ export function Tooltip({
             >
               <span>{label}</span>
               {shortcut ? (
-                <kbd className="font-sans text-background/55">{shortcut}</kbd>
+                <kbd className={cn("font-sans", appearance === "rail" ? "text-white/55" : "text-background/55")}>{shortcut}</kbd>
               ) : null}
             </TooltipPrimitive.Popup>
           </TooltipPrimitive.Positioner>

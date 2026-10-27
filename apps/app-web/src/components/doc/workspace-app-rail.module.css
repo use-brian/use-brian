@@ -1,0 +1,28 @@
+.rail {
+  --rail-highlight: var(--sidebar-accent);
+  --rail-ink: var(--sidebar-accent-foreground);
+  --rail-muted: color-mix(in srgb, var(--sidebar-foreground) 55%, var(--sidebar));
+}
+
+:global(:root:not(.dark):not([data-palette="custom"])) .rail {
+  --rail-highlight: #e8e9e9;
+  --rail-ink: #1a1d1e;
+  --rail-muted: #8b8e8f;
+}
+
+.item {
+  color: var(--rail-muted);
+}
+
+.item:is(:hover, :focus-visible, [aria-current="page"], [aria-expanded="true"]) {
+  color: var(--rail-ink);
+  background-color: var(--rail-highlight);
+}
+
+/* The shared action-focus rule is important within the base layer. Stay in
+   that layer to replace its overlay with the rail's single neutral fill. */
+@layer base {
+  .rail .item:focus-visible {
+    background-image: none !important;
+  }
+}

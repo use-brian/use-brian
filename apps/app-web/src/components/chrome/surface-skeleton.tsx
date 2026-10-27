@@ -366,9 +366,9 @@ export function AppShellSkeleton() {
         <SurfaceChromeSkeleton trailing={3} />
       </div>
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div aria-hidden className="hidden h-full w-14 shrink-0 flex-col items-center gap-1 px-2 pt-px md:flex">
+        <div aria-hidden className="hidden h-full w-14 shrink-0 flex-col items-center gap-2 px-2 pt-px md:flex">
           <div className="flex h-16 w-full shrink-0 items-center justify-center"><Skeleton className="size-7 rounded-lg" /></div>
-          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="size-9 rounded-xl" />)}
+          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="size-10 rounded-[12px]" />)}
         </div>
         <aside aria-hidden data-doc-context-sidebar className="doc-sidebar-surface mb-2 hidden h-[calc(100%-0.5rem)] w-56 shrink-0 flex-col rounded-l-2xl border-y border-l border-r border-sidebar-border md:flex">
           <div className="flex h-16 shrink-0 items-center gap-1 px-4">

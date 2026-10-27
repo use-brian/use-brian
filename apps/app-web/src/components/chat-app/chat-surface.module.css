@@ -1,6 +1,26 @@
-/* Fresh narrow chats keep the input at the bottom while the greeting uses
-   the remaining space. Scoped to Chat, including narrow desktop split panes. */
+/* Fresh chats keep the growing input at the bottom while the greeting uses
+   the remaining space. Scoped to Chat, including desktop split panes. */
 .sidePaneResize { display: contents; }
+
+.welcomeLayout {
+  flex: 1 0 auto;
+  min-height: 100%;
+}
+.welcomeComposer { margin-top: auto; }
+.welcomeGreeting {
+  flex: 1 1 0;
+  min-height: 12rem;
+  justify-content: center;
+  gap: 1.5rem;
+  padding-block: 2rem;
+}
+.welcomeIcon {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  filter: grayscale(1);
+  opacity: 0.6;
+}
 
 @media (max-width: 767px), (pointer: coarse) {
   .composerFrame :is([data-chat-composer-settings] button, [data-chat-composer-actions] button, [data-chat-assistant-control], .actionTarget),
@@ -25,17 +45,14 @@
 
 @container chat-reading (max-width: 559px) {
   .welcomeLayout {
-    min-height: 100%;
-    margin-block: 0;
     padding-block: 0.75rem 0.25rem;
   }
-  .welcomeComposer { margin-top: auto; }
   .welcomeGreeting {
-    flex: 1 1 0;
-    min-height: 0;
-    padding-top: clamp(2rem, 18dvh, 10rem);
-    padding-bottom: 1.5rem;
+    min-height: 10rem;
+    gap: 1rem;
+    padding-block: 1.5rem;
   }
+  .welcomeIcon { width: 48px; height: 48px; }
 }
 
 :global([data-chat-keyboard-constrained]) .welcomeLayout {

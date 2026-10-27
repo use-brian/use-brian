@@ -8898,6 +8898,8 @@ export const ja: Dictionary = {
 },
   chatApp: {
     deleteRecordingBody: "保存済みの会話を削除しますか？別のアーカイブ、ファイル、学習済み情報は残ります。今後の記録は停止されません。Studio の Channels で管理してください。",
+    otherProjects: "その他のプロジェクト",
+    personalProjectsFailed: "プロジェクト名を読み込めませんでした。チャットは引き続き利用できます。",
     generalChats: "全般",
     newChatInProject: "{name} で新しいチャット",
     projectChatsFailed: "プロジェクトのチャットを読み込めませんでした。",

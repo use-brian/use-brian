@@ -1,0 +1,39 @@
+/* Keep actions discoverable on phones, touch laptops and hoverless devices.
+   Only a desktop with a fine pointer gets the quieter contextual treatment. */
+.hoverAction {
+  opacity: 1;
+}
+
+@media (min-width: 768px) and (hover: hover) and (pointer: fine) {
+  .hoverAction {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .actionHost:is(:hover, :focus-within) .hoverAction,
+  .hoverAction[data-open] {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (hover: none), (any-pointer: coarse) {
+  .hoverAction {
+    opacity: 1;
+    pointer-events: auto;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .actionHost {
+    min-height: 44px;
+  }
+
+  .actionHost > :is(a, button) {
+    min-height: 44px;
+  }
+
+  .actionHost[data-chat-sidebar-row] > a {
+    padding-right: 44px;
+  }
+}
