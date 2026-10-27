@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 
 const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url))
@@ -70,5 +71,14 @@ describe('[COMP:ext/chrome-release] Chrome Web Store release command', () => {
     expect(assemble).toContain('process.env.SOURCE_DATE_EPOCH')
     expect(script).toContain('SOURCE_DATE_EPOCH=')
     expect(script).toContain('TZ=UTC zip -X')
+  })
+
+  it('reads the extension version rather than the XML declaration version', () => {
+    const expression = script.match(/const match = input\.match\((\/.*\/)\)/)?.[1]
+    expect(expression).toBeDefined()
+    const regex = runInNewContext(expression!) as RegExp
+    const xml = '<?xml version="1.0"?><gupdate protocol="2.0"><app><updatecheck status="ok" version="1.2.3" /></app></gupdate>'
+    expect(xml.match(regex)?.[1]).toBe('1.2.3')
+    expect('<?xml version="1.0"?><updatecheck status="noupdate"/>'.match(regex)).toBeNull()
   })
 })

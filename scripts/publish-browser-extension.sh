@@ -160,7 +160,7 @@ if [[ "$OFFLINE" != "1" ]]; then
     process.stdin.setEncoding("utf8")
     process.stdin.on("data", (chunk) => { input += chunk })
     process.stdin.on("end", () => {
-      const match = input.match(/\bversion="([^"]+)"/)
+      const match = input.match(/<updatecheck\b[^>]*\bversion="([^"]+)"/)
       if (!match) process.exit(1)
       process.stdout.write(match[1])
     })
