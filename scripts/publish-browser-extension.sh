@@ -160,7 +160,7 @@ if [[ "$OFFLINE" != "1" ]]; then
     process.stdin.setEncoding("utf8")
     process.stdin.on("data", (chunk) => { input += chunk })
     process.stdin.on("end", () => {
-      const match = input.match(/\bversion="([^"]+)"/)
+      const match = input.match(/<updatecheck\b[^>]*\bversion="([^"]+)"/)
       if (!match) process.exit(1)
       process.stdout.write(match[1])
     })
@@ -410,6 +410,12 @@ if [[ "$YES" != "1" ]]; then
     echo "error: confirmation did not match; nothing was uploaded" >&2
     exit 1
   fi
+fi
+
+# CI must still be publishing the current, successfully tested production SHA
+# after the build finishes. Local releases do not set this optional binding.
+if [[ -n "${CHROME_WEB_STORE_SOURCE_SHA:-}" ]]; then
+  node "$EXTENSION_ROOT/scripts/release.mjs" verify-upload "$CHROME_WEB_STORE_SOURCE_SHA"
 fi
 
 echo "==> Uploading extension $VERSION..."

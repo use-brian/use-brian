@@ -1,0 +1,84 @@
+name: Browser extension release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+
+# Never interrupt an upload or replace a review from another run.
+concurrency:
+  group: browser-extension-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    if: >-
+      github.repository == 'use-brian/use-brian' &&
+      ((github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository) ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.source.outputs.ready }}
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify current main has passed CI
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: node apps/browser-extension/scripts/release.mjs verify "$SOURCE_SHA"
+
+  publish:
+    needs: verify
+    if: needs.verify.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: browser-extension-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install pinned dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Publish new extension version after Google review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.verify.outputs.sha }}
+          CHROME_WEB_STORE_PUBLISHER_ID: ${{ secrets.CHROME_WEB_STORE_PUBLISHER_ID }}
+          CHROME_WEB_STORE_CLIENT_ID: ${{ secrets.CHROME_WEB_STORE_CLIENT_ID }}
+          CHROME_WEB_STORE_CLIENT_SECRET: ${{ secrets.CHROME_WEB_STORE_CLIENT_SECRET }}
+          CHROME_WEB_STORE_REFRESH_TOKEN: ${{ secrets.CHROME_WEB_STORE_REFRESH_TOKEN }}
+        run: node apps/browser-extension/scripts/release.mjs publish "$SOURCE_SHA"
+      - name: Retain the release package
+        if: always() && hashFiles('apps/browser-extension/release/*.zip') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-extension-${{ needs.verify.outputs.sha }}
+          path: apps/browser-extension/release/*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
