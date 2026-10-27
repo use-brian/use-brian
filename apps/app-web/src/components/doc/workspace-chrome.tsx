@@ -754,7 +754,7 @@ export function WorkspaceChrome({
             doc shell and its Yjs socket survive every switch. */}
         <ActiveOperatorAppContext.Provider value={activeOperatorApp}>
           <div data-workspace-app-frame className={cn(
-            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background md:mb-2 md:mt-3 md:mr-2 md:rounded-r-2xl md:border-y md:border-r md:border-border",
+            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background md:mb-2 md:mr-2 md:rounded-r-2xl md:border-y md:border-r md:border-border",
             sidebarCollapsed && "md:rounded-l-2xl md:border-l",
           )}>
             <div data-workspace-app-body className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden md:pt-2 [&_[data-surface-chrome-skeleton]]:hidden">

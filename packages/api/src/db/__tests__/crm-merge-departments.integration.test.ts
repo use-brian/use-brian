@@ -57,5 +57,57 @@ describe('[COMP:corrections/entity-merge-store] Departmental duplicate merge', (
     await expect(undoMerge({ workspaceId: f.workspaceId, mergeId: record.id, actorUserId: f.member, reason: 'Fictional undo' }, { repo }))
       .rejects.toMatchObject({ code: 'merge_not_found' })
     expect((await pool.query('SELECT valid_to IS NOT NULL AS superseded FROM entities WHERE id=$1', [merged])).rows[0].superseded).toBe(true)
+
+    // Restore current authority and reverse the same history-bearing merge.
+    await f.edge(f.cedar)
+    await undoMerge({ workspaceId: f.workspaceId, mergeId: record.id, actorUserId: f.member, reason: 'Fictional undo' }, { repo })
+    expect((await pool.query('SELECT valid_to,superseded_by FROM entities WHERE id=$1', [merged])).rows[0])
+      .toEqual({ valid_to: null, superseded_by: null })
+    expect((await pool.query('SELECT sensitivity,compartments FROM entities WHERE id=$1', [survivor])).rows[0])
+      .toEqual(after)
+  })
+
+  it('merges consecutive duplicates and undoes the latest merge with existing retired ancestry', async () => {
+    const f = await fixture()
+    await f.edge(f.cedar)
+    const survivor = await f.record('Fictional kept person', 'internal', [])
+    const first = await f.record('Fictional first duplicate', 'internal', [])
+    const second = await f.record('Fictional second duplicate', 'internal', [])
+    const merge = (mergedId: string) => mergeEntities({ workspaceId: f.workspaceId, survivingId: survivor, mergedId,
+      actorUserId: f.member, reason: 'Fictional duplicate review', mode: 'survivor-wins', cascade: false }, { repo })
+
+    await merge(first)
+    const latest = await merge(second)
+    expect((await pool.query('SELECT id FROM entities WHERE superseded_by=$1 ORDER BY id', [survivor])).rows.map(row => row.id))
+      .toEqual([first, second].sort())
+    await undoMerge({ workspaceId: f.workspaceId, mergeId: latest.id, actorUserId: f.member, reason: 'Fictional undo' }, { repo })
+    expect((await pool.query('SELECT id FROM entities WHERE superseded_by=$1', [survivor])).rows)
+      .toEqual([{ id: first }])
+    expect((await pool.query('SELECT valid_to,superseded_by FROM entities WHERE id=$1', [second])).rows[0])
+      .toEqual({ valid_to: null, superseded_by: null })
+  })
+
+  it('refuses held ancestry and rolls back a subsequent merge without history or identity changes', async () => {
+    const f = await fixture()
+    await f.edge(f.cedar)
+    const survivor = await f.record('Fictional protected history', 'internal', [])
+    const first = await f.record('Fictional historical duplicate', 'internal', [])
+    const second = await f.record('Fictional pending duplicate', 'internal', [])
+    const merge = (mergedId: string) => mergeEntities({ workspaceId: f.workspaceId, survivingId: survivor, mergedId,
+      actorUserId: f.member, reason: 'Fictional duplicate review', mode: 'survivor-wins', cascade: false }, { repo })
+    await merge(first)
+    await pool.query('UPDATE entities SET scope_held=true WHERE id=$1', [first])
+    const snapshot = async () => (await pool.query(
+      'SELECT id,attributes,aliases,scope_version,valid_to,superseded_by FROM entities WHERE id=ANY($1::uuid[]) ORDER BY id',
+      [[survivor, second]],
+    )).rows
+    const before = await snapshot()
+
+    await expect(merge(second)).rejects.toThrow('native source authority unavailable')
+    expect(await snapshot()).toEqual(before)
+    expect((await pool.query('SELECT merged_id FROM entity_merges WHERE workspace_id=$1', [f.workspaceId])).rows)
+      .toEqual([{ merged_id: first }])
+    expect((await pool.query('SELECT count(*)::int AS count FROM decision_events WHERE workspace_id=$1', [f.workspaceId])).rows[0])
+      .toEqual({ count: 1 })
   })
 })

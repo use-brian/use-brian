@@ -31,6 +31,7 @@
  * [COMP:app-web/studio-channels]
  */
 
+import { ChannelRecordingsPanel } from "@/components/channels/channel-recordings";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -1248,6 +1249,10 @@ export function ChannelDetail({
           the action surface, token rotation and bridge disconnect. */}
       {channel.channelType === "custom" && (
         <CustomBridgeSection workspaceId={workspaceId} channel={channel} />
+      )}
+
+      {channel.channelType === "telegram" && channel.integrationId && (
+        <ChannelRecordingsPanel workspaceId={workspaceId} channelId={channel.id} />
       )}
 
       {(channel.channelType === "slack" ||

@@ -24,6 +24,9 @@ const navigation = vi.hoisted(() => ({
   push: vi.fn(),
 }));
 
+const projectsApi = vi.hoisted(() => ({ listContextProjects: vi.fn() }));
+vi.mock("@/lib/api/context-scopes", () => projectsApi);
+
 vi.mock("next/navigation", () => ({
   usePathname: () => "/w/workspace-1/chat",
   useRouter: () => ({
@@ -127,6 +130,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   resetSurfaceCache();
   navigation.search = "v=workspace&s=room-1";
+  projectsApi.listContextProjects.mockResolvedValue([]);
   viewApi.listWorkspaceAssistants.mockResolvedValue([
     {
       id: "assistant-1",
@@ -278,4 +282,19 @@ describe("[COMP:app-web/sidebar-panel-chat] one row renderer for both rails (cha
     expect(container!.querySelector(`[aria-label="${en.chatApp.unreadDotAria}"]`)).not.toBeNull();
     seen.isRoomUnread.mockReturnValue(false);
   });
+});
+
+it("loads an older Project independently and creates a chat with its backend scope", async () => {
+  projectsApi.listContextProjects.mockResolvedValue([{ id: "project-1", name: "Sample Project", status: "active", shared: { status: "active", myRole: "participant" } }]);
+  sessionApi.listWorkspaceSessions.mockImplementation(async (opts) => opts.contextProjectId === "project-1" ? [{
+    id: "older-project-chat", title: "Older Project chat", contextProjectId: "project-1", channelId: "older", lastActive: "2025-01-01T00:00:00.000Z",
+    appOrigin: "chat", assistantId: "assistant-1", status: "idle", startedByUserId: "user-1", startedByName: null, startedByAvatarUrl: null,
+  }] : []);
+  sessionApi.createWorkspaceSession.mockResolvedValue({ id: "new-project-chat", contextProjectId: "project-1" });
+  await renderPanel();
+  await act(async () => { buttonNamed("Sample Project").click(); });
+  expect(container!.textContent).toContain("Older Project chat");
+  const create = container!.querySelector('button[aria-label="New chat in Sample Project"]') as HTMLButtonElement;
+  await act(async () => { create.click(); });
+  expect(sessionApi.createWorkspaceSession).toHaveBeenCalledWith("workspace-1", undefined, { contextGroupId: null, contextProjectId: "project-1" });
 });

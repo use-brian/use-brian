@@ -1,3 +1,4 @@
+import { telegramRecordingEnabled, admitTelegramRecording } from '../channel-recording.js'
 import { hasTelegramWorkspaceConversationBinding, telegramConfiguredConversation } from '../telegram-conversation-admission.js'
 import { runChannelMediaReceipt, type ChannelMediaReceiptStore } from '../ingest/channel-media-receipt.js'
 import { createDeliveryAudienceEnvelopeResolver } from '../context-scope/delivery-authority.js'
@@ -62,6 +63,11 @@ import type { LinkCodeStore } from '../db/link-codes.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { buildAlbumFiledReply, buildDocumentFiledReply, buildOversizeDocReply, classifyMedia, summarizeAlbumIntake } from '../ingest/channel-media-intake.js'
 import type { ContentBlock } from '@use-brian/core'
+import { calculateCost } from '@use-brian/core'
+import { sanitizeDeliveryText } from '@use-brian/shared'
+import { resolveChatModelSelection } from '../model-resolution.js'
+import { getWorkspacePlan } from '../db/workspace-store.js'
+import { checkUsageBudget } from './route-helpers.js'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@use-brian/core'
 import { transcribeFirstAudio, describeTranscriptionFailure, composeVoiceTurnText, TRANSCRIPTION_DISABLED_REASON, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, DeliveryAudienceBinding, TelegramCredentials, SeenChat } from '../db/channel-integrations.js'
@@ -533,6 +539,8 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           return
         }
       }
+      if (!await telegramRecordingEnabled(integration.id, conversationId)
+        && !explicitlyAddressed(threadMessage) && !threadUpdate.callback_query) return
       updateAdmitted = conversationOwned || !!threadUpdate.callback_query || explicitlyAddressed(threadMessage)
       // Albums can carry their sole mention on a later member. Until then
       // retain only the ephemeral bot/conversation/sender-scoped buffer.
@@ -582,6 +590,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // Reused for initially admitted updates and members admitted only when an
     // explicit album invocation arrives. No caller may stage ambient traffic.
     async function archiveAdmittedMessage(incoming: IncomingMessage, downloads: TelegramMediaDownloads): Promise<boolean> {
+      if (incoming.isGroupChat) return false
       const archiveMedia = options.archiveMedia
       if (!archiveMedia) return false
       const workspaceId = archiveWorkspaceId
@@ -642,7 +651,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     if (updateAdmitted && eventIncoming) {
       archiveInboundAlreadyPersisted = await archiveAdmittedMessage(eventIncoming, mediaDownloads)
     }
-    if (updateAdmitted && eventIncoming && eventIncoming.userId !== String(integration.botUserId ?? '')) {
+    if (updateAdmitted && eventIncoming && !eventIncoming.isGroupChat && eventIncoming.userId !== String(integration.botUserId ?? '')) {
       const raw = eventIncoming.raw as { from?: { username?: string }; sender_chat?: unknown; chat?: { type?: string } }
       const chatSender = !!raw.sender_chat || raw.chat?.type === 'channel'
       const matches = (entry: string) => {
@@ -718,7 +727,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // Only owned conversations may import surrounding discussion snapshots.
     // A storage failure drops the update, never silently fabricates source context.
     try {
-      if (conversationOwned && updateAdmitted) await observeTelegramDiscussion(discussionStore, integration.id, req.body)
+      if (conversationOwned && updateAdmitted && threadMessage?.chat?.type === 'private') await observeTelegramDiscussion(discussionStore, integration.id, req.body)
     } catch (err) {
       console.error('[telegram-byo] discussion context persistence failed:', err)
       return
@@ -732,7 +741,9 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       discussionChatIds,
       ackReaction: storedConfig.ackReaction,
       requireMention: requireMentionResolved,
-      ...(roomBinding ? { normalizePassive: true } : {}),
+      // Conversation ownership was checked above. Recording is independent
+      // of whether the legacy shared-room binder can construct a room.
+      normalizePassive: true,
     }
     const routeAssistantId = assistant.id
     function reportIncomingFailure(kind: 'message' | 'media group', channelId: string, err: unknown): void {
@@ -1030,6 +1041,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       workflowCallback?: { data: string; messageId: string },
       preparedDownloads: TelegramMediaDownloads = mediaDownloads,
       inboundArchived = false,
+      recordingMembers?: IncomingMessage[],
     ): Promise<void> {
       if (!conversationOwned) incoming = { ...incoming, replyToMessageId: undefined,
         raw: { ...(incoming.raw as object), reply_to_message: undefined } }
@@ -1456,6 +1468,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           ...options,
           mediaDownloads: preparedDownloads,
           archiveInboundAlreadyPersisted: inboundArchived,
+          recordingMembers,
           interactionScope,
           workflowCallback,
           conversationalAnswer: actionData !== undefined,
@@ -1464,7 +1477,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
             : undefined,
           questionStore: options.questionStore,
           integrationId: boundIntegration.id,
-          discussionStore: conversationOwned ? discussionStore : { ...discussionStore, read: async () => null },
+          discussionStore: !incoming.isGroupChat && conversationOwned ? discussionStore : { ...discussionStore, read: async () => null, saveRoot: async () => {}, savePost: async () => {} },
         })
       })
     }
@@ -1527,14 +1540,16 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           }
           // A later explicit caption admits this finite cohort, not future room
           // traffic. Archive every original input only after that decision.
+          const admittedMembers: IncomingMessage[] = []
           for (const rawMessage of rawMessages) {
-            if (archivedMessageIds.has(String(rawMessage.message_id))) continue
             // The cohort has already passed ownership/explicit invocation.
             // A sibling-topic mention gate must not discard its other files.
             const parsed = admittedAlbumArchiveAdapter.parseIncoming({ message: { ...rawMessage, media_group_id: undefined } })
             if (!parsed) continue
             const member = conversationOwned ? parsed : { ...parsed, replyToMessageId: undefined,
               raw: { ...(parsed.raw as object), reply_to_message: undefined } }
+            admittedMembers.push(member)
+            if (archivedMessageIds.has(String(rawMessage.message_id))) continue
             if (await archiveAdmittedMessage(member, groupDownloads)) archivedMessageIds.add(String(rawMessage.message_id))
           }
           const files = rawMessages
@@ -1582,6 +1597,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           }
           handleIncoming(merged, undefined, undefined, groupDownloads,
             rawMessages.every((message) => archivedMessageIds.has(String(message.message_id))),
+            admittedMembers,
           ).catch((err) => {
             reportIncomingFailure('media group', merged.channelId, err)
           })
@@ -1608,6 +1624,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 // ── Per-message handler ─────────────────────────────────────────
 
 type ProcessMessageParams = {
+  recordingMembers?: IncomingMessage[]
   groupRoom?: boolean
   recordingIntake?: () => Promise<void>
   discussionStore: TelegramDiscussionStore
@@ -1694,6 +1711,48 @@ type ProcessMessageParams = {
   appUrl?: string
 }
 
+/** A paused recorder does not mute an addressed group. Only this verified
+ * provider request enters this stateless, tool-free turn; no transcript,
+ * archive, event, file, memory or session-state write occurs. */
+async function replyWithoutRecording(params: ProcessMessageParams): Promise<void> {
+  const { assistant,incoming,adapter } = params
+  if (!assistant.workspaceId) return
+  const current = async () => {
+    const active = await query(`SELECT 1 FROM channel_integrations ci JOIN channels c ON c.id=ci.channel_id
+      JOIN channel_assistants ca ON ca.channel_id=c.id WHERE ci.id=$1 AND ci.status='active'
+      AND c.status='active' AND c.workspace_id=$2 AND ca.assistant_id=$3`, [params.integrationId,assistant.workspaceId,assistant.id])
+    if (!active.rows.length) throw new Error('channel_unavailable')
+  }
+  await current()
+  const plan = await getWorkspacePlan(assistant.workspaceId)
+  const budget = await checkUsageBudget(assistant.workspaceId,plan,params.checkCreditBudget)
+  if (budget.status === 'blocked') {
+    await adapter.sendMessage(incoming.channelId,{ text: 'This workspace has no available message budget.' }); return
+  }
+  const selected = resolveChatModelSelection(assistant.defaultModelAlias,plan,budget.status,params.configuredProviders)
+  const custom = await params.resolveWorkspaceCustomLlm?.({ workspaceId: assistant.workspaceId,requestedTier: selected.logicalTier,allowDefault: true })
+  const provider = custom?.provider ?? params.provider
+  let model = custom?.selector ?? selected.servingModel
+  let text = '', toolUse = false
+  let usage: TokenUsage | undefined
+  for await (const chunk of provider.stream({ model, systemPrompt: 'You are a helpful assistant replying to a group message. Use only the current message and general knowledge. You have no tools, stored history, private memories or connected account access. Group recording is paused.',
+    messages: [{ role: 'user',content: incoming.text || 'The message contains an attachment whose contents are unavailable.' }],
+    maxTokens: 2048,signal: AbortSignal.timeout(60_000) })) {
+    if (chunk.type === 'text_delta') text += chunk.text
+    if (chunk.type === 'tool_use_start' || chunk.type === 'message_end' && chunk.stopReason === 'tool_use') toolUse = true
+    if (chunk.type === 'message_start') model = chunk.model
+    if (chunk.type === 'message_end') usage = chunk.usage
+  }
+  if (usage && params.usageStore) {
+    const payer = await billingPartyForAssistant({ id: assistant.id,workspaceId: assistant.workspaceId,ownerUserId: null })
+    await params.usageStore.recordUsage({ userId: payer,actorUserId: params.channelUserId,assistantId: assistant.id,
+      sessionId: null,model,modelTier: selected.logicalTier,...usage,source: 'telegram',
+      providerKeySource: custom?.providerKeySource ?? 'platform',actualCostUsd: custom?.providerKeySource === 'user' ? 0 : calculateCost(model,usage) })
+  }
+  await current()
+  await adapter.sendMessage(incoming.channelId,{ text: !toolUse && text.trim() ? sanitizeDeliveryText(text) : 'I could not produce a reply. Please try again.' })
+}
+
 async function processMessage(params: ProcessMessageParams): Promise<void> {
   const {
     adapter,
@@ -1706,6 +1765,27 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     externalGuest,
     externalGuestConnectorTools,
   } = params
+
+  if (incoming.isGroupChat && !await telegramRecordingEnabled(params.integrationId,incoming.channelId)) {
+    if (!incoming.captureOnly) await replyWithoutRecording(params)
+    return
+  }
+  let recording: Awaited<ReturnType<typeof admitTelegramRecording>> | undefined
+  if (incoming.isGroupChat) {
+    for (const member of params.recordingMembers ?? [incoming]) {
+      if (!member.messageId) continue
+      const admitted = await admitTelegramRecording({ integrationId: params.integrationId,conversationId: member.channelId,
+        assistantId: assistant.id,providerMessageId: String(member.messageId),senderUserId: channelUserId,
+        text: member.text?.trim() || (member.mediaType ? `[${member.mediaType}]` : '') })
+      if (admitted && member.messageId === incoming.messageId) recording = admitted
+    }
+  }
+  if (incoming.isGroupChat && !recording) return
+  if (recording) {
+    if (incoming.captureOnly) return
+    // Addressed attachments can be read for this turn. Their bytes must not
+    // enter the legacy workspace-wide intake or file cache below.
+  }
 
   // Admission must precede brain-intake media side effects, including the hosted audio
   // lane. Use the common interpreter so native conversational choices retain
@@ -1750,7 +1830,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     groupScope = { sensitivity: audience.ceiling.clearance,
       compartments: audience.ceiling.compartments ?? [], projectIds: audience.ceiling.projectIds ?? [] }
   }
-  if (params.recordingIntake) {
+  if (params.recordingIntake && !recording) {
     await params.recordingIntake()
     return
   }
@@ -1795,6 +1875,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   }
 
   const intakeAttachments = async () => {
+    if (recording) return
     // ── Channel-media intake (large-content-artifacts §Phase 0.3) ──
     // Route documents/video through universal intake. In OSS, where the hosted
     // billing-aware inline hook is absent, audio falls through here as well and
@@ -1920,7 +2001,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   const attachmentUpdate = incoming.raw as { media_group_id?: string } | undefined
   const operationKey = attachmentUpdate?.media_group_id
     ? `album:${attachmentUpdate.media_group_id}` : incoming.messageId ? `message:${incoming.messageId}` : null
-  if (params.groupRoom && incoming.isGroupChat && assistant.workspaceId && operationKey && params.ingestChannelMediaRef
+  if (!recording && params.groupRoom && incoming.isGroupChat && assistant.workspaceId && operationKey && params.ingestChannelMediaRef
       && (incoming.mediaType === 'document' || incoming.files?.some(f => classifyMedia(f.mimeType, f.name) === 'document'))) {
     await runChannelMediaReceipt({ workspaceId: assistant.workspaceId, channelType: 'telegram',
       conversationId: incoming.channelId, operationKey }, intakeAttachments, params.mediaReceiptStore)
@@ -2073,7 +2154,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // channelUserId). Null (non-image / no store / failure) keeps the
   // block-only turn. See docs/architecture/engine/file-handling.md.
   const cacheImage = (file: { buffer: Buffer; mime: string; fileName: string }) =>
-    params.fileStore && !externalGuest
+    params.fileStore && !externalGuest && !recording
       ? cacheInboundImage({
           fileStore: params.fileStore,
           channelType: 'telegram',
@@ -2191,12 +2272,12 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // users with no @username). Same raw access as the allowlist check above.
   const sender = incoming.raw as { from?: { username?: string }; sender_chat?: unknown; chat?: { type?: string } }
   const byoUsername = sender.sender_chat || sender.chat?.type === 'channel' ? undefined : sender.from?.username
-  const providerVisibleContext = await telegramDiscussionContext(params.discussionStore, params.integrationId, incoming.channelId)
+  const providerVisibleContext = recording ? null : await telegramDiscussionContext(params.discussionStore, params.integrationId, incoming.channelId)
   const rawReply = incoming.raw as DiscussionMessage
   // The generic quote resolver treats bot-authored quotes as assistant replies.
   // An automatic forward is neither a human comment nor our assistant answer;
   // supply it only through the source-labelled provider context, once per turn.
-  const replyRaw = providerVisibleContext && rawReply.reply_to_message?.is_automatic_forward
+  const replyRaw = (providerVisibleContext || recording) && rawReply.reply_to_message?.is_automatic_forward
     ? { ...rawReply, reply_to_message: undefined } : incoming.raw
   await processChannelMessage({
     admittedAnswerContext: admission,
@@ -2231,7 +2312,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     replyToMessageId: incoming.replyToMessageId ?? null,
     replyRaw,
     incomingChannelMessageId: incoming.messageId ?? null,
-    archiveIncoming: incoming,
+    recording: recording ?? undefined,
+    archiveIncoming: recording ? undefined : incoming,
     archiveInboundAlreadyPersisted: params.archiveInboundAlreadyPersisted,
     archiveConnectorInstanceId: params.archiveConnectorInstanceId,
     modelAlias: assistant.defaultModelAlias,

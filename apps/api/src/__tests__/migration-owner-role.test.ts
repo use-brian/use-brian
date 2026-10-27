@@ -18,6 +18,8 @@ import { vector } from '@electric-sql/pglite-pgvector'
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { readFile } from 'node:fs/promises'
+import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
 import { migratePglite } from '../migrate-pglite.js'
 
 const migrationsDir = fileURLToPath(
@@ -29,7 +31,7 @@ const SKILL_ID = '00000000-0000-4000-8000-0000000000b1'
 const DEPARTMENT = 'team:00000000-0000-4000-8000-0000000000d1'
 
 /** A database provisioned the way the self-host recipe leaves it. */
-async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean } = {}): Promise<PGlite> {
+async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean; legacyDefaults?: boolean } = {}): Promise<PGlite> {
   const db = new PGlite({ extensions: { vector, pg_trgm } })
   await db.waitReady
   if (options.varyOids) {
@@ -55,6 +57,13 @@ async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean } = 
     GRANT CREATE ON DATABASE postgres TO migration_owner;
     SET ROLE migration_owner;
   `)
+  if (options.legacyDefaults) {
+    await db.exec(`
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO app_user;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE,SELECT ON SEQUENCES TO app_user;
+    `)
+  }
   return db
 }
 
@@ -82,6 +91,77 @@ async function assertNothingLeftBypassed(db: PGlite): Promise<void> {
 }
 
 describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner role', () => {
+  it('repairs historical function defaults atomically and replays the complete upgrade', async (t) => {
+    const db = await openAsOwner({ appUser: true, varyOids: true, legacyDefaults: true })
+    const migration = '81110_legacy_function_execute_privileges.sql'
+    const cohort = 'public.read_native_session_cohort_evidence(uuid,text[],uuid[],text[],boolean)'
+    const extra = 'public.application_session_eval_point_state(uuid,text,uuid,text[],jsonb)'
+    const facade = 'public.read_admitted_native_scope_snapshot(uuid,text,uuid)'
+    const sql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${migration}`, 'utf8'), migration)
+    const snapshots = async () => ({
+      functions: (await db.query(`SELECT to_jsonb(p) AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows,
+      defaults: (await db.query('SELECT to_jsonb(d) AS metadata FROM pg_default_acl d ORDER BY oid')).rows,
+      ledger: (await db.query('SELECT * FROM _migrations ORDER BY name')).rows,
+    })
+    try {
+      await migratePglite(db, migrationsDir, { through: '8110_canonical_task_author_delete.sql' })
+      await assertOrdinaryOwner(db)
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS legacy`, [cohort])).rows, [{ legacy: true }])
+      await db.exec('RESET ROLE; CREATE ROLE legacy_privilege_probe NOLOGIN; SET ROLE migration_owner')
+      const definition = (await db.query<{ definition: string }>('SELECT pg_get_functiondef($1::regprocedure) AS definition', [cohort])).rows[0].definition
+      const cases = [
+        { name: 'unknown body', change: definition.replace('$function$', '$function$\n-- Fictional unknown body\n'), restore: definition },
+        { name: 'unknown execution setting', change: `ALTER FUNCTION ${cohort} STABLE`, restore: `ALTER FUNCTION ${cohort} VOLATILE` },
+        { name: 'unknown principal', change: `GRANT EXECUTE ON FUNCTION ${cohort} TO legacy_privilege_probe`, restore: `REVOKE ALL ON FUNCTION ${cohort} FROM legacy_privilege_probe` },
+        { name: 'runtime grant option', change: `GRANT EXECUTE ON FUNCTION ${cohort} TO app_user WITH GRANT OPTION`, restore: `REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION ${cohort} FROM app_user` },
+        { name: 'empty late helper ACL', change: `REVOKE ALL ON FUNCTION ${extra} FROM migration_owner,app_user`, restore: `GRANT EXECUTE ON FUNCTION ${extra} TO migration_owner,app_user` },
+        { name: 'late helper metadata', change: `ALTER FUNCTION ${extra} COST 101`, restore: `ALTER FUNCTION ${extra} COST 100` },
+        { name: 'additional default principal', change: 'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO legacy_privilege_probe', restore: 'ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM legacy_privilege_probe' },
+        { name: 'global default grant', change: 'ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO app_user', restore: 'ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM app_user' },
+      ]
+      for (const scenario of cases) {
+        await t.test(`refuses ${scenario.name} without partial repair`, async () => {
+          try {
+            await db.exec(scenario.change)
+            const before = await snapshots()
+            await assert.rejects(migratePglite(db, migrationsDir, { through: migration }), /Legacy function (prerequisite|default privileges) changed/)
+            assert.deepEqual(await snapshots(), before)
+          } finally {
+            await db.exec(scenario.restore)
+          }
+        })
+      }
+      const retainedDefaults = (await db.query(`SELECT to_jsonb(d) AS metadata FROM pg_default_acl d WHERE defaclobjtype<>'f' ORDER BY oid`)).rows
+      const beforeRepair = (await db.query(`SELECT oid,to_jsonb(p)-'proacl' AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows
+      assert.equal(await migratePglite(db, migrationsDir, { through: migration }), 1)
+      assert.deepEqual((await db.query(`SELECT oid,to_jsonb(p)-'proacl' AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows, beforeRepair)
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS private,
+        has_function_privilege('app_user',$2::regprocedure,'EXECUTE') AS facade,
+        has_function_privilege('app_user',$3::regprocedure,'EXECUTE') AS later_private`, [cohort, facade, extra])).rows,
+      [{ private: false, facade: true, later_private: false }])
+      assert.deepEqual((await db.query(`SELECT to_jsonb(d) AS metadata FROM pg_default_acl d WHERE defaclobjtype<>'f' ORDER BY oid`)).rows, retainedDefaults)
+      assert.equal(await migratePglite(db, migrationsDir, { through: migration }), 0)
+      await migratePglite(db, migrationsDir)
+      assert.deepEqual((await db.query('SELECT application_memory_statement_helpers_current() AS current')).rows, [{ current: true }])
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',
+        'public.application_memory_statement_state(uuid,uuid,text[],jsonb)','EXECUTE') AS exposed`)).rows, [{ exposed: false }])
+      await assertOrdinaryOwner(db)
+      // Older installations that already passed 8111 must retain their live pins.
+      const before = await snapshots()
+      await db.transaction(async (tx) => { await tx.exec(sql) })
+      assert.deepEqual(await snapshots(), before)
+      await db.exec('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user')
+      const withLegacyDefault = await snapshots()
+      await assert.rejects(db.transaction(async (tx) => { await tx.exec(sql) }), /Memory guard already installed/)
+      assert.deepEqual(await snapshots(), withLegacyDefault)
+    } finally {
+      await db.close()
+    }
+  })
+
   for (const appUser of [false, true]) {
     it(`validates Memory prerequisites with app_user ${appUser ? 'present and local OIDs varied' : 'absent'}`, async (t) => {
       const db = await openAsOwner({ appUser, varyOids: appUser })
@@ -90,7 +170,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       const lineage = 'public.application_scope_lineage(uuid,text[],uuid[],text[])'
       const admitted = 'public.read_admitted_native_scope_snapshot(uuid,text,uuid)'
       try {
-        await migratePglite(db, migrationsDir, { through: '8111' })
+        await migratePglite(db, migrationsDir, { through: '81110_legacy_function_execute_privileges.sql' })
         await db.exec('RESET ROLE; CREATE ROLE prerequisite_probe NOLOGIN; SET ROLE migration_owner')
         const definition = async (signature: string) => (await db.query<{ definition: string }>(
           'SELECT pg_get_functiondef($1::regprocedure) AS definition', [signature],

@@ -50,6 +50,32 @@ beforeEach(() => {
 });
 
 describe("[COMP:app-web/application-authority-cache] actual native outbox replay", () => {
+  it.each(["file:", "http:"])("resolves the bundled desktop workspace from its hash route on %s", async (protocol) => {
+    const location = { protocol, pathname: "/renderer/index.html",
+      hash: `#/w/${fixture.workspaceId}/p/${pageId}?panel=comments#b-block-a` };
+    vi.stubGlobal("window", { location, usebrianDesktop: { getAccessToken: () => "native-session" } });
+    const authority = currentOfflineWriteAuthority();
+    expect(authority).toMatchObject({ viewerId: fixture.userId, workspaceId: fixture.workspaceId });
+    expect(offlinePageDocumentKey(pageId)).toContain(fixture.workspaceId);
+    expect(currentOfflineWriteAuthority("00000000-0000-4000-8000-000000000003")).toBeNull();
+    const session = await pinOfflineWriteSession(authority!);
+    location.hash = "#/w/00000000-0000-4000-8000-000000000003/p/another-page";
+    expect(() => session.assertCurrent()).toThrow();
+  });
+
+  it("keeps web workspace routing independent of a route-shaped fragment", () => {
+    vi.stubGlobal("window", { location: { pathname: `/w/${fixture.workspaceId}/p/${pageId}`,
+      hash: "#/w/00000000-0000-4000-8000-000000000003/p/another-page" } });
+    expect(currentOfflineWriteAuthority()?.workspaceId).toBe(fixture.workspaceId);
+  });
+
+  it("keeps a desktop route without a workspace unavailable", () => {
+    vi.stubGlobal("window", { location: { pathname: "/renderer/index.html", hash: "#/teams" },
+      usebrianDesktop: { getAccessToken: () => "native-session" } });
+    expect(currentOfflineWriteAuthority()).toBeNull();
+    expect(offlinePageDocumentKey(pageId)).toBeNull();
+  });
+
   it("pins page transport headers and refuses foreign endpoints or later identities", async () => {
     const authority = currentOfflineWriteAuthority()!;
     const session = await pinOfflineWriteSession(authority);

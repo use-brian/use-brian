@@ -46,6 +46,7 @@ const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Sidebar list row — mirrors what /api/sessions returns. */
 export type DocSession = {
+  transport?: string;
   id: string;
   title: string;
   /** Current admitted immutable revision identity; never an allow token. */
@@ -261,7 +262,8 @@ async function listSessions(opts: {
   signal?: AbortSignal;
 }): Promise<DocSession[]> {
   const qs = new URLSearchParams();
-  qs.set("assistantId", opts.assistantId);
+  qs.set("scope", "workspace");
+  qs.set("channels", "all");
   qs.set("workspaceId", opts.workspaceId);
   try {
     const res = await authFetch(
@@ -278,7 +280,8 @@ async function listSessions(opts: {
       channelId: r.channelId,
       lastActive: toIso(r.lastActive),
       appOrigin: r.appOrigin ?? null,
-      assistantId: opts.assistantId,
+      assistantId: r.assistantId ?? opts.assistantId,
+      transport: r.channelType ?? "web",
       contextGroupId: r.contextGroupId ?? null,
       contextProjectId: r.contextProjectId ?? null,
       ...(r.status ? { status: r.status } : {}),
@@ -306,18 +309,8 @@ export async function listSessionsForAssistants(opts: {
   assistantIds: string[];
   signal?: AbortSignal;
 }): Promise<DocSession[]> {
-  const lists = await Promise.all(
-    opts.assistantIds.map((assistantId) =>
-      listSessions({
-        workspaceId: opts.workspaceId,
-        assistantId,
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      }),
-    ),
-  );
-  return lists
-    .flat()
-    .sort((a, b) => (a.lastActive < b.lastActive ? 1 : a.lastActive > b.lastActive ? -1 : 0));
+  if (!opts.assistantIds.length) return [];
+  return listSessions({ workspaceId: opts.workspaceId, assistantId: opts.assistantIds[0], signal: opts.signal });
 }
 
 /**
@@ -458,17 +451,27 @@ export async function setRoomCapture(sessionId: string, enabled: boolean): Promi
 export async function listWorkspaceSessions(opts: {
   workspaceId: string;
   signal?: AbortSignal;
+  strict?: boolean;
+  contextProjectId?: string | null;
+  before?: { lastActive: string; id: string };
 }): Promise<WorkspaceSession[]> {
   try {
+    const query = new URLSearchParams({ workspaceId: opts.workspaceId });
+    if (opts.contextProjectId !== undefined) query.set("contextProjectId", opts.contextProjectId ?? "general");
+    if (opts.before) { query.set("before", opts.before.lastActive); query.set("beforeId", opts.before.id); }
     const res = await authFetch(
-      `${API_URL}/api/sessions/workspace?workspaceId=${encodeURIComponent(opts.workspaceId)}`,
+      `${API_URL}/api/sessions/workspace?${query}`,
       opts.signal ? { signal: opts.signal } : {},
     );
-    if (!res.ok) return [];
+    if (!res.ok) {
+      if (opts.strict && ![401, 403, 404].includes(res.status)) throw new Error("chat_list_failed");
+      return [];
+    }
     const data = (await res.json()) as RawWorkspaceRow[];
     if (!Array.isArray(data)) return [];
     return data.map(toWorkspaceSession);
-  } catch {
+  } catch (error) {
+    if (opts.strict) throw error;
     return [];
   }
 }

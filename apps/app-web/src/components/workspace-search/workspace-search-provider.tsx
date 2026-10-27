@@ -26,7 +26,7 @@ export function WorkspaceSearchSlot({placement='toolbar'}:{placement?:SearchPlac
 export function WorkspaceSearchFallback() {
   const context=useContext(Context)
   return <div hidden={context?.hasSlot ?? true} data-workspace-search-fallback data-doc-chrome
-    className="flex h-11 shrink-0 items-center border-b bg-background pl-14 text-right md:h-9 md:px-4"
+    className="flex h-11 shrink-0 items-center border-b bg-background pl-14 text-right md:h-12 md:px-4"
     style={{paddingRight:'max(env(safe-area-inset-right), var(--doc-titlebar-controls, 0px))'}}>
     <div ref={context?.setFallback} className="ml-auto h-11 w-11 md:size-8" />
   </div>

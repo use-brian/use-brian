@@ -15,6 +15,10 @@ export async function appendChannelRoomMessage(
 ): Promise<{ message: SessionMessage; created: boolean }> {
   const write = async (db: Client) => {
     if (input.channelMessageId != null) {
+      // Recording admission and destination changes lock workspace before
+      // session. Keep the same order for later addressed-turn appends.
+      await db.query(`SELECT w.id FROM workspaces w JOIN sessions s ON s.workspace_id=w.id
+        WHERE s.id=$1 AND s.recording_revision IS NOT NULL FOR UPDATE OF w`, [input.sessionId])
       // Lock the parent, not the nonexistent message: this also serializes
       // sequence allocation across concurrent installations and processes.
       const room = await db.query('SELECT id FROM sessions WHERE id=$1 FOR UPDATE', [input.sessionId])

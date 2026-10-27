@@ -63,6 +63,9 @@ const fakePool = {
 }
 
 vi.mock('../client.js', () => ({
+  applyRLSGucs: vi.fn(async (client: typeof fakeClient, userId: string) => {
+    await client.query("SELECT set_config('app.current_user_id', $1, true)", [userId])
+  }),
   getPool: () => fakePool,
   query: (text: string, values?: unknown[]) => fakePool.query(text, values),
   // The actor's RLS edit probe admits both fixture rows unless a test narrows it.
@@ -215,6 +218,7 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
 
     const texts = clientQueries.map((q) => q.text)
     expect(texts[0]).toBe('BEGIN')
+    expect(clientQueries[1]).toEqual({ text: "SELECT set_config('app.current_user_id', $1, true)", values: ['u-1'] })
     // Two-role model: no system_bypass GUC — runs on the system pool (owner).
     expect(texts.every((t) => !t.includes('system_bypass'))).toBe(true)
     // 1. supersede merged
@@ -316,6 +320,7 @@ describe('[COMP:corrections/entity-merge-store] applyUndoMerge', () => {
       cascadeReversed: false,
       now: NOW,
     })
+    expect(clientQueries[1]).toEqual({ text: "SELECT set_config('app.current_user_id', $1, true)", values: ['u-2'] })
     const unSupersede = clientQueries.find(
       (q) => q.text.includes('UPDATE entities') && q.text.includes('valid_to      = NULL'),
     )

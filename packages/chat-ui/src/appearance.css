@@ -52,8 +52,16 @@
 [data-brian-chat-action="stop"]::before, [data-brian-chat-action="secondary"]::before { background: var(--muted); }
 [data-brian-chat-action]:hover::before { opacity: .85; }
 [data-brian-chat-action]:disabled { opacity: .4; pointer-events: none; }
-[data-brian-chat-action]:focus-visible { outline: none !important; box-shadow: none !important; }
-[data-brian-chat-action]:focus-visible::before { outline: 2px solid var(--ring); outline-offset: 2px; }
+[data-brian-chat-action]:focus-visible { outline: none !important; box-shadow: none !important; background-image: none !important; }
+[data-brian-chat-action]:focus-visible::before {
+  background-image: linear-gradient(
+    color-mix(in srgb, currentColor 16%, transparent),
+    color-mix(in srgb, currentColor 16%, transparent)
+  );
+}
+@media (forced-colors: active) {
+  [data-brian-chat-action]:focus-visible::before { outline: 2px solid Highlight; }
+}
 @media (min-width: 768px) {
   [data-brian-chat-composer] { border-radius: 24px; }
 }

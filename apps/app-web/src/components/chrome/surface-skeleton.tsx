@@ -117,12 +117,12 @@ export function SurfaceSkeletonFor({
 
 /**
  * The chrome row every folded-in surface opens with (Brain / Studio topbars,
- * the operator topbar): 44px phone / 36px desktop, bottom-bordered, history on
+ * the operator topbar): 44px phone / 48px desktop, bottom-bordered, history on
  * the left, a breadcrumb, and trailing controls.
  */
 function SurfaceChromeSkeleton({ trailing = 2 }: { trailing?: number }) {
   return (
-    <div data-surface-chrome-skeleton className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background px-2 md:h-9 md:px-4">
+    <div data-surface-chrome-skeleton className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background px-2 md:h-12 md:px-4">
       <Skeleton className="size-5 rounded-md" />
       <Skeleton className="size-5 rounded-md" />
       <Skeleton className="ml-1.5 h-3.5 w-28" />
@@ -366,11 +366,11 @@ export function AppShellSkeleton() {
         <SurfaceChromeSkeleton trailing={3} />
       </div>
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div aria-hidden className="hidden h-full w-14 shrink-0 flex-col items-center gap-1 px-2 pt-[13px] md:flex">
+        <div aria-hidden className="hidden h-full w-14 shrink-0 flex-col items-center gap-1 px-2 pt-px md:flex">
           <div className="flex h-16 w-full shrink-0 items-center justify-center"><Skeleton className="size-7 rounded-lg" /></div>
           {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="size-9 rounded-xl" />)}
         </div>
-        <aside aria-hidden data-doc-context-sidebar className="doc-sidebar-surface mb-2 mt-3 hidden h-[calc(100%-1.25rem)] w-56 shrink-0 flex-col rounded-l-2xl border-y border-l border-r border-sidebar-border md:flex">
+        <aside aria-hidden data-doc-context-sidebar className="doc-sidebar-surface mb-2 hidden h-[calc(100%-0.5rem)] w-56 shrink-0 flex-col rounded-l-2xl border-y border-l border-r border-sidebar-border md:flex">
           <div className="flex h-16 shrink-0 items-center gap-1 px-4">
             <Skeleton className="h-3.5 w-28" />
           </div>
@@ -384,7 +384,7 @@ export function AppShellSkeleton() {
             ))}
           </div>
         </aside>
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background md:mb-2 md:mt-3 md:mr-2 md:pt-2 md:rounded-r-2xl md:border-y md:border-r md:border-border">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background md:mb-2 md:mr-2 md:pt-2 md:rounded-r-2xl md:border-y md:border-r md:border-border">
           <PageSurfaceSkeleton chrome={false} />
         </div>
       </div>

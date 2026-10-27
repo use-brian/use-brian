@@ -2067,7 +2067,7 @@ export async function listSessionsForWorkspaceSystem(
   opts: { limit: number; channelType?: string },
 ): Promise<WorkspaceSessionSummary[]> {
   const limit = Math.max(1, Math.min(opts.limit, 50))
-  const conditions = ['a.workspace_id = $1', 'a.placement_department_id IS NULL']
+  const conditions = ['a.workspace_id = $1', 'a.placement_department_id IS NULL', "s.recording_revision IS NULL"]
   const values: unknown[] = [workspaceId]
   let paramIdx = 2
 
@@ -2127,6 +2127,7 @@ export async function listSessionsByChannelForWorkspaceSystem(params: {
      WHERE a.workspace_id = $1
        AND s.channel_type = $2
        AND s.channel_id = $3
+       AND s.recording_revision IS NULL
      ORDER BY s.last_active_at DESC
      LIMIT $4`,
     [params.workspaceId, params.channelType, params.channelId, limit],
@@ -2162,7 +2163,7 @@ export async function getSessionTranscriptForWorkspaceSystem(
     `SELECT s.id
      FROM sessions s
      JOIN assistants a ON a.id = s.assistant_id
-     WHERE s.id = $1 AND a.workspace_id = $2
+     WHERE s.id = $1 AND a.workspace_id = $2 AND s.recording_revision IS NULL
      LIMIT 1`,
     [sessionId, workspaceId],
   )

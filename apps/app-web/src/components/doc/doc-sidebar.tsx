@@ -508,11 +508,11 @@ export function DocSidebar(props: Props) {
     <aside className="relative flex h-full w-full shrink-0 text-sidebar-foreground md:w-[calc(3.5rem+var(--workspace-sidebar-width,14rem))]">
       {/* One responsive menu/settings owner, anchored over the desktop rail head or
           the phone drawer head. It stays mounted while the panel collapses. */}
-      <div data-workspace-menu-host data-doc-chrome className="absolute left-0 top-0 z-20 flex h-14 w-16 items-center justify-center md:top-3 md:h-16 md:w-14">
+      <div data-workspace-menu-host data-doc-chrome className="absolute left-0 top-0 z-20 flex h-14 w-16 items-center justify-center md:h-16 md:w-14">
         <WorkspaceSwitcher iconOnly />
       </div>
       <WorkspaceAppRail workspaceId={workspaceId} activeSurface={props.activeSurface} activeApp={activeOperatorApp} homeApps={props.homeApps} customApps={props.customApps} liveCount={liveActiveCount} studioNudge={props.studioNudge} onDismissStudioNudge={props.onDismissStudioNudge} />
-      <div id="workspace-context-sidebar" data-doc-context-sidebar className={`doc-sidebar-surface flex h-full min-w-0 flex-1 flex-col border-r border-sidebar-border md:mb-2 md:mt-3 md:h-[calc(100%-1.25rem)] md:w-[var(--workspace-sidebar-width,14rem)] md:flex-none md:rounded-l-2xl md:border-y md:border-l ${props.sidebarCollapsed ? "md:hidden" : ""}`}>
+      <div id="workspace-context-sidebar" data-doc-context-sidebar className={`doc-sidebar-surface flex h-full min-w-0 flex-1 flex-col border-r border-sidebar-border md:mb-2 md:h-[calc(100%-0.5rem)] md:w-[var(--workspace-sidebar-width,14rem)] md:flex-none md:rounded-l-2xl md:border-y md:border-l ${props.sidebarCollapsed ? "md:hidden" : ""}`}>
       <div data-doc-chrome data-workspace-context-heading className="flex h-14 md:h-16 shrink-0 items-center gap-1 px-2 md:px-4">
         <WorkspaceAppTitleHost className="pl-14 md:pl-0" />
         <div className="flex shrink-0 items-center gap-0.5">

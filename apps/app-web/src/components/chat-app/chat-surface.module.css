@@ -106,8 +106,10 @@
 }
 .actionTarget:focus-visible::before,
 .effortControl [data-slot="select-trigger"]:focus-visible::before {
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
+  background-image: linear-gradient(
+    color-mix(in srgb, currentColor 16%, transparent),
+    color-mix(in srgb, currentColor 16%, transparent)
+  );
 }
 
 /* The shared action rule is important in base. Keep one indicator on the
@@ -116,12 +118,14 @@
   .composerFrame .actionTarget:focus-visible {
     outline: none !important;
     box-shadow: none !important;
+    background-image: none !important;
   }
 }
 @media (forced-colors: active) {
   .actionTarget:focus-visible::before,
   .effortControl [data-slot="select-trigger"]:focus-visible::before {
-    outline-color: Highlight;
+    outline: 2px solid Highlight;
+    outline-offset: 0;
   }
 }
 

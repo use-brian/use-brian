@@ -43,8 +43,9 @@ describe("[COMP:app-web/surface-skeleton] Surface skeleton shapes", () => {
     expect(html).toContain("data-surface-chrome-skeleton");
     expect(html.replace(/<[^>]+>/g, "").trim()).toBe("");
     const shell = renderToStaticMarkup(<AppShellSkeleton />);
-    expect(shell).toContain("md:mt-3");
-    expect(shell).toContain("h-[calc(100%-1.25rem)]");
+    expect(shell).not.toContain("mt-3");
+    expect(shell).toContain("md:h-12");
+    expect(shell).toContain("h-[calc(100%-0.5rem)]");
     expect(shell).toContain("md:pt-2");
     expect(shell).toContain("md:mb-2");
     expect(shell).toContain("md:rounded-r-2xl");

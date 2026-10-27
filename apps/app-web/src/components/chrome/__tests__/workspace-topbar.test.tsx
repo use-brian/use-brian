@@ -63,7 +63,7 @@ describe("[COMP:app-web/workspace-topbar] common frame", () => {
       frameClass ??= frame.className;
       expect(frame.className).toBe(frameClass);
       expect(frame.className).toContain("h-11");
-      expect(frame.className).toContain("md:h-9");
+      expect(frame.className).toContain("md:h-12");
       expect(frame.className).toContain("border-b");
       expect(frame.className).toContain("border-border bg-background");
       expect(frame.querySelectorAll("[data-workspace-search-slot]")).toHaveLength(1);

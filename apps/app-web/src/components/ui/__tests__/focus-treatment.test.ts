@@ -1,10 +1,10 @@
 /**
- * [COMP:app-web/focus-treatment] One-frame focus treatment.
+ * [COMP:app-web/focus-treatment] Frameless action focus treatment.
  *
  * Text-entry fields turn their existing border blue through the app-wide
  * `:focus-visible` override in `app/globals.css`. Composite fields put that
  * border change on their `focus-within` wrapper and suppress every nested
- * focus shadow. Discrete keyboard controls use one shape-preserving outline;
+ * focus shadow. Discrete keyboard controls use a neutral background fill;
  * resize separators use a line rather than a rectangular halo.
  */
 
@@ -55,10 +55,24 @@ const appSourceFiles = tsxFiles(SOURCE_ROOT).map((file) => ({
 }));
 
 describe("[COMP:app-web/focus-treatment] source contract", () => {
-  it("uses one snug keyboard outline without inheriting the parent shape or stacking halos", () => {
-    expect(GLOBALS_CSS).toMatch(/:not\(\[role="combobox"\]\):focus-visible\s*\{\s*outline: 2px solid var\(--ring\) !important;\s*outline-offset: 0 !important;\s*box-shadow: none !important;/);
+  it("suppresses pointer and keyboard frames and gives keyboard actions a neutral fill", () => {
+    expect(GLOBALS_CSS).toMatch(/:focus\s*\{\s*outline: none !important;\s*box-shadow: none !important;/);
+    expect(GLOBALS_CSS).toMatch(/:not\(:is\([^{}]+\)\):focus-visible\s*\{\s*background-image: linear-gradient\([\s\S]*?currentColor 16%, transparent[\s\S]*?\) !important;/);
     expect(GLOBALS_CSS).not.toContain("0 0 0 2px var(--background), 0 0 0 4px");
     expect(GLOBALS_CSS).not.toMatch(/:focus-visible[^{}]*\{[^{}]*border-radius: inherit/);
+  });
+
+  it("keeps composer discs and effort controls from restoring a pseudo-element frame", () => {
+    for (const path of [
+      "../../chat-app/chat-surface.module.css",
+      "../../../../../../packages/chat-ui/src/appearance.css",
+    ]) {
+      const css = readFileSync(new URL(path, import.meta.url), "utf8");
+      const normalCss = css.split("@media (forced-colors: active)")[0];
+      expect(normalCss).toContain("currentColor 16%, transparent");
+      expect(normalCss).not.toMatch(/outline:\s*\d+px solid/);
+      expect(css).toContain("outline: 2px solid Highlight");
+    }
   });
 
   it("uses axis-specific separator lines and retains a system high-contrast focus cue", () => {
