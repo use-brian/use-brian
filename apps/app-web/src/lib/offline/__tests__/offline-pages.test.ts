@@ -23,7 +23,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import { createDraft, getView, listViews } from "@/lib/api/views";
 import { setOnline, offlineWrite, flushWriteQueue } from "../offline-writes";
 import { syncLocalPage } from "../sync-local-page";
-import { createLocalPage, flushLocalPages, readLocalPage, readLocalPages, readCachedPage, cachePage } from "../offline-pages";
+import { createLocalPage, flushLocalPages, readLocalPage, readLocalPages, readCachedPage, cachePage, readCachedSidebarTree, sidebarCacheKey } from "../offline-pages";
 import { idbGet } from "../idb";
 const wid = "00000000-0000-4000-8000-000000000001";
 const id = "00000000-0000-4000-8000-000000000002";
@@ -364,4 +364,186 @@ describe("[COMP:app-web/offline-pages] durable offline creation", () => {
     await expect(getView(id)).rejects.toThrow("HTTP 403");
     expect(await readCachedPage(id)).toBeNull();
   });
+});
+
+
+describe("[COMP:app-web/offline-pages] Page read capabilities and owner binding", () => {
+  async function pageWithCapabilities(canEdit = true) {
+    const page = await createLocalPage({ id, workspaceId: wid });
+    state.data.clear();
+    return { ...page, effectiveRole: "edit" as const, canEdit };
+  }
+
+  it.each([false, true])("preserves canonical detail and list canEdit=%s without deriving it from role", async (canEdit) => {
+    const page = await pageWithCapabilities(canEdit);
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.mocked(authFetch).mockResolvedValueOnce(reply(page)).mockResolvedValueOnce(reply({ savedViews: [page] }));
+    expect(await getView(id)).toMatchObject({ effectiveRole: "edit", canEdit });
+    expect(await listViews({ workspaceId: wid })).toEqual([page]);
+  });
+
+  it.each(["offline", "network", "server"])("keeps cached content but withholds capabilities on %s fallback", async (failure) => {
+    const page = await pageWithCapabilities();
+    await cachePage(page);
+    vi.stubGlobal("navigator", { onLine: failure !== "offline" });
+    if (failure === "network") vi.mocked(authFetch).mockRejectedValueOnce(new TypeError("Fictional network failure"));
+    if (failure === "server") vi.mocked(authFetch).mockResolvedValueOnce(reply({}, 503));
+    const result = await getView(id);
+    expect(result.name).toBe(page.name);
+    expect(result.page).toEqual(page.page);
+    expect(result).not.toHaveProperty("canEdit");
+    expect(result).not.toHaveProperty("effectiveRole");
+  });
+
+  it("withholds old disk-list capabilities on offline fallback and sidebar hydration", async () => {
+    const page = await pageWithCapabilities();
+    state.data.set(sidebarCacheKey("saved", wid)!, [page]);
+    const listed = await listViews({ workspaceId: wid, state: "saved" });
+    expect(listed[0].name).toBe(page.name);
+    expect(listed[0]).not.toHaveProperty("canEdit");
+    expect(listed[0]).not.toHaveProperty("effectiveRole");
+    const hydrated = await readCachedSidebarTree(wid);
+    expect(hydrated?.saved[0].name).toBe(page.name);
+    expect(hydrated?.saved[0]).not.toHaveProperty("canEdit");
+    expect(hydrated?.saved[0]).not.toHaveProperty("effectiveRole");
+  });
+
+  it("networkOnly bypasses cached metadata even while navigator reports offline", async () => {
+    const page = await pageWithCapabilities();
+    await cachePage(page);
+    vi.mocked(authFetch).mockResolvedValueOnce(reply({ ...page, name: "Fresh canonical title", canEdit: false }));
+    const result = await getView(id, { networkOnly: true });
+    expect(authFetch).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ name: "Fresh canonical title", effectiveRole: "edit", canEdit: false });
+  });
+
+  it("networkOnly bypasses a pending local draft and exposes canonical denial without deleting its intent", async () => {
+    const page = await createLocalPage({ id, workspaceId: wid });
+    vi.mocked(authFetch).mockResolvedValueOnce(reply({}, 403));
+    await expect(getView(id, { networkOnly: true })).rejects.toThrow("HTTP 403");
+    expect((await readLocalPage(id))?.view).toEqual(page);
+  });
+
+  it("networkOnly never falls back after network failure", async () => {
+    const page = await pageWithCapabilities();
+    await cachePage(page);
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.mocked(authFetch).mockRejectedValueOnce(new TypeError("Fictional network failure"));
+    await expect(getView(id, { networkOnly: true })).rejects.toThrow("Fictional network failure");
+    expect((await readCachedPage(id))?.name).toBe(page.name);
+  });
+
+  it.each(["detail", "list"] as const)("does not synthesize capabilities for an older %s response", async (kind) => {
+    const page = await createLocalPage({ id, workspaceId: wid }); state.data.clear();
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.mocked(authFetch).mockResolvedValueOnce(reply(kind === "detail" ? page : { savedViews: [page] }));
+    const result = kind === "detail" ? await getView(id) : (await listViews({ workspaceId: wid }))[0];
+    expect(result.name).toBe(page.name);
+    expect(result).not.toHaveProperty("canEdit");
+    expect(result).not.toHaveProperty("effectiveRole");
+  });
+
+  it.each(["detail", "list"] as const)("rechecks the owner after %s body decoding", async (kind) => {
+    const page = await pageWithCapabilities(); vi.stubGlobal("navigator", { onLine: true });
+    const response = reply(kind === "detail" ? page : { savedViews: [page] });
+    let release!: (value: unknown) => void;
+    const decode = vi.spyOn(response, "json").mockImplementationOnce(() => new Promise<unknown>(resolve => { release = resolve; }));
+    vi.mocked(authFetch).mockResolvedValueOnce(response);
+    const pending = kind === "detail" ? getView(id) : listViews({ workspaceId: wid });
+    await vi.waitFor(() => expect(decode).toHaveBeenCalledOnce());
+    state.userId = "viewer-b";
+    release(kind === "detail" ? page : { savedViews: [page] });
+    await expect(pending).rejects.toThrow();
+    expect(await readCachedPage(id)).toBeNull();
+  });
+
+  it.each(["viewer", "workspace", "deployment"] as const)("rejects a late detail response after a %s change without writing the new owner's cache", async (axis) => {
+    const page = await pageWithCapabilities(); vi.stubGlobal("navigator", { onLine: true });
+    let release!: (response: Response) => void;
+    vi.mocked(authFetch).mockReturnValueOnce(new Promise<Response>(resolve => { release = resolve; }));
+    const pending = getView(id);
+    await vi.waitFor(() => expect(authFetch).toHaveBeenCalledOnce());
+    if (axis === "viewer") state.userId = "viewer-b";
+    if (axis === "workspace") vi.stubGlobal("window", { location: { pathname: "/w/00000000-0000-4000-8000-000000000003/p/other-page", hostname: "localhost" }, dispatchEvent: vi.fn() });
+    if (axis === "deployment") state.apiOrigin = "http://other-api.example";
+    release(reply(page));
+    await expect(pending).rejects.toThrow();
+    expect(await readCachedPage(id)).toBeNull();
+  });
+
+  it.each(["viewer", "workspace", "deployment"] as const)("rejects a late list response after a %s change", async (axis) => {
+    const page = await pageWithCapabilities(); vi.stubGlobal("navigator", { onLine: true });
+    let release!: (response: Response) => void;
+    vi.mocked(authFetch).mockReturnValueOnce(new Promise<Response>(resolve => { release = resolve; }));
+    const pending = listViews({ workspaceId: wid });
+    await vi.waitFor(() => expect(authFetch).toHaveBeenCalledOnce());
+    if (axis === "viewer") state.userId = "viewer-b";
+    if (axis === "workspace") vi.stubGlobal("window", { location: { pathname: "/w/00000000-0000-4000-8000-000000000003/p/other-page", hostname: "localhost" }, dispatchEvent: vi.fn() });
+    if (axis === "deployment") state.apiOrigin = "http://other-api.example";
+    release(reply({ savedViews: [page] }));
+    await expect(pending).rejects.toThrow();
+    vi.stubGlobal("navigator", { onLine: false });
+    expect(await listViews({ workspaceId: wid, state: "saved" })).toEqual([]);
+  });
+
+  it.each([false, true])("keeps canonical canEdit=%s on a same-ID local overlay without losing authored content", async (canEdit) => {
+    const local = await createLocalPage({ id, workspaceId: wid, name: "Pending authored title" });
+    const before = await readLocalPage(id);
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.mocked(authFetch).mockResolvedValueOnce(reply({ savedViews: [{ ...local, name: "Canonical title", effectiveRole: "edit", canEdit }] }));
+    const rows = await listViews({ workspaceId: wid, state: "draft" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id, name: "Pending authored title", effectiveRole: "edit", canEdit });
+    expect(await readLocalPage(id)).toEqual(before);
+  });
+
+  it("keeps an unmatched local Page unknown and preserves its pending record", async () => {
+    const local = await createLocalPage({ id, workspaceId: wid, name: "Pending authored title" });
+    const before = await readLocalPage(id);
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.mocked(authFetch).mockResolvedValueOnce(reply({ savedViews: [] }));
+    const rows = await listViews({ workspaceId: wid });
+    expect(rows[0].name).toBe(local.name);
+    expect(rows[0]).not.toHaveProperty("canEdit");
+    expect(rows[0]).not.toHaveProperty("effectiveRole");
+    expect(await readLocalPage(id)).toEqual(before);
+  });
+
+  it.each(["detail", "list"] as const)("keeps stable unbound %s content readable without capabilities or cache-owner recapture", async (kind) => {
+    const page = await pageWithCapabilities();
+    vi.stubGlobal("window", { location: { pathname: kind === "detail" ? "/unbound" : "/w/00000000-0000-4000-8000-000000000003/p/other-page" } });
+    vi.stubGlobal("navigator", { onLine: true });
+    vi.mocked(authFetch).mockResolvedValueOnce(reply(kind === "detail" ? page : { savedViews: [page] }));
+    const result = kind === "detail" ? await getView(id, { networkOnly: true }) : (await listViews({ workspaceId: wid }))[0];
+    expect(result.name).toBe(page.name);
+    expect(result).not.toHaveProperty("canEdit");
+    expect(result).not.toHaveProperty("effectiveRole");
+    expect(state.data.size).toBe(0);
+  });
+
+  for (const kind of ["detail", "list"] as const) {
+    for (const stage of ["transport", "body"] as const) {
+      it.each(["viewer", "deployment"] as const)(`rejects unbound ${kind} ${stage} completion after a %s change without new cache writes`, async (axis) => {
+        const page = await pageWithCapabilities();
+        vi.stubGlobal("window", { location: { pathname: kind === "detail" ? "/unbound" : "/w/00000000-0000-4000-8000-000000000003/p/other-page" } });
+        vi.stubGlobal("navigator", { onLine: true });
+        const payload = kind === "detail" ? page : { savedViews: [page] };
+        const response = reply(payload);
+        let releaseTransport!: (response: Response) => void;
+        let releaseBody!: (value: unknown) => void;
+        const decode = stage === "body" ? vi.spyOn(response, "json").mockImplementationOnce(() => new Promise<unknown>(resolve => { releaseBody = resolve; })) : null;
+        if (stage === "transport") vi.mocked(authFetch).mockReturnValueOnce(new Promise<Response>(resolve => { releaseTransport = resolve; }));
+        else vi.mocked(authFetch).mockResolvedValueOnce(response);
+        const pending = kind === "detail" ? getView(id, { networkOnly: true }) : listViews({ workspaceId: wid });
+        await vi.waitFor(() => expect(stage === "body" ? decode : authFetch).toHaveBeenCalledOnce());
+        if (axis === "viewer") state.userId = "viewer-b";
+        else state.apiOrigin = "http://other-api.example";
+        if (stage === "transport") releaseTransport(response);
+        else releaseBody(payload);
+        await expect(pending).rejects.toThrow();
+        expect(state.data.size).toBe(0);
+      });
+    }
+  }
+
 });
