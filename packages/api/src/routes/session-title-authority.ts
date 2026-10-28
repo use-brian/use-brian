@@ -1,5 +1,6 @@
 /** Native browser title readers and authored commands. [COMP:api/application-persistence] */
-import {ContextScopeAccumulator,DerivedScopeError,bindScopeSources,boundScopeSources,executionToolContext,type SessionContextAuthority} from '@use-brian/core'
+import {ContextScopeAccumulator,DerivedScopeError,bindScopeSources,boundScopeSources,executionToolContext,sanitizeTitle,type SessionContextAuthority} from '@use-brian/core'
+import {getPool} from '../db/client.js'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import {authSessionStore,type AuthTokenClaims} from '../db/auth-session-store.js'
 import {findSessionById} from '../db/sessions.js'
@@ -59,18 +60,54 @@ export async function renameCurrentSessionTitle(input:{claims:NativeClaims|null;
 }
 
 type TitleProjection=Readonly<{title:string|null;titleRevisionId:string|null}>
-const projectionAuthorities=new WeakMap<TitleProjection,SessionContextAuthority|null>()
+type ProjectionAuthority={authority:SessionContextAuthority;previewThrough?:number}
+const projectionAuthorities=new WeakMap<TitleProjection,ProjectionAuthority|null>()
+
+/** Presence metadata only: an unreadable saved title must never become a preview. */
+async function hasSavedTitle(sessionId:string,authority:SessionContextAuthority):Promise<boolean>{
+ return (await getPool().query('SELECT 1 FROM session_title_heads WHERE workspace_id=$1 AND session_id=$2',
+  [authority.execution.security.access.workspaceId,sessionId])).rowCount!==0
+}
+async function assertPreviewOutput(sessionId:string,authority:SessionContextAuthority){
+ await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-preview'}),scopeAccumulator:authority.accumulator},
+  async()=>{if(await hasSavedTitle(sessionId,authority))denied()})
+}
+/** Compatibility labels use admitted current history, never the held legacy scalar. */
+async function prepareTitlePreview(sessionId:string,authority:SessionContextAuthority,originalThrough?:number){
+ if(await hasSavedTitle(sessionId,authority))return null
+ const through=originalThrough??(await getPool().query<{sequence:number}>(`SELECT coalesce(max(sequence_num),0)::int AS sequence FROM
+  (SELECT sequence_num FROM session_messages WHERE workspace_id=$1 AND session_id=$2 ORDER BY sequence_num LIMIT 10) original`,
+  [authority.execution.security.access.workspaceId,sessionId])).rows[0].sequence
+ if(through===0)return null
+ const query=await readAdmittedSessionQuery({sessionId,throughSequence:through,topicThroughSequence:0,authority})
+ let title=''
+ for(const row of query.history){
+  if(row.role!=='user')continue
+  const text=typeof row.content==='string'?row.content:Array.isArray(row.content)?row.content.flatMap(block=>
+   typeof block==='object'&&block!==null&&block.type==='text'&&typeof block.text==='string'?[block.text]:[]).join('\n'):''
+  title=sanitizeTitle(text.trim())
+  if(title)break
+ }
+ if(!title||await hasSavedTitle(sessionId,authority))return null
+ await assertPreviewOutput(sessionId,authority)
+ return{projection:bindScopeSources(Object.freeze({title,titleRevisionId:null}),boundScopeSources(query)),through}
+}
 function heldTitleProjection():TitleProjection{
  const projection=Object.freeze({title:null,titleRevisionId:null})
  projectionAuthorities.set(projection,null);return projection
 }
 /** Immutable value identity is private and grants no reusable admission. */
 export async function sessionTitleProjection(input:{claims:NativeClaims|null;sessionId:string}):Promise<TitleProjection>{
+ const command=structuredClone(input)
  try{
-  const{authority,title}=await prepareCurrentSessionTitle(input)
-  if(!title)return heldTitleProjection()
+  const{authority,title}=await prepareCurrentSessionTitle(command)
+  if(!title){
+   const preview=await prepareTitlePreview(command.sessionId,authority)
+   if(!preview)return heldTitleProjection()
+   projectionAuthorities.set(preview.projection,{authority,previewThrough:preview.through});return preview.projection
+  }
   const projection=bindScopeSources(Object.freeze({title:title.title,titleRevisionId:title.revisionId}),boundScopeSources(title))
-  projectionAuthorities.set(projection,authority);return projection
+  projectionAuthorities.set(projection,{authority});return projection
  }catch(error){
   if(error instanceof DerivedScopeError||isAuthorityChangedError(error))return heldTitleProjection()
   throw error
@@ -85,12 +122,19 @@ export async function sessionTitleProjections(input:{claims:NativeClaims|null;se
  const result=new Map<string,TitleProjection>()
  for(const{id,projection}of prepared){
   if(!projectionAuthorities.has(projection))denied()
-  const authority=projectionAuthorities.get(projection)
-  if(!authority){result.set(id,projection);continue}
+  const binding=projectionAuthorities.get(projection)
+  if(!binding){result.set(id,projection);continue}
+  const{authority,previewThrough}=binding
   try{
-   const current=await readSessionTitle(id,authority)
-   if(!current||current.revisionId!==projection.titleRevisionId){result.set(id,heldTitleProjection());continue}
-   await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-list-output'}),scopeAccumulator:authority.accumulator})
+   if(previewThrough!==undefined){
+    const current=await prepareTitlePreview(id,authority,previewThrough)
+    if(!current||current.projection.title!==projection.title){result.set(id,heldTitleProjection());continue}
+   }else{
+    const current=await readSessionTitle(id,authority)
+    if(!current||current.revisionId!==projection.titleRevisionId){result.set(id,heldTitleProjection());continue}
+   }
+   if(previewThrough!==undefined)await assertPreviewOutput(id,authority)
+   else await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-list-output'}),scopeAccumulator:authority.accumulator})
    result.set(id,projection)
   }catch(error){
    if(error instanceof DerivedScopeError||isAuthorityChangedError(error)){result.set(id,heldTitleProjection());continue}
