@@ -20,12 +20,14 @@ export async function assertSourceModelInputAuthority(context: ToolContext): Pro
   return assertSourceModelAuthority(context, 'context')
 }
 
-/** Input permission never substitutes for the actual recipient's delivery decision. */
-export async function assertSourceModelOutputAuthority(context: ToolContext): Promise<void> {
-  return assertSourceModelAuthority(context, 'deliver')
+/** Input permission never substitutes for the actual recipient's delivery decision.
+ * A server-owned metadata guard may narrow admission inside the same SQL frame;
+ * it must not open a nested source operation or perform a mutation there. */
+export async function assertSourceModelOutputAuthority(context: ToolContext, narrowingGuard?: () => Promise<void>): Promise<void> {
+  return assertSourceModelAuthority(context, 'deliver', narrowingGuard)
 }
 
-async function assertSourceModelAuthority(context: ToolContext, action: 'context' | 'deliver'): Promise<void> {
+async function assertSourceModelAuthority(context: ToolContext, action: 'context' | 'deliver', narrowingGuard?: () => Promise<void>): Promise<void> {
   const validate = action === 'deliver' ? validateAudienceScopeEvidence : validateCallerScopeEvidence
   const execution = context.executionContext
   try {
@@ -34,14 +36,14 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     const evidence = new ContextScopeAccumulator(execution?.security.provenance)
     evidence.note(accumulated)
     let sources = evidence.evidence.sources ?? []
-    if (!sources.length) return
+    if (!sources.length) { if(narrowingGuard)denied();return }
     const accumulator = context.scopeAccumulator
     if (!execution || !(accumulator instanceof ContextScopeAccumulator)) denied()
     const originalEvidence = JSON.stringify(accumulator.evidence)
     await execution.security.authority.assertCurrent()
     const workspaceId = execution.security.access.workspaceId
     if (sources.some(source => source.workspaceId !== workspaceId)) denied()
-    const native=await tryNativeInvocationEvidence(execution,evidence.evidence,execution.security.ceiling,action==='deliver'?'audience':'caller')
+    const native=await tryNativeInvocationEvidence(execution,evidence.evidence,execution.security.ceiling,action==='deliver'?'audience':'caller',narrowingGuard)
     if(native){
       await execution.security.authority.assertCurrent()
       if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
@@ -58,6 +60,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     const prepare = wiring ? ((e: ExecutionContext, roots: readonly ScopeSource[], requested: 'context' | 'deliver') => wiring.coordinator.prepare(e, roots, requested)) : undefined
     const cohort = fields.length ? await nativeSessionQueryContextSources(execution, sources, prepare) : { sources, independent: false }
     if (!external && !fields.length && !persistent && !cohort.independent) {
+      if(narrowingGuard)denied()
       const current = await validate(evidence.evidence, execution.security.ceiling)
       await execution.security.authority.assertCurrent()
       if (JSON.stringify(accumulator.evidence) !== originalEvidence) denied()
@@ -108,6 +111,9 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
         }
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
         const current = await validate(evidence.evidence, execution.security.ceiling, client)
+        // A server-owned guard can only narrow the result. Keep it inside
+        // these same native/source locks, never before their acquisition.
+        await narrowingGuard?.()
         // A read-only proof is checked again after COMMIT below.
         if (wiring && getSharedRetainedSourceAuthority() !== wiring) denied()
         await client.query('COMMIT')

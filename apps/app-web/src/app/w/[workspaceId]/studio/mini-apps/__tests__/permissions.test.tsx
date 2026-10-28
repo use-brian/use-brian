@@ -62,7 +62,7 @@ afterEach(async () => {
 });
 
 describe("[COMP:app-web/studio-mini-apps] authenticated editing permissions", () => {
-  it("mounts native management on the existing Mini apps route with truthful readiness",async()=>{await render();expect(host.textContent).toContain(en.applicationManagement.title);expect(host.textContent).toContain(en.applicationManagement.unqualified);expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/api/applications/workspaces/workspace-one/management'),expect.objectContaining({cache:'no-store'}));});
+  it("keeps application administration off the Home-app configuration page",async()=>{await render();expect(host.textContent).not.toContain(en.applicationManagement.title);expect(fetchMock.mock.calls.some(([url])=>String(url).includes('/api/applications/'))).toBe(false);});
   it.each(["owner", "admin"])("enables dragging and saves changes for a cookieless %s session", async (value) => {
     role = value;
     expect(document.cookie).toBe("");

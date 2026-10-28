@@ -1,7 +1,5 @@
 "use client";
 
-import { ApplicationManagement } from '@/components/applications/application-admin';
-
 /**
  * Studio ▸ Programmatic access (app-web).
  *
@@ -228,7 +226,7 @@ export default function ProgrammaticAccessPage() {
   return (
     <div className="flex flex-col gap-6">
       <EndpointPanel t={t} />
-      <ApplicationManagement surface="credentials"/>
+      {activeId&&<Link className="inline-flex min-h-8 max-sm:min-h-11 items-center self-start gap-2 text-sm underline" href={`/w/${activeId}/studio/programmatic-access/applications`}><AppWindow aria-hidden className="size-4"/>{t.applicationManagement.title}</Link>}
       {activeId&&<Link className="inline-flex min-h-8 max-sm:min-h-11 items-center self-start text-sm underline" href={`/w/${activeId}/studio/programmatic-access/history`}>{t.engineeringHistory.open}</Link>}
       {!adminOnly&&!cold&&activeId&&<CapturePreset workspaceId={activeId} teams={teams} projects={projects} onCreated={async()=>{setCaptureProfiles(await listCaptureProfiles(activeId))}} onError={setError}/>}
       <CaptureSetup/>

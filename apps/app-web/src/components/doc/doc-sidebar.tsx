@@ -59,6 +59,7 @@ import {
 } from "@/lib/operator-apps";
 import { WorkspaceAppTitleHost } from "@/components/chrome/workspace-topbar";
 import { WorkspaceAppRail } from "./workspace-app-rail";
+import { WorkspaceStructureSwitcher } from "./workspace-structure-switcher";
 import { WorkspaceSearchSlot } from "@/components/workspace-search/workspace-search-provider";
 import {
   DropdownMenu,
@@ -546,6 +547,7 @@ export function DocSidebar(props: Props) {
       <WorkspaceAppRail mobile workspaceId={workspaceId} activeSurface={props.activeSurface} activeApp={activeOperatorApp} homeApps={props.homeApps} customApps={props.customApps} liveCount={liveActiveCount} studioNudge={props.studioNudge} onDismissStudioNudge={props.onDismissStudioNudge} />
 
       <div className="doc-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-4 pt-2 md:px-3">
+        {(sidebarSurface === "projects" || sidebarSurface === "organization") && <WorkspaceStructureSwitcher workspaceId={workspaceId} view={sidebarSurface} />}
         {/* Surface-aware body. Suggested borrows `/p` for its content pane but
             resolves this body from the sticky Home app, so first load keeps the
             selected app's navigation visible. Page shows the page tree; Office

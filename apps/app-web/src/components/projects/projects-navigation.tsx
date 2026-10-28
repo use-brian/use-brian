@@ -13,6 +13,8 @@ import { useWorkspaceContext } from "@/lib/workspace-context";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/skeleton";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
+import { useSidebarData } from "@/components/doc/doc-sidebar-data";
+import { WorkspaceStructureSwitcher } from "@/components/doc/workspace-structure-switcher";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
@@ -55,8 +57,11 @@ export function ProjectsTopbar() {
   const {workspaceId}=useWorkspaceContext();
   const {t,base,path,resource,items,active}=useProjectsNavigation(workspaceId);
   const router=useRouter();
+  const {sidebarCollapsed}=useSidebarData();
   const label=active?.label ?? (path===base?t.allProjects:t.projectsTitle);
   return <OperatorTopbar identity={{label:t.projectsTitle,icon:FolderKanban}} center={
+    <>
+    <div className={cn("shrink-0", !sidebarCollapsed && "md:hidden")}><WorkspaceStructureSwitcher workspaceId={workspaceId} view="projects" compact /></div>
     <DropdownMenu>
       <DropdownMenuTrigger aria-label={t.switchProject} title={label}
         className="inline-flex h-8 min-w-0 max-w-64 items-center gap-1.5 rounded-md px-2 text-sm hover:bg-sidebar-accent max-md:h-11">
@@ -74,5 +79,6 @@ export function ProjectsTopbar() {
           </DropdownMenuItem>)}
       </DropdownMenuContent>
     </DropdownMenu>
+    </>
   } />;
 }

@@ -1,7 +1,5 @@
 "use client";
 
-import { ApplicationManagement } from '@/components/applications/application-admin';
-
 /**
  * Studio mini-app curation and custom app management. The ordered workspace
  * configuration curates App store; Home remains Chat and personal pins stay
@@ -334,7 +332,6 @@ export default function StudioMiniAppsPage() {
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-6">
       <p className="text-sm text-muted-foreground">{copy.intro}</p>
-      <ApplicationManagement surface="apps"/>
 
       <p className="mt-4 text-xs font-medium text-muted-foreground tabular-nums">
         {format(copy.counter, {

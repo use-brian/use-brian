@@ -76,7 +76,6 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
   function navigate() { requestSidebarClose(); }
   const destinations = [
     { name: copy.docPage.iconHome, aria: t.homeAria, icon: Home, href: `/w/${workspaceId}/chat`, active: activeSurface === "chat", shortcut: 1 },
-    { name: copy.contextScope.projectsTitle, icon: FolderKanban, href: `/w/${workspaceId}/projects`, active: activeSurface === "projects" },
     { name: copy.docPage.iconBrain, icon: Brain, href: `/w/${workspaceId}/brain`, active: activeSurface === "brain", shortcut: 2 },
     { name: copy.liveApp.title, icon: Activity, href: `/w/${workspaceId}/live`, active: activeSurface === "live", live: true },
   ];
@@ -108,6 +107,7 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
       </div>
       </div>
       <div className={cn("my-1 shrink-0 border-t border-sidebar-border", !mobile && "w-8")} />
+      {wrap(t.projectsAndOrganization, <Link data-workspace-structure-entry href={`/w/${workspaceId}/projects`} {...prefetch(`/w/${workspaceId}/projects`)} aria-label={t.projectsAndOrganization} aria-current={activeSurface === "projects" || activeSurface === "organization" ? "page" : undefined} onClick={navigate} className={itemClass(activeSurface === "projects" || activeSurface === "organization")}><FolderKanban className="size-[19px] shrink-0" aria-hidden />{label(t.projectsAndOrganization)}</Link>)}
       {wrap(copy.docPage.iconStudio, <Link href={`/w/${workspaceId}/studio/connectors`} {...prefetch(`/w/${workspaceId}/studio/connectors`)} aria-label={copy.docPage.iconStudio} aria-current={activeSurface === "studio" ? "page" : undefined} onClick={() => { onDismissStudioNudge(); navigate(); }} className={itemClass(activeSurface === "studio")}><SlidersHorizontal className="size-[19px] shrink-0" aria-hidden />{label(copy.docPage.iconStudio)}{studioNudge && <span aria-label={copy.docPage.studioSetupNudgeAria} className="absolute right-1 top-1 size-2 rounded-full bg-primary" />}</Link>, 3)}
       {wrap(t.account, <button type="button" aria-label={t.account} className={itemClass(false)} onClick={() => { openWorkspaceSettings("profile"); navigate(); }}><CircleUserRound className="size-[19px] shrink-0" aria-hidden />{label(t.account)}</button>)}
       {!mobile && <div data-workspace-rail-footer-slot aria-hidden className="h-[calc(5rem+env(safe-area-inset-bottom))] shrink-0" />}

@@ -68,8 +68,18 @@ afterEach(async () => {
 
 vi.mock("@/app/w/[workspaceId]/studio/layout",async()=>{const {Outlet}=await import("react-router-dom");return {default:()=> <main><Outlet/></main>}});
 vi.mock("@/app/w/[workspaceId]/studio/programmatic-access/history/page",()=>({default:()=> <h1>Engineering history fixture</h1>}));
+vi.mock("@/app/w/[workspaceId]/studio/programmatic-access/applications/page",()=>({default:()=> <h1>Application management fixture</h1>}));
 describe("[COMP:app-web/engineering-history] desktop entry routing",()=>{
  it.each(["oss","hosted"] as const)("opens admitted history directly in %s without falling back to configuration or Home",async edition=>{
   await mount(edition,"/w/workspace-one/studio/programmatic-access/history");expect(window.location.hash).toBe("#/w/workspace-one/studio/programmatic-access/history");expect(host.querySelector("h1")?.textContent).toBe("Engineering history fixture");expect(host.querySelector("[data-page]")).toBeNull()
  })
+});
+
+describe("[COMP:app-web/studio-application-management] desktop entry routing",()=>{
+ it.each(["oss","hosted"] as const)("opens dedicated application administration in %s",async edition=>{
+  await mount(edition,"/w/workspace-one/studio/programmatic-access/applications");
+  expect(window.location.hash).toBe("#/w/workspace-one/studio/programmatic-access/applications");
+  expect(host.querySelector("h1")?.textContent).toBe("Application management fixture");
+  expect(host.querySelector("[data-page]")).toBeNull();
+ });
 });

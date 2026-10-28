@@ -4,8 +4,9 @@ import {getAppPool,applyRLSGucs,rollbackAndRelease,runWithAgentAccess} from '../
 import {getApplicationExecutionBinding} from '../application-platform/execution-context.js'
 import {tryValidateNativeScopeEvidence} from './caller-evidence.js'
 
-/** Null requires the full original validator; it never means admitted. Callers bracket this read with their original live lease. */
-export async function tryNativeInvocationEvidence(execution:ExecutionContext,evidence:ScopeEvidence,recipient:AccessCeiling,kind:'caller'|'audience'):Promise<ScopeEvidence|null>{
+/** Null requires the full original validator; it never means admitted. Callers bracket this read with their original live lease.
+ * An optional server-owned metadata guard only narrows a completed proof under its native locks. */
+export async function tryNativeInvocationEvidence(execution:ExecutionContext,evidence:ScopeEvidence,recipient:AccessCeiling,kind:'caller'|'audience',narrowingGuard?:()=>Promise<void>):Promise<ScopeEvidence|null>{
  const roots=evidence.sources??[],actor=execution.security.access.userId,workspaceId=execution.security.access.workspaceId
  const nativeAttended=execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'
   &&execution.identity.principal.userId===actor
@@ -35,6 +36,7 @@ export async function tryNativeInvocationEvidence(execution:ExecutionContext,evi
   // The SQL facade acquires its native lock only after proving eligibility.
   // Unknown/generic/independent-source closures therefore fall back unlocked.
   const admitted=await tryValidateNativeScopeEvidence(evidence,recipient,client,kind)
+  if(admitted)await narrowingGuard?.()
   await client.query('COMMIT');return admitted
  })}finally{await rollbackAndRelease(client)}
 }
