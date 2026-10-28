@@ -53,16 +53,11 @@ export function Board(props: BoardProps): JSX.Element {
   // similar split-state semantics.
   const [columns, setColumns] = useState<A2UIBoardColumn[]>(props.columns)
 
-  // If the parent re-renders with new payload (e.g. after refetch), pick
-  // it up. We compare by shallow card-id signatures rather than deep
-  // equality to avoid resetting drag state on identical re-renders.
-  const propsSignature = useMemo(
-    () => columnSignature(props.columns),
-    [props.columns],
-  )
-  const localSignature = useMemo(() => columnSignature(columns), [columns])
-  if (propsSignature !== localSignature && propsSignature !== columnSignature(columns)) {
-    // Cheap synchronous reconcile.
+  // Compare against the last incoming payload, not our optimistic columns.
+  // A fresh server result wins even when every card/column ID is unchanged.
+  const [source, setSource] = useState(() => ({ columns: props.columns, groupBy: props.groupBy }))
+  if (source.columns !== props.columns || source.groupBy !== props.groupBy) {
+    setSource({ columns: props.columns, groupBy: props.groupBy })
     setColumns(props.columns)
   }
 
@@ -178,10 +173,6 @@ function BoardCard(props: {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
-
-function columnSignature(cols: A2UIBoardColumn[]): string {
-  return cols.map((c) => `${c.id}:${c.cards.map((card) => card.id).join(',')}`).join('|')
-}
 
 function findCardColumn(
   cols: A2UIBoardColumn[],
