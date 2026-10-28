@@ -616,6 +616,25 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
     expect(sessionApi.listWorkspaceSessions.mock.calls.every(([opts]) => opts.contextProjectId === undefined)).toBe(true);
   });
 
+  it("shows provider icons and resolved channel/topic names while retaining source IDs in hover details", async () => {
+    sessionApi.listSessionsForAssistants.mockResolvedValue([
+      chat("slack-a", { transport: "slack", channelId: "C_ONE:thread:1.001" }),
+      chat("slack-b", { transport: "slack", channelId: "C_ONE:thread:2.001", channelName: "#engineering" }),
+      chat("topic-a", { transport: "telegram", channelId: "-1000000000000:topic:12", channelName: "Product team › Launch" }),
+      chat("discord-a", { transport: "discord", channelId: "123456789012345678" }),
+    ]);
+    await renderPanel();
+    const slack = buttonNamed("#engineering");
+    expect(slack.title).toBe("#engineering (Slack: C_ONE)");
+    expect(slack.querySelector('[data-channel-icon="slack"] svg')).not.toBeNull();
+    expect(buttonNamed("Product team › Launch").querySelector('[data-channel-icon="telegram"] svg')).not.toBeNull();
+    expect(buttonNamed("Discord: 123456789012345678").querySelector('[data-channel-icon="discord"] svg')).not.toBeNull();
+    await act(async () => slack.click());
+    expect(group("#engineering").querySelectorAll("a")).toHaveLength(2);
+    await act(async () => mutateSurfaceCache<import("@/lib/api/sessions").DocSession[]>(chatSessionsCacheKey("workspace-1"), list => list.map(row => ({ ...row, ...(row.transport === "slack" ? { channelName: "#renamed" } : {}) }))));
+    expect(buttonNamed("#renamed").getAttribute("aria-expanded")).toBe("true");
+  });
+
   it("keeps channels, transports and topics distinct, while Feishu threads share a heading", async () => {
     sessionApi.listSessionsForAssistants.mockResolvedValue([
       chat("slack-a", { transport: "slack", channelId: "C_ONE" }),

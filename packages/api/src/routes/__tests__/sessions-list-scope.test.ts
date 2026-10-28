@@ -33,7 +33,7 @@ vi.mock('../../db/workspace-store.js', () => ({
 }))
 vi.mock('../route-helpers.js', () => ({ resolveUser: vi.fn() }))
 
-import { sessionRoutes } from '../sessions.js'
+import { sessionRoutes, type SessionRouteOptions } from '../sessions.js'
 import { DOC_DOCK_RESUME_ROW } from '../_room-binding.js'
 import { policyFor } from '../../session-kind.js'
 import { query } from '../../db/client.js'
@@ -61,9 +61,9 @@ function assistant(id: string) {
   return { id } as never
 }
 
-function makeApp() {
+function makeApp(options: SessionRouteOptions = {}) {
   const app = express()
-  app.use('/api/sessions', sessionRoutes())
+  app.use('/api/sessions', sessionRoutes(options))
   return app
 }
 
@@ -265,5 +265,32 @@ describe('[COMP:api/sessions-list] Project paging', () => {
     expect(res.body.map((r:{id:string})=>r.id)).toEqual(['visible'])
     expect(mockQuery.mock.calls[0][1]).toEqual([WS_ID,project,null,null,USER_ID])
     expect(mockQuery.mock.calls[1][1]).toEqual([WS_ID,project,'2026-01-01T00:00:00.000Z','hidden-99',USER_ID])
+  })
+})
+
+
+describe('[COMP:api/sessions-list] provider labels follow read admission', () => {
+  it('enriches admitted rows only and tolerates metadata failures', async () => {
+    const makeRows = () => ['internal', 'confidential'].map((clearance, index) => ({
+      id: `session-${index}`, userId: USER_ID, visibility: 'personal', mode: null,
+      channelId: `C${index}`, channelType: 'slack', appOrigin: null, anchorKind: 'none',
+      lastActiveAt: new Date('2026-01-01'), status: 'idle', assistantId: WS_PRIMARY_ASSISTANT_ID,
+      effectiveClearance: clearance, contextCompartments: [], contextProjectId: null, contextGroupId: null,
+    }))
+    mockWorkspacePrimary.mockResolvedValue(assistant(WS_PRIMARY_ASSISTANT_ID))
+    vi.mocked(getWorkspaceMembershipWithReadScopeSystem).mockResolvedValue({
+      clearance: 'internal', compartments: [], projectIds: null,
+      departmentAccess: { principal: { kind: 'user', id: USER_ID },
+        snapshot: { workspaceId: WS_ID, base: { [`user:${USER_ID}`]: 'internal' }, edges: [] } },
+    } as never)
+    const resolveChannelNames = vi.fn().mockResolvedValue(new Map([['session-0', '#engineering']]))
+    mockQuery.mockResolvedValueOnce({ rows: makeRows() } as never)
+    const response = await request(makeApp({ resolveChannelNames })).get(`/api/sessions?scope=workspace&channels=all&workspaceId=${WS_ID}`).expect(200)
+    expect(resolveChannelNames).toHaveBeenCalledWith({ userId: USER_ID, workspaceId: WS_ID, rows: [expect.objectContaining({ id: 'session-0' })] })
+    expect(response.body).toEqual([expect.objectContaining({ id: 'session-0', channelName: '#engineering' })])
+    resolveChannelNames.mockRejectedValue(new Error('metadata unavailable'))
+    mockQuery.mockResolvedValueOnce({ rows: makeRows() } as never)
+    const fallback = await request(makeApp({ resolveChannelNames })).get(`/api/sessions?scope=workspace&channels=all&workspaceId=${WS_ID}`).expect(200)
+    expect(fallback.body).toEqual([expect.objectContaining({ id: 'session-0', channelId: 'C0' })])
   })
 })

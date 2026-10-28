@@ -52,6 +52,8 @@ export type DocSession = {
   /** Current admitted immutable revision identity; never an allow token. */
   titleRevisionId?: string | null;
   channelId: string;
+  /** Provider channel/topic name, separate from the conversation title. */
+  channelName?: string | null;
   /** ISO string — server emits a Date which JSON-serialises here. */
   lastActive: string;
   /**
@@ -148,6 +150,8 @@ type RawListRow = {
   /** Current admitted immutable revision identity; never an allow token. */
   titleRevisionId?: string | null;
   channelId: string;
+  /** Provider channel/topic name, separate from the conversation title. */
+  channelName?: string | null;
   lastActive: string | Date;
   appOrigin?: string | null;
   /** The session's bound assistant (echoed per row; spans assistants under
@@ -289,6 +293,7 @@ export async function listPersonalSessions(opts: {
       title: r.title,
       ...(r.titleRevisionId !== undefined ? {titleRevisionId: r.titleRevisionId} : {}),
       channelId: r.channelId,
+      ...(r.channelName ? { channelName: r.channelName } : {}),
       lastActive: toIso(r.lastActive),
       appOrigin: r.appOrigin ?? null,
       assistantId: r.assistantId ?? opts.assistantId,
