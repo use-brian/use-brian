@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PdfSnapshot } from "@use-brian/office-model";
@@ -17,21 +17,34 @@ const api = vi.hoisted(() => ({
   uploadPdfSessionImage: vi.fn(),
   admitPdfSessionImage: vi.fn(),
 }));
+const pdf = vi.hoisted(() => ({ getDocument: vi.fn() }));
 
 vi.mock("@/lib/office/api", () => api);
 vi.mock("@/lib/user", () => ({ getUserInfo: () => ({ id: "00000000-0000-4000-8000-000000000003" }) }));
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: vi.fn(async () => true) }));
 vi.mock("pdfjs-dist", () => ({
   GlobalWorkerOptions: { workerSrc: "" },
-  getDocument: () => ({ promise: Promise.resolve({ destroy: vi.fn(async () => undefined) }) }),
+  getDocument: pdf.getDocument,
 }));
-vi.mock("../pdf/page-canvas", () => ({ PdfPageCanvas: ({ sourcePageIndex }: { sourcePageIndex: number }) => <div data-test-pdf-canvas={sourcePageIndex} /> }));
+vi.mock("../pdf/page-canvas", () => ({ PdfPageCanvas: ({ sourcePageIndex, document }: { sourcePageIndex: number; document: { testId: string } }) => <div data-test-pdf-canvas={sourcePageIndex} data-test-document={document.testId} /> }));
 
 import { PdfEditor } from "../pdf-editor";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const id = (ordinal: number) => `00000000-0000-4000-8000-${String(ordinal).padStart(12, "0")}`;
+const source = () => ({ bytes: new ArrayBuffer(8), validForMs: 30_000 });
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+function loadingTask(testId: string) {
+  const document = { testId, destroy: vi.fn(async () => undefined) };
+  const pending = deferred<typeof document>();
+  return { document, pending, task: { promise: pending.promise, destroy: vi.fn(async () => { await document.destroy(); }) } };
+}
 
 function fixture(): PdfSnapshot {
   return {
@@ -50,17 +63,21 @@ describe("[COMP:app-web/office-pdf-editor] protected responsive PDF editor", () 
   let host: HTMLDivElement;
   let root: ReturnType<typeof createRoot>;
   beforeEach(() => {
-    api.readOfficePdfSource.mockClear();
+    api.readOfficePdfSource.mockReset().mockResolvedValue(source());
+    pdf.getDocument.mockReset().mockImplementation(() => {
+      const load = loadingTask("default"); load.pending.resolve(load.document); return load.task;
+    });
     host = document.createElement("div"); document.body.append(host); root = createRoot(host);
     let next = 100;
     vi.stubGlobal("crypto", { randomUUID: vi.fn(() => id(next++)) });
   });
-  afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
+  afterEach(() => { act(() => root.unmount()); host.remove(); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
-  async function mount(options: { role?: "view" | "edit"; expiresAt?: string; onCommand?: (command: unknown) => Promise<void> } = {}) {
-    const snapshot = fixture();
+  async function mount(options: { role?: "view" | "edit"; expiresAt?: string; onCommand?: (command: unknown) => Promise<void>; snapshot?: PdfSnapshot; strict?: boolean } = {}) {
+    const snapshot = options.snapshot ?? fixture();
     const onCommand = vi.fn(options.onCommand ?? (async () => undefined));
-    await act(async () => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><PdfEditor workspaceId={snapshot.workspaceId} snapshot={snapshot} seq={2} baseVersion={1} artifactVersion={1} expiresAt={options.expiresAt ?? "2099-01-01T00:00:00.000Z"} role={options.role ?? "edit"} onCommand={onCommand} onReadback={vi.fn(async () => undefined)} onSelectTargets={vi.fn()} /></I18nProvider>));
+    const editor = <I18nProvider locale="en" dict={en as unknown as Dictionary}><PdfEditor workspaceId={snapshot.workspaceId} snapshot={snapshot} seq={2} baseVersion={1} artifactVersion={1} expiresAt={options.expiresAt ?? "2099-01-01T00:00:00.000Z"} role={options.role ?? "edit"} onCommand={onCommand} onReadback={vi.fn(async () => undefined)} onSelectTargets={vi.fn()} /></I18nProvider>;
+    await act(async () => root.render(options.strict ? <StrictMode>{editor}</StrictMode> : editor));
     return { onCommand };
   }
 
@@ -141,6 +158,145 @@ describe("[COMP:app-web/office-pdf-editor] protected responsive PDF editor", () 
     expect(api.readOfficePdfSource).toHaveBeenCalledTimes(1);
     await act(async () => window.dispatchEvent(new Event("focus")));
     expect(api.readOfficePdfSource).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["focus", "visibility"] as const)("starts every %s refresh while source is still loading", async event => {
+    vi.useFakeTimers();
+    api.readOfficePdfSource.mockImplementation(() => new Promise(() => {}));
+    await mount();
+    for (let attempt = 2; attempt <= 3; attempt++) {
+      await act(async () => {
+        if (event === "focus") window.dispatchEvent(new Event("focus"));
+        else {
+          Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+          document.dispatchEvent(new Event("visibilitychange"));
+        }
+      });
+      expect(api.readOfficePdfSource).toHaveBeenCalledTimes(attempt);
+    }
+  });
+
+  it("ignores the cleaned-up StrictMode source read and leaves one renewal owner", async () => {
+    vi.useFakeTimers();
+    const obsolete = deferred<ReturnType<typeof source>>();
+    api.readOfficePdfSource.mockReturnValueOnce(obsolete.promise);
+    await mount({ strict: true });
+    expect(api.readOfficePdfSource).toHaveBeenCalledTimes(2);
+    expect(pdf.getDocument).toHaveBeenCalledTimes(1);
+    await act(async () => obsolete.resolve(source()));
+    expect(pdf.getDocument).toHaveBeenCalledTimes(1);
+    api.readOfficePdfSource.mockImplementation(() => new Promise(() => {}));
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(api.readOfficePdfSource).toHaveBeenCalledTimes(3);
+    expect(host.querySelector("[data-test-pdf-canvas]")).toBeNull();
+  });
+
+  it("does not publish an old artifact after its replacement becomes ready", async () => {
+    const obsolete = deferred<ReturnType<typeof source>>();
+    api.readOfficePdfSource.mockReturnValueOnce(obsolete.promise);
+    await mount();
+    await mount({ snapshot: { ...fixture(), artifactId: id(900) } });
+    expect(host.querySelector("[data-test-document=default]")).not.toBeNull();
+    await act(async () => obsolete.resolve(source()));
+    expect(pdf.getDocument).toHaveBeenCalledTimes(1);
+    expect(host.querySelector("[data-test-document=default]")).not.toBeNull();
+  });
+
+  it("disposes a pending PDF.js task and ignores its late document after refresh", async () => {
+    const obsolete = loadingTask("obsolete");
+    pdf.getDocument.mockReturnValueOnce(obsolete.task);
+    await mount();
+    expect(host.querySelector("[data-test-pdf-canvas]")).toBeNull();
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(obsolete.task.destroy).toHaveBeenCalledTimes(1);
+    expect(host.querySelector("[data-test-document=default]")).not.toBeNull();
+    await act(async () => obsolete.pending.resolve(obsolete.document));
+    expect(host.querySelector("[data-test-document=obsolete]")).toBeNull();
+    expect(host.querySelector("[data-test-document=default]")).not.toBeNull();
+  });
+
+  it("does not start PDF.js or renew after its pending source owner unmounts", async () => {
+    vi.useFakeTimers();
+    const obsolete = deferred<ReturnType<typeof source>>();
+    api.readOfficePdfSource.mockReturnValueOnce(obsolete.promise);
+    await mount();
+    await act(async () => root.render(null));
+    await act(async () => obsolete.resolve(source()));
+    await act(async () => vi.advanceTimersByTimeAsync(31_000));
+    expect(pdf.getDocument).not.toHaveBeenCalled();
+    expect(api.readOfficePdfSource).toHaveBeenCalledTimes(1);
+  });
+
+  it("disposes a PDF.js task when its editor unmounts before parsing completes", async () => {
+    vi.useFakeTimers();
+    const obsolete = loadingTask("unmounted");
+    pdf.getDocument.mockReturnValueOnce(obsolete.task);
+    await mount();
+    await act(async () => root.render(null));
+    expect(obsolete.task.destroy).toHaveBeenCalledTimes(1);
+    await act(async () => obsolete.pending.resolve(obsolete.document));
+    await act(async () => vi.advanceTimersByTimeAsync(31_000));
+    expect(host.querySelector("[data-test-pdf-canvas]")).toBeNull();
+    expect(api.readOfficePdfSource).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears a ready artifact while its replacement source is pending", async () => {
+    await mount();
+    const task = pdf.getDocument.mock.results[0].value;
+    api.readOfficePdfSource.mockImplementation(() => new Promise(() => {}));
+    await mount({ snapshot: { ...fixture(), artifactId: id(900) } });
+    expect(task.destroy).toHaveBeenCalledTimes(1);
+    expect(host.querySelector("[data-test-pdf-canvas]")).toBeNull();
+    expect(host.querySelector(`[aria-label="${en.office.pdf.sourceLoading}"]`)).not.toBeNull();
+  });
+
+  it("keeps the latest refusal when an obsolete PDF.js task completes", async () => {
+    const obsolete = loadingTask("obsolete");
+    pdf.getDocument.mockReturnValueOnce(obsolete.task);
+    await mount();
+    api.readOfficePdfSource.mockRejectedValue(new Error("current refusal"));
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(host.querySelector(`[aria-label="${en.office.pdf.sourceFailed}"]`)).not.toBeNull();
+    await act(async () => obsolete.pending.resolve(obsolete.document));
+    expect(host.querySelector("[data-test-pdf-canvas]")).toBeNull();
+    expect(host.querySelector(`[aria-label="${en.office.pdf.sourceFailed}"]`)).not.toBeNull();
+  });
+
+  it("keeps the latest successful document when an obsolete read rejects", async () => {
+    const obsolete = deferred<ReturnType<typeof source>>();
+    api.readOfficePdfSource.mockReturnValueOnce(obsolete.promise);
+    await mount();
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(host.querySelector("[data-test-document=default]")).not.toBeNull();
+    await act(async () => obsolete.reject(new Error("obsolete refusal")));
+    expect(host.querySelector("[data-test-document=default]")).not.toBeNull();
+    expect(host.querySelector(`[aria-label="${en.office.pdf.sourceFailed}"]`)).toBeNull();
+  });
+
+  it("purges a ready document on lease renewal and preserves denial", async () => {
+    vi.useFakeTimers();
+    api.readOfficePdfSource.mockResolvedValueOnce({ ...source(), validForMs: 500 });
+    await mount();
+    expect(host.querySelector("[data-test-pdf-canvas]")).not.toBeNull();
+    api.readOfficePdfSource.mockRejectedValue(new Error("source unavailable"));
+    await act(async () => vi.advanceTimersByTimeAsync(501));
+    expect(api.readOfficePdfSource).toHaveBeenCalledTimes(2);
+    expect(host.querySelector("[data-test-pdf-canvas]")).toBeNull();
+    expect(host.querySelector(`[aria-label="${en.office.pdf.sourceFailed}"]`)).not.toBeNull();
+  });
+
+  it("expires a source lease while PDF.js is pending and cannot resurrect that task", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"] });
+    const obsolete = loadingTask("expired");
+    pdf.getDocument.mockReturnValueOnce(obsolete.task);
+    api.readOfficePdfSource.mockResolvedValueOnce({ ...source(), validForMs: 500 });
+    await mount();
+    api.readOfficePdfSource.mockImplementation(() => new Promise(() => {}));
+    await act(async () => vi.advanceTimersByTimeAsync(501));
+    expect(api.readOfficePdfSource).toHaveBeenCalledTimes(2);
+    expect(obsolete.task.destroy).toHaveBeenCalledTimes(1);
+    await act(async () => obsolete.pending.resolve(obsolete.document));
+    expect(host.querySelector("[data-test-document=expired]")).toBeNull();
   });
 
   it("maps rotated overlay geometry and pointer deltas in the canonical point plane", () => {

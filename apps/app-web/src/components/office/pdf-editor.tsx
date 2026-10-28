@@ -6,7 +6,7 @@ import { buttonVariants } from "@/components/ui/button";
  * every editable surface is a DOM projection of the Office PDF snapshot.
  * [COMP:app-web/office-pdf-editor] */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { PDFDocumentProxy } from "pdfjs-dist";
+import type { PDFDocumentLoadingTask, PDFDocumentProxy } from "pdfjs-dist";
 import type { OfficeCommand, PdfField, PdfOverlay, PdfPage, PdfRect, PdfSnapshot } from "@use-brian/office-model";
 import { CalendarPlus, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileImage, List, PenLine, RotateCw, Save, Trash2, Type } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -68,31 +68,46 @@ function overlayText(overlay: PdfOverlay): string {
 }
 
 function useProtectedPdf(artifactId: string) {
-  const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
-  const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
+  const [revision, setRevision] = useState(0);
+  const [projection, setProjection] = useState<{ artifactId: string; revision: number; document: PDFDocumentProxy | null; state: "ready" | "failed" } | null>(null);
   const generation = useRef(0);
   const refresh = useCallback(() => {
     generation.current += 1;
-    setDocument((current) => { void current?.destroy(); return null; });
-    setState("loading");
+    setProjection(null);
+    setRevision(current => current + 1);
   }, []);
 
   useEffect(() => {
     const owner = generation.current;
-    let loaded: PDFDocumentProxy | null = null;
+    let active = true;
+    let task: PDFDocumentLoadingTask | null = null;
+    let destroyed = false;
     let timer = 0;
+    const current = () => active && generation.current === owner;
+    const destroy = () => {
+      if (task && !destroyed) { destroyed = true; void task.destroy().catch(() => undefined); }
+    };
     void readOfficePdfSource(artifactId).then(async (source) => {
+      if (!current()) return;
+      const deadline = performance.now() + source.validForMs;
+      timer = window.setTimeout(refresh, source.validForMs - Math.min(250, source.validForMs / 2));
       const pdfjs = await import("pdfjs-dist");
+      if (!current()) return;
+      if (performance.now() >= deadline) { refresh(); return; }
       pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
-      const task = pdfjs.getDocument({ data: new Uint8Array(source.bytes.slice(0)), isEvalSupported: false });
-      loaded = await task.promise;
-      if (generation.current !== owner) { await loaded.destroy(); return; }
-      setDocument(loaded);
-      setState("ready");
-      timer = window.setTimeout(refresh, Math.max(1_000, source.validForMs - 250));
-    }).catch(() => { if (generation.current === owner) setState("failed"); });
-    return () => { window.clearTimeout(timer); void loaded?.destroy(); };
-  }, [artifactId, refresh, generation.current]);
+      task = pdfjs.getDocument({ data: new Uint8Array(source.bytes.slice(0)), isEvalSupported: false });
+      const document = await task.promise;
+      if (!current()) return;
+      if (performance.now() >= deadline) { refresh(); return; }
+      setProjection({ artifactId, revision, document, state: "ready" });
+    }).catch(() => {
+      if (!current()) return;
+      window.clearTimeout(timer);
+      destroy();
+      setProjection({ artifactId, revision, document: null, state: "failed" });
+    });
+    return () => { active = false; window.clearTimeout(timer); destroy(); };
+  }, [artifactId, refresh, revision]);
 
   useEffect(() => {
     const purge = () => refresh();
@@ -102,7 +117,8 @@ function useProtectedPdf(artifactId: string) {
     return () => { window.removeEventListener("focus", purge); window.document.removeEventListener("visibilitychange", visible); };
   }, [refresh]);
 
-  return { document, state, refresh };
+  const visible = projection?.artifactId === artifactId && projection.revision === revision ? projection : null;
+  return { document: visible?.document ?? null, state: visible?.state ?? "loading", refresh };
 }
 
 export function PdfEditor(props: PdfEditorProps) {

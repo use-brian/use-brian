@@ -31,7 +31,7 @@ vi.mock('@/lib/chat-dock-suppress',()=>({chatDockSuppression:{suppress:()=>()=>{
 vi.mock('../document-editor',()=>({DocumentEditor:({snapshot,onCommand,onSelectTargets}:{snapshot:OfficeArtifactSnapshot;onCommand:(command:OfficeCommand)=>void;onSelectTargets:(ids:string[])=>void})=>{state.command=onCommand;return <div data-editor>{snapshot.title}{snapshot.family==='document'?JSON.stringify(snapshot.sections):null}<button onClick={()=>onSelectTargets(['block-a'])}>Select block</button></div>;}}));
 vi.mock('../presentation-editor',()=>({PresentationEditor:({snapshot}:{snapshot:OfficeArtifactSnapshot})=><div data-editor>{snapshot.title}</div>}));
 vi.mock('../presentation-presenter',()=>({PresentationPresenter:({snapshot}:{snapshot:OfficeArtifactSnapshot})=><div data-presenter>{snapshot.title}</div>}));
-vi.mock('pdfjs-dist',()=>({GlobalWorkerOptions:{workerSrc:''},getDocument:()=>({promise:Promise.resolve({destroy:vi.fn(async()=>undefined)})})}));
+vi.mock('pdfjs-dist',()=>({GlobalWorkerOptions:{workerSrc:''},getDocument:()=>({promise:Promise.resolve({destroy:vi.fn(async()=>undefined)}),destroy:vi.fn(async()=>undefined)})}));
 vi.mock('../pdf/page-canvas',()=>({PdfPageCanvas:()=> <div data-pdf-page-fixture/>}));
 vi.mock('../office-review',()=>({OfficeReview:({onPresent}:{onPresent:()=>void})=><button onClick={onPresent}>Present fixture</button>}));
 vi.mock('../job-activity',()=>({OfficeJobActivity:({targetIds}:{targetIds:string[]})=><div data-selection>{targetIds.join('|')}</div>}));
