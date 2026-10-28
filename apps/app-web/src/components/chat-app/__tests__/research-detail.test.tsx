@@ -440,6 +440,8 @@ describe("[COMP:app-web/research-detail] truthful detail read recovery", () => {
     expect(host.querySelector('[role="status"]')?.textContent).toContain(coldFailure);
     const recovery = button(en.chat.retry)!;
     expect(recovery.className).toContain("min-h-11");
+    expect(recovery.classList.contains("min-h-11")).toBe(false);
+    expect(recovery.classList.contains("max-sm:min-h-11")).toBe(true);
     await click(recovery);
     expect(api.getResearchActivity).toHaveBeenCalledTimes(2);
     expect(host.querySelector('[aria-busy="true"]')).not.toBeNull();

@@ -1,3 +1,5 @@
+BEGIN;
+
 -- Content-free, source-owned feedback recovery intent. See features/research.md.
 -- [COMP:api/research-feedback-replay]
 CREATE TABLE public.research_feedback_attempts (
@@ -61,3 +63,5 @@ DO $$ BEGIN
       ON public.research_feedback_attempts TO app_user;
   END IF;
 END $$;
+
+COMMIT;

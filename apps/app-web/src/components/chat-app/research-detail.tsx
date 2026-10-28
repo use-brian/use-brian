@@ -229,7 +229,7 @@ function ResearchDetailBody({ owner, workspaceId, activityId, onOpenArtifact }: 
   const recovery = (message: string) => (
     <div className="space-y-2" aria-busy={reading}>
       <p role="status" className="text-muted-foreground">{message}</p>
-      <Button type="button" variant="outline" size="sm" className="min-h-11" disabled={reading} onClick={retry}>
+      <Button type="button" variant="outline" size="sm" disabled={reading} onClick={retry}>
         {dictionary.chat.retry}
       </Button>
     </div>
