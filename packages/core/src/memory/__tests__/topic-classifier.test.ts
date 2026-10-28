@@ -69,6 +69,70 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('does not re-enter the original authority window after a timed-out classifier returns', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const assertInputAuthority = vi.fn(async () => {})
+    let releaseTransport!: () => void
+    const transport = new Promise<void>((resolve) => { releaseTransport = resolve })
+    let signal: AbortSignal | undefined
+    const provider = mockProvider('unused')
+    provider.stream = async function* (request) {
+      signal = request.signal
+      // A transport can finish unwinding after cancellation and fallback.
+      // Hold that completion until the caller has started its next phase.
+      await transport
+      throw request.signal?.reason ?? new Error('Fictional delayed transport cancellation')
+    }
+    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], assertInputAuthority })
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    await expect(classification).resolves.toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
+    expect(signal?.aborted).toBe(true)
+    const checksAtReturn = assertInputAuthority.mock.calls.length
+
+    releaseTransport()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(assertInputAuthority).toHaveBeenCalledTimes(checksAtReturn)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('drains a losing cascade authority check before returning the timeout fallback', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let checksStarted = 0
+    let activeChecks = 0
+    const assertInputAuthority = vi.fn(async () => {
+      if (++checksStarted === 1) return
+      activeChecks++
+      try { await new Promise(resolve => setTimeout(resolve, 20)) }
+      finally { activeChecks-- }
+    })
+    const provider = mockProvider('unused')
+    const decisionRuntime = executionFixture({ mode: 'llm_only', llm: provider })
+    decisionRuntime.run = async ({ request, operation }) => {
+      await new Promise<void>(resolve => request.signal!.addEventListener('abort', () => resolve(), { once: true }))
+      // A canceled cascade can have several authority boundaries while it
+      // unwinds. Its next continuation can run before the host's await resumes.
+      for (let i = 0; i < 10; i++) await operation.assertInputAuthority!()
+      return { runId: request.runId, result: operation.safeFailure('timeout'), path: 'safe_default', attempts: 0, failureKind: 'timeout' }
+    }
+    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], decisionRuntime, assertInputAuthority })
+
+    await vi.advanceTimersByTimeAsync(2_040)
+    await expect(classification).resolves.toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
+    const activeChecksAtReturn = activeChecks
+    const checksAtReturn = assertInputAuthority.mock.calls.length
+    await vi.advanceTimersByTimeAsync(100)
+
+    expect(activeChecksAtReturn).toBe(0)
+    expect(assertInputAuthority).toHaveBeenCalledTimes(checksAtReturn)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('passes the same total budget through the decision runtime to its LLM transport', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})

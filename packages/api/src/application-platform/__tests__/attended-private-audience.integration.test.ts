@@ -1,8 +1,8 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
-import {ContextScopeAccumulator,boundScopeSources} from '@use-brian/core'
+import {ContextScopeAccumulator,boundScopeSources,executionToolContext,type LLMProvider} from '@use-brian/core'
 import {getAppPool,getPool} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
-import {createPersonalWebSession} from '../../db/sessions.js'
+import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
 import {findAssistantById} from '../../db/users.js'
 import {createMemory} from '../../db/memories.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
@@ -10,6 +10,8 @@ import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
 import {createAttendedDeliveryAudienceAuthorizer,validateAttendedAudienceEvidence} from '../../context-scope/attended-audience.js'
 import {createDeliveryAudienceAuthorizer} from '../../context-scope/delivery-authority.js'
+import {classifyAttendedSessionMessage,readAttendedSessionHistory} from '../../routes/attended-session-context.js'
+import {assertSourceModelInputAuthority} from '../model-source-authority.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const{assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -55,6 +57,25 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/delivery-autho
   const original=createDeliveryAudienceAuthorizer({validateEvidence:(evidence,recipient)=>validateAttendedAudienceEvidence(current.execution,evidence,recipient,{directHumanSource:true})})
   const before=structuredClone(current.input),actual=await current.authorize(current.input),expected=await original(current.input)
   expect(actual).toEqual(expected);expect(actual.allowed).toBe(true);expect(current.input).toEqual(before)
+ })
+ it('keeps a private reply authorized after a timed-out classifier finishes unwinding',async()=>{
+  const f=await setup(),current=await context(f)
+  const message=await addSessionMessage({sessionId:current.session.id,role:'user',content:[{type:'text',text:'Hello'}],senderUserId:f.firstId,
+   scope:{workspaceId:f.workspaceId,userId:f.firstId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]}})
+  let releaseTransport!:()=>void
+  const transport=new Promise<void>(resolve=>{releaseTransport=resolve})
+  const provider:LLMProvider={name:'fictional-delayed-classifier',models:['fixture'],createSession(){throw new Error('Unexpected fixture session')},
+   async *stream(request){await transport;throw request.signal?.reason??new Error('Fictional delayed cancellation')}}
+  try{
+   const result=await classifyAttendedSessionMessage({authority:current.authority,session:current.session,message,provider,model:'fixture'})
+   expect(result.classification).toMatchObject({topic_label:'(uncategorized)',confidence:0})
+   const history=await readAttendedSessionHistory(current.authority,current.session.id)
+   current.authority.accumulator.note({sources:boundScopeSources(history)})
+   releaseTransport()
+   await new Promise(resolve=>setImmediate(resolve))
+   await assertSourceModelInputAuthority({...executionToolContext(current.execution,{appId:'fictional-private-reply'}),scopeAccumulator:current.authority.accumulator})
+   expect(await current.authorize({...current.input,scopeEvidence:current.authority.accumulator.evidence})).toMatchObject({allowed:true})
+  }finally{releaseTransport()}
  })
  it('holds a contracted source while keeping an independently authorized current browser usable',async()=>{
   const f=await setup(),memory=await sourceMemory(f,'Fictional contracting browser source'),current=await context(f,f.firstId,memory.id)
