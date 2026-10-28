@@ -37,6 +37,7 @@ export type OfficeArtifact = {
 export function isOfficeStartFailed(artifact: OfficeArtifact): boolean {
   return artifact.lifecycleState === "active"
     && artifact.mode !== "template"
+    && artifact.mode !== "session"
     && Number(artifact.version) === 0
     && !artifact.job;
 }
