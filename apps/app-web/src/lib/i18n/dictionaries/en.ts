@@ -3987,14 +3987,14 @@ export const en = {
     offlineSyncPausedTitle: "Sync needs attention",
     offlineSyncPausedBody: "{count} Feed drafts are saved on this device but sync is paused. Open the draft to retry sync or save as a new post.",
     offlineSyncPendingTitle: "Changes waiting to sync",
-    offlineSyncPendingBody: "{count} changes are saved on this device. Sync will retry automatically.",
+    offlineSyncPendingBody: "{count} changes are saved on this device and waiting to sync.",
     offlinePageStorageFailed: "Could not save this page on your device. Check available storage and try again.",
     offlinePageParentMissing: "Open the parent page online once before creating a subpage offline.",
     offlinePageSessionMissing: "Your account information is not available on this device. Reconnect and try again.",
     offlineBannerTitle: "You're offline",
     offlineBannerBody: "Pages and Feed drafts saved on this device can be edited offline. AI, uploads, and publishing need a connection.",
     offlineBannerPending:
-      "Showing saved content. {count} changes will sync after you reconnect.",
+      "Showing saved content. {count} changes are saved on this device and waiting to sync.",
     dataBlockFailed: "Failed to load this data block.",
     // Data-table header: an always-visible entity title + view-config chrome
     // (search / filter / sort / group) that stays hidden until hover/focus.

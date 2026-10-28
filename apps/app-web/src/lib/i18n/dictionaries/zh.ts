@@ -3846,14 +3846,14 @@ export const zh: Dictionary = {
     offlineSyncPausedTitle: "同步需要處理",
     offlineSyncPausedBody: "{count} 篇 Feed 草稿已儲存在此裝置，但同步已暫停。請開啟草稿重試同步或另存為新貼文。",
     offlineSyncPendingTitle: "變更等待同步",
-    offlineSyncPendingBody: "{count} 項變更已儲存在此裝置。系統會自動重試同步。",
+    offlineSyncPendingBody: "{count} 項變更已儲存在此裝置，等待同步。",
     offlinePageStorageFailed: "無法將此頁面儲存到裝置。請檢查可用儲存空間後再試。",
     offlinePageParentMissing: "離線建立子頁面前，請先連線開啟父頁面一次。",
     offlinePageSessionMissing: "此裝置上的帳戶資料無法使用。請重新連線後再試。",
     offlineBannerTitle: "目前離線",
     offlineBannerBody: "此裝置已儲存的頁面及 Feed 草稿可離線編輯。AI、上傳及發佈需要連線。",
     offlineBannerPending:
-      "正在顯示已儲存的內容。重新連線後會同步 {count} 項變更。",
+      "正在顯示已儲存的內容。{count} 項變更已儲存在此裝置，等待同步。",
     dataBlockFailed: "無法載入此資料區塊。",
     dataTable: {
       entityLabels: {

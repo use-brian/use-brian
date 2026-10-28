@@ -3831,13 +3831,13 @@ export const zhCN: Dictionary = {
     offlineSyncPausedTitle: "同步需要处理",
     offlineSyncPausedBody: "{count} 篇 Feed 草稿已保存在此设备，但同步已暂停。请打开草稿重试同步或另存为新帖子。",
     offlineSyncPendingTitle: "变更等待同步",
-    offlineSyncPendingBody: "{count} 项变更已保存在此设备。系统会自动重试同步。",
+    offlineSyncPendingBody: "{count} 项变更已保存在此设备，等待同步。",
     offlinePageStorageFailed: "无法将此页面保存到设备。请检查可用存储空间后重试。",
     offlinePageParentMissing: "离线创建子页面前，请先联网打开父页面一次。",
     offlinePageSessionMissing: "此设备上的账户信息不可用。请重新连接后重试。",
     offlineBannerTitle: "目前离线",
     offlineBannerBody: "此设备已保存的页面及 Feed 草稿可离线编辑。AI、上传及发布需要连接。",
-    offlineBannerPending: "正在显示已保存的内容。重新连接后会同步 {count} 项变更。",
+    offlineBannerPending: "正在显示已保存的内容。{count} 项变更已保存在此设备，等待同步。",
     dataBlockFailed: "无法加载此数据区块。",
     dataTable: {
       entityLabels: {

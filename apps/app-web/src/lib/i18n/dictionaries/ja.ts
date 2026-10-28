@@ -3858,14 +3858,14 @@ export const ja: Dictionary = {
     offlineSyncPausedTitle: "同期の確認が必要です",
     offlineSyncPausedBody: "{count} 件の Feed 下書きはこの端末に保存されていますが、同期は一時停止中です。下書きを開き、同期を再試行するか、新しい投稿として保存してください。",
     offlineSyncPendingTitle: "同期待ちの変更",
-    offlineSyncPendingBody: "{count} 件の変更がこの端末に保存されています。同期は自動的に再試行されます。",
+    offlineSyncPendingBody: "{count} 件の変更がこの端末に保存され、同期待ちです。",
     offlinePageStorageFailed: "この端末にページを保存できませんでした。空き容量を確認して再試行してください。",
     offlinePageParentMissing: "オフラインでサブページを作成する前に、オンラインで親ページを一度開いてください。",
     offlinePageSessionMissing: "この端末でアカウント情報を取得できません。再接続して再試行してください。",
     offlineBannerTitle: "オフラインです",
     offlineBannerBody: "この端末に保存したページとFeedの下書きはオフラインで編集できます。AI、アップロード、公開には接続が必要です。",
     offlineBannerPending:
-      "保存済みの内容を表示しています。再接続後に {count} 件の変更を同期します。",
+      "保存済みの内容を表示しています。{count} 件の変更がこの端末に保存され、同期待ちです。",
     dataBlockFailed: "このデータブロックの読み込みに失敗しました。",
     dataTable: {
       entityLabels: {
