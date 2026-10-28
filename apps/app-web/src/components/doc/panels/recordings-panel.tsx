@@ -49,6 +49,7 @@ import {
   type StatusFilter,
 } from "@/lib/recordings/recordings-board";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Button } from "@/components/ui/button";
 import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /** Re-poll while anything is still transcribing. */
@@ -197,7 +198,7 @@ export function RecordingsPanel() {
           onChange={(e) => setQuery(e.target.value)}
           placeholder={t.recordings.panelSearchPlaceholder}
           aria-label={t.recordings.panelSearchPlaceholder}
-          className="h-8 w-48 rounded-md border border-border bg-transparent px-2 text-[16px] md:text-sm"
+          className="h-11 w-48 rounded-md border border-border bg-transparent px-2 text-[16px] md:h-8 md:text-sm"
         />
         {/* Themed SearchableSelect, never the browser-native element. */}
         <SearchableSelect
@@ -205,14 +206,23 @@ export function RecordingsPanel() {
           onValueChange={(v) => setStatus((v || "all") as StatusFilter)}
           items={STATUS_FILTERS.map((s) => ({ value: s, label: statusLabel[s] }))}
           aria-label={t.recordings.panelFilterLabel}
-          className="w-40"
-          popupClassName="w-40"
+          searchPlaceholder={t.recordings.panelFilterSearch}
+          emptyMessage={t.recordings.panelFilterNoResults}
+          className="h-11 w-40 text-[16px] md:h-9 md:text-sm"
+          popupClassName="w-40 [&_input]:h-11 [&_input]:text-[16px] [&_[role=option]]:min-h-11 md:[&_input]:h-5 md:[&_input]:text-sm md:[&_[role=option]]:min-h-0"
         />
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
         {error ? (
-          <p className="text-sm text-muted-foreground">{t.recordings.panelError}</p>
+          <div role="alert" className="flex flex-col items-start gap-3">
+            <p className="text-sm text-muted-foreground">{t.recordings.panelError}</p>
+            <Button variant="outline" size="sm" className="h-11 md:h-8"
+              disabled={board.revalidating} aria-busy={board.revalidating}
+              onClick={() => { void board.refresh(); }}>
+              {t.recordings.panelRetry}
+            </Button>
+          </div>
         ) : loading ? (
           // Cold cache only (N4): the row recipe's geometry, never a sentence.
           <div className="flex flex-col gap-1" aria-busy>
