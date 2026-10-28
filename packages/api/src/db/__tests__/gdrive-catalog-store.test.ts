@@ -7,6 +7,8 @@ import {
   completeGDriveCatalogSync,
   configureGDriveCatalog,
   getGDriveCatalogReadPolicy,
+  listGDriveCatalogArtifactsOutsideGeneration,
+  listStaleGDriveCatalogArtifacts,
 } from '../gdrive-catalog-store.js'
 
 const mockQuery = vi.mocked(query)
@@ -59,4 +61,43 @@ describe('[COMP:integrations/gdrive-enrichment] Drive catalog store', () => {
     expect(mockQuery.mock.calls[0]?.[0]).toContain('removed AS')
     expect(mockQuery.mock.calls[0]?.[0]).toContain("status = 'done'")
   })
+
+  const selectors = [
+    ['scope replacement', listGDriveCatalogArtifactsOutsideGeneration],
+    ['recurring completion', listStaleGDriveCatalogArtifacts],
+  ] as const
+
+  it.each(selectors)('%s selects the exact scope and generation, retaining row order and duplicates', async (_name, select) => {
+    mockQuery.mockResolvedValueOnce({ rows: [
+      { artifact_file_id: 'artifact-2' },
+      { artifact_file_id: 'artifact-1' },
+      { artifact_file_id: 'artifact-2' },
+    ] } as never)
+    const input = { workspaceId: 'workspace-fixture', connectorInstanceId: 'connector-fixture', generation: 'generation-7' }
+
+    await expect(select(input)).resolves.toEqual(['artifact-2', 'artifact-1', 'artifact-2'])
+
+    expect(mockQuery).toHaveBeenCalledTimes(1)
+    expect(mockQuery).toHaveBeenCalledWith(
+      `SELECT artifact_file_id
+       FROM gdrive_file_catalog
+      WHERE workspace_id = $1 AND connector_instance_id = $2
+        AND last_seen_generation <> $3 AND artifact_file_id IS NOT NULL`,
+      ['workspace-fixture', 'connector-fixture', 'generation-7'],
+    )
+  })
+
+  it.each(selectors)('%s returns an empty artifact list without inventing membership', async (_name, select) => {
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+    await expect(select({ workspaceId: 'workspace-fixture', connectorInstanceId: 'connector-fixture', generation: 'generation-7' })).resolves.toEqual([])
+    expect(mockQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(selectors)('%s preserves a rejected query error', async (_name, select) => {
+    const error = new Error('fictional catalog query failure')
+    mockQuery.mockRejectedValueOnce(error)
+    await expect(select({ workspaceId: 'workspace-fixture', connectorInstanceId: 'connector-fixture', generation: 'generation-7' })).rejects.toBe(error)
+    expect(mockQuery).toHaveBeenCalledTimes(1)
+  })
+
 })
