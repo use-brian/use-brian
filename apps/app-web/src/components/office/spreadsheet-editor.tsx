@@ -208,7 +208,7 @@ export function SpreadsheetEditor({ snapshot, baseVersion, role, suggestMode, on
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-background" data-office-editor="spreadsheet">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-background" data-office-editor="spreadsheet">
       <div className="flex items-center gap-2 border-b bg-background px-2 py-1.5" role="toolbar" aria-label={t.spreadsheetToolbar}>
         <div className="flex h-8 w-24 shrink-0 items-center rounded border bg-muted/30 px-2 font-mono text-xs" aria-label={t.cellReference}>{spreadsheetSelectionLabel(selection)}</div>
         <span className="text-sm font-semibold text-muted-foreground" aria-hidden>=</span>
