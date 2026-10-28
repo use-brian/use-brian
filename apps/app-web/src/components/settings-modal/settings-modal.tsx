@@ -20,11 +20,11 @@
  */
 
 import {WorkspaceModeSummary} from "@/components/context/mode-aware-context";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Dialog } from "@base-ui/react/dialog";
 import { useRouter } from "next/navigation";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { organizationSettingsHref } from "@/lib/organization-navigation";
-import { createPortal } from "react-dom";
 import {
   Select,
   SelectContent,
@@ -109,6 +109,9 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
   const workspaceSections = workspaceSettingsSections(deploymentCapabilities());
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const navigated = useRef(false);
   const [memberTarget,setMemberTarget]=useState(initialMemberTarget);
   const activeSection = section === "ws-usage" && deploymentCapabilities().billing ? "ws-plan"
     : section === "ws-llm-key" ? "ws-models" : section;
@@ -156,6 +159,9 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
   const organizationDestination = section === "ws-projects"
     ? `/w/${workspaceId}/projects`
     : organizationSettingsHref(workspaceId, section, memberTarget);
+  // A compatibility shortcut can remove the popup during this render. Its
+  // closing focus lifecycle must not pull focus away from the destination.
+  if (open && organizationDestination) navigated.current = true;
   useEffect(() => {
     if (!open || !organizationDestination) return;
     router.push(organizationDestination);
@@ -168,46 +174,43 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
     setPickerOpen(false);
   };
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented && !pickerOpen) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prev;
-    };
-  }, [open, onClose, pickerOpen]);
-
   // SSR-safe portal mount guard — document.body only exists client-side.
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  if (!open || !mounted || organizationDestination) return null;
+  if (!mounted || organizationDestination) return null;
 
-  // Portal to <body> so the fixed overlay escapes the sidebar's transformed
-  // ancestor (the chrome wrapper carries `md:translate-x-0`, which would
-  // otherwise make `position: fixed` resolve to the 256px sidebar column
-  // instead of the viewport — clipping the modal). Mirrors the AlertDialog.Portal
-  // already used by DeleteWorkspaceDialog.
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 bg-background/40 backdrop-blur-sm overflow-y-auto"
-      onClick={onClose}
-    >
+  // Body portal escapes the sidebar's translated phone drawer. Base UI owns
+  // modality, scroll locking, focus containment and nested Escape handling.
+  return (
+    <Dialog.Root open={open} onOpenChange={(next) => { if (!next && !pickerOpen) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Backdrop forceRender className="fixed inset-0 z-50 bg-background/40 backdrop-blur-sm" />
+        <div className="pointer-events-none fixed inset-0 z-50 overflow-y-auto">
       <div className="min-h-full flex items-center justify-center p-0 sm:p-6">
-        <div
-          role="dialog"
+        <Dialog.Popup
+          aria-modal="true"
           aria-label={t.chrome.settingsModal.title}
+          initialFocus={() => {
+            opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            navigated.current = false;
+            // Always visible at either layout; never summon a phone keyboard.
+            return closeRef.current;
+          }}
+          finalFocus={() => {
+            if (navigated.current) return false;
+            const visible = (element: HTMLElement | null) => element?.isConnected && element !== document.body && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
+            return [
+              opener.current,
+              document.querySelector<HTMLElement>("[data-doc-mobile-menu]"),
+              document.querySelector<HTMLElement>("[data-workspace-switcher-trigger]"),
+            ].find(visible) ?? false;
+          }}
           className={cn(
-            "relative w-full max-w-4xl bg-popover border border-border rounded-none sm:rounded-xl shadow-2xl",
+            "pointer-events-auto relative w-full max-w-4xl bg-popover border border-border rounded-none sm:rounded-xl shadow-2xl",
             "flex flex-col sm:flex-row overflow-hidden",
             "h-[100dvh] sm:h-[85vh]",
           )}
-          onClick={(e) => e.stopPropagation()}
         >
           {/* Desktop rail and mobile picker share the same destinations. */}
           <nav
@@ -260,14 +263,13 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
           </div>
 
           <div key={activeSection} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
-            <SectionBody section={section} onClose={onClose} />
+            <SectionBody section={section} onClose={() => { navigated.current = true; onClose(); }} />
             {oss && <div className="sm:hidden"><OssVersionFooter /></div>}
           </div>
 
           {/* Close button */}
-          <button
-            type="button"
-            onClick={onClose}
+          <Dialog.Close
+            ref={closeRef}
             aria-label={t.chrome.settingsModal.close}
             className="absolute top-3 right-3 h-11 w-11 sm:h-7 sm:w-7 rounded hover:bg-muted inline-flex items-center justify-center text-muted-foreground"
           >
@@ -282,11 +284,12 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
             >
               <path d="M18 6 6 18M6 6l12 12" />
             </svg>
-          </button>
-        </div>
+          </Dialog.Close>
+        </Dialog.Popup>
       </div>
-    </div>,
-    document.body,
+        </div>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
