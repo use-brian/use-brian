@@ -176,6 +176,7 @@ function topLevelContexts(result: unknown): BrowsingContextInfo[] {
 export class FirefoxBidiExecutor {
   private socket: BidiSocket | null = null;
   private nextId = 0;
+  private generation = 0;
   private pending = new Map<
     number,
     { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
@@ -193,7 +194,7 @@ export class FirefoxBidiExecutor {
     const socket = this.createSocket(this.url);
     this.socket = socket;
     socket.addEventListener("message", (event) => this.onMessage(event.data));
-    socket.addEventListener("close", () => this.onClosed());
+    socket.addEventListener("close", () => { if (this.socket === socket) this.onClosed(); });
     await new Promise<void>((resolve, reject) => {
       socket.addEventListener("open", resolve, { once: true });
       socket.addEventListener("error", () => reject(new FirefoxBidiError("Could not connect to Firefox.", "detached")), {
@@ -252,7 +253,9 @@ export class FirefoxBidiExecutor {
   }
 
   async bindFocusedContext(expected?: { url?: string; title?: string }): Promise<{ bound: true }> {
+    const generation = this.generation;
     const contexts = await this.getTree();
+    this.check(generation);
     const candidates = contexts.filter((context) => !expected?.url || context.url === expected.url);
     const focusedMatches: Array<{ context: BrowsingContextInfo; title: string }> = [];
     for (const context of candidates) {
@@ -263,6 +266,7 @@ export class FirefoxBidiExecutor {
         resultOwnership: "none",
         serializationOptions: { maxObjectDepth: 1 },
       })) as { type?: string; result?: unknown };
+      this.check(generation);
       if (evaluated.type !== "success") continue;
       const state = decodeRemoteValue(evaluated.result) as { focused?: unknown; title?: unknown };
       const title = typeof state?.title === "string" ? state.title : "";
@@ -279,6 +283,12 @@ export class FirefoxBidiExecutor {
       "The approved Firefox tab could not be matched. Focus the tab you want Use Brian to control and allow it again.",
       "no_eligible_tab",
     );
+  }
+
+  private check(generation: number): void {
+    if (generation !== this.generation) {
+      throw new FirefoxBidiError("The task ended before this browser operation completed.", "stopped");
+    }
   }
 
   private mustContext(): string {
@@ -312,28 +322,33 @@ export class FirefoxBidiExecutor {
   }
 
   async execute(op: string, args: Record<string, unknown>): Promise<unknown> {
-    switch (op) {
-      case "navigate":
-        return this.navigate(String(args.url ?? ""));
-      case "snapshot":
-        return this.snapshot(args.mode === "full" ? "full" : "interactive");
-      case "click":
-        await this.click(String(args.ref ?? ""));
-        return { clicked: true };
-      case "fillForm":
-        throw new FirefoxBidiError("Batch form filling is not implemented in Firefox.", "unsupported_browser");
-      case "type":
-        await this.type(String(args.ref ?? ""), String(args.text ?? ""));
-        return { typed: true };
-      case "currentUrl":
-        return this.currentUrl();
-      case "captureFrame":
-        return this.captureFrame();
-      case "takeoverInput":
-        await this.takeoverInput(args.event as Record<string, unknown>);
-        return { forwarded: true };
-      default:
-        throw new FirefoxBidiError(`Unknown browser operation ${op}.`, "backend_error");
+    const generation = this.generation;
+    try {
+      switch (op) {
+        case "navigate":
+          return await this.navigate(String(args.url ?? ""));
+        case "snapshot":
+          return await this.snapshot(args.mode === "full" ? "full" : "interactive");
+        case "click":
+          await this.click(String(args.ref ?? ""));
+          return { clicked: true };
+        case "fillForm":
+          throw new FirefoxBidiError("Batch form filling is not implemented in Firefox.", "unsupported_browser");
+        case "type":
+          await this.type(String(args.ref ?? ""), String(args.text ?? ""));
+          return { typed: true };
+        case "currentUrl":
+          return await this.currentUrl();
+        case "captureFrame":
+          return await this.captureFrame();
+        case "takeoverInput":
+          await this.takeoverInput(args.event as Record<string, unknown>);
+          return { forwarded: true };
+        default:
+          throw new FirefoxBidiError(`Unknown browser operation ${op}.`, "backend_error");
+      }
+    } finally {
+      this.check(generation);
     }
   }
 
@@ -400,9 +415,11 @@ export class FirefoxBidiExecutor {
   }
 
   private async click(ref: string, cursorKind: "pointer" | "typing" = "pointer"): Promise<void> {
+    const generation = this.generation;
     const element = this.sharedNode(ref);
     try {
       await this.armActionCursor(cursorKind);
+      this.check(generation);
       await this.command("input.performActions", {
         context: this.mustContext(),
         actions: [
@@ -427,7 +444,9 @@ export class FirefoxBidiExecutor {
   }
 
   private async type(ref: string, text: string): Promise<void> {
+    const generation = this.generation;
     await this.click(ref, "typing");
+    this.check(generation);
     await this.command("input.performActions", {
       context: this.mustContext(),
       actions: [
@@ -471,6 +490,7 @@ export class FirefoxBidiExecutor {
   }
 
   private async takeoverInput(event: Record<string, unknown>): Promise<void> {
+    const generation = this.generation;
     const context = this.mustContext();
     if (event.kind === "click" || event.kind === "pointer") {
       const x = Number(event.x);
@@ -479,6 +499,7 @@ export class FirefoxBidiExecutor {
         throw new FirefoxBidiError("Invalid Take-Over click coordinates.", "backend_error");
       }
       const viewportResult = await this.callFunction("() => ({ width: window.innerWidth, height: window.innerHeight })");
+      this.check(generation);
       const viewport = decodeRemoteValue(viewportResult.result) as { width?: unknown; height?: unknown };
       const frameW = Number(event.frameW);
       const frameH = Number(event.frameH);
@@ -556,19 +577,22 @@ export class FirefoxBidiExecutor {
   }
 
   async stop(): Promise<void> {
-    if (!this.socket) return;
+    this.generation++;
+    const socket = this.socket;
+    const context = this.contextId;
+    this.contextId = null;
+    this.refs.clear();
+    if (!socket) return;
     try {
-      if (this.contextId) {
-        await this.command("input.releaseActions", { context: this.contextId });
+      if (context) {
+        await this.command("input.releaseActions", { context });
       }
       await this.command("session.end", {});
     } catch {
       // Firefox may already have exited.
     }
-    this.contextId = null;
-    this.refs.clear();
-    this.socket?.close();
-    this.socket = null;
+    if (this.socket === socket) this.onClosed();
+    socket.close();
   }
 }
 

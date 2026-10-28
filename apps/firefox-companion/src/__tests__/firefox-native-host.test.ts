@@ -51,6 +51,7 @@ async function hostFixture() {
   const bind = deferred<{ bound: true }>();
   let holdConnect = false;
   let holdBind = false;
+  let expectedInputError = false;
   const executors: Array<{
     connect: ReturnType<typeof vi.fn>;
     bindFocusedContext: ReturnType<typeof vi.fn>;
@@ -69,12 +70,22 @@ async function hostFixture() {
   });
   const running = runFirefoxNativeHost({ input, output, error: new PassThrough(), platform: "linux",
     env: { USE_BRIAN_FIREFOX_PROFILE_ROOT: directory }, home: directory, createExecutor });
+  // Attach the rejection observer immediately, including transport error schedules.
+  const outcome = running.then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
   return {
-    replies, executors, createExecutor, connect, bind,
+    replies, executors, createExecutor, connect, bind, outcome,
+    async disconnect(kind: "end" | "error", error: Error) {
+      expectedInputError = kind === "error";
+      await new Promise<void>((resolve) => {
+        input.once(kind, () => resolve());
+        if (kind === "end") input.end();
+        else input.destroy(error);
+      });
+    },
     holdConnect: () => { holdConnect = true; }, holdBind: () => { holdBind = true; },
     send: (id: string, type: string, extra: Record<string, unknown> = {}) => input.write(encodeNativeMessage({ id, type, ...extra })),
     reply: (id: string) => replies.find((value) => value.id === id),
-    async close() { connect.resolve(); bind.resolve({ bound: true }); input.end(); await running; await rm(directory, { recursive: true, force: true }); },
+    async close() { connect.resolve(); bind.resolve({ bound: true }); input.end(); const result = await outcome; await rm(directory, { recursive: true, force: true }); if (!result.ok && !expectedInputError) throw result.error; },
   };
 }
 
@@ -133,6 +144,47 @@ describe("[COMP:ext/firefox-companion] actual framed host Stop fence", () => {
       expect(host.reply("fresh-bind")).toMatchObject({ ok: true });
       expect(host.executors.flatMap(executor => executor.execute.mock.calls)).toEqual([["navigate", { url: "https://destination.example/fresh" }]]);
       expect(host.executors[0]!.stop).toHaveBeenCalledOnce();
+    } finally { await host.close(); }
+  });
+});
+
+describe("[COMP:ext/firefox-companion] actual framed host transport lifetime", () => {
+  it.each([
+    { kind: "end", boundary: "connect" },
+    { kind: "end", boundary: "bind" },
+    { kind: "error", boundary: "connect" },
+    { kind: "error", boundary: "bind" },
+  ] as const)("invalidates queued effects on $kind during $boundary and cleans only the owned candidate", async ({ kind, boundary }) => {
+    const host = await hostFixture();
+    const transportError = new Error("Synthetic native input failure");
+    if (boundary === "connect") host.holdConnect();
+    else host.holdBind();
+    try {
+      host.send("retiring-bind", "bind", { args: { url: "https://destination.example/" } });
+      await vi.waitFor(() => expect(boundary === "connect" ? host.executors[0]?.connect : host.executors[0]?.bindFocusedContext)
+        .toHaveBeenCalledOnce());
+      host.send("queued-effect", "execute", { op: "navigate", args: { url: "https://destination.example/retired" } });
+      await host.disconnect(kind, transportError);
+      // The native transport has delivered its real end/error event before either old await resumes.
+      host.connect.resolve();
+      host.bind.resolve({ bound: true });
+      // Observe either correct retirement or the original forbidden dispatch, without requiring
+      // a reply on a dead native transport as part of the corrected host contract.
+      await vi.waitFor(() => expect(host.executors[0]!.stop.mock.calls.length
+        + host.executors[0]!.execute.mock.calls.length).toBeGreaterThan(0));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const result = await host.outcome;
+      expect({
+        effects: host.executors.flatMap((executor) => executor.execute.mock.calls),
+        binds: host.executors.flatMap((executor) => executor.bindFocusedContext.mock.calls).length,
+        ownedCleanup: host.executors[0]!.stop.mock.calls.length > 0,
+        executorCount: host.createExecutor.mock.calls.length,
+        successfulRetiredReplies: host.replies.filter((reply) => reply.ok
+          && ["retiring-bind", "queued-effect"].includes(reply.id)),
+      }).toEqual({ effects: [], binds: boundary === "connect" ? 0 : 1, ownedCleanup: true,
+        executorCount: 1, successfulRetiredReplies: [] });
+      expect(result.ok).toBe(kind === "end");
+      if (!result.ok) expect(result.error).toBe(transportError);
     } finally { await host.close(); }
   });
 });

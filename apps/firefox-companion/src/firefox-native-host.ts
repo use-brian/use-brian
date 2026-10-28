@@ -70,9 +70,23 @@ export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise
   const decoder = new NativeMessageDecoder();
   let executor: FirefoxBidiExecutor | null = null;
   let generation = 0;
+  let transportClosed = false;
   const stopped = () => new FirefoxBidiError("The task ended before this browser operation completed.", "stopped");
-  const check = (expected: number) => { if (expected !== generation) throw stopped(); };
+  const check = (expected: number) => { if (transportClosed || expected !== generation) throw stopped(); };
   const profilesRoots = firefoxProfilesRoots(deps.platform, deps.env, deps.home);
+
+  const retireExecutor = async (): Promise<void> => {
+    generation++;
+    const active = executor;
+    executor = null;
+    await active?.stop();
+  };
+  let transportRetirement: Promise<void> | null = null;
+  const retireTransport = (): Promise<void> => {
+    if (transportRetirement) return transportRetirement;
+    transportClosed = true;
+    return transportRetirement = retireExecutor();
+  };
 
   const ensureExecutor = async (expected: number): Promise<FirefoxBidiExecutor> => {
     check(expected);
@@ -117,10 +131,7 @@ export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise
     }
     try {
       if (req.type === "stop") {
-        generation++;
-        const active = executor;
-        executor = null;
-        await active?.stop();
+        await retireExecutor();
         reply({ id: req.id, ok: true, data: { stopped: true } });
         return;
       }
@@ -186,7 +197,11 @@ export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise
 
   await new Promise<void>((resolve, reject) => {
     let queue = Promise.resolve();
+    const fail = (error: unknown): void => {
+      void retireTransport().then(() => reject(error), () => reject(error));
+    };
     deps.input.on("data", (chunk: Buffer | string) => {
+      if (transportClosed) return;
       try {
         for (const message of decoder.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))) {
           if ((message as { type?: unknown } | null)?.type === "stop") void handle(message);
@@ -195,14 +210,16 @@ export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise
             queue = queue.then(() => handle(message, expected));
           }
         }
-        queue.catch(reject);
+        void queue.catch(fail);
       } catch (error) {
-        reject(error);
+        fail(error);
       }
     });
-    deps.input.on("end", () => queue.finally(resolve));
-    deps.input.on("error", reject);
+    deps.input.on("end", () => {
+      void retireTransport().then(() => queue).then(resolve, reject);
+    });
+    deps.input.on("error", fail);
   }).finally(async () => {
-    await executor?.stop();
+    await retireTransport();
   });
 }
