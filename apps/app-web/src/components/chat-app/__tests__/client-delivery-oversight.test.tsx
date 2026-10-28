@@ -34,14 +34,66 @@ async function change(label:string,value:string){
  const prototype=node instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
  await act(async()=>{Object.getOwnPropertyDescriptor(prototype,'value')!.set!.call(node,value);node.dispatchEvent(new Event('input',{bubbles:true}))});
 }
-async function view(onDraft=vi.fn(),scope:{kind:'personal'}|{kind:'project';id:string}={kind:'personal'},dict:Dictionary=en){
- await act(async()=>root.render(<StrictMode><I18nProvider locale="en" dict={dict}><ClientDeliveryOversight workspaceId="workspace" scope={scope} onDraft={onDraft} hideWhenEmpty={false}/></I18nProvider></StrictMode>));
+async function view(onDraft=vi.fn(),scope:{kind:'personal'}|{kind:'project';id:string}={kind:'personal'},dict:Dictionary=en,inline=false){
+ await act(async()=>root.render(<StrictMode><I18nProvider locale="en" dict={dict}><ClientDeliveryOversight workspaceId="workspace" scope={scope} onDraft={onDraft} hideWhenEmpty={inline} hideWhileLoading={inline}/></I18nProvider></StrictMode>));
 }
 beforeEach(()=>{vi.useFakeTimers();resetSurfaceCache();vi.clearAllMocks();f.viewer='viewer';host=document.createElement('div');document.body.append(host);root=createRoot(host);
  f.list.mockResolvedValue(protect({commitments:[commitment],nextCursor:null}));f.detail.mockResolvedValue(protect(detail));f.command.mockResolvedValue({record:{id,version:2},duplicate:false});f.confirm.mockResolvedValue(true)});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();resetSurfaceCache();vi.useRealTimers()});
 async function open(){await click(`Inspect evidence: ${commitment.outcome}`);expect(host.querySelector('[data-testid="delivery-detail"]')).toBeTruthy()}
 describe('[COMP:app-web/client-delivery-oversight] quiet scoped Chat pickup',()=>{
+ it('keeps the optional transcript insert absent while its first read is pending',async()=>{
+  let settle!:(value:unknown)=>void;f.list.mockImplementation(()=>new Promise(resolve=>{settle=resolve}));
+  await view(vi.fn(),{kind:'personal'},en,true);expect(host.childElementCount).toBe(0);
+  await act(async()=>settle(protect({commitments:[],nextCursor:null})));expect(host.childElementCount).toBe(0);
+ })
+ it('renews an idle empty transcript insert before expiry without inserting loading bars',async()=>{
+  f.list.mockImplementation(async()=>protect({commitments:[],nextCursor:null}));
+  await view(vi.fn(),{kind:'personal'},en,true);
+  const added:Node[]=[];const observer=new MutationObserver(records=>records.forEach(record=>added.push(...record.addedNodes)));
+  observer.observe(host,{childList:true,subtree:true});
+  try {
+   for(let renewal=1;renewal<=3;renewal++){
+    await act(async()=>{await vi.advanceTimersByTimeAsync(25_000)});
+    expect(f.list).toHaveBeenCalledTimes(renewal+1);expect(host.childElementCount).toBe(0);
+   }
+   expect(added).toEqual([]);
+  } finally {observer.disconnect()}
+ })
+ it('revalidates a live list on foreground return without replacing it with a skeleton',async()=>{
+  await view();let settle!:(value:unknown)=>void;f.list.mockImplementation(()=>new Promise(resolve=>{settle=resolve}));
+  await act(async()=>window.dispatchEvent(new Event('focus')));
+  expect(f.list).toHaveBeenCalledTimes(2);expect(text()).toContain(commitment.outcome);
+  expect(host.querySelector(`[aria-label="${en.clientDelivery.loading}"]`)).toBeNull();
+  await act(async()=>settle(protect({commitments:[commitment],nextCursor:null})));
+  expect(text()).toContain(commitment.outcome);
+ })
+ it('withholds expired facts during a slow renewal without flashing an optional loading panel',async()=>{
+  await view(vi.fn(),{kind:'personal'},en,true);let settle!:(value:unknown)=>void;
+  f.list.mockImplementation(()=>new Promise(resolve=>{settle=resolve}));
+  await act(async()=>{await vi.advanceTimersByTimeAsync(25_000)});
+  expect(f.list).toHaveBeenCalledTimes(2);expect(text()).toContain(commitment.outcome);
+  await act(async()=>{await vi.advanceTimersByTimeAsync(5_001)});
+  expect(host.childElementCount).toBe(0);expect(f.list).toHaveBeenCalledTimes(2);
+  await act(async()=>settle(protect({commitments:[],nextCursor:null})));expect(host.childElementCount).toBe(0);
+ })
+ it('retains opt-in loading and authoritative empty states',async()=>{
+  let settle!:(value:unknown)=>void;f.list.mockImplementation(()=>new Promise(resolve=>{settle=resolve}));
+  await view();expect(host.querySelector(`[aria-label="${en.clientDelivery.loading}"]`)).toBeTruthy();
+  await act(async()=>settle(protect({commitments:[],nextCursor:null})));expect(text()).toContain(en.clientDelivery.empty);
+ })
+ it('preserves the work entry defaults: loading is visible and an empty result is hidden',async()=>{
+  let settle!:(value:unknown)=>void;f.list.mockImplementation(()=>new Promise(resolve=>{settle=resolve}));
+  await act(async()=>root.render(<I18nProvider locale="en" dict={en}><ClientDeliveryOversight workspaceId="workspace" scope={{kind:'personal'}} onDraft={vi.fn()}/></I18nProvider>));
+  expect(host.querySelector(`[aria-label="${en.clientDelivery.loading}"]`)).toBeTruthy();
+  await act(async()=>settle(protect({commitments:[],nextCursor:null})));expect(host.childElementCount).toBe(0);
+ })
+ it('keeps errors and retry visible for the optional transcript insert',async()=>{
+  f.list.mockRejectedValueOnce(new Error('offline'));await view(vi.fn(),{kind:'personal'},en,true);
+  expect(host.querySelector('[role="alert"]')).toBeTruthy();expect(text()).not.toContain(en.clientDelivery.empty);
+  f.list.mockImplementation(async()=>protect({commitments:[],nextCursor:null}));await click(en.clientDelivery.retry);
+  expect(host.childElementCount).toBe(0);
+ })
  it('CO03/CO11 elapsed date and unobserved work stay quiet; update is draft-only without a recipient',async()=>{
   const onDraft=vi.fn();await view(onDraft);await open();
   expect(text()).toContain(en.clientDelivery.coverage.unobserved);expect(text()).toContain(en.clientDelivery.outcomes.unknown);
