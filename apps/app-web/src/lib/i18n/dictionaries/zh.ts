@@ -8850,7 +8850,24 @@ export const zh: Dictionary = {
     "noProjects": "沒有可用的專案"
 },
   chatApp: {
+    unarchiveChat: "取消封存對話",
+    archiveManage: "管理",
+    archiveSettingsDescription: "查看及取消封存此工作區的對話。",
+    archiveManagerDescription: "已封存的對話會隱藏在對話列表之外，直到您取消封存。",
+    archiveClose: "關閉已封存的對話",
+    archiveLastActive: "最近活動",
+
+    archiveChat: "封存對話",
+    archivedChats: "已封存的對話",
+    archiveEmpty: "沒有已封存的對話。",
+    archiveFailed: "無法封存此對話。",
+    restoreFailed: "無法取消封存此對話。",
+    archiveLoadFailed: "無法載入已封存的對話。",
+    archiveRetry: "重試",
+
     deleteRecordingBody: "刪除此已儲存對話記錄？獨立封存、檔案和已學習資訊會保留。此操作不會停止未來記錄，請在 Studio Channels 中管理。",
+    otherProjects: "其他專案",
+    personalProjectsFailed: "無法載入專案名稱。你仍可查看對話。",
     generalChats: "一般",
     newChatInProject: "在 {name} 中開啟新對話",
     projectChatsFailed: "無法載入專案對話。",
@@ -9035,6 +9052,8 @@ export const zh: Dictionary = {
       work: "工作",
       closeTab: "關閉 {title}",
       closePane: "關閉窗格",
+      fullView: "完整檢視",
+      exitFullView: "退出完整檢視",
       openPane: "開啟側邊窗格",
       openPaneCount: "開啟側邊窗格（{count} 個分頁）",
       back: "返回",

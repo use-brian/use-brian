@@ -26,7 +26,7 @@ let root: Root;
 let host: HTMLDivElement;
 let latest: ChatPane;
 function Harness({ sessionId }: { sessionId: string | null }) {
-  latest = useChatPane("ws", sessionId, () => true);
+  latest = useChatPane("ws", sessionId);
   return null;
 }
 function mount(sessionId: string | null) {
@@ -44,16 +44,27 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/chat-pane-session] the pane stays with each chat", () => {
+  it("starts closed until the user opens Work", () => {
+    mount("chat-a");
+    expect(latest.state.open).toBe(false);
+    expect(latest.state.fullView).toBe(false);
+    act(() => latest.setOpen(true));
+    expect(latest.state.open).toBe(true);
+    expect(latest.state.fullView).toBe(false);
+  });
+
   it("D7/D8: tabs, the active tab and the open state survive an unmount and remount", () => {
     mount("chat-a");
     act(() => latest.open(doc("brief")));
     act(() => latest.open(doc("notes")));
+    act(() => latest.setFullView(true));
     const before = latest.state;
     unmount();
     // Leaving /chat unmounts the surface; coming back restores the pane.
     mount("chat-a");
     expect(latest.state).toBe(before);
     expect(latest.state.open).toBe(true);
+    expect(latest.state.fullView).toBe(true);
     expect(latest.state.tabs).toHaveLength(3);
     expect(tabRef(activeTab(latest.state))).toEqual(doc("notes"));
   });
@@ -65,7 +76,7 @@ describe("[COMP:app-web/chat-pane-session] the pane stays with each chat", () =>
     unmount();
     mount("chat-b");
     expect(latest.state.tabs).toHaveLength(1);
-    expect(latest.state.open).toBe(true);
+    expect(latest.state.open).toBe(false);
     unmount();
     mount("chat-a");
     expect(latest.state.open).toBe(false);

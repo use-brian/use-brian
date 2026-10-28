@@ -236,7 +236,7 @@ export function createTelegramApi(options: TelegramApiOptions) {
       replyToMessageId?: number
       replyMarkup?: unknown
       messageThreadId?: number
-    }) => call<{ message_id: number }>('sendMessage', {
+    }) => call<{ message_id: number; text?: string }>('sendMessage', {
       chat_id: chatId,
       text,
       parse_mode: opts?.parseMode,

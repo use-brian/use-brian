@@ -1,4 +1,34 @@
 import type { IdentityWorkspace, IdentityPickerLabels } from '@use-brian/chat-ui'
+import { isTrustedPairingOrigin } from './pairing.js'
+
+/** Open canonical sign-in in a normal browser tab, preserving any OAuth redirect. */
+export function createAccountSignIn(deps: {
+  appOrigin: () => Promise<string | null>
+  matches: () => string[]
+  tabs: Pick<typeof chrome.tabs, 'get' | 'update' | 'create'>
+  windows: Pick<typeof chrome.windows, 'getLastFocused' | 'update' | 'create'>
+}) {
+  let tabId: number | undefined
+  let tabOrigin: string | undefined
+  return async () => {
+    const saved = await deps.appOrigin()
+    const origin = saved && isTrustedPairingOrigin(saved, deps.matches()) ? new URL(saved).origin : 'https://app.usebrian.ai'
+    const existing = tabId === undefined || tabOrigin !== origin ? null : await deps.tabs.get(tabId).catch(() => null)
+    if (existing?.id !== undefined && !existing.incognito) {
+      await deps.tabs.update(existing.id, { active: true })
+      await deps.windows.update(existing.windowId, { focused: true })
+      return
+    }
+    const window = await deps.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null)
+    if (window?.id !== undefined && !window.incognito) {
+      tabId = (await deps.tabs.create({ windowId: window.id, url: `${origin}/`, active: true })).id
+    } else {
+      const created = await deps.windows.create({ url: `${origin}/`, type: 'normal', incognito: false, focused: true })
+      tabId = created?.tabs?.[0]?.id
+    }
+    tabOrigin = origin
+  }
+}
 
 /** Account credentials stay in the app. Only a bounded redirect intent lives here. */
 export type AccountBroker = { port: chrome.runtime.Port; hello: Record<string, unknown> }

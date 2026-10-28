@@ -70,17 +70,20 @@ export type ChatPaneState = {
   nextKey: number;
   /** Whether the pane is expanded (D8). Only the user closes it. */
   open: boolean;
+  /** Explicit full view; ordinary opens always start beside Chat. */
+  fullView: boolean;
 };
 
 export const WORK_TAB_KEY = "work";
 
-/** A fresh pane: just the Work tab. `open` is the caller's seed (phones start closed). */
-export function initPane(open: boolean): ChatPaneState {
+/** A fresh pane: just the Work tab, closed until opened. */
+export function initPane(open = false): ChatPaneState {
   return {
     tabs: [{ key: WORK_TAB_KEY, history: [{ kind: "work" }], cursor: 0 }],
     activeKey: WORK_TAB_KEY,
     nextKey: 0,
     open,
+    fullView: false,
   };
 }
 
@@ -219,7 +222,13 @@ export function closePaneTab(state: ChatPaneState, key: string): ChatPaneState {
 
 /** Expand or collapse the pane. Only a user action calls this with `false` (D8). */
 export function setPaneOpen(state: ChatPaneState, open: boolean): ChatPaneState {
-  return state.open === open ? state : { ...state, open };
+  return state.open === open ? state : { ...state, open, fullView: open ? state.fullView : false };
+}
+
+/** Full view changes layout only; tabs and their bodies stay mounted. */
+export function setPaneFullView(state: ChatPaneState, fullView: boolean): ChatPaneState {
+  if (!state.open || state.fullView === fullView) return state;
+  return { ...state, fullView };
 }
 
 export function canGoBackInTab(tab: PaneTab): boolean {

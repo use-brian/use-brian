@@ -1,10 +1,89 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createTelegramAdapter, parseTopicChannelId, type TelegramAdapterConfig } from '../telegram/adapter.js'
+import { createTelegramAdapter, parseTopicChannelId, configureTelegramTextDeliveryObserver, type TelegramAdapterConfig, type TelegramTextDelivery } from '../telegram/adapter.js'
 import { createTelegramApi, isTelegramThreadNotFoundError, describeTelegramDownloadFailure, TELEGRAM_BOT_COMMANDS, TelegramApiError } from '../telegram/api.js'
 import { chunkText } from '../chunking.js'
 import { createDedupBuffer } from '../dedup.js'
 import { createTelegramWebhookHandler, verifyTelegramWebhook } from '../telegram/webhook.js'
 import { escapeHtml, markdownToTelegramHTML, stripMarkdown } from '../telegram/markdown.js'
+
+describe('[COMP:channels/telegram] provider-confirmed text delivery recording', () => {
+  async function run(options: { failAt?: number; recorderFails?: boolean; fallbackTopic?: boolean } = {}) {
+    const deliveries: TelegramTextDelivery[] = []
+    let sends = 0
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (!url.endsWith('/sendMessage')) return { ok: true, json: async () => ({ ok: true, result: true }) }
+      sends++
+      if (options.failAt === sends || options.fallbackTopic && sends === 1) return {
+        ok: true, json: async () => ({ ok: false, error_code: 400,
+          description: options.fallbackTopic ? 'Bad Request: message thread not found' : 'Bad Request' }),
+      }
+      return { ok: true, json: async () => ({ ok: true, result: { message_id: sends, text: `Published ${sends}` } }) }
+    }))
+    // Runtime lookup covers send-only adapters constructed before API boot.
+    const adapter = createTelegramAdapter({ token: '12345:fictional', botUsername: 'fictional_bot' })
+    configureTelegramTextDeliveryObserver(async receipt => {
+      deliveries.push(receipt)
+      if (options.recorderFails) throw new Error('fictional recorder failure')
+    })
+    try {
+      const send = adapter.sendMessage('-1000000001:topic:21', { text: 'a'.repeat(options.fallbackTopic ? 10 : 8000) })
+      if (options.failAt) await expect(send).rejects.toThrow('Bad Request')
+      else await expect(send).resolves.toBe('2')
+      return { deliveries, sends, errors: error.mock.calls.length }
+    } finally {
+      configureTelegramTextDeliveryObserver()
+      error.mockRestore()
+      vi.unstubAllGlobals()
+    }
+  }
+  it('reports each provider-confirmed chunk, exact visible text, id and topic', async () => {
+    const result = await run()
+    expect(result.sends).toBe(2)
+    expect(result.deliveries).toEqual([1,2].map(id => ({ channelId: '-1000000001:topic:21',
+      providerMessageId: String(id), text: `Published ${id}`, botId: '12345', botUsername: 'fictional_bot' })))
+  })
+  it('does not report a failed first send', async () => {
+    expect((await run({ failAt: 1 })).deliveries).toEqual([])
+  })
+  it('keeps the successful chunk when a later chunk fails', async () => {
+    const result = await run({ failAt: 2 })
+    expect(result.deliveries.map(row => row.providerMessageId)).toEqual(['1'])
+  })
+  it('reports recording failures without resending or hiding provider success', async () => {
+    const result = await run({ recorderFails: true })
+    expect(result.sends).toBe(2)
+    expect(result.deliveries).toHaveLength(2)
+    expect(result.errors).toBe(2)
+  })
+  it('reports the actual bare conversation after a deleted-topic fallback', async () => {
+    const result = await run({ fallbackTopic: true })
+    expect(result.deliveries).toMatchObject([{ channelId: '-1000000001',providerMessageId: '2' }])
+  })
+  it('lets an instance override the process observer', async () => {
+    const global = vi.fn(), local = vi.fn()
+    configureTelegramTextDeliveryObserver(global)
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true,
+      json: async () => ({ ok: true,result: { message_id: 1,text: 'Published' } }) })))
+    try {
+      await createTelegramAdapter({ token: 'fixture',onTextDelivered: local }).sendMessage('-1000000001', { text: 'Published' })
+      expect(local).toHaveBeenCalledOnce()
+      expect(global).not.toHaveBeenCalled()
+    } finally { configureTelegramTextDeliveryObserver(); vi.unstubAllGlobals() }
+  })
+  it('excludes explicitly provisional tool status and typing UI from recording', async () => {
+    const recorder = vi.fn()
+    configureTelegramTextDeliveryObserver(recorder)
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true,
+      json: async () => ({ ok: true,result: { message_id: 1,text: 'Provisional status' } }) })))
+    try {
+      const adapter = createTelegramAdapter({ token: 'fixture' })
+      await adapter.sendMessage('-1000000001', { text: 'Provisional status',ephemeral: true,collapsibleDetails: 'Private tool arguments' })
+      await adapter.sendStatus('-1000000001', 'Thinking...')
+      expect(recorder).not.toHaveBeenCalled()
+    } finally { configureTelegramTextDeliveryObserver(); vi.unstubAllGlobals() }
+  })
+})
 
 // ── Chunking ───────────────────────────────────────────────────
 

@@ -20,6 +20,7 @@ import { createEngineeringHistoryService } from './engineering-history/service.j
 import { createCaptureConfigurationReader } from './engineering-history/configuration.js'
 import { engineeringHistoryRoutes } from './routes/engineering-history.js'
 import { configureTurnKernel } from './turn/runtime.js'
+import { recordDeliveredTelegramMessage } from './channel-recording.js'
 import { configureChannelRooms, postPassiveChannelMessage } from './channel-room/room.js'
 import { scopeEvidenceFromRows, workspaceFilesCtxFor, type CreateComputerToolsOptions } from '@use-brian/core'
 import { prepareBrowserDownload, type BrowserDownload } from './sandbox/download-publication.js'
@@ -77,7 +78,7 @@ import { seedBuiltinPrimitiveCapabilities } from './db/capability-seed.js'
 import type http from 'node:http'
 
 import express, { type Express } from 'express'
-import { createTelegramApi } from '@use-brian/channels'
+import { createTelegramApi, configureTelegramTextDeliveryObserver } from '@use-brian/channels'
 import { createApiCorsMiddleware } from './cors-policy.js'
 import {
   vertexTransport, resolveVertexTokenSource, aiStudioTransport, credentialPoolAiStudioTransport,
@@ -2434,6 +2435,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // providers through this registration, so a route that forgets to thread
   // them cannot change which model answers a turn.
   configureTurnKernel({ resolveWorkspaceCustomLlm, configuredProviders })
+  configureTelegramTextDeliveryObserver(recordDeliveredTelegramMessage)
   // Accepted Brief grounding + revision boundary for every runner's prepare stage.
   configureBriefTurnContext(resolveBriefTurn)
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>

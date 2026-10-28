@@ -126,6 +126,12 @@ export type SessionRouteOptions = {
 /** Max characters accepted for one room post (text-only in P1 — T12). */
 const ROOM_POST_MAX_CHARS = 32_000
 
+const archiveListQuery = z.object({ archived: z.enum(['true', 'false']).optional() })
+const personalListCursor = z.object({
+  before: z.string().datetime({ offset: true }).optional(),
+  beforeId: z.string().uuid().optional(),
+}).refine(value => Boolean(value.before) === Boolean(value.beforeId))
+
 /** One SSE frame the reconnect relay writes: `event:` name + JSON `data:`. */
 export type ReconnectRelayFrame = { event: string; data: unknown }
 
@@ -208,6 +214,12 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     const titleClaims=pinSessionTitleClaims(req)
     res.setHeader('Cache-Control','no-store')
     try {
+      const archiveFilter = archiveListQuery.safeParse(req.query)
+      const cursor = personalListCursor.safeParse(req.query)
+      if (!archiveFilter.success || !cursor.success) {
+        res.status(400).json({ error: 'Invalid session archive filter or cursor' }); return
+      }
+      const archived = archiveFilter.data.archived === 'true'
       const jwtUserId = (req as { userId?: string }).userId
       const user = await resolveUser(jwtUserId)
       if (!user) { res.json([]); return }
@@ -297,7 +309,14 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // started in apps/web — even against a `kind='app'` assistant — has
       // `mode IS NULL` and a UUID channel_id, so it remains visible after
       // refresh.
-      const result = await query<{
+      const listParams: unknown[] = allChannels
+        ? [requestedWorkspaceId, user.id]
+        : workspaceScope
+          ? [requestedWorkspaceId, user.id, DOC_DOCK_RESUME_ROW.channelType, DOC_DOCK_RESUME_ROW.appOrigin]
+          : [assistant.id, user.id, appOrigin]
+      const cursorIndex = listParams.length + 1
+      listParams.push(cursor.data.before ?? null, cursor.data.beforeId ?? null)
+      type PersonalRailRow = {
         id: string; title: string | null; channelId: string;
         lastActiveAt: Date; status: string; appOrigin: string | null
         assistantId: string; channelType: string
@@ -305,7 +324,19 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         userId: string; visibility: string | null; mode: string | null
         effectiveClearance: string | null; contextCompartments: string[] | null
         anchorKind: string | null
-      }>(
+      }
+      const listWorkspaceId = workspaceScope ? requestedWorkspaceId! : assistant.workspaceId
+      const membership = listWorkspaceId
+        ? await getWorkspaceMembershipWithReadScopeSystem(user.id, listWorkspaceId)
+        : null
+      if (listWorkspaceId && !membership) { res.json([]); return }
+      const now = new Date()
+      const readable: PersonalRailRow[] = []
+      const pageSize = allChannels && !archived ? 200 : 50
+      // Archived rows can lose read authority. Scan past those rows so they
+      // neither leak nor hide readable older archives behind a short page.
+      while (readable.length < pageSize) {
+      const result = await query<PersonalRailRow>(
         `SELECT s.id, NULL::text AS title, s.channel_id as "channelId",
                 s.last_active_at as "lastActiveAt", s.status,
                 s.app_origin as "appOrigin",
@@ -317,7 +348,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
                 s.user_id as "userId", s.visibility, s.mode,
                 s.effective_clearance as "effectiveClearance",
                 s.context_compartments as "contextCompartments"
-         FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
+         FROM (SELECT * FROM sessions WHERE session_recording_read_allowed(id) AND feed_draft_audience_allowed(id)) s
          WHERE ${workspaceScope
            ? `s.assistant_id IN (SELECT a.id FROM assistants a WHERE a.workspace_id = $1)`
            : `s.assistant_id = $1`} AND s.user_id = $2
@@ -328,31 +359,18 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
            -- threads are stored on the web transport, so the audience and
            -- anchor predicate, not the channel type, is what excludes them.
            AND ${sessionKindSql.personalHistory('s')}
+           AND ${archived ? '' : 'NOT '}EXISTS (
+             SELECT 1 FROM session_archives sa WHERE sa.session_id=s.id AND sa.user_id=$2
+           )
            ${surfaceFilter}
-         ORDER BY s.last_active_at DESC
-         LIMIT ${allChannels ? 200 : 50}`,
-        allChannels
-          ? [requestedWorkspaceId, user.id]
-          : workspaceScope
-            ? [
-                requestedWorkspaceId,
-                user.id,
-                DOC_DOCK_RESUME_ROW.channelType,
-                DOC_DOCK_RESUME_ROW.appOrigin,
-              ]
-            : [assistant.id, user.id, appOrigin],
+           AND ($${cursorIndex}::timestamptz IS NULL OR (s.last_active_at,s.id)<($${cursorIndex}::timestamptz,$${cursorIndex + 1}::uuid))
+         ORDER BY s.last_active_at DESC,s.id DESC
+         LIMIT ${pageSize}`,
+        [...listParams],
       )
 
-      // The list never outruns the read gate (session-messages.md): a
-      // department-context chat the caller can no longer read is omitted,
-      // title and all, rather than listed and refused on open.
-      const listWorkspaceId = workspaceScope ? requestedWorkspaceId! : assistant.workspaceId
-      const membership = listWorkspaceId
-        ? await getWorkspaceMembershipWithReadScopeSystem(user.id, listWorkspaceId)
-        : null
-      if (listWorkspaceId && !membership) { res.json([]); return }
-      const now = new Date()
-      const readable = result.rows.filter((s) => !listWorkspaceId || decideSessionRead({
+      // Never disclose a title for a row the current viewer cannot read.
+      const admitted = result.rows.filter((s) => !listWorkspaceId || decideSessionRead({
         callerUserId: user.id,
         session: {
           userId: s.userId,
@@ -369,6 +387,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         departmentAccess: membership!.departmentAccess,
         now,
       }).readable)
+      readable.push(...admitted.slice(0, pageSize - readable.length))
+      const last = result.rows.at(-1)
+      if (!archived || result.rows.length < pageSize || !last) break
+      listParams[cursorIndex - 1] = new Date(last.lastActiveAt).toISOString()
+      listParams[cursorIndex] = last.id
+      }
+
 
       const titles=await sessionTitleProjections({claims:titleClaims,sessionIds:readable.map(s=>s.id)})
       res.json(readable.map((s) => ({
@@ -425,6 +450,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     const titleClaims=pinSessionTitleClaims(req)
     res.setHeader('Cache-Control','no-store')
     try {
+      const archiveFilter = archiveListQuery.safeParse(req.query)
+      if (!archiveFilter.success) {
+        res.status(400).json({ error: 'Invalid session archive filter' }); return
+      }
+      const archived = archiveFilter.data.archived === 'true'
       const jwtUserId = (req as { userId?: string }).userId
       const user = await resolveUser(jwtUserId)
       if (!user) { res.json([]); return }
@@ -483,15 +513,18 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
                 s.context_group_id AS "contextGroupId",
                 s.context_project_id AS "contextProjectId",
                 s.context_compartments AS "contextCompartments"
-           FROM (SELECT * FROM sessions WHERE feed_draft_audience_allowed(id)) s
+           FROM (SELECT * FROM sessions WHERE session_recording_read_allowed(id) AND feed_draft_audience_allowed(id)) s
            JOIN assistants a ON a.id = s.assistant_id
           WHERE a.workspace_id = $1
             AND ${sessionKindSql.railRoom('s')}
+            AND ${archived ? '' : 'NOT '}EXISTS (
+              SELECT 1 FROM session_archives sa WHERE sa.session_id=s.id AND sa.user_id=$5
+            )
             AND ($2::text IS NULL OR ($2='general' AND s.context_project_id IS NULL) OR s.context_project_id::text=$2)
             AND ($3::timestamptz IS NULL OR (s.last_active_at,s.id)<($3::timestamptz,$4::uuid))
           ORDER BY s.last_active_at DESC,s.id DESC
           LIMIT 100`,
-        [workspaceId, projectFilter ?? null, cursorDate, cursorId],
+        [workspaceId, projectFilter ?? null, cursorDate, cursorId, user.id],
       )
 
       // The list never outruns the read gate (L4): the same decision the
@@ -937,10 +970,35 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   })
 
   /**
-   * PATCH /api/sessions/:id — rename a session.
-   * Body: { title: string }
-   * Sets title_manually_set so the auto-titler doesn't overwrite it.
+   * Per-viewer organization only; the canonical read gate still applies.
    */
+  router.patch('/:id/archive', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store')
+    try {
+      const userId = (req as { userId?: string }).userId
+      if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+      const body = z.object({ archived: z.boolean() }).strict().safeParse(req.body)
+      if (!body.success) { res.status(400).json({ error: 'Invalid archive request' }); return }
+      const id = z.string().uuid().safeParse(req.params.id)
+      if (!id.success) { res.status(404).json({ error: 'Session not found' }); return }
+      const session = await readSessionById(id.data)
+      if (!session || await gateSessionRead(userId, session)) {
+        res.status(404).json({ error: 'Session not found' }); return
+      }
+      if (body.data.archived) {
+        await query(`INSERT INTO session_archives(user_id,session_id) VALUES($1,$2)
+          ON CONFLICT (user_id,session_id) DO NOTHING`, [userId, session.id])
+      } else {
+        await query('DELETE FROM session_archives WHERE user_id=$1 AND session_id=$2', [userId, session.id])
+      }
+      res.json({ archived: body.data.archived })
+    } catch (err) {
+      console.error('Session archive error:', err)
+      res.status(500).json({ error: 'Failed to update session archive' })
+    }
+  })
+
+  /** Rename with a manual override so the auto-titler leaves it alone. */
   router.patch('/:id', async (req, res) => {
     const titleClaims=pinSessionTitleClaims(req)
     res.setHeader('Cache-Control','no-store')
@@ -1249,6 +1307,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         // the client resolves the avatar from its roster. Null on human rows
         // and pre-390 history (rendered as the session's bound assistant).
         senderAssistantId: m.senderAssistantId,
+        publishedSenderName: m.publishedSenderName ?? null,
         // Outbound file attachments (sendFile, migration 273) — rendered
         // as file cards. Omitted when empty to keep the payload lean.
         attachments: m.attachments.length > 0 ? m.attachments : undefined,

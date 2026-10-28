@@ -15,14 +15,81 @@ function harness(accounts = false, withControl = false) {
   vi.stubGlobal('chrome', { runtime: { id: 'extension-id', getURL: (p: string) => `chrome-extension://extension-id/${p}`, onConnectExternal: external, onConnect: internal }, storage: { onChanged: event() } })
   const stored: Record<string, unknown> = {}
   const store = { get: async () => ({ ...stored }), set: async (value: object) => { Object.assign(stored, value) }, remove: async (key: string | string[]) => { for (const k of Array.isArray(key) ? key : [key]) delete stored[k] } }
-  const deps = { ...(withControl ? { controlState: vi.fn(async (): Promise<{ phase: 'active' | 'stopped'; host?: string }> => ({ phase: 'active', host: 'example.com' })) } : {}), ...(accounts ? { accountStore: store as unknown as chrome.storage.StorageArea } : {}), identity: vi.fn(async () => identity), ready: () => true, readPage: vi.fn(), pageStillCurrent: async () => true, stop: vi.fn(async () => {}), matches: () => ['https://app.usebrian.ai/*'] }
+  const deps = { openSignIn: vi.fn(async () => {}), now: vi.fn(() => 1000), ...(withControl ? { controlState: vi.fn(async (): Promise<{ phase: 'active' | 'stopped'; host?: string }> => ({ phase: 'active', host: 'example.com' })) } : {}), ...(accounts ? { accountStore: store as unknown as chrome.storage.StorageArea } : {}), identity: vi.fn(async () => identity), ready: () => true, readPage: vi.fn(), pageStillCurrent: async () => true, stop: vi.fn(async () => {}), matches: () => ['https://app.usebrian.ai/*'] }
   installAssistantChat(deps)
   const port = (name: string, sender: object) => ({ name, sender, postMessage: vi.fn(), disconnect: vi.fn(), onMessage: event(), onDisconnect: event() })
   const broker = port('brian-assistant-chat', { origin: 'https://app.usebrian.ai', frameId: 0 })
   const panel = port('brian-assistant-panel', { id: 'extension-id', url: 'chrome-extension://extension-id/sidepanel.html' })
-  return { external, internal, deps, broker, panel }
+  const settings = port('brian-assistant-settings', { id: 'extension-id', url: 'chrome-extension://extension-id/popup.html#advanced-connection' })
+  return { external, internal, deps, broker, panel, settings }
 }
 const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve() }
+
+describe('[COMP:ext/assistant-chat] account sign-in entry', () => {
+  it('opens sign-in without pairing or starting a chat, then bounds the waiting state', async () => {
+    const h = harness(); h.internal.emit(h.panel); await settle()
+    h.panel.onMessage.emit({ type: 'sign-in' }); await settle()
+    expect(h.deps.openSignIn).toHaveBeenCalledTimes(1)
+    expect(h.panel.postMessage).toHaveBeenCalledWith({ type: 'status', connected: false, signInPending: true })
+    expect(h.deps.stop).not.toHaveBeenCalled()
+    expect(h.broker.postMessage).not.toHaveBeenCalled()
+    h.deps.now.mockReturnValue(1000 + 10 * 60_000)
+    h.panel.onMessage.emit({ type: 'status' }); await settle()
+    expect(h.panel.postMessage).toHaveBeenLastCalledWith({ type: 'status', connected: false, signInExpired: true })
+    h.panel.onMessage.emit({ type: 'cancel-sign-in' }); await settle()
+    expect(h.panel.postMessage).toHaveBeenLastCalledWith({ type: 'status', connected: false })
+    vi.unstubAllGlobals()
+  })
+  it('clears waiting when the authenticated app connects', async () => {
+    const h = harness(); h.internal.emit(h.panel); h.panel.onMessage.emit({ type: 'sign-in' }); await settle()
+    h.external.emit(h.broker); h.broker.onMessage.emit({ type: 'hello', ...identity, assistants: [] }); await settle()
+    expect(h.panel.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ connected: true }))
+    expect(h.panel.postMessage.mock.calls.at(-1)?.[0]).not.toHaveProperty('signInPending')
+    vi.unstubAllGlobals()
+  })
+  it('reports a failed tab open and fences a cancelled in-flight open', async () => {
+    const h = harness(); h.internal.emit(h.panel)
+    h.deps.openSignIn.mockRejectedValueOnce(new Error('window unavailable'))
+    h.panel.onMessage.emit({ type: 'sign-in' }); await settle()
+    expect(h.panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'failure', code: 'sign_in_failed' }))
+    let release = () => {}
+    h.deps.openSignIn.mockImplementation(() => new Promise<void>(resolve => { release = resolve }))
+    h.panel.onMessage.emit({ type: 'sign-in' }); h.panel.onMessage.emit({ type: 'sign-in' }); await settle()
+    h.panel.onMessage.emit({ type: 'cancel-sign-in' }); release(); await settle()
+    expect(h.deps.openSignIn).toHaveBeenCalledTimes(2)
+    expect(h.panel.postMessage).toHaveBeenLastCalledWith({ type: 'status', connected: false })
+    vi.unstubAllGlobals()
+  })
+  it('admits settings connection actions but refuses chat and page reads', async () => {
+    const h = harness(); h.external.emit(h.broker); h.broker.onMessage.emit({ type: 'hello', ...identity, assistants: [] })
+    h.internal.emit(h.settings); await settle()
+    h.settings.onMessage.emit({ type: 'read-page' })
+    h.settings.onMessage.emit({ type: 'send', id: 'request', text: 'Hello', assistantId: 'assistant' }); await settle()
+    expect(h.deps.readPage).not.toHaveBeenCalled(); expect(h.broker.postMessage).not.toHaveBeenCalled()
+    h.settings.onMessage.emit({ type: 'sign-in' }); await settle()
+    expect(h.deps.openSignIn).toHaveBeenCalledOnce()
+    vi.unstubAllGlobals()
+  })
+  it('rejects other extension pages and identities from the settings port', async () => {
+    for (const sender of [{ id: 'other', url: 'chrome-extension://extension-id/popup.html' }, { id: 'extension-id', url: 'chrome-extension://extension-id/allow.html' }]) {
+      const h = harness(); Object.assign(h.settings.sender, sender); h.internal.emit(h.settings)
+      h.settings.onMessage.emit({ type: 'sign-in' }); await settle()
+      expect(h.deps.openSignIn).not.toHaveBeenCalled()
+      vi.unstubAllGlobals()
+    }
+  })
+  it('does not interrupt a chat admission when settings closes', async () => {
+    const h = harness(); h.external.emit(h.broker); h.broker.onMessage.emit({ type: 'hello', ...identity, assistants: [] })
+    h.internal.emit(h.panel); h.internal.emit(h.settings); await settle()
+    let release: (value: typeof identity) => void = () => {}
+    h.deps.identity = () => new Promise<typeof identity>(resolve => { release = resolve })
+    h.panel.onMessage.emit({ type: 'send', id: 'request', text: 'Hello', assistantId: 'assistant' }); await settle()
+    h.settings.onDisconnect.emit()
+    h.deps.identity = async () => identity; release(identity); await settle()
+    expect(h.broker.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'send', id: 'request' }))
+    vi.unstubAllGlobals()
+  })
+})
 
 describe('[COMP:ext/assistant-chat] paired assistant transport and evidence', () => {
   it('rejects expired, malformed and wrong-kind pairing hints', () => {

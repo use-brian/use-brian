@@ -119,6 +119,8 @@ export type DocSessionMessage = {
    *  migration 390). Null on human rows and pre-390 history — render as the
    *  session's bound assistant. */
   senderAssistantId?: string | null;
+  /** Non-null marks an external provider bot. Empty string uses a neutral label. */
+  publishedSenderName?: string | null;
   /** Sender's display name (`users.name` ?? email), resolved server-side so
    *  the client can attribute *other* members' comments. `null` for assistant
    *  rows and the rare unknown sender (e.g. a deleted user). */
@@ -169,6 +171,7 @@ type RawMessageRow = {
   attachments?: SessionFileAttachment[];
   senderUserId?: string | null;
   senderAssistantId?: string | null;
+  publishedSenderName?: string | null;
   senderName?: string | null;
   senderAvatarUrl?: string | null;
   replyToText?: string | null;
@@ -256,21 +259,29 @@ export async function fetchLatestSession(opts: {
  * Returns `[]` on any failure — an empty rail reads as "no history yet", which
  * is the same thing the user does next either way (start a chat).
  */
-async function listSessions(opts: {
+export async function listPersonalSessions(opts: {
   workspaceId: string;
-  assistantId: string;
+  assistantId?: string;
+  archived?: boolean;
+  strict?: boolean;
+  before?: { lastActive: string; id: string };
   signal?: AbortSignal;
 }): Promise<DocSession[]> {
   const qs = new URLSearchParams();
   qs.set("scope", "workspace");
   qs.set("channels", "all");
   qs.set("workspaceId", opts.workspaceId);
+  if (opts.archived) qs.set("archived", "true");
+  if (opts.before) { qs.set("before", opts.before.lastActive); qs.set("beforeId", opts.before.id); }
   try {
     const res = await authFetch(
       `${API_URL}/api/sessions?${qs.toString()}`,
       opts.signal ? { signal: opts.signal } : {},
     );
-    if (!res.ok) return [];
+    if (!res.ok) {
+      if (opts.strict) throw new Error("chat_list_failed");
+      return [];
+    }
     const data = (await res.json()) as RawListRow[];
     if (!Array.isArray(data)) return [];
     return data.map((r) => ({
@@ -290,7 +301,8 @@ async function listSessions(opts: {
       policy: parseChatSessionPolicy(r.policy) ?? PERSONAL_CHAT_POLICY,
       humanCount: typeof r.humanCount === "number" ? r.humanCount : 1,
     }));
-  } catch {
+  } catch (error) {
+    if (opts.strict) throw error;
     return [];
   }
 }
@@ -307,10 +319,13 @@ async function listSessions(opts: {
 export async function listSessionsForAssistants(opts: {
   workspaceId: string;
   assistantIds: string[];
+  archived?: boolean;
+  strict?: boolean;
+  before?: { lastActive: string; id: string };
   signal?: AbortSignal;
 }): Promise<DocSession[]> {
   if (!opts.assistantIds.length) return [];
-  return listSessions({ workspaceId: opts.workspaceId, assistantId: opts.assistantIds[0], signal: opts.signal });
+  return listPersonalSessions({ ...opts, assistantId: opts.assistantIds[0] });
 }
 
 /**
@@ -441,6 +456,16 @@ export async function setRoomCapture(sessionId: string, enabled: boolean): Promi
   }
 }
 
+/** Archive changes only the current viewer's session-list preference. */
+export async function setSessionArchived(sessionId: string, archived: boolean): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ archived }),
+  });
+  if (!res.ok) throw new Error("chat_archive_failed");
+}
+
 /**
  * The workspace's shared chats (`GET /api/sessions/workspace`), newest first.
  *
@@ -450,6 +475,7 @@ export async function setRoomCapture(sessionId: string, enabled: boolean): Promi
  */
 export async function listWorkspaceSessions(opts: {
   workspaceId: string;
+  archived?: boolean;
   signal?: AbortSignal;
   strict?: boolean;
   contextProjectId?: string | null;
@@ -457,6 +483,7 @@ export async function listWorkspaceSessions(opts: {
 }): Promise<WorkspaceSession[]> {
   try {
     const query = new URLSearchParams({ workspaceId: opts.workspaceId });
+    if (opts.archived) query.set("archived", "true");
     if (opts.contextProjectId !== undefined) query.set("contextProjectId", opts.contextProjectId ?? "general");
     if (opts.before) { query.set("before", opts.before.lastActive); query.set("beforeId", opts.before.id); }
     const res = await authFetch(
@@ -464,7 +491,7 @@ export async function listWorkspaceSessions(opts: {
       opts.signal ? { signal: opts.signal } : {},
     );
     if (!res.ok) {
-      if (opts.strict && ![401, 403, 404].includes(res.status)) throw new Error("chat_list_failed");
+      if (opts.strict) throw new Error("chat_list_failed");
       return [];
     }
     const data = (await res.json()) as RawWorkspaceRow[];
@@ -825,6 +852,7 @@ export async function fetchSessionMessages(
       attachments: Array.isArray(m.attachments) ? m.attachments : [],
       senderUserId: m.senderUserId ?? null,
       senderAssistantId: m.senderAssistantId ?? null,
+      publishedSenderName: m.publishedSenderName ?? null,
       senderName: m.senderName ?? null,
       senderAvatarUrl: m.senderAvatarUrl ?? null,
       replyToText: m.replyToText ?? null,

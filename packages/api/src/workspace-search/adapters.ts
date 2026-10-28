@@ -84,7 +84,7 @@ function searchSourceSql(projectScoped = false, countsOnly = false): Record<Work
         AND m.scope_held IS NOT TRUE AND ${department('m')}
         AND NOT jsonb_path_exists(m.content,'$[*] ? (@.type == "tool_use" || @.type == "tool_result")'))`,
     's.last_active_at', "jsonb_build_object('type','conversation','id',s.id,'visibility',s.visibility)")}
-    FROM sessions s WHERE s.workspace_id=$1${project('s', 'context_project_id')} AND public.assistant_placement_visible($2,s.assistant_id) AND ${sessionKindSql.conversationLane('s')}
+    FROM sessions s WHERE session_recording_read_allowed(s.id) AND s.workspace_id=$1${project('s', 'context_project_id')} AND public.assistant_placement_visible($2,s.assistant_id) AND ${sessionKindSql.conversationLane('s')}
       AND ${sessionKindSql.searchableConversation('s')} AND (s.user_id=$2 OR ${sessionKindSql.workspaceAudience('s')})
       AND department_row_allows((SELECT department_read_grants()),s.workspace_id,coalesce(s.effective_clearance,'internal'),s.context_compartments,
         CASE WHEN ${sessionKindSql.workspaceAudience('s')} THEN NULL ELSE s.user_id END)`,

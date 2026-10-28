@@ -25,6 +25,7 @@ import http from 'node:http'
 
 vi.mock('../../db/client.js', () => ({
   query: vi.fn(async () => ({ rows: [{
+    allowed: true,
     id: 'a-1',
     workspaceId: 'ws-1',
     kind: 'primary',

@@ -11,7 +11,7 @@ export async function sessionTitleHead(sessionId:string,authority:SessionContext
  const {execution}=authority
  if(execution.lifecycle.sessionId!==sessionId||execution.lifecycle.sessionPersisted===false)changed()
  await execution.security.authority.assertCurrent()
- const id=(await getPool().query<{id:string}>('SELECT scope_revision_id AS id FROM session_title_heads WHERE workspace_id=$1 AND session_id=$2',
+ const id=(await getPool().query<{id:string}>('SELECT scope_revision_id AS id FROM session_title_heads WHERE workspace_id=$1 AND session_id=$2 AND session_recording_read_allowed(session_id)',
   [execution.security.access.workspaceId,sessionId])).rows[0]?.id??null
  await execution.security.authority.assertCurrent();return id
 }

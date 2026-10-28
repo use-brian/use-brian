@@ -1,4 +1,4 @@
-export { createTelegramAdapter, parseTopicChannelId } from './adapter.js'
+export { createTelegramAdapter, parseTopicChannelId, configureTelegramTextDeliveryObserver } from './adapter.js'
 export type {
   TelegramAdapterOptions,
   TelegramAdapterConfig,
@@ -6,6 +6,8 @@ export type {
   MyChatMemberUpdate,
   RequireMentionConfig,
   ChatSeenEvent,
+  TelegramTextDelivery,
+  TelegramTextDeliveryObserver,
 } from './adapter.js'
 export { createTelegramApi, TelegramApiError, isTelegramThreadNotFoundError, describeTelegramDownloadFailure, TELEGRAM_BOT_COMMANDS, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from './api.js'
 export type { TelegramApi } from './api.js'

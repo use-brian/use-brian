@@ -84,7 +84,7 @@ describe('[COMP:api/external-source-access] authenticated sidecar coordinator', 
     await expect(f.client.reconcile({ version: SOURCE_PROTOCOL_VERSION, idempotencyKey: 'effect-1' })).rejects.toMatchObject({ code: 'source_effect_uncertain' })
     expect(f.fetch).toHaveBeenCalledTimes(1)
   })
-  it('retains signed base and exact-digest reconciliation without a command sender', async () => {
+  it('keeps base and exact-digest reconciliation independent of attended command dispatch', async () => {
     const f=fixture();expect(Object.hasOwn(f.client,'commandMcp')).toBe(false)
     f.respond.mockReturnValue({version:SOURCE_PROTOCOL_VERSION,tenant:f.profile.tenant,state:'applied',receipt:'base-receipt'})
     expect(await f.client.reconcile({version:SOURCE_PROTOCOL_VERSION,idempotencyKey:'base-key'})).toMatchObject({state:'applied',receipt:'base-receipt'})

@@ -1,5 +1,5 @@
 import { authFetch } from "../auth-fetch";
-import { fetchLatestSession, listSessionsForAssistants, listWorkspaceSessions, listAuditSessions, getChatSessionSummary } from "../api/sessions";
+import { fetchLatestSession, listSessionsForAssistants, listWorkspaceSessions, listAuditSessions, getChatSessionSummary, listPersonalSessions, setSessionArchived } from "../api/sessions";
 import { PERSONAL_CHAT_POLICY } from "../chat-session-policy";
 vi.mock("../auth-fetch", () => ({ authFetch: vi.fn() }));
 /**
@@ -19,6 +19,28 @@ import {
   stripCommentThreadReplyTag,
   parseMessageAttachments,
 } from "../api/sessions";
+
+describe("[COMP:app-web/sessions-sdk] archived history", () => {
+  it("sends a strict per-viewer archive command", async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({ archived: true })));
+    await setSessionArchived("chat-id", true);
+    expect(authFetch).toHaveBeenLastCalledWith(expect.stringContaining("/api/sessions/chat-id/archive"), expect.objectContaining({ method: "PATCH", body: '{"archived":true}' }));
+  });
+  it("queries archived Personal history with its cursor", async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response("[]"));
+    await listPersonalSessions({ workspaceId: "workspace", archived: true, strict: true, before: { id: "last", lastActive: "2026-10-01T00:00:00Z" } });
+    const url = new URL(String(vi.mocked(authFetch).mock.calls.at(-1)![0]), "http://localhost");
+    expect(url.searchParams.get("archived")).toBe("true");
+    expect(url.searchParams.get("beforeId")).toBe("last");
+    expect(url.searchParams.get("channels")).toBe("all");
+  });
+  it("reports archive mutation and list failures", async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response("", { status: 403 }));
+    await expect(setSessionArchived("chat-id", false)).rejects.toThrow();
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response("", { status: 500 }));
+    await expect(listPersonalSessions({ workspaceId: "workspace", archived: true, strict: true })).rejects.toThrow();
+  });
+});
 
 describe("[COMP:app-web/chat-document-viewer] persisted document payloads", () => {
   it("restores a validated presentDocument tool input verbatim", () => {

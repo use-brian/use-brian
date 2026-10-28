@@ -852,7 +852,7 @@ export function WorkspaceChrome({
             )}
           >
             <Popover>
-              <Tooltip side="right" label={<span className="block max-w-64 whitespace-normal">{syncTitle}{syncDescription ? <span className="mt-1 block">{syncDescription}</span> : null}</span>}>
+              <Tooltip side="right" sideOffset={4} delay={100} appearance="rail" label={<span className="block max-w-64 whitespace-normal">{syncTitle}{syncDescription ? <span className="mt-1 block">{syncDescription}</span> : null}</span>}>
                 <PopoverTrigger aria-label={syncTitle} className="flex h-11 max-w-full items-center gap-2 rounded-lg px-3 hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 md:h-7 md:w-11 md:justify-center md:px-0">
                   {offlineState.reconnecting && !offlineState.offline && offlineState.paused === 0 ? (
                     <RefreshCw aria-hidden className="size-3 shrink-0 animate-spin" />

@@ -30,6 +30,8 @@ export type SourceAccessClient = {
   reconcile: (request: SourceReconcileRequest) => Promise<SourceReconcileResponse>
   readMcp: (tool: string, input: Record<string, unknown>, retentionMode?: SourceRetentionMode) => Promise<TrustedSourceRead>
   readHttp: (input: Record<string, unknown>, retentionMode?: SourceRetentionMode) => Promise<TrustedSourceRead>
+  /** Attended source-owned commands only; service runtimes never receive this sender. */
+  actionMcp: (tool: string, input: Record<string, unknown>, metadataKey: string, idempotencyKey: string) => Promise<TrustedSourceRead | undefined>
 }
 export type TrustedSourceRead = { result: CallToolResult }
 const sourceReads = new WeakMap<TrustedSourceRead, { execution: ExecutionContext; envelope: SourceEnvelope; proof: SourceOperationProof }>()
@@ -120,12 +122,12 @@ export function createSourceAccessClient(execution: ExecutionContext, rawProfile
     const read: TrustedSourceRead = { result: display }; sourceReads.set(read, { execution, envelope, proof })
     return read
   }
-  function intentFetch(send:FetchLike,intent:Record<string,unknown>):FetchLike {
+  function intentFetch(send:FetchLike,intent:Record<string,unknown>,metadata?:Record<string,string>):FetchLike {
     return async(url,init={})=>{
       if(typeof init.body==='string'){
         const body=JSON.parse(init.body)
         if(body.method==='tools/call'){
-          body.params={...body.params,_meta:{...body.params?._meta,[SOURCE_PROTOCOL_VERSION]:intent}}
+          body.params={...body.params,_meta:{...body.params?._meta,[SOURCE_PROTOCOL_VERSION]:intent,...metadata}}
           return send(url,{...init,body:JSON.stringify(body)})
         }
       }
@@ -175,6 +177,21 @@ export function createSourceAccessClient(execution: ExecutionContext, rawProfile
       if (result.isError) unavailable()
       // Reserved evidence stays out of display/model input. The trusted binding survives only object identity.
       return admittedRead(result, result._meta?.[SOURCE_PROTOCOL_VERSION], retentionMode)
+    },
+    async actionMcp(tool, input, metadataKey, idempotencyKey) {
+      const identity = execution.identity
+      if (identity.kind !== 'attended' || identity.principal.kind !== 'workspace_member'
+        || !['native_session','verified_channel'].includes(identity.principal.authenticationKind ?? '') || execution.surface.readOnly || execution.security.access.sharedAudience
+        || !/^[a-z][a-z0-9_.-]{0,63}\/[a-z][a-z0-9_.-]{0,63}$/.test(metadataKey)) denied()
+      const capabilities = await client.capabilities()
+      if (!capabilities.reconciliation || capabilities.attendedActions?.idempotencyMetadataKey !== metadataKey) denied()
+      const catalog = await client.discoverMcp('Attended source action')
+      if (!catalog.tools.some(candidate => candidate.name === tool && candidate.readOnlyHint !== true)) denied()
+      const result = await boundary(profile.mcpUrl, send => callRemoteMcpToolEnvelope(profile.mcpUrl, tool, input, headers,
+        intentFetch(send,{intent:'attended_action'},{[metadataKey]:idempotencyKey})))
+      if (result.isError) throw new SourceProtocolError('source_effect_uncertain')
+      // An acknowledgement without evidence can describe only the command receipt.
+      return result._meta?.[SOURCE_PROTOCOL_VERSION] === undefined ? undefined : admittedRead(result,result._meta[SOURCE_PROTOCOL_VERSION],'governed')
     },
     async readHttp(input, retentionMode = 'governed') {
       if (!profile.httpReadPath || !(await client.capabilities()).retentionModes.includes(retentionMode)) denied()

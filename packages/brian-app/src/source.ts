@@ -23,7 +23,8 @@ export type SourceObservation = {
 }
 export type SourceEnvelope = { version: typeof SOURCE_PROTOCOL_VERSION; tenant: string; resources: SourceObservation[] }
 export type SourceCapabilities = { version: typeof SOURCE_PROTOCOL_VERSION; tenant: string;
-  retentionModes: SourceRetentionMode[]; fieldEvidence: true; reconciliation: boolean; effectBinding?: 'command_v1' }
+  retentionModes: SourceRetentionMode[]; fieldEvidence: true; reconciliation: boolean; effectBinding?: 'command_v1';
+  attendedActions?: { idempotencyMetadataKey: string } }
 export type SourceEffectBinding = { tool: string; input: Record<string, unknown>; idempotencyKey: string }
 export type SourceAuthorizationRequest = { effect?: SourceEffectBinding; version: typeof SOURCE_PROTOCOL_VERSION; operationId: string;
   items: Array<{ itemId: string; resource: SourceResourceRef; fields: string[]; action: SourceAction; retentionMode: SourceRetentionMode; release?: { id: string; expiresAt: number } }>;
@@ -138,9 +139,14 @@ export function parseSourceEnvelope(value: unknown): SourceEnvelope {
 }
 export function parseSourceCapabilities(value: unknown): SourceCapabilities {
   bounded(value)
-  const record = object(value, ['version','tenant','retentionModes','fieldEvidence','reconciliation'], ['effectBinding']); version(record); text(record.tenant)
+  const record = object(value, ['version','tenant','retentionModes','fieldEvidence','reconciliation'], ['effectBinding','attendedActions']); version(record); text(record.tenant)
   strings(record.retentionModes, 3, true); record.retentionModes.forEach(mode => enumeration(mode, ['governed','released_snapshot','ephemeral']))
   if (record.fieldEvidence !== true || typeof record.reconciliation !== 'boolean' || record.effectBinding !== undefined && record.effectBinding !== 'command_v1') invalid()
+  if (record.attendedActions !== undefined) {
+    const action = object(record.attendedActions, ['idempotencyMetadataKey'])
+    if (record.reconciliation !== true || typeof action.idempotencyMetadataKey !== 'string'
+      || !/^[a-z][a-z0-9_.-]{0,63}\/[a-z][a-z0-9_.-]{0,63}$/.test(action.idempotencyMetadataKey)) invalid()
+  }
   return detached(value)
 }
 export function parseSourceAuthorizationRequest(value: unknown): SourceAuthorizationRequest {

@@ -1,7 +1,43 @@
 import { describe, expect, it, vi } from 'vitest'
-import { installAccountSwitching, type AccountBroker } from '../account-switching.js'
+import { createAccountSignIn, installAccountSwitching, type AccountBroker } from '../account-switching.js'
 const first = { id: 'user-1', name: 'First account', email: 'first@example.com' }
 const second = { id: 'user-2', name: 'Second account', email: 'second@example.com' }
+
+describe('[COMP:ext/account-switching] account sign-in tab', () => {
+  function signIn(saved: string | null = null) {
+    const tabs = { get: vi.fn(async () => ({ id: 20, windowId: 10 })), create: vi.fn(async () => ({ id: 20 })), update: vi.fn(async () => ({})) }
+    const windows = { getLastFocused: vi.fn(async () => ({ id: 10, incognito: false })), update: vi.fn(async () => ({})), create: vi.fn(async () => ({ tabs: [{ id: 30 }] })) }
+    const appOrigin = vi.fn(async () => saved)
+    const open = createAccountSignIn({ tabs, windows, appOrigin, matches: () => ['https://app.usebrian.ai/*', 'http://localhost/*'] } as unknown as Parameters<typeof createAccountSignIn>[0])
+    return { open, tabs, windows, appOrigin }
+  }
+  it('opens canonical account entry in a normal window and reuses its OAuth tab without navigation', async () => {
+    const h = signIn(); await h.open(); await h.open()
+    expect(h.windows.getLastFocused).toHaveBeenCalledWith({ windowTypes: ['normal'] })
+    expect(h.tabs.create).toHaveBeenCalledExactlyOnceWith({ windowId: 10, url: 'https://app.usebrian.ai/', active: true })
+    expect(h.tabs.update).toHaveBeenCalledExactlyOnceWith(20, { active: true })
+    expect(h.windows.update).toHaveBeenCalledWith(10, { focused: true })
+  })
+  it('reopens a closed sign-in tab and accepts only a manifest-trusted app origin', async () => {
+    const h = signIn('https://app.usebrian.ai.evil.example/login'); await h.open()
+    h.tabs.get.mockRejectedValueOnce(new Error('closed')); await h.open()
+    expect(h.tabs.create).toHaveBeenCalledTimes(2)
+    expect(h.tabs.create).toHaveBeenLastCalledWith(expect.objectContaining({ url: 'https://app.usebrian.ai/' }))
+    const local = signIn('http://localhost:3003/w/workspace'); await local.open()
+    expect(local.tabs.create).toHaveBeenCalledWith(expect.objectContaining({ url: 'http://localhost:3003/' }))
+  })
+  it('creates a normal window rather than using an incognito window or the settings popup', async () => {
+    const h = signIn(); h.windows.getLastFocused.mockResolvedValueOnce({ id: 99, incognito: true }); await h.open()
+    expect(h.tabs.create).not.toHaveBeenCalled()
+    expect(h.windows.create).toHaveBeenCalledWith({ url: 'https://app.usebrian.ai/', type: 'normal', incognito: false, focused: true })
+  })
+  it('opens the newly selected deployment instead of focusing a previous deployment', async () => {
+    const h = signIn(); await h.open()
+    h.appOrigin.mockResolvedValue('http://localhost:3003'); await h.open()
+    expect(h.tabs.update).not.toHaveBeenCalled()
+    expect(h.tabs.create).toHaveBeenLastCalledWith(expect.objectContaining({ url: 'http://localhost:3003/' }))
+  })
+})
 function broker(user = first, origin = 'https://app.example.com', workspaceId = 'workspace-1'): AccountBroker {
   return { port: { sender: { origin }, postMessage: vi.fn() } as unknown as chrome.runtime.Port,
     hello: { userId: user.id, workspaceId, workspaceName: 'Example workspace', accountDirectory: { current: user, accounts: [first, second] } } }

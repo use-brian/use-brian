@@ -184,6 +184,8 @@ export type SessionMessage = {
    * predating the migration (treated as the session's bound assistant).
    */
   senderAssistantId: string | null
+  /** Public provider bot label; empty string marks a neutral external sender. */
+  publishedSenderName?: string | null
   /**
    * Outbound file attachments on assistant messages (migration 273, the
    * `sendFile` tool). Soft references to `workspace_files` rows — rendered
@@ -551,7 +553,7 @@ export async function findSessionByChannel(params: {
               WHERE workspace_id=(SELECT workspace_id FROM assistants WHERE id=sessions.assistant_id)),'legacy') as "classificationMode",
             created_at as "createdAt", last_active_at as "lastActiveAt"
      FROM sessions
-     WHERE assistant_id = $1 AND user_id = $2 AND channel_type = $3
+     WHERE session_recording_read_allowed(id) AND assistant_id = $1 AND user_id = $2 AND channel_type = $3
        AND channel_id = $4 AND app_id = $5`,
     [params.assistantId, params.userId, params.channelType, params.channelId, appId],
   )
@@ -679,7 +681,7 @@ export async function readSessionById(id: string): Promise<Session | null> {
             context_compartments as "contextCompartments",
             context_locked_at as "contextLockedAt",
             created_at as "createdAt", last_active_at as "lastActiveAt"
-     FROM sessions WHERE id = $1`,
+     FROM sessions WHERE id = $1 AND session_recording_read_allowed(id)`,
     [id],
   )
   return result.rows[0] ?? null
@@ -713,7 +715,7 @@ export async function findSessionAuthorityById(id: string): Promise<Pick<Session
             context_group_id as "contextGroupId",
             context_project_id as "contextProjectId",
             context_locked_at as "contextLockedAt"
-       FROM sessions WHERE id = $1`,
+       FROM sessions WHERE id = $1 AND session_recording_read_allowed(id)`,
     [id],
   )
   return result.rows[0] ?? null
@@ -1187,7 +1189,7 @@ export async function rebindSessionAssistant(
  */
 export async function countSessionTurns(sessionId: string): Promise<number> {
   const result = await query<{ count: string }>(
-    `SELECT COUNT(*) as count FROM session_messages WHERE session_id = $1 AND role IN ('user', 'assistant')`,
+    `SELECT COUNT(*) as count FROM session_messages WHERE session_id = $1 AND session_recording_read_allowed(session_id) AND role IN ('user', 'assistant')`,
     [sessionId],
   )
   return parseInt(result.rows[0]?.count ?? '0')
@@ -1215,12 +1217,12 @@ export async function countSessionHumans(
   const result = await query<{ sessionId: string; count: number }>(
     `SELECT h.session_id AS "sessionId", COUNT(DISTINCT h.user_id)::int AS count
        FROM (
-         SELECT s.id AS session_id, s.user_id FROM sessions s WHERE s.id = ANY($1::uuid[])
+         SELECT s.id AS session_id, s.user_id FROM sessions s WHERE s.id = ANY($1::uuid[]) AND session_recording_read_allowed(s.id)
          UNION
          SELECT m.session_id, m.sender_user_id FROM session_messages m
-          WHERE m.session_id = ANY($1::uuid[]) AND m.role = 'user' AND m.sender_user_id IS NOT NULL
+          WHERE m.session_id = ANY($1::uuid[]) AND session_recording_read_allowed(m.session_id) AND m.role = 'user' AND m.sender_user_id IS NOT NULL
          UNION
-         SELECT s.id, $2::uuid FROM sessions s WHERE s.id = ANY($1::uuid[])
+         SELECT s.id, $2::uuid FROM sessions s WHERE s.id = ANY($1::uuid[]) AND session_recording_read_allowed(s.id)
        ) h
       GROUP BY h.session_id`,
     [sessionIds, callerUserId],
@@ -1255,7 +1257,7 @@ export async function getSessionMessages(
   /** Host-owned current app transaction; its source receipts never travel on the wire. */
   admittedClient?: pg.PoolClient,
 ): Promise<SessionMessage[]> {
-  const conditions = ['session_id = $1']
+  const conditions = ['session_id = $1', 'session_recording_read_allowed(session_id)']
   const values: unknown[] = [sessionId]
   let paramIdx = 2
   if (opts?.excludeHeld) conditions.push('scope_held IS NOT TRUE')
@@ -1304,6 +1306,7 @@ export async function getSessionMessages(
             channel_message_id as "channelMessageId",
             sender_user_id as "senderUserId",
             sender_assistant_id as "senderAssistantId",
+            published_sender_name AS "publishedSenderName",
             attachments,
             workspace_id as "scopeWorkspaceId",
             user_id as "scopeUserId",
@@ -1332,12 +1335,12 @@ export async function getRecentSessionMessages(
               created_at AS "createdAt",reply_to_text AS "replyToText",
               topic_label AS "topicLabel",topic_confidence AS "topicConfidence",
               channel_message_id AS "channelMessageId",sender_user_id AS "senderUserId",
-              sender_assistant_id AS "senderAssistantId",attachments,
+              sender_assistant_id AS "senderAssistantId", published_sender_name AS "publishedSenderName",attachments,
               workspace_id AS "scopeWorkspaceId",user_id AS "scopeUserId",
               assistant_id AS "scopeAssistantId",sensitivity AS "scopeSensitivity",
               compartments AS "scopeCompartments",project_ids AS "scopeProjectIds",
               scope_version::text AS "scopeVersion",scope_held AS "scopeHeld"
-         FROM session_messages WHERE session_id=$1
+         FROM session_messages WHERE session_id=$1 AND session_recording_read_allowed(session_id)
          ORDER BY sequence_num DESC LIMIT $2
      ) recent ORDER BY "sequenceNum" ASC`,
     [sessionId, limit],
@@ -1358,8 +1361,9 @@ export async function getSessionMessageById(
             channel_message_id as "channelMessageId",
             sender_user_id as "senderUserId",
             sender_assistant_id as "senderAssistantId",
+            published_sender_name AS "publishedSenderName",
             attachments
-     FROM session_messages WHERE id = $1`,
+     FROM session_messages WHERE id = $1 AND session_recording_read_allowed(session_id)`,
     [messageId],
   )
   return result.rows[0] ?? null
@@ -1391,6 +1395,7 @@ export async function updateSessionMessageText(params: {
                channel_message_id as "channelMessageId",
                sender_user_id as "senderUserId",
                sender_assistant_id as "senderAssistantId",
+            published_sender_name AS "publishedSenderName",
                attachments`,
     [params.messageId, params.sessionId, JSON.stringify([{ type: 'text', text: params.text }])],
   )
@@ -1613,6 +1618,7 @@ export async function addSessionMessage(params: {
   senderUserId?: string | null
   /** The answering assistant (assistant rows in multi-assistant rooms — T9). */
   senderAssistantId?: string | null
+  publishedSenderName?: string | null
   /** Outbound file attachments (assistant rows only — `sendFile`, migration 273). */
   attachments?: SessionMessageAttachment[]
   /** Canonical input envelope. Required for new workspace input rows. */
@@ -1631,11 +1637,11 @@ export async function addSessionMessage(params: {
   const sql =
     `INSERT INTO session_messages
        (session_id, role, content, sequence_num,
-        reply_to_text, topic_label, topic_confidence, channel_message_id, sender_user_id, sender_assistant_id, attachments,
+        reply_to_text, topic_label, topic_confidence, channel_message_id, sender_user_id, sender_assistant_id, attachments, published_sender_name,
         workspace_id, user_id, assistant_id, sensitivity, compartments, project_ids, scope_version, scope_held)
      VALUES ($1, $2, $3,
        COALESCE((SELECT MAX(sequence_num) FROM session_messages WHERE session_id = $1), 0) + 1,
-       $4, $5, $6, $7, $8, $9, $10,
+       $4, $5, $6, $7, $8, $9, $10, $19,
        $11, $12, $13, $14, $15, $16, $17, $18
      )
      RETURNING id, session_id as "sessionId", role, content,
@@ -1646,6 +1652,7 @@ export async function addSessionMessage(params: {
                channel_message_id as "channelMessageId",
                sender_user_id as "senderUserId",
                sender_assistant_id as "senderAssistantId",
+            published_sender_name AS "publishedSenderName",
                attachments`
 
   const write = async (db: Pick<pg.ClientBase, 'query'>): Promise<SessionMessage> => {
@@ -1707,6 +1714,7 @@ export async function addSessionMessage(params: {
       scope?.projectIds ?? null,
       scope ? 1 : null,
       scope ? false : null,
+      params.publishedSenderName ?? null,
     ]
     const result = await db.query<SessionMessage>(sql, values)
     const stored = result.rows[0]
@@ -1772,7 +1780,7 @@ export async function getSessionTopicLabels(sessionId: string, limit = 20): Prom
   const result = await query<{ topicLabel: string }>(
     `SELECT DISTINCT ON (topic_label) topic_label as "topicLabel"
      FROM session_messages
-     WHERE session_id = $1 AND topic_label IS NOT NULL
+     WHERE session_id = $1 AND session_recording_read_allowed(session_id) AND topic_label IS NOT NULL
      ORDER BY topic_label, sequence_num DESC
      LIMIT $2`,
     [sessionId, limit],
@@ -1824,7 +1832,7 @@ export async function findSessionMessageByChannelTriple(
      FROM session_messages sm
      JOIN sessions s ON s.id = sm.session_id
      JOIN assistants a ON a.id = s.assistant_id
-     WHERE s.channel_type = $1
+     WHERE session_recording_read_allowed(s.id) AND s.channel_type = $1
        AND (
          s.channel_id = $2
          OR (
@@ -1891,7 +1899,7 @@ export async function findSessionMessageByChannelId(
             channel_message_id as "channelMessageId",
             sender_user_id as "senderUserId"
      FROM session_messages
-     WHERE session_id = $1 AND channel_message_id = $2
+     WHERE session_id = $1 AND session_recording_read_allowed(session_id) AND channel_message_id = $2
      LIMIT 1`,
     [sessionId, channelMessageId],
   )
@@ -1919,7 +1927,7 @@ export async function findSlackVisibleMessageByChannelId(params: {
             sm.channel_message_id as "channelMessageId"
      FROM session_messages sm
      JOIN sessions s ON s.id = sm.session_id
-     WHERE s.assistant_id = $1
+     WHERE session_recording_read_allowed(s.id) AND s.assistant_id = $1
        AND s.channel_type = 'slack'
        AND (
          s.channel_id = $2
@@ -1951,7 +1959,7 @@ export async function truncateMessagesFrom(
   // Find the message to get session + sequence
   const info = await query<{ sessionId: string; sequenceNum: number }>(
     `SELECT session_id as "sessionId", sequence_num as "sequenceNum"
-     FROM session_messages WHERE id = $1`,
+     FROM session_messages WHERE id = $1 AND session_recording_read_allowed(session_id)`,
     [messageId],
   )
   if (info.rows.length === 0) return { deleted: 0, sessionId: null, deletedMessages: [] }
@@ -1978,7 +1986,7 @@ export async function truncateMessagesFrom(
             channel_message_id as "channelMessageId",
             sender_user_id as "senderUserId"
      FROM session_messages
-     WHERE session_id = $1 AND sequence_num >= $2
+     WHERE session_id = $1 AND session_recording_read_allowed(session_id) AND sequence_num >= $2
      ORDER BY sequence_num ASC`,
     [sessionId, sequenceNum],
   )
@@ -2012,7 +2020,7 @@ export async function getPreferredChannel(
   const result = await query<{ channelType: string; channelId: string }>(
     `SELECT channel_type as "channelType", channel_id as "channelId"
      FROM sessions
-     WHERE assistant_id = $1 AND user_id = $2
+     WHERE session_recording_read_allowed(id) AND assistant_id = $1 AND user_id = $2
        AND ${sessionKindSql.proactiveDeliveryTransport('sessions')}
        AND ${sessionKindSql.notInbox('sessions')}
        AND channel_id <> 'default'
@@ -2067,7 +2075,7 @@ export async function listSessionsForWorkspaceSystem(
   opts: { limit: number; channelType?: string },
 ): Promise<WorkspaceSessionSummary[]> {
   const limit = Math.max(1, Math.min(opts.limit, 50))
-  const conditions = ['a.workspace_id = $1', 'a.placement_department_id IS NULL', "s.recording_revision IS NULL"]
+  const conditions = ['a.workspace_id = $1', 'a.placement_department_id IS NULL', "s.recording_revision IS NULL", "session_recording_read_allowed(s.id)"]
   const values: unknown[] = [workspaceId]
   let paramIdx = 2
 
@@ -2127,7 +2135,7 @@ export async function listSessionsByChannelForWorkspaceSystem(params: {
      WHERE a.workspace_id = $1
        AND s.channel_type = $2
        AND s.channel_id = $3
-       AND s.recording_revision IS NULL
+       AND s.recording_revision IS NULL AND session_recording_read_allowed(s.id)
      ORDER BY s.last_active_at DESC
      LIMIT $4`,
     [params.workspaceId, params.channelType, params.channelId, limit],
@@ -2163,7 +2171,7 @@ export async function getSessionTranscriptForWorkspaceSystem(
     `SELECT s.id
      FROM sessions s
      JOIN assistants a ON a.id = s.assistant_id
-     WHERE s.id = $1 AND a.workspace_id = $2 AND s.recording_revision IS NULL
+     WHERE s.id = $1 AND a.workspace_id = $2 AND s.recording_revision IS NULL AND session_recording_read_allowed(s.id)
      LIMIT 1`,
     [sessionId, workspaceId],
   )

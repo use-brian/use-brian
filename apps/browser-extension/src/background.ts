@@ -27,6 +27,7 @@ import type { LocalControlMode } from './protocol.js'
 
 import { ProtectedFill, denied } from './protected-fill.js'
 import { installAssistantChat, pairedChatIdentity, pageEvidence } from './assistant-chat.js'
+import { createAccountSignIn } from './account-switching.js'
 
 const protectedFill = new ProtectedFill(chrome.storage.local)
 const executor = new TabExecutor()
@@ -657,6 +658,7 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
 })
 
 assistantChat = installAssistantChat({
+  openSignIn: createAccountSignIn({ appOrigin: () => getStored('assistantAppOrigin'), matches: pairingMatches, tabs: chrome.tabs, windows: chrome.windows }),
   identity: async () => pairedChatIdentity((await getStored('sessionToken')) ?? (await getStored('pairingToken'))),
   ready: () => client.getState() === 'ready',
   accountStore: chrome.storage.session,

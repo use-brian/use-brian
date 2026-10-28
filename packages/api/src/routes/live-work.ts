@@ -325,7 +325,7 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
                              AND v.id <> s.assistant_id
                              AND v.workspace_id = a.workspace_id
        LEFT JOIN users u ON u.id = s.user_id
-      WHERE a.workspace_id = $1 AND feed_draft_audience_allowed(s.id)
+      WHERE a.workspace_id = $1 AND session_recording_read_allowed(s.id) AND feed_draft_audience_allowed(s.id)
         -- An Office file's thread is read by the file's audience only; its
         -- live view is the file's Brian tab (office.md "Brian conversation in the file").
         AND ${sessionKindSql.conversationLane('s')}

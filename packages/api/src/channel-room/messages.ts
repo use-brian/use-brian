@@ -4,7 +4,7 @@ import type { PoolClient } from 'pg'
 import { getPool } from '../db/client.js'
 import { addSessionMessage, type SessionMessage } from '../db/sessions.js'
 
-type RoomMessageInput = Omit<Parameters<typeof addSessionMessage>[0], 'role' | 'derivation'> & { role: 'user' }
+type RoomMessageInput = Omit<Parameters<typeof addSessionMessage>[0], 'role' | 'derivation'> & { role: 'user' | 'assistant' }
 type Client = Pick<PoolClient, 'query'>
 
 /** Reuse a provider input atomically, including rows already saved passively.
@@ -27,10 +27,10 @@ export async function appendChannelRoomMessage(
         `SELECT id,session_id AS "sessionId",role,content,sequence_num AS "sequenceNum",created_at AS "createdAt",
                 reply_to_text AS "replyToText",topic_label AS "topicLabel",topic_confidence AS "topicConfidence",
                 channel_message_id AS "channelMessageId",sender_user_id AS "senderUserId",
-                sender_assistant_id AS "senderAssistantId",attachments
-           FROM session_messages WHERE session_id=$1 AND role='user' AND channel_message_id=$2
+                sender_assistant_id AS "senderAssistantId",published_sender_name AS "publishedSenderName",attachments
+           FROM session_messages WHERE session_id=$1 AND role=$3 AND channel_message_id=$2
           ORDER BY sequence_num,id LIMIT 1`,
-        [input.sessionId, input.channelMessageId],
+        [input.sessionId, input.channelMessageId, input.role],
       )
       if (existing.rows[0]) return { message: existing.rows[0], created: false }
     }

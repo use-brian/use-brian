@@ -34,7 +34,7 @@ END $$;
 -- by the original callable after alias narrowing, never during this safety phase.
 DO $fixture_guard_shape$
 DECLARE guard pg_proc;canonical_owner oid;previous_oid oid;source_oid oid;dispatcher_oid oid;
- pinned boolean:=false;feedback boolean:=false;amended boolean:=false;history boolean:=false;helper pg_proc;
+ pinned boolean:=false;feedback boolean:=false;amended boolean:=false;history boolean:=false;privacy boolean:=false;helper pg_proc;
  matched integer;pins text;actual_oids oid[];expected_oids oid[];expected_body text;
 BEGIN
  SELECT * INTO guard FROM pg_proc WHERE oid=to_regprocedure('public.application_memory_statement_helpers_current()');
@@ -43,9 +43,10 @@ BEGIN
   feedback:=EXISTS(SELECT FROM public._migrations WHERE name='8112_native_feedback_outcome_projection.sql');
   amended:=EXISTS(SELECT FROM public._migrations WHERE name='8113_native_memory_statement_helper_projection_guard.sql');
   history:=EXISTS(SELECT FROM public._migrations WHERE name='8128_native_memory_history_admission.sql');
+  privacy:=EXISTS(SELECT FROM public._migrations WHERE name='8135_channel_recording_privacy_hold.sql');
  END IF;
  IF guard.oid IS NULL THEN
-  IF pinned OR feedback OR amended OR history THEN RAISE EXCEPTION 'Unknown fixture Memory guard: missing installed guard' USING ERRCODE='55000';END IF;
+  IF pinned OR feedback OR amended OR history OR privacy THEN RAISE EXCEPTION 'Unknown fixture Memory guard: missing installed guard' USING ERRCODE='55000';END IF;
   RETURN; -- Fresh/pre8111 prefix, including the explicit new-disposable callback.
  END IF;
  IF NOT pinned OR amended AND NOT feedback THEN RAISE EXCEPTION 'Unknown fixture Memory guard: migration phase' USING ERRCODE='55000';END IF;
@@ -200,11 +201,18 @@ BEGIN
  previous_oid:=to_regprocedure('public.application_field_projection_state_before_feedback_outcome(uuid,jsonb,text,uuid,text,text,text[])')::oid;
  source_oid:=to_regprocedure('public.read_entity_derivation_source(uuid,text,uuid)')::oid;
  dispatcher_oid:=to_regprocedure('public.application_field_projection_state(uuid,jsonb,text,uuid,text,text,text[])')::oid;
- IF (NOT history AND matched<>121 OR history AND matched<>122) OR cardinality(expected_oids)<>120 OR array_position(expected_oids,NULL) IS NOT NULL
+ IF (matched<>(CASE WHEN privacy THEN 126 WHEN history THEN 122 ELSE 121 END)) OR cardinality(expected_oids)<>120 OR array_position(expected_oids,NULL) IS NOT NULL
   OR previous_oid IS NULL OR source_oid IS NULL OR dispatcher_oid IS NULL OR previous_oid=dispatcher_oid
   OR actual_oids[1:120] IS DISTINCT FROM expected_oids OR actual_oids[121] IS DISTINCT FROM dispatcher_oid
-  OR (SELECT count(DISTINCT function_oid) FROM unnest(actual_oids) identities(function_oid))<>(CASE WHEN history THEN 122 ELSE 121 END) THEN
+  OR (SELECT count(DISTINCT function_oid) FROM unnest(actual_oids) identities(function_oid))<>(CASE WHEN privacy THEN 126 WHEN history THEN 122 ELSE 121 END) THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: closed pin identities' USING ERRCODE='55000';END IF;
+ IF privacy AND (NOT history OR actual_oids[123:126] IS DISTINCT FROM ARRAY[
+  to_regprocedure('public.session_recording_read_allowed(uuid)')::oid,
+  to_regprocedure('public.recording_source_read_allowed(uuid,text,uuid)')::oid,
+  to_regprocedure('public.guard_session_recording_privacy()')::oid,
+  to_regprocedure('public.refuse_quarantined_recording_message()')::oid]
+  OR array_position(actual_oids[123:126],NULL) IS NOT NULL) THEN
+  RAISE EXCEPTION 'Unknown fixture Memory guard: recording privacy identities' USING ERRCODE='55000';END IF;
  IF history THEN
   SELECT * INTO helper FROM pg_proc WHERE oid=to_regprocedure('public.application_memory_history_status(uuid,uuid,text)');
   IF helper.oid IS NULL OR actual_oids[122] IS DISTINCT FROM helper.oid
@@ -338,6 +346,15 @@ BEGIN
  IF k='external_source' THEN RETURN external_source_snapshot(w,i);END IF;
  RETURN read_entity_derivation_source_before_memory_successor(w,k,i);
 END $fixture_original_source$,pins);
+ END IF;
+ IF privacy THEN
+  -- 8135 keeps the reviewed source normalization and adds one exact early
+  -- refusal to its complete feedback body. Only the four named pins expand.
+  IF array_length(string_to_array(expected_body,E'BEGIN\n IF k=''''feedback_event'''' THEN'),1)<>2 THEN
+   RAISE EXCEPTION 'Unknown fixture Memory guard: recording privacy body shape' USING ERRCODE='55000';END IF;
+  expected_body:=replace(expected_body,'SELECT count(*)=122','SELECT count(*)=126');
+  expected_body:=replace(expected_body,E'BEGIN\n IF k=''''feedback_event'''' THEN',
+   E'BEGIN\n -- Recording privacy admission precedes body selection.\n IF NOT recording_source_read_allowed(w,k,i) THEN RETURN NULL;END IF;\n IF k=''''feedback_event'''' THEN');
  END IF;
  IF guard.prosrc IS DISTINCT FROM expected_body THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: complete generated body' USING ERRCODE='55000';END IF;

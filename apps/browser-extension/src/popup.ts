@@ -23,14 +23,78 @@ async function refreshStatus(): Promise<void> {
   // the green state.
   const granted = status.hasControl !== false
   statusBox.classList.toggle('ready', status.state === 'ready' && !status.stopped && granted)
-  statusText.textContent = statusLine(status)
+  statusText.textContent = status.state === 'unpaired' && !status.stopped && granted
+    ? 'Browser control is not connected. Sign in above or use Advanced connection.'
+    : statusLine(status)
   // Staleness does NOT clear the green dot: the socket really is up. It is a
   // second fact about the install, shown beside the first rather than instead.
   const warning = buildWarning(status)
   buildWarningBox.textContent = warning ?? ''
   buildWarningBox.hidden = warning === null
   buildLineBox.textContent = buildLine(status)
+  if (!accountPort) connectAccount()
+  postAccount('status')
 }
+
+type AccountConnection = {
+  connected?: boolean
+  workspaceName?: string
+  signInPending?: boolean
+  signInExpired?: boolean
+  accountDirectory?: { current: { name: string; email: string } }
+  workspaceDirectory?: { active: { name: string } }
+  accountSetup?: { automatic?: boolean; pairing?: boolean; failed?: boolean } | null
+}
+let accountPort: chrome.runtime.Port | null = null
+let accountState: AccountConnection = {}
+const accountError = (message: string) => {
+  const node = el('account-error')
+  node.textContent = message; node.hidden = !message
+}
+function renderAccount() {
+  const account = accountState.accountDirectory?.current
+  const workspace = accountState.workspaceDirectory?.active.name || accountState.workspaceName
+  const setup = accountState.accountSetup
+  el('account-status').textContent = accountState.connected ? 'Your account and browser are connected.'
+    : setup?.pairing ? 'Connecting this browser to your workspace...'
+    : setup?.failed ? 'This browser could not connect. Retry connection or open Brian to check your account.'
+    : setup && !setup.automatic ? 'Choose your browser profile in the chat panel, or use Advanced connection.'
+    : accountState.signInPending ? 'Finish signing in and choose a workspace in the Brian tab.'
+    : accountState.signInExpired ? 'Sign-in has not connected yet. Open Brian to check your account, then try again.'
+    : account ? 'Signed in. Retry to connect this browser.' : 'Sign in to connect this browser automatically.'
+  const identity = el('account-identity')
+  identity.textContent = [account?.email || account?.name, workspace].filter(Boolean).join(' · ')
+  identity.hidden = !identity.textContent
+  const signIn = el<HTMLButtonElement>('sign-in')
+  signIn.textContent = accountState.signInPending ? 'Open sign-in tab' : account || accountState.connected ? 'Open Brian' : 'Sign in to Brian'
+  signIn.classList.toggle('primary', !account || accountState.connected === true)
+  el('cancel-sign-in').hidden = !accountState.signInPending
+  el('account-retry').hidden = !account || accountState.connected === true || setup?.pairing === true
+}
+function connectAccount() {
+  try {
+    const next = chrome.runtime.connect({ name: 'brian-assistant-settings' })
+    accountPort = next
+    next.onMessage.addListener(message => {
+      if (accountPort !== next) return
+      if (message.type === 'status') { accountState = message; if (message.connected) accountError(''); renderAccount() }
+      if (message.type === 'identity-reset') { accountState = {}; renderAccount() }
+      if (message.type === 'failure' || message.type === 'account-error') accountError(message.code === 'busy'
+        ? 'Finish the current task before changing the connection.'
+        : 'Connection could not finish. Open Brian, check your sign-in and workspace, then retry.')
+    })
+    next.onDisconnect.addListener(() => { if (accountPort === next) accountPort = null })
+  } catch { accountError('The extension connection is unavailable. Reopen settings and try again.') }
+}
+function postAccount(type: string) {
+  try { accountPort?.postMessage({ type }) }
+  catch { accountPort = null; accountError('The extension connection is unavailable. Reopen settings and try again.') }
+}
+el('sign-in').addEventListener('click', () => { accountError(''); if (!accountPort) connectAccount(); postAccount('sign-in') })
+el('cancel-sign-in').addEventListener('click', () => { accountError(''); postAccount('cancel-sign-in') })
+el('account-retry').addEventListener('click', () => { accountError(''); postAccount(accountState.accountSetup ? 'account-retry' : 'account-connect') })
+const advancedConnection = el<HTMLDetailsElement>('advanced-connection')
+if (window.location.hash === '#advanced-connection') advancedConnection.open = true
 
 async function loadStored(): Promise<void> {
   const stored = await chrome.storage.local.get(['relayUrl', PREAPPROVE_TAB_CONTROL_KEY])
@@ -65,11 +129,12 @@ el<HTMLButtonElement>('connect').addEventListener('click', () => {
       pairingToken: tokenInput.value.trim() || undefined,
     })
     if (!result?.ok) {
-      protectedError = 'Connect denied. A locked task can only be re-paired to the same account, workspace and profile.'
-      void refreshProtected()
+      const error = el('pairing-error')
+      error.textContent = 'Manual connection could not finish. Check the relay URL and token. A locked task can only be re-paired to the same account, workspace and browser profile.'
+      error.hidden = false; advancedConnection.open = true
       return
     }
-    protectedError = ''
+    el('pairing-error').hidden = true
     tokenInput.value = ''
     setTimeout(() => void refreshStatus(), 400)
   })()
@@ -124,6 +189,7 @@ async function refreshProtected(): Promise<void> {
   const panel = el<HTMLDetailsElement>('protected-fill')
   panel.classList.toggle('attention', attention)
   if (attention) panel.open = true
+  if (s?.needsRenewal === true) advancedConnection.open = true
 }
 for (const [id, allowed] of [['protected-approve',true],['protected-deny',false]] as const) {
   el(id).addEventListener('click', () => { void chrome.runtime.sendMessage({type:'protected-approval', allowed}).then(refreshProtected) })

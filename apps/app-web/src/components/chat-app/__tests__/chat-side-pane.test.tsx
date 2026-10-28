@@ -121,6 +121,25 @@ describe("[COMP:app-web/chat-side-pane] one right pane with tabs", () => {
     expect(pane.state.tabs).toHaveLength(2);
   });
 
+  it("enters and exits full view without remounting the tab; closing reopens in split view", () => {
+    const body = host.querySelector('[data-testid="work"]');
+    const clickNamed = (label: string) => act(() => host.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!.click());
+    clickNamed(en.chatApp.sidePane.fullView);
+    expect(pane.state.fullView).toBe(true);
+    expect(host.querySelector('[data-pane-full-view="true"]')).not.toBeNull();
+    expect(host.querySelector('[role="separator"]')).toBeNull();
+    expect(host.querySelector('[data-testid="work"]')).toBe(body);
+    clickNamed(en.chatApp.sidePane.exitFullView);
+    expect(pane.state.fullView).toBe(false);
+    expect(host.querySelector('[role="separator"]')).not.toBeNull();
+    expect(host.querySelector('[data-testid="work"]')).toBe(body);
+    clickNamed(en.chatApp.sidePane.fullView);
+    clickNamed(en.chatApp.sidePane.closePane);
+    act(() => host.querySelector<HTMLButtonElement>('[data-pane-toggle]')!.click());
+    expect(pane.state.fullView).toBe(false);
+    expect(host.querySelector('[role="separator"]')).not.toBeNull();
+  });
+
   it("is a resizable split beside the transcript, and a full-screen overlay on phones", () => {
     const aside = host.querySelector("#chat-side-pane")!;
     expect(aside.querySelector('[role="separator"]')).not.toBeNull();

@@ -5,11 +5,14 @@
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import { maxSensitivity, type ResourceScope } from '@use-brian/core'
+import { parseTopicChannelId, type TelegramTextDelivery } from '@use-brian/channels'
 import { getPool, query } from './db/client.js'
 import { readSessionById, type Session } from './db/sessions.js'
 import { appendChannelRoomMessage } from './channel-room/messages.js'
 import { admitChannelRoom, admitSessionCreate } from './workspace-access/session-create-admission.js'
 import { WorkspaceAccessError } from './workspace-access/policy.js'
+import type { ChannelIntegrationConfig } from './db/channel-integrations.js'
+import { hasTelegramWorkspaceConversationBinding, telegramConfiguredConversation } from './telegram-conversation-admission.js'
 
 export type RecordingPolicy = {
   id: string; conversationId: string; enabled: boolean; destination: 'personal' | 'workspace';
@@ -83,6 +86,15 @@ export async function telegramRecordingEnabled(integrationId: string, conversati
 export async function admitTelegramRecording(input: {
   integrationId: string; conversationId: string; assistantId: string; providerMessageId: string; text: string; senderUserId: string;
 }): Promise<RecordingAdmission | null> {
+  return appendTelegramRecording(input)
+}
+
+type RecordingMessage = {
+  integrationId: string; conversationId: string; assistantId: string; providerMessageId: string; text: string;
+  senderUserId?: string; role?: 'user' | 'assistant'; publishedSenderName?: string; expectedPolicy?: { id: string; revision: number };
+}
+
+async function appendTelegramRecording(input: RecordingMessage): Promise<RecordingAdmission | null> {
   const db = await getPool().connect()
   let policy: RecordingPolicy | undefined
   let owner: Awaited<ReturnType<typeof liveOwner>>
@@ -91,9 +103,23 @@ export async function admitTelegramRecording(input: {
     await lockWorkspace(db, input.integrationId)
     owner = await liveOwner(db, input.integrationId)
     if (!owner) throw unavailable()
-    await db.query(`INSERT INTO channel_recording_policies(integration_id,conversation_id,workspace_id,bot_id,owner_user_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, [input.integrationId,input.conversationId,owner.workspaceId,owner.botId,owner.ownerUserId])
+    if (!input.expectedPolicy) await db.query(`INSERT INTO channel_recording_policies(integration_id,conversation_id,workspace_id,bot_id,owner_user_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, [input.integrationId,input.conversationId,owner.workspaceId,owner.botId,owner.ownerUserId])
     policy = (await db.query<RecordingPolicy>(`SELECT ${cols} FROM channel_recording_policies WHERE workspace_id=$1 AND bot_id=$2 AND conversation_id=$3 AND owner_user_id=$4 FOR UPDATE`, [owner.workspaceId,owner.botId,input.conversationId,owner.ownerUserId])).rows[0]
     if (!policy?.enabled) throw unavailable()
+    if (input.expectedPolicy && (input.expectedPolicy.id !== policy.id || input.expectedPolicy.revision !== policy.revision)) throw unavailable()
+    if (input.role === 'assistant') {
+      // A public provider receipt grants no ambient reach into another recorder.
+      // Re-admit the target installation's exact conversation in this transaction.
+      const { chatId, messageThreadId } = parseTopicChannelId(input.conversationId)
+      const config = (await db.query<{ config: ChannelIntegrationConfig }>('SELECT config FROM channel_integrations WHERE id=$1 FOR SHARE', [input.integrationId])).rows[0]?.config ?? {}
+      const scope = telegramConfiguredConversation(config, chatId, messageThreadId)
+      if (scope === 'elsewhere' || scope !== 'owned' && !await hasTelegramWorkspaceConversationBinding(
+        owner.workspaceId, chatId, input.conversationId, messageThreadId, {
+          query: (sql, values) => db.query(sql, values),
+          getWorkspaceRole: async (userId, workspaceId) => (await db.query('SELECT role FROM workspace_members WHERE user_id=$1 AND workspace_id=$2', [userId,workspaceId])).rows[0]?.role ?? null,
+          now: Date.now,
+        })) throw unavailable()
+    }
     await db.query('UPDATE channel_recording_policies SET integration_id=$2 WHERE id=$1', [policy.id,input.integrationId])
     const prior = (await db.query<{ sessionId: string | null }>(`SELECT session_id AS "sessionId" FROM channel_recording_messages WHERE policy_id=$1 AND provider_message_id=$2`, [policy.id, input.providerMessageId])).rows[0]
     if (prior) { await db.query('COMMIT'); return null }
@@ -124,16 +150,55 @@ export async function admitTelegramRecording(input: {
     await db.query('INSERT INTO channel_recording_messages(policy_id,provider_message_id,session_id) VALUES($1,$2,$3)', [policy.id,input.providerMessageId,policy.sessionId])
     const stored = (await db.query<{ clearance: ResourceScope['sensitivity']; compartments: string[]; projectId: string | null }>(
       'SELECT effective_clearance AS clearance,context_compartments AS compartments,context_project_id AS "projectId" FROM sessions WHERE id=$1', [policy.sessionId])).rows[0]
-    await appendChannelRoomMessage({ sessionId: policy.sessionId!, role: 'user', content: [{ type: 'text', text: input.text }],
-      senderUserId: input.senderUserId, channelMessageId: input.providerMessageId, scope: {
+    await appendChannelRoomMessage({ sessionId: policy.sessionId!, role: input.role ?? 'user', content: [{ type: 'text', text: input.text }],
+      senderUserId: input.senderUserId, publishedSenderName: input.publishedSenderName, channelMessageId: input.providerMessageId, scope: {
         workspaceId: owner.workspaceId, userId: policy.destination === 'personal' ? owner.ownerUserId : null,
         assistantId: null, sensitivity: stored.clearance, compartments: stored.compartments, projectIds: stored.projectId ? [stored.projectId] : [],
       } }, db)
     await db.query('COMMIT')
   } catch (error) { await db.query('ROLLBACK'); throw error } finally { db.release() }
+  // Published receipt capture needs no transcript read or source-session join.
+  if (input.role === 'assistant') return null
   const session = await readSessionById(policy.sessionId!)
   if (!session) throw unavailable()
   return { policy, session, ownerUserId: owner!.ownerUserId, workspaceId: owner!.workspaceId }
+}
+
+/** Copy only text already published into the provider conversation. Candidate
+ * discovery is not admission: every target rechecks its live owner, provider
+ * binding, destination and epoch under the canonical writer's locks. */
+export async function recordDeliveredTelegramMessage(delivery: TelegramTextDelivery): Promise<void> {
+  if (!/^-[0-9]+(?::(?:topic|discussion):[0-9]+)?$/.test(delivery.channelId)
+    || !delivery.providerMessageId || !delivery.text) return
+  const { chatId } = parseTopicChannelId(delivery.channelId)
+  const candidates = await query<{ id: string; revision: number; integrationId: string; assistantId: string | null }>(
+    `SELECT p.id,p.revision,p.integration_id AS "integrationId",COALESCE(s.assistant_id,route.assistant_id) AS "assistantId"
+       FROM channel_recording_policies p JOIN channel_integrations ci ON ci.id=p.integration_id
+       JOIN channels c ON c.id=ci.channel_id
+       LEFT JOIN sessions s ON s.id=p.session_id AND s.recording_policy_id=p.id AND s.recording_revision=p.revision
+       LEFT JOIN LATERAL (SELECT ca.assistant_id FROM channel_assistants ca WHERE ca.channel_id=c.id
+         AND (ca.external_surface_id=$1 OR ca.external_surface_id=$2 OR ca.external_surface_id IS NULL)
+         ORDER BY CASE WHEN ca.external_surface_id=$1 THEN 0 WHEN ca.external_surface_id=$2 THEN 1 ELSE 2 END,ca.id LIMIT 1) route ON true
+      WHERE p.conversation_id=$1 AND p.enabled AND ci.channel_type='telegram' AND ci.status='active'
+        AND c.status='active' AND c.workspace_id=p.workspace_id AND ci.bot_user_id=p.bot_id
+        AND ci.recording_owner_user_id=p.owner_user_id ORDER BY p.workspace_id,p.id`, [delivery.channelId,chatId])
+  const failures: Error[] = []
+  for (const candidate of candidates.rows) {
+    if (!candidate.assistantId) continue
+    try {
+      await appendTelegramRecording({ integrationId: candidate.integrationId,conversationId: delivery.channelId,
+        assistantId: candidate.assistantId,providerMessageId: delivery.providerMessageId,text: delivery.text,
+        role: 'assistant',publishedSenderName: delivery.botUsername ? `@${delivery.botUsername}` : '',
+        expectedPolicy: { id: candidate.id,revision: candidate.revision } })
+    } catch (error) {
+      // Revocation, stop, destination changes and unowned provider conversations
+      // are expected exclusions. Operational recording failures remain visible.
+      if (error instanceof WorkspaceAccessError) continue
+      const failure = new Error(`telegram_reply_recording_failed: policy=${candidate.id} integration=${candidate.integrationId} message=${delivery.providerMessageId}`, { cause: error })
+      failures.push(failure)
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, 'telegram_reply_recording_failed')
 }
 
 export function recordingInputScope(recording: RecordingAdmission): ResourceScope {

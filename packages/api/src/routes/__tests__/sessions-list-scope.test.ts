@@ -43,6 +43,7 @@ import {
   getWorkspacePrimaryAssistant,
 } from '../../db/users.js'
 import { resolveUser } from '../route-helpers.js'
+import { getWorkspaceMembershipWithReadScopeSystem } from '../../db/workspace-store.js'
 
 const mockQuery = vi.mocked(query)
 const mockDefault = vi.mocked(getDefaultAssistant)
@@ -70,6 +71,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   mockResolveUser.mockResolvedValue({ id: USER_ID } as never)
   mockQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+  vi.mocked(getWorkspaceMembershipWithReadScopeSystem).mockResolvedValue({ clearance: 'internal', compartments: [], projectIds: null } as never)
 })
 
 describe('[COMP:api/sessions-list] GET /api/sessions workspace scoping', () => {
@@ -181,7 +183,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
     // so legacy null-origin and inbox rows stay visible there.
     expect(sql).toContain('app_origin IS NULL')
     expect(sql).toContain("anchor_kind IN ('none', 'inbox', 'channel')")
-    expect(params).toHaveLength(3)
+    expect(params).toHaveLength(5)
   })
 
   it('ignores scope=workspace without a workspaceId (falls back to the assistant list)', async () => {
@@ -209,7 +211,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
     expect(sql).toContain('s.channel_type as "channelType"')
     expect(sql).not.toContain('s.channel_type = $3')
     expect(sql).not.toContain("s.channel_type IN ('web'")
-    expect(params).toEqual([WS_ID, USER_ID])
+    expect(params).toEqual([WS_ID, USER_ID, null, null])
   })
 
   it('channels=all is ignored without scope=workspace', async () => {
@@ -222,7 +224,7 @@ describe('[COMP:api/sessions-list] doc-dock workspace-scope resume', () => {
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain("s.channel_type = 'web'")
     expect(sql).toContain("anchor_kind IN ('none', 'inbox', 'channel')")
-    expect(params).toHaveLength(3)
+    expect(params).toHaveLength(5)
   })
 })
 
@@ -261,7 +263,7 @@ describe('[COMP:api/sessions-list] Project paging', () => {
       .mockResolvedValueOnce({rows:[row('visible','internal')]} as never)
     const res=await request(makeApp()).get(`/api/sessions/workspace?workspaceId=${WS_ID}&contextProjectId=${project}`).expect(200)
     expect(res.body.map((r:{id:string})=>r.id)).toEqual(['visible'])
-    expect(mockQuery.mock.calls[0][1]).toEqual([WS_ID,project,null,null])
-    expect(mockQuery.mock.calls[1][1]).toEqual([WS_ID,project,'2026-01-01T00:00:00.000Z','hidden-99'])
+    expect(mockQuery.mock.calls[0][1]).toEqual([WS_ID,project,null,null,USER_ID])
+    expect(mockQuery.mock.calls[1][1]).toEqual([WS_ID,project,'2026-01-01T00:00:00.000Z','hidden-99',USER_ID])
   })
 })

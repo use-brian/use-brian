@@ -89,6 +89,12 @@ describe('[COMP:shared/brian-app-sdk] independent source evidence and sidecar co
     expect(()=>parseSourceAuthorizationRequest({...mutation,effect:{...effect,idempotencyKey:'different'}})).toThrow('source_protocol_invalid')
     expect(()=>parseSourceAuthorizationRequest({...mutation,effect:{...effect,input:{...input,extra:undefined}}})).toThrow('source_protocol_invalid')
     expect(parseSourceCapabilities({...capabilities,effectBinding:'command_v1'}).effectBinding).toBe('command_v1')
+    expect(parseSourceCapabilities({...capabilities,attendedActions:{idempotencyMetadataKey:'source/operation-key'}}).attendedActions)
+      .toEqual({idempotencyMetadataKey:'source/operation-key'})
+    for(const invalid of [{idempotencyMetadataKey:'authorization'},{idempotencyMetadataKey:'ub.source.v1'},{idempotencyMetadataKey:'source/operation-key',identity:'forged'}]){
+      expect(()=>parseSourceCapabilities({...capabilities,attendedActions:invalid})).toThrow('source_protocol_invalid')
+    }
+    expect(()=>parseSourceCapabilities({...capabilities,reconciliation:false,attendedActions:{idempotencyMetadataKey:'source/operation-key'}})).toThrow('source_protocol_invalid')
     expect(()=>parseSourceCapabilities({...capabilities,effectBinding:'future'})).toThrow('source_protocol_invalid')
   })
   it('treats absent/denied decisions as denial and refuses unknown or duplicate pairs', () => {
