@@ -900,13 +900,30 @@ export class TabExecutor {
     // for sites the user did not name.
     const siteCookies = cookies.filter((c) => hostMatchesSite(String(c.domain ?? ''), site)).map(toStorageStateCookie)
 
-    const evaluated = await this.cdp<{ result?: { value?: Array<[string, string]> } }>(tabId, 'Runtime.evaluate', {
-      expression: 'Object.entries(localStorage)',
-      returnByValue: true,
-    })
     const origin = parsed?.origin ?? ''
+    const storageRefusal = new ExecutorError(
+      'The page changed or its storage could not be captured. Retry saving this login from the original site.',
+      'site_mismatch',
+    )
+    let evaluated: { result?: { value?: unknown }; exceptionDetails?: unknown }
+    try {
+      evaluated = await this.cdp<typeof evaluated>(tabId, 'Runtime.evaluate', {
+        // Check and read synchronously in the page: an earlier tab URL check
+        // cannot stop a navigation during the awaited cookie calls above.
+        expression: `location.origin === ${JSON.stringify(origin)} ? Object.entries(localStorage) : null`,
+        returnByValue: true,
+      })
+    } catch (error) {
+      if (isDetachedError(error)) throw error
+      throw storageRefusal
+    }
+    const entries = evaluated?.result?.value
+    if (evaluated?.exceptionDetails || !Array.isArray(entries) || entries.some(entry =>
+      !Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || typeof entry[1] !== 'string')) {
+      throw storageRefusal
+    }
     const localStorage: Record<string, Record<string, string>> = {
-      [origin]: Object.fromEntries(evaluated.result?.value ?? []),
+      [origin]: Object.fromEntries(entries),
     }
 
     return { site, cookies: siteCookies, localStorage, capturedAt: new Date().toISOString() }
