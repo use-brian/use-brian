@@ -828,7 +828,7 @@ export function CommentThreadBody({
         type="button"
         onClick={() => void resolve()}
         aria-label={t.resolve}
-        className={`absolute right-1 top-1 z-10 inline-flex size-11 items-center justify-center rounded-md text-muted-foreground/70 hover:bg-accent hover:text-foreground sm:right-2 sm:top-2 sm:size-7${
+        className={`absolute right-1 top-1 z-10 inline-flex size-11 items-center justify-center rounded-md text-muted-foreground/70 hover:bg-accent hover:text-foreground sm:right-2 sm:top-2 ${inline ? "md:size-7" : "sm:size-7"}${
           // Notion reveals the resolve control on hover; the popover/rail keep it
           // always visible (a fixed box with no surrounding page to hover off).
           // The hover reveal only applies from `md` (responsive contract M2):
@@ -1042,19 +1042,20 @@ export function CommentThreadBody({
             uploadProgress={rec.uploadProgress}
             message={rec.message}
           />
-          <div className="mt-1 flex items-center gap-1.5">
+          <div className={`mt-1 flex items-center gap-1.5${inline ? " flex-wrap md:flex-nowrap" : ""}`}>
             {aiReply ? (
               <button
                 type="button"
                 aria-label={tAttach.attach}
                 onClick={() => fileInputRef.current?.click()}
                 disabled={rec.busy}
-                className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50 sm:size-7"
+                className={`inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50 ${inline ? "md:size-7" : "sm:size-7"}`}
               >
                 <Paperclip className="size-[18px]" />
               </button>
             ) : null}
             <ComposerControls
+              phoneTargets={!!inline}
               model={controls.model}
               onModelChange={controls.setModel}
               plan={controls.plan}
@@ -1067,10 +1068,10 @@ export function CommentThreadBody({
               // (it disables with AI-reply off, like the model picker).
               aiReply={aiReply}
               onAiReplyChange={setAiReply}
-              className="flex-1"
+              className={inline ? "min-w-0 flex-[1_1_10rem] md:flex-1" : "flex-1"}
             />
             {/* Send is the primary action of every comment surface: 44px on a
-                phone, the 28px desktop button from `sm` (responsive contract M3). */}
+                phone, the 28px desktop button from `md` in the inline Page band (responsive contract M3). */}
             <button
               type="button"
               onClick={() => void sendReply()}
@@ -1082,7 +1083,7 @@ export function CommentThreadBody({
                 (!draft.trim() && !(aiReply && (att.hasReady || pendingRecordings.length > 0)))
               }
               aria-label={busy ? t.sending : t.send}
-              className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground sm:size-7"
+              className={`inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground ${inline ? "md:size-7" : "sm:size-7"}`}
             >
               <ArrowUp className="size-4" />
             </button>

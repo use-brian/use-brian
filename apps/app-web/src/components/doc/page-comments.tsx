@@ -345,19 +345,20 @@ export function PageComments({
                 message={rec.message}
               />
             ) : null}
-            <div className="mt-1 flex items-center gap-1.5">
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 md:flex-nowrap">
               {aiReply ? (
                 <button
                   type="button"
                   aria-label={tAttach.attach}
                   onClick={() => fileInputRef.current?.click()}
                   disabled={rec.busy}
-                  className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50 sm:size-7"
+                  className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50 md:size-7"
                 >
                   <Paperclip className="size-[18px]" />
                 </button>
               ) : null}
               <ComposerControls
+                phoneTargets
                 model={controls.model}
                 onModelChange={controls.setModel}
                 plan={controls.plan}
@@ -369,9 +370,9 @@ export function PageComments({
                   aiReply={aiReply}
                 onAiReplyChange={setAiReply}
                 selectSide="bottom"
-                className="flex-1"
+                className="min-w-0 flex-[1_1_10rem] md:flex-1"
               />
-              {/* 44px on a phone, 28px from `sm` (responsive contract M3). */}
+              {/* 44px on a phone, 28px from `md` (responsive contract M3). */}
               <button
                 type="button"
                 onClick={() => void post()}
@@ -382,7 +383,7 @@ export function PageComments({
                   (!draft.trim() && !(aiReply && (att.hasReady || pendingRecordings.length > 0)))
                 }
                 aria-label={busy ? t.sending : t.send}
-                className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground sm:size-7"
+                className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground md:size-7"
               >
                 <ArrowUp className="size-4" />
               </button>

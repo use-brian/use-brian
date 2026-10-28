@@ -90,6 +90,7 @@ async function mount(node: React.ReactNode) {
 
 beforeEach(() => {
   mockFetchMessages.mockReset().mockResolvedValue(messages);
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -135,6 +136,44 @@ describe("[COMP:app-web/comment-thread-body] collapsed inline thread expands on 
       textarea!.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
     });
     expect(onExpand).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("[COMP:app-web/comment-thread-body] presentation preserves reply state", () => {
+  it.each([false, true])("keeps the unsent reply and selected model with inline=%s", async (inline) => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    const onExpand = vi.fn();
+    try {
+      await mount(<CommentThreadBody thread={thread} pageId="p1" workspaceId="ws1" assistantId="a1"
+        currentUser={{ id: "u1", name: "Ada" }} assistant={{ id: "a1", name: "Doc", iconSeed: 7 }}
+        onChanged={noop} onResolved={noop} inline={inline} collapsed={inline} onExpand={onExpand} />);
+      const textarea = container!.querySelector<HTMLTextAreaElement>("textarea")!;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!;
+      act(() => { setter.call(textarea, "Keep this reply unsent"); textarea.dispatchEvent(new Event("input", { bubbles: true })); });
+      const trigger = container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.chat.modelLabel}"]`)!;
+      await act(async () => trigger.click());
+      const pro = [...document.querySelectorAll<HTMLElement>("[role=option]")].find(item => item.textContent?.includes(dict.chat.modelProDesc))!;
+      expect(pro).toBeTruthy();
+      await act(async () => pro.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })));
+      await act(async () => pro.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })));
+      await act(async () => pro.click());
+      expect(trigger.textContent).toContain(dict.chat.modelPro);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      expect(onExpand).not.toHaveBeenCalled();
+      const toggle = container!.querySelector<HTMLButtonElement>("button[aria-pressed]")!;
+      act(() => toggle.click());
+      expect(trigger.disabled).toBe(true);
+      expect(container!.querySelector(`[aria-label="${dict.attachments.attach}"]`)).toBeNull();
+      expect(textarea.value).toBe("Keep this reply unsent");
+      expect(container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.comments.send}"]`)!.disabled).toBe(false);
+      act(() => toggle.click());
+      expect(trigger.disabled).toBe(false);
+      expect(trigger.textContent).toContain(dict.chat.modelPro);
+      expect(container!.querySelector(`[aria-label="${dict.attachments.attach}"]`)).toBeTruthy();
+      expect(container!.querySelector("textarea")).toBe(textarea);
+      expect(textarea.value).toBe("Keep this reply unsent");
+      expect(onExpand).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
   });
 });
 

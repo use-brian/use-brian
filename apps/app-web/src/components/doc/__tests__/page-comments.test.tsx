@@ -230,6 +230,7 @@ describe("[COMP:app-web/page-comments] posting hands the comment to the thread b
 
   beforeEach(() => {
     mockCreateThread.mockReset().mockResolvedValue(newThread);
+    localStorage.clear();
   });
 
   afterEach(() => {
@@ -362,6 +363,41 @@ describe("[COMP:app-web/page-comments] posting hands the comment to the thread b
       aiReply: false,
       researchMode: false,
     });
+  });
+
+  it("keeps the starter draft and chosen tier through AI-off and back without posting", async () => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    const onSubmitted = vi.fn();
+    try {
+      mount(<PageComments pageId="p1" workspaceId="ws1" assistantId="a1" threads={[]} onPick={noop} onSubmitted={onSubmitted} />);
+      const textarea = container!.querySelector<HTMLTextAreaElement>("textarea")!;
+      act(() => typeInto(textarea, "Keep this comment unsent"));
+      const trigger = container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.chat.modelLabel}"]`)!;
+      await act(async () => trigger.click());
+      const pro = [...document.querySelectorAll<HTMLElement>("[role=option]")].find(item => item.textContent?.includes(dict.chat.modelProDesc))!;
+      await act(async () => pro.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })));
+      await act(async () => pro.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })));
+      await act(async () => pro.click());
+      expect(trigger.textContent).toContain(dict.chat.modelPro);
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      const toggle = container!.querySelector<HTMLButtonElement>("button[aria-pressed]")!;
+      act(() => toggle.click());
+      expect(toggle.getAttribute("aria-pressed")).toBe("false");
+      expect(trigger.disabled).toBe(true);
+      expect(container!.querySelector(`[aria-label="${dict.attachments.attach}"]`)).toBeNull();
+      expect(textarea.value).toBe("Keep this comment unsent");
+      const send = container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.comments.send}"]`)!;
+      expect(send.disabled).toBe(false);
+      act(() => toggle.click());
+      expect(trigger.disabled).toBe(false);
+      expect(trigger.textContent).toContain(dict.chat.modelPro);
+      expect(container!.querySelector(`[aria-label="${dict.attachments.attach}"]`)).toBeTruthy();
+      expect(container!.querySelectorAll("textarea")).toHaveLength(1);
+      expect(container!.querySelector("textarea")).toBe(textarea);
+      expect(textarea.value).toBe("Keep this comment unsent");
+      expect(mockCreateThread).not.toHaveBeenCalled();
+      expect(onSubmitted).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("does not post an empty comment (send disabled with no draft, no files)", () => {
