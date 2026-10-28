@@ -178,7 +178,6 @@ import {
 import { authFetch } from "@/lib/auth-fetch";
 import { useT, useLocale, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-import { isPhoneViewport } from "@/lib/viewport";
 import { Skeleton } from "@/components/skeleton";
 import { listWorkspaceAssistants, type WorkspaceAssistantSummary } from "@/lib/api/views";
 import {
@@ -587,9 +586,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /**
    * The side pane of the open chat (chat-parity D4-D8). Its tabs and whether
    * it is open live in the per-chat store, not in this component, so they
-   * survive leaving `/chat` (T6). Phones seed it closed (T11).
+   * survive leaving `/chat` (T6). Every chat starts with it closed.
    */
-  const pane = useChatPane(workspaceId, activeSessionId, () => !isPhoneViewport());
+  const pane = useChatPane(workspaceId, activeSessionId);
   // Saved research of this chat, matched to the replies that delivered it.
   const sessionResearch = useSessionResearch(workspaceId, activeSessionId);
   // One hero context picker for both views (chat-parity T5). A fresh personal
@@ -1516,7 +1515,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         workspaceId,
         sessionIdRef.current,
         (state) => openInPane(state, ref, options),
-        !isPhoneViewport(),
       );
     },
     [workspaceId],
@@ -1537,7 +1535,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             event.type === "tab-updated"
               ? refreshPaneRef(state, { kind: "browser", browserId: event.browserId, url: event.url, title: event.title })
               : openInPane(state, { kind: "browser", browserId: event.browserId, url: event.url }),
-          !isPhoneViewport(),
         );
       }),
     [workspaceId],
@@ -1569,7 +1566,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 url: null,
                 title: task.injectedSite,
               }),
-            !isPhoneViewport(),
           );
         })
         .catch(() => computerTabsRef.current.delete(sessionId));
@@ -4719,7 +4715,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         </section>
       ) : (
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-      <section className="@container/chat-reading flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* Full view keeps the transcript and unsent composer draft mounted. */}
+      <section
+        style={pane.state.open && pane.state.fullView ? { display: "none" } : undefined}
+        className="@container/chat-reading flex min-h-0 min-w-0 flex-1 flex-col"
+      >
         <div
           ref={scrollRef}
           data-chat-transcript

@@ -9085,6 +9085,8 @@ export const ja: Dictionary = {
       work: "作業",
       closeTab: "{title} を閉じる",
       closePane: "ペインを閉じる",
+      fullView: "全体表示",
+      exitFullView: "全体表示を終了",
       openPane: "サイドペインを開く",
       openPaneCount: "サイドペインを開く（タブ {count} 件）",
       back: "戻る",

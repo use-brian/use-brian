@@ -1,6 +1,11 @@
 /* Fresh chats keep the growing input at the bottom while the greeting uses
    the remaining space. Scoped to Chat, including desktop split panes. */
 .sidePaneResize { display: contents; }
+.sidePaneFullView {
+  width: 100% !important;
+  max-width: 100%;
+  border-left: 0;
+}
 
 .welcomeLayout {
   flex: 1 0 auto;
@@ -31,7 +36,7 @@
   }
 }
 
-@container chat-reading (max-width: 959px) {
+@container chat-reading (max-width: 767px) {
   .sidePane {
     position: absolute;
     inset: 0;

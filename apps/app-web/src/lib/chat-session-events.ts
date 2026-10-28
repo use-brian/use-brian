@@ -77,7 +77,7 @@ export function shouldAcceptRoomMirror(params: {
 }
 
 /**
- * Same-tab fast path for the Workspace rail's working avatar. The persisted
+ * Same-tab fast path for the Workspace rail's working indicator. The persisted
  * session `status` returned by `listWorkspaceSessions` remains authoritative
  * across navigation and reload; this signal only closes the visual gap before
  * the next list fetch sees `running` / `idle`.

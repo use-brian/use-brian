@@ -82,10 +82,6 @@ vi.mock("@/components/ui/prompt-dialog", () => ({
   promptDialog: dialogs.promptDialog,
 }));
 
-vi.mock("@/components/assistant-avatar", () => ({
-  AssistantAvatar: ({ name }: { name: string }) => <span>{name}</span>,
-}));
-
 const seen = vi.hoisted(() => ({ isRoomUnread: vi.fn(() => false) }));
 vi.mock("@/lib/chat-seen", () => seen);
 vi.mock("@/lib/chat-session-events", () => ({
@@ -194,7 +190,7 @@ describe("[COMP:app-web/sidebar-panel-chat] open-chat deletion", () => {
 });
 
 describe("[COMP:app-web/sidebar-panel-chat] live room activity", () => {
-  it("pulses a running room avatar and settles from the same-tab activity signal", async () => {
+  it("shows a running-room spinner and settles from the same-tab activity signal", async () => {
     sessionApi.listWorkspaceSessions.mockResolvedValueOnce([
       {
         id: "room-1",
@@ -213,7 +209,9 @@ describe("[COMP:app-web/sidebar-panel-chat] live room activity", () => {
 
     const working = container!.querySelector('[data-chat-working="true"]');
     expect(working).not.toBeNull();
-    expect(working?.classList.contains("animate-pulse")).toBe(true);
+    expect(working?.classList.contains("animate-spin")).toBe(true);
+    expect(working?.classList.contains("motion-reduce:animate-none")).toBe(true);
+    expect(working?.getAttribute("aria-hidden")).toBe("false");
     expect(working?.getAttribute("role")).toBe("status");
     expect(working?.getAttribute("aria-label")).toBe("Brian is working");
 
@@ -233,7 +231,85 @@ describe("[COMP:app-web/sidebar-panel-chat] live room activity", () => {
   });
 });
 
+describe("[COMP:app-web/sidebar-panel-chat] overflowing title measurements", () => {
+  let available: number;
+  let observers: { notify: () => void; disconnect: ReturnType<typeof vi.fn> }[];
+
+  beforeEach(() => {
+    available = 120;
+    observers = [];
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("data-sidebar-title") ? available : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockImplementation(function (this: HTMLElement) {
+      return this.parentElement?.hasAttribute("data-sidebar-title") ? (this.textContent?.length ?? 0) * 8 : 0;
+    });
+    vi.stubGlobal("ResizeObserver", class {
+      disconnect = vi.fn();
+      observe = vi.fn();
+      constructor(notify: () => void) { observers.push({ notify, disconnect: this.disconnect }); }
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("adapts overflow to action gutters and sidebar resizing while fitting labels stay still", async () => {
+    await renderPanel();
+    const title = container!.querySelector<HTMLElement>('a[href*="s=room-1"] [data-sidebar-title]')!;
+    const general = buttonNamed(en.chatApp.generalChats).querySelector('[data-sidebar-title]')!;
+    expect(title.hasAttribute("data-overflow")).toBe(true);
+    expect(general.hasAttribute("data-overflow")).toBe(false);
+
+    await act(async () => { available = 100; observers.forEach(observer => observer.notify()); });
+    expect(title.style.getPropertyValue("--chat-title-travel")).toBe("-28px");
+    await act(async () => { available = 260; observers.forEach(observer => observer.notify()); });
+    expect(title.hasAttribute("data-overflow")).toBe(false);
+    expect(title.textContent).toBe("Workspace launch");
+
+    act(() => root!.unmount());
+    root = null;
+    expect(observers.every(observer => observer.disconnect.mock.calls.length === 1)).toBe(true);
+  });
+
+  it("remeasures an auto-renamed title without duplicating its accessible text", async () => {
+    await renderPanel();
+    await act(async () => {
+      mutateSurfaceCache(chatSharedSessionsCacheKey("workspace-1", null), () => [{
+        id: "room-1", title: "Plan", channelId: "channel-1", lastActive: "2026-08-01T01:00:00.000Z",
+        appOrigin: "chat", assistantId: "assistant-1", status: "idle",
+      }]);
+    });
+    const title = container!.querySelector<HTMLElement>('a[href*="s=room-1"] [data-sidebar-title]')!;
+    expect(title.textContent).toBe("Plan");
+    expect(title.hasAttribute("data-overflow")).toBe(false);
+    expect(title.querySelectorAll("span")).toHaveLength(1);
+  });
+});
+
 describe("[COMP:app-web/sidebar-panel-chat] one row renderer for both rails (chat-parity T4)", () => {
+  it.each(["personal", "workspace"])("shows only the title in an idle %s row while retaining accessible identity and transport", async (view) => {
+    navigation.search = `${view === "workspace" ? "v=workspace&" : ""}s=transport-chat`;
+    const row = {
+      id: "transport-chat", title: "Channel updates", channelId: "channel-example",
+      transport: "telegram", lastActive: "2026-08-01T01:00:00.000Z",
+      appOrigin: "chat", assistantId: "assistant-1", status: "idle", humanCount: 1,
+    };
+    sessionApi.listSessionsForAssistants.mockResolvedValue([row]);
+    sessionApi.listWorkspaceSessions.mockResolvedValue([{ ...row, startedByUserId: "user-1", startedByName: "Alex" }]);
+    await renderPanel();
+    const link = container!.querySelector<HTMLAnchorElement>('a[href*="s=transport-chat"]')!;
+    expect(link).not.toBeNull();
+    expect(link.querySelector("svg, img")).toBeNull();
+    expect(link.textContent).toContain("Brian");
+    expect(link.textContent).toContain("Group on Telegram");
+    const visible = link.cloneNode(true) as HTMLAnchorElement;
+    visible.querySelectorAll(".sr-only").forEach(node => node.remove());
+    expect(visible.textContent?.trim()).toBe("Channel updates");
+  });
+
   it("keeps starter attribution accessible without adding a second visible line", async () => {
     await renderPanel();
     const link = container!.querySelector<HTMLAnchorElement>('a[href*="s=room-1"]')!;
@@ -275,7 +351,7 @@ describe("[COMP:app-web/sidebar-panel-chat] one row renderer for both rails (cha
     policy: { addressing: "every_message", multiVoice: true, pins: true, queue: true, post: false, presence: false },
   };
 
-  it("pulses a running personal chat exactly as it pulses a room", async () => {
+  it("shows a running-personal-chat spinner exactly as it does for a room", async () => {
     navigation.search = "";
     sessionApi.listSessionsForAssistants.mockResolvedValue([personalRow]);
     await renderPanel();
@@ -348,6 +424,28 @@ describe("[COMP:app-web/sidebar-panel-chat] group disclosure persistence", () =>
     container!.remove();
     await renderPanel(workspaceId);
   }
+
+  it("switches the Project folder icon with its disclosure and omits the chevron", async () => {
+    await renderPanel();
+    const heading = buttonNamed("Sample Project");
+    expect(heading.getAttribute("aria-expanded")).toBe("false");
+    expect(heading.querySelector(".lucide-folder")).not.toBeNull();
+    expect(heading.querySelector(".lucide-chevron-right")).toBeNull();
+    await act(async () => heading.click());
+    expect(heading.getAttribute("aria-expanded")).toBe("true");
+    expect(heading.querySelector(".lucide-folder-open")).not.toBeNull();
+    expect(container!.querySelector('a[href*="s=project-chat"]')).not.toBeNull();
+  });
+
+  it("focuses a tapped Project heading so touch users can reveal compose", async () => {
+    await renderPanel();
+    const heading = buttonNamed("Sample Project");
+    const tap = new Event("pointerup", { bubbles: true });
+    Object.defineProperty(tap, "pointerType", { value: "touch" });
+    await act(async () => heading.dispatchEvent(tap));
+    expect(document.activeElement).toBe(heading);
+    expect(sessionApi.createWorkspaceSession).not.toHaveBeenCalled();
+  });
 
   async function navigate(search: string) {
     navigation.search = search;

@@ -1,39 +1,108 @@
-/* Keep actions discoverable on phones, touch laptops and hoverless devices.
-   Only a desktop with a fine pointer gets the quieter contextual treatment. */
-.hoverAction {
-  opacity: 1;
+/* Hide contextual actions at rest, including on narrow or hybrid devices.
+   Keyboard navigation reveals the slot without retaining ordinary mouse focus. */
+.actionHost {
+  --chat-compose-space: 44px;
+  --chat-menu-space: 44px;
 }
 
-@media (min-width: 768px) and (hover: hover) and (pointer: fine) {
-  .hoverAction {
-    opacity: 0;
-    pointer-events: none;
+.titleViewport {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.titleText {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+}
+
+.titleViewport[data-overflow] {
+  mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  mask-size: calc(100% + 18px) 100%;
+  mask-position: 100% 0;
+  mask-repeat: no-repeat;
+}
+
+/* The text moves inside its own slot, leaving status and action controls still.
+   Hoverless taps navigate normally; keyboard focus works with either pointer. */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .titleHost:hover .titleViewport[data-overflow] {
+    animation: reveal-title-edges var(--chat-title-duration) linear infinite alternate;
   }
 
-  .actionHost:is(:hover, :focus-within) .hoverAction,
-  .hoverAction[data-open] {
-    opacity: 1;
-    pointer-events: auto;
+  .titleHost:hover .titleViewport[data-overflow] > .titleText {
+    animation: reveal-title var(--chat-title-duration) linear infinite alternate;
   }
 }
 
-@media (hover: none), (any-pointer: coarse) {
-  .hoverAction {
-    opacity: 1;
-    pointer-events: auto;
-    min-width: 44px;
-    min-height: 44px;
+@media (prefers-reduced-motion: no-preference) {
+  .titleHost:has(:focus-visible) .titleViewport[data-overflow],
+  .titleHost:focus-visible .titleViewport[data-overflow] {
+    animation: reveal-title-edges var(--chat-title-duration) linear infinite alternate;
   }
 
+  .titleHost:has(:focus-visible) .titleViewport[data-overflow] > .titleText,
+  .titleHost:focus-visible .titleViewport[data-overflow] > .titleText {
+    animation: reveal-title var(--chat-title-duration) linear infinite alternate;
+  }
+}
+
+@keyframes reveal-title {
+  0%, 15% { transform: translateX(0); }
+  85%, 100% { transform: translateX(var(--chat-title-travel)); }
+}
+
+@keyframes reveal-title-edges {
+  0%, 15% { mask-position: 100% 0; }
+  85%, 100% { mask-position: 0 0; }
+}
+
+@media (min-width: 768px) {
   .actionHost {
-    min-height: 44px;
+    --chat-compose-space: 32px;
+    --chat-menu-space: 28px;
+  }
+}
+
+.hoverAction {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.actionHost:hover .hoverAction,
+.actionHost:has(:focus-visible) .hoverAction,
+.hoverAction[data-open] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Reclaim the hidden slot for text. Make room only during reveal so labels,
+   unread dots and working indicators never sit beneath an active control. */
+.actionHost:is(:hover, :has(:focus-visible)):has(> .composeAction) > .groupToggle {
+  padding-right: var(--chat-compose-space);
+}
+
+.actionHost[data-chat-sidebar-row]:is(:hover, :has(:focus-visible), :has(> [data-open])) > a {
+  padding-right: var(--chat-menu-space);
+}
+
+/* A tap on the heading reveals compose on hoverless devices. Row menus stay
+   directly available because tapping the chat row itself navigates. */
+@media (hover: none) {
+  .hoverAction:not(.composeAction),
+  .actionHost:focus-within .composeAction {
+    opacity: 1;
+    pointer-events: auto;
   }
 
-  .actionHost > :is(a, button) {
-    min-height: 44px;
+  .actionHost:focus-within:has(> .composeAction) > .groupToggle {
+    padding-right: var(--chat-compose-space);
   }
 
   .actionHost[data-chat-sidebar-row] > a {
-    padding-right: 44px;
+    padding-right: var(--chat-menu-space);
   }
 }

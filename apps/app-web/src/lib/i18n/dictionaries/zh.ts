@@ -9037,6 +9037,8 @@ export const zh: Dictionary = {
       work: "工作",
       closeTab: "關閉 {title}",
       closePane: "關閉窗格",
+      fullView: "完整檢視",
+      exitFullView: "退出完整檢視",
       openPane: "開啟側邊窗格",
       openPaneCount: "開啟側邊窗格（{count} 個分頁）",
       back: "返回",

@@ -8907,6 +8907,8 @@ export const zhCN: Dictionary = {
       work: "工作",
       closeTab: "关闭 {title}",
       closePane: "关闭窗格",
+      fullView: "完整视图",
+      exitFullView: "退出完整视图",
       openPane: "打开侧边窗格",
       openPaneCount: "打开侧边窗格（{count} 个标签页）",
       back: "返回",

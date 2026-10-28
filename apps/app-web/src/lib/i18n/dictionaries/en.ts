@@ -9319,6 +9319,8 @@ export const en = {
       work: "Work",
       closeTab: "Close {title}",
       closePane: "Close pane",
+      fullView: "Full view",
+      exitFullView: "Exit full view",
       openPane: "Open side pane",
       openPaneCount: "Open side pane, {count} tabs",
       back: "Back",

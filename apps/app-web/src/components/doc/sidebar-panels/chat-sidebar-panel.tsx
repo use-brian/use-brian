@@ -41,13 +41,12 @@
  * [COMP:app-web/sidebar-panel-chat]
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Brain, ChevronRight, Folder, MessageSquare, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
+import { Brain, ChevronRight, Folder, FolderOpen, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
-import { AssistantAvatar } from "@/components/assistant-avatar";
 import { Skeleton } from "@/components/skeleton";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { promptDialog } from "@/components/ui/prompt-dialog";
@@ -77,15 +76,43 @@ import { useCachedResource } from "@/lib/surface-cache";
 import { chatSessionsCacheKey, chatSharedSessionsCacheKey, surfaceDataKey } from "@/lib/surface-prefetch";
 import { isRoomUnread } from "@/lib/chat-seen";
 
-/** Compact single-line rows, with a 44px phone target (M3). The CSS module
- *  also keeps touch/hoverless desktops at 44px, with room for the row menu. */
+/** Compact single-line rows, with a 44px phone target (M3) and room for the row menu. */
 const rowCls = (active: boolean) =>
   cn(
-    "flex min-h-11 w-full items-center rounded-md px-2 py-1 pr-11 text-left text-sm transition-colors md:min-h-8 md:py-0.5 md:pr-7",
+    "flex min-h-11 w-full items-center rounded-md px-2 py-1 pr-1 text-left text-sm transition-colors md:min-h-8 md:py-0.5",
     active
       ? "doc-nav-active font-medium text-sidebar-accent-foreground"
       : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
   );
+
+/** Measure the visible slot as contextual actions appear or the sidebar resizes. */
+function SidebarTitle({ children }: { children: string }) {
+  const viewportRef = useRef<HTMLSpanElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const [overflow, setOverflow] = useState(0);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const text = textRef.current;
+    if (!viewport || !text) return;
+    const measure = () => setOverflow(Math.max(0, text.scrollWidth - viewport.clientWidth));
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    observer.observe(text);
+    return () => observer.disconnect();
+  }, [children]);
+
+  return <span ref={viewportRef} className={styles.titleViewport} data-sidebar-title
+    data-overflow={overflow > 0 ? "" : undefined}
+    style={{
+      "--chat-title-travel": `${-overflow}px`,
+      "--chat-title-duration": `${Math.max(2.5, overflow / 28 + 1)}s`,
+    } as CSSProperties}>
+    <span ref={textRef} className={styles.titleText}>{children}</span>
+  </span>;
+}
 
 /** Cold-cache fallback: rows shaped like the rail's, never a sentence (N4). */
 function RailRowsSkeleton({ rows = 4 }: { rows?: number }) {
@@ -93,7 +120,6 @@ function RailRowsSkeleton({ rows = 4 }: { rows?: number }) {
     <div aria-hidden className="flex flex-col gap-0.5">
       {Array.from({ length: rows }).map((_, i) => (
         <div key={i} className="flex min-h-11 items-center gap-2 px-2 py-1 md:min-h-8 md:py-0.5">
-          <Skeleton className="size-4 shrink-0 rounded-full" />
           <Skeleton className="h-3" style={{ width: `${44 + ((i * 19) % 40)}%` }} />
         </div>
       ))}
@@ -349,11 +375,8 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     row: DocSession | WorkspaceSession,
     href: string,
   ) => {
-    // Every row names its interlocutor with the assistant's creature icon —
-    // sessions are assistant-bound, so "which assistant is this chat with" is
-    // a property of the row, not of the surface. Shared rows echo their bound
-    // assistant server-side (a room binds ANY workspace assistant at
-    // creation, default the primary).
+    // Assistant identity stays in hover/focus and accessible details, leaving
+    // the visible row for its title. Shared rows resolve their bound assistant.
     const rowAssistant =
       (row.assistantId ? assistantById.get(row.assistantId) : undefined) ??
       primary;
@@ -367,7 +390,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       row.humanCount !== 1 &&
       row.id !== activeSessionId &&
       isRoomUnread(workspaceId, row.id, row.lastActive);
-    // The working pulse reads every row's turn slot, personal or room.
+    // The working indicator reads every row's turn slot, personal or room.
     const working = activityBySession[row.id]?.working ?? row.status === "running";
     const title = row.title === "New Chat" && row.transport && row.transport !== "web"
       ? `${t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport}: ${row.channelId}`
@@ -375,10 +398,19 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     const attribution = "startedByUserId" in row
       ? row.startedByName ? format(t.startedBy, { name: row.startedByName }) : t.startedByUnknown
       : null;
+    const transport = row.transport && row.transport !== "web"
+      ? t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport
+      : null;
+    const transportDescription = transport ? format(t.roomTransportAria, { transport }) : null;
+    const workingLabel = rowAssistant
+      ? format(t.workingAria, { name: rowAssistant.name })
+      : t.taskExecution.phase.running;
     return (
-    <div key={row.id} className={cn(styles.actionHost, "relative")} data-chat-sidebar-row>
+    <div key={row.id} className={cn(styles.actionHost, styles.titleHost, "relative")} data-chat-sidebar-row>
       <Tooltip side="right" label={<span className="block max-w-[min(18rem,calc(100vw-2rem))] break-words font-normal">
         <span className="block">{title}</span>
+        {rowAssistant && <span className="block opacity-70">{rowAssistant.name}</span>}
+        {transportDescription && <span className="block opacity-70">{transportDescription}</span>}
         {attribution && <span className="block opacity-70">{attribution}</span>}
       </span>}>
       <Link
@@ -386,59 +418,25 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         aria-current={row.id === activeSessionId ? "page" : undefined}
         className={rowCls(row.id === activeSessionId)}
       >
-        <span className="flex min-w-0 flex-1 items-center gap-2">
-          {rowAssistant && (
+        <span className="flex min-w-0 flex-1 items-center gap-1">
+          <SidebarTitle>{title}</SidebarTitle>
+          {working && <LoaderCircle
+            className="size-3.5 shrink-0 animate-spin text-sidebar-foreground/60 motion-reduce:animate-none"
+            role="status" aria-hidden={false} aria-label={workingLabel}
+            data-chat-working="true"
+          />}
+          {unread && (
             <span
-              className={cn(
-                "shrink-0",
-                working && "animate-pulse motion-reduce:animate-none",
-              )}
-              role={working ? "status" : undefined}
-              aria-label={
-                working
-                  ? format(t.workingAria, { name: rowAssistant.name })
-                  : undefined
-              }
-              title={
-                working
-                  ? format(t.workingAria, { name: rowAssistant.name })
-                  : rowAssistant.name
-              }
-              data-chat-working={working ? "true" : undefined}
-            >
-              <AssistantAvatar
-                id={rowAssistant.id}
-                name={rowAssistant.name}
-                iconSeed={rowAssistant.iconSeed ?? undefined}
-                size="xs"
-              />
-            </span>
+              role="status"
+              aria-label={t.unreadDotAria}
+              title={t.unreadDotAria}
+              className="size-1.5 shrink-0 rounded-full bg-primary"
+            />
           )}
-          <span className="min-w-0 flex-1">
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span className="min-w-0 flex-1 truncate">{title}</span>
-              {"transport" in row && row.transport && row.transport !== "web" && (
-                <span
-                  aria-label={format(t.roomTransportAria, {
-                    transport: t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport,
-                  })}
-                  className="shrink-0 rounded border border-sidebar-border px-1 text-[10px] leading-4 text-sidebar-foreground/60"
-                >
-                  {t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport}
-                </span>
-              )}
-              {unread && (
-                <span
-                  role="status"
-                  aria-label={t.unreadDotAria}
-                  title={t.unreadDotAria}
-                  className="size-1.5 shrink-0 rounded-full bg-primary"
-                />
-              )}
-            </span>
-            {attribution && <span className="sr-only">{attribution}</span>}
-          </span>
         </span>
+        {attribution && <span className="sr-only">{attribution}</span>}
+        {rowAssistant && <span className="sr-only">{rowAssistant.name}</span>}
+        {transportDescription && <span className="sr-only">{transportDescription}</span>}
       </Link>
       </Tooltip>
       <button
@@ -513,7 +511,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   }, [base, creatingShared, router, t, workspaceId]);
 
   return (
-    <div className="flex flex-col gap-3 px-1 pt-1 md:gap-2 md:pt-0">
+    <div className="-mx-1 flex min-w-0 flex-col gap-3 pt-1 md:-mx-2 md:gap-2 md:pt-0">
       {view === "personal" ? (
         <Link
           href={base}
@@ -548,7 +546,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       {view === "personal" && (
         <div>
           <div className={sectionHeaderCls}>{t.railAria}</div>
-          <div className="flex flex-col gap-0.5">
+          <div className="flex flex-col">
             {rows === null && <RailRowsSkeleton />}
             {rows !== null && personalGroups.length === 0 && (
               <div className="select-none px-2 py-1 text-[12px] text-sidebar-foreground/40">
@@ -567,7 +565,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       )}
 
       {view === "workspace" && (
-        <div className="flex flex-col gap-0.5">
+        <div className="flex flex-col">
           <ProjectChatGroup workspaceId={workspaceId} project={null} activeSessionId={activeSessionId}
             renderRow={renderRow} onCreate={startWorkspaceChat} creating={creatingShared} />
           {projects.loading && <RailRowsSkeleton rows={2} />}
@@ -629,16 +627,15 @@ function PersonalChatGroup({ workspaceId, group, activeSessionId, renderRow }: {
     `doc:personal-chat-group:${chatSessionsCacheKey(workspaceId)}:${group.id}`,
     activeSessionId, group.rows.some(row => row.id === activeSessionId), group.kind === "general",
   );
-  const Icon = group.kind === "channel" ? MessageSquare : Folder;
+  const Icon = group.kind === "channel" ? MessageSquare : open ? FolderOpen : Folder;
   return <section className="flex flex-col gap-0.5" data-personal-chat-group={group.kind}>
     <button type="button"
-      className="flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent md:min-h-8"
+      className={cn(styles.titleHost, "flex min-h-11 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}
       aria-expanded={open} onClick={toggleOpen} title={group.label}>
-      <ChevronRight aria-hidden className={cn("size-3 shrink-0", open && "rotate-90")} />
-      {group.kind !== "general" && <Icon aria-hidden className="size-4 shrink-0" />}
-      <span className="min-w-0 truncate">{group.label}</span>
+      <Icon aria-hidden className="size-4 shrink-0" />
+      <SidebarTitle>{group.label}</SidebarTitle>
     </button>
-    {open && <div className="flex flex-col gap-0.5 pl-4">
+    {open && <div className="flex flex-col gap-0.5 pl-[22px]">
       {group.rows.map(row => renderRow(row, `/w/${workspaceId}/chat?s=${encodeURIComponent(row.id)}`))}
     </div>}
   </section>;
@@ -657,20 +654,25 @@ function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, on
     activeSessionId, rows.data?.some(row => row.id === activeSessionId) ?? false, project === null,
   );
   const canCreate = !project || !project.shared || project.shared.myRole === "owner" || project.shared.myRole === "participant";
+  const FolderIcon = open ? FolderOpen : Folder;
   return <section className="flex flex-col gap-0.5" data-workspace-chat-group={project?.id ?? "general"}>
-    <div className={cn(styles.actionHost, "flex items-center rounded-md hover:bg-sidebar-accent")}>
-      <button type="button" className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent md:min-h-8"
-        aria-expanded={open} onClick={toggleOpen}>
-        <ChevronRight aria-hidden className={cn("size-3 shrink-0", open && "rotate-90")} />
-        {project && <Folder aria-hidden className="size-4 shrink-0" />}
-        <span className="truncate">{project?.name ?? t.generalChats}</span>
+    <div className={cn(styles.actionHost, styles.titleHost, "relative flex items-center rounded-md hover:bg-sidebar-accent")}>
+      <button type="button" className={cn(styles.groupToggle, "flex min-h-11 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}
+        aria-expanded={open} onClick={toggleOpen} title={project?.name ?? t.generalChats}
+        onPointerUp={event => {
+          // Safari need not focus a tapped button. Give hoverless users a
+          // stable reveal path to the adjacent compose action.
+          if (event.pointerType !== "mouse") event.currentTarget.focus({ preventScroll: true });
+        }}>
+        <FolderIcon aria-hidden className="size-4 shrink-0" />
+        <SidebarTitle>{project?.name ?? t.generalChats}</SidebarTitle>
       </button>
-      {canCreate && <button type="button" className={cn(styles.hoverAction, "flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/60 transition-opacity hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:min-h-8 md:min-w-8")}
+      {canCreate && <button type="button" className={cn(styles.hoverAction, styles.composeAction, "absolute top-1/2 right-0 flex size-11 -translate-y-1/2 items-center justify-center rounded-md text-sidebar-foreground/60 transition-opacity hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:size-8")}
         aria-label={format(t.newChatInProject, { name: project?.name ?? t.generalChats })}
         title={format(t.newChatInProject, { name: project?.name ?? t.generalChats })}
         disabled={creating} onClick={() => void onCreate(project?.id ?? null)}><SquarePen aria-hidden className="size-4" /></button>}
     </div>
-    {open && <div className={cn("flex flex-col gap-0.5", project && "pl-4")}>
+    {open && <div className="flex flex-col gap-0.5 pl-[22px]">
       {rows.loading && <RailRowsSkeleton />}
       {Boolean(rows.error) && <p role="alert" className="px-2 text-xs text-destructive">{t.projectChatsFailed}</p>}
       {rows.data?.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">{t.workspaceRailEmpty}</p>}

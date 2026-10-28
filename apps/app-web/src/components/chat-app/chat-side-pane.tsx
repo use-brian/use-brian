@@ -8,13 +8,14 @@
  * - **Tab strip:** the fixed **Work** tab first (Live work, Stop, worker
  *   runs, pins; never closed, the default), then pinned tabs, then open
  *   tabs. Each tab keeps its own Back / Forward history.
- * - **State:** the tabs, the active tab and whether the pane is open live in
+ * - **State:** tabs, the active tab, open state and full-view state live in
  *   the per-chat store (`lib/chat-pane-session.ts`), never in this component
  *   or the surface, so they survive surface switches. Nothing collapses the
  *   pane automatically; only the close control here does (D8).
  * - **Layout:** a resizable split section beside the transcript on desktop
  *   (`usePeekResize`, key `chat:side-pane-width`); a full-screen overlay
- *   below 960px of available Chat width (T11), opened from the header toggle.
+ *   below 768px of available Chat width (T11), opened from the header toggle.
+ *   Full view is explicit and restores the split width on exit.
  *
  * The host renders the bodies it owns (`renderTab`: Work, and the kinds
  * later phases add); this component renders the `document` and `file`
@@ -39,8 +40,11 @@ import {
   FlaskConical,
   Globe,
   Monitor,
+  Maximize2,
+  Minimize2,
   NotebookText,
   Paperclip,
+  PanelRightOpen,
   Pin,
   PinOff,
   X,
@@ -233,9 +237,11 @@ export function ChatSidePane({
     <aside
       id={CHAT_SIDE_PANE_ID}
       aria-label={t.label}
+      data-pane-full-view={state.fullView || undefined}
       style={width !== null ? { width } : undefined}
       className={cn(
         styles.sidePane,
+        state.fullView && styles.sidePaneFullView,
         "relative flex h-full max-w-[50%] shrink-0 flex-col overflow-hidden border-l border-border bg-background",
         width === null && "w-full sm:w-[380px] lg:w-[440px]",
         // Container styles also cover narrow tablet/desktop main panes. The
@@ -245,7 +251,7 @@ export function ChatSidePane({
         resizing && "select-none",
       )}
     >
-      <div className={styles.sidePaneResize}><PeekResizeHandle resizing={resizing} {...handleProps} /></div>
+      {!state.fullView && <div className={styles.sidePaneResize}><PeekResizeHandle resizing={resizing} {...handleProps} /></div>}
 
       <header className="flex shrink-0 items-center gap-1 border-b border-border/70 py-1.5 pl-2 pr-1.5">
         <div
@@ -301,6 +307,17 @@ export function ChatSidePane({
             );
           })}
         </div>
+        <button
+          type="button"
+          onClick={() => pane.setFullView(!state.fullView)}
+          aria-label={state.fullView ? t.exitFullView : t.fullView}
+          title={state.fullView ? t.exitFullView : t.fullView}
+          aria-pressed={state.fullView}
+          aria-controls={CHAT_SIDE_PANE_ID}
+          className="grid size-11 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground sm:size-8"
+        >
+          {state.fullView ? <Minimize2 className="size-4" aria-hidden /> : <Maximize2 className="size-4" aria-hidden />}
+        </button>
         <button
           type="button"
           onClick={() => pane.setOpen(false)}
@@ -382,7 +399,7 @@ export function ChatSidePaneToggle({ pane, className }: { pane: ChatPane; classN
         className,
       )}
     >
-      <Activity className="size-4" aria-hidden />
+      <PanelRightOpen className="size-4" aria-hidden />
       {count > 0 && <span className="tabular-nums">{count}</span>}
     </button>
   );

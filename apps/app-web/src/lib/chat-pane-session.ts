@@ -8,7 +8,7 @@
  * that forgot its tabs, or collapsed, every time the user glanced at a page
  * would break D8 ("nothing collapses it automatically"). So the pane lives
  * in a module-level map keyed by `(workspaceId, sessionId)`: the tabs, their
- * order, the active tab and whether the pane is open survive moving between
+ * order, the active tab, open state and full-view state survive moving between
  * surfaces and switching chats, and are lost on a hard reload (open tabs are
  * local; durable tabs are pins, D7). The same session scope as
  * `doc-tabs-session.ts`.
@@ -29,6 +29,7 @@ import {
   initPane,
   openInPane,
   setPaneOpen,
+  setPaneFullView,
   setPaneTabPin,
   stepPaneTab,
   updatePaneTabRef,
@@ -54,7 +55,7 @@ export function readChatPane(workspaceId: string, sessionId: string | null): Cha
   return panes.get(chatPaneKey(workspaceId, sessionId)) ?? null;
 }
 
-/** Read the chat's pane, seeding it once (`seedOpen`: phones start closed). */
+/** Read the chat's pane, seeding it once (closed by default). */
 function ensureChatPane(
   workspaceId: string,
   sessionId: string | null,
@@ -74,7 +75,7 @@ export function updateChatPane(
   workspaceId: string,
   sessionId: string | null,
   transition: (state: ChatPaneState) => ChatPaneState,
-  seedOpen = true,
+  seedOpen = false,
 ): ChatPaneState {
   const key = chatPaneKey(workspaceId, sessionId);
   const current = ensureChatPane(workspaceId, sessionId, seedOpen);
@@ -125,6 +126,8 @@ export type ChatPane = {
   close: (key: string) => void;
   /** Expand or collapse. Only a user action collapses (D8). */
   setOpen: (open: boolean) => void;
+  /** Enter or exit full view without changing the active tab or split width. */
+  setFullView: (fullView: boolean) => void;
   step: (delta: -1 | 1) => void;
   setPin: (key: string, pinId: string | null) => void;
   update: (key: string, ref: PaneRef) => void;
@@ -137,7 +140,7 @@ export type ChatPane = {
 export function useChatPane(
   workspaceId: string,
   sessionId: string | null,
-  seedOpen: () => boolean,
+  seedOpen: () => boolean = () => false,
 ): ChatPane {
   const getSnapshot = useCallback(
     () => ensureChatPane(workspaceId, sessionId, seedOpen()),
@@ -155,6 +158,7 @@ export function useChatPane(
       activate: (key) => apply((s) => activatePaneTab(s, key)),
       close: (key) => apply((s) => closePaneTab(s, key)),
       setOpen: (open) => apply((s) => setPaneOpen(s, open)),
+      setFullView: (fullView) => apply((s) => setPaneFullView(s, fullView)),
       step: (delta) => apply((s) => stepPaneTab(s, delta)),
       setPin: (key, pinId) => apply((s) => setPaneTabPin(s, key, pinId)),
       update: (key, ref) => apply((s) => updatePaneTabRef(s, key, ref)),
