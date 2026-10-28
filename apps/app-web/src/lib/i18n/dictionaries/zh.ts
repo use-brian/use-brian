@@ -9178,6 +9178,8 @@ export const zh: Dictionary = {
       title: "研究",
       loading: "正在載入研究",
       unavailable: "你無法查看此研究。",
+      loadFailed: "無法載入這項研究。",
+      refreshFailed: "無法更新這項研究。目前顯示上次載入的版本。",
       status: {
         saved: "已儲存",
         partial: "部分儲存",

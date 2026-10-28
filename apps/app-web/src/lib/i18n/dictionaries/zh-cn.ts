@@ -9048,6 +9048,8 @@ export const zhCN: Dictionary = {
       title: "研究",
       loading: "正在加载研究",
       unavailable: "你无法查看此研究。",
+      loadFailed: "无法加载这项研究。",
+      refreshFailed: "无法刷新这项研究。当前显示上次加载的版本。",
       status: {
         saved: "已保存",
         partial: "部分保存",

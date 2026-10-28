@@ -9226,6 +9226,8 @@ export const ja: Dictionary = {
       title: "リサーチ",
       loading: "リサーチを読み込み中",
       unavailable: "このリサーチは表示できません。",
+      loadFailed: "このリサーチを読み込めませんでした。",
+      refreshFailed: "このリサーチを更新できませんでした。最後に読み込んだ内容を表示しています。",
       status: {
         saved: "保存済み",
         partial: "一部保存",

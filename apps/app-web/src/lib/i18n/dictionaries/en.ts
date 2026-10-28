@@ -9462,6 +9462,8 @@ export const en = {
       title: "Research",
       loading: "Loading research",
       unavailable: "This research is not available to you.",
+      loadFailed: "Could not load this research.",
+      refreshFailed: "Could not refresh this research. Showing the last loaded version.",
       status: {
         saved: "Saved",
         partial: "Partly saved",

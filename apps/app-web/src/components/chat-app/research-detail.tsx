@@ -11,12 +11,14 @@
  * [COMP:app-web/research-detail]
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { FlaskConical } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { format, useT } from "@/lib/i18n/client";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
+import { getUserInfo, subscribeUserInfo } from "@/lib/user";
 import {
   correctResearchFeedback,
   decideResearchLesson,
@@ -42,33 +44,63 @@ export function announceResearchChanged(): void {
   if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(RESEARCH_CHANGED_EVENT));
 }
 
+// Each tuple transition creates a new incarnation, including A -> B -> A.
+// Layout cleanup revokes it before another owner's committed UI can act.
+function useResearchOwner(workspaceId: string | null, resourceId: string | null) {
+  const workspace = useOptionalWorkspaceContext();
+  const currentViewer = useSyncExternalStore(subscribeUserInfo, currentViewerId, () => null);
+  const viewerId = workspace?.workspaceId === workspaceId && workspace.me.id === currentViewer
+    ? currentViewer : null;
+  const owner = useMemo(() => ({
+    workspaceId, resourceId, viewerId,
+    key: JSON.stringify([workspaceId, resourceId, viewerId]),
+    live: false,
+  }), [workspaceId, resourceId, viewerId]);
+  useLayoutEffect(() => {
+    owner.live = true;
+    return () => { owner.live = false; };
+  }, [owner]);
+  return owner;
+}
+
+function currentViewerId(): string | null { return getUserInfo()?.id ?? null; }
+type ResearchOwner = ReturnType<typeof useResearchOwner>;
+function ownsResearch(owner: ResearchOwner): boolean {
+  return owner.live && !!owner.workspaceId && !!owner.resourceId && !!owner.viewerId
+    && currentViewerId() === owner.viewerId;
+}
+const EMPTY_RESEARCH = new Map<string, ResearchActivityRow>();
+
 /** Saved research of one chat, keyed by the assistant message that delivered it. */
 export function useSessionResearch(workspaceId: string | null, sessionId: string | null): Map<string, ResearchActivityRow> {
-  const [byMessage, setByMessage] = useState<Map<string, ResearchActivityRow>>(new Map());
+  const owner = useResearchOwner(workspaceId, sessionId);
+  const [saved, setSaved] = useState<{ owner: ResearchOwner; rows: Map<string, ResearchActivityRow> } | null>(null);
   useEffect(() => {
-    if (!workspaceId || !sessionId) {
-      setByMessage(new Map());
-      return;
-    }
+    if (!ownsResearch(owner) || !workspaceId || !sessionId) return;
+    let sequence = 0;
     let live = true;
-    const load = () => {
-      listResearchActivities(workspaceId, { sessionId })
-        .then(({ activities }) => {
-          if (!live) return;
-          setByMessage(new Map(activities.filter((a) => a.outputMessageId).map((a) => [a.outputMessageId!, a])));
-        })
-        .catch(() => {
-          // A failed refresh keeps what is shown; a revoked chat lists nothing next time.
-        });
+    const load = async () => {
+      if (!live || !ownsResearch(owner)) return;
+      const request = ++sequence;
+      try {
+        const { activities } = await listResearchActivities(workspaceId, { sessionId });
+        if (!live || !ownsResearch(owner) || request !== sequence) return;
+        setSaved({ owner, rows: new Map(activities.filter((a) => a.outputMessageId).map((a) => [a.outputMessageId!, a])) });
+      } catch {
+        // A transient failure keeps only this owner's last successful map.
+      }
     };
-    load();
-    window.addEventListener(RESEARCH_CHANGED_EVENT, load);
+    void load();
+    const refresh = () => { void load(); };
+    window.addEventListener(RESEARCH_CHANGED_EVENT, refresh);
     return () => {
       live = false;
-      window.removeEventListener(RESEARCH_CHANGED_EVENT, load);
+      ++sequence;
+      window.removeEventListener(RESEARCH_CHANGED_EVENT, refresh);
     };
-  }, [workspaceId, sessionId]);
-  return byMessage;
+  }, [owner, workspaceId, sessionId]);
+  // Mask on render; a passive effect reset would expose the old map for a commit.
+  return saved?.owner === owner && owner.viewerId ? saved.rows : EMPTY_RESEARCH;
 }
 
 /** The card under a research reply. */
@@ -91,8 +123,9 @@ export function ChatResearchCard({ status, onOpen }: { status: ResearchStatus; o
 
 type ViewState =
   | { kind: "loading" }
-  | { kind: "ready"; detail: ResearchActivityDetail }
-  | { kind: "gone" };
+  | { kind: "ready"; detail: ResearchActivityDetail; refreshFailed?: boolean }
+  | { kind: "gone" }
+  | { kind: "error" };
 
 export function ResearchDetail({
   workspaceId,
@@ -103,43 +136,104 @@ export function ResearchDetail({
   activityId: string;
   onOpenArtifact: (artifact: ResearchArtifactRow) => void;
 }) {
+  const owner = useResearchOwner(workspaceId, activityId);
   const t = useT().chatApp.research;
+  if (!owner.viewerId) return <p className="p-4 text-sm text-muted-foreground">{t.unavailable}</p>;
+  return <ResearchDetailBody key={owner.key} owner={owner} workspaceId={workspaceId} activityId={activityId} onOpenArtifact={onOpenArtifact} />;
+}
+
+function ResearchDetailBody({ owner, workspaceId, activityId, onOpenArtifact }: {
+  owner: ResearchOwner;
+  workspaceId: string;
+  activityId: string;
+  onOpenArtifact: (artifact: ResearchArtifactRow) => void;
+}) {
+  const dictionary = useT();
+  const t = dictionary.chatApp.research;
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [reading, setReading] = useState(false);
+  const readSequence = useRef(0);
+  const readPending = useRef(false);
+  const actionSequence = useRef(0);
+  const actionPending = useRef(false);
 
   const load = useCallback(async () => {
+    if (!ownsResearch(owner)) return;
+    const request = ++readSequence.current;
+    readPending.current = true;
+    setReading(true);
+    setState((previous) => previous.kind === "ready" ? previous : { kind: "loading" });
+    const current = () => ownsResearch(owner) && request === readSequence.current;
     try {
       const detail = await getResearchActivity(workspaceId, activityId);
+      if (!current()) return;
       setState({ kind: "ready", detail });
     } catch (error) {
-      // Revoked or deleted: evict what was shown rather than keep a stale copy.
-      if (error instanceof ResearchApiError && error.status === 404) setState({ kind: "gone" });
+      if (!current()) return;
+      if (error instanceof ResearchApiError && [401, 403, 404].includes(error.status)) {
+        setState({ kind: "gone" });
+        setNotice(null);
+        ++actionSequence.current;
+        actionPending.current = false;
+        setBusy(false);
+      } else {
+        setState((previous) => previous.kind === "ready"
+          ? { ...previous, refreshFailed: true } : { kind: "error" });
+      }
+    } finally {
+      if (current()) {
+        readPending.current = false;
+        setReading(false);
+      }
     }
-  }, [workspaceId, activityId]);
+  }, [owner, workspaceId, activityId]);
 
   useEffect(() => {
-    setState({ kind: "loading" });
     void load();
-    const refresh = () => void load();
+    const refresh = () => { void load(); };
     window.addEventListener(RESEARCH_CHANGED_EVENT, refresh);
-    return () => window.removeEventListener(RESEARCH_CHANGED_EVENT, refresh);
+    return () => {
+      ++readSequence.current;
+      ++actionSequence.current;
+      window.removeEventListener(RESEARCH_CHANGED_EVENT, refresh);
+    };
   }, [load]);
 
-  const act = async (work: () => Promise<unknown>) => {
+  const act = async (work: (current: () => boolean) => Promise<unknown>) => {
+    if (!ownsResearch(owner) || actionPending.current) return;
+    const action = ++actionSequence.current;
+    const current = () => ownsResearch(owner) && action === actionSequence.current;
+    actionPending.current = true;
     setBusy(true);
     setNotice(null);
     try {
-      await work();
+      const result = await work(current);
+      if (!current() || result === false) return;
       announceResearchChanged();
     } catch (error) {
+      if (!current()) return;
       const code = error instanceof ResearchApiError ? error.code : "";
       setNotice(code === "research_stale" ? t.stale : code === "research_forbidden" ? t.forbidden : t.failed);
       await load();
     } finally {
-      setBusy(false);
+      if (current()) {
+        actionPending.current = false;
+        setBusy(false);
+      }
     }
   };
+
+  const retry = () => { if (!readPending.current) void load(); };
+  const recovery = (message: string) => (
+    <div className="space-y-2" aria-busy={reading}>
+      <p role="status" className="text-muted-foreground">{message}</p>
+      <Button type="button" variant="outline" size="sm" className="min-h-11" disabled={reading} onClick={retry}>
+        {dictionary.chat.retry}
+      </Button>
+    </div>
+  );
 
   if (state.kind === "loading") {
     return (
@@ -151,6 +245,7 @@ export function ResearchDetail({
     );
   }
   if (state.kind === "gone") return <p className="p-4 text-sm text-muted-foreground">{t.unavailable}</p>;
+  if (state.kind === "error") return <div className="p-4 text-sm">{recovery(t.loadFailed)}</div>;
 
   const { activity, artifacts, feedback, lessons } = state.detail;
   const saveError = activity.saveError
@@ -165,6 +260,7 @@ export function ResearchDetail({
         <p className="text-muted-foreground" data-testid="research-status">{t.status[activity.status]}</p>
         {saveError && <p className="text-muted-foreground" data-testid="research-save-error">{saveError}</p>}
         {notice && <p role="status" className="text-destructive">{notice}</p>}
+        {state.refreshFailed && recovery(t.refreshFailed)}
       </header>
 
       <section aria-labelledby="research-artifacts">
@@ -175,7 +271,7 @@ export function ResearchDetail({
               <button
                 type="button"
                 className="min-h-11 rounded-md px-2 text-left underline-offset-2 hover:underline md:min-h-8"
-                onClick={() => onOpenArtifact(a)}
+                onClick={() => { if (ownsResearch(owner)) onOpenArtifact(a); }}
               >
                 {format(t.openArtifact, { kind: t.kinds[a.kind] })}
                 {a.relation === "revision" ? ` (${t.revision})` : ""}
@@ -250,7 +346,7 @@ export function ResearchDetail({
           <p className="text-muted-foreground">{t.noLessons}</p>
         ) : (
           <ul className="space-y-3">
-            {lessons.map((l) => <LessonRow key={l.id} lesson={l} busy={busy} onDecide={(decision) => act(async () => {
+            {lessons.map((l) => <LessonRow key={l.id} lesson={l} busy={busy} onDecide={(decision) => act(async (current) => {
               if (decision !== "approve") {
                 const ok = await confirmDialog({
                   title: decision === "retire" ? t.retireConfirmTitle : t.rejectConfirmTitle,
@@ -258,7 +354,7 @@ export function ResearchDetail({
                   confirmLabel: decision === "retire" ? t.retire : t.reject,
                   variant: "destructive",
                 });
-                if (!ok) return;
+                if (!ok || !current()) return false;
               }
               await decideResearchLesson(workspaceId, l.id, decision, l.revision);
             })} />)}
@@ -268,9 +364,9 @@ export function ResearchDetail({
 
       <ImprovementForm
         busy={busy}
-        onSubmit={(input) => act(async () => {
+        onSubmit={(input) => act(async (current) => {
           await nominateResearchImprovement(workspaceId, { ...input, feedbackIds: feedback.map((f) => f.id), activityIds: [activity.id] });
-          setNotice(t.improvement.done);
+          if (current()) setNotice(t.improvement.done);
         })}
       />
     </div>
