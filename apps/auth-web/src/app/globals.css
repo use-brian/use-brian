@@ -34,3 +34,13 @@ button, input { font: inherit; }
 .error { color: var(--danger); }
 .languages { display: flex; justify-content: center; gap: 8px; margin-top: 24px; }
 .languages button { border: 1px solid var(--border); border-radius: 999px; padding: 5px 9px; color: var(--muted); background: transparent; cursor: pointer; }
+
+.recipient { overflow-wrap: anywhere; }
+.recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.recovery-button { max-width: 100%; border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; color: var(--foreground); background: transparent; font-size: 13px; cursor: pointer; }
+.recovery-button:disabled, .languages button:disabled { cursor: wait; opacity: .55; }
+.recovery-button:focus-visible, .languages button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+@media (width < 48rem) {
+  .input { font-size: 16px; }
+  .languages button, .recovery-button { min-width: 44px; min-height: 44px; }
+}
