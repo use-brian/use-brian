@@ -9124,6 +9124,21 @@ export const en = {
     "noProjects": "No available Projects"
 },
   chatApp: {
+    unarchiveChat: "Unarchive chat",
+    archiveManage: "Manage",
+    archiveSettingsDescription: "View and unarchive chats in this workspace.",
+    archiveManagerDescription: "Archived chats stay out of your chat list until you unarchive them.",
+    archiveClose: "Close archived chats",
+    archiveLastActive: "Last active",
+
+    archiveChat: "Archive chat",
+    archivedChats: "Archived chats",
+    archiveEmpty: "No archived chats.",
+    archiveFailed: "Could not archive this chat.",
+    restoreFailed: "Could not unarchive this chat.",
+    archiveLoadFailed: "Could not load archived chats.",
+    archiveRetry: "Try again",
+
     deleteRecordingBody: "Delete this saved transcript? Separate archives, files and learned facts will remain. This does not stop future recording; manage that in Studio Channels.",
     otherProjects: "Other projects",
     personalProjectsFailed: "Could not load project names. Your chats are still available.",

@@ -372,7 +372,7 @@ function SectionBody({
     case "preferences":
       return <GeneralSection />;
     case "privacy":
-      return <PrivacySection />;
+      return <PrivacySection onOpenChat={onClose} />;
     case "notifications":
       return <NotificationsSection />;
     case "ws-general":

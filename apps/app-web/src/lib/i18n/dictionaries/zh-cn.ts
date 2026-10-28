@@ -8722,6 +8722,21 @@ export const zhCN: Dictionary = {
     "noProjects": "没有可用的项目"
 },
   chatApp: {
+    unarchiveChat: "取消归档对话",
+    archiveManage: "管理",
+    archiveSettingsDescription: "查看并取消归档此工作区的对话。",
+    archiveManagerDescription: "已归档的对话会隐藏在对话列表之外，直到您取消归档。",
+    archiveClose: "关闭已归档的对话",
+    archiveLastActive: "最近活动",
+
+    archiveChat: "归档对话",
+    archivedChats: "已归档的对话",
+    archiveEmpty: "没有已归档的对话。",
+    archiveFailed: "无法归档此对话。",
+    restoreFailed: "无法取消归档此对话。",
+    archiveLoadFailed: "无法加载已归档的对话。",
+    archiveRetry: "重试",
+
     deleteRecordingBody: "删除此已保存的聊天记录？独立归档、文件和已学习信息会保留。此操作不会停止未来记录，请在 Studio Channels 中管理。",
     otherProjects: "其他项目",
     personalProjectsFailed: "无法加载项目名称。你仍可查看对话。",

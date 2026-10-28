@@ -375,6 +375,10 @@ export function chatSharedSessionsCacheKey(workspaceId: string, projectId?: stri
   return `chat-shared:${workspaceId}${viewerSuffix()}${projectId === undefined ? "" : `:project:${projectId ?? "general"}`}`;
 }
 
+export function chatArchivedSessionsCacheKey(workspaceId: string, audience: "personal" | "workspace"): string {
+  return `${audience === "personal" ? chatSessionsCacheKey(workspaceId) : chatSharedSessionsCacheKey(workspaceId)}:archived`;
+}
+
 /**
  * A session's transcript, keyed per SESSION (session ids are global): a
  * thread switch paints the last transcript of the same session and never the

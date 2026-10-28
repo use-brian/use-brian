@@ -60,6 +60,8 @@ const sessionApi = vi.hoisted(() => ({
   listSessionsForAssistants: vi.fn(),
   listWorkspaceSessions: vi.fn(),
   renameSessionTitle: vi.fn(),
+  setSessionArchived: vi.fn(),
+  listPersonalSessions: vi.fn(),
 }));
 
 vi.mock("@/lib/api/sessions", () => sessionApi);
@@ -117,7 +119,7 @@ async function renderPanel(workspaceId = "workspace-1") {
 }
 
 function buttonNamed(name: string): HTMLButtonElement {
-  const button = [...container!.querySelectorAll("button")].find(
+  const button = [...document.querySelectorAll("button")].find(
     (candidate) => candidate.textContent?.trim() === name,
   );
   if (!button) throw new Error(`Button not found: ${name}`);
@@ -156,6 +158,8 @@ beforeEach(() => {
     },
   ]);
   sessionApi.deleteSession.mockResolvedValue(undefined);
+  sessionApi.setSessionArchived.mockResolvedValue(undefined);
+  sessionApi.listPersonalSessions.mockResolvedValue([]);
   dialogs.confirmDialog.mockResolvedValue(true);
 });
 
@@ -164,6 +168,29 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+});
+
+describe("[COMP:app-web/sidebar-panel-chat] direct archive action", () => {
+  it("archives from the row without opening the overflow menu or closing the chat", async () => {
+    sessionApi.setSessionArchived.mockImplementationOnce(async () => { sessionApi.listWorkspaceSessions.mockResolvedValue([]); });
+    await renderPanel();
+    expect(container!.querySelector('section[aria-label="Archived chats"]')).toBeNull();
+    const archive = container!.querySelector(`button[aria-label="${en.chatApp.archiveChat}"]`) as HTMLButtonElement;
+    expect(archive).not.toBeNull();
+    await act(async () => archive.click());
+    expect(sessionApi.setSessionArchived).toHaveBeenCalledWith("room-1", true);
+    expect(navigation.replace).not.toHaveBeenCalled();
+    expect(container!.querySelector('a[href*="s=room-1"]')).toBeNull();
+    expect(sessionApi.deleteSession).not.toHaveBeenCalled();
+  });
+  it("keeps a failed archive visible and reports the failure", async () => {
+    sessionApi.setSessionArchived.mockRejectedValueOnce(new Error("offline"));
+    await renderPanel();
+    const archive = container!.querySelector(`button[aria-label="${en.chatApp.archiveChat}"]`) as HTMLButtonElement;
+    await act(async () => archive.click());
+    expect(container!.textContent).toContain(en.chatApp.archiveFailed);
+    expect(container!.querySelector('a[href*="s=room-1"]')).not.toBeNull();
+  });
 });
 
 describe("[COMP:app-web/sidebar-panel-chat] open-chat deletion", () => {

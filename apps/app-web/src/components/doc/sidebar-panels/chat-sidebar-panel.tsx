@@ -44,13 +44,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Brain, ChevronRight, Folder, FolderOpen, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
+import { Archive, Brain, ChevronRight, Folder, FolderOpen, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 import { Skeleton } from "@/components/skeleton";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { promptDialog } from "@/components/ui/prompt-dialog";
 import { Tooltip } from "@/components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import styles from "./chat-sidebar-panel.module.css";
 import {
   CHAT_SESSION_ACTIVITY_EVENT,
@@ -70,11 +71,13 @@ import {
   patchSharedChatSessions,
   useChatSessionsData,
   useProjectChatSessionsData,
+  setChatSessionArchived,
 } from "@/lib/chat-surface-data";
 import { listContextProjects, type ContextProject } from "@/lib/api/context-scopes";
-import { useCachedResource } from "@/lib/surface-cache";
-import { chatSessionsCacheKey, chatSharedSessionsCacheKey, surfaceDataKey } from "@/lib/surface-prefetch";
+import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { chatArchivedSessionsCacheKey, chatSessionsCacheKey, chatSharedSessionsCacheKey, surfaceDataKey } from "@/lib/surface-prefetch";
 import { isRoomUnread } from "@/lib/chat-seen";
+import { requestSidebarClose } from "@/lib/sidebar-close";
 
 /** Compact single-line rows, with a 44px phone target (M3) and room for the row menu. */
 const rowCls = (active: boolean) =>
@@ -161,6 +164,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const projects = useCachedResource(surfaceDataKey("projects", workspaceId), () => listContextProjects(workspaceId, true));
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [archiving, setArchiving] = useState<string | null>(null);
   // The ambient-thread section's disclosure. Collapsed by default: those
   // threads are reachable, not top-of-mind.
   const [othersOpen, setOthersOpen] = useState(false);
@@ -304,12 +308,13 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
           list.map((r) => (r.id === row.id ? { ...r, title } : r));
         if ("startedByUserId" in row) patchSharedChatSessions(workspaceId, retitle);
         else patchPersonalChatSessions(workspaceId, retitle);
+        mutateSurfaceCache<DocSession[]>(chatArchivedSessionsCacheKey(workspaceId, view), retitle);
         dispatchChatSessionsRefresh(workspaceId);
       } catch {
         setError(t.renameFailed);
       }
     },
-    [t, workspaceId],
+    [t, view, workspaceId],
   );
 
   /** A converged group's brain capture (unified-sessions D4); admins only. */
@@ -356,6 +361,8 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
           list.filter((r) => r.id !== row.id);
         patchPersonalChatSessions(workspaceId, without);
         patchSharedChatSessions(workspaceId, without);
+        mutateSurfaceCache<DocSession[]>(chatArchivedSessionsCacheKey(workspaceId, view), without);
+        mutateSurfaceCache<DocSession[]>(chatSharedSessionsCacheKey(workspaceId, row.contextProjectId ?? null), without);
         dispatchChatSessionsRefresh(workspaceId);
       } catch {
         setError(t.deleteFailed);
@@ -370,6 +377,20 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   );
   const primary =
     assistants.find((a) => a.kind === "primary") ?? assistants[0] ?? null;
+
+  const onArchive = async (row: DocSession) => {
+    if (archiving) return;
+    setMenuFor(null);
+    setArchiving(row.id);
+    try {
+      await setChatSessionArchived(workspaceId, view, row, true);
+      setError(null);
+    } catch {
+      setError(t.archiveFailed);
+    } finally {
+      setArchiving(null);
+    }
+  };
 
   const renderRow = (
     row: DocSession | WorkspaceSession,
@@ -415,6 +436,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       </span>}>
       <Link
         href={href}
+        onClick={() => requestSidebarClose()}
         aria-current={row.id === activeSessionId ? "page" : undefined}
         className={rowCls(row.id === activeSessionId)}
       >
@@ -439,21 +461,34 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         {transportDescription && <span className="sr-only">{transportDescription}</span>}
       </Link>
       </Tooltip>
-      <button
+      <Tooltip side="right" label={t.archiveChat}>
+        <button type="button" aria-label={t.archiveChat}
+          disabled={archiving !== null} onClick={() => void onArchive(row)}
+          className={cn(styles.hoverAction, "absolute top-1/2 right-11 flex size-11 -translate-y-1/2 items-center justify-center rounded text-sidebar-foreground/50 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground disabled:opacity-50 md:right-7 md:size-6")}>
+          {archiving === row.id ? <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden /> : <Archive className="size-4 md:size-3.5" aria-hidden />}
+        </button>
+      </Tooltip>
+      <Popover open={menuFor === row.id} onOpenChange={open => setMenuFor(open ? row.id : null)}>
+      <PopoverTrigger render={<button
         type="button"
         aria-label={t.rowActionsAria}
-        onClick={() => setMenuFor(menuFor === row.id ? null : row.id)}
         data-open={menuFor === row.id ? "" : undefined}
         className={cn(styles.hoverAction, "absolute top-1/2 right-0 flex size-11 -translate-y-1/2 items-center justify-center rounded text-sidebar-foreground/50 transition-opacity md:right-1 md:size-6")}
-      >
+      />}>
         <MoreHorizontal className="size-4 md:size-3.5" aria-hidden />
-      </button>
+      </PopoverTrigger>
       {menuFor === row.id && (
-        <div className="absolute top-full right-1 z-20 mt-0.5 w-32 overflow-hidden rounded-md border border-border bg-popover shadow-md">
+        <PopoverContent align="end" aria-label={t.rowActionsAria} className="w-40 max-w-[calc(100vw-2rem)] gap-0 p-0">
+          <button type="button" disabled={archiving !== null}
+            onClick={() => void onArchive(row)}
+            className="flex min-h-11 w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-accent disabled:opacity-50 md:min-h-8">
+            <Archive className="size-3.5" aria-hidden />
+            {t.archiveChat}
+          </button>
           <button
             type="button"
             onClick={() => void onRename(row)}
-            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-accent"
+            className="flex min-h-11 w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-accent md:min-h-8"
           >
             <Pencil className="size-3.5" aria-hidden />
             {t.rename}
@@ -462,7 +497,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
             <button
               type="button"
               onClick={() => void onToggleCapture(row)}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-accent"
+              className="flex min-h-11 w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-accent md:min-h-8"
             >
               <Brain className="size-3.5" aria-hidden />
               {row.roomCapture ? t.roomCaptureOff : t.roomCaptureOn}
@@ -471,13 +506,14 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
           <button
             type="button"
             onClick={() => void onDelete(row)}
-            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-destructive hover:bg-accent"
+            className="flex min-h-11 w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-destructive hover:bg-accent md:min-h-8"
           >
             <Trash2 className="size-3.5" aria-hidden />
             {t.delete}
           </button>
-        </div>
+        </PopoverContent>
       )}
+      </Popover>
     </div>
     );
   };
@@ -540,7 +576,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       )}
 
       {error && (
-        <p className="px-1 text-[11px] leading-snug text-destructive">{error}</p>
+        <p role="alert" className="px-1 text-[11px] leading-snug text-destructive">{error}</p>
       )}
 
       {view === "personal" && (
@@ -612,6 +648,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
           )}
         </div>
       )}
+
     </div>
   );
 }

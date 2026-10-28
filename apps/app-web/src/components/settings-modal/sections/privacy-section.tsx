@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ArchivedChatsSettings } from "./archived-chats-settings";
 import {
   downloadSupportDiagnosticCapsule,
   getSupportDiagnosticStatus,
@@ -38,7 +39,7 @@ const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 type ConflictAssistant = { id: string; name: string; memberCount: number };
 type ConflictTeam = { id: string; name: string; memberCount?: number };
 
-export function PrivacySection() {
+export function PrivacySection({ onOpenChat }: { onOpenChat?: () => void }) {
   const t = useT();
   const [analyticsOptOut, setAnalyticsOptOut] = useState(false);
   const [userInfo, setUserInfo] = useState<UserInfo | null>(getCachedUserInfo);
@@ -51,6 +52,8 @@ export function PrivacySection() {
   return (
     <div className="space-y-6">
       <h2 className="text-lg font-semibold">{t.settings.nav.privacy}</h2>
+
+      <ArchivedChatsSettings onOpenChat={onOpenChat} />
 
       <div className="border-t border-border pt-6 space-y-5">
         <Toggle

@@ -57,12 +57,15 @@ import {
 } from "@/lib/api/views";
 import {
   listSessionsForAssistants,
+  listPersonalSessions,
+  setSessionArchived,
   listWorkspaceSessions,
   type DocSession,
   type WorkspaceSession,
 } from "@/lib/api/sessions";
 import {
   chatRosterCacheKey,
+  chatArchivedSessionsCacheKey,
   chatSessionsCacheKey,
   chatSharedSessionsCacheKey,
   chatTranscriptCacheKey,
@@ -77,7 +80,7 @@ import {
 } from "@/lib/surface-cache";
 import { idbDelete, idbGet, idbSet } from "@/lib/offline/idb";
 import { getUserInfo } from "@/lib/user";
-import { CHAT_SESSIONS_REFRESH_EVENT } from "@/lib/chat-session-events";
+import { CHAT_SESSIONS_REFRESH_EVENT, dispatchChatSessionsRefresh } from "@/lib/chat-session-events";
 import { leaseSurfaceContent, surfaceContentRemaining, useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 // ── Disk tier ────────────────────────────────────────────────────────────
@@ -253,6 +256,52 @@ export function useProjectChatSessionsData(workspaceId: string, projectId: strin
 }
 
 // ── Optimistic patches ───────────────────────────────────────────────────
+
+/** Archived history is separately cached and paged; failures remain visible. */
+export function useArchivedChatSessionsData(workspaceId: string, audience: "personal" | "workspace", enabled: boolean) {
+  const key = chatArchivedSessionsCacheKey(workspaceId, audience);
+  const fetchPage = (before?: { id: string; lastActive: string }): Promise<DocSession[]> => audience === "workspace"
+    ? listWorkspaceSessions({ workspaceId, archived: true, strict: true, before })
+    : listPersonalSessions({ workspaceId, archived: true, strict: true, before });
+  const rows = useCachedResource<DocSession[]>(enabled ? key : null, () => fetchPage());
+  const [paging, setPaging] = useState(false);
+  const [exhaustedCursor, setExhaustedCursor] = useState<string | null>(null);
+  const [pageError, setPageError] = useState<unknown>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ workspaceId?: string | null }>).detail;
+      if (!detail?.workspaceId || detail.workspaceId === workspaceId) markSurfaceCacheStale(key);
+    };
+    window.addEventListener(CHAT_SESSIONS_REFRESH_EVENT, handler);
+    return () => window.removeEventListener(CHAT_SESSIONS_REFRESH_EVENT, handler);
+  }, [enabled, key, workspaceId]);
+  useEffect(() => { setExhaustedCursor(null); setPageError(null); }, [key]);
+  const more = async () => {
+    const last = rows.data?.at(-1);
+    if (!last || paging) return;
+    setPaging(true); setPageError(null);
+    try {
+      const next = await fetchPage({ id: last.id, lastActive: last.lastActive });
+      mutateSurfaceCache<DocSession[]>(key, current => [...current, ...next.filter(row => !current.some(old => old.id === row.id))]);
+      setExhaustedCursor(next.length < 50 ? next.at(-1)?.id ?? last.id : null);
+    } catch (error) { setPageError(error); } finally { setPaging(false); }
+  };
+  const refresh = () => { setPageError(null); setExhaustedCursor(null); return rows.refresh(); };
+  return { ...rows, refresh, error: rows.error ?? pageError, paging, hasMore: (rows.data?.length ?? 0) >= 50 && rows.data?.at(-1)?.id !== exhaustedCursor, more };
+}
+
+/** The row action and Settings manager share one cache/refresh contract. */
+export async function setChatSessionArchived(workspaceId: string, audience: "personal" | "workspace", row: DocSession, archived: boolean): Promise<void> {
+  await setSessionArchived(row.id, archived);
+  const without = <R extends DocSession>(list: R[]): R[] => list.filter(r => r.id !== row.id);
+  patchPersonalChatSessions(workspaceId, without);
+  patchSharedChatSessions(workspaceId, without);
+  mutateSurfaceCache<DocSession[]>(chatSharedSessionsCacheKey(workspaceId, row.contextProjectId ?? null), without);
+  mutateSurfaceCache<DocSession[]>(chatArchivedSessionsCacheKey(workspaceId, audience), without);
+  markChatSessionsStale(workspaceId);
+  dispatchChatSessionsRefresh(workspaceId);
+}
 
 /**
  * Apply a local edit to a cached list. `mutateSurfaceCache` alone no-ops on

@@ -2,7 +2,7 @@
    Keyboard navigation reveals the slot without retaining ordinary mouse focus. */
 .actionHost {
   --chat-compose-space: 44px;
-  --chat-menu-space: 44px;
+  --chat-menu-space: 88px;
 }
 
 .titleViewport {
@@ -63,7 +63,7 @@
 @media (min-width: 768px) {
   .actionHost {
     --chat-compose-space: 32px;
-    --chat-menu-space: 28px;
+    --chat-menu-space: 56px;
   }
 }
 
