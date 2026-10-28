@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import type { A2UIRowValue } from '../types.js'
 import { LastEditedByProperty } from '../properties/last-edited-by.js'
+import { CreatedByProperty } from '../properties/created-by.js'
 
 function elName(el: ReactElement): string {
   if (typeof el.type === 'string') return el.type
@@ -53,19 +54,25 @@ describe('[COMP:views/property-last-edited-by] last_edited_by property', () => {
   })
 
   it('Editor is read-only — no input/select affordance', () => {
+    const onCommit = vi.fn()
+    const onCancel = vi.fn()
     const editorHtml = renderToStaticMarkup(
       React.createElement(Editor!, {
         value: { type: 'person', id: 'wm_2', name: 'Bob', initials: 'B' },
-        onCommit: vi.fn(),
-        onCancel: vi.fn(),
+        onCommit,
+        onCancel,
+        hints: { members: [{ type: 'person', id: 'wm_3', name: 'Charlie' }] },
       }),
     )
     expect(editorHtml).not.toMatch(/<(input|select|textarea)\b/)
     expect(editorHtml).toContain('Bob')
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(onCancel).not.toHaveBeenCalled()
   })
 
   it('Icon renders an svg', () => {
     expect(elName(Icon({}))).toBe('svg')
+    expect(renderToStaticMarkup(Icon({}))).not.toBe(renderToStaticMarkup(CreatedByProperty.Icon({})))
   })
 
   it('sortFn orders alphabetically by name with nulls last', () => {
@@ -81,4 +88,14 @@ describe('[COMP:views/property-last-edited-by] last_edited_by property', () => {
     expect((v[2] as { name: string }).name).toBe('Charlie')
     expect(v[3]).toBeNull()
   })
+
+  it('uses name initials without an avatar and refuses unresolved raw member ids', () => {
+    const html = renderToStaticMarkup(Cell({ value: { type: 'person', id: 'wm_4', name: 'Dana' } }))
+    expect(html).toContain('>D</span>')
+    expect(html).toContain('Dana')
+    expect(html).not.toContain('<img')
+    expect(isEmptyMarker(Cell({ value: 'wm_4' }))).toBe(true)
+    expect(sortFn('wm_4', { type: 'person', id: 'wm_4', name: 'Dana' })).toBeGreaterThan(0)
+  })
+
 })
