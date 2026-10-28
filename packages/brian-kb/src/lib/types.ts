@@ -18,7 +18,7 @@ export const SENSITIVITY_RANK: Record<Sensitivity, number> = {
 }
 
 export function isSensitivity(v: unknown): v is Sensitivity {
-  return typeof v === 'string' && v in SENSITIVITY_RANK
+  return v === 'public' || v === 'internal' || v === 'confidential'
 }
 
 // ── Parser output shape (canonical — what the sync worker consumes) ──
