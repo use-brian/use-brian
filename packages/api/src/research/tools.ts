@@ -24,7 +24,7 @@ const key = (context: ToolContext, ...parts: unknown[]) =>
   createHash('sha256').update([context.sessionId, ...parts.map((p) => JSON.stringify(p))].join('\u0000')).digest('hex').slice(0, 48)
 
 const COPY: Record<research.ResearchErrorCode, string> = {
-  research_not_found: 'Nothing you can see matches that id. Nothing was changed.',
+  research_not_found: 'Nothing you can see matches that id.',
   research_forbidden: 'You are not allowed to do this here (only the member, the Project owner, or a workspace owner acting directly may). Nothing was changed; retrying will be refused the same way.',
   research_stale: 'Not applied: it changed since you read it. Read it again and use the current version.',
   research_invalid: 'The request was invalid. Nothing was changed.',

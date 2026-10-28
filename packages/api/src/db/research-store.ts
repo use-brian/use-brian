@@ -626,6 +626,10 @@ const COMPARISON_COLUMNS = `c.id, c.improvement_id AS "improvementId", c.recorde
   c.case_set_version AS "caseSetVersion", c.dataset_version AS "datasetVersion", c.judge_identity AS "judgeIdentity",
   c.baseline_identity AS "baselineIdentity", c.candidate_identity AS "candidateIdentity", c.result, c.created_at AS "createdAt"`
 
+export class ResearchNotFoundError extends Error {
+  constructor() { super('research_not_found') }
+}
+
 export async function insertResearchImprovementSystem(input: {
   workspaceId: string
   createdBy: string
@@ -639,19 +643,34 @@ export async function insertResearchImprovementSystem(input: {
   compartments: string[]
   idempotencyKey: string
 }): Promise<{ improvement: ResearchImprovement; created: boolean }> {
-  const pool = getPool()
-  const inserted = await pool.query<ResearchImprovement>(
-    `INSERT INTO research_improvements AS i (workspace_id, created_by, title, pattern, desired_behavior, task_id, feedback_ids,
-       activity_ids, sensitivity, compartments, idempotency_key)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-     ON CONFLICT (workspace_id, idempotency_key) DO NOTHING RETURNING ${IMPROVEMENT_COLUMNS}`,
-    [input.workspaceId, input.createdBy, input.title, input.pattern, input.desiredBehavior, input.taskId, input.feedbackIds,
-      input.activityIds, input.sensitivity, input.compartments, input.idempotencyKey])
-  if (inserted.rows[0]) return { improvement: inserted.rows[0], created: true }
-  const existing = await pool.query<ResearchImprovement>(
-    `SELECT ${IMPROVEMENT_COLUMNS} FROM research_improvements i WHERE i.workspace_id = $1 AND i.idempotency_key = $2`,
-    [input.workspaceId, input.idempotencyKey])
-  return { improvement: existing.rows[0]!, created: false }
+  const result = await withResearchTransaction(async (client) => {
+    // Canonical lock order: workspace, then the exact current membership.
+    // The member lock also serializes direct removal and role/clearance edits.
+    const workspace = await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [input.workspaceId])
+    if (!workspace.rows.length) throw new ResearchNotFoundError()
+    const member = await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE',
+      [input.workspaceId, input.createdBy])
+    if (!member.rows.length) throw new ResearchNotFoundError()
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO research_improvements (workspace_id, created_by, title, pattern, desired_behavior, task_id, feedback_ids,
+         activity_ids, sensitivity, compartments, idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT (workspace_id, idempotency_key) DO NOTHING RETURNING id`,
+      [input.workspaceId, input.createdBy, input.title, input.pattern, input.desiredBehavior, input.taskId, input.feedbackIds,
+        input.activityIds, input.sensitivity, input.compartments, input.idempotencyKey])
+    if (inserted.rows[0]) return { id: inserted.rows[0].id, created: true }
+    // The key resolves identity only. It never grants access to the candidate.
+    const existing = await client.query<{ id: string }>(
+      'SELECT id FROM research_improvements WHERE workspace_id=$1 AND idempotency_key=$2',
+      [input.workspaceId, input.idempotencyKey])
+    if (!existing.rows[0]) throw new ResearchNotFoundError()
+    return { id: existing.rows[0].id, created: false }
+  })
+  // Finish/release the owner transaction before a viewer checkout: embedded
+  // mode shares one connection. RLS remains the canonical candidate read gate.
+  const visible = await getResearchImprovementForViewer(input.createdBy, input.workspaceId, result.id)
+  if (!visible) throw new ResearchNotFoundError()
+  return { improvement: visible.improvement, created: result.created }
 }
 
 export async function listResearchImprovementsForViewer(userId: string, workspaceId: string): Promise<ResearchImprovement[]> {
