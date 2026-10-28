@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
 import { createToolExecutor, renderToolResultData } from '../tool-executor.js'
@@ -1561,5 +1563,117 @@ describe('[COMP:engine/tool-executor] mini-app invocation gate', () => {
     expect((results[0] as { content: string }).content).toContain('home_app:office:write')
     expect(confirm).not.toHaveBeenCalled()
     expect(execute).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('[COMP:engine/tool-executor] rejected asynchronous setup', () => {
+  // The unrepaired executor leaves its real collector waiting forever and
+  // emits an unhandled rejection. Isolate that failure in a bounded child so
+  // this regression cannot strand the test runner's generator or pollers.
+  function rejectedSetup(hook: 'confirmation' | 'permission', failure: 'ordinary' | 'huge' | 'authority') {
+    const executorUrl = new URL('../tool-executor.ts', import.meta.url).href
+    const detectorUrl = new URL('../loop-detector.ts', import.meta.url).href
+    const program = `
+      import { createToolExecutor } from ${JSON.stringify(executorUrl)};
+      import { createLoopDetector } from ${JSON.stringify(detectorUrl)};
+      import { z } from 'zod';
+      const hook = ${JSON.stringify(hook)}, failureKind = ${JSON.stringify(failure)};
+      const failure = failureKind === 'authority'
+        ? Object.assign(new Error('Current authority unavailable'), { reason: 'authority_changed', retrySafe: false, operationMayHaveExecuted: true })
+        : new Error(failureKind === 'huge' ? 'x'.repeat(200_000) : 'Policy lookup unavailable');
+      const unhandled = [];
+      process.on('unhandledRejection', error => unhandled.push(error === failure));
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      const rejectSetup = async () => { await gate; throw failure; };
+      let executed = 0, followingExecuted = 0, confirmations = 0;
+      const outcomes = [];
+      const detector = createLoopDetector();
+      const recordOutcome = detector.recordOutcome.bind(detector);
+      detector.recordOutcome = (name, failed) => { outcomes.push([name, failed]); recordOutcome(name, failed); };
+      const guarded = {
+        name: 'guarded', description: 'Fictional governed operation', inputSchema: z.object({}),
+        isConcurrencySafe: false, requiresConfirmation: true,
+        ...(hook === 'confirmation' ? { resolveConfirmation: rejectSetup } : {}),
+        execute: async () => { executed++; return { data: 'Unexpected mutation' }; },
+      };
+      const following = {
+        name: 'following', description: 'Independent fictional read', inputSchema: z.object({}),
+        isConcurrencySafe: false, isReadOnly: true,
+        execute: async () => { followingExecuted++; return { data: 'Following result' }; },
+      };
+      const executor = createToolExecutor({
+        tools: new Map([['guarded', guarded], ['following', following]]),
+        context: { assistantId: 'assistant', userId: 'reader', sessionId: 'session', appId: 'Use Brian', channelType: 'web', channelId: 'chat', abortSignal: new AbortController().signal },
+        loopDetector: detector,
+        confirmationResolver: { waitForDecision: async () => { confirmations++; return { decision: 'allow' }; }, resolve() {} },
+        onConfirmationRequired: () => { confirmations++; },
+        ...(hook === 'permission' ? { permissionGrantEvaluator: rejectSetup } : {}),
+      });
+      executor.addTool('guarded-call', 'guarded', {});
+      executor.addTool('following-call', 'following', {});
+      const drain = (async () => {
+        const blocks = [];
+        for await (const batch of executor.getRemainingResults()) blocks.push(...batch.blocks);
+        return blocks;
+      })();
+      let finished = false;
+      const finish = result => {
+        if (finished) return;
+        finished = true;
+        process.stdout.write(JSON.stringify({ ...result, executed, followingExecuted, confirmations, outcomes, unhandled, pendingCount: executor.pendingCount }) + '\\n', () => process.exit(0));
+      };
+      setTimeout(() => finish({ kind: 'pending' }), 300);
+      drain.then(blocks => finish({ kind: 'results', blocks }), error => finish({
+        kind: 'fatal', sameError: error === failure, reason: error.reason, retrySafe: error.retrySafe, operationMayHaveExecuted: error.operationMayHaveExecuted,
+      }));
+      release();
+    `
+    const output = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', program], {
+      cwd: fileURLToPath(new URL('../../..', import.meta.url)),
+      encoding: 'utf8', timeout: 5_000, maxBuffer: 512_000,
+    })
+    return JSON.parse(output.trim().split('\n').at(-1)!) as {
+      kind: string; blocks: Array<{ toolUseId: string; content: string; isError?: boolean }>;
+      executed: number; followingExecuted: number; confirmations: number; outcomes: Array<[string, boolean]>;
+      unhandled: boolean[]; pendingCount: number; sameError?: boolean; reason?: string;
+      retrySafe?: boolean; operationMayHaveExecuted?: boolean;
+    }
+  }
+
+  it.each(['confirmation', 'permission'] as const)('settles a rejected %s hook and drains following tools in order', hook => {
+    const result = rejectedSetup(hook, 'ordinary')
+    expect(result.kind).toBe('results')
+    expect(result.blocks.map(block => block.toolUseId)).toEqual(['guarded-call', 'following-call'])
+    expect(result.blocks[0]).toMatchObject({ isError: true, content: 'Error: Policy lookup unavailable' })
+    expect(result.blocks[1]).toMatchObject({ content: 'Following result' })
+    expect(result.executed).toBe(0)
+    expect(result.confirmations).toBe(0)
+    expect(result.followingExecuted).toBe(1)
+    expect(result.outcomes).toContainEqual(['guarded', true])
+    expect(result.unhandled).toEqual([])
+    expect(result.pendingCount).toBe(0)
+  })
+
+  it('caps an oversized setup rejection using the existing error-result budget', () => {
+    const result = rejectedSetup('confirmation', 'huge')
+    expect(result.kind).toBe('results')
+    expect(result.blocks[0]!.isError).toBe(true)
+    expect(result.blocks[0]!.content.length).toBeLessThan(101_000)
+    expect(result.blocks[0]!.content).toContain('[Response truncated at 25k tokens')
+    expect(result.executed).toBe(0)
+    expect(result.confirmations).toBe(0)
+    expect(result.unhandled).toEqual([])
+  })
+
+  it.each(['confirmation', 'permission'] as const)('propagates the identical fatal authority error from a rejected %s hook', hook => {
+    const result = rejectedSetup(hook, 'authority')
+    expect(result.kind).toBe('fatal')
+    expect(result).toMatchObject({ sameError: true, reason: 'authority_changed', retrySafe: false, operationMayHaveExecuted: true })
+    expect(result.executed).toBe(0)
+    expect(result.confirmations).toBe(0)
+    expect(result.outcomes).not.toContainEqual(['guarded', true])
+    expect(result.unhandled).toEqual([])
   })
 })
