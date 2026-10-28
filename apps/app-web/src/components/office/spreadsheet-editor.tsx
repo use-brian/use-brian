@@ -806,7 +806,7 @@ function cellStyle(style: SpreadsheetCellStyle | undefined, numberFormat: string
   const border = (side: NonNullable<SpreadsheetCellStyle["border"]>["top"]) => side?.style ? `${side.style === "double" ? 3 : side.style === "thick" ? 2 : 1}px ${side.style === "dotted" ? "dotted" : side.style === "dashed" ? "dashed" : side.style === "double" ? "double" : "solid"} ${side.color ?? "#334155"}` : undefined;
   return {
     backgroundColor: style?.fill,
-    color: numberFormat?.includes("[Red]") && typeof (cell?.formula ? cell.calculatedValue : cell?.value) === "number" && Number(cell?.formula ? cell.calculatedValue : cell?.value) < 0 ? "#DC2626" : style?.font?.color,
+    color: numberFormat?.includes("[Red]") && typeof (cell?.formula ? cell.calculatedValue : cell?.value) === "number" && Number(cell?.formula ? cell.calculatedValue : cell?.value) < 0 ? "#DC2626" : style?.font?.color ?? "#0f172a",
     fontFamily: style?.font?.family,
     fontSize: style?.font ? `${style.font.sizePt}pt` : undefined,
     fontWeight: style?.font?.bold ? 700 : undefined,

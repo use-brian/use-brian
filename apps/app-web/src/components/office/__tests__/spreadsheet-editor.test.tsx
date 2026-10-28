@@ -55,6 +55,90 @@ describe("[COMP:app-web/office-spreadsheet-editor] Spreadsheet editor", () => {
     expect(html).toContain("position:sticky");
   });
 
+
+  it.each(["literal", "formula", "empty", "fill-only"] as const)("projects a readable paper foreground for %s cells without changing the snapshot", (kind) => {
+    const snapshot = spreadsheetFixture(), sheet = snapshot.worksheets[0];
+    const cell = { ...sheet.cells[1], address: "A1", value: kind === "fill-only" ? 0 : 7, style: {}, numberFormat: "[Red]0.00" };
+    sheet.merges = [];
+    sheet.cells = kind === "empty" ? [] : [kind === "formula" ? { ...cell, value: null, formula: "7*2", calculatedValue: 14 } : cell];
+    sheet.conditionalFormats = kind === "fill-only" ? [{ id: "00000000-0000-4000-8000-000000000201", range: "A1", ruleType: "cellIs", operator: "equal", formulas: ["0"], style: { fill: "#E0E7FF" }, priority: 1 }] : [];
+    const before = structuredClone(snapshot), onCommand = vi.fn();
+    const host = document.createElement("div"), root = createRoot(host);
+    host.style.color = "#D4D4D4";
+    document.body.append(host);
+    try {
+      act(() => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><SpreadsheetEditor snapshot={snapshot} baseVersion={1} role="edit" suggestMode={false} onCommand={onCommand} /></I18nProvider>));
+      const rendered = host.querySelector<HTMLButtonElement>('[data-cell-address="A1"]')!;
+      expect(rendered.style.color).toBe("rgb(15, 23, 42)");
+      if (kind === "formula") expect(rendered.textContent).toBe("14.00");
+      if (kind === "fill-only") expect(rendered.style.backgroundColor).toBe("rgb(224, 231, 255)");
+      expect(rendered.getAttribute("aria-selected")).toBe("true");
+      act(() => host.querySelector<HTMLButtonElement>('[data-cell-address="B1"]')!.click());
+      expect(rendered.getAttribute("aria-selected")).toBe("false");
+      expect(rendered.style.color).toBe("rgb(15, 23, 42)");
+      expect(onCommand).not.toHaveBeenCalled();
+      expect(snapshot).toEqual(before);
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("preserves authored fonts and fills and matching conditional font precedence", () => {
+    const snapshot = spreadsheetFixture(), sheet = snapshot.worksheets[0];
+    const font = sheet.cells[0].style.font!;
+    const numberCell = sheet.cells[1];
+    sheet.merges = [];
+    sheet.cells = [
+      sheet.cells[0],
+      { ...numberCell, address: "A2", style: { font: { ...font, color: "#126C5A" } } },
+      { ...numberCell, id: "00000000-0000-4000-8000-000000000202", address: "B2", style: { font: { ...font, color: "#126C5A" } } },
+      { ...numberCell, id: "00000000-0000-4000-8000-000000000203", address: "C2", style: { font: { ...font, color: "#126C5A" } } },
+    ];
+    sheet.conditionalFormats = [
+      { id: "00000000-0000-4000-8000-000000000204", range: "A2", ruleType: "cellIs", operator: "greaterThan", formulas: ["0"], style: { fill: "#DAF9E9" }, priority: 1 },
+      { id: "00000000-0000-4000-8000-000000000205", range: "B2", ruleType: "cellIs", operator: "greaterThan", formulas: ["0"], style: { font: { ...font, color: "#7C3AED" } }, priority: 1 },
+      { id: "00000000-0000-4000-8000-000000000206", range: "B2", ruleType: "cellIs", operator: "greaterThan", formulas: ["0"], style: { font: { ...font, color: "#DC2626" } }, priority: 2 },
+      { id: "00000000-0000-4000-8000-000000000207", range: "C2", ruleType: "cellIs", operator: "lessThan", formulas: ["0"], style: { font: { ...font, color: "#DC2626" } }, priority: 1 },
+    ];
+    const before = structuredClone(snapshot), onCommand = vi.fn(), host = document.createElement("div");
+    host.innerHTML = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><SpreadsheetEditor snapshot={snapshot} baseVersion={1} role="edit" suggestMode={false} onCommand={onCommand} /></I18nProvider>);
+    const cell = (address: string) => host.querySelector<HTMLElement>(`[data-cell-address="${address}"]`)!;
+    expect(cell("A1").style.color).toBe("rgb(255, 255, 255)");
+    expect(cell("A1").style.backgroundColor).toBe("rgb(16, 32, 44)");
+    expect(cell("A2").style.color).toBe("rgb(18, 108, 90)");
+    expect(cell("A2").style.backgroundColor).toBe("rgb(218, 249, 233)");
+    expect(cell("B2").style.color).toBe("rgb(124, 58, 237)");
+    expect(cell("C2").style.color).toBe("rgb(18, 108, 90)");
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(snapshot).toEqual(before);
+  });
+
+  it("keeps negative Red number-format priority over authored and conditional fonts", () => {
+    const snapshot = spreadsheetFixture(), sheet = snapshot.worksheets[0];
+    const font = { ...sheet.cells[0].style.font!, color: "#126C5A" }, base = sheet.cells[1];
+    sheet.merges = [];
+    sheet.cells = [
+      { ...base, address: "A1", value: -7, numberFormat: "[Red]0.00", style: { font } },
+      { ...base, id: "00000000-0000-4000-8000-000000000208", address: "A2", value: null, formula: "-7*2", calculatedValue: -14, numberFormat: "[Red]0.00", style: { font } },
+      { ...base, id: "00000000-0000-4000-8000-000000000209", address: "B1", value: 7, numberFormat: "[Red]0.00", style: { font } },
+      { ...base, id: "00000000-0000-4000-8000-000000000210", address: "B2", value: 0, numberFormat: "[Red]0.00", style: { font } },
+    ];
+    sheet.conditionalFormats = [
+      { id: "00000000-0000-4000-8000-000000000211", range: "A2 B2", ruleType: "cellIs", operator: "lessThanOrEqual", formulas: ["0"], style: { font: { ...font, color: "#7C3AED" } }, priority: 1 },
+    ];
+    const before = structuredClone(snapshot), onCommand = vi.fn(), host = document.createElement("div");
+    host.innerHTML = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><SpreadsheetEditor snapshot={snapshot} baseVersion={1} role="edit" suggestMode={false} onCommand={onCommand} /></I18nProvider>);
+    const cell = (address: string) => host.querySelector<HTMLElement>(`[data-cell-address="${address}"]`)!;
+    expect(cell("A1").style.color).toBe("rgb(220, 38, 38)");
+    expect(cell("A2").style.color).toBe("rgb(220, 38, 38)");
+    expect(cell("A2").textContent).toBe("-14.00");
+    expect(cell("B1").style.color).toBe("rgb(18, 108, 90)");
+    expect(cell("B2").style.color).toBe("rgb(124, 58, 237)");
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(snapshot).toEqual(before);
+  });
+
   it("keeps an explicit editor fixture for every editable Spreadsheet capability", () => {
     const expected = officeCapabilityManifest.capabilities.filter((capability) => capability.disposition === "editable" && capability.family === "spreadsheet").map((capability) => capability.id).sort();
     expect(coveredCapabilities).toEqual(expected);
