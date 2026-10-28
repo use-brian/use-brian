@@ -13,6 +13,10 @@ const sidebarSource = readFileSync(
   new URL("../doc-sidebar.tsx", import.meta.url),
   "utf8",
 );
+const statusSource = readFileSync(
+  new URL("../../chrome/workspace-status.tsx", import.meta.url),
+  "utf8",
+);
 
 describe("[COMP:app-web/doc-shell] mobile workspace menu", () => {
   it("uses the compact top-bar button treatment without a floating card", () => {
@@ -52,7 +56,8 @@ describe("[COMP:app-web/doc-shell] mobile workspace menu", () => {
     // One persistent picker/live region. Collapsing does not conditionally
     // mount either control or change its desktop anchor.
     expect(source.match(/<WorkspaceThemePicker \/>/g)).toHaveLength(1);
-    expect(source.match(/data-workspace-sync-status/g)).toHaveLength(1);
+    expect(source.match(/<WorkspaceStatus\b/g)).toHaveLength(1);
+    expect(statusSource.match(/data-workspace-sync-status/g)).toHaveLength(1);
     expect(sidebarSource).not.toContain("<PalettePicker");
     expect(sidebarSource).toContain("data-doc-sidebar-footer-slot");
     const railSource = readFileSync(new URL("../workspace-app-rail.tsx", import.meta.url), "utf8");
@@ -60,24 +65,16 @@ describe("[COMP:app-web/doc-shell] mobile workspace menu", () => {
     expect(source).toContain("WORKSPACE_STATUS_ROW_HEIGHT_CLASS");
   });
 
-  it("hides only the healthy phone label when the drawer is closed", () => {
-    const status = source.slice(source.indexOf("data-workspace-sync-status"));
-    expect(status).toContain('!sidebarOpen && !hasSyncNotice && "max-md:hidden"');
+  it("keeps updates in the shared status control and retains phone notices", () => {
+    expect(statusSource).toContain('!sidebarOpen && !hasSyncNotice && !status && "max-md:hidden"');
     // Attention states remain visible, including paused writes without a pending count.
-    expect(source).toContain(
+    expect(statusSource).toContain(
       "offlineState.offline || offlineState.pending > 0 || offlineState.paused > 0 || offlineState.reconnecting",
     );
-    // Only the label is gated: uploading and updating remain independently reachable.
-    expect(status).toMatch(/data-workspace-activity-footer[\s\S]*?<DesktopUpdateChip \/>\s*<BrainIntakeTray/);
+    // Update text never renders as a separate chip over the contextual panel.
+    expect(source).not.toContain("DesktopUpdateChip");
+    expect(source).toMatch(/data-workspace-activity-footer[\s\S]*?<BrainIntakeTray/);
     expect(source).toContain('!sidebarOpen && "max-md:hidden"');
   });
 
-  it("uses an emerald dot for the healthy Online sync state", () => {
-    expect(source).toContain(
-      'hasSyncNotice ? "bg-amber-500" : "bg-emerald-500"',
-    );
-    expect(source).not.toContain(
-      'hasSyncNotice ? "bg-amber-500" : "bg-muted-foreground/50"',
-    );
-  });
 });

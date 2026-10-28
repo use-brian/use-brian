@@ -35,9 +35,7 @@ import { DesktopBrowserCoordinator } from "@/components/computer/desktop-browser
 import { WorkspaceTopbarProvider, WorkspaceTopbarHost } from "@/components/chrome/workspace-topbar";
 import { useWorkspaceSidebarResize, WorkspaceSidebarResizeHandle } from "./workspace-sidebar-resize";
 import { WorkspaceThemePicker } from "./workspace-theme-picker";
-import { Tooltip } from "@/components/ui/tooltip";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { DesktopUpdateChip } from "@/components/chrome/desktop-update-chip";
+import { WorkspaceStatus } from "@/components/chrome/workspace-status";
 import {
   createContext,
   useCallback,
@@ -46,14 +44,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { RefreshCw } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   docPagePath,
   pageIdFromPathname,
   surfaceFromPathname,
 } from "@/lib/doc-page-url";
-import { useT, format } from "@/lib/i18n/client";
+import { useT } from "@/lib/i18n/client";
 import { SurfaceTransition } from "@/components/chrome/surface-transition";
 import { usePrimaryAssistant } from "@/contexts/primary-assistant";
 import { routeProgress } from "@/lib/route-progress";
@@ -572,17 +569,6 @@ export function WorkspaceChrome({
     return () => window.removeEventListener("keydown", onKey);
   }, [router, workspaceId, homeHref]);
 
-  const hasSyncNotice = offlineState.offline || offlineState.pending > 0 || offlineState.paused > 0 || offlineState.reconnecting;
-  const syncTitle = offlineState.paused > 0 ? t.offlineSyncPausedTitle
-    : offlineState.offline ? t.offlineBannerTitle
-    : offlineState.reconnecting ? t.errors.collabReconnecting
-    : offlineState.pending > 0 ? t.offlineSyncPendingTitle : t.offlineStatusOnline;
-  const syncDescription = offlineState.paused > 0
-    ? format(t.offlineSyncPausedBody, { count: offlineState.paused })
-    : offlineState.pending > 0
-    ? format(offlineState.offline ? t.offlineBannerPending : t.offlineSyncPendingBody, { count: offlineState.pending })
-    : offlineState.offline ? t.offlineBannerBody : "";
-
   return (
     <div ref={sidebarResize.containerRef} style={sidebarResize.style} data-workspace-layout data-workspace-sidebar-resizing={sidebarResize.resizing || undefined} className="h-full min-h-0 w-full">
     <WorkspaceSearchProvider workspaceId={workspaceId}>
@@ -839,38 +825,9 @@ export function WorkspaceChrome({
         <div className={cn("pointer-events-auto flex w-full justify-center px-2", !sidebarOpen && "max-md:hidden")}>
           <WorkspaceThemePicker />
         </div>
-        <div className={cn("flex w-64 max-w-[100vw] self-start items-center pb-[env(safe-area-inset-bottom)] md:w-[calc(3.5rem+var(--workspace-sidebar-width,14rem))]", WORKSPACE_STATUS_ROW_HEIGHT_CLASS)}>
-          <div
-            data-workspace-sync-status
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-            className={cn(
-              "pointer-events-auto relative z-10 min-w-0 shrink md:flex md:w-14 md:shrink-0 md:justify-center",
-              !sidebarOpen && !hasSyncNotice && "max-md:hidden",
-              hasSyncNotice ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground",
-            )}
-          >
-            <Popover>
-              <Tooltip side="right" sideOffset={4} delay={100} appearance="rail" label={<span className="block max-w-64 whitespace-normal">{syncTitle}{syncDescription ? <span className="mt-1 block">{syncDescription}</span> : null}</span>}>
-                <PopoverTrigger aria-label={syncTitle} className="flex h-11 max-w-full items-center gap-2 rounded-lg px-3 hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 md:h-7 md:w-11 md:justify-center md:px-0">
-                  {offlineState.reconnecting && !offlineState.offline && offlineState.paused === 0 ? (
-                    <RefreshCw aria-hidden className="size-3 shrink-0 animate-spin" />
-                  ) : (
-                    <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", hasSyncNotice ? "bg-amber-500" : "bg-emerald-500")} />
-                  )}
-                  <span className="min-w-0 truncate font-medium md:sr-only">{syncTitle}</span>
-                  {syncDescription ? <span className="sr-only">{syncDescription}</span> : null}
-                </PopoverTrigger>
-              </Tooltip>
-              <PopoverContent side="top" align="start" sideOffset={8} aria-label={syncTitle} className="w-[min(18rem,calc(100vw-1rem))] gap-1.5 text-sm">
-                <p className="font-medium">{syncTitle}</p>
-                {syncDescription ? <p className="text-muted-foreground">{syncDescription}</p> : null}
-              </PopoverContent>
-            </Popover>
-          </div>
+        <div className={cn("flex w-64 max-w-[100vw] self-start items-center pb-[calc(0.5rem+env(safe-area-inset-bottom))] md:w-[calc(3.5rem+var(--workspace-sidebar-width,14rem))]", WORKSPACE_STATUS_ROW_HEIGHT_CLASS)}>
+          <WorkspaceStatus offlineState={offlineState} sidebarOpen={sidebarOpen} />
           <div data-workspace-activity-footer className="pointer-events-none flex min-w-0 items-center gap-2 px-2 [&>*]:pointer-events-auto">
-            <DesktopUpdateChip />
             <BrainIntakeTray workspaceId={workspaceId} />
           </div>
         </div>

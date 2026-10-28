@@ -110,7 +110,7 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
       <div className={cn("my-1 shrink-0 border-t border-sidebar-border", !mobile && "w-8")} />
       {wrap(copy.docPage.iconStudio, <Link href={`/w/${workspaceId}/studio/connectors`} {...prefetch(`/w/${workspaceId}/studio/connectors`)} aria-label={copy.docPage.iconStudio} aria-current={activeSurface === "studio" ? "page" : undefined} onClick={() => { onDismissStudioNudge(); navigate(); }} className={itemClass(activeSurface === "studio")}><SlidersHorizontal className="size-[19px] shrink-0" aria-hidden />{label(copy.docPage.iconStudio)}{studioNudge && <span aria-label={copy.docPage.studioSetupNudgeAria} className="absolute right-1 top-1 size-2 rounded-full bg-primary" />}</Link>, 3)}
       {wrap(t.account, <button type="button" aria-label={t.account} className={itemClass(false)} onClick={() => { openWorkspaceSettings("profile"); navigate(); }}><CircleUserRound className="size-[19px] shrink-0" aria-hidden />{label(t.account)}</button>)}
-      {!mobile && <div data-workspace-rail-footer-slot aria-hidden className="h-[calc(4.5rem+env(safe-area-inset-bottom))] shrink-0" />}
+      {!mobile && <div data-workspace-rail-footer-slot aria-hidden className="h-[calc(5rem+env(safe-area-inset-bottom))] shrink-0" />}
     </nav>
   );
 }
