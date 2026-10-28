@@ -134,13 +134,14 @@ function buildApp(opts: {
   archiveMedia?: ReturnType<typeof makeArchiveMedia>
   voiceTranscription?: { enabled: boolean; apiKey: string }
   deferredConfirmationStore?: Record<string, unknown>
+  channelUserStore?: boolean
 } = {}) {
   const { store } = opts.store ? { store: opts.store } : makeStore()
   const integrationStore = opts.integrationStore ?? makeIntegrationStore()
   const app = createTestApp('/bridge/v1/channels', customChannelBridgeRoutes({
     integrationStore: integrationStore as never,
     customChannelStore: store,
-    channelUserStore: {} as never,
+    channelUserStore: opts.channelUserStore === false ? undefined : {} as never,
     provider: {} as never,
     systemPrompt: '',
     tools: new Map(),
@@ -377,12 +378,34 @@ describe('[COMP:api/custom-channel-bridge] inbound', () => {
     expect(enqueued).toContainEqual({ type: 'typing', peerId: 'peer-1', payload: { on: false } })
   })
 
-  it('keeps owner fallback unidentified when sender resolution fails', async () => {
-    vi.mocked(resolveChannelUser).mockRejectedValueOnce(new Error('resolution failed'))
-    const { app } = buildApp()
+  it.each(['missing', 'failed'])('keeps scoped Stop available when identity resolution is %s', async mode => {
+    const { app } = buildApp({ channelUserStore: mode !== 'missing' })
+    if (mode === 'failed') vi.mocked(resolveChannelUser).mockRejectedValue(new Error('identity lookup unavailable'))
+    const scope = { channelType: 'custom', integrationId: CHANNEL_ID, conversationId: 'peer-1', senderId: 'peer-1' }
+    const controller = new AbortController()
+    const onAbort = vi.fn()
+    const resolve = vi.fn()
+    const disposeTurn = channelConfirmations.registerTurn(scope, controller, { onAbort })
+    const disposeConfirmation = channelConfirmations.register(scope,
+      { toolCallId: 'custom-stop', toolName: 'sendEmail', input: {}, allowPersistentApproval: false } as never, { resolve } as never)
+    try {
+      await request(app).post(`${BASE}/inbound`).set('Authorization', `Bearer ${TOKEN}`).send(inbound({ text: 'stop' })).expect(200)
+      await flush()
+      expect(controller.signal.aborted).toBe(true)
+      expect(resolve).toHaveBeenCalledExactlyOnceWith('custom-stop', 'deny')
+      expect(onAbort).toHaveBeenCalledOnce()
+      expect(resolveChannelUser).not.toHaveBeenCalled()
+      expect(processChannelMessage).not.toHaveBeenCalled()
+    } finally { disposeConfirmation(); disposeTurn() }
+  })
+
+  it.each(['missing', 'failed'])('refuses an unresolved sender when resolution is %s', async mode => {
+    if (mode === 'failed') vi.mocked(resolveChannelUser).mockRejectedValueOnce(new Error('resolution failed'))
+    const { app, store } = buildApp({ channelUserStore: mode !== 'missing' })
     await request(app).post(`${BASE}/inbound`).set('Authorization', `Bearer ${TOKEN}`).send(inbound())
     await flush()
-    expect(processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner', isIdentified: false }))
+    expect(processChannelMessage).not.toHaveBeenCalled()
+    expect(store.enqueue).toHaveBeenCalledWith(CHANNEL_ID, { type: 'message', peerId: 'peer-1', payload: { text: 'Your identity could not be verified. Please try again shortly.', format: 'plain' } })
   })
 
   it('a pending text confirmation is resolved by the next message instead of starting a turn', async () => {

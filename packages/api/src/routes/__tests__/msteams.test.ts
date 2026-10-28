@@ -30,6 +30,11 @@ vi.mock('../../db/channels-store.js', () => ({
 vi.mock('../../db/channel-user-store.js', () => ({ resolveChannelUser: vi.fn() }))
 vi.mock('../../db/chat-lock.js', () => ({ withChatLock: vi.fn(async (_key: string, fn: () => Promise<void>) => fn()) }))
 vi.mock('../../billing-party.js', () => ({ billingPartyForAssistant: vi.fn(async () => 'owner') }))
+vi.mock('../../channel-room/room.js', () => ({
+  resolveRoomBinding: vi.fn(async () => null),
+  isWorkspaceAdmin: vi.fn(async (userId: string) => userId === 'owner'),
+  postPassiveChannelMessage: vi.fn(async () => {}),
+}))
 vi.mock('@use-brian/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@use-brian/core')>()),
   parseFileContent: vi.fn(async () => ({ text: '' })),
@@ -45,7 +50,8 @@ vi.mock('@use-brian/shared', async (importOriginal) => ({
 import { msteamsRoutes, msteamsUserAllowed } from '../msteams.js'
 import * as channels from '@use-brian/channels'
 import { processChannelMessage } from '../channel-pipeline.js'
-import { channelConfirmations } from '../channel-interactions.js'
+import { channelConfirmations, roomInteractionScope } from '../channel-interactions.js'
+import { isWorkspaceAdmin, postPassiveChannelMessage, resolveRoomBinding } from '../../channel-room/room.js'
 import { withChatLock } from '../../db/chat-lock.js'
 import { getChannelForWebhook, resolveRoutingForSurface, resolveAssistantForSurface } from '../../db/channels-store.js'
 import { findAssistantById } from '../../db/users.js'
@@ -96,6 +102,7 @@ const ACTIVITY = {
 describe('[COMP:api/msteams-route] webhook', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(resolveRoomBinding).mockResolvedValue(null)
     mocks.verifyAuthHeader.mockResolvedValue({ valid: true })
     mocks.parseIncoming.mockReturnValue({
       userId: '29:user', channelId: 'conv-1', text: 'hello',
@@ -195,6 +202,7 @@ describe('[COMP:api/msteams-route] webhook', () => {
     expect(dispatchIncomingMessageEvent).toHaveBeenCalledWith(expect.objectContaining({ incoming: expect.objectContaining({ channelType: 'msteams', timestamp: 1700000000 }) }))
     expect(processChannelMessage).toHaveBeenCalledTimes(1)
     const arg = vi.mocked(processChannelMessage).mock.calls[0][0]
+    expect(arg).toMatchObject({ userId: 'cu-1', isIdentified: false, ownerId: 'owner' })
     expect(arg.channelType).toBe('msteams')
     expect(arg.channelId).toBe('conv-1')
     expect(arg.questionIntegrationId).toBe('int-1')
@@ -202,14 +210,78 @@ describe('[COMP:api/msteams-route] webhook', () => {
     expect(arg.interactionScope).toEqual({ channelType: 'msteams', integrationId: 'ch-1', conversationId: 'conv-1', senderId: '29:user' })
   })
 
-  it.each(['missing', 'failed'])('does not identify an owner-fallback sender when resolution is %s', async mode => {
+  it('does not use a failed sender lookup as room-admin confirmation authority', async () => {
+    vi.mocked(resolveRoomBinding).mockResolvedValue({ workspaceId: 'ws-1', channelIntegrationId: 'int-1' })
+    vi.mocked(resolveChannelUser).mockRejectedValueOnce(new Error('identity lookup unavailable'))
+    mocks.parseIncoming.mockReturnValue({
+      userId: '29:other', channelId: 'conv-1', text: 'approve', isGroupChat: true,
+      isMentioned: true, messageId: 'unverified-approval', timestamp: 1700000000000,
+    })
+    const scope = roomInteractionScope({ channelType: 'msteams', integrationId: 'ch-1', conversationId: 'conv-1', senderId: '29:addresser' })
+    const resolve = vi.fn()
+    const disposeTurn = channelConfirmations.registerTurn(scope, new AbortController(), { addresserId: '29:addresser', onAbort: () => {} })
+    const disposeConfirmation = channelConfirmations.register(scope,
+      { toolCallId: 'room-confirm', toolName: 'sendEmail', input: {}, allowPersistentApproval: false } as never, { resolve } as never)
+    try {
+      const app = createTestApp('/webhook/msteams', msteamsRoutes(baseOptions(makeIntegrationStore())))
+      await request(app).post('/webhook/msteams/ch-1').set('Authorization', 'Bearer good.jwt.token').send(ACTIVITY)
+      await flush()
+      expect(resolve).not.toHaveBeenCalled()
+      expect(isWorkspaceAdmin).not.toHaveBeenCalled()
+      expect(processChannelMessage).not.toHaveBeenCalled()
+      expect(mocks.sendMessage).toHaveBeenCalledWith('conv-1', { text: 'Your identity could not be verified. Please try again shortly.' })
+    } finally { disposeConfirmation(); disposeTurn() }
+  })
+
+  it.each(['missing', 'failed'])('keeps room Stop available when identity resolution is %s', async mode => {
+    vi.mocked(resolveRoomBinding).mockResolvedValue({ workspaceId: 'ws-1', channelIntegrationId: 'int-1' })
+    const options = baseOptions(makeIntegrationStore())
+    if (mode === 'missing') options.channelUserStore = undefined as never
+    else vi.mocked(resolveChannelUser).mockRejectedValue(new Error('identity lookup unavailable'))
+    mocks.parseIncoming.mockReturnValue({ userId: '29:other', channelId: 'conv-1', text: '/STOP', isGroupChat: true, isMentioned: true, messageId: 'stop', timestamp: 1700000000000 })
+    const scope = roomInteractionScope({ channelType: 'msteams', integrationId: 'ch-1', conversationId: 'conv-1', senderId: '29:addresser' })
+    const controller = new AbortController()
+    const onAbort = vi.fn()
+    const resolve = vi.fn()
+    const dispose = channelConfirmations.registerTurn(scope, controller, { addresserId: '29:addresser', onAbort })
+    const disposeConfirmation = channelConfirmations.register(scope,
+      { toolCallId: 'teams-stop', toolName: 'sendEmail', input: {}, allowPersistentApproval: false } as never, { resolve } as never)
+    try {
+      const app = createTestApp('/webhook/msteams', msteamsRoutes(options))
+      await request(app).post('/webhook/msteams/ch-1').set('Authorization', 'Bearer good.jwt.token').send(ACTIVITY)
+      await flush()
+      expect(controller.signal.aborted).toBe(true)
+      expect(resolve).toHaveBeenCalledExactlyOnceWith('teams-stop', 'deny')
+      expect(onAbort).toHaveBeenCalledOnce()
+      expect(processChannelMessage).not.toHaveBeenCalled()
+      expect(isWorkspaceAdmin).not.toHaveBeenCalled()
+    } finally { disposeConfirmation(); dispose() }
+  })
+
+  it.each(['missing', 'failed'])('refuses an unresolved sender when resolution is %s', async mode => {
     const options = baseOptions(makeIntegrationStore())
     if (mode === 'missing') options.channelUserStore = undefined as never
     else vi.mocked(resolveChannelUser).mockRejectedValueOnce(new Error('resolution failed'))
     const app = createTestApp('/webhook/msteams', msteamsRoutes(options))
     await request(app).post('/webhook/msteams/ch-1').set('Authorization', 'Bearer good.jwt.token').send(ACTIVITY)
     await flush()
-    expect(processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner', isIdentified: false }))
+    expect(processChannelMessage).not.toHaveBeenCalled()
+    expect(mocks.sendMessage).toHaveBeenCalledWith('conv-1', { text: 'Your identity could not be verified. Please try again shortly.' })
+  })
+
+  it.each(['missing', 'failed'])('does not attribute a passive room post when resolution is %s', async mode => {
+    vi.mocked(resolveRoomBinding).mockResolvedValue({ workspaceId: 'ws-1', channelIntegrationId: 'int-1' })
+    const options = baseOptions(makeIntegrationStore())
+    if (mode === 'missing') options.channelUserStore = undefined as never
+    else vi.mocked(resolveChannelUser).mockRejectedValueOnce(new Error('identity lookup unavailable'))
+    const passive = { userId: '29:user', channelId: 'conv-1', messageId: 'passive', text: 'hello', isGroupChat: true }
+    mocks.parseIncoming.mockReturnValueOnce(passive).mockReturnValueOnce(null)
+    const app = createTestApp('/webhook/msteams', msteamsRoutes(options))
+    await request(app).post('/webhook/msteams/ch-1').set('Authorization', 'Bearer good.jwt.token').send(ACTIVITY)
+    await flush()
+    expect(postPassiveChannelMessage).not.toHaveBeenCalled()
+    expect(processChannelMessage).not.toHaveBeenCalled()
+    expect(mocks.sendMessage).not.toHaveBeenCalled()
   })
 
   it('resolves only the bound sender before acquiring the conversation lock', async () => {

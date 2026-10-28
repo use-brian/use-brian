@@ -675,7 +675,7 @@ describe('[COMP:api/slack-route] realtime thread addressing', () => {
 // non-member of the workspace, so workflows/tasks read as empty. The
 // designed remedy (link code -> linked_identities) was written but never
 // READ on the inbound path. These pin the order: link first (scoped by the
-// bindsHere rule), then the profile-email path, then the owner fallback.
+// bindsHere rule), then the profile-email path; unavailable identity never borrows the owner.
 describe('[COMP:api/slack-route] resolveSlackSender', () => {
   const base = {
     slackUserId: 'U_KEN',
@@ -730,8 +730,8 @@ describe('[COMP:api/slack-route] resolveSlackSender', () => {
       channelUserStore: {} as never,
       deps: { resolveByEmail: resolveByEmail as never, ensureMember: vi.fn(async () => undefined) },
     })
-    expect(out.userId).toBe('u_company_email')
-    expect(out.viaLink).toBe(false)
+    expect(out?.userId).toBe('u_company_email')
+    expect(out?.viaLink).toBe(false)
   })
 
   it('a failing link lookup degrades to the email path, never to a dropped turn', async () => {
@@ -742,20 +742,26 @@ describe('[COMP:api/slack-route] resolveSlackSender', () => {
       channelUserStore: {} as never,
       deps: { resolveByEmail: resolveByEmail as never },
     })
-    expect(out.userId).toBe('u_company_email')
+    expect(out?.userId).toBe('u_company_email')
   })
 
-  it('does not verify the owner when both identity lookup paths fail', async () => {
+  it('retains a successfully resolved shadow as the actual actor', async () => {
+    const out = await resolveSlackSender({ ...base, channelUserStore: {} as never,
+      deps: { resolveByEmail: vi.fn(async () => ({ user: { id: 'shadow-actor' }, isIdentified: false })) as never } })
+    expect(out).toEqual({ userId: 'shadow-actor', isIdentified: false, viaLink: false })
+  })
+
+  it('returns no execution identity when both identity lookup paths fail', async () => {
     const out = await resolveSlackSender({ ...base,
       linkedAccountStore: { findByProvider: vi.fn(async () => { throw new Error('offline') }) } as never,
       channelUserStore: {} as never,
       deps: { resolveByEmail: vi.fn(async () => { throw new Error('offline') }) as never },
     })
-    expect(out).toEqual({ userId: 'owner_1', isIdentified: false, viaLink: false })
+    expect(out).toBeNull()
   })
 
-  it('keeps legacy owner storage unverified when neither identity store is wired', async () => {
+  it('returns no execution identity when neither identity store is wired', async () => {
     const out = await resolveSlackSender({ ...base })
-    expect(out).toEqual({ userId: 'owner_1', isIdentified: false, viaLink: false })
+    expect(out).toBeNull()
   })
 })

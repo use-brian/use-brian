@@ -719,9 +719,19 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
         workspaceId: assistant.workspaceId ?? null,
       })
 
+      // Resolve before acquiring the conversation lock held by the suspended turn.
+      const scope: ChannelInteractionScope = {
+        channelType: 'custom', integrationId: channelId,
+        conversationId: incoming.channelId, senderId: incoming.userId,
+      }
+      if (channelConfirmations.handleStop(scope, incoming.text)) {
+        res.status(200).json({ ok: true })
+        return
+      }
+
       // 6. Sender → tier-2 shadow user, namespaced by channel: two custom
       //    channels may carry overlapping sender ids.
-      let channelUserId = ownerId
+      let resolvedUserId: string | null = null
       let isIdentified = false
       if (options.channelUserStore) {
         try {
@@ -736,10 +746,10 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
               displayName: msg.senderName ?? null,
             }),
           )
-          channelUserId = resolved.user.id
+          resolvedUserId = resolved.user.id
           isIdentified = resolved.isIdentified
         } catch (err) {
-          console.error('[custom-channel] channel user resolution failed, falling back to owner:', err)
+          console.error('[custom-channel] channel user resolution failed:', err)
         }
       }
 
@@ -747,11 +757,13 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       // inbound is fire-and-forget from the bridge's side.
       res.status(200).json({ ok: true })
 
-      // Resolve before acquiring the conversation lock held by the suspended turn.
-      const scope: ChannelInteractionScope = {
-        channelType: 'custom', integrationId: channelId,
-        conversationId: incoming.channelId, senderId: incoming.userId,
+      if (!resolvedUserId) {
+        await adapter.sendMessage(peerId, { text: 'Your identity could not be verified. Please try again shortly.' }).catch(() => {})
+        return
       }
+
+      const channelUserId = resolvedUserId
+
       if (channelConfirmations.handle(scope, { kind: 'text', text: incoming.text }).handled) return
 
       // 8. Sequentialize per conversation.

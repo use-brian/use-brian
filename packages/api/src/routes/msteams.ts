@@ -279,9 +279,19 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
         workspaceId: assistant.workspaceId ?? null,
       })
 
+      // Resolve before acquiring the conversation lock held by the suspended turn.
+      const senderScope: ChannelInteractionScope = {
+        channelType: 'msteams', integrationId: channelId,
+        conversationId: incoming.channelId, senderId: incoming.userId,
+      }
+      // A room's turn belongs to the room: any reader stops it, the addresser
+      // or an admin answers its confirmations.
+      const scope = roomBinding ? roomInteractionScope(senderScope) : senderScope
+      if (!unaddressed && channelConfirmations.handleStop(scope, incoming.text)) return
+
       // 8. Resolve the Teams sender → a platform user (tier 2 shadow: Teams bots
       //    can't read email without Graph consent, so identity stays anonymous).
-      let channelUserId = ownerId
+      let resolvedUserId: string | null = null
       let isIdentified = false
       if (options.channelUserStore && incoming.userId) {
         try {
@@ -293,12 +303,19 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
             routing.assistantId,
             async () => ({ providerUserId: incoming.userId, email: null, displayName }),
           )
-          channelUserId = resolved.user.id
+          resolvedUserId = resolved.user.id
           isIdentified = resolved.isIdentified
         } catch (err) {
-          console.error('[msteams] channel user resolution failed, falling back to owner:', err)
+          console.error('[msteams] channel user resolution failed:', err)
         }
       }
+
+      if (!resolvedUserId) {
+        if (!unaddressed) await adapter.sendMessage(incoming.channelId, { text: 'Your identity could not be verified. Please try again shortly.' }).catch(() => {})
+        return
+      }
+
+      const channelUserId = resolvedUserId
 
       if (unaddressed) {
         await postPassiveChannelMessage({
@@ -316,14 +333,6 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
         return
       }
 
-      // Resolve before acquiring the conversation lock held by the suspended turn.
-      const senderScope: ChannelInteractionScope = {
-        channelType: 'msteams', integrationId: channelId,
-        conversationId: incoming.channelId, senderId: incoming.userId,
-      }
-      // A room's turn belongs to the room: any reader stops it, the addresser
-      // or an admin answers its confirmations.
-      const scope = roomBinding ? roomInteractionScope(senderScope) : senderScope
       if ((roomBinding
         ? await channelConfirmations.handleRoom(scope, { kind: 'text', text: incoming.text }, {
             senderId: incoming.userId,

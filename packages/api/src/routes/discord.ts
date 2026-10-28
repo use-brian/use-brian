@@ -387,11 +387,26 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         workspaceId: assistant.workspaceId ?? null,
       })
 
+      // 5. Build the send-side adapter (API → Discord REST).
+      const adapter = createDiscordAdapter({
+        token: creds.bot_token,
+        botUserId: integration.botUserId ?? undefined,
+      })
+
+      const senderScope: ChannelInteractionScope = {
+        channelType: 'discord', integrationId: channelId,
+        conversationId: incoming.channelId, senderId: incoming.userId,
+      }
+      // A room's turn belongs to the room: any reader stops it, the addresser
+      // or an admin answers its confirmations.
+      const scope = roomBinding ? roomInteractionScope(senderScope) : senderScope
+      if (!unaddressed && !actionData && !workflowCallback && channelConfirmations.handleStop(scope, incoming.text)) return
+
       // 4. Resolve the Discord sender → a platform user (shadow user, tier 2:
       //    Discord bots can't read user email without OAuth, so identity stays
       //    anonymous — session only, no memory consolidation).
       //    See docs/architecture/channels/channel-user-identity.md.
-      let channelUserId = ownerId
+      let resolvedUserId: string | null = null
       let isIdentified = false
       if (options.channelUserStore && incoming.userId) {
         try {
@@ -404,18 +419,19 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
             routing.assistantId,
             async () => ({ providerUserId: incoming.userId, email: null, displayName }),
           )
-          channelUserId = resolved.user.id
+          resolvedUserId = resolved.user.id
           isIdentified = resolved.isIdentified
         } catch (err) {
-          console.error('[discord] channel user resolution failed, falling back to owner:', err)
+          console.error('[discord] channel user resolution failed:', err)
         }
       }
 
-      // 5. Build the send-side adapter (API → Discord REST).
-      const adapter = createDiscordAdapter({
-        token: creds.bot_token,
-        botUserId: integration.botUserId ?? undefined,
-      })
+      if (!resolvedUserId) {
+        if (!unaddressed) await adapter.sendMessage(incoming.channelId, { text: 'Your identity could not be verified. Please try again shortly.' }).catch(() => {})
+        return
+      }
+
+      const channelUserId = resolvedUserId
 
       if (unaddressed) {
         const author = (incoming.raw as { author?: { username?: string; global_name?: string | null } })?.author
@@ -434,13 +450,6 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         return
       }
 
-      const senderScope: ChannelInteractionScope = {
-        channelType: 'discord', integrationId: channelId,
-        conversationId: incoming.channelId, senderId: incoming.userId,
-      }
-      // A room's turn belongs to the room: any reader stops it, the addresser
-      // or an admin answers its confirmations.
-      const scope = roomBinding ? roomInteractionScope(senderScope) : senderScope
       if (!actionData && !workflowCallback && (roomBinding
         ? await channelConfirmations.handleRoom(scope, { kind: 'text', text: incoming.text }, {
             senderId: incoming.userId,

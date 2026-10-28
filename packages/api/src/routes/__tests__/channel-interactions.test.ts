@@ -33,6 +33,36 @@ describe('shared channel controls', () => {
     dispose()
   })
 
+  it.each(['approve', 'yes', 'deny', 'always allow', 'always deny', 'wq:question:0', 'mcp_confirm:call:allow', 'stop after replying'])('stop-only recovery never interprets %s', text => {
+    const service = new ChannelInteractions()
+    const controller = new AbortController()
+    const resolve = vi.fn()
+    const disposeTurn = service.registerTurn(scope, controller, { onAbort: vi.fn() })
+    const disposeConfirmation = service.register(scope, prompt, { resolve } as never)
+    try {
+      expect(service.handleStop(scope, text)).toBe(false)
+      expect(controller.signal.aborted).toBe(false)
+      expect(resolve).not.toHaveBeenCalled()
+    } finally { disposeConfirmation(); disposeTurn() }
+  })
+
+  it('stop-only recovery requires an existing turn at the exact scope', () => {
+    const service = new ChannelInteractions()
+    const controller = new AbortController()
+    const resolve = vi.fn()
+    const disposeTurn = service.registerTurn(scope, controller, { onAbort: vi.fn() })
+    const disposeConfirmation = service.register(scope, prompt, { resolve } as never)
+    try {
+      expect(service.handleStop({ ...scope, senderId: 'other' }, 'stop')).toBe(false)
+      expect(controller.signal.aborted).toBe(false)
+      expect(resolve).not.toHaveBeenCalled()
+      expect(service.handleStop(scope, '/STOP')).toBe(true)
+      expect(resolve).toHaveBeenCalledExactlyOnceWith('call', 'deny')
+      expect(controller.signal.aborted).toBe(true)
+      expect(service.handleStop(scope, 'stop')).toBe(false)
+    } finally { disposeConfirmation(); disposeTurn() }
+  })
+
   it('edits only the original message and never sends a stop acknowledgement', () => {
     const service = new ChannelInteractions()
     const controller = new AbortController()

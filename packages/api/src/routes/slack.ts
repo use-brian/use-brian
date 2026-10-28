@@ -326,8 +326,8 @@ export type SlackSenderResolution = {
  * same gate RLS applies downstream, so honouring the link cannot widen
  * what the sender can read.
  *
- * An unresolved sender retains the legacy owner session key for ordinary
- * anonymous chat, but that fallback is NEVER a verified workflow identity.
+ * An unresolved sender has no execution identity. Billing ownership cannot
+ * substitute for the sender, including passive attribution and room approvals.
  * See docs/architecture/channels/channel-user-identity.md → "Slack".
  */
 export async function resolveSlackSender(params: {
@@ -345,7 +345,7 @@ export async function resolveSlackSender(params: {
     ensureMember?: (assistantId: string, userId: string) => Promise<void>
     resolveByEmail?: typeof resolveChannelUser
   }
-}): Promise<SlackSenderResolution> {
+}): Promise<SlackSenderResolution | null> {
   const { slackUserId, assistantId, ownerId, workspaceId } = params
   const linkBindsHere = params.deps?.linkBindsHere ?? channelLinkBindsHere
   const findUser = params.deps?.findUser ?? findUserById
@@ -380,11 +380,11 @@ export async function resolveSlackSender(params: {
       )
       return { userId: resolved.user.id, isIdentified: resolved.isIdentified, viaLink: false }
     } catch (err) {
-      console.error('[slack] channel user resolution failed, falling back to owner:', err)
+      console.error('[slack] channel user resolution failed:', err)
     }
   }
 
-  return { userId: ownerId, isIdentified: false, viaLink: false }
+  return null
 }
 
 export function slackRoutes(options: SlackRouteOptions): Router {
@@ -698,7 +698,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
           channelUserStore: options.channelUserStore,
           fetchProfile: () => fetchSlackProfile(incoming.userId, slackCreds.bot_token),
         })
-      : { userId: ownerId, isIdentified: false, viaLink: false }
+      : null
     if (!addressing.accepted) {
       // D4: an un-mentioned message in a room is a post that runs no turn. A
       // top-level message in a reply-in-thread channel belongs to no room yet.
@@ -707,6 +707,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
         : slackConfig.replyInThread === true ? null : incoming.channelId
       if (roomBinding && passiveScope && incoming.text) {
         const sender = await resolveSender()
+        if (!sender) return
         await postPassiveChannelMessage({
           assistant: { id: assistant.id, name: assistant.name, workspaceId: assistant.workspaceId },
           channelType: 'slack',
@@ -751,13 +752,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     // or an admin answers its confirmations.
     const interactionScope = roomBinding ? roomInteractionScope(senderScope) : senderScope
     if (incoming.isEdit) channelConfirmations.abortForEdit(interactionScope, incoming.messageId)
-    const interaction = roomBinding
-      ? await channelConfirmations.handleRoom(interactionScope, { kind: 'text', text: incoming.text }, {
-          senderId: incoming.userId,
-          isAdmin: async () => isWorkspaceAdmin((await resolveSender()).userId, roomBinding.workspaceId),
-        })
-      : channelConfirmations.handle(interactionScope, { kind: 'text', text: incoming.text })
-    if (interaction.handled) return
+    if (channelConfirmations.handleStop(interactionScope, incoming.text)) return
 
     // 5a-link. Link-code claim — a 6-char alphanumeric code in a Slack
     //          message binds this Slack user to the sidan web user that
@@ -809,13 +804,21 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     //     Link first (a claimed link code binds this Slack id to the account
     //     the person actually uses), then the profile-email path.
     //     See docs/architecture/channels/channel-user-identity.md → "Slack".
-    let channelUserId = ownerId
-    let isIdentified = false
-    if (incoming.userId) {
-      const sender = await resolveSender()
-      channelUserId = sender.userId
-      isIdentified = sender.isIdentified
+    const sender = await resolveSender()
+    if (!sender) {
+      await adapter.sendMessage(incoming.channelId, { text: 'Your identity could not be verified. Please try again shortly.' },
+        threadTs ? { threadTs } : undefined).catch(() => {})
+      return
     }
+    const { userId: channelUserId, isIdentified } = sender
+
+    const interaction = roomBinding
+      ? await channelConfirmations.handleRoom(interactionScope, { kind: 'text', text: incoming.text }, {
+          senderId: incoming.userId,
+          isAdmin: async () => isWorkspaceAdmin(channelUserId, roomBinding.workspaceId),
+        })
+      : channelConfirmations.handle(interactionScope, { kind: 'text', text: incoming.text })
+    if (interaction.handled) return
 
     // 6. Sequentialize per Slack channel via Postgres advisory lock.
     //    Awaited (not fire-and-forget) so the deferred background producers
@@ -1191,10 +1194,8 @@ async function dispatchSlackReactionFeedback(params: {
     resolveUserId: async (assistantId) => {
       const assistant = await findAssistantById(assistantId)
       if (!assistant) return null
-      // Fall back to the assistant owner if channel-user resolution
-      // fails so feedback attribution stays best-effort. The recorded
-      // `metadata.source='slack'` + `channelId` still identify the
-      // surface for analytics.
+      // Reaction feedback belongs to the actual sender. An unavailable
+      // identity skips attribution instead of borrowing the billing owner.
       const ownerId = await billingPartyForAssistant({
         id: assistant.id,
         ownerUserId: assistant.ownerUserId ?? null,
@@ -1211,7 +1212,7 @@ async function dispatchSlackReactionFeedback(params: {
         channelUserStore,
         fetchProfile: () => fetchSlackProfile(reactingSlackUserId, botToken),
       })
-      return sender.userId
+      return sender?.userId ?? null
     },
   })
 }

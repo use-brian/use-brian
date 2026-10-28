@@ -70,10 +70,15 @@ export class ChannelInteractions extends ChannelConfirmations {
     return true
   }
 
+  /** Provider-authenticated recovery only: cancel an existing scoped turn.
+   * Never interpret confirmation answers or start execution here. */
+  handleStop(scope: ChannelInteractionScope, text: string): boolean {
+    return STOP_TEXT.test(text.trim()) && this.stop(scope, true)
+  }
+
   override handle(scope: ChannelInteractionScope, event: Parameters<ChannelConfirmations['handle']>[1]):
     ReturnType<ChannelConfirmations['handle']> {
-    if (event.kind === 'text' && STOP_TEXT.test(event.text.trim())
-      && this.stop(scope, true)) return { handled: true, status: 'resolved', decision: 'deny' }
+    if (event.kind === 'text' && this.handleStop(scope, event.text)) return { handled: true, status: 'resolved', decision: 'deny' }
     return super.handle(scope, event)
   }
 
@@ -85,7 +90,7 @@ export class ChannelInteractions extends ChannelConfirmations {
    */
   async handleRoom(scope: ChannelInteractionScope, event: Parameters<ChannelConfirmations['handle']>[1],
     actor: { senderId: string; isAdmin: () => Promise<boolean> }): Promise<ReturnType<ChannelConfirmations['handle']>> {
-    if (event.kind === 'text' && STOP_TEXT.test(event.text.trim())) return this.handle(scope, event)
+    if (event.kind === 'text' && this.handleStop(scope, event.text)) return { handled: true, status: 'resolved', decision: 'deny' }
     const addresser = this.roomAddressers.get(scopeKey(scope))
     if (addresser !== undefined && addresser !== actor.senderId && !(await actor.isAdmin())) {
       return { handled: false, status: 'message' }
