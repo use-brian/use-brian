@@ -57,7 +57,8 @@ export function appendOfficeCommand(doc: Y.Doc, input: OfficeCommand): void {
     }, command.origin)
     return
   }
-  if (command.kind === 'batch' && command.expectedSnapshotHash) applyOfficeCommand(yDocToSnapshot(doc), command)
+  // Validate before publishing: Y.Doc transactions do not roll back on errors.
+  applyOfficeCommand(yDocToSnapshot(doc), command)
   const admitted = withoutSnapshotFence(command)
   doc.transact(() => {
     if (commands.has(command.commandId)) return
