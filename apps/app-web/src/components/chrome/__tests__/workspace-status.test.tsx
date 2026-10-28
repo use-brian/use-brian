@@ -86,6 +86,24 @@ describe("[COMP:app-web/workspace-status] shared connection and update control",
     expect(installUpdate).not.toHaveBeenCalled();
   });
 
+  it("updates an open Online label to real details and back without reopening", async () => {
+    installBridge(null);
+    await render();
+    await openDetails();
+    expect(dialog().textContent).toBe(en.docPage.offlineStatusOnline);
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+
+    await act(async () => push!({ phase: "downloading", version: release, percent: 42 }));
+    expect(dialog().querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow")).toBe("42");
+    expect(dialog().textContent).toContain(release);
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+
+    await act(async () => push!(null));
+    expect(dialog().textContent).toBe(en.docPage.offlineStatusOnline);
+    expect(dialog().querySelector('[role="progressbar"]')).toBeNull();
+    expect(installUpdate).not.toHaveBeenCalled();
+  });
+
   it("requires an explicit restart and ignores duplicate clicks", async () => {
     installBridge({ phase: "ready", version: release });
     await render();

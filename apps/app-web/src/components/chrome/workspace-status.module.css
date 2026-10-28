@@ -1,0 +1,13 @@
+/* Match rail labels without inheriting the details popover's card styling. */
+.onlineLabel {
+  width: max-content;
+  gap: 0;
+  border-radius: 14px;
+  padding: 6px 14px;
+  background: #1a1d1e;
+  color: #f5f5f5;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 20px;
+  box-shadow: 0 8px 24px -4px rgb(0 0 0 / 22%), 0 0 0 1px rgb(255 255 255 / 8%);
+}

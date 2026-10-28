@@ -14,7 +14,7 @@ import { SearchableSelect } from '@/components/ui/searchable-select';
 import { Button } from '@/components/ui/button';
 import { confirmDialog } from '@/components/ui/confirm-dialog';
 
-type Surface='apps'|'credentials'|'sources'|'access'|'all';
+type Surface='apps'|'credentials'|'access'|'all';
 type Copy=ReturnType<typeof useT>['applicationManagement'];
 const fieldClass='min-h-8 max-sm:min-h-11 w-full rounded-md border border-border bg-background px-3 py-2 text-base md:text-sm';
 const pretty=(value:unknown)=>JSON.stringify(value,null,2);
@@ -76,8 +76,6 @@ function ManagementPanel({workspaceId,viewerId,appId,moduleKey,onModule,onSelect
  const selected=data.clients.find(client=>client.id===data.selectedAppId);
  return <section className="my-4 min-w-0 space-y-4 max-sm:[&_button]:min-h-11 rounded-xl border border-border p-4" aria-label={t.title}>
   <h2 className="text-lg font-semibold">{t.title}</h2>
-  <p role="status" className="text-sm">{t.unqualified}</p>
-  <p className="break-all text-xs">{t.identity}: {data.actor.userId} / {data.actor.assistantId}</p>
   <SearchableSelect className="text-base md:text-sm" popupClassName="[&_input]:text-base md:[&_input]:text-sm" aria-label={t.application} value={data.selectedAppId??''} onValueChange={onSelect} items={data.clients.map(client=>({value:client.id,label:client.name}))} placeholder={t.application} searchPlaceholder={t.application} emptyMessage={t.empty}/>
   {selected&&<div className="space-y-2"><p>{t.status}: {t[selected.status]}</p><div className="flex flex-wrap gap-2"><Button disabled={blocked||selected.status!=='active'} onClick={()=>void confirmed({kind:'status',appId:selected.id,status:'suspended'},selected)}>{t.suspend}</Button><Button disabled={blocked||selected.status==='revoked'} onClick={()=>void confirmed({kind:'status',appId:selected.id,status:'revoked'},selected)}>{t.revoke}</Button><Button disabled={blocked||selected.status!=='active'} onClick={()=>void run({kind:'activation.review',appId:selected.id},'activation')}>{t.reviewActivation}</Button>{selected.qualified&&<Button disabled={blocked} onClick={()=>void confirmed({kind:'activation.revoke',appId:selected.id},selected)}>{t.revokeActivation}</Button>}</div></div>}
   {show('apps')&&<><Registration t={t} modules={data.modules} busy={blocked} submit={command=>void run(command)}/><SchemaEditor t={t} data={data} busy={blocked} submit={command=>void run(command,'schema')}/></>}
@@ -89,8 +87,6 @@ function ManagementPanel({workspaceId,viewerId,appId,moduleKey,onModule,onSelect
    <Metadata title={t.credentials} items={data.credentials} empty={t.empty} renderAction={item=><Button disabled={blocked||item.status==='revoked'} onClick={()=>void confirmed({kind:'credential.revoke',appId:selected.id,credentialId:item.id},item)}>{t.revoke}</Button>}/>
   </>}
   {show('access')&&<GovernanceEditor t={t} data={data} onModule={onModule} targetUserId={targetUserId??viewerId} busy={blocked} submit={command=>void run(command,'governance')}/>}
-  {show('sources')&&<><h3>{t.sources}</h3><p>{t.sourceUnavailable}</p><Metadata title={t.sources} items={data.sources.items} empty={t.empty}/><a className="underline" href={data.links.connectors}>{t.sources}</a></>}
-  <p>{t.legacyUnavailable}</p><a className="underline" href={data.links.access}>{t.access}</a>
   {review&&<div className="space-y-2 rounded-lg bg-muted/40 p-3"><h3>{t.exactReview}</h3><pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs">{pretty(review.value)}</pre><Button disabled={blocked||!review.enabled} onClick={()=>void confirmed(review.command,review.value)}>{t.apply}</Button><Button onClick={()=>setReview(null)}>{t.cancel}</Button>{!review.enabled&&<p>{t.unqualified}</p>}</div>}
   {receipt&&<div><h3>{t.receipt}</h3><pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all text-xs">{pretty(receipt)}</pre>{!secret&&<Button onClick={()=>{setReceipt(null);setMessage(null);void resource.refresh();}}>{t.close}</Button>}</div>}
   {secret&&<div><h3>{t.secret}</h3><p>{t.secretOnce}</p><code className="break-all">{secret}</code><Button onClick={()=>{setSecret(null);setReceipt(null);setMessage(null);void resource.refresh();}}>{t.close}</Button></div>}
@@ -103,7 +99,7 @@ function Registration({t,modules,busy,submit}:{t:Copy;modules:string[];busy:bool
 }
 function JsonReview({title,t,initial,busy,submit}:{title:string;t:Copy;initial:unknown;busy:boolean;submit:(input:unknown)=>void}){
  const [value,setValue]=useState(pretty(initial)),[invalid,setInvalid]=useState(false);
- return <form className="space-y-2" onSubmit={event=>{event.preventDefault();try{const input=JSON.parse(value);setInvalid(false);submit(input);}catch{setInvalid(true);}}}><h3>{title}</h3><label>{t.proposal}<textarea className={`${fieldClass} min-h-40 font-mono`} value={value} onChange={e=>setValue(e.target.value)} spellCheck={false}/></label>{invalid&&<p role="alert">{t.invalid}</p>}<Button disabled={busy} type="submit">{t.review}</Button></form>;
+ return <form aria-label={title} className="space-y-2" onSubmit={event=>{event.preventDefault();try{const input=JSON.parse(value);setInvalid(false);submit(input);}catch{setInvalid(true);}}}><h3>{title}</h3><label>{t.proposal}<textarea className={`${fieldClass} min-h-40 font-mono`} value={value} onChange={e=>setValue(e.target.value)} spellCheck={false}/></label>{invalid&&<p role="alert">{t.invalid}</p>}<Button disabled={busy} type="submit">{t.review}</Button></form>;
 }
 function SchemaEditor({t,data,busy,submit}:{t:Copy;data:ApplicationManagementOverview;busy:boolean;submit:(command:ApplicationManagementCommand)=>void}){
  const [id,setId]=useState(data.schemas.items[0]?.id??'');const schema=data.schemas.items.find(item=>item.id===id);
