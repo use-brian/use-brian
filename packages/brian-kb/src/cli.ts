@@ -15,6 +15,10 @@ function parseArgs(argv: string[]): ParsedArgs {
     const arg = rest[i]
     if (arg.startsWith('--')) {
       const key = arg.slice(2)
+      if (['json', 'quiet', 'strict', 'help'].includes(key)) {
+        flags[key] = true
+        continue
+      }
       const next = rest[i + 1]
       if (next !== undefined && !next.startsWith('--')) {
         flags[key] = next
