@@ -180,6 +180,7 @@ function makeApp(opts: {
     softDeleteStore: opts.stores?.softDeleteStore ?? fakeSoftDeleteStore(),
     workspaceDirectory: opts.stores?.workspaceDirectory ?? fakeWorkspaceDirectory(),
   }
+  if (opts.autoTitle) stores.savedViewStore.getById.mockResolvedValue(Object.assign(savedViewFixture(), { canEdit: true, effectiveRole: 'edit' as const }))
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
@@ -1952,7 +1953,7 @@ describe('[COMP:api/doc-auto-title] POST /saved-views/:id/auto-title', () => {
       userId: USER_ID,
       autoTitle: { provider: platformProvider, docPageStore, resolveBackgroundRuntime },
     })
-    stores.savedViewStore.getById.mockResolvedValueOnce(savedViewFixture({ id: 'sv-1', workspaceId: WORKSPACE_ID }))
+    stores.savedViewStore.getById.mockResolvedValueOnce(Object.assign(savedViewFixture({ id: 'sv-1', workspaceId: WORKSPACE_ID }), { canEdit: true }))
     stores.savedViewStore.setAutoTitle.mockResolvedValueOnce({ name: 'Custom title', icon: null })
     const res = await request(app).post('/api/saved-views/sv-1/auto-title').send({})
     expect(res.status).toBe(200)
@@ -2013,4 +2014,57 @@ describe('[COMP:api/views-routes] offline draft identity', () => {
     expect(result.status).toBe(409)
     expect(result.body).toEqual({ error: 'Page ID is already in use' })
   })
+})
+
+
+describe('[COMP:api/views-routes] authoritative read capability transport', () => {
+  for (const path of ['/views/sv-page-1', '/saved-views/sv-page-1']) {
+    it(`forwards canonical read capability on GET ${path}`, async () => {
+      const { app, stores } = makeApp({ userId: USER_ID })
+      stores.savedViewStore.getById.mockResolvedValue(Object.assign(savedViewFixture(), { effectiveRole: 'edit' as const, canEdit: false }))
+      const response = await request(app).get(`/api${path}`)
+      expect(response.status).toBe(200)
+      expect(response.body).toMatchObject({ effectiveRole: 'edit', canEdit: false })
+    })
+  }
+  it('forwards list capability without inferring edit from role', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    stores.savedViewStore.list.mockResolvedValue([Object.assign(savedViewFixture(), { effectiveRole: 'full' as const, canEdit: false })])
+    const response = await request(app).get(`/api/workspaces/${WORKSPACE_ID}/saved-views`)
+    expect(response.status).toBe(200)
+    expect(response.body.savedViews[0]).toMatchObject({ effectiveRole: 'full', canEdit: false })
+  })
+  it('omits capabilities on create and mutation replies even when the store supplies them', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    const row = Object.assign(savedViewFixture(), { effectiveRole: 'edit' as const, canEdit: true })
+    stores.savedViewStore.create.mockResolvedValue(row)
+    stores.savedViewStore.update.mockResolvedValue(row)
+    for (const response of [
+      await request(app).post(`/api/workspaces/${WORKSPACE_ID}/saved-views`).send({ name: 'Created page', binding: row.binding }),
+      await request(app).patch('/api/saved-views/sv-page-1').send({ icon: 'star' }),
+    ]) {
+      expect(response.status).toBeLessThan(300)
+      expect(response.body).not.toHaveProperty('effectiveRole')
+      expect(response.body).not.toHaveProperty('canEdit')
+    }
+  })
+})
+
+describe('[COMP:api/doc-auto-title] reached HTTP admission before runtime', () => {
+  for (const row of [null, { canEdit: false }, {}]) {
+    it(`does no runtime or provider work for unavailable edit capability ${JSON.stringify(row)}`, async () => {
+      const provider = titleProvider('Should not run'), stream = vi.spyOn(provider, 'stream')
+      const resolveBackgroundRuntime = vi.fn().mockResolvedValue({ provider, selector: 'unused' })
+      const { app, stores } = makeApp({ userId: USER_ID, autoTitle: {
+        provider, docPageStore: placeholderPageStore('Developed page content. '.repeat(50)), resolveBackgroundRuntime,
+      } })
+      stores.savedViewStore.getById.mockResolvedValue(row === null ? null : Object.assign(savedViewFixture(), row))
+      const response = await request(app).post('/api/saved-views/sv-page-1/auto-title').send({})
+      expect(response.status).toBe(row === null ? 404 : 200)
+      if (row !== null) expect(response.body).toEqual({ applied: false, title: null, icon: null })
+      expect(resolveBackgroundRuntime).not.toHaveBeenCalled()
+      expect(stream).not.toHaveBeenCalled()
+      expect(stores.savedViewStore.setAutoTitle).not.toHaveBeenCalled()
+    })
+  }
 })

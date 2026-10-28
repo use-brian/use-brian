@@ -19,10 +19,10 @@
  *
  * The query fn is injected (queryWithRLS-shaped) so this unit-tests without a
  * DB. `canRead` is the same comparator the rest of the brain uses; the grant
- * precedence mirrors `page-grant-store.ts`'s role vocabulary.
+ * decision is shared with persisted Page mutation policies.
  *
- * The `/internal/apply` AI-write path stays ungated (it opens a direct
- * service connection that never runs `onAuthenticate`).
+ * The `/internal/apply` path rechecks the same current mutation authority;
+ * service authentication alone does not grant a Page edit.
  *
  * [COMP:doc-sync/clearance-gate]
  */
@@ -84,39 +84,11 @@ export const PAGE_ACCESS_SQL = `
   LIMIT 1
 `
 
-/**
- * The viewer's most-specific live grant role on the page, or NULL when none
- * applies (→ the caller uses the `edit` baseline). Priority: a `user` grant
- * for the viewer wins over a `group` grant (via `workspace_group_members`)
- * wins over the `workspace`-default grant. `link`/`published` principals are
- * excluded — those are the anonymous external surface, never an authenticated
- * member's role. `revoked_at IS NULL` + unexpired only. RLS
- * (`page_grants_workspace_member`) already confines rows to the viewer's
- * workspace; the `principal_ref` predicates confine to the viewer's identity.
- */
+/** Canonical actor-bound role. The database returns explicit `edit` for an
+ * admitted page with no applicable grant, and NULL for unavailable pages. */
 export const PAGE_ROLE_SQL = `
-  SELECT pg.role AS role
-  FROM page_grants pg
-  WHERE pg.page_id = $1
-    AND pg.revoked_at IS NULL
-    AND (pg.expires_at IS NULL OR pg.expires_at > now())
-    AND (
-      (pg.principal_type = 'user'      AND pg.principal_ref = $2)
-      OR (pg.principal_type = 'group'  AND pg.principal_ref IN (
-            SELECT gm.group_id::text FROM workspace_group_members gm WHERE gm.user_id = $2::uuid))
-      OR (pg.principal_type = 'workspace')
-    )
-  ORDER BY CASE pg.principal_type
-             WHEN 'user' THEN 0
-             WHEN 'group' THEN 1
-             WHEN 'workspace' THEN 2
-             ELSE 3
-           END
-  LIMIT 1
+  SELECT public.saved_view_effective_role($1::uuid) AS role
 `
-
-/** The workspace-member baseline when a readable page carries no grant. */
-const BASELINE_ROLE: GrantRole = 'edit'
 
 const VALID_ROLES: ReadonlySet<string> = new Set<GrantRole>(['view', 'comment', 'edit', 'full'])
 
@@ -162,14 +134,9 @@ export async function assertPageAccess(params: {
   }
 }
 
-/**
- * Resolve the viewer's effective write-authz role after the clearance gate has
- * passed. Returns the most-specific live grant role, or the `edit` baseline
- * when the page has no grant for the viewer (a bare workspace member on an
- * ungranted page keeps the historical read-write default). A malformed role
- * value from the row (should be impossible under the CHECK constraint) is
- * treated as the fail-safe `view` — never silently upgraded to `edit`.
- */
+/** Resolve the canonical current role after the independent read gate.
+ * NULL/absent/malformed is unavailable and fails closed to `view`; only the
+ * database may return the no-grant `edit` baseline after current admission. */
 export async function resolveEffectiveRole(params: {
   userId: string
   pageId: string
@@ -178,10 +145,10 @@ export async function resolveEffectiveRole(params: {
   const rows = await params.query<{ role: string | null }>(
     params.userId,
     PAGE_ROLE_SQL,
-    [params.pageId, params.userId],
+    [params.pageId],
   )
   const raw = rows[0]?.role
-  if (raw == null) return BASELINE_ROLE
+  if (raw == null) return 'view'
   return VALID_ROLES.has(raw) ? (raw as GrantRole) : 'view'
 }
 

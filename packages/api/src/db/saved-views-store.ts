@@ -1,3 +1,4 @@
+import type { PoolClient } from 'pg'
 import { withPagePlacement } from './page-placement-admission.js'
 /**
  * Saved views store, backed by PostgreSQL (migration 120 + 184).
@@ -73,6 +74,12 @@ const FULL_SELECT = `
   updated_at     AS "updatedAt"
 `
 
+// SELECT-only: INSERT/UPDATE RETURNING must not query a pre-write snapshot.
+const CAPABILITY_SELECT = `
+  public.saved_view_effective_role(id) AS "effectiveRole",
+  public.saved_view_edit_operation_scope_allows(id) AS "canEdit"
+`
+
 const LIST_SELECT = `
   id,
   workspace_id   AS "workspaceId",
@@ -92,6 +99,8 @@ const LIST_SELECT = `
 `
 
 type FullRow = {
+  effectiveRole?: SavedView['effectiveRole']
+  canEdit?: boolean
   pageEventRevision: string | null
   id: string
   workspaceId: string
@@ -125,6 +134,8 @@ type FullRow = {
 }
 
 type ListRow = {
+  effectiveRole?: SavedView['effectiveRole']
+  canEdit?: boolean
   id: string
   workspaceId: string
   name: string
@@ -145,6 +156,8 @@ type ListRow = {
 
 function rowToFull(row: FullRow): SavedView {
   return {
+    ...(row.effectiveRole !== undefined ? { effectiveRole: row.effectiveRole } : {}),
+    ...(row.canEdit !== undefined ? { canEdit: row.canEdit } : {}),
     id: row.id,
     workspaceId: row.workspaceId,
     createdBy: row.createdBy,
@@ -179,6 +192,8 @@ function rowToFull(row: FullRow): SavedView {
 
 function rowToList(row: ListRow): SavedViewListRow {
   return {
+    ...(row.effectiveRole !== undefined ? { effectiveRole: row.effectiveRole } : {}),
+    ...(row.canEdit !== undefined ? { canEdit: row.canEdit } : {}),
     id: row.id,
     workspaceId: row.workspaceId,
     name: row.name,
@@ -272,6 +287,34 @@ export async function copySavedViewPage(params: {
   }, undefined, { pageId: params.sourcePageId, version: params.sourceVersion })
 }
 
+// Bounded tree transaction checks. Plain SELECT supplies intended IDs;
+// UPDATE RLS must not silently shrink that set into a partial success.
+const TREE_REFUSAL = 'page_tree_mutation_refused'
+function requireTreeIds(expected: string[], actual: string[], locked?: Set<string>): void {
+  const left = [...expected].sort(), right = [...actual].sort()
+  if (left.length !== right.length || left.some((id, index) => id !== right[index])
+    || (locked && left.some(id => !locked.has(id)))) throw new Error(TREE_REFUSAL)
+}
+
+type TreeRow = {
+  id: string; workspaceId: string; name: string; nestParentId: string | null
+  position: number; teamspaceId: string | null; projectId: string | null
+}
+const TREE_SELECT = `id, workspace_id AS "workspaceId", name,
+  nest_parent_id AS "nestParentId", position, teamspace_id AS "teamspaceId", project_id AS "projectId"`
+
+async function lockTreeChanges(client: PoolClient, ids: string[]): Promise<Set<string>> {
+  const locked = await client.query<{ id: string }>(
+    'SELECT id FROM saved_views WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE', [ids])
+  requireTreeIds(ids, locked.rows.map(row => row.id))
+  // A lock wait can outlive an existing-grant downgrade. Do not reuse its
+  // statement snapshot as admission for subsequent writes.
+  const admitted = await client.query<{ id: string }>(`SELECT id FROM saved_views
+    WHERE id=ANY($1::uuid[]) AND public.saved_view_edit_operation_scope_allows(id)`, [ids])
+  requireTreeIds(ids, admitted.rows.map(row => row.id))
+  return new Set(ids)
+}
+
 // ── Factory ───────────────────────────────────────────────────────────
 
 /** Construction deps for the saved-views store. */
@@ -353,7 +396,7 @@ export function createDbSavedViewStore(
     async getById(userId, id) {
       const result = await queryWithRLS<FullRow>(
         userId,
-        `SELECT ${FULL_SELECT} FROM saved_views WHERE id = $1`,
+        `SELECT ${FULL_SELECT}, ${CAPABILITY_SELECT} FROM saved_views WHERE id = $1`,
         [id],
       )
       return result.rows[0] ? rowToFull(result.rows[0]) : null
@@ -379,7 +422,7 @@ export function createDbSavedViewStore(
       values.push(cap)
       const result = await queryWithRLS<ListRow>(
         userId,
-        `SELECT ${LIST_SELECT} FROM saved_views
+        `SELECT ${LIST_SELECT}, ${CAPABILITY_SELECT} FROM saved_views
          WHERE workspace_id = $1${entityClause}${stateClause}
          ORDER BY updated_at DESC
          LIMIT $${values.length}`,
@@ -760,201 +803,117 @@ export function createDbSavedViewStore(
     // ── Doc page-tree (migration 210) ──────────────────────────────
 
     async reparent(userId, id, newNestParentId, position, writtenBy, teamspaceId, projectId, contextMoveConfirmed) {
-      // 1. Cycle guard. Walk up the ancestor chain from the destination
-      //    parent (RLS-scoped reads) and refuse the move if it would form
-      //    a loop. Done before opening the write transaction so a rejected
-      //    move never touches the row.
-      if (newNestParentId !== null) {
-        const ancestors = new Map<string, string | null>()
-        let cursor: string | null = newNestParentId
-        let steps = 0
-        while (cursor != null) {
-          if (ancestors.has(cursor)) break // already-corrupt tree; stop walking
-          if (++steps > 10_000) break
-          const row: import('pg').QueryResult<{ nestParentId: string | null }> =
-            await queryWithRLS<{ nestParentId: string | null }>(
-              userId,
-              `SELECT nest_parent_id AS "nestParentId" FROM saved_views WHERE id = $1`,
-              [cursor],
-            )
-          if (row.rows.length === 0) {
-            // Destination parent (or an ancestor) is not visible / missing.
-            // RLS hid it or it doesn't exist — reject the move.
-            ancestors.set(cursor, null)
-            break
-          }
-          const parent: string | null = row.rows[0].nestParentId
-          ancestors.set(cursor, parent)
-          cursor = parent
-        }
-        if (
-          reparentWouldCycle(id, newNestParentId, (pid) =>
-            ancestors.has(pid) ? ancestors.get(pid) : undefined,
-          )
-        ) {
-          return false
-        }
-      }
-
-      // 2. Mutate under a single RLS transaction: set the new parent +
-      //    position on the moved row, then reindex the destination
-      //    siblings to 0..n-1. Multi-statement under RLS → the
-      //    bypass-disable / SET current_user_id / BEGIN / COMMIT pattern
-      //    documented in packages/api/CLAUDE.md.
       const client = await getAppPool().connect()
       try {
         await client.query('BEGIN')
-        // App pool (app_user, RLS-enforced). applyRLSGucs sets current_user_id
-        // (+ agent_clearance inside an assistant execution wrap); both are
-        // SET LOCAL, reverting at COMMIT/ROLLBACK to the seeded sentinel.
         await applyRLSGucs(client, userId)
-        // The final revision can be written by subtree propagation/reindexing.
-        // Preserve the root operation's action through those same-tx writes.
-        await client.query("SELECT set_config('app.page_event_moved_id',$1,true)", [id])
+        const initial = (await client.query<{ workspaceId: string }>(
+          'SELECT workspace_id AS "workspaceId" FROM saved_views WHERE id=$1', [id])).rows[0]
+        if (!initial) throw new Error(TREE_REFUSAL)
+        // Same order as authored placement: workspace barrier before Page locks.
+        const workspace = await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [initial.workspaceId])
+        if (!workspace.rows.length) throw new Error(TREE_REFUSAL)
+        const workspaceId = initial.workspaceId
 
-        // Confirm the row is visible to this user before moving it, and
-        // capture its workspace so the sibling-set operations stay scoped
-        // to one workspace (critical for the root list — `nest_parent_id
-        // IS NULL` would otherwise span every workspace the user can see).
-        // `teamspace_id` rides along for the destination-teamspace resolve
-        // below (migration 313).
-        const found = await client.query<{ workspaceId: string; name: string; teamspaceId: string | null; projectId: string | null }>(
-          `SELECT workspace_id AS "workspaceId", name, teamspace_id AS "teamspaceId", project_id AS "projectId"
-             FROM saved_views WHERE id = $1 FOR UPDATE`,
-          [id],
-        )
-        if (found.rows.length === 0) {
-          await client.query('ROLLBACK')
-          return false
-        }
-        const workspaceId = found.rows[0].workspaceId
-        const movedName = found.rows[0].name
-        const currentTeamspaceId = found.rows[0].teamspaceId
-        const currentProjectId = found.rows[0].projectId
-
-        // Resolve the destination teamspace (migration 313):
-        //  - under a page parent → the child always adopts the parent's
-        //    teamspace (the container is a property of the subtree root);
-        //  - to a root slot → the caller's explicit section (a teamspace id
-        //    or null = Private), else keep the current one (plain reorder /
-        //    legacy promote-to-root).
-        let destTeamspaceId: string | null
-        let destProjectId: string | null
-        if (newNestParentId !== null) {
-          const parentRow = await client.query<{ teamspaceId: string | null; projectId: string | null }>(
-            `SELECT teamspace_id AS "teamspaceId", project_id AS "projectId" FROM saved_views WHERE id = $1`,
-            [newNestParentId],
-          )
-          if (parentRow.rows.length === 0) {
-            // Parent invisible under RLS / gone — mirrors the cycle-guard's
-            // inaccessible-parent rejection.
-            await client.query('ROLLBACK')
-            return false
+        const plan = async () => {
+          const root = (await client.query<TreeRow>(`SELECT ${TREE_SELECT} FROM saved_views WHERE id=$1 AND workspace_id=$2`, [id, workspaceId])).rows[0]
+          if (!root) throw new Error(TREE_REFUSAL)
+          const parent = newNestParentId === null ? undefined : (await client.query<TreeRow>(
+            `SELECT ${TREE_SELECT} FROM saved_views WHERE id=$1 AND workspace_id=$2`, [newNestParentId, workspaceId])).rows[0]
+          if (newNestParentId !== null && !parent) throw new Error(TREE_REFUSAL)
+          const destTeamspaceId = parent ? parent.teamspaceId : teamspaceId === undefined ? root.teamspaceId : teamspaceId
+          const destProjectId = parent ? parent.projectId : projectId === undefined ? root.projectId : projectId
+          const contextChanged = destTeamspaceId !== root.teamspaceId || destProjectId !== root.projectId
+          if (contextChanged && contextMoveConfirmed !== true) throw new Error(TREE_REFUSAL)
+          // Visible structural set only; this does not certify hidden descendants.
+          // UNION bounds corrupt cycles without inventing a new tree-size limit.
+          const related = await client.query<TreeRow>(`WITH RECURSIVE subtree AS (
+              SELECT id FROM saved_views WHERE id=$1
+              UNION SELECT sv.id FROM saved_views sv JOIN subtree s ON sv.nest_parent_id=s.id
+            ), ancestors AS (
+              SELECT id,nest_parent_id FROM saved_views WHERE id=$2
+              UNION SELECT sv.id,sv.nest_parent_id FROM saved_views sv JOIN ancestors a ON sv.id=a.nest_parent_id
+            ) SELECT ${TREE_SELECT} FROM saved_views
+              WHERE workspace_id=$3 AND (id IN(SELECT id FROM ancestors)
+                OR (id IN(SELECT id FROM subtree) AND $5::boolean)
+                OR id=$1 OR (nest_parent_id IS NOT DISTINCT FROM $2
+                  AND ($2::uuid IS NOT NULL OR teamspace_id IS NOT DISTINCT FROM $4::uuid)))`,
+          [id, newNestParentId, workspaceId, destTeamspaceId, contextChanged])
+          const rows = new Map(related.rows.map(row => [row.id, row]))
+          if (reparentWouldCycle(id, newNestParentId, parentId => rows.get(parentId)?.nestParentId)) throw new Error(TREE_REFUSAL)
+          const affected = new Set([id])
+          const siblings = related.rows.filter(row => row.id !== id && row.nestParentId === newNestParentId
+            && (newNestParentId !== null || row.teamspaceId === destTeamspaceId))
+          const projected = siblings.map(row => ({ id: row.id, position: row.position >= position ? row.position + 1 : row.position }))
+          for (const row of siblings) if (row.position >= position) affected.add(row.id)
+          projected.push({ id, position })
+          projected.sort((a, b) => a.position - b.position || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+          projected.forEach((row, index) => { if (row.position !== index) affected.add(row.id) })
+          if (contextChanged) {
+            const descendants = new Set([id])
+            let changed = true
+            while (changed) {
+              changed = false
+              for (const row of related.rows) if (row.nestParentId && descendants.has(row.nestParentId) && !descendants.has(row.id)) {
+                descendants.add(row.id); changed = true
+              }
+            }
+            for (const descendant of descendants) affected.add(descendant)
           }
-          destTeamspaceId = parentRow.rows[0].teamspaceId
-          destProjectId = parentRow.rows[0].projectId
-        } else {
-          destTeamspaceId = teamspaceId === undefined ? currentTeamspaceId : teamspaceId
-          destProjectId = projectId === undefined ? currentProjectId : projectId
-        }
-        if (
-          (destTeamspaceId !== currentTeamspaceId || destProjectId !== currentProjectId) &&
-          contextMoveConfirmed !== true
-        ) {
-          await client.query('ROLLBACK')
-          return false
+          return { root, destTeamspaceId, destProjectId, contextChanged, affected: [...affected] }
         }
 
-        // Open a gap at the requested slot among the destination siblings,
-        // then place the moved row there. `nest_parent_id IS NOT DISTINCT
-        // FROM $1` matches the root list (NULL) and any concrete parent;
-        // `workspace_id = $4` keeps the root list per-workspace, and the
-        // root list is additionally scoped to the destination teamspace
-        // section ($5/$6) so sections keep independent orderings — a
-        // non-root sibling set is teamspace-uniform already, so the extra
-        // predicate is a no-op there.
-        await client.query(
-          `UPDATE saved_views
-              SET position = position + 1
-            WHERE nest_parent_id IS NOT DISTINCT FROM $1
-              AND id <> $2
-              AND position >= $3
-              AND workspace_id = $4
-              AND ($1::uuid IS NOT NULL OR teamspace_id IS NOT DISTINCT FROM $5::uuid)`,
-          [newNestParentId, id, position, workspaceId, destTeamspaceId],
-        )
-        await client.query(
-          `UPDATE saved_views
-              SET nest_parent_id = $1, position = $2, teamspace_id = $4, project_id = $5
-            WHERE id = $3`,
-          [newNestParentId, position, id, destTeamspaceId, destProjectId],
-        )
+        const before = await plan(), locked = await lockTreeChanges(client, before.affected)
+        const current = await plan()
+        requireTreeIds(before.affected, current.affected, locked)
+        await client.query("SELECT set_config('app.page_event_moved_id',$1,true)", [id])
+        const gapParams = [newNestParentId, id, position, workspaceId, current.destTeamspaceId]
+        const gapWhere = `nest_parent_id IS NOT DISTINCT FROM $1 AND id<>$2 AND position>=$3
+          AND workspace_id=$4 AND ($1::uuid IS NOT NULL OR teamspace_id IS NOT DISTINCT FROM $5::uuid)`
+        const gap = (await client.query<{ id: string }>(`SELECT id FROM saved_views WHERE ${gapWhere}`, gapParams)).rows.map(row => row.id)
+        requireTreeIds(gap, gap, locked)
+        const shifted = await client.query<{ id: string }>(`UPDATE saved_views SET position=position+1 WHERE ${gapWhere} RETURNING id`, gapParams)
+        requireTreeIds(gap, shifted.rows.map(row => row.id), locked)
+        const moved = await client.query<{ id: string }>(`UPDATE saved_views
+          SET nest_parent_id=$1,position=$2,teamspace_id=$4,project_id=$5 WHERE id=$3 RETURNING id`,
+        [newNestParentId, position, id, current.destTeamspaceId, current.destProjectId])
+        requireTreeIds([id], moved.rows.map(row => row.id), locked)
 
-        // Cascade the teamspace across the moved page's whole descendant
-        // subtree so the denormalized `teamspace_id` stays true (migration
-        // 313) — a move files the subtree, not just the root. RLS-scoped:
-        // the caller can see the subtree (it shared the moved row's old
-        // teamspace), and the policy's WITH CHECK refuses a destination the
-        // caller isn't a member of.
-        if (destTeamspaceId !== currentTeamspaceId || destProjectId !== currentProjectId) {
-          await client.query(
-            `WITH RECURSIVE subtree AS (
-               SELECT id FROM saved_views WHERE id = $1
-               UNION ALL
-               SELECT sv.id FROM saved_views sv JOIN subtree s ON sv.nest_parent_id = s.id
-             )
-             UPDATE saved_views
-                SET teamspace_id = $2, project_id = $3
-              WHERE id IN (SELECT id FROM subtree)`,
-            [id, destTeamspaceId, destProjectId],
-          )
+        if (current.contextChanged) {
+          const subtree = `WITH RECURSIVE subtree AS (
+            SELECT id FROM saved_views WHERE id=$1
+            UNION SELECT sv.id FROM saved_views sv JOIN subtree s ON sv.nest_parent_id=s.id
+          )`
+          const expected = (await client.query<{ id: string }>(`${subtree} SELECT id FROM subtree`, [id])).rows.map(row => row.id)
+          requireTreeIds(expected, expected, locked)
+          const propagated = await client.query<{ id: string }>(`${subtree} UPDATE saved_views
+            SET teamspace_id=$2,project_id=$3 WHERE id IN(SELECT id FROM subtree) RETURNING id`,
+          [id, current.destTeamspaceId, current.destProjectId])
+          requireTreeIds(expected, propagated.rows.map(row => row.id), locked)
         }
 
-        // Renumber the destination sibling set to contiguous 0..n-1,
-        // preserving the ordering the gap-open produced. Ties (e.g. equal
-        // raw positions) break on id for determinism. Scoped to the
-        // workspace (and, for the root list, the destination teamspace
-        // section) so positions don't bleed across workspaces or sections.
-        await client.query(
-          `WITH ordered AS (
-             SELECT id, ROW_NUMBER() OVER (ORDER BY position ASC, id ASC) - 1 AS rn
-               FROM saved_views
-              WHERE nest_parent_id IS NOT DISTINCT FROM $1
-                AND workspace_id = $2
-                AND ($1::uuid IS NOT NULL OR teamspace_id IS NOT DISTINCT FROM $3::uuid)
-           )
-           UPDATE saved_views sv
-              SET position = ordered.rn
-             FROM ordered
-            WHERE sv.id = ordered.id
-              AND sv.position <> ordered.rn`,
-          [newNestParentId, workspaceId, destTeamspaceId],
-        )
-
+        const ordered = `WITH ordered AS (
+          SELECT id,ROW_NUMBER() OVER(ORDER BY position ASC,id ASC)-1 AS rn FROM saved_views
+          WHERE nest_parent_id IS NOT DISTINCT FROM $1 AND workspace_id=$2
+            AND ($1::uuid IS NOT NULL OR teamspace_id IS NOT DISTINCT FROM $3::uuid)
+        )`
+        const orderParams = [newNestParentId, workspaceId, current.destTeamspaceId]
+        const expectedOrder = (await client.query<{ id: string }>(`${ordered} SELECT sv.id FROM saved_views sv
+          JOIN ordered ON sv.id=ordered.id WHERE sv.position<>ordered.rn`, orderParams)).rows.map(row => row.id)
+        requireTreeIds(expectedOrder, expectedOrder, locked)
+        const normalized = await client.query<{ id: string }>(`${ordered} UPDATE saved_views sv
+          SET position=ordered.rn FROM ordered WHERE sv.id=ordered.id AND sv.position<>ordered.rn RETURNING sv.id`, orderParams)
+        requireTreeIds(expectedOrder, normalized.rows.map(row => row.id), locked)
         const eventRow = (await client.query<{ pageEventRevision: string }>(
-          'SELECT page_event_revision AS "pageEventRevision" FROM saved_views WHERE id=$1', [id],
-        )).rows[0]
+          'SELECT page_event_revision AS "pageEventRevision" FROM saved_views WHERE id=$1', [id])).rows[0]
+        if (!eventRow) throw new Error(TREE_REFUSAL)
         await client.query('COMMIT')
-        // Emit after the move commits — `newNestParentId` is the destination
-        // parent (null = workspace root).
-        emitLifecycle({
-          workspaceId,
-          pageId: id,
-          parentId: newNestParentId,
-          title: movedName,
-          sourceVersion: eventRow.pageEventRevision,
-          actorId: userId,
-          action: 'moved',
-          isSystem: writtenBy === 'system',
-        })
+        emitLifecycle({ workspaceId, pageId: id, parentId: newNestParentId, title: current.root.name,
+          sourceVersion: eventRow.pageEventRevision, actorId: userId, action: 'moved', isSystem: writtenBy === 'system' })
         return true
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {})
-        // A row-level-security WITH CHECK violation (42501) means the caller
-        // tried to file the page (or its subtree) somewhere they may not —
-        // a teamspace they aren't a member of, or privatizing a teammate's
-        // page. That's a clean authorization reject, not a server fault.
-        if ((err as { code?: string }).code === '42501') return false
+        if ((err as { code?: string }).code === '42501' || (err as Error).message === TREE_REFUSAL) return false
         throw err
       } finally {
         await rollbackAndRelease(client)
@@ -963,30 +922,37 @@ export function createDbSavedViewStore(
 
     async reorderSiblings(userId, nestParentId, orderedIds) {
       if (orderedIds.length === 0) return
+      if (new Set(orderedIds).size !== orderedIds.length) throw new Error(TREE_REFUSAL)
       const client = await getAppPool().connect()
       try {
         await client.query('BEGIN')
-        // App pool (app_user, RLS-enforced). applyRLSGucs sets current_user_id
-        // (+ agent_clearance inside an assistant execution wrap); both are
-        // SET LOCAL, reverting at COMMIT/ROLLBACK to the seeded sentinel.
         await applyRLSGucs(client, userId)
-
-        // Set each id's position to its array index. Scope the write to
-        // the sibling set (`nest_parent_id IS NOT DISTINCT FROM`) so a
-        // stray id from another parent can't be re-positioned here.
-        for (let i = 0; i < orderedIds.length; i++) {
-          await client.query(
-            `UPDATE saved_views
-                SET position = $1
-              WHERE id = $2
-                AND nest_parent_id IS NOT DISTINCT FROM $3`,
-            [i, orderedIds[i], nestParentId],
-          )
+        const read = () => client.query<TreeRow>(`SELECT ${TREE_SELECT} FROM saved_views WHERE id=ANY($1::uuid[])`, [orderedIds])
+        const initial = await read()
+        requireTreeIds(orderedIds, initial.rows.map(row => row.id))
+        const workspaceId = initial.rows[0].workspaceId
+        if (initial.rows.some(row => row.workspaceId !== workspaceId || row.nestParentId !== nestParentId)) throw new Error(TREE_REFUSAL)
+        const workspace = await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [workspaceId])
+        if (!workspace.rows.length) throw new Error(TREE_REFUSAL)
+        const plan = async () => {
+          const rows = (await read()).rows
+          requireTreeIds(orderedIds, rows.map(row => row.id))
+          if (rows.some(row => row.workspaceId !== workspaceId || row.nestParentId !== nestParentId)) throw new Error(TREE_REFUSAL)
+          return rows.filter(row => row.position !== orderedIds.indexOf(row.id)).map(row => row.id)
         }
-
+        const affected = await plan(), locked = await lockTreeChanges(client, affected)
+        requireTreeIds(affected, await plan(), locked)
+        for (const [position, id] of orderedIds.entries()) {
+          if (!locked.has(id)) continue
+          const updated = await client.query<{ id: string }>(`UPDATE saved_views SET position=$1
+            WHERE id=$2 AND nest_parent_id IS NOT DISTINCT FROM $3 AND workspace_id=$4 AND position<>$1 RETURNING id`,
+          [position, id, nestParentId, workspaceId])
+          requireTreeIds([id], updated.rows.map(row => row.id), locked)
+        }
         await client.query('COMMIT')
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {})
+        if ((err as { code?: string }).code === '42501') throw new Error(TREE_REFUSAL)
         throw err
       } finally {
         await rollbackAndRelease(client)

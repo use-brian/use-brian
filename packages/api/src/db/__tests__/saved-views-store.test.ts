@@ -718,3 +718,14 @@ describe('[COMP:api/saved-views-store] idempotent offline creation', () => {
     await expect(store.createDraft(input)).rejects.toMatchObject({ code: 'PAGE_ID_CONFLICT' })
   })
 })
+
+
+describe('[COMP:api/saved-views-store] SELECT-only capability projection', () => {
+  it('preserves canonical capability fields on actor reads', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ id: VIEW_ID, effectiveRole: 'edit', canEdit: false }], rowCount: 1 } as never)
+    expect(await store.getById(USER_ID, VIEW_ID)).toMatchObject({ id: VIEW_ID, effectiveRole: 'edit', canEdit: false })
+    const sql = mockQueryWithRLS.mock.calls[0][1]
+    expect(sql).toContain('saved_view_effective_role')
+    expect(sql).toContain('saved_view_edit_operation_scope_allows')
+  })
+})

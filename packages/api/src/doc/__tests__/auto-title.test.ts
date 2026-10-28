@@ -52,7 +52,7 @@ function savedStore(committed: { name: string; icon: string | null } | null): {
   setAutoTitle: ReturnType<typeof vi.fn>
 } {
   const setAutoTitle = vi.fn().mockResolvedValue(committed)
-  return { store: { setAutoTitle } as unknown as SavedViewStore, setAutoTitle }
+  return { store: { getById: vi.fn().mockResolvedValue({ id: PAGE_ID, canEdit: true }), setAutoTitle } as unknown as SavedViewStore, setAutoTitle }
 }
 
 const LONG = 'A page about quarterly revenue growth and enterprise renewals.' // > floor
@@ -168,4 +168,23 @@ describe('[COMP:api/doc-auto-title] runDocAutoTitle', () => {
     // The model still ran — usage is returned so the caller can attribute it.
     expect(result.usage).toEqual({ inputTokens: 50, outputTokens: 4 })
   })
+})
+
+
+describe('[COMP:api/doc-auto-title] canonical cheap admission', () => {
+  for (const admission of [null, { canEdit: false }, {}]) {
+    it(`skips unavailable edit capability ${JSON.stringify(admission)} before provider work`, async () => {
+      const { store, setAutoTitle } = savedStore({ name: 'Should not commit', icon: null })
+      vi.mocked(store.getById).mockResolvedValue(admission as never)
+      const provider = mockProvider('Should Not Run'), stream = vi.spyOn(provider, 'stream')
+      const session = vi.spyOn(provider, 'createSession'), doc = pageStore({ nameOrigin: 'placeholder', text: LONG })
+      expect(await runDocAutoTitle({ userId: USER_ID, pageId: PAGE_ID, provider, docPageStore: doc, savedViewStore: store, minChars: 10 }))
+        .toEqual({ applied: false, title: null, icon: null, usage: null, model: null })
+      expect(store.getById).toHaveBeenCalledWith(USER_ID, PAGE_ID)
+      expect(stream).not.toHaveBeenCalled()
+      expect(session).not.toHaveBeenCalled()
+      expect(doc.getVersionedPage).not.toHaveBeenCalled()
+      expect(setAutoTitle).not.toHaveBeenCalled()
+    })
+  }
 })

@@ -307,8 +307,9 @@ function buildBindingDeps(
   }
 }
 
-function viewMetadata(view: SavedView) {
+function viewMetadata(view: SavedView, includeCapabilities = false) {
   return {
+    ...(includeCapabilities ? { effectiveRole: view.effectiveRole, canEdit: view.canEdit } : {}),
     id: view.id,
     workspaceId: view.workspaceId,
     createdBy: view.createdBy,
@@ -401,12 +402,11 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (!opts.provider || !opts.docPageStore) {
       return res.status(503).json({ error: 'Auto-title is not configured' })
     }
+    const view = await opts.savedViewStore.getById(userId, req.params.id)
+    if (!view && opts.resolveBackgroundRuntime) return notFound(res, 'View not found')
+    if (view?.canEdit !== true) return res.json({ applied: false, title: null, icon: null })
     let runtime: Awaited<ReturnType<NonNullable<ViewsRouteOptions['resolveBackgroundRuntime']>>> | null = null
-    if (opts.resolveBackgroundRuntime) {
-      const view = await opts.savedViewStore.getById(userId, req.params.id)
-      if (!view) return notFound(res, 'View not found')
-      runtime = await opts.resolveBackgroundRuntime(view.workspaceId)
-    }
+    if (opts.resolveBackgroundRuntime) runtime = await opts.resolveBackgroundRuntime(view.workspaceId)
     const result = await runDocAutoTitle({
       userId,
       pageId: req.params.id,
@@ -626,6 +626,8 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     })
     res.json({
       savedViews: rows.map((r) => ({
+        effectiveRole: r.effectiveRole,
+        canEdit: r.canEdit,
         id: r.id,
         workspaceId: r.workspaceId,
         name: r.name,
@@ -687,7 +689,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     const view = await opts.savedViewStore.getById(userId, req.params.id)
     if (!view) return notFound(res, 'Saved view not found')
     res.json({
-      ...viewMetadata(view),
+      ...viewMetadata(view, true),
       binding: view.binding,
     })
   })
@@ -862,7 +864,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
         : Promise.resolve(null),
     ])
 
-    res.json({ ...viewMetadata(view), scheduledJobs, published: publishedResolution !== null })
+    res.json({ ...viewMetadata(view, true), scheduledJobs, published: publishedResolution !== null })
   })
 
   // GET /views/:id/payload  — fully rendered A2UI payload via renderPage
