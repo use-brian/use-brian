@@ -11,7 +11,7 @@ import {
   type ChatInteractionState,
   type ChatRunState,
 } from "@use-brian/chat-ui";
-import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
+import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
 
 export type ChatControllerSnapshot = {
   run: ChatRunState;
@@ -40,6 +40,8 @@ export function createChatControllerCoordinator(
     }),
   };
   let destroyed = false;
+  let attached = true;
+  let attachment = 0;
   const listeners = new Set<() => void>();
   const cleanups = new Map<number, Set<() => void>>();
   const claimedExits = new Set<number>();
@@ -58,10 +60,12 @@ export function createChatControllerCoordinator(
   };
 
   const selectSession = (sessionId: string | null): ChatControllerIdentity => {
-    if (!destroyed && identity.sessionId === sessionId) return identity;
-    cleanGeneration(identity.generation);
-    identity = { sessionId, generation: identity.generation + 1 };
-    if (destroyed) return identity;
+    if (destroyed || !attached || identity.sessionId === sessionId) return identity;
+    const previous = identity;
+    const next = { sessionId, generation: identity.generation + 1 };
+    identity = next;
+    cleanGeneration(previous.generation);
+    if (destroyed || !attached || identity !== next) return identity;
     publish({
       run: chatRunReducer(snapshot.run, { type: "visit", identity }),
       interaction: chatInteractionReducer(snapshot.interaction, {
@@ -75,15 +79,18 @@ export function createChatControllerCoordinator(
   const syncSelection = () => selectSession(getSelectedSessionId());
 
   const isCurrent = (candidate: ChatControllerIdentity): boolean => {
-    if (destroyed) return false;
+    if (destroyed || !attached) return false;
     syncSelection();
     return sameChatControllerIdentity(identity, candidate);
   };
 
   const begin = (sessionId = getSelectedSessionId()): ChatControllerIdentity => {
-    if (destroyed) return identity;
-    cleanGeneration(identity.generation);
-    identity = { sessionId, generation: identity.generation + 1 };
+    if (destroyed || !attached) return identity;
+    const previous = identity;
+    const next = { sessionId, generation: identity.generation + 1 };
+    identity = next;
+    cleanGeneration(previous.generation);
+    if (destroyed || !attached || identity !== next) return identity;
     let run = chatRunReducer(snapshot.run, { type: "visit", identity });
     run = chatRunReducer(run, { type: "begin", identity });
     publish({
@@ -186,11 +193,36 @@ export function createChatControllerCoordinator(
     return true;
   };
 
+  // React can detach and then replay setup without permanently destroying the
+  // coordinator. A lease prevents an older cleanup from detaching a newer setup.
+  const attach = () => {
+    if (destroyed) return () => {};
+    const lease = ++attachment;
+    if (!attached) {
+      attached = true;
+      identity = { sessionId: getSelectedSessionId(), generation: identity.generation + 1 };
+      publish({
+        run: chatRunReducer(snapshot.run, { type: "visit", identity }),
+        interaction: chatInteractionReducer(snapshot.interaction, { type: "visit", identity }),
+      });
+    }
+    return () => {
+      if (destroyed || !attached || lease !== attachment) return;
+      attached = false;
+      const previous = identity.generation;
+      identity = { sessionId: null, generation: previous + 1 };
+      // Revocation precedes callbacks: abort may synchronously emit late work.
+      cleanGeneration(previous);
+    };
+  };
+
   const teardown = () => {
     if (destroyed) return;
     destroyed = true;
-    cleanGeneration(identity.generation);
-    identity = { sessionId: null, generation: identity.generation + 1 };
+    attached = false;
+    const previous = identity.generation;
+    identity = { sessionId: null, generation: previous + 1 };
+    cleanGeneration(previous);
     listeners.clear();
   };
 
@@ -221,6 +253,7 @@ export function createChatControllerCoordinator(
       applyInteraction("resolved", candidate, approvalId),
     registerCleanup,
     claimExit,
+    attach,
     teardown,
   };
 }
@@ -243,10 +276,10 @@ export function useChatController(
     controller.getSnapshot,
   );
 
+  useLayoutEffect(() => controller.attach(), [controller]);
   useLayoutEffect(() => {
     controller.capture();
   });
-  useEffect(() => () => controller.teardown(), [controller]);
 
   const bound = controller as ChatControllerCoordinator & {
     state: ChatControllerSnapshot;
