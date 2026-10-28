@@ -28,7 +28,7 @@ export function ArchivedChatsSettings({ onOpenChat }: { onOpenChat?: () => void 
         <h3 className="text-sm font-medium">{t.archivedChats}</h3>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t.archiveSettingsDescription}</p>
       </div>
-      <Button variant="outline" className="min-h-11 shrink-0 sm:min-h-9" onClick={() => {
+      <Button variant="outline" className="min-h-11 max-md:min-w-11 shrink-0 md:min-h-9" onClick={() => {
         setAudience("personal");
         setOpenWorkspace(workspaceId);
       }}>{t.archiveManage}</Button>
@@ -55,7 +55,7 @@ export function ArchivedChatsSettings({ onOpenChat }: { onOpenChat?: () => void 
           <div role="group" aria-label={t.archivedChats} className="flex shrink-0 gap-1 border-b border-border px-5 py-3">
             {(["personal", "workspace"] as const).map(value => <Button key={value}
               variant={value === audience ? "secondary" : "ghost"} aria-pressed={value === audience}
-              className="min-h-11 sm:min-h-9" onClick={() => setAudience(value)}>
+              className="min-h-11 max-md:min-w-11 md:min-h-9" onClick={() => setAudience(value)}>
               {value === "personal" ? t.viewPersonal : t.viewWorkspace}
             </Button>)}
           </div>
@@ -96,7 +96,7 @@ function ArchivedChatList({ workspaceId, audience, onOpenChat }: {
     {rows.loading && <div aria-hidden className="space-y-6 py-5">{[0, 1, 2].map(i => <Skeleton key={i} className="h-4 w-2/3" />)}</div>}
     {Boolean(rows.error) && <div role="alert" className="py-4 text-sm text-destructive">
       <p>{t.archiveLoadFailed}</p>
-      <Button variant="ghost" className="mt-2 max-sm:min-h-11" onClick={() => void rows.refresh()}>{t.archiveRetry}</Button>
+      <Button variant="ghost" className="mt-2 max-md:min-h-11 max-md:min-w-11" onClick={() => void rows.refresh()}>{t.archiveRetry}</Button>
     </div>}
     {error && <p role="alert" className="py-3 text-sm text-destructive">{error}</p>}
     {!rows.error && rows.data?.length === 0 && <p className="py-10 text-center text-sm text-muted-foreground">{t.archiveEmpty}</p>}
@@ -107,7 +107,7 @@ function ArchivedChatList({ workspaceId, audience, onOpenChat }: {
         return <li key={row.id} className="flex min-h-16 items-center gap-3 py-2">
           <div className="min-w-0 flex-1">
             <Link href={`/w/${workspaceId}/chat?${audience === "workspace" ? "v=workspace&" : ""}s=${encodeURIComponent(row.id)}`}
-              onClick={onOpenChat} className="flex min-h-11 min-w-0 items-center rounded text-sm font-medium hover:underline sm:min-h-8">
+              onClick={onOpenChat} className="flex min-h-11 min-w-0 max-md:min-w-11 items-center rounded text-sm font-medium hover:underline md:min-h-8">
               <span className="truncate">{row.title}</span>
             </Link>
             {dateLabel && <time dateTime={row.lastActive} className="block text-xs text-muted-foreground" aria-label={`${t.archiveLastActive}: ${dateLabel}`}>{dateLabel}</time>}
@@ -121,6 +121,6 @@ function ArchivedChatList({ workspaceId, audience, onOpenChat }: {
         </li>;
       })}
     </ul>
-    {rows.hasMore && <Button variant="ghost" disabled={rows.paging} className="my-3 max-sm:min-h-11 w-full" onClick={() => void rows.more()}>{t.moreChats}</Button>}
+    {rows.hasMore && <Button variant="ghost" disabled={rows.paging} className="my-3 max-md:min-h-11 max-md:min-w-11 w-full" onClick={() => void rows.more()}>{t.moreChats}</Button>}
   </div>;
 }

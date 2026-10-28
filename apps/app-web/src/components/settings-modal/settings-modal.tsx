@@ -238,7 +238,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
               open={pickerOpen}
               onOpenChange={setPickerOpen}
             >
-              <SelectTrigger aria-label={t.chrome.settingsModal.title} className="w-full max-sm:min-h-11">
+              <SelectTrigger aria-label={t.chrome.settingsModal.title} className="w-full max-md:min-h-11 text-[16px] md:text-sm">
                 <SelectValue>{labels[activeSection]}</SelectValue>
               </SelectTrigger>
               <SelectContent
@@ -252,7 +252,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
                       {group.label}
                     </div>
                     {group.sections.map((s) => (
-                      <SelectItem key={s} value={s} className="min-h-8 max-sm:min-h-11">
+                      <SelectItem key={s} value={s} className="min-h-8 max-md:min-h-11">
                         {labels[s]}
                       </SelectItem>
                     ))}
@@ -271,7 +271,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
           <Dialog.Close
             ref={closeRef}
             aria-label={t.chrome.settingsModal.close}
-            className="absolute top-3 right-3 h-11 w-11 sm:h-7 sm:w-7 rounded hover:bg-muted inline-flex items-center justify-center text-muted-foreground"
+            className="absolute top-3 right-3 h-11 w-11 md:h-7 md:w-7 rounded hover:bg-muted inline-flex items-center justify-center text-muted-foreground"
           >
             <svg
               width="14"
@@ -313,7 +313,7 @@ export function OssVersionFooter({ commitSha = OSS_GIT_COMMIT_SHA }: { commitSha
         rel="noopener noreferrer"
         aria-label={linkLabel}
         title={normalizedSha || linkLabel}
-        className="transition-colors hover:text-foreground hover:underline underline-offset-2"
+        className="max-md:inline-flex max-md:min-h-11 max-md:min-w-11 max-md:items-center transition-colors hover:text-foreground hover:underline underline-offset-2"
       >
         {label}
       </a>
@@ -347,7 +347,7 @@ function SectionGroup({
               onClick={() => onSelect(s)}
               aria-current={active === s ? "page" : undefined}
               className={cn(
-                "w-full text-left px-2 py-1.5 text-sm rounded transition-colors",
+                "max-md:min-h-11 max-md:min-w-11 w-full text-left px-2 py-1.5 text-sm rounded transition-colors",
                 active === s
                   ? "bg-muted font-medium"
                   : "text-muted-foreground hover:text-foreground hover:bg-muted",

@@ -214,7 +214,7 @@ export function AccountSection() {
           {!isOssEdition() && (
             <div className="text-xs text-muted-foreground truncate">{userInfo?.email ?? ""}</div>
           )}
-          <div className="mt-2 flex items-center gap-3">
+          <div className="mt-2 flex max-md:flex-wrap items-center gap-3">
             <input
               ref={fileInputRef}
               type="file"
@@ -222,7 +222,7 @@ export function AccountSection() {
               className="hidden"
               onChange={onPickPhoto}
             />
-            {/* `Button size="sm"` carries the phone floor (44px below `sm`);
+            {/* Local action classes keep the phone floor through `md`;
                 the 12px text links were ~16px-tall targets (report A row 18). */}
             <Button
               type="button"
@@ -230,7 +230,7 @@ export function AccountSection() {
               size="sm"
               onClick={() => fileInputRef.current?.click()}
               disabled={uploading || removing}
-              className="px-0 text-[12px]"
+              className="max-md:min-h-11 max-md:min-w-11 px-0 text-[12px]"
             >
               {uploading ? t.settings.common.save + "…" : t.settings.account.changePhoto}
             </Button>
@@ -241,7 +241,7 @@ export function AccountSection() {
                 size="sm"
                 onClick={onRemovePhoto}
                 disabled={uploading || removing}
-                className="px-0 text-[12px] text-muted-foreground hover:text-foreground"
+                className="max-md:min-h-11 max-md:min-w-11 px-0 text-[12px] text-muted-foreground hover:text-foreground"
               >
                 {t.settings.account.removePhoto}
               </Button>
@@ -253,7 +253,7 @@ export function AccountSection() {
       {profileLoadFailed && (
         <div role="alert" className="flex items-center gap-3">
           <p className="text-xs text-red-400">{t.settings.account.profileLoadError}</p>
-          <Button type="button" variant="outline" size="sm" onClick={() => void refreshProfile()}>
+          <Button className="max-md:min-h-11 max-md:min-w-11" type="button" variant="outline" size="sm" onClick={() => void refreshProfile()}>
             {t.settings.account.retry}
           </Button>
         </div>
@@ -286,14 +286,14 @@ export function AccountSection() {
                 // launcher prompt / ~/.usebrian/config.json), so it is read-only
                 // here — an in-app edit would be re-clobbered on the next boot.
                 disabled={savingName || isOssEdition()}
-                className="flex-1 min-w-0 text-[16px] md:text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 disabled:opacity-60"
+                className="max-md:min-h-11 flex-1 min-w-0 text-[16px] md:text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 disabled:opacity-60"
               />
               {!isOssEdition() && (
                 <button
                   type="button"
                   onClick={onSaveName}
                   disabled={!nameDirty || savingName}
-                  className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
+                  className="max-md:min-h-11 max-md:min-w-11 text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
                 >
                   {savingName ? "…" : t.settings.account.saveName}
                 </button>
@@ -324,7 +324,7 @@ export function AccountSection() {
         <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">{t.settings.account.signOut}</h3>
         <button
           onClick={() => signOutActiveAccount()}
-          className="text-sm font-medium border border-border px-4 py-2 rounded-lg hover:bg-muted transition-colors"
+          className="max-md:min-h-11 max-md:min-w-11 text-sm font-medium border border-border px-4 py-2 rounded-lg hover:bg-muted transition-colors"
         >
           {t.settings.account.logOut}
         </button>
@@ -416,7 +416,7 @@ export function DevicesSection() {
       {loadFailed && (
         <div className="flex items-center gap-3">
           <p className="text-xs text-red-400">{t.settings.account.devicesLoadError}</p>
-          <Button type="button" variant="outline" size="sm" onClick={() => void load()}>
+          <Button className="max-md:min-h-11 max-md:min-w-11" type="button" variant="outline" size="sm" onClick={() => void load()}>
             {t.settings.account.retry}
           </Button>
         </div>
@@ -448,7 +448,7 @@ export function DevicesSection() {
                   {session.ipAddress ? ` · ${session.ipAddress}` : ""}
                 </p>
               </div>
-              <Button
+              <Button className="max-md:min-h-11 max-md:min-w-11"
                 type="button"
                 variant="outline"
                 size="sm"
@@ -468,7 +468,7 @@ export function DevicesSection() {
         size="sm"
         disabled={busyId !== null}
         onClick={() => void revokeAll()}
-        className="text-red-500 hover:text-red-500"
+        className="max-md:min-h-11 max-md:min-w-11 text-red-500 hover:text-red-500"
       >
         {busyId === "all" ? "…" : t.settings.account.logOutAllDevices}
       </Button>
@@ -568,20 +568,20 @@ function HandleSection() {
                 value={input}
                 onChange={(e) => { setInput(e.target.value); setError(""); }}
                 onKeyDown={(e) => e.key === "Enter" && saveHandle()}
-                className="min-w-0 flex-1 text-[16px] md:text-sm bg-transparent py-2 pl-1 focus:outline-none"
+                className="max-md:min-h-11 min-w-0 flex-1 text-[16px] md:text-sm bg-transparent py-2 pl-1 focus:outline-none"
                 autoFocus={!isPhoneViewport()}
               />
             </div>
             <button
               onClick={saveHandle}
               disabled={saving}
-              className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
+              className="max-md:min-h-11 max-md:min-w-11 text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
             >
               {saving ? "..." : t.settings.common.save}
             </button>
             <button
               onClick={() => { setEditing(false); setInput(handle ?? ""); setError(""); }}
-              className="text-sm text-muted-foreground hover:text-foreground"
+              className="max-md:min-h-11 max-md:min-w-11 text-sm text-muted-foreground hover:text-foreground"
             >
               {t.settings.common.cancel}
             </button>
@@ -601,7 +601,7 @@ function HandleSection() {
             variant="link"
             size="sm"
             onClick={() => setEditing(true)}
-            className="px-0 text-[12px]"
+            className="max-md:min-h-11 max-md:min-w-11 px-0 text-[12px]"
           >
             {t.settings.account.change}
           </Button>
