@@ -358,6 +358,193 @@ describeIf('[COMP:brain/entities-store] entities store (integration)', () => {
     })
   })
 
+
+  describe('real merged UUID resolution', () => {
+    const bornAt = new Date('2020-01-01T00:00:00Z')
+    const firstMerge = new Date('2021-01-01T00:00:00Z')
+    const secondMerge = new Date('2022-01-01T00:00:00Z')
+    let userId: string
+    let workspaceId: string
+
+    beforeEach(async () => {
+      const client = await pool!.connect()
+      try {
+        userId = await makeUser(client)
+        workspaceId = await makeWorkspace(client, userId)
+        await addMember(client, workspaceId, userId)
+      } finally { client.release() }
+    })
+
+    async function entity(label: string, targetWorkspace = workspaceId) {
+      const row = await store.create({ kind: 'project', displayName: label,
+        workspaceId: targetWorkspace, userId, createdByUserId: userId, source: 'user' })
+      // Deterministic historical boundaries, without mocking any reader.
+      await pool!.query('UPDATE entities SET valid_from=$2 WHERE id=$1', [row.id, bornAt])
+      return row
+    }
+
+    async function merge(survivingId: string, mergedId: string, at: Date) {
+      const { mergeEntities } = await import('@use-brian/core')
+      const { createEntityMergeStore } = await import('../entity-merge-store.js')
+      return mergeEntities({ workspaceId, survivingId, mergedId, actorUserId: userId,
+        mode: 'survivor-wins', cascade: false }, { repo: createEntityMergeStore(), clock: () => at })
+    }
+
+    // Malformed/withdrawn-chain controls may use synthetic links; positive
+    // retirement and transitive recovery below always use real merge code.
+    async function syntheticChain(length: number) {
+      const rows = []
+      for (let i = 0; i < length; i++) rows.push(await entity(`Fictional version ${i}`))
+      for (let i = 0; i + 1 < rows.length; i++) {
+        await pool!.query('UPDATE entities SET valid_to=$2,superseded_by=$3 WHERE id=$1',
+          [rows[i]!.id, firstMerge, rows[i + 1]!.id])
+      }
+      return rows
+    }
+
+    it('resolves a truly retired UUID after the actual merge and keeps ordinary temporal reads unchanged', async () => {
+      const older = await entity('Fictional original')
+      const newer = await entity('Fictional survivor')
+      const { queryWithRLS } = await import('../client.js')
+      const role = await queryWithRLS<{ superuser: boolean; bypass: boolean; owner: boolean }>(userId,
+        `SELECT r.rolsuper AS superuser,r.rolbypassrls AS bypass,
+          r.oid=(SELECT relowner FROM pg_class WHERE oid='entities'::regclass) AS owner
+         FROM pg_roles r WHERE r.rolname=current_user`)
+      expect(role.rows[0]).toEqual({ superuser: false, bypass: false, owner: false })
+      await merge(newer.id, older.id, firstMerge)
+      const retired = await pool!.query('SELECT valid_to,superseded_by FROM entities WHERE id=$1', [older.id])
+      expect(retired.rows[0]).toEqual({ valid_to: firstMerge, superseded_by: newer.id })
+      expect(await store.getById(ctxOf(userId, workspaceId), older.id)).toBeNull()
+      // Merge preserves the old name as a survivor alias; name discovery stays live.
+      expect((await store.findByName(ctxOf(userId, workspaceId), older.displayName))?.id).toBe(newer.id)
+      const result = await store.getEntity(ctxOf(userId, workspaceId), older.id)
+      expect(result?.entity.id).toBe(newer.id)
+      expect(result?.followedSupersession).toEqual({ fromId: older.id, toId: newer.id, supersededAt: firstMerge })
+    })
+
+    it('follows actual transitive merges and reports the final predecessor breadcrumb', async () => {
+      const a = await entity('Fictional first')
+      const b = await entity('Fictional second')
+      const c = await entity('Fictional final')
+      await merge(b.id, a.id, firstMerge)
+      await merge(c.id, b.id, secondMerge)
+      const result = await store.getEntity(ctxOf(userId, workspaceId), a.id)
+      expect(result?.entity.id).toBe(c.id)
+      expect(result?.followedSupersession).toEqual({ fromId: b.id, toId: c.id, supersededAt: secondMerge })
+    })
+
+    it('returns the effective identity before, between and after actual merges', async () => {
+      const a = await entity('Fictional historical first')
+      const b = await entity('Fictional historical middle')
+      const c = await entity('Fictional historical final')
+      await merge(b.id, a.id, firstMerge)
+      await merge(c.id, b.id, secondMerge)
+      const before = await store.getEntity(ctxOf(userId, workspaceId), a.id, { asOf: new Date('2020-06-01T00:00:00Z') })
+      expect(before?.entity.id).toBe(a.id)
+      expect(before?.followedSupersession).toBeUndefined()
+      const between = await store.getEntity(ctxOf(userId, workspaceId), a.id, { asOf: new Date('2021-06-01T00:00:00Z') })
+      expect(between?.entity.id).toBe(b.id)
+      expect(between?.followedSupersession).toEqual({ fromId: a.id, toId: b.id, supersededAt: firstMerge })
+      const after = await store.getEntity(ctxOf(userId, workspaceId), a.id, { asOf: new Date('2023-01-01T00:00:00Z') })
+      expect(after?.entity.id).toBe(c.id)
+    })
+
+    it('keeps strict identity on the authorized retired predecessor without following it', async () => {
+      const a = await entity('Fictional strict original')
+      const b = await entity('Fictional strict survivor')
+      await merge(b.id, a.id, firstMerge)
+      const result = await store.getEntity(ctxOf(userId, workspaceId), a.id, { strictIdentity: true })
+      expect(result?.entity.id).toBe(a.id)
+      expect(result?.followedSupersession).toBeUndefined()
+    })
+
+    async function fractionalMerge() {
+      const a = await entity('Fictional fractional predecessor')
+      const b = await entity('Fictional fractional survivor')
+      await merge(b.id, a.id, firstMerge)
+      // PostgreSQL retirement timestamps can retain microseconds that JS Date
+      // cannot represent. Keep the real merge and stamp an exact fixture time.
+      await pool!.query('UPDATE entities SET valid_to=$2::timestamptz WHERE id=$1',
+        [a.id, '2021-01-01T00:00:00.123456Z'])
+      const stored = await pool!.query<{ exact: boolean }>(
+        "SELECT valid_to='2021-01-01T00:00:00.123456Z'::timestamptz AS exact FROM entities WHERE id=$1", [a.id])
+      expect(stored.rows[0]?.exact).toBe(true)
+      return { a, b }
+    }
+
+    it.each(['2021-01-01T00:00:00.122Z', '2021-01-01T00:00:00.123Z'])(
+      'preserves the predecessor before a fractional retirement at asOf %s', async instant => {
+        const { a } = await fractionalMerge()
+        const result = await store.getEntity(ctxOf(userId, workspaceId), a.id, { asOf: new Date(instant) })
+        expect(result?.entity.id).toBe(a.id)
+        expect(result?.followedSupersession).toBeUndefined()
+      },
+    )
+
+    it('keeps strict identity on a predecessor with a fractional retirement timestamp', async () => {
+      const { a } = await fractionalMerge()
+      const result = await store.getEntity(ctxOf(userId, workspaceId), a.id, { strictIdentity: true })
+      expect(result?.entity.id).toBe(a.id)
+      expect(result?.followedSupersession).toBeUndefined()
+    })
+
+    it('follows a fractional retirement only after it is effective', async () => {
+      const { a, b } = await fractionalMerge()
+      const result = await store.getEntity(ctxOf(userId, workspaceId), a.id,
+        { asOf: new Date('2021-01-01T00:00:00.124Z') })
+      expect(result?.entity.id).toBe(b.id)
+      expect(result?.followedSupersession).toEqual({ fromId: a.id, toId: b.id,
+        supersededAt: new Date('2021-01-01T00:00:00.123Z') })
+    })
+
+    it.each([0, 1, 2])('refuses an invisible chain row at position %s even when other rows remain visible', async position => {
+      const rows = await syntheticChain(3)
+      await pool!.query("UPDATE entities SET sensitivity='confidential' WHERE id=$1", [rows[position]!.id])
+      const viewer = { ...ctxOf(userId, workspaceId), clearance: 'internal' as const }
+      if (position !== 2) expect((await store.getById(viewer, rows[2]!.id))?.id).toBe(rows[2]!.id)
+      expect(await store.getEntity(viewer, rows[0]!.id)).toBeNull()
+    })
+
+    it.each([
+      ['retracted', 0], ['retracted', 1], ['retracted', 2],
+      ['held', 0], ['held', 1], ['held', 2],
+    ] as const)('refuses a %s row at chain position %s', async (state, position) => {
+      const rows = await syntheticChain(3)
+      if (state === 'retracted') await pool!.query("UPDATE entities SET retracted_at=now(),retracted_reason='Fictional correction' WHERE id=$1", [rows[position]!.id])
+      else await pool!.query('UPDATE entities SET scope_held=true WHERE id=$1', [rows[position]!.id])
+      expect(await store.getEntity(ctxOf(userId, workspaceId), rows[0]!.id)).toBeNull()
+    })
+
+    it('refuses a cross-workspace successor even when the actor belongs to both workspaces', async () => {
+      const client = await pool!.connect()
+      let otherWorkspace: string
+      try { otherWorkspace = await makeWorkspace(client, userId); await addMember(client, otherWorkspace, userId) }
+      finally { client.release() }
+      const a = await entity('Fictional local original')
+      const b = await entity('Fictional foreign successor', otherWorkspace)
+      await pool!.query('UPDATE entities SET valid_to=$2,superseded_by=$3 WHERE id=$1', [a.id, firstMerge, b.id])
+      expect(await store.getEntity(ctxOf(userId, workspaceId), a.id)).toBeNull()
+    })
+
+    it('refuses an expired terminal target without a successor', async () => {
+      const rows = await syntheticChain(2)
+      await pool!.query('UPDATE entities SET valid_to=$2 WHERE id=$1', [rows[1]!.id, secondMerge])
+      expect(await store.getEntity(ctxOf(userId, workspaceId), rows[0]!.id)).toBeNull()
+    })
+
+    it('refuses cyclic malformed links without returning an intermediate row', async () => {
+      const rows = await syntheticChain(2)
+      await pool!.query('UPDATE entities SET valid_to=$2,superseded_by=$3 WHERE id=$1', [rows[1]!.id, secondMerge, rows[0]!.id])
+      expect(await store.getEntity(ctxOf(userId, workspaceId), rows[0]!.id)).toBeNull()
+    })
+
+    it('accepts 64 links and refuses a chain exceeding that bound', async () => {
+      const rows = await syntheticChain(66)
+      expect((await store.getEntity(ctxOf(userId, workspaceId), rows[1]!.id))?.entity.id).toBe(rows[65]!.id)
+      expect(await store.getEntity(ctxOf(userId, workspaceId), rows[0]!.id)).toBeNull()
+    })
+  })
+
   describe('[COMP:brain/entity-rollup] cross-primitive rollup (WU-1.8)', () => {
     let userId: string
     let workspaceId: string

@@ -1942,6 +1942,70 @@ async function countKbChunksForEntity(): Promise<number> {
   return 0
 }
 
+/**
+ * UUID rollups may inspect a retired identity, but only under the current
+ * viewer projection. Ordinary point/name reads keep their temporal contract.
+ * Metadata is enough for each hop; fetch the final payload only after the
+ * entire visible chain has been admitted.
+ */
+async function resolveMergedEntityIdentity(
+  ctx: AccessContext,
+  id: string,
+  opts: GetEntityOpts,
+): Promise<Pick<EntityRollup, 'entity' | 'followedSupersession'> | null> {
+  const asOf = opts.asOf ?? new Date()
+  const ap = buildAccessPredicate(ctx, { startIdx: 3 })
+  const visibleIdentity = `id = $1 AND valid_from <= $2::timestamptz
+    AND retracted_at IS NULL AND NOT scope_held AND ${ap.sql}`
+  const visited = new Set<string>()
+  let currentId = id
+  let followedSupersession: EntityRollup['followedSupersession']
+
+  for (let links = 0; ; links++) {
+    if (visited.has(currentId)) return null
+    visited.add(currentId)
+    const result = await queryWithRLS<Pick<EntityRow, 'id' | 'workspaceId' | 'validTo' | 'supersededBy'> & {
+      validToToken: string | null; retired: boolean
+    }>(
+      ctx.userId,
+      `SELECT id,workspace_id AS "workspaceId",valid_to AS "validTo",superseded_by AS "supersededBy",
+         valid_to::text AS "validToToken",
+         (valid_to IS NOT NULL AND valid_to <= $2::timestamptz) AS retired
+       FROM entities WHERE ${visibleIdentity}`,
+      [currentId, asOf, ...ap.params],
+    )
+    const row = result.rows[0]
+    if (!row || row.workspaceId !== ctx.workspaceId) return null
+
+    // A legacy live pointer has no retirement time. Preserve its existing
+    // redirect behavior; a dated merge is effective only at/after valid_to.
+    const follows = !opts.strictIdentity && row.supersededBy
+      && (row.validTo === null || row.retired)
+    if (follows) {
+      if (links >= 64) return null
+      followedSupersession = { fromId: row.id, toId: row.supersededBy!, supersededAt: row.validTo }
+      currentId = row.supersededBy!
+      continue
+    }
+    // A retired terminal row is a miss, except for explicitly authorized
+    // no-follow reads. A future link still represents this predecessor.
+    if (!opts.strictIdentity && row.retired) return null
+
+    // Recheck the current projection and the resolved identity at payload
+    // read time. Keep PostgreSQL's microsecond precision in the identity
+    // token; JS Date is retained only for the existing breadcrumb output.
+    const payload = await queryWithRLS<EntityRow>(ctx.userId,
+      `SELECT ${FULL_SELECT} FROM entities WHERE ${visibleIdentity}
+       AND valid_to IS NOT DISTINCT FROM $${ap.nextIdx}::timestamptz
+       AND superseded_by IS NOT DISTINCT FROM $${ap.nextIdx + 1}::uuid`,
+      [currentId, asOf, ...ap.params, row.validToToken, row.supersededBy],
+    )
+    const final = payload.rows[0]
+    if (!final || final.workspaceId !== ctx.workspaceId) return null
+    return { entity: toEntity(final), ...(followedSupersession ? { followedSupersession } : {}) }
+  }
+}
+
 async function getEntityRollup(
   deps: { entityLinks: EntityLinksStore },
   ctx: AccessContext,
@@ -1949,8 +2013,9 @@ async function getEntityRollup(
   opts: GetEntityOpts = {},
 ): Promise<EntityRollup | null> {
   const isUuid = UUID_RE.test(idOrName)
+  const identity = isUuid ? await resolveMergedEntityIdentity(ctx, idOrName, opts) : null
   let entity: EntityRecord | null = isUuid
-    ? await getEntityById(ctx, idOrName, { asOf: opts.asOf })
+    ? identity?.entity ?? null
     : await findEntityByName(ctx, idOrName, { asOf: opts.asOf })
 
   if (!entity) return null
@@ -1961,8 +2026,8 @@ async function getEntityRollup(
   // even if a future predicate change loosens the projection.
   if (entity.workspaceId !== ctx.workspaceId) return null
 
-  let followedSupersession: EntityRollup['followedSupersession']
-  if (!opts.strictIdentity && entity.supersededBy) {
+  let followedSupersession = identity?.followedSupersession
+  if (!isUuid && !opts.strictIdentity && entity.supersededBy) {
     const target = await getEntityById(ctx, entity.supersededBy, { asOf: opts.asOf })
     if (target) {
       followedSupersession = {
