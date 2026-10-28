@@ -46,9 +46,11 @@ export function independentSourceReplayConsumer(pool: Pool, maximumEntries = 10_
 type Query = Pick<Pool | PoolClient, 'query'>
 type SourceRecord = { id: string; kind: string; content_version: number; policy_version: number; data: Record<string, unknown>; compartments: string[]; withdrawn: boolean }
 export async function startIndependentSource(input: { pool: Pool; tenant: string; transportToken: string;
-  verifyActor: ReturnType<typeof createConnectorActorVerifier>; uiSessions: Map<string, SourceSubject>; retentionModes?: SourceRetentionMode[] }) {
+  verifyActor: ReturnType<typeof createConnectorActorVerifier>; uiSessions: Map<string, SourceSubject>; retentionModes?: SourceRetentionMode[]; pathPrefix?: '/api';
+  attendedActions?: {idempotencyMetadataKey:string} }) {
   const { pool, tenant } = input
-  const capabilities: SourceCapabilities = { version: SOURCE_PROTOCOL_VERSION, tenant, retentionModes: input.retentionModes ?? ['governed'], fieldEvidence: true, reconciliation: true, effectBinding: 'command_v1' }
+  const capabilities: SourceCapabilities = { version: SOURCE_PROTOCOL_VERSION, tenant, retentionModes: input.retentionModes ?? ['governed'], fieldEvidence: true, reconciliation: true, effectBinding: 'command_v1',
+    ...(input.attendedActions ? {attendedActions:input.attendedActions} : {}) }
   const counters = { reads: 0, discoveries: 0, authorizations: 0, effects: 0, reconciliations: 0 }
   let afterRead: (() => Promise<void>) | undefined
   let afterEffect: (() => Promise<void>) | undefined
@@ -163,7 +165,7 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
   const requestAuth = (req: express.Request) => ({ assertion: String(req.headers['x-usebrian-actor-assertion'] ?? ''),
     request: { method: req.method, target: req.originalUrl, body: (req as express.Request & { sourceBytes?: Buffer }).sourceBytes ?? new Uint8Array() },
     authenticateTransport: async () => req.headers.authorization === `Bearer ${input.transportToken}`, verifyActor: input.verifyActor })
-  app.post('/usebrian/source/:endpoint', async (req, res) => {
+  app.post(`${input.pathPrefix ?? ''}/usebrian/source/:endpoint`, async (req, res) => {
     try {
       const endpoint = req.params.endpoint
       if (!['capabilities','authorize','reconcile'].includes(endpoint)) { res.sendStatus(404); return }
@@ -193,7 +195,7 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
     }
   })
   // Independent source administration. Brian assertions and transport tokens cannot grant source rights.
-  app.post('/ui/grants',async(req,res)=>{
+  app.post(`${input.pathPrefix ?? ''}/ui/grants`,async(req,res)=>{
     const subject=input.uiSessions.get(String(req.headers.authorization??'').replace(/^Bearer /,''))
     if(!subject||!await actorKnown(pool,subject)||(await pool.query('SELECT 1 FROM accounts WHERE kind=$1 AND id=$2 AND administrative AND active',[subject.kind,subject.id])).rowCount!==1){res.sendStatus(403);return}
     const parsed=z.object({kind:z.enum(['human','service']),accountId:z.string().uuid(),assistantId:z.string().uuid(),recordId:z.string(),fields:z.array(z.string()).min(1),actions:z.array(z.enum(['read','context','derive','retain','deliver','export','mutate'])).min(1)}).strict().safeParse(req.body)
@@ -207,13 +209,13 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
     const parsed=z.object({kind:z.enum(['human','service']),accountId:z.string().uuid(),recordId:z.string()}).strict().safeParse(req.body)
     if(!parsed.success){res.sendStatus(400);return}const v=parsed.data;await pool.query('DELETE FROM grants WHERE kind=$1 AND account_id=$2 AND record_id=$3',[v.kind,v.accountId,v.recordId]);res.json({revoked:true})
   })
-  app.get('/ui/records/:id', async (req, res) => {
+  app.get(`${input.pathPrefix ?? ''}/ui/records/:id`, async (req, res) => {
     const subject = input.uiSessions.get(String(req.headers.authorization ?? '').replace(/^Bearer /,''))
     if (!subject) { res.sendStatus(401); return }
     const fields = String(req.query.fields ?? '').split(',').filter(Boolean), result = await read(subject, req.params.id, fields)
     if (!result) { res.sendStatus(403); return }; res.json(result.data)
   })
-  app.post('/http/read', async (req, res) => {
+  app.post(`${input.pathPrefix ?? ''}/http/read`, async (req, res) => {
     try {
       const { value } = await authorizeConnectorRequest({ ...requestAuth(req), authorize: async actor => {
         const parsed = z.object({ id: z.string(), fields: z.array(z.string()).min(1).max(256) }).strict().parse(req.body)
@@ -222,13 +224,15 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
       } }); res.json(value)
     } catch { res.status(403).json({ error: 'source_access_denied' }) }
   })
-  app.all('/mcp', async (req, res) => {
+  app.all(`${input.pathPrefix ?? ''}/mcp`, async (req, res) => {
     try {
       const { actor } = await authorizeConnectorRequest({ ...requestAuth(req), authorize: async actor => ({ allowed: await actorKnown(pool, sourceSubjectFromActor(actor)), value: null }) })
       if(req.body?.method==='tools/call'){
         const intent=req.body.params?._meta?.[SOURCE_PROTOCOL_VERSION]
         if((actor.actor.kind==='service'||actor.executionKind==='programmatic')&&!['read','mutate'].includes(intent?.intent)){res.status(403).json({error:'source_access_denied'});return}
         if(intent?.intent==='read'&&req.body.params?.name!=='readRecord'){res.status(403).json({error:'source_access_denied'});return}
+        if(intent?.intent==='attended_action'&&(!input.attendedActions||actor.actor.kind!=='human'||actor.executionKind!=='attended'
+          ||typeof req.body.params?._meta?.[input.attendedActions.idempotencyMetadataKey]!=='string'))throw new SourceProtocolError('source_access_denied')
         if(intent?.intent==='mutate'){
           const authorization=parseSourceAuthorizationRequest(intent.authorization),actual=req.body.params
           if(!authorization.effect||!effectMatchesRequest(authorization)||authorization.effect.tool!==actual.name
@@ -248,8 +252,16 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
         return result ? { content: [{ type: 'text', text: JSON.stringify(result.data) }], _meta: { [SOURCE_PROTOCOL_VERSION]: result.envelope } }
           : { isError: true, content: [{ type: 'text', text: 'source_access_denied' }] }
       })
-      server.registerTool('updateRecord', { inputSchema: { id: z.string(), expectedVersion: z.string(), expectedPolicyVersion:z.string().optional(), values: z.record(z.string()), idempotencyKey: z.string().min(1).max(256) } }, async args => {
-        try { const result = await update(actor, args.id, args.expectedVersion, args.values, args.idempotencyKey,args.expectedPolicyVersion)
+      server.registerTool('updateRecord', { inputSchema: { id: z.string(), expectedVersion: z.string(), expectedPolicyVersion:z.string().optional(), values: z.record(z.string()),
+        idempotencyKey: input.attendedActions ? z.string().min(1).max(256).optional() : z.string().min(1).max(256) } }, async (args,extra) => {
+        try {
+          const key=input.attendedActions?extra._meta?.[input.attendedActions.idempotencyMetadataKey]:args.idempotencyKey
+          if(typeof key!=='string')throw new Error('idempotency_required')
+          const result = await update(actor, args.id, args.expectedVersion, args.values, key,args.expectedPolicyVersion)
+          if(input.attendedActions){
+            const projection=await read(subject,args.id,Object.keys(args.values))
+            if(projection)return {content:[{type:'text',text:JSON.stringify(projection.data)}],_meta:{[SOURCE_PROTOCOL_VERSION]:projection.envelope}}
+          }
           return { content: [{ type: 'text', text: JSON.stringify(result) }] }
         } catch { return { isError: true, content: [{ type: 'text', text: 'source_effect_unavailable' }] } }
       })
@@ -259,6 +271,6 @@ export async function startIndependentSource(input: { pool: Pool; tenant: string
     } catch { res.status(403).json({ error: 'source_access_denied' }) }
   })
   const server = app.listen(0, '127.0.0.1'); await once(server, 'listening')
-  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, counters, setAfterRead: (next?: () => Promise<void>) => { afterRead = next }, setAfterEffect: (next?: () => Promise<void>) => { afterEffect = next },setBeforeEffect:(next?:()=>Promise<void>)=>{beforeEffect=next},
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}${input.pathPrefix ?? ''}`, counters, setAfterRead: (next?: () => Promise<void>) => { afterRead = next }, setAfterEffect: (next?: () => Promise<void>) => { afterEffect = next },setBeforeEffect:(next?:()=>Promise<void>)=>{beforeEffect=next},
     close: () => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections() }) }
 }

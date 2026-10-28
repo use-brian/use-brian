@@ -1,5 +1,6 @@
 import {applicationLegacyViewInput,applicationLegacyApplyInput,executeApplicationLegacyReview,type ApplicationLegacyCommand} from './legacy-review.js'
 import {prepareApplicationSourceSetup,applyApplicationSourceSetup,sourceSetupInput} from './source-onboarding.js'
+import { attendedSourceSetupInput, prepareAttendedConnectorIdentity, reviewAttendedSourceSetup, applyAttendedSourceSetup } from './attended-source-onboarding.js'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 /** Native app preparation and recovery; registration confers no data rights. [COMP:api/application-auth] */
 import type { Pool, PoolClient } from 'pg'
@@ -30,6 +31,10 @@ const schemaPreviewBody = applicationSchemaPreviewInput.omit({ typeId: true }).e
 
 /** One command vocabulary for the native human and Brian management adapters. */
 export const applicationManagementCommandSchema = z.discriminatedUnion('kind', [
+ z.object({kind:z.literal('connector.identity.prepare'),assistantId:z.string().uuid().optional()}).strict(),
+ z.object({kind:z.literal('connector.source.review'),assistantId:z.string().uuid().optional(),input:attendedSourceSetupInput}).strict(),
+ z.object({kind:z.literal('connector.source.apply'),assistantId:z.string().uuid().optional(),reviewId:z.string().uuid()}).strict(),
+ z.object({kind:z.literal('connector.source.revoke'),profileId:z.string().uuid()}).strict(),
  z.object({kind:z.literal('legacy.view'),...applicationLegacyViewInput.shape,assistantId:z.string().uuid().optional()}).strict(),
  z.object({kind:z.literal('legacy.apply'),...applicationLegacyApplyInput.shape,assistantId:z.string().uuid().optional()}).strict(),
  z.object({kind:z.literal('legacy.cancel'),...applicationLegacyApplyInput.shape,assistantId:z.string().uuid().optional()}).strict(),
@@ -101,12 +106,26 @@ export class ApplicationManagementService {
       links:{miniApps:`${base}/studio/mini-apps`,connectors:`${base}/studio/connectors`,programmaticAccess:`${base}/studio/programmatic-access`,access:`${base}/organization?section=access`}}
   }
 
-  async executeCommand(actorId:string,workspaceId:string,raw:unknown,delivery:{audience:'human'|'brian';assistantId?:string}={audience:'human'}):Promise<unknown> {
+  async executeCommand(actorId:string,workspaceId:string,raw:unknown,delivery:{audience:'human'|'brian';assistantId?:string;execution?:import('@use-brian/core').ExecutionContext}={audience:'human'}):Promise<unknown> {
     const parsed=applicationManagementCommandSchema.safeParse(raw)
     if(!parsed.success)throw new ApplicationPlatformError('invalid_value','The management command is invalid.')
     const command=parsed.data
     const assistant=delivery.assistantId?{assistantId:delivery.assistantId}:{}
     switch(command.kind) {
+      case 'connector.identity.prepare':{
+        const execution=await this.attendedSetupExecution(actorId,workspaceId,delivery,command.assistantId)
+        return this.transaction(actorId,workspaceId,client=>prepareAttendedConnectorIdentity(client,execution),true)
+      }
+      case 'connector.source.review':{
+        const execution=await this.attendedSetupExecution(actorId,workspaceId,delivery,command.assistantId)
+        return this.transaction(actorId,workspaceId,client=>reviewAttendedSourceSetup(client,execution,command.input),true)
+      }
+      case 'connector.source.apply':{
+        const execution=await this.attendedSetupExecution(actorId,workspaceId,delivery,command.assistantId)
+        return this.transaction(actorId,workspaceId,client=>applyAttendedSourceSetup(client,execution,command.reviewId),true)
+      }
+      case 'connector.source.revoke':return this.transaction(actorId,workspaceId,async client=>({revoked:
+        (await client.query('SELECT connector_revoke_attended_source($1,$2) AS value',[workspaceId,command.profileId])).rows[0].value}),true)
       case 'legacy.view':case 'legacy.apply':case 'legacy.cancel':return this.legacyReview(actorId,workspaceId,command,delivery.assistantId??command.assistantId)
       case 'register':return this.create(actorId,{...command.input,workspaceId})
       case 'activation.review':return this.transaction(actorId,workspaceId,async client=>{
@@ -161,6 +180,17 @@ export class ApplicationManagementService {
     try {await execution.security.authority.assertCurrent()}
     catch {throw new ApplicationPlatformError('grant_revoked','The reviewed authority changed. Check the saved review before retrying.',effectful?'committed':'none')}
     return result
+  }
+
+  private async attendedSetupExecution(actorId:string,workspaceId:string,delivery:{audience:'human'|'brian';assistantId?:string;execution?:import('@use-brian/core').ExecutionContext},assistantId?:string) {
+    const execution=delivery.execution
+    if(execution){
+      if(execution.security.access.userId!==actorId||execution.security.access.workspaceId!==workspaceId
+        ||execution.assistant.id!==(delivery.assistantId??assistantId??execution.assistant.id))throw new ApplicationPlatformError('access_unavailable','The connector actor is unavailable.')
+      return execution
+    }
+    if(delivery.audience==='brian')throw new ApplicationPlatformError('authentication_required','The original native execution is required.')
+    return this.nativeSchemaExecution(actorId,workspaceId,delivery.assistantId??assistantId)
   }
   async managementMcpTools(actorId:string,workspaceId:string,rawSelection:unknown={}) {
     const selection=schemaAssistantInput.safeParse(rawSelection)

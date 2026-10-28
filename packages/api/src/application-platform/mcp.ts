@@ -118,7 +118,7 @@ export function buildNativeApplicationManagementMcpTools(service:ApplicationMana
     {name:'applicationManage',description:'Use the same native reviewed management commands as the human panel. Preview first and apply only an explicitly confirmed review. Uncertain writes require reconciliation, never automatic retry. Credential delivery returns a human-only link, never credential material.',
     inputSchema:{command:applicationManagementCommandSchema},handler:input=>{
       const metadataRead=(input.command as {kind?:unknown}|undefined)?.kind==='legacy.view'
-      return invoke(value=>service.executeCommand(actorId,workspaceId,value.command,{audience:'brian',assistantId:execution.assistant.id}),!metadataRead,metadataRead)(input)
+      return invoke(value=>service.executeCommand(actorId,workspaceId,value.command,{audience:'brian',assistantId:execution.assistant.id,execution}),!metadataRead,metadataRead)(input)
     }}]
 }
 

@@ -169,6 +169,20 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
 
   after(async () => { await db?.close() })
 
+  it('returns a newly inserted personal chat under app-role RLS while preserving legacy holds', async () => {
+    const rows = await asUser<{ id: string; recording_privacy_held: boolean }>(MEMBER,
+      `INSERT INTO sessions (assistant_id,workspace_id,user_id,channel_type,channel_id,visibility)
+       VALUES ($1,$2,$3,'web','ordinary-app-role-chat','personal') RETURNING id,recording_privacy_held`,
+      [ASSISTANT, W, MEMBER])
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].recording_privacy_held, false)
+    assert.deepEqual(await asUser(MEMBER, 'SELECT id FROM sessions WHERE id=$1', [rows[0].id]), [{ id: rows[0].id }])
+    assert.deepEqual(await asUser(OWNER, 'SELECT id FROM sessions WHERE id=$1', [rows[0].id]), [])
+    assert.deepEqual(await asUser(MEMBER, 'SELECT id FROM sessions WHERE id=$1', [ids.get('legacy Telegram channel room')]), [])
+    // Keep the existing whole-table audience matrix independent of this probe.
+    await db.query('DELETE FROM sessions WHERE id=$1', [rows[0].id])
+  })
+
   it('derives anchor, audience and transport on insert', async () => {
     for (const shape of SHAPES) {
       const row = (await db.query<{ anchor_kind: string; visibility: string; channel_type: string; effective_clearance: string | null; recording_privacy_held: boolean }>(

@@ -14,6 +14,7 @@ import { getSourceServiceExecutionBinding,assertSourceServiceRequest,assertSourc
 import { bindTrustedSourceRead } from './source-store.js'
 import { mergeValidatedHeaders } from '../mcp/auth-headers.js'
 import { mcpToolDisplayResult } from '../mcp/client.js'
+import { attendedSourceActionsInput, attendedActionCatalog, executeAttendedSourceAction } from './attended-source-actions.js'
 
 export type ConnectorSourceRuntime = {
   execution: ExecutionContext
@@ -45,17 +46,17 @@ export function configureConnectorSourceRuntimeFactory(factory: ConnectorSourceR
 }
 export function getSharedConnectorSourceRuntimeFactory() { return sharedFactory }
 export function getSharedRetainedSourceAuthority() { return sharedRetainedAuthority }
-type ProfileRow = { source_effect_binding:'command_v1'|null; scoped_app_id:string|null; id: string; revision: string; status: string; issuer: string; audience: string; tenant: string;
+type ProfileRow = { attended_profile:string|null; attended_actions:unknown; source_effect_binding:'command_v1'|null; scoped_app_id:string|null; id: string; revision: string; status: string; issuer: string; audience: string; tenant: string;
   source_base_url: string; mcp_url: string; http_read_path: string | null }
 function unavailable(): never { throw new SourceProtocolError('source_unavailable') }
 const fingerprint = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 
-/** No key generation or readiness override. Product setup cannot qualify a profile before the P1-P4 barrier. */
+/** No key generation or global readiness override. Scoped attended setup owns its separate reviewed profile. */
 export function createConnectorSourceRuntimeFactory(options: { issuer: string; keys?: ReturnType<typeof createConnectorActorKeyStore>;
   instances: ConnectorInstanceStore }): ConnectorSourceRuntimeFactory {
   const factory:ConnectorSourceRuntimeFactory=async input => {
     input = { ...input, headers: { ...input.headers } }
-    const rows = (await getPool().query<ProfileRow>(`SELECT source_effect_binding,scoped_app_id,id,revision::text,status,issuer,audience,tenant,source_base_url,mcp_url,http_read_path
+    const rows = (await getPool().query<ProfileRow>(`SELECT attended_profile,attended_actions,source_effect_binding,scoped_app_id,id,revision::text,status,issuer,audience,tenant,source_base_url,mcp_url,http_read_path
       FROM connector_source_profiles WHERE workspace_id=$1 AND original_connector_instance_id=$2 ORDER BY created_at,id`, [input.workspaceId,input.instanceId])).rows
     if (rows.length === 0) {
       let invalid = false
@@ -76,6 +77,9 @@ export function createConnectorSourceRuntimeFactory(options: { issuer: string; k
     if (!execution || !(accumulator instanceof ContextScopeAccumulator) || execution.security.access.workspaceId !== input.workspaceId
       || execution.ownership.kind !== 'workspace' || execution.ownership.workspaceId !== input.workspaceId) unavailable()
     const service = getSourceServiceExecutionBinding(execution)
+    if(profile.attended_profile && (!['attended_governed_read_v1','attended_governed_actions_v1'].includes(profile.attended_profile)||service||execution.security.access.sharedAudience))unavailable()
+    const actionConfig=profile.attended_profile==='attended_governed_actions_v1'?attendedSourceActionsInput.parse(profile.attended_actions):undefined
+    if(!actionConfig&&profile.attended_actions!=null)unavailable()
     if(profile.scoped_app_id&&(!service||service.row.appId!==profile.scoped_app_id))unavailable()
     const attended = execution.identity.kind === 'attended' && execution.identity.principal.kind === 'workspace_member' ? execution.identity.principal : undefined
     if (!service && (!attended || await getWorkspaceRoleSystem(execution.security.access.userId,input.workspaceId,true)===null)) unavailable()
@@ -106,7 +110,7 @@ export function createConnectorSourceRuntimeFactory(options: { issuer: string; k
       if (invalid) unavailable()
       try {
         await execution.security.authority.assertCurrent(); await native.assertCurrent()
-        const current = (await getPool().query<ProfileRow>(`SELECT source_effect_binding,scoped_app_id,id,revision::text,status,issuer,audience,tenant,source_base_url,mcp_url,http_read_path
+        const current = (await getPool().query<ProfileRow>(`SELECT attended_profile,attended_actions,source_effect_binding,scoped_app_id,id,revision::text,status,issuer,audience,tenant,source_base_url,mcp_url,http_read_path
           FROM connector_source_profiles WHERE id=$1 AND workspace_id=$2 AND connector_instance_id=$3`, [profile.id,input.workspaceId,input.instanceId])).rows[0]
         const instance = await options.instances.getSystem(input.instanceId), auth = await options.instances.getAuthCredentialsSystem(input.instanceId)
         if (!current || fingerprint(current) !== initialProfile || !instance || instanceState(instance) !== initialState || fingerprint(auth) !== credentialState
@@ -129,7 +133,8 @@ export function createConnectorSourceRuntimeFactory(options: { issuer: string; k
       if(service?.row.status==='pending')unavailable()
       const catalog = await client(overrides).discoverMcp(name)
       await assertCurrent()
-      return { ...catalog, tools: catalog.tools.filter(tool => tool.readOnlyHint === true) }
+      return { ...catalog, tools: catalog.tools.flatMap(tool => tool.readOnlyHint === true ? [tool]
+        : actionConfig?.tools.includes(tool.name) ? [attendedActionCatalog(tool)] : []) }
     }
     const read = async(tool:string,args:Record<string,unknown>,retentionMode:'governed'|'released_snapshot'='governed')=>{
         const catalog=await discover('Protected source')
@@ -158,6 +163,20 @@ export function createConnectorSourceRuntimeFactory(options: { issuer: string; k
         if(service){if(overrides&&Object.keys(overrides).length)unavailable();return mcpToolDisplayResult((await read(tool,args)).result)}
         const catalog = await discover('Protected source', overrides)
         if (!catalog.tools.some(candidate => candidate.name === tool)) unavailable()
+        if(actionConfig?.tools.includes(tool)&&catalog.tools.find(candidate=>candidate.name===tool)?.readOnlyHint!==true){
+          const {read:protectedRead,...receipt}=await executeAttendedSourceAction({execution,profileId:profile.id,config:actionConfig,tool,raw:args,client:client(overrides),assertCurrent})
+          if(!protectedRead)return receipt
+          const transaction=await getAppPool().connect()
+          try{
+            await transaction.query('BEGIN')
+            const bound=await runWithAgentAccess(execution.security.access,async()=>{await applyRLSGucs(transaction,execution.security.access.userId);await applyApplicationRLSContext(transaction,execution);return bindTrustedSourceRead(transaction,execution,protectedRead,accumulator)})
+            await assertCurrent();await transaction.query('COMMIT');await assertCurrent()
+            return {...receipt,result:mcpToolDisplayResult(bound.result)}
+          }catch{
+            await transaction.query('ROLLBACK');await assertCurrent()
+            return {...receipt,resultUnavailable:true}
+          }finally{releaseApplicationTransactionBinding(transaction);transaction.release()}
+        }
         const nativeRead = await client(overrides).readMcp(tool, args)
         await assertCurrent()
         const transaction = await getAppPool().connect()

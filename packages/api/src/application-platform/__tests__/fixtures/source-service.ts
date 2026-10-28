@@ -24,7 +24,7 @@ import { independentSourceSchema,independentSourceReplayConsumer,startIndependen
 const pool=getPool()
 export const sourceServiceFixtureCleanups=new Set<()=>Promise<void>>()
 const cleanups=sourceServiceFixtureCleanups
-export async function sourceServiceFixture(options:{readOnly?:boolean;fields?:string[];mutate?:boolean}={}){
+export async function sourceServiceFixture(options:{readOnly?:boolean;fields?:string[];mutate?:boolean;attendedActions?:{idempotencyMetadataKey:string}}={}){
  const workspace=randomUUID(),owner=randomUUID(),reader=randomUUID(),assistant=randomUUID(),department=randomUUID(),app=randomUUID(),parent=randomUUID(),leaf=randomUUID()
  const role='service_source_'+randomBytes(7).toString('hex'),password=randomBytes(24).toString('hex')
  await pool.query(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS PASSWORD '${password}'`)
@@ -55,7 +55,7 @@ export async function sourceServiceFixture(options:{readOnly?:boolean;fields?:st
  await sourcePool.query("INSERT INTO records(id,kind,data,compartments) VALUES('order-1','purchase',$1,$2)",[{description:'Fictional purchase',cost:'37.25'},['team:'+department]])
  const actions=['read','context','derive','retain','deliver','export','mutate']
  for(const [kind,id] of [['service',service],['human',reader]])await sourcePool.query('INSERT INTO grants(kind,account_id,record_id,fields,actions) VALUES($1,$2,\'order-1\',$3,$4)',[kind,id,['description','cost'],actions])
- source=await startIndependentSource({pool:sourcePool,tenant:'fixture-tenant',transportToken:token,verifyActor:verify,uiSessions:new Map()})
+ source=await startIndependentSource({pool:sourcePool,tenant:'fixture-tenant',transportToken:token,verifyActor:verify,uiSessions:new Map(),attendedActions:options.attendedActions})
  await instances.update(owner,instance.id,{url:source.url+'/mcp'})
  const profile=(await pool.query<{id:string}>(`INSERT INTO connector_source_profiles(workspace_id,connector_instance_id,tenant,issuer,audience,source_base_url,mcp_url,http_read_path,status,created_by_user_id,source_effect_binding)
  VALUES($1,$2,'fixture-tenant',$3,$4,$5,$6,'/http/read','qualified',$7,$8) RETURNING id`,[workspace,instance.id,issuer,audience,source.url,source.url+'/mcp',owner,options.mutate?'command_v1':null])).rows[0].id
