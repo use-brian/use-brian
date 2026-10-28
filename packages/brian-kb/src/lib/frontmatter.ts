@@ -30,7 +30,7 @@ export function isNestedObject(v: unknown): boolean {
 
 export function parseYamlSubset(raw: string): Record<string, unknown> {
   const result: Record<string, unknown> = {}
-  const lines = raw.split('\n')
+  const lines = raw.split(/\r?\n/)
   let currentKey: string | null = null
 
   for (const line of lines) {
@@ -67,7 +67,8 @@ export function parseYamlSubset(raw: string): Record<string, unknown> {
       continue
     }
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1)
+      result[key] = value.slice(1, -1)
+      continue
     }
     if (value === 'true') { result[key] = true; continue }
     if (value === 'false') { result[key] = false; continue }

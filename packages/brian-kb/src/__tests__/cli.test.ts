@@ -14,6 +14,7 @@ let workingDirectory: string
 let targetDirectory: string
 let warningsDirectory: string
 let emptyDirectory: string
+let quotedDirectory: string
 
 function isolatedEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NO_COLOR: '1' }
@@ -58,7 +59,8 @@ beforeAll(() => {
   targetDirectory = path.join(fixtureRoot, 'explicit-target')
   warningsDirectory = path.join(fixtureRoot, 'warnings-target')
   emptyDirectory = path.join(fixtureRoot, 'empty-target')
-  for (const directory of [workingDirectory, targetDirectory, warningsDirectory, emptyDirectory]) {
+  quotedDirectory = path.join(fixtureRoot, 'quoted-target')
+  for (const directory of [workingDirectory, targetDirectory, warningsDirectory, emptyDirectory, quotedDirectory]) {
     mkdirSync(directory)
   }
   for (const [directory, entry] of [
@@ -72,6 +74,12 @@ beforeAll(() => {
   writeFileSync(path.join(targetDirectory, 'target-only.md'),
     '---\ntitle: Explicit target\ntags: [fixture]\nsensitivity: invalid-target-tier\n---\n# Target\n')
   writeFileSync(path.join(warningsDirectory, 'warnings-only.md'), '# Synthetic warning-only entry\n')
+  writeFileSync(path.join(quotedDirectory, 'index.md'),
+    '---\ntitle: Quoted scalar fixtures\ndescription: Synthetic orientation\ntags: [fixture]\nsensitivity: internal\n---\n[[quoted-single]]\n[[quoted-double]]\n')
+  for (const [name, quote, eol] of [['quoted-single', "'", '\n'], ['quoted-double', '"', '\r\n']] as const) {
+    writeFileSync(path.join(quotedDirectory, `${name}.md`),
+      ['---', `title: ${quote}true${quote}`, `description: ${quote}123${quote}`, 'tags: [fixture]', 'sensitivity: internal', '---', '# Synthetic content', ''].join(eol))
+  }
 }, 30_000)
 
 afterAll(() => {
@@ -158,5 +166,15 @@ describe('[COMP:knowledge/cli] executable lint directory and boolean flags', () 
     expect(result.status).toBe(1)
     expect(result.stdout).toContain('cwd-only.md')
     expect(result.stdout).not.toContain('target-only.md')
+  })
+
+  it('accepts LF and CRLF quoted numeric descriptions through the actual compiled CLI', () => {
+    const result = run(['lint', '--json', '--strict', quotedDirectory])
+    expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
+    const report = JSON.parse(result.stdout) as JsonReport
+    expect(report.summary).toEqual({ error: 0, warning: 0, info: 0 })
+    expect(report.findings).toEqual([])
+    expect(result.stdout).not.toContain('missing-description')
   })
 })
