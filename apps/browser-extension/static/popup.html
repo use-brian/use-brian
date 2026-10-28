@@ -62,7 +62,7 @@
       button.primary:hover { opacity: 0.88; background: var(--action); }
       button.danger { background: var(--danger); border-color: var(--danger); color: var(--danger-fg); }
       button.danger:hover { opacity: 0.9; background: var(--danger); }
-      body { width: 340px; padding: 14px 14px 12px; }
+      body { width: 100%; max-width: 380px; padding: 14px 14px 12px; }
       .head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
       .mark { width: 28px; height: 28px; border-radius: 7px; image-rendering: pixelated; flex: none; }
       .title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; }
@@ -72,7 +72,7 @@
       .status.ready .dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
       .row { margin-bottom: 10px; }
       label { display: block; font-size: 12px; font-weight: 500; color: var(--fg); margin-bottom: 4px; }
-      input:not([type="checkbox"]) { width: 100%; padding: 7px 10px; border: 1px solid var(--input); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font: inherit; font-size: 12.5px; transition: border-color 120ms; }
+      input:not([type="checkbox"]) { width: 100%; padding: 7px 10px; border: 1px solid var(--input); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font: inherit; font-size: 16px; transition: border-color 120ms; }
       input:not([type="checkbox"])::placeholder { color: var(--faint); }
       input:not([type="checkbox"]):focus-visible { outline: none; border-color: var(--ring); box-shadow: none; }
       input[type="checkbox"] { width: 15px; height: 15px; margin: 2px 0 0; accent-color: var(--action); flex: none; }
@@ -115,6 +115,17 @@
       .panel-body .warn label { display: flex; gap: 7px; font-weight: 500; color: inherit; margin: 6px 0 8px; }
       .panel-body .field { margin-top: 4px; }
       .panel-body .field input { margin-bottom: 6px; }
+      [hidden] { display: none !important; }
+      .account-card { padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 14px; background: var(--surface); }
+      .account-card h2, .section-title { font-size: 13px; font-weight: 600; margin: 0 0 6px; }
+      .account-card p { margin: 6px 0; }
+      .account-card .actions { flex-wrap: wrap; }
+      .account-card button, #advanced-connection button { min-height: 44px; }
+      #account-identity { overflow-wrap: anywhere; font-size: 12px; }
+      #account-help { font-size: 11.5px; color: var(--muted); }
+      #account-error, #pairing-error { color: var(--danger); font-size: 12px; }
+      .pairing-steps { padding-left: 18px; margin: 8px 0 12px; }
+      .pairing-steps li { margin-block: 6px; }
     </style>
   </head>
   <body>
@@ -125,18 +136,23 @@
         <div class="sub">Browser agent</div>
       </div>
     </header>
+    <section class="account-card" aria-labelledby="account-heading">
+      <h2 id="account-heading">Your Brian account</h2>
+      <p id="account-status" role="status">Sign in to connect this browser automatically.</p>
+      <p id="account-identity" hidden></p>
+      <div class="actions">
+        <button id="sign-in" class="primary">Sign in to Brian</button>
+        <button id="account-retry" class="primary" hidden>Retry connection</button>
+        <button id="cancel-sign-in" hidden>Cancel</button>
+      </div>
+      <p id="account-error" role="alert" hidden></p>
+      <p id="account-help">Sign in and choose a workspace in the tab we open. Keep the Brian tab open while you chat in the extension.</p>
+    </section>
+    <h2 class="section-title">Browser control</h2>
     <div id="status" class="status"><span class="dot"></span><span id="status-text">Checking...</span></div>
     <!-- Separate from the status line, not folded into it: a stale build still
          connects and still holds consent, so both statements are true at once. -->
     <div id="build-warning" class="warn" hidden></div>
-    <div class="row">
-      <label for="relay-url">Relay URL</label>
-      <input id="relay-url" placeholder="wss://relay.usebrian.ai/ext" />
-    </div>
-    <div class="row">
-      <label for="pairing-token">Pairing token</label>
-      <input id="pairing-token" placeholder="Paste from Settings > Browser extension" />
-    </div>
     <div class="row toggle">
       <label for="preapprove-tab-control">
         Pre-approve tab control
@@ -145,18 +161,41 @@
       <input id="preapprove-tab-control" class="switch" type="checkbox" role="switch" />
     </div>
     <div class="actions">
-      <button id="connect" class="primary">Connect</button>
-      <button id="disconnect">Disconnect</button>
       <button id="stop" class="danger-quiet">Stop task</button>
     </div>
     <p class="hint">The assistant only acts within this browser profile's configured tab scope. Chrome labels active browser control as "debugging this browser." Cancel in that banner or Stop here ends the current task.</p>
+    <details id="advanced-connection" class="panel">
+      <summary>Advanced connection</summary>
+      <div class="panel-body">
+        <p>Use manual pairing for browser control or a custom relay. Account sign-in above is the usual way to connect. Manual pairing does not sign you in for chat.</p>
+        <ol class="pairing-steps">
+          <li>Open Browsers in your Brian workspace and select a local browser profile you own.</li>
+          <li>Generate a pairing token for that profile.</li>
+          <li>Paste its relay URL and pairing token below, then select Connect manually.</li>
+        </ol>
+        <div class="row">
+          <label for="relay-url">Relay URL</label>
+          <input id="relay-url" placeholder="wss://relay.usebrian.ai/ext" />
+        </div>
+        <div class="row">
+          <label for="pairing-token">Pairing token</label>
+          <input id="pairing-token" type="password" autocomplete="off" placeholder="Paste the token from your browser profile" />
+        </div>
+        <p class="hint">Leave the token blank to reconnect the current browser pairing.</p>
+        <p id="pairing-error" role="alert" hidden></p>
+        <div class="actions">
+          <button id="connect" class="primary">Connect manually</button>
+          <button id="disconnect">Disconnect</button>
+        </div>
+      </div>
+    </details>
     <details id="protected-fill" class="panel">
       <summary>Protected fill</summary>
       <div class="panel-body">
         <p id="protected-status">Checking disclosure status…</p>
         <p id="protected-details"></p>
         <p id="protected-setup" class="warn">Setup required: enter your deployment's API origin below (not the app or relay URL). Ask your administrator for the API_URL used by your app. Local development commonly uses http://localhost:4000. The API must enable protected fill and allow this extension ID in its extension-origin CORS list.</p>
-        <p id="protected-renewal" class="warn" hidden>Pairing expired. Generate a new pairing token in Settings → Browser extension for the SAME account, workspace and browser profile, paste it below, and Connect. Then retry cleanup. Re-pairing does not unlock the task or change its API origin.</p>
+        <p id="protected-renewal" class="warn" hidden>Pairing expired. Generate a new token for the SAME account, workspace and browser profile, then paste it under Advanced connection and select Connect manually. Retry cleanup afterward. Re-pairing does not unlock the task or change its API origin.</p>
         <p>Approval shares the selected private source fields with the exact destination below, in the listed text fields. The page receives those values. No automatic submit. Finish in the browser yourself.</p>
         <p>All controlled task tabs, including pre-existing full-browser tabs, will be closed by cleanup. All assistant commands stay blocked until you clean up.</p>
         <div class="btns">
@@ -166,7 +205,7 @@
         <p id="protected-server-help">Browser actions blocked but no local task shown? Recover the server reservation below. Unresolved references will be invalidated and cancelled. If resolution may have occurred, a separate warned cleanup of ALL accessible browser tabs is required; this button never closes tabs.</p>
         <div class="btns">
           <button id="protected-recover-server">Recover server reservation</button>
-          <button id="protected-complete" class="primary" hidden>Finished — close controlled tabs and unlock</button>
+          <button id="protected-complete" class="primary" hidden>Finished: close controlled tabs and unlock</button>
         </div>
         <div id="protected-session-recovery" class="warn" hidden>
           <strong>Browser session changed or cannot be verified.</strong>

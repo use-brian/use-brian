@@ -25,6 +25,7 @@ const errors: Record<string, string> = {
   pairing_in_progress: 'The browser profile is connecting. Wait for it to finish.',
   stopped: 'Stopped before sending or sharing. No new request was started.',
   protected_fill_denied: 'Finish protected fill cleanup in extension Settings before sharing this page.',
+  sign_in_failed: 'The sign-in tab could not open. Try again, or open Brian in this browser profile.',
 }
 const fallbackError = 'The connection or page read failed. Open Brian, check the chat, then retry. No action was repeated.'
 
@@ -58,6 +59,8 @@ export function BrowserAssistantPanel() {
   const boundIdentity = useRef<string | undefined>(undefined)
   const displayedAccount = useRef<string | undefined>(undefined)
   const [connected, setConnected] = useState(false)
+  const [signInPending, setSignInPending] = useState(false)
+  const [signInExpired, setSignInExpired] = useState(false)
   const [control, setControl] = useState<{ phase: 'idle' | 'waiting' | 'active' | 'stopped'; host?: string }>({ phase: 'idle' })
   const [workspace, setWorkspace] = useState('')
   const [assistants, setAssistants] = useState<Assistant[]>([])
@@ -77,7 +80,7 @@ export function BrowserAssistantPanel() {
   const transcript = useRef<HTMLDivElement>(null)
 
   const send = (message: unknown) => {
-    try { port.current?.postMessage(message) }
+    try { (port.current ?? connect()).postMessage(message) }
     catch { setConnected(false); setError('Connection lost. Keep Brian open and retry. No message was resent.') }
   }
   const clear = () => { session.current = undefined; setMessages([]); setPage(undefined); setReview(false); setError('') }
@@ -85,12 +88,15 @@ export function BrowserAssistantPanel() {
     clear(); setDraft(''); setPickerOpen(false); setConnected(false); setWorkspace(''); setAssistants([]); selected.current = null; setAssistant(null)
     setRunning(false); setReading(false); setActivity(''); request.current = null
   }
-  const connect = () => {
-    port.current?.disconnect()
+  const connect = (): chrome.runtime.Port => {
+    const previous = port.current
+    port.current = null
+    previous?.disconnect()
     const next = chrome.runtime.connect({ name: 'brian-assistant-panel' })
     port.current = next
     next.onDisconnect.addListener(() => {
       if (port.current !== next) return
+      port.current = null
       setConnected(false); setRunning(false); setReading(false); request.current = null
       setError('Connection lost. Check the full chat before retrying an action.')
     })
@@ -114,6 +120,9 @@ export function BrowserAssistantPanel() {
         setAccountDirectory(message.accountDirectory ?? null)
         setAccountSetup(message.accountSetup ?? null)
         setConnected(message.connected === true)
+        if (message.connected) setError(current => current === errors.sign_in_failed ? '' : current)
+        setSignInPending(message.signInPending === true)
+        setSignInExpired(message.signInExpired === true)
         if (['idle', 'waiting', 'active', 'stopped'].includes(message.control?.phase)) setControl({ phase: message.control.phase, ...(typeof message.control.host === 'string' ? { host: message.control.host } : {}) })
         setWorkspace(typeof message.workspaceName === 'string' ? message.workspaceName : '')
         if (message.appearance) applyChatAppearance(document.documentElement, message.appearance)
@@ -148,6 +157,7 @@ export function BrowserAssistantPanel() {
         if (message.type === 'failure') setError(errors[message.code] ?? fallbackError)
       }
     })
+    return next
   }
   useEffect(() => {
     connect()
@@ -156,7 +166,7 @@ export function BrowserAssistantPanel() {
   }, [])
   useEffect(() => {
     const node = transcript.current
-    if (node) node.scrollTop = node.scrollHeight
+    if (node) node.scrollTop = messages.length || activity ? node.scrollHeight : 0
   }, [messages, activity])
 
   useEffect(() => { if (!pickerOpen) setWorkspaceQuery('') }, [pickerOpen])
@@ -175,7 +185,8 @@ export function BrowserAssistantPanel() {
     selected.current = next; setAssistant(next); clear()
     document.getElementById('assistant-picker')?.removeAttribute('open')
   }
-  const openBrian = () => { void chrome.storage.local.get('assistantAppOrigin').then(stored => chrome.tabs.create({ url: stored.assistantAppOrigin || 'https://app.usebrian.ai' })) }
+  const openBrian = () => { setError(''); send({ type: 'sign-in' }) }
+  const openSettings = (advanced = false) => { void chrome.windows.create({ url: chrome.runtime.getURL(`popup.html${advanced ? '#advanced-connection' : ''}`), type: 'popup', width: 380, height: 720 }) }
   const stop = () => send({ type: 'stop' })
   const manageAccount = (message: unknown) => {
     setError(''); send(message)
@@ -185,6 +196,22 @@ export function BrowserAssistantPanel() {
   const searchableWorkspaces = usesScalableWorkspacePicker(workspaceDirectory?.workspaces.length ?? 0)
   const groupedWorkspaces = organizeWorkspacePicker(workspaceDirectory?.workspaces ?? [], workspaceQuery)
   const workspaceRows = searchableWorkspaces ? [...groupedWorkspaces.pinned, ...groupedWorkspaces.recent, ...groupedWorkspaces.all] : workspaceDirectory?.workspaces ?? []
+  const needsSignIn = !connected && !accountDirectory && !accountSetup
+  const signInCard = <section className={`connection-card ${messages.length ? 'connection-card-inline' : 'welcome'}`} aria-labelledby="connection-heading">
+    <h2 id="connection-heading">{signInPending ? 'Finish signing in' : 'Sign in to Brian'}</h2>
+    <p>{signInPending ? 'Sign in and choose a workspace in the Brian tab. This panel will connect automatically.' : 'Use your Brian account to chat and connect this browser automatically.'}</p>
+    {signInExpired ? <p role="status">Sign-in has not connected yet. Open Brian to check your account, then try again.</p> : null}
+    <div className="connection-actions">
+      <button className="connection-primary" type="button" onClick={openBrian}>{signInPending ? 'Open sign-in tab' : 'Sign in to Brian'}</button>
+      {signInPending ? <button className="text-button" type="button" onClick={() => send({ type: 'cancel-sign-in' })}>Cancel</button> : null}
+    </div>
+    <p className="connection-help">Sign-in opens in this browser profile. Keep the Brian tab open while you chat here.</p>
+    <details className="connection-advanced">
+      <summary>Advanced connection</summary>
+      <p>Use a relay URL and pairing token to set up browser control manually. Chat still needs a signed-in Brian tab.</p>
+      <button className="text-button" type="button" onClick={() => openSettings(true)}>Open manual pairing</button>
+    </details>
+  </section>
 
   return <div data-chat-surface className="extension-chat @container/chat-reading bg-background text-foreground">
     <header className="panel-header">
@@ -207,7 +234,7 @@ export function BrowserAssistantPanel() {
       <div className="header-actions">
         <button type="button" className="icon-button" title="Stop browser task" aria-label="Stop browser task" onClick={stop}><Square size={14} /></button>
         <button type="button" className="icon-button" disabled={running} title="New chat" aria-label="New chat" onClick={clear}><Plus size={16} /></button>
-        <button type="button" className="icon-button" title="Extension settings" aria-label="Extension settings" onClick={() => { void chrome.windows.create({ url: chrome.runtime.getURL('popup.html'), type: 'popup', width: 380, height: 720 }) }}><Settings2 size={16} /></button>
+        <button type="button" className="icon-button" title="Extension settings" aria-label="Extension settings" onClick={() => openSettings()}><Settings2 size={16} /></button>
       </div>
     </header>
 
@@ -218,7 +245,7 @@ export function BrowserAssistantPanel() {
     </div> : null}
 
     <div ref={transcript} className="transcript" role="log" aria-label="Conversation">
-      {!messages.length && !accountSetup ? <div data-chat-greeting className="welcome"><h2>What would you like to work on?</h2></div> : null}
+      {!messages.length && needsSignIn ? signInCard : !messages.length && !accountSetup ? <div data-chat-greeting className="welcome"><h2>What would you like to work on?</h2></div> : null}
       {messages.map(message => message.role === 'user' ? <div key={message.id} className="user-row"><div data-brian-chat-user>
         {message.text}{message.page ? <a className="shared-page-receipt" href={message.page.url} target="_blank" rel="noreferrer"><Globe size={12} />{message.page.title || message.page.url}</a> : null}
       </div></div> : message.text ? <div key={message.id} className="assistant-row">
@@ -230,6 +257,7 @@ export function BrowserAssistantPanel() {
     </div>
 
     <footer className="composer-area">
+      {messages.length && needsSignIn ? signInCard : null}
       {accountSetup ? <div className="account-setup" role="status">
         {accountSetup.automatic ? <p>{accountSetup.failed ? 'This browser could not connect. Check your sign-in and retry.' : 'Connecting this browser to your workspace...'}</p> : accountSetup.profiles ? <>
           <p>{accountSetup.pairing ? 'Connecting browser profile...' : `Choose your local browser profile${accountSetup.workspaceName ? ` in ${accountSetup.workspaceName}` : ''}.`}</p>
@@ -238,7 +266,7 @@ export function BrowserAssistantPanel() {
         </> : <p>Finish signing in to Brian. This browser will connect automatically.</p>}
         {!accountSetup.pairing ? <div><button className="text-button" onClick={openBrian}>Open Brian</button><button className="text-button" onClick={() => manageAccount({ type: 'account-retry' })}>Retry connection</button><button className="text-button" onClick={() => manageAccount({ type: 'account-cancel' })}>Cancel account setup</button></div> : null}
       </div> : null}
-      {!connected && !accountSetup ? <div className="connection-note" role="status"><p>{accountDirectory ? "Keep a signed-in Brian workspace tab open. This browser connects automatically." : "Sign in to Brian and choose a workspace. This browser connects automatically."}</p><div>
+      {!connected && !accountSetup && accountDirectory ? <div className="connection-note" role="status"><p>Signed in as {accountDirectory.current.email || accountDirectory.current.name}. Retry to connect this browser, and keep your Brian tab open.</p><div>
         <button className="text-button" onClick={openBrian}>Open Brian</button>
 
         <button className="text-button" onClick={() => { if (accountDirectory) manageAccount({ type: 'account-connect' }); else connect() }}>Retry connection</button>

@@ -40,12 +40,18 @@ export function installAssistantChat(deps: {
   installationId?: () => Promise<string>
   beforeAutomaticConnect?: () => Promise<void>
   controlState?: () => Promise<{ phase: 'idle' | 'waiting' | 'active' | 'stopped'; host?: string }>
+  openSignIn?: () => Promise<void>
+  now?: () => number
 }) {
   const brokers = new Set<Broker>()
   const panels = new Set<chrome.runtime.Port>()
   const sharedPages = new Map<chrome.runtime.Port, PageEvidence>()
   let pending: Request | null = null
   let generation = 0
+  let signInStarted: number | undefined
+  let openingSignIn = false
+  let signInAttempt = 0
+  const now = deps.now ?? Date.now
   const post = (port: chrome.runtime.Port, message: unknown) => { try { port.postMessage(message) } catch { /* disconnected */ } }
   const invalidate = () => {
     generation++
@@ -77,7 +83,10 @@ export function installAssistantChat(deps: {
   const status = async (panel: chrome.runtime.Port) => {
     await accounts?.ensureConnection()
     const broker = await eligible()
-    post(panel, { type: 'status', ...(await accounts?.status()), ...(deps.controlState ? { control: await deps.controlState() } : {}), connected: !!broker, ...(broker ? { identity: { userId: broker.hello.userId, workspaceId: broker.hello.workspaceId }, workspaceName: broker.hello.workspaceName, assistants: broker.hello.assistants, appearance: broker.hello.appearance } : {}) })
+    const accountStatus = await accounts?.status()
+    if (accountStatus?.accountDirectory || broker) signInStarted = undefined
+    const signIn = signInStarted === undefined ? {} : now() - signInStarted < 10 * 60_000 ? { signInPending: true } : { signInExpired: true }
+    post(panel, { type: 'status', ...accountStatus, ...signIn, ...(deps.controlState ? { control: await deps.controlState() } : {}), connected: !!broker, ...(broker ? { identity: { userId: broker.hello.userId, workspaceId: broker.hello.workspaceId }, workspaceName: broker.hello.workspaceName, assistants: broker.hello.assistants, appearance: broker.hello.appearance } : {}) })
   }
   const refresh = () => { for (const panel of panels) void status(panel) }
   chrome.storage.onChanged.addListener(refresh)
@@ -135,12 +144,16 @@ export function installAssistantChat(deps: {
   })
 
   chrome.runtime.onConnect.addListener(panel => {
-    if (panel.name !== 'brian-assistant-panel' || panel.sender?.id !== chrome.runtime.id || panel.sender.url !== chrome.runtime.getURL('sidepanel.html')) return
+    if (panel.sender?.id !== chrome.runtime.id) return
+    const page = panel.sender.url?.split('#')[0]
+    const settings = panel.name === 'brian-assistant-settings' && page === chrome.runtime.getURL('popup.html')
+    if (!settings && (panel.name !== 'brian-assistant-panel' || page !== chrome.runtime.getURL('sidepanel.html'))) return
     panels.add(panel)
     void status(panel)
     panel.onDisconnect.addListener(() => {
-      generation++
       panels.delete(panel)
+      if (settings) return
+      generation++
       sharedPages.delete(panel)
       if (pending?.panel === panel) {
         post(pending.broker.port, { type: 'stop', id: pending.id })
@@ -151,6 +164,23 @@ export function installAssistantChat(deps: {
     panel.onMessage.addListener(message => {
       const admission = generation
       void (async () => {
+        if (settings && !['status', 'sign-in', 'cancel-sign-in', 'account-connect', 'account-retry'].includes(message?.type)) return
+        if (message?.type === 'cancel-sign-in') {
+          signInAttempt++; signInStarted = undefined; refresh(); return
+        }
+        if (message?.type === 'sign-in') {
+          if (pending) throw new Error('busy')
+          if (openingSignIn) return
+          if (!deps.openSignIn) throw new Error('sign_in_failed')
+          openingSignIn = true
+          const attempt = ++signInAttempt
+          try {
+            await deps.openSignIn()
+            if (attempt === signInAttempt) signInStarted = now()
+          } catch { throw new Error('sign_in_failed') }
+          finally { openingSignIn = false }
+          refresh(); return
+        }
         if (message && typeof message === 'object' && await accounts?.panel(message)) return
         if (message?.type === 'status') { await status(panel); return }
         if (message?.type === 'stop') {

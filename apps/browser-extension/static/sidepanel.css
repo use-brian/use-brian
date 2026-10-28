@@ -44,6 +44,18 @@ button:disabled { cursor:default; }
 .connection-note,.error-note,.review-note { margin:0 0 10px; padding:8px 4px; font-size:12px; color:var(--muted-foreground); }
 .error-note { color:var(--destructive); }
 .connection-note>div { display:flex; flex-wrap:wrap; gap:6px; }
+.connection-card { max-width:28rem; margin-inline:auto; text-align:center; }
+.connection-card>p { margin:14px auto; max-width:22rem; color:var(--muted-foreground); font-size:14px; line-height:1.5; }
+.connection-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:8px; }
+.connection-primary { min-height:44px; padding:10px 18px; border:0; border-radius:10px; background:var(--foreground); color:var(--background); font-size:14px; font-weight:500; }
+.connection-primary:hover { opacity:.88; }
+.connection-card>.connection-help { font-size:12px; }
+.connection-advanced { margin-top:20px; color:var(--muted-foreground); font-size:12px; text-align:left; }
+.connection-advanced summary { min-height:44px; align-content:center; }
+.connection-advanced p { line-height:1.5; }
+.connection-card-inline { padding-block:8px; }
+.connection-card-inline h2 { font-size:18px; font-weight:500; }
+@media(max-height:600px) { .connection-card.welcome { display:block; padding-top:0; } .connection-card>p { margin-block:8px; } .connection-advanced { margin-top:4px; } }
 .page-context { margin-bottom:6px; padding:0 8px 6px; font-size:12px; color:var(--muted-foreground); }
 .page-context summary { display:flex; align-items:center; gap:6px; min-height:36px; list-style:none; }
 .page-context summary span { min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
