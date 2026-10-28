@@ -268,6 +268,7 @@ export function PdfEditor(props: PdfEditorProps) {
       <button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(true)}><Download className="size-4" />{t.download}</button>
       <button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(false)}><Save className="size-4" />{t.saveToFiles}</button>
     </div>
+    <p data-pdf-phone-expiry className={cn("shrink-0 border-b px-3 py-2 text-xs md:hidden", seconds <= 300 ? "bg-amber-500/10 text-amber-800 dark:text-amber-200" : "bg-muted/30 text-muted-foreground")}>{expiry}</p>
     {notice ? <p className="border-b bg-background px-3 py-2 text-xs" role="status">{notice}</p> : null}
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <aside className="hidden w-36 shrink-0 overflow-y-auto border-r bg-background p-2 md:block" aria-label={t.pages}>
@@ -312,6 +313,7 @@ export function PdfEditor(props: PdfEditorProps) {
     </div>
     {phoneSheet ? <div className="fixed inset-x-2 bottom-[calc(4rem+env(safe-area-inset-bottom))] z-20 max-h-[45dvh] overflow-y-auto rounded-xl border bg-background p-3 shadow-lg md:hidden" data-pdf-phone-sheet={phoneSheet}>
       {phoneSheet === "pages" ? snapshot.pages.map((candidate, index) => <button type="button" key={candidate.id} className={buttonVariants({ variant: "ghost", size: "sm", className: "w-full text-left justify-start" })} onClick={() => { setPageId(candidate.id); setPhoneSheet(null); }}>{t.page.replace("{page}", String(index + 1))}</button>) : allFields.length ? allFields.map(({ field, page: fieldPage, index }) => <button type="button" key={field.id} className={buttonVariants({ variant: "ghost", size: "sm", className: "w-full text-left justify-start" })} onClick={() => { setPageId(fieldPage.id); onSelectTargets([field.id]); setPhoneSheet(null); }}>{index + 1}. {field.label}</button>) : <p className="text-sm text-muted-foreground">{t.noFields}</p>}
+      <div className="mt-2 grid grid-cols-2 gap-2 border-t pt-2"><button type="button" className={cn(button, "min-w-0 whitespace-normal")} disabled={!canEdit || busy} onClick={() => addOverlay("date")}>{t.addDate}</button><button type="button" className={cn(button, "min-w-0 whitespace-normal")} disabled={!canEdit || busy} onClick={() => addOverlay("checkmark")}>{t.addCheckmark}</button></div>
       <div className="mt-2 grid grid-cols-2 gap-2 border-t pt-2"><button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(true)}>{t.download}</button><button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(false)}>{t.saveToFiles}</button></div>
       <div className="mt-2 grid grid-cols-2 gap-2"><button type="button" className={button} disabled={!canEdit || busy} onClick={() => { pendingImageKind.current = "image"; imageInput.current?.click(); }}>{t.addImage}</button><button type="button" className={button} disabled={!canEdit || busy} onClick={() => void addSignature()}>{t.addSignature}</button></div>
     </div> : null}

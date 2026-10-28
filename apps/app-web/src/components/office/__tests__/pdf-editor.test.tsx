@@ -57,12 +57,74 @@ describe("[COMP:app-web/office-pdf-editor] protected responsive PDF editor", () 
   });
   afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
-  async function mount() {
+  async function mount(options: { role?: "view" | "edit"; expiresAt?: string; onCommand?: (command: unknown) => Promise<void> } = {}) {
     const snapshot = fixture();
-    const onCommand = vi.fn(async () => undefined);
-    await act(async () => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><PdfEditor workspaceId={snapshot.workspaceId} snapshot={snapshot} seq={2} baseVersion={1} artifactVersion={1} expiresAt="2099-01-01T00:00:00.000Z" role="edit" onCommand={onCommand} onReadback={vi.fn(async () => undefined)} onSelectTargets={vi.fn()} /></I18nProvider>));
+    const onCommand = vi.fn(options.onCommand ?? (async () => undefined));
+    await act(async () => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><PdfEditor workspaceId={snapshot.workspaceId} snapshot={snapshot} seq={2} baseVersion={1} artifactVersion={1} expiresAt={options.expiresAt ?? "2099-01-01T00:00:00.000Z"} role={options.role ?? "edit"} onCommand={onCommand} onReadback={vi.fn(async () => undefined)} onSelectTargets={vi.fn()} /></I18nProvider>));
     return { onCommand };
   }
+
+  async function openPhoneSheet(name: "pages" | "fields") {
+    const actions = host.querySelector(`[aria-label="${en.office.pdf.mobileActions}"]`)!;
+    const trigger = [...actions.querySelectorAll("button")].find(button => name === "fields" ? button.textContent === en.office.pdf.fields : button.textContent === "1/2");
+    expect(trigger).toBeDefined();
+    await act(async () => trigger!.click());
+    return host.querySelector(`[data-pdf-phone-sheet="${name}"]`)!;
+  }
+
+  function sheetAction(sheet: Element, label: string) {
+    const action = [...sheet.querySelectorAll("button")].find(button => button.textContent === label);
+    expect(action).toBeDefined();
+    return action!;
+  }
+
+  it.each(["pages", "fields"] as const)("inserts canonical dates and checkmarks from the phone %s sheet", async name => {
+    const { onCommand } = await mount();
+    const sheet = await openPhoneSheet(name);
+    for (const [label, kind] of [[en.office.pdf.addDate, "date"], [en.office.pdf.addCheckmark, "checkmark"]] as const) {
+      await act(async () => sheetAction(sheet, label).click());
+      expect(onCommand).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "addPdfOverlay", pageId: id(10), overlay: expect.objectContaining({ kind }) }));
+    }
+    expect(onCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["view", "expired"] as const)("keeps phone insertion disabled for %s sessions", async state => {
+    const { onCommand } = await mount(state === "view" ? { role: "view" } : { expiresAt: "2000-01-01T00:00:00.000Z" });
+    const sheet = await openPhoneSheet("fields");
+    for (const label of [en.office.pdf.addDate, en.office.pdf.addCheckmark]) {
+      const action = sheetAction(sheet, label);
+      expect(action.disabled).toBe(true);
+      await act(async () => action.click());
+    }
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
+  it("prevents a second phone insertion while its command is pending", async () => {
+    let finish!: () => void;
+    const { onCommand } = await mount({ onCommand: () => new Promise(resolve => { finish = resolve; }) });
+    const sheet = await openPhoneSheet("fields");
+    await act(async () => sheetAction(sheet, en.office.pdf.addDate).click());
+    const checkmark = sheetAction(sheet, en.office.pdf.addCheckmark);
+    expect(checkmark.disabled).toBe(true);
+    await act(async () => checkmark.click());
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    await act(async () => finish());
+    expect(checkmark.disabled).toBe(false);
+  });
+
+  it("keeps the phone expiry countdown available before a sheet opens and marks expiry", async () => {
+    vi.useFakeTimers();
+    try {
+      await mount({ expiresAt: new Date(Date.now() + 1_000).toISOString() });
+      const expiry = host.querySelector("[data-pdf-phone-expiry]")!;
+      expect(expiry).not.toBeNull();
+      expect(expiry.textContent).toBe(en.office.pdf.expiresIn.replace("{time}", "0:00:01"));
+      await act(async () => vi.advanceTimersByTime(1_000));
+      expect(expiry.textContent).toBe(en.office.pdf.expired);
+      const sheet = await openPhoneSheet("fields");
+      expect(sheetAction(sheet, en.office.pdf.addDate).disabled).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
 
   it("renders one selected page, desktop rails, phone actions, and canonical add commands", async () => {
     const { onCommand } = await mount();
