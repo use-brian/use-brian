@@ -339,3 +339,16 @@ describe("[COMP:app-web/sessions-sdk] admitted title revision transport", () => 
     });
   }
 });
+
+
+describe("[COMP:app-web/sessions-sdk] provider channel names", () => {
+  it("preserves source names independently of conversation titles and accepts older servers", async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify([
+      { id: "a", title: "Conversation title", channelId: "C123", channelType: "slack", channelName: "#engineering", lastActive: "2026-01-01" },
+      { id: "b", title: "Older conversation", channelId: "C456", channelType: "slack", lastActive: "2026-01-01" },
+    ])));
+    const rows = await listPersonalSessions({ workspaceId: "workspace" });
+    expect(rows[0]).toMatchObject({ title: "Conversation title", channelName: "#engineering", transport: "slack" });
+    expect(rows[1].channelName).toBeUndefined();
+  });
+});

@@ -342,6 +342,7 @@ import { assembleHomeSignals } from './home/signals.js'
 import { runHomeRefresh } from './home/refresh.js'
 import { isWorkspaceMember } from './db/home-store.js'
 import { sessionRoutes } from './routes/sessions.js'
+import { createSessionChannelNameResolver } from './session-channel-names.js'
 import { createRoomIngestor } from './ingest/room-ingest.js'
 import { sessionQuestionRoutes } from './routes/sessions-questions.js'
 import { analyticsRoutes } from './routes/analytics.js'
@@ -6042,6 +6043,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : {}),
   })
   app.use('/api/sessions', optionalAuth(env.JWT_SECRET), sessionRoutes({
+    resolveChannelNames: createSessionChannelNameResolver({
+      integrationStore: integrationStore ?? undefined,
+      telegramBotToken: env.TELEGRAM_BOT_TOKEN,
+    }),
     subscribeSessionEvents,
     publishSessionEvent,
     setSessionTyping,

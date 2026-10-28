@@ -106,12 +106,12 @@ import { summarizeRosterItems } from "@/lib/live-roster";
 import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /**
- * Height of the workspace status row: 28px desktop / 44px phone plus safe area.
+ * Status row: 28px desktop / 44px phone, plus 8px bottom inset and safe area.
  * Shared by the slot this sidebar reserves and by the overlay
  * `WorkspaceChrome` lays over it, so the two halves cannot drift.
  */
 export const WORKSPACE_STATUS_ROW_HEIGHT_CLASS =
-  "h-[calc(2.75rem+env(safe-area-inset-bottom))] md:h-[calc(1.75rem+env(safe-area-inset-bottom))]";
+  "h-[calc(3.25rem+env(safe-area-inset-bottom))] md:h-[calc(2.25rem+env(safe-area-inset-bottom))]";
 
 export type SidebarMove = ContextAwareReparentMove;
 

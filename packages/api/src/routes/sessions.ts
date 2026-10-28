@@ -53,6 +53,7 @@ import {
 import { resolveSessionPinLabels } from '../resolve-session-pins.js'
 import { guestAuthorNameForSession, guestSenderProfile } from '../db/guest-comment-store.js'
 import { gateSessionRead } from '../session-read-authority.js'
+import type { ResolveSessionChannelNames } from '../session-channel-names.js'
 
 export { gateSessionRead } from '../session-read-authority.js'
 
@@ -62,6 +63,8 @@ export { gateSessionRead } from '../session-read-authority.js'
  * GET /api/sessions/:id/messages — get messages for a session
  */
 export type SessionRouteOptions = {
+  /** Best-effort source labels for already-admitted personal history only. */
+  resolveChannelNames?: ResolveSessionChannelNames
   /**
    * Live session-event bus subscribe — backs the `GET /:id/stream` reconnect
    * relay (the doc-comment live-reconnect feature). The composition root injects
@@ -396,11 +399,15 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
 
 
       const titles=await sessionTitleProjections({claims:titleClaims,sessionIds:readable.map(s=>s.id)})
+      const channelNames = listWorkspaceId && opts.resolveChannelNames
+        ? await opts.resolveChannelNames({ userId: user.id, workspaceId: listWorkspaceId, rows: readable }).catch(() => new Map<string, string>())
+        : new Map<string, string>()
       res.json(readable.map((s) => ({
         id: s.id,
         title: titles.get(s.id)?.title ?? 'New Chat',
         titleRevisionId: titles.get(s.id)?.titleRevisionId ?? null,
         channelId: s.channelId,
+        ...(channelNames.has(s.id) ? { channelName: channelNames.get(s.id) } : {}),
         lastActive: s.lastActiveAt,
         // The minting surface (or null pre-migration). The Chat app's rail
         // splits on it — chat-origin rows are "Chats", the rest are the

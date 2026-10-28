@@ -53,6 +53,7 @@ import { promptDialog } from "@/components/ui/prompt-dialog";
 import { Tooltip } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import styles from "./chat-sidebar-panel.module.css";
+import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import {
   CHAT_SESSION_ACTIVITY_EVENT,
   dispatchChatSessionsRefresh,
@@ -240,25 +241,31 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   );
   const personalGroups = useMemo(() => {
     const projectById = new Map((projects.data ?? []).map(project => [project.id, project]));
-    const groups = new Map<string, { id: string; label: string; kind: "general" | "project" | "channel"; rows: DocSession[] }>();
+    const groups = new Map<string, { id: string; label: string; kind: "general" | "project" | "channel"; transport?: string; sourceLabel?: string; named?: boolean; rows: DocSession[] }>();
     for (const row of chatRows) {
       let kind: "general" | "project" | "channel" = "general";
       let id = "general";
       let label = t.generalChats;
+      let sourceLabel: string | undefined;
       if (row.transport && row.transport !== "web") {
         kind = "channel";
         const channelId = row.transport === "slack" || row.transport === "feishu"
           ? row.channelId.split(":thread:")[0] : row.channelId;
         id = JSON.stringify([kind, row.transport, channelId]);
         const transport = t.roomTransport[row.transport as keyof typeof t.roomTransport] ?? row.transport;
-        label = `${transport}: ${channelId}`;
+        sourceLabel = `${transport}: ${channelId}`;
+        label = row.channelName?.trim() || sourceLabel;
       } else if (row.contextProjectId) {
         kind = "project";
         const project = projectById.get(row.contextProjectId);
         id = JSON.stringify([kind, project?.id ?? null]);
         label = project?.name ?? t.otherProjects;
       }
-      const group = groups.get(id) ?? { id, label, kind, rows: [] };
+      const group = groups.get(id) ?? { id, label, kind, transport: row.transport, sourceLabel, named: false, rows: [] };
+      if (kind === "channel" && row.channelName?.trim() && !group.named) {
+        group.label = row.channelName.trim();
+        group.named = true;
+      }
       group.rows.push(row);
       groups.set(id, group);
     }
@@ -656,7 +663,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
 /** Personal grouping never requests a shared transcript or changes its binding. */
 function PersonalChatGroup({ workspaceId, group, activeSessionId, renderRow }: {
   workspaceId: string;
-  group: { id: string; label: string; kind: "general" | "project" | "channel"; rows: DocSession[] };
+  group: { id: string; label: string; kind: "general" | "project" | "channel"; transport?: string; sourceLabel?: string; named?: boolean; rows: DocSession[] };
   activeSessionId: string | null;
   renderRow: (row: DocSession, href: string) => React.ReactNode;
 }) {
@@ -668,8 +675,11 @@ function PersonalChatGroup({ workspaceId, group, activeSessionId, renderRow }: {
   return <section className="flex flex-col gap-0.5" data-personal-chat-group={group.kind}>
     <button type="button"
       className={cn(styles.titleHost, "flex min-h-11 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}
-      aria-expanded={open} onClick={toggleOpen} title={group.label}>
-      <Icon aria-hidden className="size-4 shrink-0" />
+      aria-expanded={open} onClick={toggleOpen}
+      title={group.sourceLabel && group.sourceLabel !== group.label ? `${group.label} (${group.sourceLabel})` : group.label}>
+      {group.kind === "channel" ? <span aria-hidden className="flex size-4 shrink-0 items-center justify-center [&>svg]:size-4" data-channel-icon={group.transport}>
+        <ConnectorIcon connectorId={group.transport ?? ""} fallback={group.transport === "brain_inspection" ? <Brain className="size-4" /> : <MessageSquare className="size-4" />} />
+      </span> : <Icon aria-hidden className="size-4 shrink-0" />}
       <SidebarTitle>{group.label}</SidebarTitle>
     </button>
     {open && <div className="flex flex-col gap-0.5 pl-[22px]">
