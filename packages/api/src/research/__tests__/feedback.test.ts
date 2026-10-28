@@ -109,4 +109,12 @@ describe('[COMP:api/research-feedback] Research follow-up capture', () => {
     expect(outputKeyFor(activity('a1'), [link('a1', null)])).toBe('page:page-a1:latest')
     expect(outputKeyFor(activity('a1'), [])).toBe('message:out-a1')
   })
+
+  it('does not replace an explicitly selected hidden activity with another same-chat result', async () => {
+    const { deps,record }=fakeDeps([activity('local'),activity('hidden')],['hidden'])
+    expect(await captureResearchFollowup(deps,{workspaceId:WS,sessionId:'s1',assistantId:'a1',message:message(),
+      externalPrincipal:false,selectedActivityId:'hidden'})).toMatchObject({outcome:'unlinked',reason:'not_visible'})
+    expect(record).not.toHaveBeenCalled()
+  })
+
 })

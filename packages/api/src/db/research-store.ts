@@ -13,6 +13,7 @@
  * [COMP:api/research-source-authority]
  */
 import type pg from 'pg'
+import { pinFeedbackAttempt, completeFeedbackAttempt, type AttemptLease } from './research-feedback-attempt-store.js'
 import {
   researchSourceRefSchema,
   type ResearchActivityStatus,
@@ -335,6 +336,8 @@ export async function settleResearchActivitySystem(input: SettleResearchActivity
 // ── Follow-up writes ──────────────────────────────────────────────────────
 
 export type RecordResearchFeedbackInput = {
+  /** Internal retry CAS, never a public request or authority token. */
+  attemptLease?: AttemptLease
   workspaceId: string
   activityId: string
   sessionId: string
@@ -359,6 +362,7 @@ export type RecordResearchFeedbackInput = {
  */
 export async function recordResearchFeedbackSystem(input: RecordResearchFeedbackInput): Promise<{ feedback: ResearchFeedback; inserted: boolean }> {
   return withResearchTransaction(async (client) => {
+    if (input.attemptLease) await pinFeedbackAttempt(client,input,input.attemptLease)
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO research_feedback (workspace_id, activity_id, message_id, message_version, actor_user_id, output_key,
          association, project_id, sensitivity, compartments)
@@ -394,6 +398,7 @@ export async function recordResearchFeedbackSystem(input: RecordResearchFeedback
       `SELECT ${FEEDBACK_COLUMNS} FROM research_feedback f
          JOIN research_feedback_revisions r ON r.feedback_id = f.id AND r.revision = f.current_revision
        WHERE f.message_id = $1`, [input.messageId])
+    if (input.attemptLease) await completeFeedbackAttempt(client,input.attemptLease)
     return { feedback: row.rows[0] as ResearchFeedback, inserted: !!id }
   })
 }

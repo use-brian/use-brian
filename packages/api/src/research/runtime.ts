@@ -7,7 +7,7 @@
  * [COMP:api/research-delivery] [COMP:api/research-feedback]
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { markdownToBlocks, normalizeMarkdownBlocks, type SavedViewStore } from '@use-brian/core'
+import { markdownToBlocks, normalizeMarkdownBlocks, interpretResearchFollowup, resolveResearchFollowupTarget, type SavedViewStore } from '@use-brian/core'
 import {
   artifactReadableForViewer,
   findSessionMessageByChannelIdSystem,
@@ -24,11 +24,12 @@ import {
   type ResearchSensitivity,
 } from '../db/research-store.js'
 import { getPool } from '../db/client.js'
+import { readFeedbackFrame, readFeedbackMessage, replyActivity, discoverFeedbackMessages, claimFeedbackRetries, prepareFeedbackAttempt, releaseFeedbackAttempt, renewFeedbackAttempt, feedbackTargetExists, readFeedbackReceipt, rejectFeedbackSelection, type FeedbackAttempt, type FeedbackFrame, type AttemptLease } from '../db/research-feedback-attempt-store.js'
 import { createDbSavedViewStore } from '../db/saved-views-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { publishPageLifecycle } from '../page-event-fanout.js'
 import { researchTitleFor, type ResearchDeliveryDeps } from './delivery.js'
-import { captureResearchFollowup, replayResearchFollowups, type FollowupCaptureResult, type ResearchFeedbackDeps } from './feedback.js'
+import { captureResearchFollowup, outputKeyFor, ownFollowupText, type FollowupCaptureResult, type FollowupMessage, type ResearchFeedbackDeps } from './feedback.js'
 
 const RANK: Record<ResearchSensitivity, number> = { public: 0, internal: 1, confidential: 2 }
 
@@ -150,14 +151,118 @@ export function createResearchFeedbackDeps(): ResearchFeedbackDeps & {
       return result
     },
     listMessagesAfter: listResearchMessagesAfterSystem,
+    async findReplyActivity(actor, workspaceId, output) {
+      const id = await replyActivity(actor,workspaceId,output)
+      const detail = id ? await getResearchActivityForViewer(actor,workspaceId,id) : null
+      return detail ? { activity:detail.activity,artifacts:detail.artifacts } : null
+    },
+    replayDurable: params => replayDurableFeedback(params),
   }
 }
 
-/**
- * Capture one persisted member message as a research follow-up, after first
- * replaying any earlier message in the session a previous capture missed.
- * Never throws: research capture must not block the ordinary reply.
- */
+type FeedbackCaptureParams = Parameters<typeof captureResearchFollowupForMessage>[0]
+function leaseFor(attempt: FeedbackAttempt): AttemptLease {
+  if (!attempt.leaseToken) throw new Error('research_feedback_attempt_unclaimed')
+  return { messageId:attempt.messageId,messageVersion:attempt.messageVersion,leaseToken:attempt.leaseToken }
+}
+/** Actual admitted context is read again for every item; ledger references never grant access. */
+async function captureStoredFeedback(params: FeedbackCaptureParams, message: FollowupMessage, frame: FeedbackFrame, pending?: FeedbackAttempt): Promise<FollowupCaptureResult> {
+  const actor = params.actorUserId!, workspace = params.workspaceId!
+  const deps = createResearchFeedbackDeps()
+  deps.listSessionActivities = async () => frame.activities
+  deps.record = async input => {
+    const existing = await readFeedbackReceipt(actor,input.messageId)
+    if (existing) return { feedback:existing,inserted:false }
+    if (pending && (input.activityId!==pending.targetActivityId || input.outputKey!==pending.targetOutputKey)) throw new Error('research_feedback_context_changed')
+    const intent = pending ?? await prepareFeedbackAttempt({ workspaceId:workspace,sessionId:params.sessionId,assistantId:params.assistantId,
+      actorUserId:actor,messageId:message.id,messageVersion:message.version,contextKey:frame.key,targetActivityId:input.activityId,
+      targetOutputKey:input.outputKey,association:input.association,selectedActivityId:params.selectedActivityId,replyToMessageId:params.replyToMessageId })
+    if (!intent) throw new Error('research_feedback_attempt_busy')
+    const lease = leaseFor(intent)
+    try {
+      const result = await recordResearchFeedbackSystem({ ...input,association:pending?.association ?? input.association,attemptLease:lease })
+      if (result.inserted) notifyWorkspaceChange(workspace,'research','update',input.activityId)
+      return result
+    } catch (error) { await releaseFeedbackAttempt(lease); throw error }
+  }
+  const result = await captureResearchFollowup(deps, { workspaceId:workspace,sessionId:params.sessionId,assistantId:params.assistantId,
+    message,externalPrincipal:false,selectedActivityId:pending?.targetActivityId ?? params.selectedActivityId,
+    replyToMessageId:params.replyToMessageId })
+  if (!pending && params.selectedActivityId && (result.outcome==='no_research' || (result.outcome==='unlinked' && result.reason==='not_visible'))) {
+    await rejectFeedbackSelection({workspaceId:workspace,sessionId:params.sessionId,assistantId:params.assistantId,actorUserId:actor,
+      messageId:message.id,messageVersion:message.version,contextKey:frame.key,selectedActivityId:params.selectedActivityId})
+    return result
+  }
+  if (!pending && result.outcome!=='recorded' && result.outcome!=='replayed') {
+    const reason = result.outcome==='not_member' ? 'no_member_text' : result.outcome==='no_research' ? 'no_research'
+      : 'reason' in result && result.reason==='multiple_outputs' ? 'multiple_outputs' : 'unrelated_or_uncertain'
+    // Derive source-only validity from canonical member-owned meaning, never
+    // the fallback storage reason (which can also describe authority refusal).
+    const ownText = ownFollowupText(message.content)
+    const interpretation = interpretResearchFollowup(ownText)
+    const sourceOnlyEvaluation = !params.selectedActivityId && !params.replyToMessageId
+      && (!ownText || interpretation.uncertain || interpretation.kind==='changed_objective')
+    await prepareFeedbackAttempt({ workspaceId:workspace,sessionId:params.sessionId,assistantId:params.assistantId,actorUserId:actor,
+      messageId:message.id,messageVersion:message.version,contextKey:frame.key,reason,sourceOnlyEvaluation })
+  }
+  return result
+}
+async function replayDurableFeedback(params: { workspaceId:string;sessionId:string;assistantId:string;actorUserId:string;excludeMessageId?:string|null }, onError?: (error:unknown) => void): Promise<number> {
+  let recorded = 0
+  // A denied triggering turn cannot use retained assistant authority to replay.
+  if(!await readFeedbackFrame(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId)) return recorded
+  const retries = await claimFeedbackRetries(params.actorUserId,params.workspaceId,params.sessionId,params.excludeMessageId ?? null)
+  for (let pending of retries) {
+    let lease = leaseFor(pending)
+    try {
+      const retryParams={...params,assistantId:pending.assistantId}
+      const frame = await readFeedbackFrame(params.actorUserId,params.workspaceId,params.sessionId,retryParams.assistantId)
+      const message = await readFeedbackMessage(params.actorUserId,params.workspaceId,params.sessionId,retryParams.assistantId,pending.messageId)
+      if (!frame || !message) continue // Temporary hold/revocation remains recoverable.
+      // A pinned implicit target preserves identity, not explicit-selection
+      // meaning. Re-admit current words with the canonical implicit resolver.
+      if (pending.association==='same_chat_continuation' && resolveResearchFollowupTarget({
+        candidates:[{activityId:pending.targetActivityId!,outputMessageId:null}],
+        interpretation:interpretResearchFollowup(ownFollowupText(message.content)),
+      }).status!=='linked') continue
+
+      if (message.version!==pending.messageVersion) {
+        const renewed = await renewFeedbackAttempt(lease,message.version,frame.key)
+        if (!renewed) continue
+        pending=renewed;lease=leaseFor(renewed)
+      }
+      const target = pending.targetActivityId ? await getResearchActivityForViewer(params.actorUserId,params.workspaceId,pending.targetActivityId) : null
+      if (!target) {
+        if (!pending.targetActivityId || !(await feedbackTargetExists(pending.targetActivityId))) await releaseFeedbackAttempt(lease,true)
+        continue
+      }
+      const currentOutput = outputKeyFor(target.activity,target.artifacts)
+      if (currentOutput!==pending.targetOutputKey) {
+        // An omitted artifact can be temporarily hidden; retain its retry.
+        if (target.artifacts.some(a => a.relation==='output') || pending.targetOutputKey?.startsWith('message:')) await releaseFeedbackAttempt(lease,true)
+        continue
+      }
+      const result = await captureStoredFeedback({ ...retryParams,messageId:message.id,externalPrincipal:false },message,frame,pending)
+      if (result.outcome==='recorded') recorded++
+    } catch (error) { onError?.(error) }
+    finally { await releaseFeedbackAttempt(lease).catch(error => onError?.(error)) }
+  }
+  const frame = await readFeedbackFrame(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId)
+  if (!frame) return recorded
+  const messages = await discoverFeedbackMessages(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId,frame,params.excludeMessageId ?? null)
+  for (const id of messages) {
+    try {
+      const currentFrame = await readFeedbackFrame(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId)
+      const message = await readFeedbackMessage(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId,id)
+      if (!currentFrame || !message) continue
+      const result = await captureStoredFeedback({ ...params,messageId:id,externalPrincipal:false },message,currentFrame)
+      if (result.outcome==='recorded') recorded++
+    } catch (error) { onError?.(error) }
+  }
+  return recorded
+}
+
+/** Feedback recovery cannot prevent direct capture or the ordinary reply. */
 export async function captureResearchFollowupForMessage(params: {
   workspaceId: string | null
   sessionId: string
@@ -173,26 +278,15 @@ export async function captureResearchFollowupForMessage(params: {
 }): Promise<FollowupCaptureResult | null> {
   if (!params.workspaceId || !params.actorUserId || params.externalPrincipal) return null
   try {
-    const deps = createResearchFeedbackDeps()
-    await replayResearchFollowups(deps, {
-      workspaceId: params.workspaceId, sessionId: params.sessionId, assistantId: params.assistantId, actorUserId: params.actorUserId,
-      excludeMessageId: params.messageId,
-    })
-    const message = await getResearchMessageSystem(params.messageId)
-    if (!message || message.senderUserId !== params.actorUserId) return null
+    await replayDurableFeedback({ workspaceId:params.workspaceId,sessionId:params.sessionId,assistantId:params.assistantId,
+      actorUserId:params.actorUserId,excludeMessageId:params.messageId },params.onError)
+  } catch (error) { params.onError?.(error) }
+  try {
+    const frame = await readFeedbackFrame(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId)
+    const message = await readFeedbackMessage(params.actorUserId,params.workspaceId,params.sessionId,params.assistantId,params.messageId)
+    if (!frame || !message) return null
     const replyToMessageId = params.replyToMessageId
-      ?? (params.replyToChannelMessageId ? await findSessionMessageByChannelIdSystem(params.sessionId, params.replyToChannelMessageId) : null)
-    return await captureResearchFollowup(deps, {
-      workspaceId: params.workspaceId,
-      sessionId: params.sessionId,
-      assistantId: params.assistantId,
-      message,
-      externalPrincipal: false,
-      selectedActivityId: params.selectedActivityId ?? null,
-      replyToMessageId: replyToMessageId ?? null,
-    })
-  } catch (error) {
-    params.onError?.(error)
-    return null
-  }
+      ?? (params.replyToChannelMessageId ? await findSessionMessageByChannelIdSystem(params.sessionId,params.replyToChannelMessageId) : null)
+    return await captureStoredFeedback({ ...params,replyToMessageId },message,frame)
+  } catch (error) { params.onError?.(error); return null }
 }
