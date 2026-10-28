@@ -20,6 +20,7 @@ import {visibleOrganizationSections} from "@/lib/organization-navigation";
 import { useRouter } from 'next/navigation';
 import { Check, ChevronDown, Users } from 'lucide-react';
 import { OperatorTopbar } from '@/components/operator/operator-topbar';
+import { WorkspaceStructureSwitcher } from '@/components/doc/workspace-structure-switcher';
 import { useSidebarData } from '@/components/doc/doc-sidebar-data';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { useT } from '@/lib/i18n/client';
@@ -42,6 +43,7 @@ export function OrganizationTopbar({ workspaceId, section, slotRef }: {
   return <OperatorTopbar
     identity={{ label: t.title, icon: Users }}
     center={<>
+      <div className={cn("shrink-0", !sidebarCollapsed && "md:hidden")}><WorkspaceStructureSwitcher workspaceId={workspaceId} view="organization" compact /></div>
       <DropdownMenu>
         <DropdownMenuTrigger aria-label={t.sectionsAriaLabel} data-organization-section-menu
           className={cn("inline-flex h-11 min-w-0 max-w-44 items-center gap-1.5 rounded-md bg-sidebar-accent/60 px-2.5 text-[13px] font-medium text-sidebar-accent-foreground md:h-7", !sidebarCollapsed && "md:hidden")}>

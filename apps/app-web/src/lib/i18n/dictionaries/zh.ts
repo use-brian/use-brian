@@ -7692,6 +7692,7 @@ export const zh: Dictionary = {
     },
   },
   workspaceNav: {
+    projectsAndOrganization: "專案與組織",
     more: "更多應用程式",
     homeAria: "首頁：聊天",
     appStore: "應用程式商店",

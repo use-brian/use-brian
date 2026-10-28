@@ -7739,6 +7739,7 @@ export const ja: Dictionary = {
     },
   },
   workspaceNav: {
+    projectsAndOrganization: "プロジェクトと組織",
     more: "その他のアプリ",
     homeAria: "ホーム: チャット",
     appStore: "アプリストア",

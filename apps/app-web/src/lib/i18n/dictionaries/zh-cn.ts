@@ -7542,6 +7542,7 @@ export const zhCN: Dictionary = {
     },
   },
   workspaceNav: {
+    projectsAndOrganization: "项目与组织",
     more: "更多应用",
     homeAria: "首页：聊天",
     appStore: "应用商店",

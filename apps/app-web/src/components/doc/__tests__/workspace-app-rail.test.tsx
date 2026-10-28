@@ -6,6 +6,7 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import { PopoverTrigger } from "@/components/ui/popover";
 import { miniAppPinsKey, miniAppMenuOrderKey } from "@/lib/workspace-apps";
+import type { WorkspaceSurface } from "@/lib/doc-page-url";
 import type { HomeAppEntry } from "@/lib/operator-apps";
 import type { CustomHomeApp } from "@/lib/api/home-apps";
 import { WorkspaceAppRail, WorkspaceAppCatalogue } from "../workspace-app-rail";
@@ -42,8 +43,8 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
-  async function render(mobile = false) {
-    await act(async () => root.render(<I18nProvider locale="en" dict={en}><WorkspaceAppRail workspaceId={workspaceId} activeSurface="tasks" activeApp="tasks" homeApps={homeApps} customApps={customApps} liveCount={0} studioNudge={false} onDismissStudioNudge={() => {}} mobile={mobile} /></I18nProvider>));
+  async function render(mobile = false, activeSurface: WorkspaceSurface = "tasks") {
+    await act(async () => root.render(<I18nProvider locale="en" dict={en}><WorkspaceAppRail workspaceId={workspaceId} activeSurface={activeSurface} activeApp="tasks" homeApps={homeApps} customApps={customApps} liveCount={0} studioNudge={false} onDismissStudioNudge={() => {}} mobile={mobile} /></I18nProvider>));
   }
   const button = (name: string) => document.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!;
   const railLink = (name: string) => container.querySelector<HTMLAnchorElement>(`a[aria-label="${name}"]`);
@@ -52,7 +53,7 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
   it("reveals a rail item's name after 100ms of hover", async () => {
     vi.useFakeTimers();
     await render();
-    const projects = railLink(en.contextScope.projectsTitle)!;
+    const projects = railLink(en.workspaceNav.projectsAndOrganization)!;
     const pointerEnter = new Event("pointerover", { bubbles: true });
     Object.defineProperty(pointerEnter, "pointerType", { value: "mouse" });
     await act(async () => {
@@ -63,7 +64,7 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(99); });
     expect(document.querySelector('[data-app-tooltip][data-open]')).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(document.querySelector('[data-app-tooltip][data-open]')?.textContent).toBe(en.contextScope.projectsTitle);
+    expect(document.querySelector('[data-app-tooltip][data-open]')?.textContent).toBe(en.workspaceNav.projectsAndOrganization);
   });
 
   it("reveals names on keyboard focus without waiting for the hover delay", async () => {
@@ -71,9 +72,9 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     await render();
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
-      railLink(en.contextScope.projectsTitle)!.focus();
+      railLink(en.workspaceNav.projectsAndOrganization)!.focus();
     });
-    expect(document.querySelector('[data-app-tooltip][data-open]')?.textContent).toBe(en.contextScope.projectsTitle);
+    expect(document.querySelector('[data-app-tooltip][data-open]')?.textContent).toBe(en.workspaceNav.projectsAndOrganization);
   });
 
   it("reserves the workspace menu above Home without a duplicate panel toggle", async () => {
@@ -85,6 +86,28 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     const more = button(en.workspaceNav.more);
     const divider = container.querySelector('[data-workspace-added-apps-divider]')!;
     expect(more.compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each([false, true])("groups both setup views once above Studio outside the scrolling usage apps (mobile: %s)", async (mobile) => {
+    const close = vi.fn(); window.addEventListener("doc:sidebar-close", close);
+    try {
+      for (const surface of ["projects", "organization"] as const) {
+        state.pathname = `/w/${workspaceId}/${surface}`;
+        await render(mobile, surface);
+        const entry = railLink(en.workspaceNav.projectsAndOrganization)!;
+        expect(entry.getAttribute("href")).toBe("/w/workspace-a/projects");
+        expect(entry.getAttribute("aria-current")).toBe("page");
+        expect(container.querySelectorAll("[data-workspace-structure-entry]")).toHaveLength(1);
+        expect(container.querySelector('[data-workspace-app-rail-scroll]')!.contains(entry)).toBe(false);
+        expect(entry.compareDocumentPosition(railLink(en.docPage.iconStudio)!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(railLink(en.contextScope.projectsTitle)).toBeNull();
+        expect(railLink(en.organization.title)).toBeNull();
+        await click(entry);
+      }
+      expect(close).toHaveBeenCalledTimes(2);
+      await render(mobile, "tasks");
+      expect(railLink(en.workspaceNav.projectsAndOrganization)?.hasAttribute("aria-current")).toBe(false);
+    } finally { window.removeEventListener("doc:sidebar-close", close); }
   });
 
   it.each([false, true])("keeps Chat only in Home while another mini-app is active (mobile: %s)", async (mobile) => {

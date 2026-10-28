@@ -6,6 +6,8 @@ const ports=vi.hoisted(()=>({path:'/w/ws/projects/one',list:vi.fn(),push:vi.fn()
 vi.mock('next/navigation',()=>({usePathname:()=>ports.path,useRouter:()=>({push:ports.push})}));
 vi.mock('@/lib/api/context-scopes',()=>({listContextProjects:ports.list}));
 vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>({workspaceId:'ws'})}));
+vi.mock('@/components/doc/doc-sidebar-data',()=>({useSidebarData:()=>({sidebarCollapsed:false})}));
+vi.mock('@/lib/surface-prefetch',()=>({surfaceDataKey:(kind:string,id:string)=>`${kind}:${id}`,useIntentPrefetch:()=>()=>({})}));
 vi.mock('@/components/operator/operator-topbar',()=>({OperatorTopbar:({center}:{center:React.ReactNode})=><header>{center}</header>}));
 vi.mock('@/lib/i18n/client',async()=>{const {en}=await import('@/lib/i18n/dictionaries/en');return {useT:()=>en};});
 import { ProjectsSidebarPanel, ProjectsTopbar } from '../projects-navigation';

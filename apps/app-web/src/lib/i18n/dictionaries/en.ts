@@ -7965,6 +7965,7 @@ export const en = {
   },
   // ── Home operator app-bar (tasks-operator-surface §2) ──
   workspaceNav: {
+    projectsAndOrganization: "Projects and organization",
     more: "More apps",
     homeAria: "Home: Chat",
     appStore: "App store",
