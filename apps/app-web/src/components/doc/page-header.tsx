@@ -19,7 +19,7 @@
  *   - **Share** — opens the internal sharing controls; Copy link chooses the
  *     deployment's supported alias, ID handoff, or canonical URL.
  *   - **Favorite star** — toggles saved/draft (a saved page is a Favorite).
- *   - **⋯ menu** — Duplicate / Full width / Delete, via the on-brand
+ *   - **⋯ menu** — Find / Duplicate / Full width / Delete, via the on-brand
  *     `DropdownMenu` + `confirmDialog` for the destructive delete. Also the
  *     entry point for "Link a recording" (`onLinkRecording`, present only when
  *     the page carries no recording) — most pages never link one, so the
@@ -103,6 +103,8 @@ type PageHeaderProps = {
   /** Commit a new title directly — drives the breadcrumb's inline rename. */
   onRenameValue: (id: string, name: string) => void;
   onDuplicate: (id: string) => void;
+  /** Search is local read-only state; absent when no searchable editor is hosted. */
+  onFind?: () => void;
   /** Snapshot this page's current content as a reusable custom template (the
    *  ⋯ menu "Save as template"). When absent the item is hidden. */
   onSaveAsTemplate?: (id: string) => void;
@@ -147,6 +149,7 @@ export function PageHeader({
   onDeleted,
   onRenameValue,
   onDuplicate,
+  onFind,
   onSaveAsTemplate,
   onLinkRecording,
   fullWidth,
@@ -486,6 +489,11 @@ export function PageHeader({
               }
             />
             <DropdownMenuContent className="max-w-[calc(100vw-1rem)]">
+              {onFind ? (
+                <DropdownMenuItem onClick={onFind} className="max-md:min-h-11">
+                  {t.find.label}
+                </DropdownMenuItem>
+              ) : null}
               {view.anchorKey === "meeting-notes-folder" && <MeetingTagRulesMenuItem workspaceId={view.workspaceId} pageId={view.id} onOpen={() => setTagRulesOpen(true)} />}
               {/* Phone home of the page actions, schedule and triggered runs
                   (hidden from `md`, where they render as header chips). The

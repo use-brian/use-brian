@@ -11,7 +11,8 @@
  */
 
 import { describe, expect, it, afterEach, beforeAll, vi } from "vitest";
-import { act, createElement } from "react";
+import { act, createElement, useEffect, type ReactNode } from "react";
+import type { Editor } from "@tiptap/core";
 import { createRoot, type Root } from "react-dom/client";
 import { useEditor, EditorContent } from "@tiptap/react";
 import { browserDocExtensions } from "../doc-schema";
@@ -42,26 +43,33 @@ afterEach(() => {
   activeRoot = null;
   activeHost?.remove();
   activeHost = null;
+  window.history.replaceState(null, "", "/");
 });
 
 const HTML =
   "<p>alpha beta</p><p>the alpha again</p>";
 
-function Harness() {
+const scope = { ownerId: "page-owner", workspaceId: "workspace-a", pageId: "page-a" };
+type Scope = typeof scope;
+type HarnessProps = { requestScope?: Scope; editable?: boolean; onEditor?: (editor: Editor | null) => void };
+
+function Harness({ requestScope, editable = true, onEditor }: HarnessProps) {
   const editor = useEditor({
     immediatelyRender: true,
     content: HTML,
+    editable,
     extensions: [...browserDocExtensions(), docFindExtension()],
   });
+  useEffect(() => { onEditor?.(editor); }, [editor, onEditor]);
   return createElement(
     "div",
     null,
-    createElement(DocFindBar, { editor }),
+    createElement(DocFindBar, { editor, requestScope }),
     createElement(EditorContent, { editor }),
   );
 }
 
-async function mount(): Promise<HTMLElement> {
+async function mount(children: ReactNode = createElement(Harness)): Promise<HTMLElement> {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -73,7 +81,7 @@ async function mount(): Promise<HTMLElement> {
         I18nProvider,
         // Children ride in props (the toggle-collapse test's idiom): the
         // third-arg overload trips TS's required-`children` check here.
-        { dict: en, locale: "en", children: createElement(Harness) } as never,
+        { dict: en, locale: "en", children } as never,
       ),
     );
   });
@@ -121,7 +129,112 @@ function input(host: HTMLElement) {
   return host.querySelector<HTMLInputElement>('[role="search"] input')!;
 }
 
+async function requestFind(detail: unknown = scope) {
+  await act(async () => window.dispatchEvent(new CustomEvent("doc:find-open", { detail })));
+}
+
+function activatePage(page = scope) {
+  window.history.replaceState(null, "", `/w/${page.workspaceId}/p/${page.pageId}`);
+}
+
 describe("[COMP:app-web/doc-find] Find bar", () => {
+  it("opens the scoped touch request with the existing local match and close behavior", async () => {
+    activatePage();
+    const host = await mount(createElement(Harness, { requestScope: scope }));
+    await requestFind();
+    expect(bar(host)).not.toBeNull();
+    await type(input(host), "alpha");
+    expect(bar(host)!.textContent).toContain("1 of 2");
+    const next = bar(host)!.querySelector<HTMLButtonElement>(`[aria-label="${en.docPage.find.next}"]`)!;
+    await act(async () => next.click());
+    expect(bar(host)!.textContent).toContain("2 of 2");
+    await act(async () => bar(host)!.querySelector<HTMLButtonElement>(`[aria-label="${en.docPage.find.close}"]`)!.click());
+    expect(bar(host)).toBeNull();
+    expect(host.querySelectorAll(".doc-find-match")).toHaveLength(0);
+  });
+
+  it("addresses only its editor owner when the same page has two mounted editors", async () => {
+    activatePage();
+    const host = await mount(createElement("div", null,
+      createElement(Harness, { requestScope: scope }),
+      createElement(Harness, { requestScope: { ...scope, ownerId: "other-owner" } }),
+      createElement(Harness),
+    ));
+    await requestFind();
+    expect(host.querySelectorAll('[role="search"]')).toHaveLength(1);
+    await type(input(host), "alpha");
+    expect(host.querySelectorAll(".doc-find-match")).toHaveLength(2);
+  });
+
+  it("rejects malformed and mismatched requests and ignores its request on a stale route", async () => {
+    activatePage();
+    const host = await mount(createElement(Harness, { requestScope: scope }));
+    for (const detail of [null, {}, { ...scope, ownerId: "other" }, { ...scope, pageId: "other" }, { ...scope, workspaceId: "other" }]) {
+      await requestFind(detail);
+      expect(bar(host)).toBeNull();
+    }
+    activatePage({ ...scope, pageId: "other" });
+    await requestFind();
+    expect(bar(host)).toBeNull();
+    activatePage();
+    await requestFind();
+    expect(bar(host)).not.toBeNull();
+  });
+
+  it("searches a read-only selection without a document mutation", async () => {
+    activatePage();
+    let editor: Editor | null = null;
+    const host = await mount(createElement(Harness, { requestScope: scope, editable: false, onEditor: value => { editor = value; } }));
+    const live = editor as unknown as Editor;
+    const before = live.getJSON();
+    const changes: boolean[] = [];
+    live.on("transaction", ({ transaction }) => { changes.push(transaction.docChanged); });
+    await act(async () => { live.commands.setTextSelection({ from: 1, to: 6 }); });
+    await requestFind();
+    expect(bar(host)).not.toBeNull();
+    expect(input(host).value).toBe("alpha");
+    expect(bar(host)!.textContent).toContain("1 of 2");
+    expect(live.getJSON()).toEqual(before);
+    expect(changes.every(changed => !changed)).toBe(true);
+  });
+
+  it("closes when its page identity changes before the editor rebuilds", async () => {
+    activatePage();
+    const host = await mount(createElement(Harness, { requestScope: scope }));
+    await requestFind();
+    expect(bar(host)).not.toBeNull();
+    await type(input(host), "alpha");
+    const next = { ...scope, pageId: "page-b" };
+    activatePage(next);
+    await act(async () => activeRoot!.render(createElement(I18nProvider, { dict: en, locale: "en", children: createElement(Harness, { requestScope: next }) } as never)));
+    expect(bar(host)).toBeNull();
+    expect(host.querySelectorAll(".doc-find-match")).toHaveLength(0);
+    await requestFind();
+    expect(bar(host)).toBeNull();
+    await requestFind(next);
+    expect(input(host).value).toBe("");
+  });
+
+  it("removes the request listener when its editor unmounts", async () => {
+    activatePage();
+    const host = await mount(createElement(Harness, { requestScope: scope }));
+    await requestFind();
+    expect(bar(host)).not.toBeNull();
+    await act(async () => activeRoot!.render(null));
+    await requestFind();
+    expect(bar(host)).toBeNull();
+  });
+
+  it("ignores its matching request while its kept-alive editor is hidden", async () => {
+    activatePage();
+    const host = await mount(createElement("div", { hidden: true }, createElement(Harness, { requestScope: scope })));
+    await requestFind();
+    expect(bar(host)).toBeNull();
+    host.firstElementChild!.removeAttribute("hidden");
+    await requestFind();
+    expect(bar(host)).not.toBeNull();
+  });
+
   it("renders nothing until the chord, and claims the chord when it fires", async () => {
     const host = await mount();
     expect(bar(host)).toBeNull();

@@ -5,7 +5,7 @@
  *
  * Mounted once per doc editor (always, editable or not: searching a page is a
  * READ, so a viewer with no edit rights still gets it). It renders nothing
- * until ⌘F / Ctrl+F, and owns three things:
+ * until ⌘F / Ctrl+F or a scoped Page header request, and owns three things:
  *
  *  1. **The chord.** A window-level keydown, so ⌘F works wherever focus is
  *     while a page is open - in the doc, in the chat composer, on a button.
@@ -32,10 +32,14 @@ import type { Editor } from "@tiptap/core";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { docPagePath } from "@/lib/doc-page-url";
 import { findShortcutPressed, readFind, setFindQuery, stepFindMatch } from "./find-in-page";
 
 /** Longest selection we will seed the query with on open. */
 const SEED_MAX_CHARS = 120;
+
+export const DOC_FIND_OPEN_EVENT = "doc:find-open";
+export type DocFindRequestScope = { ownerId: string; workspaceId: string; pageId: string };
 
 /** The nearest scrollable ancestor — the doc pane the bar floats over. */
 function scrollParentOf(el: HTMLElement): HTMLElement | null {
@@ -48,21 +52,24 @@ function scrollParentOf(el: HTMLElement): HTMLElement | null {
   return null;
 }
 
-export function DocFindBar({ editor }: { editor: Editor | null }) {
+export function DocFindBar({ editor, requestScope }: { editor: Editor | null; requestScope?: DocFindRequestScope }) {
   const t = useT().docPage.find;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState({ total: 0, index: 0 });
   const [box, setBox] = useState<{ top: number; right: number } | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const ownerId = requestScope?.ownerId;
+  const workspaceId = requestScope?.workspaceId;
+  const pageId = requestScope?.pageId;
 
   // A page switch rebuilds the editor (the Yjs doc is a dependency of
-  // `useEditor`), so a new editor identity means a different document - close
-  // rather than carry one page's search onto the next.
+  // `useEditor`). The page scope can change before that rebuild finishes;
+  // close then too, rather than carry one page's search onto the next.
   useEffect(() => {
     setOpen(false);
     setQuery("");
-  }, [editor]);
+  }, [editor, ownerId, workspaceId, pageId]);
 
   // Mirror the plugin's match count + active index into React. Driven off
   // `transaction` so a live edit (yours or a collaborator's) re-counts too.
@@ -104,6 +111,22 @@ export function DocFindBar({ editor }: { editor: Editor | null }) {
       inputRef.current?.select();
     });
   }, [editor]);
+
+  // A header targets one mounted full-page editor, even when Chat or a cached
+  // surface has another editor for the same page. The chord remains unchanged.
+  useEffect(() => {
+    if (!editor || !ownerId || !workspaceId || !pageId) return;
+    const onRequest = (event: Event) => {
+      const request = (event as CustomEvent<Partial<DocFindRequestScope> | null>).detail;
+      if (request?.ownerId !== ownerId || request.workspaceId !== workspaceId || request.pageId !== pageId) return;
+      if (window.location.pathname !== docPagePath(workspaceId, pageId)) return;
+      const dom = editor.view.dom;
+      if (!dom.isConnected || dom.closest("[hidden], [inert]") || dom.checkVisibility?.({ visibilityProperty: true }) === false) return;
+      openBar();
+    };
+    window.addEventListener(DOC_FIND_OPEN_EVENT, onRequest);
+    return () => window.removeEventListener(DOC_FIND_OPEN_EVENT, onRequest);
+  }, [editor, ownerId, workspaceId, pageId, openBar]);
 
   const close = useCallback(() => {
     setOpen(false);
@@ -181,7 +204,7 @@ export function DocFindBar({ editor }: { editor: Editor | null }) {
       // pill's existing border turns blue while the input has focus. The
       // nav/close buttons keep their own rounded halo so a keyboard user can
       // still see which one they are on.
-      className="fixed z-40 flex items-center gap-1 rounded-lg border border-border bg-popover/95 px-1.5 py-1 shadow-lg backdrop-blur transition-[border-color,box-shadow] has-[input:focus-visible]:border-ring"
+      className="fixed z-40 flex items-center gap-1 rounded-lg border border-border bg-popover/95 px-1.5 py-1 shadow-lg backdrop-blur transition-[border-color,box-shadow] has-[input:focus-visible]:border-ring max-md:left-2 max-md:flex-wrap"
     >
       <input
         ref={inputRef}
@@ -201,21 +224,21 @@ export function DocFindBar({ editor }: { editor: Editor | null }) {
             step(e.shiftKey ? -1 : 1);
           }
         }}
-        className="h-9 w-44 bg-transparent px-1.5 text-[16px] text-foreground outline-none focus-visible:shadow-none placeholder:text-muted-foreground sm:w-56 md:h-7 md:text-sm"
+        className="h-11 min-w-0 w-full basis-full bg-transparent px-1.5 text-[16px] text-foreground outline-none focus-visible:shadow-none placeholder:text-muted-foreground md:h-7 md:w-56 md:basis-auto md:text-sm"
       />
       <span
         aria-live="polite"
-        className="min-w-14 shrink-0 text-right text-xs tabular-nums text-muted-foreground"
+        className="min-w-0 flex-1 text-xs tabular-nums text-muted-foreground md:min-w-14 md:flex-none md:text-right"
       >
         {counter}
       </span>
-      <span aria-hidden className="mx-0.5 h-5 w-px bg-border" />
+      <span aria-hidden className="mx-0.5 hidden h-5 w-px bg-border md:block" />
       <button
         type="button"
         aria-label={t.previous}
         disabled={status.total === 0}
         onClick={() => step(-1)}
-        className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+        className="inline-flex size-11 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40 md:size-7"
       >
         <ChevronUp size={14} aria-hidden />
       </button>
@@ -224,7 +247,7 @@ export function DocFindBar({ editor }: { editor: Editor | null }) {
         aria-label={t.next}
         disabled={status.total === 0}
         onClick={() => step(1)}
-        className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+        className="inline-flex size-11 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40 md:size-7"
       >
         <ChevronDown size={14} aria-hidden />
       </button>
@@ -232,7 +255,7 @@ export function DocFindBar({ editor }: { editor: Editor | null }) {
         type="button"
         aria-label={t.close}
         onClick={close}
-        className="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        className="inline-flex size-11 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:size-7"
       >
         <X size={14} aria-hidden />
       </button>

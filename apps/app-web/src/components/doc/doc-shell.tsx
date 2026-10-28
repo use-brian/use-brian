@@ -38,7 +38,7 @@
 
 import { MeetingTagsPanel } from "@/components/recordings/meeting-tags-panel";
 import { availableAppWidth, subscribeAppViewport } from "@/lib/app-viewport";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   docEntryPath,
@@ -87,6 +87,7 @@ import { useWorkspaceContext } from "@/lib/workspace-context";
 import { useSidebarData, type ActivePageBridge } from "./doc-sidebar-data";
 import { DocTopBar, type TabView } from "./doc-topbar";
 import { PageHeader } from "./page-header";
+import { DOC_FIND_OPEN_EVENT, type DocFindRequestScope } from "./find-bar";
 import { PageTitle } from "./page-title";
 import { CollabPageEditor } from "./collab-page-editor";
 import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
@@ -152,6 +153,7 @@ const CREATED_COMMIT_BLANK_MS = 5_000;
 const CREATED_COMMIT_TEMPLATE_MS = 15_000;
 
 export function DocShell({ workspaceId, assistantId }: ShellProps) {
+  const findOwnerId = useId();
   // `assistantId` is forwarded to `<CollabPageEditor>` (the centre pane). The
   // assistant chat dock is mounted in `WorkspaceChrome`, not here.
   const copy = useT();
@@ -1225,6 +1227,11 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                 onDeleted={handleActiveDeletedFromHeader}
                 onRenameValue={handleRenameValue}
                 onDuplicate={handleDuplicate}
+                onFind={!isDraftLanding && collab.synced && collab.doc && collab.provider ? () => {
+                  window.dispatchEvent(new CustomEvent<DocFindRequestScope>(DOC_FIND_OPEN_EVENT, {
+                    detail: { ownerId: findOwnerId, workspaceId, pageId: pageView.id },
+                  }));
+                } : undefined}
                 onSaveAsTemplate={(id) => void handleSaveAsTemplate(id)}
                 // "Link a recording" lives in the ⋯ menu, only for a page
                 // with NO recording (anchor-derived or manual) to fall back to.
@@ -1420,6 +1427,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     : null}
                   <CollabPageEditor
                     collab={collab}
+                    findOwnerId={findOwnerId}
                     canEdit
                     user={user}
                     viewId={urlViewId}
