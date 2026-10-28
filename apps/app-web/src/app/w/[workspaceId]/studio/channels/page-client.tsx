@@ -2448,7 +2448,7 @@ export function AddChannelDialog({
             </Dialog.Title>
             <Dialog.Close
               aria-label={add.close}
-              className="inline-flex size-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground sm:size-7"
+              className="inline-flex size-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:size-7"
             >
               <X className="size-4" aria-hidden />
             </Dialog.Close>
@@ -2797,7 +2797,7 @@ export function AddChannelForm({
   // lines. No -mb-px: inside a scroll container the 1px hang can't overlap the
   // container border anyway - it only creates a spurious 1px vertical overflow.
   const TAB_BASE =
-    "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-1.5 text-sm transition-colors";
+    "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-1.5 text-sm transition-colors max-md:min-h-11";
   // 16px below `md` (M4): iOS zooms the dialog on a 14px focus and stays
   // zoomed; the constant carries the floor so every field it dresses does.
   const FIELD_INPUT =
@@ -2809,27 +2809,29 @@ export function AddChannelForm({
           (hidden scrollbar + edge arrows) instead of painting a raw scroll
           bar between the tabs and their border. */}
       {!lockPlatform && (
-        <ScrollableNav className="flex gap-1 border-b border-border">
-          {connectablePlatforms(emailConfigured).map((p) => (
-            <button
-              key={p}
-              type="button"
-              onClick={() => pickPlatform(p)}
-              className={
-                TAB_BASE +
-                " " +
-                (platform === p
-                  ? "border-primary font-medium text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground")
-              }
-            >
-              <span className="grid size-5 place-items-center text-muted-foreground">
-                <ChannelTypeIcon type={p} />
-              </span>
-              <span>{add.platform[p]}</span>
-            </button>
-          ))}
-        </ScrollableNav>
+        <div className="max-md:[&>div>button]:min-w-11">
+          <ScrollableNav className="flex gap-1 border-b border-border">
+            {connectablePlatforms(emailConfigured).map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => pickPlatform(p)}
+                className={
+                  TAB_BASE +
+                  " " +
+                  (platform === p
+                    ? "border-primary font-medium text-foreground"
+                    : "border-transparent text-muted-foreground hover:text-foreground")
+                }
+              >
+                <span className="grid size-5 place-items-center text-muted-foreground">
+                  <ChannelTypeIcon type={p} />
+                </span>
+                <span>{add.platform[p]}</span>
+              </button>
+            ))}
+          </ScrollableNav>
+        </div>
       )}
 
       {platform === "whatsapp" ? (
@@ -2889,7 +2891,7 @@ export function AddChannelForm({
           <button
             type="button"
             onClick={() => setManifestOpen((v) => !v)}
-            className="text-xs text-primary hover:underline self-start"
+            className="text-xs text-primary hover:underline self-start max-md:inline-flex max-md:items-center max-md:min-h-11 max-md:min-w-11"
           >
             {manifestOpen ? add.manifest.hide : add.manifest.show}
           </button>
@@ -2905,7 +2907,7 @@ export function AddChannelForm({
                     onChange={(e) => setAppName(e.target.value)}
                     maxLength={35}
                     disabled={submitting || !!success}
-                    className="text-[16px] md:text-sm rounded-md border border-border bg-background px-2 py-1"
+                    className="text-[16px] md:text-sm rounded-md border border-border bg-background px-2 py-1 max-md:min-h-11"
                   />
                 </label>
                 <label className="flex flex-col gap-0.5">
@@ -2915,7 +2917,7 @@ export function AddChannelForm({
                     value={bgColor}
                     onChange={(e) => setBgColor(e.target.value)}
                     disabled={submitting || !!success}
-                    className="h-8 w-12 rounded border border-border cursor-pointer"
+                    className="h-8 w-12 rounded border border-border cursor-pointer max-md:min-h-11"
                   />
                 </label>
               </div>
@@ -2927,18 +2929,18 @@ export function AddChannelForm({
                   onChange={(e) => setAppDescription(e.target.value)}
                   maxLength={140}
                   disabled={submitting || !!success}
-                  className="text-[16px] md:text-sm rounded-md border border-border bg-background px-2 py-1"
+                  className="text-[16px] md:text-sm rounded-md border border-border bg-background px-2 py-1 max-md:min-h-11"
                 />
               </label>
               <p className="text-xs text-muted-foreground">{add.manifest.urlNote}</p>
               <div className="relative">
-                <pre className="text-xs font-mono px-3 py-2 rounded bg-background overflow-x-auto max-h-56 overflow-y-auto">
+                <pre className="text-xs font-mono px-3 py-2 rounded bg-background overflow-x-auto max-h-56 overflow-y-auto max-md:pt-14">
                   {manifest}
                 </pre>
                 <button
                   type="button"
                   onClick={copyManifest}
-                  className="absolute top-1.5 right-1.5 text-xs rounded-md border border-border bg-background px-2 py-1 hover:bg-muted"
+                  className="absolute top-1.5 right-1.5 text-xs rounded-md border border-border bg-background px-2 py-1 hover:bg-muted max-md:min-h-11 max-md:min-w-11"
                 >
                   {manifestCopied ? add.copied : add.manifest.copyManifest}
                 </button>
@@ -2955,7 +2957,7 @@ export function AddChannelForm({
               onChange={(e) => setSlackBotToken(e.target.value)}
               placeholder="xoxb-..."
               disabled={submitting || !!success}
-              className={FIELD_INPUT}
+              className={cn(FIELD_INPUT, "max-md:min-h-11")}
             />
           </label>
           <label className="flex flex-col gap-1">
@@ -2966,7 +2968,7 @@ export function AddChannelForm({
               onChange={(e) => setSigningSecret(e.target.value)}
               placeholder="••••••••••••••••"
               disabled={submitting || !!success}
-              className={FIELD_INPUT}
+              className={cn(FIELD_INPUT, "max-md:min-h-11")}
             />
           </label>
         </div>
@@ -3338,7 +3340,7 @@ export function AddChannelForm({
             }
             disabled={submitting || !!success}
           >
-            <SelectTrigger size="sm" className="text-[16px] md:text-sm">
+            <SelectTrigger size="sm" className="text-[16px] md:text-sm max-md:min-h-11">
               <SelectValue
                 placeholder={
                   platform === "email"
@@ -3372,7 +3374,7 @@ export function AddChannelForm({
             type="button"
             onClick={() => void submit()}
             disabled={!canSubmit}
-            className="text-sm font-medium rounded-md bg-action text-action-foreground px-3 py-1.5 disabled:opacity-50"
+            className="text-sm font-medium rounded-md bg-action text-action-foreground px-3 py-1.5 disabled:opacity-50 max-md:min-h-11 max-md:min-w-11"
           >
             {submitting ? add.connecting : add.connect}
           </button>

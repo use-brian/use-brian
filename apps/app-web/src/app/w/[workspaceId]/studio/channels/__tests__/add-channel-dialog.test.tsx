@@ -116,4 +116,54 @@ describe("[COMP:app-web/studio-channels] Add channel dialog", () => {
     expect(host.querySelector("input")).not.toBeNull();
     expect(host.textContent).toContain("BotFather");
   });
+  it("retains a manifest draft across Hide and Show and copies without creating a channel", async () => {
+    const add = en.studioPage.channels.add;
+    const onCreated = vi.fn();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      await act(async () => {
+        root.render(localized(
+          <AddChannelDialog
+            open
+            onClose={vi.fn()}
+            workspaceId="workspace_1"
+            assistants={[]}
+            onCreated={onCreated}
+          />,
+        ));
+      });
+      const dialog = document.querySelector("[role='dialog']")!;
+      const button = (text: string) => [...dialog.querySelectorAll("button")]
+        .find((node) => node.textContent?.trim() === text)!;
+      await act(async () => button(add.manifest.show).click());
+      const name = dialog.querySelector("input[type='text']") as HTMLInputElement;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!
+          .call(name, "Fictional Helper");
+        name.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      const draft = dialog.querySelector("pre")!.textContent!;
+      expect(draft).toContain("name: Fictional Helper");
+      await act(async () => button(add.manifest.hide).click());
+      expect(dialog.querySelector("pre")).toBeNull();
+      await act(async () => button(add.manifest.show).click());
+      expect((dialog.querySelector("input[type='text']") as HTMLInputElement).value)
+        .toBe("Fictional Helper");
+      expect(dialog.querySelector("pre")!.textContent).toBe(draft);
+      await act(async () => button(add.manifest.copyManifest).click());
+      expect(writeText).toHaveBeenCalledExactlyOnceWith(draft);
+      expect(button(add.copied)).toBeDefined();
+      expect(button(add.connect).disabled).toBe(true);
+      expect(onCreated).not.toHaveBeenCalled();
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
 });
