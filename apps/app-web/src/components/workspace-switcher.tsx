@@ -620,7 +620,7 @@ function CreateWorkspacePanel({
           type="button"
           onClick={onBack}
           aria-label={t.create.back}
-          className="inline-flex size-11 items-center justify-center -ml-1 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors sm:size-auto sm:p-1"
+          className="inline-flex size-11 items-center justify-center -ml-1 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors md:size-auto md:p-1"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
             <path d="M15 18l-6-6 6-6" />
