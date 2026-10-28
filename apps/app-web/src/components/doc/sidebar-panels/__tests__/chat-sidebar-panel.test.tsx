@@ -170,6 +170,23 @@ afterEach(() => {
   container = null;
 });
 
+describe("[COMP:app-web/sidebar-panel-chat] failed history loads", () => {
+  it("shows recovery instead of empty history and loads the chats when retried", async () => {
+    navigation.search = "";
+    sessionApi.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed"));
+    await renderPanel();
+    expect(container?.querySelector('[role="alert"]')?.textContent).toContain("Could not load chats.");
+    expect(container?.textContent).not.toContain(en.chatApp.railEmpty);
+    sessionApi.listSessionsForAssistants.mockResolvedValue([
+      { id: "recovered-chat", title: "Recovered plan", channelId: "channel-2", lastActive: "2026-10-01", appOrigin: "chat", assistantId: "assistant-1" },
+    ]);
+    await act(async () => buttonNamed("Retry").click());
+    await flushEffects();
+    expect(container?.textContent).toContain("Recovered plan");
+    expect(container?.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
 describe("[COMP:app-web/sidebar-panel-chat] direct archive action", () => {
   it("archives from the row without opening the overflow menu or closing the chat", async () => {
     sessionApi.setSessionArchived.mockImplementationOnce(async () => { sessionApi.listWorkspaceSessions.mockResolvedValue([]); });

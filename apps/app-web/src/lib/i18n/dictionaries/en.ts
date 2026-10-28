@@ -9155,6 +9155,8 @@ export const en = {
     searchPlaceholder: "Search chats",
     railAria: "Chats",
     railEmpty: "No chats yet",
+    railLoadFailed: "Could not load chats.",
+    railRetry: "Retry",
     otherConversations: "Other conversations",
     loading: "Loading",
     rowActionsAria: "Chat actions",

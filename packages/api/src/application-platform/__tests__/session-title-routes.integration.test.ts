@@ -60,6 +60,21 @@ describe.sequential('[COMP:api/application-persistence] actual browser title DTO
    expect(row).toMatchObject({id:c.session.id,titleRevisionId:null})
   }
  })
+ it('reads browser title projections without recency writes while another reader holds the session row',async()=>{
+  const c=await setup(),fence=await c.f.pool.connect()
+  const before=(await c.f.pool.query('SELECT last_active_at FROM sessions WHERE id=$1',[c.session.id])).rows[0].last_active_at
+  try{
+   await fence.query('BEGIN')
+   await fence.query('SELECT id FROM sessions WHERE id=$1 FOR SHARE',[c.session.id])
+   for(const read of [()=>c.get('/'+c.session.id),()=>c.list(),()=>c.byChannel()]){
+    const response=await read()
+    expect(response.status,JSON.stringify(response.body)).toBe(200)
+   }
+   // Preparing an authored rename also resolves authority without changing activity.
+   await resolveSessionTitleAuthority({claims:c.claims,sessionId:c.session.id,readOnly:false})
+   expect((await c.f.pool.query('SELECT last_active_at FROM sessions WHERE id=$1',[c.session.id])).rows[0].last_active_at).toEqual(before)
+  }finally{await fence.query('ROLLBACK');fence.release()}
+ })
  it('labels existing personal and shared chats from admitted user text without promoting legacy names or writing a title',async()=>{
   const c=await setup()
   await c.f.pool.query("UPDATE sessions SET title='Fictional held historical name' WHERE id=$1",[c.session.id])

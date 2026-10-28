@@ -279,6 +279,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     expect(api.listSessionsForAssistants).toHaveBeenCalledWith({
       workspaceId: "w1",
       assistantIds: ["a1"],
+      strict: true,
     });
   });
 
@@ -309,8 +310,92 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     expect(api.listSessionsForAssistants).toHaveBeenCalledWith({
       workspaceId: "w1",
       assistantIds: ["a1"],
+      strict: true,
     });
     expect(text("personal")).toBe("Quarterly plan");
+  });
+});
+
+describe("[COMP:app-web/chat-sessions-cache] list failures", () => {
+  async function healthyLists() {
+    api.listWorkspaceAssistants.mockResolvedValue(ROSTER);
+    api.listSessionsForAssistants.mockResolvedValue(PERSONAL);
+    api.listWorkspaceSessions.mockResolvedValue(SHARED);
+    let latest: ChatSessionsData;
+    mount(<Probe onData={(data) => { latest = data; }} />);
+    await act(async () => { await settle(); await settle(); });
+    return () => latest!;
+  }
+
+  it("does not turn a failed cold roster read into successful empty history", async () => {
+    api.listWorkspaceAssistants.mockRejectedValue(new Error("Failed to list workspace assistants: 503"));
+    await expect(fetchPersonalChatSessions("w1")).rejects.toThrow();
+    expect(api.listSessionsForAssistants).not.toHaveBeenCalled();
+  });
+
+  it("retains healthy rows and disk history after a failed list refresh", async () => {
+    api.listWorkspaceAssistants.mockResolvedValue(ROSTER);
+    api.listSessionsForAssistants.mockResolvedValue(PERSONAL);
+    api.listWorkspaceSessions.mockResolvedValue(SHARED);
+    let latest: ChatSessionsData | undefined;
+    mount(<Probe onData={(data) => { latest = data; }} />);
+    await act(async () => { await settle(); await settle(); });
+    const snapshot = idb.store.get(chatSessionsSnapshotKey("u1", "w1"));
+    const failure = new Error("chat_list_failed: 500");
+    api.listSessionsForAssistants.mockRejectedValue(failure);
+    await act(async () => { await latest!.refreshPersonal(); await settle(); });
+    expect(text("personal")).toBe("Quarterly plan");
+    expect(latest?.personalError).toBe(failure);
+    expect(idb.store.get(chatSessionsSnapshotKey("u1", "w1"))).toBe(snapshot);
+  });
+
+  it("evicts a denied personal value so a later server failure cannot restore it", async () => {
+    const latest = await healthyLists();
+    api.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed: 403"));
+    await act(async () => { await latest().refreshPersonal(); await settle(); });
+    expect(latest().personal).toBeNull();
+    expect(readSurfaceCache(chatSessionsCacheKey("w1")).data).toBeUndefined();
+    api.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed: 500"));
+    await act(async () => { await latest().refresh(); await settle(); });
+    expect(latest().personal).toBeNull();
+    expect(text("personal")).not.toBe("Quarterly plan");
+  });
+
+  it("keeps independently current personal history available when only the shared list is denied", async () => {
+    const latest = await healthyLists();
+    api.listWorkspaceSessions.mockRejectedValue(new Error("chat_list_failed: 403"));
+    await act(async () => { await latest().refreshShared(); await settle(); });
+    expect(latest().personal).toEqual(PERSONAL);
+    expect(latest().personalError).toBeUndefined();
+    expect(latest().shared).toBeNull();
+    expect(readSurfaceCache(chatSharedSessionsCacheKey("w1")).data).toBeUndefined();
+  });
+
+  it("cannot restore denied history when only the roster recovers", async () => {
+    const latest = await healthyLists();
+    api.listWorkspaceAssistants.mockRejectedValue(new Error("Failed to list workspace assistants: 403"));
+    api.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed: 500"));
+    api.listWorkspaceSessions.mockRejectedValue(new Error("chat_list_failed: 500"));
+    await act(async () => { await latest().refresh(); await settle(); await settle(); });
+    expect(latest().personal).toBeNull();
+    expect(latest().shared).toBeNull();
+    api.listWorkspaceAssistants.mockResolvedValue(ROSTER);
+    await act(async () => { await latest().refresh(); await settle(); });
+    expect(latest().personal).toBeNull();
+    expect(latest().shared).toBeNull();
+  });
+
+  it("does not hydrate history outside the existing offline authority window", async () => {
+    await writeChatSessionsSnapshot("u1", "w1", { personal: PERSONAL, shared: SHARED });
+    const stored = idb.store.get(chatSessionsSnapshotKey("u1", "w1")) as { updatedAt: number };
+    stored.updatedAt = Date.now() - 60 * 60_000 - 1;
+    api.listWorkspaceAssistants.mockImplementation(never);
+    api.listSessionsForAssistants.mockImplementation(never);
+    api.listWorkspaceSessions.mockImplementation(never);
+    mount(<Probe />);
+    await act(async () => { await settle(); });
+    expect(text("personal")).toBe("SKELETON");
+    expect(text("shared")).toBe("SKELETON");
   });
 });
 

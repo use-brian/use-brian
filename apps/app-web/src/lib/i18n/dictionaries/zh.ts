@@ -8881,6 +8881,8 @@ export const zh: Dictionary = {
     searchPlaceholder: "搜尋對話",
     railAria: "對話",
     railEmpty: "尚未有對話",
+    railLoadFailed: "無法載入對話。",
+    railRetry: "重試",
     otherConversations: "其他對話",
     loading: "載入中",
     rowActionsAria: "對話操作",

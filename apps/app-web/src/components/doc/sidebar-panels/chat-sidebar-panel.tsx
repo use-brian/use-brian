@@ -161,6 +161,9 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     personal: rows,
     shared: sharedRows,
     refreshShared,
+    personalError,
+    revalidating,
+    refresh,
   } = useChatSessionsData(workspaceId);
   const projects = useCachedResource(surfaceDataKey("projects", workspaceId), () => listContextProjects(workspaceId, true));
   const [menuFor, setMenuFor] = useState<string | null>(null);
@@ -590,8 +593,17 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         <div>
           <div className={sectionHeaderCls}>{t.railAria}</div>
           <div className="flex flex-col">
-            {rows === null && <RailRowsSkeleton />}
-            {rows !== null && personalGroups.length === 0 && (
+            {rows === null && !personalError && <RailRowsSkeleton />}
+            {Boolean(personalError) && (
+              <div role="alert" className="px-2 py-1 text-xs text-sidebar-foreground/70">
+                <p>{t.railLoadFailed}</p>
+                <button type="button" disabled={revalidating} onClick={() => void refresh()}
+                  className="min-h-11 rounded px-2 text-sidebar-foreground underline disabled:opacity-50 md:min-h-8">
+                  {t.railRetry}
+                </button>
+              </div>
+            )}
+            {rows !== null && !personalError && personalGroups.length === 0 && (
               <div className="select-none px-2 py-1 text-[12px] text-sidebar-foreground/40">
                 {t.railEmpty}
               </div>

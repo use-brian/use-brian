@@ -8753,6 +8753,8 @@ export const zhCN: Dictionary = {
     searchPlaceholder: "搜索对话",
     railAria: "对话",
     railEmpty: "尚未有对话",
+    railLoadFailed: "无法加载对话。",
+    railRetry: "重试",
     otherConversations: "其他对话",
     loading: "加载中",
     rowActionsAria: "对话操作",

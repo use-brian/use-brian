@@ -260,8 +260,8 @@ export async function fetchLatestSession(opts: {
  * Filtering by origin would split a user's history across two surfaces for no
  * reason they could see.
  *
- * Returns `[]` on any failure — an empty rail reads as "no history yet", which
- * is the same thing the user does next either way (start a chat).
+ * Cached lists use strict mode: a failed read must not replace history with
+ * a successful empty value. Legacy best-effort consumers can omit it.
  */
 export async function listPersonalSessions(opts: {
   workspaceId: string;
@@ -283,11 +283,14 @@ export async function listPersonalSessions(opts: {
       opts.signal ? { signal: opts.signal } : {},
     );
     if (!res.ok) {
-      if (opts.strict) throw new Error("chat_list_failed");
+      if (opts.strict) throw new Error(`chat_list_failed: ${res.status}`);
       return [];
     }
     const data = (await res.json()) as RawListRow[];
-    if (!Array.isArray(data)) return [];
+    if (!Array.isArray(data)) {
+      if (opts.strict) throw new Error("chat_list_invalid_response");
+      return [];
+    }
     return data.map((r) => ({
       id: r.id,
       title: r.title,
@@ -496,11 +499,14 @@ export async function listWorkspaceSessions(opts: {
       opts.signal ? { signal: opts.signal } : {},
     );
     if (!res.ok) {
-      if (opts.strict) throw new Error("chat_list_failed");
+      if (opts.strict) throw new Error(`chat_list_failed: ${res.status}`);
       return [];
     }
     const data = (await res.json()) as RawWorkspaceRow[];
-    if (!Array.isArray(data)) return [];
+    if (!Array.isArray(data)) {
+      if (opts.strict) throw new Error("chat_list_invalid_response");
+      return [];
+    }
     return data.map(toWorkspaceSession);
   } catch (error) {
     if (opts.strict) throw error;

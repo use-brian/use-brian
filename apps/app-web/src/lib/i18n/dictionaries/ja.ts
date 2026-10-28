@@ -8928,6 +8928,8 @@ export const ja: Dictionary = {
     searchPlaceholder: "チャットを検索",
     railAria: "チャット",
     railEmpty: "チャットはまだありません",
+    railLoadFailed: "チャットを読み込めませんでした。",
+    railRetry: "再試行",
     otherConversations: "その他の会話",
     loading: "読み込み中",
     rowActionsAria: "チャットの操作",
