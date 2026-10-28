@@ -26,6 +26,8 @@
  *   and fires a retrieval storm.
  */
 
+import { computeSimilarity } from '../knowledge/similarity.js'
+
 export type MemoryEntry = {
   id: string
   summary: string
@@ -315,15 +317,7 @@ export function buildMemoryContext(params: {
     )
     .filter((m) => {
       if (kbSummaries.length === 0) return true
-      // Lazy import — only compute similarity when KB entries exist
-      const words = (s: string) => new Set(s.toLowerCase().split(/\s+/).filter(Boolean))
-      const jaccard = (a: string, b: string) => {
-        const wa = words(a), wb = words(b)
-        const inter = [...wa].filter((w) => wb.has(w)).length
-        const union = new Set([...wa, ...wb]).size
-        return union === 0 ? 0 : inter / union
-      }
-      return !kbSummaries.some((kbs) => jaccard(m.summary, kbs) >= 0.85)
+      return !kbSummaries.some((kbs) => computeSimilarity(m.summary, kbs) >= 0.85)
     })
   if (nonIdentity.length > 0) {
     // Q1 lock: flat by recency-of-recall, tags-as-chips per line.
