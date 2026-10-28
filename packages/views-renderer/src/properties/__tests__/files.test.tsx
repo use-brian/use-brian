@@ -67,6 +67,72 @@ function widget(files: FileRef[]): A2UIRowValue {
   return { type: 'files', files }
 }
 
+type PreviewEnv = Partial<Record<'PUBLIC_API_URL' | 'API_DOMAIN' | 'NEXT_PUBLIC_API_URL', string>>
+
+function withPreviewConfig(
+  runtime: { apiUrl?: unknown } | undefined,
+  env: PreviewEnv,
+  run: () => void,
+): void {
+  const configKey = '__USE_BRIAN_PUBLIC_CONFIG__'
+  const previousConfig = Object.getOwnPropertyDescriptor(globalThis, configKey)
+  const envKeys = ['PUBLIC_API_URL', 'API_DOMAIN', 'NEXT_PUBLIC_API_URL'] as const
+  const previousEnv = envKeys.map((key) => [key, process.env[key]] as const)
+  try {
+    Object.defineProperty(globalThis, configKey, { configurable: true, writable: true, value: runtime })
+    for (const key of envKeys) {
+      const value = env[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    run()
+  } finally {
+    if (previousConfig) Object.defineProperty(globalThis, configKey, previousConfig)
+    else Reflect.deleteProperty(globalThis, configKey)
+    for (const [key, value] of previousEnv) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+const previewUrlCases: Array<{
+  name: string
+  runtime?: { apiUrl?: unknown }
+  env?: PreviewEnv
+  path: string
+  expected: string
+}> = [
+  { name: 'relative origin', path: 'cover.png', expected: '/api/files/cover.png/preview' },
+  {
+    name: 'runtime origin overrides SSR origins, trims slashes and encodes the complete path',
+    runtime: { apiUrl: 'https://runtime.example///' },
+    env: { PUBLIC_API_URL: 'https://public.example', API_DOMAIN: 'domain.example', NEXT_PUBLIC_API_URL: 'https://next.example' },
+    path: 'folder/cover space#?雪.png',
+    expected: 'https://runtime.example/api/files/folder%2Fcover%20space%23%3F%E9%9B%AA.png/preview',
+  },
+  {
+    name: 'PUBLIC_API_URL takes precedence over other SSR origins',
+    env: { PUBLIC_API_URL: 'https://public.example///', API_DOMAIN: 'domain.example', NEXT_PUBLIC_API_URL: 'https://next.example' },
+    path: 'cover.png', expected: 'https://public.example/api/files/cover.png/preview',
+  },
+  {
+    name: 'API_DOMAIN takes precedence over NEXT_PUBLIC_API_URL',
+    env: { API_DOMAIN: 'domain.example', NEXT_PUBLIC_API_URL: 'https://next.example' },
+    path: 'cover.png', expected: 'https://domain.example/api/files/cover.png/preview',
+  },
+  {
+    name: 'NEXT_PUBLIC_API_URL remains the final SSR fallback',
+    env: { NEXT_PUBLIC_API_URL: 'https://next.example///' },
+    path: 'cover.png', expected: 'https://next.example/api/files/cover.png/preview',
+  },
+  {
+    name: 'an explicit empty runtime origin retains relative URLs',
+    runtime: { apiUrl: '' }, env: { PUBLIC_API_URL: 'https://public.example' },
+    path: 'cover.png', expected: '/api/files/cover.png/preview',
+  },
+]
+
 // ── Module registration ─────────────────────────────────────────────
 
 describe('[COMP:views/property-files] files property — registry', () => {
@@ -81,26 +147,15 @@ describe('[COMP:views/property-files] files property — registry', () => {
 
 describe('[COMP:views/property-files] files property — runtime API URL', () => {
   it('uses the host runtime config without a package rebuild', () => {
-    const host = globalThis as typeof globalThis & {
-      __USE_BRIAN_PUBLIC_CONFIG__?: { apiUrl: string }
-    }
-    host.__USE_BRIAN_PUBLIC_CONFIG__ = { apiUrl: 'https://api.example.com' }
-    try {
+    withPreviewConfig({ apiUrl: 'https://api.example.com' }, {}, () => {
       expect(runtimePublicApiUrl()).toBe('https://api.example.com')
-    } finally {
-      delete host.__USE_BRIAN_PUBLIC_CONFIG__
-    }
+    })
   })
 
   it('derives the SSR origin from API_DOMAIN', () => {
-    const previous = process.env.API_DOMAIN
-    process.env.API_DOMAIN = 'api.runtime.example'
-    try {
+    withPreviewConfig(undefined, { API_DOMAIN: 'api.runtime.example' }, () => {
       expect(runtimePublicApiUrl()).toBe('https://api.runtime.example')
-    } finally {
-      if (previous === undefined) delete process.env.API_DOMAIN
-      else process.env.API_DOMAIN = previous
-    }
+    })
   })
 })
 
@@ -160,6 +215,52 @@ describe('[COMP:views/property-files] files property — Cell', () => {
     const v = widget([pdf('a.pdf'), pdf('b.pdf')])
     const html = renderToStaticMarkup(Cell({ value: v }))
     expect(html).not.toMatch(/<img[^>]+\/api\/files/)
+  })
+})
+
+describe('[COMP:views/property-files] rendered cover preview URL policy', () => {
+  const renderFiles = (files: FileRef[]) => renderToStaticMarkup(FilesProperty.Cell({ value: widget(files) }))
+
+  it.each(previewUrlCases)('$name', ({ runtime, env, path, expected }) => {
+    withPreviewConfig(runtime, env ?? {}, () => {
+      const first = { ...img('first.png'), path }
+      const html = renderFiles([pdf('before.pdf'), first, img('later.png')])
+      expect(html).toContain(`src="${expected}"`)
+      expect(html).toContain('alt="first.png"')
+      expect(html).toContain('loading="lazy"')
+      expect(html).toContain('aspect-[16/9]')
+      expect(html).not.toMatch(/<img[^>]+src="[^"]*img-later/)
+    })
+  })
+
+  it('retains the named Files placeholder for an unsupported image bucket', () => {
+    withPreviewConfig({ apiUrl: 'https://runtime.example///' }, {}, () => {
+      const html = renderFiles([{ ...img('unsupported.png'), bucket: 'gcs' }])
+      expect(html).not.toMatch(/<img\b/)
+      expect(html).toContain('aria-label="unsupported.png"')
+      expect(html).toContain('border-dashed')
+      expect(html).toContain('unsupported.png')
+    })
+  })
+
+  it('reads the current runtime origin on each render', () => {
+    const runtime = { apiUrl: 'https://first.example///' }
+    withPreviewConfig(runtime, {}, () => {
+      const first = renderFiles([img('cover.png')])
+      runtime.apiUrl = 'https://second.example/'
+      const second = renderFiles([img('cover.png')])
+      expect(first).toContain('src="https://first.example/api/files/img-cover.png/preview"')
+      expect(second).toContain('src="https://second.example/api/files/img-cover.png/preview"')
+      expect(second).not.toContain('https://first.example')
+    })
+  })
+
+  it('reads runtime configuration before rejecting an unsupported bucket', () => {
+    const failure = new Error('runtime configuration unavailable')
+    const runtime = { get apiUrl(): string { throw failure } }
+    withPreviewConfig(runtime, {}, () => {
+      expect(() => renderFiles([{ ...img('unsupported.png'), bucket: 'gcs' }])).toThrow(failure)
+    })
   })
 })
 
