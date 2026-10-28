@@ -109,10 +109,14 @@ export function createResearchTurnObserver(now: () => Date = () => new Date()) {
 
 export type ResearchDeliveryDeps = {
   settle(input: SettleResearchActivityInput): Promise<ResearchActivity>
+  /** Current viewer projection after a refused attempt; saved status is historical. */
+  currentActivity?(userId: string, workspaceId: string, activityId: string): Promise<ResearchActivity | null>
   /** Re-read an artifact as the actor; `readable` false when it is gone or hidden. */
   inspect(userId: string, kind: ResearchArtifactKind, artifactId: string): Promise<{ readable: boolean; version: number | null }>
   /** Author the default Page through the canonical page writer. */
   writeDefaultPage(input: {
+    activityId: string
+    requestMessageId: string | null
     userId: string
     workspaceId: string
     pageId: string
@@ -160,6 +164,8 @@ export async function recordResearchDelivery(deps: ResearchDeliveryDeps, params:
   if (receipts.length === 0 && answer && !params.interrupted && activity.plannedPageId) {
     try {
       const page = await deps.writeDefaultPage({
+        activityId: activity.id,
+        requestMessageId: activity.requestMessageId,
         userId: activity.actorUserId,
         workspaceId: activity.workspaceId,
         pageId: activity.plannedPageId,
@@ -171,6 +177,10 @@ export async function recordResearchDelivery(deps: ResearchDeliveryDeps, params:
       })
       receipts = [{ kind: 'page', artifactId: page.pageId, version: page.version, toolName: 'research.default_page', toolUseId: activity.id, operation: 'create' }]
     } catch (error) {
+      if (deps.currentActivity) {
+        const current = await deps.currentActivity(activity.actorUserId,activity.workspaceId,activity.id)
+        if (!current || current.status === 'saved') throw Object.assign(new Error('Research source is not currently available'), { code: 'research_source_unavailable' })
+      }
       saveError = errorCode(error)
     }
   }

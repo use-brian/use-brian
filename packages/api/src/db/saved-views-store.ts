@@ -1,5 +1,6 @@
 import type { PoolClient } from 'pg'
 import { withPagePlacement } from './page-placement-admission.js'
+import { readResearchDefaultPageSource, researchSourceUnavailable } from './research-store.js'
 /**
  * Saved views store, backed by PostgreSQL (migration 120 + 184).
  *
@@ -605,6 +606,10 @@ export function createDbSavedViewStore(
       const origin: NameOrigin = nameOrigin ?? 'placeholder'
       let replay = false
       const result = await withPagePlacement(workspaceId, userId, { teamspaceId, projectId, nestParentId, ...(sharedProjectId !== undefined ? { sharedProjectId } : {}) }, async (client, placement) => {
+        const privateProof = options?.provenance.kind === 'research-private' ? options.provenance : null
+        if (privateProof) {
+          if (id !== privateProof.pageId || !(await readResearchDefaultPageSource(client, { userId,workspaceId,activityId:privateProof.activityId,requestMessageId:privateProof.requestMessageId,pageId:privateProof.pageId })).private) throw researchSourceUnavailable()
+        }
         const inserted = await client.query<FullRow>(
         // `position` appends to the end of the destination sibling set so
         // new pages get a distinct, contiguous slot instead of all sharing
@@ -684,10 +689,12 @@ export function createDbSavedViewStore(
         const existing = await client.query<FullRow>(
           `SELECT ${FULL_SELECT} FROM saved_views
            WHERE id = $1 AND workspace_id = $2 AND created_by = $3
-             AND saved_view_root_operation_scope_allows(id,true)`,
-          [id, workspaceId, userId])
+             AND saved_view_root_operation_scope_allows(id,true)
+             AND (NOT $4::boolean OR (teamspace_id IS NULL AND nest_parent_id IS NULL AND project_id IS NULL
+               AND shared_project_id IS NULL AND clearance='internal' AND public.saved_view_edit_operation_scope_allows(id)))`,
+          [id, workspaceId, userId, !!privateProof])
         if (!existing.rows[0]) {
-          throw Object.assign(new Error('Page ID is already in use'), { code: 'PAGE_ID_CONFLICT' })
+          throw Object.assign(new Error('Page ID is already in use'), { code: privateProof ? 'research_page_placement_conflict' : 'PAGE_ID_CONFLICT' })
         }
         replay = true
         return existing

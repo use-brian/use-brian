@@ -609,12 +609,17 @@ export type PageWriteActor = 'user' | 'system'
 
 // ── Store interface ───────────────────────────────────────────────────
 
-/** Internal-only evidence supplied by an authenticated, source-free human
- * authoring adapter. Never deserialize from request/tool JSON, infer from the
- * row creator, or attach to imports, copies, generated bodies or source pages.
+/** Internal-only provenance, never deserialized from request/tool JSON.
+ * Human evidence is limited to authenticated source-free authoring, never
+ * imports/copies/generated bodies. Research pointers require current native
+ * source admission and do not enable ready-mode source-derived writes.
  * A parent proves placement, not content provenance. */
 export type SavedViewCreationOptions = {
-  provenance: { kind: 'human-authored'; actorId: string }
+  provenance: { kind: 'human-authored'; actorId: string } | {
+    /** Server-only persisted research pointers, never caller-supplied authority.
+     * This remains unsupported by ready-mode source-derived admission. */
+    kind: 'research-private'; actorId: string; activityId: string; requestMessageId: string; pageId: string
+  }
 }
 
 export type SavedViewStore = {

@@ -711,7 +711,7 @@ describe('[COMP:api/saved-views-store] idempotent offline creation', () => {
     const [user, sql, params] = mockQueryWithRLS.mock.calls[1] as [string, string, unknown[]]
     expect(user).toBe(USER_ID)
     expect(sql).toContain('workspace_id = $2 AND created_by = $3')
-    expect(params).toEqual([VIEW_ID, WORKSPACE_ID, USER_ID])
+    expect(params).toEqual([VIEW_ID, WORKSPACE_ID, USER_ID, false])
   })
   it('refuses a collision when the scoped lookup cannot see the existing page', async () => {
     mockQueryWithRLS.mockResolvedValue({ rows: [], rowCount: 0 } as never)

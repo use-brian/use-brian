@@ -165,6 +165,75 @@ export async function withResearchTransaction<T>(work: (client: pg.PoolClient) =
   }
 }
 
+/** Exact persisted identity, not an audience/envelope supplied by a caller. */
+export type ResearchDefaultPageRefs = {
+  userId: string; workspaceId: string; activityId: string; requestMessageId: string | null; pageId: string
+}
+
+type ResearchPageSourceRow = SessionKindRow & {
+  sessionId: string; sessionOwner: string; projectId: string | null; sessionProjectId: string | null
+  expectedVersion: string | null; actualVersion: string | null; requestText: unknown
+  sensitivity: string; messageSensitivity: string | null; sessionSensitivity: string | null
+  compartments: string[]; messageCompartments: string[] | null; sessionCompartments: string[] | null; messageProjects: string[] | null
+}
+export type ResearchDefaultPageSource = {
+  private: boolean; sessionId: string; projectId: string | null; requestText: string
+}
+export function researchSourceUnavailable(): Error & { code: string } {
+  return Object.assign(new Error('Research source is not currently available'), { code: 'research_source_unavailable' })
+}
+
+/** Current native policies are inherited by this app-client SELECT. Never run
+ * inside readAdmissionPolicy's temporary metadata elevation or an owner query. */
+export async function readResearchDefaultPageSource(client: pg.PoolClient, refs: ResearchDefaultPageRefs): Promise<ResearchDefaultPageSource> {
+  const elevated = (await client.query<{ value: string | null }>("SELECT current_setting('app.system_bypass',true) AS value")).rows[0]?.value
+  if (elevated === 'true' || !refs.requestMessageId) throw researchSourceUnavailable()
+  const r = await client.query<ResearchPageSourceRow>(`SELECT s.id AS "sessionId",s.user_id AS "sessionOwner",
+    s.visibility,s.mode,s.channel_type AS "channelType",s.channel_id AS "channelId",s.anchor_kind AS "anchorKind",
+    s.anchor_ref AS "anchorRef",s.app_origin AS "appOrigin",s.transient,
+    a.project_id AS "projectId",s.context_project_id AS "sessionProjectId",
+    a.request_message_version::text AS "expectedVersion",m.scope_version::text AS "actualVersion",m.content AS "requestText",
+    a.sensitivity,m.sensitivity AS "messageSensitivity",s.effective_clearance AS "sessionSensitivity",
+    a.compartments,m.compartments AS "messageCompartments",s.context_compartments AS "sessionCompartments",m.project_ids AS "messageProjects"
+    FROM research_activities a JOIN sessions s ON s.id=a.session_id
+    JOIN session_messages m ON m.id=a.request_message_id AND m.session_id=s.id
+    JOIN workspace_members wm ON wm.workspace_id=a.workspace_id AND wm.user_id=$1
+    WHERE a.id=$2 AND a.workspace_id=$3 AND a.actor_user_id=$1 AND a.planned_page_id=$4
+      AND a.request_message_id=$5 AND s.workspace_id=a.workspace_id AND s.assistant_id=a.assistant_id
+      AND m.workspace_id=a.workspace_id AND m.assistant_id=a.assistant_id AND m.role='user'`,
+  [refs.userId,refs.activityId,refs.workspaceId,refs.pageId,refs.requestMessageId])
+  const row = r.rows[0]
+  if (!row || !row.expectedVersion || row.expectedVersion !== row.actualVersion || row.projectId !== row.sessionProjectId) throw researchSourceUnavailable()
+  const kind = classifySession(row)
+  const personalWeb = kind.audience === 'personal' && kind.transport === 'web' && kind.anchor.kind === 'none' && row.projectId === null
+  if (personalWeb) {
+    const tiers = [row.sensitivity,row.messageSensitivity,row.sessionSensitivity]
+    const labels = [row.compartments,row.messageCompartments,row.sessionCompartments,row.messageProjects]
+    if (kind.lane !== 'conversation' || row.sessionOwner !== refs.userId
+      || tiers.some(t => t !== 'public' && t !== 'internal')
+      || labels.some(l => !Array.isArray(l) || l.length !== 0)) throw researchSourceUnavailable()
+  }
+  const content = row.requestText
+  const requestText = typeof content === 'string' ? content : Array.isArray(content)
+    ? content.flatMap((b: unknown) => b && typeof b === 'object' && (b as {type?:unknown}).type === 'text' && typeof (b as {text?:unknown}).text === 'string' ? [(b as {text:string}).text] : []).join('\n') : ''
+  return { private: personalWeb, sessionId: row.sessionId, projectId: row.projectId, requestText }
+}
+
+export async function researchDefaultPageSourceForViewer(refs: ResearchDefaultPageRefs): Promise<ResearchDefaultPageSource> {
+  return asViewer(refs.userId, client => readResearchDefaultPageSource(client,refs))
+}
+
+/** Selected native personal rows can be pinned under their own policies. The
+ * workspace barrier is held by withPagePlacement before this helper runs. */
+export async function pinResearchPrivatePageSource(client: pg.PoolClient, refs: ResearchDefaultPageRefs): Promise<void> {
+  const source = await readResearchDefaultPageSource(client,refs)
+  if (!source.private) throw researchSourceUnavailable()
+  const member = await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE', [refs.workspaceId,refs.userId])
+  const session = await client.query('SELECT id FROM sessions WHERE id=$1 AND user_id=$2 FOR SHARE', [source.sessionId,refs.userId])
+  const message = await client.query('SELECT id FROM session_messages WHERE id=$1 AND session_id=$2 FOR SHARE', [refs.requestMessageId,source.sessionId])
+  if (!member.rows.length || !session.rows.length || !message.rows.length || !(await readResearchDefaultPageSource(client,refs)).private) throw researchSourceUnavailable()
+}
+
 // ── Activity writes ───────────────────────────────────────────────────────
 
 export type OpenResearchActivityInput = {

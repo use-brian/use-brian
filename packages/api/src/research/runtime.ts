@@ -17,6 +17,8 @@ import {
   listResearchMessagesAfterSystem,
   openResearchActivitySystem,
   recordResearchFeedbackSystem,
+  researchDefaultPageSourceForViewer,
+  researchSourceUnavailable,
   settleResearchActivitySystem,
   type ResearchActivity,
   type ResearchSensitivity,
@@ -25,7 +27,7 @@ import { getPool } from '../db/client.js'
 import { createDbSavedViewStore } from '../db/saved-views-store.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { publishPageLifecycle } from '../page-event-fanout.js'
-import type { ResearchDeliveryDeps } from './delivery.js'
+import { researchTitleFor, type ResearchDeliveryDeps } from './delivery.js'
 import { captureResearchFollowup, replayResearchFollowups, type FollowupCaptureResult, type ResearchFeedbackDeps } from './feedback.js'
 
 const RANK: Record<ResearchSensitivity, number> = { public: 0, internal: 1, confidential: 2 }
@@ -93,6 +95,9 @@ export function createResearchDeliveryDeps(savedViewStore?: SavedViewStore): Res
       return settled
     },
     inspect: artifactReadableForViewer,
+    async currentActivity(userId,workspaceId,activityId) {
+      return (await getResearchActivityForViewer(userId,workspaceId,activityId))?.activity ?? null
+    },
     async writeDefaultPage(input) {
       // The canonical writer places a new page at `internal`; it has no
       // clearance input. A confidential source floor therefore fails closed
@@ -100,6 +105,9 @@ export function createResearchDeliveryDeps(savedViewStore?: SavedViewStore): Res
       if (input.sensitivity === 'confidential') {
         throw Object.assign(new Error('research output is confidential'), { code: 'research_confidential_floor' })
       }
+      const source = await researchDefaultPageSourceForViewer({ userId:input.userId,workspaceId:input.workspaceId,
+        activityId:input.activityId,requestMessageId:input.requestMessageId,pageId:input.pageId })
+      if (source.projectId !== input.projectId) throw researchSourceUnavailable()
       const blocks = normalizeMarkdownBlocks(markdownToBlocks(input.markdown))
       const shared = input.projectId ? await sharedProjectActive(input.projectId, input.workspaceId) : false
       const view = await store().createDraft({
@@ -107,7 +115,7 @@ export function createResearchDeliveryDeps(savedViewStore?: SavedViewStore): Res
         userId: input.userId,
         workspaceId: input.workspaceId,
         writtenBy: 'system',
-        name: input.title,
+        name: source.private ? researchTitleFor(source.requestText) : input.title,
         nameOrigin: 'user',
         icon: null,
         entity: 'tasks',
@@ -115,10 +123,14 @@ export function createResearchDeliveryDeps(savedViewStore?: SavedViewStore): Res
         binding: { entity: 'tasks', viewType: 'table' },
         page: { blocks },
         state: 'saved',
-        originPrompt: input.originPrompt ?? undefined,
+        originPrompt: source.private ? source.requestText : input.originPrompt ?? undefined,
+        ...(source.private ? { teamspaceId: null } : {}),
         ...(input.projectId ? (shared ? { sharedProjectId: input.projectId } : { projectId: input.projectId }) : {}),
-      } as Parameters<SavedViewStore['createDraft']>[0])
-      return { pageId: view.id, version: 1 }
+      } as Parameters<SavedViewStore['createDraft']>[0], source.private ? { provenance: { kind:'research-private',actorId:input.userId,
+        activityId:input.activityId,requestMessageId:input.requestMessageId!,pageId:input.pageId } } : undefined)
+      const inspected = await artifactReadableForViewer(input.userId,'page',view.id)
+      if (!inspected.readable || inspected.version === null) throw researchSourceUnavailable()
+      return { pageId: view.id, version: inspected.version }
     },
   }
 }

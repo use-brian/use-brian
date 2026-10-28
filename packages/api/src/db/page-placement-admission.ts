@@ -5,6 +5,7 @@ import { applyRLSGucs, getAppPool, rollbackAndRelease } from './client.js'
 import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
 import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { pinResearchPrivatePageSource, researchSourceUnavailable } from './research-store.js'
 
 export type PagePlacement = {
   /** A shared Project collection (project-shared-spaces.md -> "Pages"); exclusive of a teamspace for new pages. */
@@ -179,6 +180,11 @@ export async function withPagePlacement<T>(
       [workspaceId, userId, placement.teamspaceId, sensitivity, placement.projectId ?? null, placement.sharedProjectId ?? null])).rows[0]
       if (!allowed?.ok) throw new WorkspaceAccessError('context_not_available', 404)
       placement.clearance = sensitivity
+    }
+    if (options?.provenance.kind === 'research-private') {
+      const proof = options.provenance
+      if (proof.actorId !== userId || input.teamspaceId !== null || input.nestParentId || input.projectId || input.sharedProjectId) throw researchSourceUnavailable()
+      await pinResearchPrivatePageSource(client, { userId,workspaceId,activityId:proof.activityId,requestMessageId:proof.requestMessageId,pageId:proof.pageId })
     }
     const result = await write(client, placement, source)
     await client.query('COMMIT')
