@@ -1176,7 +1176,7 @@ export const TuningChatPanel = forwardRef<
             />
           </div>
           <div className="flex flex-wrap items-center gap-0.5 px-2 pb-2 pt-1 md:flex-nowrap">
-            {dockRecorder ? <DockRecorderButton rec={dockRecorder} className={inlineRecorderClass} /> : null}
+            {dockRecorder ? <DockRecorderButton rec={dockRecorder} className={cn(inlineRecorderClass, "h-11 md:h-9 [&>button]:min-w-11 md:[&>button]:min-w-0")} /> : null}
             {/* A desktop rail can be narrower than a phone. Phone controls may
                 wrap to preserve touch targets; desktop controls compress into
                 one row so the tier picker and Send are never orphaned below. */}
@@ -1185,7 +1185,7 @@ export const TuningChatPanel = forwardRef<
                 <SelectTrigger
                   size="sm"
                   aria-label={tChat.modelLabel}
-                  className="min-w-0 text-[16px] md:text-xs gap-1.5 bg-muted/50 hover:bg-muted border-transparent"
+                  className="min-h-11 md:min-h-0 min-w-0 text-[16px] md:text-xs gap-1.5 bg-muted/50 hover:bg-muted border-transparent"
                 >
                   <span className="min-w-0 truncate">{model === "pro" ? t.modelPro : model === "max" ? t.modelMax : t.modelStandard}</span>
                 </SelectTrigger>
