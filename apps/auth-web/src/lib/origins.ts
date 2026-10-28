@@ -2,11 +2,11 @@ import type { PortalConfig } from "./config";
 
 export function safeReturnUrl(raw: string | null | undefined, config: PortalConfig): URL | null {
   if (!raw || raw.startsWith("//")) return null;
-  if (raw.startsWith("/")) {
-    const url = new URL(raw, config.portalOrigin);
-    return url.pathname === "/invite" ? url : null;
-  }
   try {
+    if (raw.startsWith("/")) {
+      const url = new URL(raw, config.portalOrigin);
+      return url.origin === config.portalOrigin && url.pathname === "/invite" ? url : null;
+    }
     const url = new URL(raw);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
     return url.origin === config.appOrigin || url.origin === config.portalOrigin ? url : null;
