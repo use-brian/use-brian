@@ -18,7 +18,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const user = vi.hoisted(() => ({ id: null as string | null }));
+const user = vi.hoisted(() => ({ id: null as string | null, apiOrigin: "http://api.example" }));
+vi.mock("@/lib/runtime-public-config", () => ({ publicRuntimeConfig: () => ({ apiUrl: user.apiOrigin }) }));
 vi.mock("@/lib/user", () => ({
   getUserInfo: () => (user.id ? { id: user.id, name: "n", email: "e" } : null),
 }));
@@ -64,6 +65,8 @@ import {
 
 afterEach(() => {
   user.id = null;
+  user.apiOrigin = "http://api.example";
+  vi.unstubAllGlobals();
 });
 
 // The doc-shell panel + Brain detail builders (Phase 3 steps 2 / 5). A
@@ -138,8 +141,28 @@ describe("[COMP:app-web/surface-prefetch] Surface prefetch keys", () => {
   });
 
   it("keys doc pages per page, not per surface", () => {
-    expect(docPageCacheKey("abc")).toBe("page:abc");
+    expect(docPageCacheKey("abc")).toMatch(/^page:abc:/);
     expect(docPageCacheKey("abc")).not.toBe(docPageCacheKey("def"));
+  });
+
+  it("isolates the existing Page key across viewer, workspace, API and unbound identity", () => {
+    user.id = "viewer-a";
+    vi.stubGlobal("window", { location: { pathname: "/w/00000000-0000-4000-8000-000000000001/p/page-a", hostname: "localhost" } });
+    const first = docPageCacheKey("page-a");
+    expect(first).toMatch(/^page:page-a:/);
+    expect(first).toContain("native");
+    user.id = "viewer-b";
+    expect(docPageCacheKey("page-a")).not.toBe(first);
+    user.id = "viewer-a";
+    vi.stubGlobal("window", { location: { pathname: "/w/00000000-0000-4000-8000-000000000003/p/page-a", hostname: "localhost" } });
+    expect(docPageCacheKey("page-a")).not.toBe(first);
+    vi.stubGlobal("window", { location: { pathname: "/w/00000000-0000-4000-8000-000000000001/p/page-a", hostname: "localhost" } });
+    user.apiOrigin = "http://other-api.example";
+    expect(docPageCacheKey("page-a")).not.toBe(first);
+    user.apiOrigin = "http://api.example/";
+    expect(docPageCacheKey("page-a")).toBe(first);
+    user.id = null;
+    expect(docPageCacheKey("page-a")).not.toBe(first);
   });
 
   it("keys the Studio section lists workspace-first with the viewer appended", () => {

@@ -74,6 +74,10 @@ export async function runDocAutoTitle(
 ): Promise<RunDocAutoTitleResult> {
   const { userId, pageId, provider, docPageStore, savedViewStore, minChars, backgroundModel } = params
 
+  // Cheap current actor admission precedes body/provider work for every caller.
+  const admission = await savedViewStore.getById(userId, pageId)
+  if (admission?.canEdit !== true) return SKIPPED
+
   // 1. Read the merged page (prefers the live Yjs snapshot). `nameOrigin`
   //    rides along — only 'placeholder' pages are eligible.
   const read = await docPageStore.getVersionedPage(userId, pageId)

@@ -98,6 +98,8 @@ type Props = {
   customOptions?: Array<{ key: string; label: string; sublabel: string }>;
   customSelectedKey?: string | null;
   onCustomSelect?: (key: string | null) => void;
+  /** Opt-in Page comment presentation: 44px targets below md, compact desktop. */
+  phoneTargets?: boolean;
   /** Row layout override (margin) for the host composer. */
   className?: string;
 };
@@ -119,6 +121,7 @@ export function ComposerControls({
   customOptions,
   customSelectedKey,
   onCustomSelect,
+  phoneTargets = false,
   className,
 }: Props) {
   const t = useT().chat;
@@ -134,7 +137,7 @@ export function ComposerControls({
   const aiOn = aiReply !== false;
   const aiTurnDisabled = showAiToggle && !aiOn;
   return (
-    <div className={cn("flex items-center gap-1.5", className)}>
+    <div className={cn("flex items-center gap-1.5", phoneTargets && "min-w-0 flex-wrap md:flex-nowrap", className)}>
       {showAiToggle ? (
         // Subtle icon-only toggle (label rides the tooltip + aria-label). Both
         // glyphs are horizontally symmetric — `Bot` and the single-figure
@@ -148,7 +151,8 @@ export function ComposerControls({
           aria-label={aiOn ? tc.aiReply : tc.aiReplyOff}
           title={aiOn ? tc.aiReplyHintOn : tc.aiReplyHintOff}
           className={cn(
-            "inline-flex size-7 shrink-0 items-center justify-center rounded-lg transition-colors",
+            "inline-flex shrink-0 items-center justify-center rounded-lg transition-colors",
+            phoneTargets ? "size-11 md:size-7" : "size-7",
             aiOn
               ? "bg-primary/15 text-primary hover:bg-primary/20"
               : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -186,9 +190,12 @@ export function ComposerControls({
           size="sm"
           aria-label={pickerLabel ?? t.modelLabel}
           disabled={aiTurnDisabled}
-          className="gap-1.5 border-transparent bg-muted/60 text-[16px] hover:bg-muted disabled:pointer-events-none disabled:opacity-40 md:text-xs"
+          className={cn(
+            "gap-1.5 border-transparent bg-muted/60 text-[16px] hover:bg-muted disabled:pointer-events-none disabled:opacity-40 md:text-xs",
+            phoneTargets && "min-h-11 min-w-11 max-w-full md:min-h-0 md:min-w-0",
+          )}
         >
-          <span className="font-medium">
+          <span className={cn("font-medium", phoneTargets && "min-w-0 truncate md:overflow-visible md:text-clip")}>
             {customSelectedKey
               ? customOptions?.find((o) => o.key === customSelectedKey)?.label ?? t.modelCustomGroup
               : meteredSelectedKey

@@ -90,7 +90,7 @@ describe("[COMP:app-web/live-app] Live sidebar panel", () => {
   it("keeps the persistent app rail outside the Live-local body", () => {
     const source = readFileSync(new URL("../../doc-sidebar.tsx", import.meta.url), "utf8");
     const rail = source.indexOf("<WorkspaceAppRail");
-    const body = source.indexOf('className="doc-sidebar-scroll');
+    const body = source.indexOf("doc-sidebar-scroll");
     const live = source.indexOf("<LiveSidebarPanel");
     for (const position of [rail, body, live]) {
       expect(position).toBeGreaterThanOrEqual(0);

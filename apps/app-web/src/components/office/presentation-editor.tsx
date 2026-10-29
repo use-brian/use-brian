@@ -546,7 +546,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   }
 
   return (
-    <div ref={rootRef} className={cn("flex min-h-0 flex-1 flex-col md:grid md:grid-cols-[var(--presentation-slide-rail-width)_0.5rem_minmax(0,1fr)]", railResizing && "select-none")} style={{ "--presentation-slide-rail-width": `${railWidth}px` } as CSSProperties} data-office-editor="presentation" data-properties-open={primary ? "true" : "false"} tabIndex={-1}>
+    <div ref={rootRef} className={cn("flex min-h-0 min-w-0 flex-1 flex-col md:grid md:grid-cols-[var(--presentation-slide-rail-width)_0.5rem_minmax(0,1fr)]", railResizing && "select-none")} style={{ "--presentation-slide-rail-width": `${railWidth}px` } as CSSProperties} data-office-editor="presentation" data-properties-open={primary ? "true" : "false"} tabIndex={-1}>
       {/* Below md the rail is a horizontal filmstrip above the canvas (report
           B row 18): a permanent 104px side rail left a 224px canvas at 360. */}
       <nav ref={railRef} data-slide-rail="true" className="flex shrink-0 gap-2 overflow-x-auto border-b bg-muted/30 p-2 md:block md:min-h-0 md:overflow-y-auto md:border-b-0" aria-label={t.slideRail} onPointerMove={updateSlideDrag} onPointerUp={finishSlideDrag} onPointerCancel={cancelSlideDrag}>

@@ -342,6 +342,18 @@ describe("[COMP:app-web/sessions-sdk] admitted title revision transport", () => 
 
 
 describe("[COMP:app-web/sessions-sdk] provider channel names", () => {
+  it.each([500, 503])("preserves personal and shared list HTTP %i as failures for cached readers", async (status) => {
+    vi.mocked(authFetch).mockImplementation(async () => new Response("", { status }));
+    await expect(listSessionsForAssistants({ workspaceId: "workspace", assistantIds: ["assistant"], strict: true })).rejects.toThrow();
+    await expect(listWorkspaceSessions({ workspaceId: "workspace", strict: true })).rejects.toThrow();
+  });
+
+  it("rejects malformed successful list responses in strict mode", async () => {
+    vi.mocked(authFetch).mockImplementation(async () => new Response(JSON.stringify({ error: "unavailable" })));
+    await expect(listPersonalSessions({ workspaceId: "workspace", strict: true })).rejects.toThrow();
+    await expect(listWorkspaceSessions({ workspaceId: "workspace", strict: true })).rejects.toThrow();
+  });
+
   it("preserves source names independently of conversation titles and accepts older servers", async () => {
     vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify([
       { id: "a", title: "Conversation title", channelId: "C123", channelType: "slack", channelName: "#engineering", lastActive: "2026-01-01" },

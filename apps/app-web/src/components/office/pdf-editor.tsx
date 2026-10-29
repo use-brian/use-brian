@@ -6,7 +6,7 @@ import { buttonVariants } from "@/components/ui/button";
  * every editable surface is a DOM projection of the Office PDF snapshot.
  * [COMP:app-web/office-pdf-editor] */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { PDFDocumentProxy } from "pdfjs-dist";
+import type { PDFDocumentLoadingTask, PDFDocumentProxy } from "pdfjs-dist";
 import type { OfficeCommand, PdfField, PdfOverlay, PdfPage, PdfRect, PdfSnapshot } from "@use-brian/office-model";
 import { CalendarPlus, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileImage, List, PenLine, RotateCw, Save, Trash2, Type } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -68,31 +68,46 @@ function overlayText(overlay: PdfOverlay): string {
 }
 
 function useProtectedPdf(artifactId: string) {
-  const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
-  const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
+  const [revision, setRevision] = useState(0);
+  const [projection, setProjection] = useState<{ artifactId: string; revision: number; document: PDFDocumentProxy | null; state: "ready" | "failed" } | null>(null);
   const generation = useRef(0);
   const refresh = useCallback(() => {
     generation.current += 1;
-    setDocument((current) => { void current?.destroy(); return null; });
-    setState("loading");
+    setProjection(null);
+    setRevision(current => current + 1);
   }, []);
 
   useEffect(() => {
     const owner = generation.current;
-    let loaded: PDFDocumentProxy | null = null;
+    let active = true;
+    let task: PDFDocumentLoadingTask | null = null;
+    let destroyed = false;
     let timer = 0;
+    const current = () => active && generation.current === owner;
+    const destroy = () => {
+      if (task && !destroyed) { destroyed = true; void task.destroy().catch(() => undefined); }
+    };
     void readOfficePdfSource(artifactId).then(async (source) => {
+      if (!current()) return;
+      const deadline = performance.now() + source.validForMs;
+      timer = window.setTimeout(refresh, source.validForMs - Math.min(250, source.validForMs / 2));
       const pdfjs = await import("pdfjs-dist");
+      if (!current()) return;
+      if (performance.now() >= deadline) { refresh(); return; }
       pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
-      const task = pdfjs.getDocument({ data: new Uint8Array(source.bytes.slice(0)), isEvalSupported: false });
-      loaded = await task.promise;
-      if (generation.current !== owner) { await loaded.destroy(); return; }
-      setDocument(loaded);
-      setState("ready");
-      timer = window.setTimeout(refresh, Math.max(1_000, source.validForMs - 250));
-    }).catch(() => { if (generation.current === owner) setState("failed"); });
-    return () => { window.clearTimeout(timer); void loaded?.destroy(); };
-  }, [artifactId, refresh, generation.current]);
+      task = pdfjs.getDocument({ data: new Uint8Array(source.bytes.slice(0)), isEvalSupported: false });
+      const document = await task.promise;
+      if (!current()) return;
+      if (performance.now() >= deadline) { refresh(); return; }
+      setProjection({ artifactId, revision, document, state: "ready" });
+    }).catch(() => {
+      if (!current()) return;
+      window.clearTimeout(timer);
+      destroy();
+      setProjection({ artifactId, revision, document: null, state: "failed" });
+    });
+    return () => { active = false; window.clearTimeout(timer); destroy(); };
+  }, [artifactId, refresh, revision]);
 
   useEffect(() => {
     const purge = () => refresh();
@@ -102,7 +117,8 @@ function useProtectedPdf(artifactId: string) {
     return () => { window.removeEventListener("focus", purge); window.document.removeEventListener("visibilitychange", visible); };
   }, [refresh]);
 
-  return { document, state, refresh };
+  const visible = projection?.artifactId === artifactId && projection.revision === revision ? projection : null;
+  return { document: visible?.document ?? null, state: visible?.state ?? "loading", refresh };
 }
 
 export function PdfEditor(props: PdfEditorProps) {
@@ -268,6 +284,7 @@ export function PdfEditor(props: PdfEditorProps) {
       <button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(true)}><Download className="size-4" />{t.download}</button>
       <button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(false)}><Save className="size-4" />{t.saveToFiles}</button>
     </div>
+    <p data-pdf-phone-expiry className={cn("shrink-0 border-b px-3 py-2 text-xs md:hidden", seconds <= 300 ? "bg-amber-500/10 text-amber-800 dark:text-amber-200" : "bg-muted/30 text-muted-foreground")}>{expiry}</p>
     {notice ? <p className="border-b bg-background px-3 py-2 text-xs" role="status">{notice}</p> : null}
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <aside className="hidden w-36 shrink-0 overflow-y-auto border-r bg-background p-2 md:block" aria-label={t.pages}>
@@ -312,6 +329,7 @@ export function PdfEditor(props: PdfEditorProps) {
     </div>
     {phoneSheet ? <div className="fixed inset-x-2 bottom-[calc(4rem+env(safe-area-inset-bottom))] z-20 max-h-[45dvh] overflow-y-auto rounded-xl border bg-background p-3 shadow-lg md:hidden" data-pdf-phone-sheet={phoneSheet}>
       {phoneSheet === "pages" ? snapshot.pages.map((candidate, index) => <button type="button" key={candidate.id} className={buttonVariants({ variant: "ghost", size: "sm", className: "w-full text-left justify-start" })} onClick={() => { setPageId(candidate.id); setPhoneSheet(null); }}>{t.page.replace("{page}", String(index + 1))}</button>) : allFields.length ? allFields.map(({ field, page: fieldPage, index }) => <button type="button" key={field.id} className={buttonVariants({ variant: "ghost", size: "sm", className: "w-full text-left justify-start" })} onClick={() => { setPageId(fieldPage.id); onSelectTargets([field.id]); setPhoneSheet(null); }}>{index + 1}. {field.label}</button>) : <p className="text-sm text-muted-foreground">{t.noFields}</p>}
+      <div className="mt-2 grid grid-cols-2 gap-2 border-t pt-2"><button type="button" className={cn(button, "min-w-0 whitespace-normal")} disabled={!canEdit || busy} onClick={() => addOverlay("date")}>{t.addDate}</button><button type="button" className={cn(button, "min-w-0 whitespace-normal")} disabled={!canEdit || busy} onClick={() => addOverlay("checkmark")}>{t.addCheckmark}</button></div>
       <div className="mt-2 grid grid-cols-2 gap-2 border-t pt-2"><button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(true)}>{t.download}</button><button type="button" className={button} disabled={!canEdit || busy} onClick={() => void release(false)}>{t.saveToFiles}</button></div>
       <div className="mt-2 grid grid-cols-2 gap-2"><button type="button" className={button} disabled={!canEdit || busy} onClick={() => { pendingImageKind.current = "image"; imageInput.current?.click(); }}>{t.addImage}</button><button type="button" className={button} disabled={!canEdit || busy} onClick={() => void addSignature()}>{t.addSignature}</button></div>
     </div> : null}

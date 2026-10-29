@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { isSensitivity as isPublicKbSensitivity } from '@use-brian/brian-kb'
 import {
   RANK,
   SensitivityAccumulator,
@@ -23,6 +24,12 @@ describe('[COMP:security/sensitivity] Sensitivity utilities', () => {
       expect(isSensitivity('internal')).toBe(true)
       expect(isSensitivity('confidential')).toBe(true)
     })
+
+    it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])(
+      'rejects inherited object property %s as a core sensitivity tier', value => {
+        expect(isSensitivity(value)).toBe(false)
+      },
+    )
 
     it('rejects unknown strings and non-strings', () => {
       expect(isSensitivity('secret')).toBe(false)
@@ -137,5 +144,21 @@ describe('[COMP:security/sensitivity] Sensitivity utilities', () => {
       // Never launder a confidential source into a public research note.
       expect(researchWriteFloor('confidential', true)).toBe('confidential')
     })
+  })
+})
+
+describe('[COMP:security/sensitivity] public KB guard vocabulary', () => {
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])(
+    'rejects inherited object property %s through the actual public package', value => {
+      expect(isPublicKbSensitivity(value)).toBe(false)
+    },
+  )
+
+  it('accepts exactly the three tiers and rejects unknown or non-string values', () => {
+    for (const value of ['public', 'internal', 'confidential']) expect(isPublicKbSensitivity(value)).toBe(true)
+    for (const value of ['secret', '', 'Public', null, undefined, 2, {}, [], new String('public')]) {
+      expect(isPublicKbSensitivity(value)).toBe(false)
+      expect(isSensitivity(value)).toBe(false)
+    }
   })
 })

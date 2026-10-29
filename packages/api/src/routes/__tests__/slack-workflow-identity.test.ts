@@ -14,25 +14,26 @@ import { dispatchQuestionResponse } from '../../workflow/question-response.js'
 
 afterEach(() => { vi.clearAllMocks(); configureChannelWorkflowReplies(undefined) })
 
-describe('Slack fallback identity cannot authorize owner workflow actions', () => {
+describe('Unresolved Slack identity and shadow workflow guards', () => {
   for (const missing of [true, false]) {
     for (const durable of [false, true]) {
-      it(`${missing ? 'missing' : 'failed'} identity services reject ${durable ? 'durable answer' : 'approval text'} even when fallback owner is a workspace owner`, async () => {
+      it(`${missing ? 'missing' : 'failed'} identity services yield no actor and a resolved shadow cannot authorize ${durable ? 'durable answer' : 'approval text'}`, async () => {
         const sender = await resolveSlackSender({
           slackUserId: 'provider-stranger', assistantId: 'assistant', ownerId: 'owner', workspaceId: 'workspace',
           fetchProfile: async () => ({ email: null, displayName: null }),
           ...(!missing ? { channelUserStore: {} as never,
             deps: { resolveByEmail: vi.fn(async () => { throw new Error('offline') }) as never } } : {}),
         })
-        expect(sender).toMatchObject({ userId: 'owner', isIdentified: false })
+        expect(sender).toBeNull()
         const consume = vi.fn()
         const binding = { token: 'a'.repeat(24), integrationId: 'integration', channelId: 'room', workspaceId: 'workspace',
-          assistantId: 'assistant', userId: 'owner', messageId: 'question', question: { question: '?' },
+          assistantId: 'assistant', userId: 'resolved-shadow', messageId: 'question', question: { question: '?' },
           response: { toolName: 'execute', arguments: {}, answerField: 'answer' } }
         const store = { isQuestionMessage: vi.fn(async () => durable), find: vi.fn(async () => [binding]), consume }
         configureChannelWorkflowReplies({ approvalsStore: {} } as never)
+        // A real resolved shadow remains independently barred from business replies.
         const result = await maybeHandleChannelWorkflowContext({
-          userId: sender.userId, isIdentified: sender.isIdentified,
+          userId: 'resolved-shadow', isIdentified: false,
           assistant: { id: 'assistant', ownerUserId: 'owner', workspaceId: 'workspace', name: 'Assistant', kind: 'standard', systemPrompt: null, clearance: 'internal' },
           channelType: 'slack', channelId: 'room', integrationId: 'integration',
           messageText: durable ? 'answer' : 'approve abc123',

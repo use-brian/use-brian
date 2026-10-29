@@ -17,8 +17,8 @@ import {
 // assertPageAccess makes TWO RLS reads: PAGE_ACCESS_SQL (workspace + clearance
 // gate) then PAGE_ROLE_SQL (the effective page_grants role). The mock routes by
 // which SQL is asked so a test can supply a member row and, independently, the
-// grant the resolver should find. `access: null` → not a member (empty first
-// read); `grantRole: null` → no grant (empty second read → the `edit` baseline).
+// canonical role. `access: null` means unavailable on the first read;
+// `grantRole: null` means unavailable on the second, never an edit baseline.
 function makeQuery(opts: {
   access: {
     workspaceId: string
@@ -32,7 +32,7 @@ function makeQuery(opts: {
 }): RlsQuery {
   return (async (_userId: string, sql: string) => {
     if (sql === PAGE_ACCESS_SQL) return (opts.access ? [{ ...opts.access, canMutate: opts.access.canMutate ?? true }] : []) as never[]
-    if (sql === PAGE_ROLE_SQL) return (opts.grantRole ? [{ role: opts.grantRole }] : []) as never[]
+    if (sql === PAGE_ROLE_SQL) return [{ role: opts.grantRole === undefined ? 'edit' : opts.grantRole }] as never[]
     throw new Error(`unexpected sql: ${sql}`)
   }) as RlsQuery
 }
@@ -76,7 +76,7 @@ describe('[COMP:doc-sync/clearance-gate] assertPageAccess', () => {
   it('an ungranted member at/above clearance keeps the edit baseline (read-write)', async () => {
     const query = makeQuery({
       access: { workspaceId: 'w', pageClearance: 'internal', memberClearance: 'confidential' },
-      grantRole: null,
+      grantRole: 'edit',
     })
     await expect(assertPageAccess({ userId: 'u', pageId: 'p', query })).resolves.toEqual({
       workspaceId: 'w',
@@ -158,7 +158,7 @@ describe('[COMP:doc-sync/clearance-gate] assertPageAccess', () => {
         memberClearance: 'internal',
         teamspaceSensitivity: null,
       },
-      grantRole: null,
+      grantRole: 'edit',
     })
     await expect(assertPageAccess({ userId: 'u', pageId: 'p', query })).resolves.toMatchObject({
       workspaceId: 'w',
@@ -174,7 +174,7 @@ describe('[COMP:doc-sync/clearance-gate] assertPageAccess', () => {
         memberClearance: 'confidential',
         teamspaceSensitivity: 'confidential',
       },
-      grantRole: null,
+      grantRole: 'edit',
     })
     await expect(assertPageAccess({ userId: 'u', pageId: 'p', query })).resolves.toMatchObject({
       workspaceId: 'w',
@@ -206,8 +206,19 @@ describe('[COMP:doc-sync/clearance-gate] assertPageAccess', () => {
 
 describe('[COMP:doc-sync/clearance-gate] resolveEffectiveRole', () => {
   it('returns the edit baseline when the page carries no grant for the viewer', async () => {
-    const query = makeQuery({ access: null, grantRole: null })
+    const query = makeQuery({ access: null, grantRole: 'edit' })
     await expect(resolveEffectiveRole({ userId: 'u', pageId: 'p', query })).resolves.toBe('edit')
+  })
+
+  it('fails closed when read admission disappears before the canonical role read', async () => {
+    const query = makeQuery({ access: { workspaceId: 'w', pageClearance: 'internal', memberClearance: 'internal' }, grantRole: null })
+    await expect(assertPageAccess({ userId: 'u', pageId: 'p', query })).resolves.toMatchObject({ role: 'view' })
+    await expect(assertPageMutationAccess({ userId: 'u', pageId: 'p', query })).rejects.toMatchObject({ reason: 'write_denied' })
+  })
+
+  it('an absent canonical result cannot mint the edit baseline', async () => {
+    const query = (async () => []) as RlsQuery
+    await expect(resolveEffectiveRole({ userId: 'u', pageId: 'p', query })).resolves.toBe('view')
   })
 
   it('returns the grant role when one applies', async () => {
@@ -225,18 +236,20 @@ describe('[COMP:doc-sync/clearance-gate] resolveEffectiveRole', () => {
     await expect(resolveEffectiveRole({ userId: 'u', pageId: 'p', query })).resolves.toBe('view')
   })
 
-  it('passes the pageId and userId through to both reads', async () => {
-    const seen: { sql: string; params: unknown[] }[] = []
+  it('binds the role query actor through queryWithRLS and passes only pageId to canonical SQL', async () => {
+    const seen: { userId: string; sql: string; params: unknown[] }[] = []
     const query = (async (_u: string, sql: string, params: unknown[]) => {
-      seen.push({ sql, params })
+      seen.push({ userId: _u, sql, params })
       if (sql === PAGE_ACCESS_SQL)
         return [{ workspaceId: 'w', pageClearance: 'public', memberClearance: 'internal', canMutate: true }] as never[]
       return [{ role: 'view' }] as never[]
     }) as RlsQuery
     await assertPageAccess({ userId: 'user-1', pageId: 'page-1', query })
-    // Second read is the role resolver, keyed by (pageId, userId).
+    // The actor is bound by RLS context, not a second arbitrary SQL argument.
     const roleRead = seen.find((s) => s.sql === PAGE_ROLE_SQL)
-    expect(roleRead?.params).toEqual(['page-1', 'user-1'])
+    expect(roleRead?.params).toEqual(['page-1'])
+    expect(roleRead?.userId).toBe('user-1')
+    expect(PAGE_ROLE_SQL).toContain('public.saved_view_effective_role($1::uuid)')
   })
 })
 

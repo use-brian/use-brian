@@ -98,13 +98,13 @@ export function GeneralSection() {
       <Section title={t.settings.general.appearance}>
         <Row label={t.settings.general.theme}>
           <Select value={theme} onValueChange={(v) => v && setTheme(v as ThemeMode)} items={themeItems}>
-            <SelectTrigger className="min-w-32">
+            <SelectTrigger className="max-md:min-h-11 text-[16px] md:text-sm min-w-32">
               <SelectValue />
             </SelectTrigger>
             <SelectContent align="end">
-              <SelectItem value="system">{t.settings.general.themeSystem}</SelectItem>
-              <SelectItem value="light">{t.settings.general.themeLight}</SelectItem>
-              <SelectItem value="dark">{t.settings.general.themeDark}</SelectItem>
+              <SelectItem value="system" className="max-md:min-h-11 max-md:min-w-11">{t.settings.general.themeSystem}</SelectItem>
+              <SelectItem value="light" className="max-md:min-h-11 max-md:min-w-11">{t.settings.general.themeLight}</SelectItem>
+              <SelectItem value="dark" className="max-md:min-h-11 max-md:min-w-11">{t.settings.general.themeDark}</SelectItem>
             </SelectContent>
           </Select>
         </Row>
@@ -119,12 +119,12 @@ export function GeneralSection() {
             value={timezone}
             onValueChange={handleTimezoneChange}
           >
-            <SelectTrigger className="min-w-0 w-full md:min-w-56 md:max-w-xs">
+            <SelectTrigger className="max-md:min-h-11 text-[16px] md:text-sm min-w-0 w-full md:min-w-56 md:max-w-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent align="end">
               {timezones.map((tz) => (
-                <SelectItem key={tz} value={tz}>
+                <SelectItem key={tz} value={tz} className="max-md:min-h-11 max-md:min-w-11">
                   {tz}
                 </SelectItem>
               ))}
@@ -133,12 +133,12 @@ export function GeneralSection() {
         </Row>
         <Row label={t.settings.general.language}>
           <Select value={currentLocale} onValueChange={handleLocaleChange} items={LOCALE_LABELS}>
-            <SelectTrigger className="min-w-40">
+            <SelectTrigger className="max-md:min-h-11 text-[16px] md:text-sm min-w-40">
               <SelectValue />
             </SelectTrigger>
             <SelectContent align="end">
               {LOCALES.map((loc: Locale) => (
-                <SelectItem key={loc} value={loc}>{LOCALE_LABELS[loc]}</SelectItem>
+                <SelectItem key={loc} value={loc} className="max-md:min-h-11 max-md:min-w-11">{LOCALE_LABELS[loc]}</SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -196,12 +196,12 @@ function CustomThemesSection() {
             return (
               <li
                 key={theme.id}
-                className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2"
+                className="flex max-md:flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2"
               >
                 <button
                   type="button"
                   onClick={() => applyTheme(theme)}
-                  className="flex min-w-0 items-center gap-2 text-left text-sm"
+                  className="max-md:min-h-11 max-md:min-w-11 flex min-w-0 items-center gap-2 text-left text-sm"
                 >
                   <ThemeSwatch theme={theme} />
                   <span className="truncate">{theme.name}</span>
@@ -209,14 +209,14 @@ function CustomThemesSection() {
                     <span className="shrink-0 text-xs text-muted-foreground">✓</span>
                   ) : null}
                 </button>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button variant="ghost" size="sm" onClick={() => setRefineTarget(theme)}>
+                <div className="flex max-md:flex-wrap shrink-0 items-center gap-1">
+                  <Button className="max-md:min-h-11 max-md:min-w-11" variant="ghost" size="sm" onClick={() => setRefineTarget(theme)}>
                     {t.settings.general.customThemeRefine}
                   </Button>
-                  <Button variant="ghost" size="sm" onClick={() => onRename(theme.id, theme.name)}>
+                  <Button className="max-md:min-h-11 max-md:min-w-11" variant="ghost" size="sm" onClick={() => onRename(theme.id, theme.name)}>
                     {t.settings.general.customThemeRename}
                   </Button>
-                  <Button variant="ghost" size="sm" onClick={() => onDelete(theme.id)}>
+                  <Button className="max-md:min-h-11 max-md:min-w-11" variant="ghost" size="sm" onClick={() => onDelete(theme.id)}>
                     {t.settings.general.customThemeDelete}
                   </Button>
                 </div>
@@ -225,7 +225,7 @@ function CustomThemesSection() {
           })}
         </ul>
       )}
-      <Button variant="outline" size="sm" onClick={() => setCreateOpen(true)}>
+      <Button className="max-md:min-h-11 max-md:min-w-11" variant="outline" size="sm" onClick={() => setCreateOpen(true)}>
         {t.settings.general.customThemeNew}
       </Button>
       <CreateThemeDialog open={createOpen} onOpenChange={setCreateOpen} />

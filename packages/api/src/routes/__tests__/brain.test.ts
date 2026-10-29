@@ -374,6 +374,154 @@ describe('[COMP:brain/entity-rollup-http] GET /api/brain/entities/:id', () => {
   })
 })
 
+describe('[COMP:brain/entity-rollup-http] strict entity identity header', () => {
+  const oldId = '11111111-1111-4111-8111-111111111111'
+  const currentId = '22222222-2222-4222-8222-222222222222'
+  const current = { ...baseEntity, id: currentId, displayName: 'Fictional survivor', aliases: [] } as EntityRecord
+  const predecessor = { ...baseEntity, id: oldId, displayName: 'Fictional predecessor',
+    validTo: new Date('2026-01-02T00:00:00Z'), supersededBy: currentId } as EntityRecord
+
+  function rollup(entity: EntityRecord, withEdges = false): EntityRollup {
+    return { entity,
+      summary: { edge_count: withEdges ? 1 : 0, memory_count: 0, episode_count: 0, open_task_count: 0, file_count: 0, kb_chunk_count: 0 },
+      embedded: { edges: withEdges ? [{ id: 'fictional-edge', sourceKind: 'entity', sourceId: entity.id,
+        targetKind: 'entity', targetId: 'fictional-target', edgeType: 'mentioned' } as never] : [],
+        recent_episodes: [], recent_memory: [], open_tasks: [], files: [] },
+    }
+  }
+
+  function identityStore(withEdges = false, state: 'effective' | 'legacy' | 'future' | 'hidden-chain' = 'effective') {
+    const mergeTime = state === 'legacy' ? null : state === 'future'
+      ? new Date('2099-01-01T00:00:00Z') : predecessor.validTo
+    const retired = rollup({ ...predecessor, validTo: mergeTime }, withEdges)
+    const followed = { ...rollup(current, withEdges), followedSupersession: {
+      fromId: oldId, toId: currentId, supersededAt: mergeTime,
+    } }
+    const store = makeEntityStore(null)
+    // Canonical default resolution reports only an actually followed merge.
+    // Internal no-follow remains modeled so the old HTTP branch reproduces
+    // both its premature future refusal and its hidden-chain status mismatch.
+    vi.mocked(store.getEntity).mockImplementation(async (_ctx, id, opts) => {
+      if (id === currentId) return rollup(current)
+      if (id !== oldId) return null
+      if (opts?.strictIdentity === true || state === 'future') return retired
+      return state === 'hidden-chain' ? null : followed
+    })
+    return store
+  }
+
+  function admit() { mockQuery.mockResolvedValueOnce(memberRow).mockResolvedValueOnce(assistantRow) }
+
+  it.each(['effective', 'legacy'] as const)('uses canonical %s resolution and returns an opaque 410 before HTTP enrichment', async state => {
+    admit()
+    const store = identityStore(true, state)
+    const response = await request(makeApp(store)).get(`/api/brain/entities/${oldId}?workspaceId=ws-1`)
+      .set('x-strict-identity', 'true').expect(410)
+    expect(store.getEntity).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'ws-1', userId: 'u-1',
+      assistantKind: 'primary', clearance: 'confidential' }), oldId)
+    expect(response.body).toEqual({ error: 'superseded' })
+    expect(JSON.stringify(response.body)).not.toContain(currentId)
+    expect(JSON.stringify(response.body)).not.toContain(current.displayName)
+    expect(store.getById).not.toHaveBeenCalled()
+  })
+
+  it('keeps a current strict entity response identical to the existing flat web DTO', async () => {
+    const store = identityStore()
+    const app = makeApp(store)
+    admit()
+    const normal = await request(app).get(`/api/brain/entities/${currentId}?workspaceId=ws-1`).expect(200)
+    admit()
+    const strict = await request(app).get(`/api/brain/entities/${currentId}?workspaceId=ws-1`)
+      .set('X-Strict-Identity', 'true').expect(200)
+    expect(strict.body).toEqual(normal.body)
+    expect(strict.body).toMatchObject({ id: currentId, name: current.displayName, attributes: {}, pendingChanges: [] })
+    expect(strict.body.data).toBeUndefined()
+    expect(strict.body.meta).toBeUndefined()
+    expect(vi.mocked(store.getEntity).mock.calls).toEqual([[expect.anything(), currentId], [expect.anything(), currentId]])
+  })
+
+  it.each(['missing', 'hidden'])('keeps a strict %s identity indistinguishable as 404', async id => {
+    admit()
+    const store = identityStore()
+    const response = await request(makeApp(store)).get(`/api/brain/entities/${id}?workspaceId=ws-1`)
+      .set('X-Strict-Identity', 'true').expect(404)
+    expect(response.body).toEqual({ error: 'Not found' })
+    expect(vi.mocked(store.getEntity).mock.calls[0]).toEqual([expect.anything(), id])
+    expect(store.getById).not.toHaveBeenCalled()
+  })
+
+  it.each([undefined, 'false', 'TRUE', '1'])('preserves normal auto-follow when the header value is %s', async header => {
+    admit()
+    const store = identityStore()
+    const pending = request(makeApp(store)).get(`/api/brain/entities/${oldId}?workspaceId=ws-1`)
+    if (header !== undefined) pending.set('X-Strict-Identity', header)
+    const response = await pending.expect(200)
+    expect(response.body).toMatchObject({ id: currentId, name: current.displayName })
+    expect(response.body.data).toBeUndefined()
+    expect(response.body.meta).toBeUndefined()
+    expect(vi.mocked(store.getEntity).mock.calls[0]).toEqual([expect.anything(), oldId])
+  })
+
+  it('keeps a future-effective pointer current in both default and strict HTTP modes', async () => {
+    const store = identityStore(false, 'future')
+    const app = makeApp(store)
+    admit()
+    const normal = await request(app).get(`/api/brain/entities/${oldId}?workspaceId=ws-1`).expect(200)
+    admit()
+    const strict = await request(app).get(`/api/brain/entities/${oldId}?workspaceId=ws-1`)
+      .set('X-Strict-Identity', 'true').expect(200)
+    expect(strict.body).toEqual(normal.body)
+    expect(strict.body).toMatchObject({ id: oldId, name: predecessor.displayName })
+    expect(strict.body.data).toBeUndefined()
+    expect(strict.body.meta).toBeUndefined()
+    expect(vi.mocked(store.getEntity).mock.calls).toEqual([[expect.anything(), oldId], [expect.anything(), oldId]])
+  })
+
+  it('keeps an authorized predecessor with a hidden canonical successor opaque as 404', async () => {
+    admit()
+    const store = identityStore(true, 'hidden-chain')
+    const response = await request(makeApp(store)).get(`/api/brain/entities/${oldId}?workspaceId=ws-1`)
+      .set('X-Strict-Identity', 'true').expect(404)
+    expect(response.body).toEqual({ error: 'Not found' })
+    expect(vi.mocked(store.getEntity).mock.calls[0]).toEqual([expect.anything(), oldId])
+    expect(store.getById).not.toHaveBeenCalled()
+  })
+
+  it('preserves the member and selected assistant read ceiling on strict lookup', async () => {
+    mockQuery.mockResolvedValueOnce(internalMemberRow).mockResolvedValueOnce(assistantRow)
+    const store = identityStore()
+    await request(makeApp(store)).get(`/api/brain/entities/${currentId}?workspaceId=ws-1&assistantId=a-1`)
+      .set('X-Strict-Identity', 'true').expect(200)
+    expect(mockQuery.mock.calls[1]?.[1]).toEqual(['a-1', 'ws-1'])
+    expect(store.getEntity).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'ws-1', userId: 'u-1',
+      assistantId: 'a-1', assistantKind: 'primary', clearance: 'internal' }), currentId)
+  })
+
+  it('still rejects an unauthenticated strict request before store access', async () => {
+    const store = identityStore()
+    const app = express()
+    app.use('/api/brain', brainRoutes({ entitiesStore: store, entityLinksStore: makeEntityLinksStore(),
+      retrievalStore: makeRetrievalStore(), knowledgeStore: makeKnowledgeStore() as never }))
+    await request(app).get(`/api/brain/entities/${oldId}?workspaceId=ws-1`).set('X-Strict-Identity', 'true').expect(401)
+    expect(store.getEntity).not.toHaveBeenCalled()
+  })
+
+  it('still requires a workspace for strict lookup before store access', async () => {
+    const store = identityStore()
+    await request(makeApp(store)).get(`/api/brain/entities/${oldId}`).set('X-Strict-Identity', 'true').expect(400)
+    expect(store.getEntity).not.toHaveBeenCalled()
+  })
+
+  it('still refuses a non-member strict lookup without revealing supersession', async () => {
+    mockQuery.mockResolvedValueOnce(noMemberRow)
+    const store = identityStore()
+    const response = await request(makeApp(store)).get(`/api/brain/entities/${oldId}?workspaceId=ws-1`)
+      .set('X-Strict-Identity', 'true').expect(404)
+    expect(response.body).toEqual({ error: 'Not found' })
+    expect(store.getEntity).not.toHaveBeenCalled()
+  })
+})
+
 describe('[COMP:brain/list-http] GET /api/brain/list', () => {
   it('rejects requests without authenticated userId', async () => {
     const app = express()

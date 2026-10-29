@@ -160,3 +160,52 @@ describe('[COMP:knowledge/sync-worker] sensitivity round-trip', () => {
     }
   })
 })
+
+describe('[COMP:knowledge/sync-worker] inherited sensitivity stamps use the source default', () => {
+  it.each(['full', 'incremental'] as const)('keeps default and valid-stamp provenance on a real %s parse/sync', async mode => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const stamps = ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'public', 'internal', 'confidential', null]
+      const files = stamps.map((stamp, index) => ({ path: `fictional-entry-${index}.md`, sha: `blob-${index}`, stamp }))
+      vi.mocked(mockStore.getSourcesDueForSync).mockResolvedValueOnce([
+        { ...SOURCE, defaultSensitivity: 'confidential', lastSyncedSha: mode === 'incremental' ? 'sha_previous' : null },
+      ])
+      vi.mocked(mockApi.getBranchHead).mockResolvedValueOnce('sha_current')
+      if (mode === 'full') vi.mocked(mockApi.getRepoTree).mockResolvedValueOnce(files.map(({ path, sha }) => ({ path, sha })))
+      else vi.mocked(mockApi.compareCommits).mockResolvedValueOnce({ headSha: 'sha_current',
+        files: files.map(({ path }) => ({ filename: path, status: 'modified' as const })) })
+      for (const { stamp } of files) {
+        vi.mocked(mockApi.getFileContents).mockResolvedValueOnce({
+          content: `---\ntitle: Fictional entry\n${stamp === null ? '' : `sensitivity: ${stamp}\n`}---\nBody.`,
+        })
+      }
+      vi.mocked(mockStore.upsertByPath).mockResolvedValue({ id: 'fictional-entry', path: 'fictional' })
+      const worker = createKnowledgeSyncWorker({ store: mockStore, api: mockApi, credentials: mockCreds })
+      await worker.tick()
+      const calls = vi.mocked(mockStore.upsertByPath).mock.calls
+      expect(calls).toHaveLength(stamps.length)
+      for (const index of [0, 1, 2, 3, 7]) {
+        expect(calls[index]![0]).toMatchObject({ sensitivity: 'confidential', sensitivityExplicit: false })
+      }
+      for (const [index, sensitivity] of [[4, 'public'], [5, 'internal'], [6, 'confidential']] as const) {
+        expect(calls[index]![0]).toMatchObject({ sensitivity, sensitivityExplicit: true })
+      }
+      const messages = warn.mock.calls.map(([message]) => String(message))
+      const parserWarnings = messages.filter(message => message.startsWith('[kb-parser] invalid sensitivity='))
+      expect(parserWarnings).toEqual(files.slice(0, 4).map(({ path, stamp }) =>
+        `[kb-parser] invalid sensitivity=${JSON.stringify(stamp)} in ${path}, defaulting to internal`,
+      ))
+      // Full sync also lints the raw frontmatter. Its four error findings
+      // and summary are separate diagnostics, not duplicate parser warnings.
+      const lintWarnings = messages.filter(message => message.startsWith(`[knowledge-sync] ${SOURCE.repo}:`)
+        && message.includes(' invalid-sensitivity '))
+      expect(lintWarnings).toHaveLength(mode === 'full' ? 4 : 0)
+      if (mode === 'full') {
+        for (const { path } of files.slice(0, 4)) {
+          expect(lintWarnings.some(message => message.startsWith(`[knowledge-sync] ${SOURCE.repo}:${path} invalid-sensitivity `))).toBe(true)
+        }
+        expect(messages.some(message => message.startsWith(`[knowledge-sync] lint findings for ${SOURCE.repo}:`))).toBe(true)
+      }
+    } finally { warn.mockRestore() }
+  })
+})

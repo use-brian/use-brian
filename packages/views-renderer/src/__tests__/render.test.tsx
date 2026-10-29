@@ -7,7 +7,8 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import type { ReactElement } from 'react'
+import { createElement, type ReactElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import type { A2UIWidget, ViewPayload } from '@use-brian/core'
 import { ViewRenderer, renderWidget } from '../render.js'
 
@@ -157,17 +158,16 @@ describe('[COMP:views/render] ViewRenderer payload validation', () => {
       a2ui: '0.8',
       root: { type: 'text', text: 'hello' },
     }
-    const el = ViewRenderer({ payload })
-    expect(elementType(el)).toBe('div')
-    const inner = (el.props as { children: ReactElement }).children
-    expect(elementType(inner)).toBe('Text')
+    const html = renderToStaticMarkup(createElement(ViewRenderer, { payload }))
+    expect(html).toMatch(/^<div>/)
+    expect(html).toContain('<span class="text-sm">hello</span>')
   })
 
   it('renders an error marker for invalid payloads instead of throwing', () => {
     const bad = { a2ui: '0.9', root: {} } // wrong version
-    const el = ViewRenderer({ payload: bad })
-    expect(elementType(el)).toBe('div')
-    expect((el.props as { 'data-a2ui-error'?: string })['data-a2ui-error']).toBe('invalid-payload')
+    const html = renderToStaticMarkup(createElement(ViewRenderer, { payload: bad }))
+    expect(html).toMatch(/^<div/)
+    expect(html).toContain('data-a2ui-error="invalid-payload"')
   })
 
   it('skips re-validation when validated:true is passed', () => {
@@ -176,10 +176,9 @@ describe('[COMP:views/render] ViewRenderer payload validation', () => {
       a2ui: '0.8',
       root: { type: 'container', direction: 'column', children: [] },
     } as unknown
-    const el = ViewRenderer({ payload: sneaky, validated: true })
-    expect(elementType(el)).toBe('div')
-    const inner = (el.props as { children: ReactElement }).children
-    expect(elementType(inner)).toBe('Container')
+    const html = renderToStaticMarkup(createElement(ViewRenderer, { payload: sneaky, validated: true }))
+    expect(html).toMatch(/^<div>/)
+    expect(html).toContain('<div class="flex flex-col gap-2"></div>')
   })
 
   it('passes className through to the wrapper', () => {
@@ -187,7 +186,7 @@ describe('[COMP:views/render] ViewRenderer payload validation', () => {
       a2ui: '0.8',
       root: { type: 'text', text: 'hi' },
     }
-    const el = ViewRenderer({ payload, className: 'custom-cls' })
-    expect((el.props as { className?: string }).className).toBe('custom-cls')
+    const html = renderToStaticMarkup(createElement(ViewRenderer, { payload, className: 'custom-cls' }))
+    expect(html).toMatch(/^<div class="custom-cls">/)
   })
 })

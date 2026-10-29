@@ -143,6 +143,8 @@ export type CollabPageEditorProps = {
   user?: { id: string; name: string; avatarUrl?: string | null };
   /** Active page id — drives the human auto-title trigger (migration 218). */
   viewId?: string;
+  /** Local full-page Find request owner; side-pane editors do not receive one. */
+  findOwnerId?: string;
   /** Title provenance; auto-title is armed only while `"placeholder"`. */
   nameOrigin?: string;
   /** Reflect an auto-generated title + suggested icon back into page metadata (no REST rename). */
@@ -188,6 +190,7 @@ export function CollabPageEditor({
   canEdit,
   user,
   viewId,
+  findOwnerId,
   nameOrigin,
   onAutoTitled,
   assistantId,
@@ -246,6 +249,7 @@ export function CollabPageEditor({
       status={status}
       user={user}
       viewId={viewId}
+      findOwnerId={findOwnerId}
       nameOrigin={nameOrigin}
       onAutoTitled={onAutoTitled}
       assistantId={assistantId}
@@ -269,6 +273,7 @@ function CollabEditorInner({
   status,
   user,
   viewId,
+  findOwnerId,
   nameOrigin,
   onAutoTitled,
   assistantId,
@@ -285,6 +290,7 @@ function CollabEditorInner({
   status: CollabStatus;
   user?: { id: string; name: string; avatarUrl?: string | null };
   viewId?: string;
+  findOwnerId?: string;
   nameOrigin?: string;
   onAutoTitled?: (title: string, icon: string | null) => void;
   assistantId?: string;
@@ -1282,8 +1288,8 @@ function CollabEditorInner({
       ) : null}
       {/* Find on page (⌘F / Ctrl+F). Not gated on `canEdit` — searching is a
           read, so a viewer without edit rights gets it too. Renders nothing
-          until the chord fires. */}
-      <DocFindBar editor={editor} />
+          until the chord or this full-page header's scoped request fires. */}
+      <DocFindBar editor={editor} requestScope={findOwnerId && viewId ? { ownerId: findOwnerId, workspaceId: ws.workspaceId, pageId: viewId } : undefined} />
       {/* Top-level block reorder (drag) + the block-action menu (click).
           PM-transaction moves sync through Yjs — see drag-handle.tsx.
           Read-only viewers don't get the handle. */}

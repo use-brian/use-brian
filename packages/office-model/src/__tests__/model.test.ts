@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { OfficeArtifactSnapshotSchema, officeTableCellPlacements, officeTableResolvedColumnWidthsPt, type OfficeTable } from '../model.js'
-import { documentFixture, presentationFixture } from './fixtures.js'
+import { preflightOfficeCandidate } from '../capabilities.js'
+import { snapshotToYDoc, yDocToSnapshot } from '../collab.js'
+import { documentFixture, id, presentationFixture } from './fixtures.js'
 
 describe('[COMP:office/model] Office canonical model', () => {
   it('accepts strict document and presentation snapshots', () => {
@@ -56,5 +58,47 @@ describe('[COMP:office/model] Office canonical model', () => {
       { id: table.rows[1].cells[0].id, rowIndex: 1, startColumn: 2, endColumn: 3 },
     ])
     expect(officeTableResolvedColumnWidthsPt(table, 400)).toEqual([80, 160, 80])
+  })
+})
+
+describe('[COMP:office/model] exact Presentation reading order', () => {
+  it.each([
+    ['duplicate', [id(17), id(17)]],
+    ['missing', [id(17)]],
+    ['unknown', [id(17), id(999)]],
+    ['extra', [id(17), id(42), id(42)]],
+  ] as const)('refuses a %s order through public snapshot and preflight admission', (_kind, order) => {
+    const snapshot = presentationFixture()
+    snapshot.slides[0].objects.push({ id: id(42), kind: 'shape', shape: 'rectangle', geometry: { ...snapshot.slides[0].objects[0].geometry }, locked: false, strokeWidthPt: 1, text: [] })
+    snapshot.slides[0].readingOrder = [...order]
+    const before = structuredClone(snapshot)
+    const parsed = OfficeArtifactSnapshotSchema.safeParse(snapshot)
+    const preflight = preflightOfficeCandidate(snapshot)
+    let admittedDoc: ReturnType<typeof snapshotToYDoc> | undefined
+    let rejection: unknown
+    try { admittedDoc = snapshotToYDoc(snapshot) } catch (error) { rejection = error }
+    const yDocAccepted = admittedDoc !== undefined
+    admittedDoc?.destroy()
+    expect({ schemaAccepted: parsed.success, preflightAccepted: preflight.ok, yDocAccepted }).toEqual({
+      schemaAccepted: false, preflightAccepted: false, yDocAccepted: false,
+    })
+    expect(rejection).toBeInstanceOf(Error)
+    expect((rejection as Error).message).toMatch(/Reading order/)
+    expect(snapshot).toEqual(before)
+  })
+
+  it('preserves a valid reversed order independently of visual stacking through a real Y.Doc', () => {
+    const snapshot = presentationFixture()
+    snapshot.slides[0].objects.push({ id: id(42), kind: 'shape', shape: 'rectangle', geometry: { ...snapshot.slides[0].objects[0].geometry }, locked: false, strokeWidthPt: 1, text: [] })
+    snapshot.slides[0].readingOrder = [id(42), id(17)]
+    expect(OfficeArtifactSnapshotSchema.parse(snapshot)).toEqual(snapshot)
+    expect(preflightOfficeCandidate(snapshot).ok).toBe(true)
+    const doc = snapshotToYDoc(snapshot)
+    try {
+      const restored = yDocToSnapshot(doc)
+      expect(restored).toEqual(snapshot)
+      expect(restored.family === 'presentation' && restored.slides[0].objects.map(object => object.id)).toEqual([id(17), id(42)])
+      expect(restored.family === 'presentation' && restored.slides[0].readingOrder).toEqual([id(42), id(17)])
+    } finally { doc.destroy() }
   })
 })

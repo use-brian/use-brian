@@ -2,7 +2,7 @@
  * Spec: docs/architecture/features/doc.md -> Offline page creation.
  * [COMP:app-web/offline-pages]
  */
-import type { DraftInput, ViewListRow, ViewMetadata } from "@/lib/api/views";
+import { withoutPageReadCapabilities, type DraftInput, type ViewListRow, type ViewMetadata } from "@/lib/api/views";
 import { getDictionary } from "@/lib/i18n/dictionaries";
 import { isLocale } from "@/lib/i18n/config";
 import type { Teamspace } from "@/lib/api/teamspaces";
@@ -84,8 +84,8 @@ export async function readCachedSidebarTree(workspaceId: string): Promise<Cached
   ]);
   if (!current(authority) || !saved && !drafts && !teamspaces) return null;
   const tree = {
-    saved: await mergeLocalPages(saved ?? [], workspaceId, "saved"),
-    drafts: await mergeLocalPages(drafts ?? [], workspaceId, "draft"),
+    saved: await mergeLocalPages((saved ?? []).map(withoutPageReadCapabilities), workspaceId, "saved"),
+    drafts: await mergeLocalPages((drafts ?? []).map(withoutPageReadCapabilities), workspaceId, "draft"),
     teamspaces: teamspaces ?? [],
   };
   return current(authority) ? tree : null;
@@ -114,9 +114,9 @@ export async function readCachedPage(id: string, workspaceId?: string): Promise<
   if (!authority) return null;
   const local = await readLocalPage(id, authority.workspaceId);
   if (!current(authority)) return null;
-  if (local) return local.view;
+  if (local) return withoutPageReadCapabilities(local.view);
   const cached = await idbGet<ViewMetadata>(metadataKey(authority, id));
-  return current(authority) && cached?.workspaceId === authority.workspaceId ? cached : null;
+  return current(authority) && cached?.workspaceId === authority.workspaceId ? withoutPageReadCapabilities(cached) : null;
 }
 export async function evictCachedPage(id: string, expected?: OfflineWriteAuthority): Promise<void> {
   const authority = expected ?? currentOfflineWriteAuthority();
@@ -125,9 +125,19 @@ export async function evictCachedPage(id: string, expected?: OfflineWriteAuthori
 export async function mergeLocalPages(rows: ViewListRow[], workspaceId: string, state?: string): Promise<ViewListRow[]> {
   const local = (await readLocalPages(workspaceId)).filter((p) => p.view.workspaceId === workspaceId);
   const ids = new Set(local.map((p) => p.view.id));
+  const canonical = new Map(rows.map(row => [row.id, row]));
   return [...rows.filter((p) => !ids.has(p.id)), ...local
     .filter((p) => !state || state === "all" || p.view.state === state)
-    .map((p) => p.view)];
+    .map((p) => {
+      // Pending authored fields overlay content, never the matching read decision.
+      // Disk/fallback callers already withhold these fields before merging.
+      const read = canonical.get(p.view.id);
+      return {
+        ...withoutPageReadCapabilities(p.view),
+        ...(read?.effectiveRole !== undefined ? { effectiveRole: read.effectiveRole } : {}),
+        ...(typeof read?.canEdit === "boolean" ? { canEdit: read.canEdit } : {}),
+      };
+    })];
 }
 
 export async function createLocalPage(input: DraftInput & { id: string },

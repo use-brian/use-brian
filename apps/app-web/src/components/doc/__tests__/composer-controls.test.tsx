@@ -95,12 +95,12 @@ describe("[COMP:app-web/composer-controls] presentational controls", () => {
     expect(trigger.textContent).toContain(dict.chat.modelPro);
   });
 
-  it("selects effort directly, closes its only popup and preserves the assistant and draft", async () => {
+  it.each([false, true])("selects effort and preserves the assistant and draft with phoneTargets=%s", async (phoneTargets) => {
     vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
     const select = vi.fn();
     function Composer() {
       const [tier, setTier] = React.useState<"standard" | "pro" | "max">("standard");
-      return <><button aria-label={dict.chat.switchAssistant}>Another assistant</button><textarea defaultValue="Keep this unsent draft" /><ComposerControls {...props({ model: tier, pickerLabel: dict.chat.effortLabel, onModelChange: next => { select(next); setTier(next); } })} /></>;
+      return <><button aria-label={dict.chat.switchAssistant}>Another assistant</button><textarea defaultValue="Keep this unsent draft" /><ComposerControls phoneTargets={phoneTargets} {...props({ model: tier, pickerLabel: dict.chat.effortLabel, onModelChange: next => { select(next); setTier(next); } })} /></>;
     }
     try {
       mount(<Composer />);
@@ -132,11 +132,11 @@ describe("[COMP:app-web/composer-controls] presentational controls", () => {
     expect(container!.textContent).not.toContain(dict.chat.research);
   });
 
-  it("renders the AI-reply toggle only when onAiReplyChange is wired, and flips it", () => {
+  it.each([false, true])("flips the wired AI-reply toggle with phoneTargets=%s", (phoneTargets) => {
     const onAiReplyChange = vi.fn();
     mount(
       <ComposerControls
-        {...props({ showResearch: false, aiReply: true, onAiReplyChange })}
+        {...props({ showResearch: false, aiReply: true, onAiReplyChange, phoneTargets })}
       />,
     );
     const toggle = container!.querySelector<HTMLButtonElement>("button[aria-pressed]")!;
@@ -146,10 +146,10 @@ describe("[COMP:app-web/composer-controls] presentational controls", () => {
     expect(onAiReplyChange).toHaveBeenCalledWith(false);
   });
 
-  it("disables model controls when AI reply is off (they only shape an AI turn)", () => {
+  it.each([false, true])("disables model controls with AI reply off and phoneTargets=%s", (phoneTargets) => {
     mount(
       <ComposerControls
-        {...props({ aiReply: false, onAiReplyChange: vi.fn() })}
+        {...props({ aiReply: false, onAiReplyChange: vi.fn(), phoneTargets })}
       />,
     );
     expect(container!.textContent).not.toContain(dict.chat.research);
@@ -158,6 +158,37 @@ describe("[COMP:app-web/composer-controls] presentational controls", () => {
       `[aria-label="${dict.chat.modelLabel}"]`,
     )!;
     expect(trigger.disabled).toBe(true);
+  });
+});
+
+describe("[COMP:app-web/composer-controls] host presentation preserves model routing", () => {
+  it.each([false, true])("keeps custom and metered selections distinct with phoneTargets=%s", async (phoneTargets) => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    const onCustomSelect = vi.fn();
+    const onMeteredSelect = vi.fn();
+    const onModelChange = vi.fn();
+    try {
+      mount(<ComposerControls {...props({ phoneTargets, onModelChange, onCustomSelect, onMeteredSelect,
+        customOptions: [{ key: "endpoint-a", label: "Fictional endpoint", sublabel: "Workspace endpoint" }],
+        meteredOptions: [{ key: "model-a", label: "Fictional model", sublabel: "Metered entry" }],
+      })} />);
+      const trigger = container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.chat.modelLabel}"]`)!;
+      for (const [label, callback, key, cleared] of [
+        ["Fictional endpoint", onCustomSelect, "endpoint-a", onMeteredSelect],
+        ["Fictional model", onMeteredSelect, "model-a", onCustomSelect],
+      ] as const) {
+        await act(async () => trigger.click());
+        const option = [...document.querySelectorAll<HTMLElement>("[role=option]")].find(item => item.textContent?.includes(label))!;
+        expect(option).toBeTruthy();
+        await act(async () => option.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })));
+        await act(async () => option.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })));
+        await act(async () => option.click());
+        expect(callback).toHaveBeenLastCalledWith(key);
+        expect(cleared).toHaveBeenLastCalledWith(null);
+        expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      }
+      expect(onModelChange).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
   });
 });
 

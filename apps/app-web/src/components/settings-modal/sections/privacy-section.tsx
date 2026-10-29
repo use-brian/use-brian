@@ -184,7 +184,7 @@ function SupportDiagnosticsCard() {
                 }
               }}
             >
-              <SelectTrigger aria-label={t.supportDuration} className="min-h-11 w-full sm:min-h-0">
+              <SelectTrigger aria-label={t.supportDuration} className="min-h-11 w-full md:min-h-0 text-[16px] md:text-sm">
                 <SelectValue>
                   {durationHours === 1
                     ? t.supportDurationOneHour
@@ -194,14 +194,14 @@ function SupportDiagnosticsCard() {
                 </SelectValue>
               </SelectTrigger>
               <SelectContent align="start">
-                <SelectItem value="1" className="min-h-11 sm:min-h-0">{t.supportDurationOneHour}</SelectItem>
-                <SelectItem value="24" className="min-h-11 sm:min-h-0">{t.supportDurationOneDay}</SelectItem>
-                <SelectItem value="168" className="min-h-11 sm:min-h-0">{t.supportDurationOneWeek}</SelectItem>
+                <SelectItem value="1" className="min-h-11 md:min-h-0">{t.supportDurationOneHour}</SelectItem>
+                <SelectItem value="24" className="min-h-11 md:min-h-0">{t.supportDurationOneDay}</SelectItem>
+                <SelectItem value="168" className="min-h-11 md:min-h-0">{t.supportDurationOneWeek}</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
-          <label className="flex min-h-11 items-start gap-3 sm:min-h-0">
+          <label className="flex min-h-11 items-start gap-3 md:min-h-0">
             <Checkbox
               checked={includeContent}
               onCheckedChange={setIncludeContent}
@@ -225,7 +225,7 @@ function SupportDiagnosticsCard() {
             type="button"
             onClick={startCapture}
             disabled={working !== null}
-            className="rounded-lg bg-foreground px-3 py-2 text-sm font-medium text-background hover:opacity-90 disabled:opacity-50"
+            className="max-md:min-h-11 max-md:min-w-11 rounded-lg bg-foreground px-3 py-2 text-sm font-medium text-background hover:opacity-90 disabled:opacity-50"
           >
             {working === "start" ? t.supportStarting : t.supportStart}
           </button>
@@ -253,7 +253,7 @@ function SupportDiagnosticsCard() {
               type="button"
               onClick={stopCapture}
               disabled={working !== null}
-              className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50"
+              className="max-md:min-h-11 max-md:min-w-11 rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50"
             >
               {working === "stop" ? t.supportStopping : t.supportStop}
             </button>
@@ -268,7 +268,7 @@ function SupportDiagnosticsCard() {
               type="button"
               onClick={loadPreview}
               disabled={working !== null}
-              className="rounded-lg bg-foreground px-3 py-2 text-sm font-medium text-background hover:opacity-90 disabled:opacity-50"
+              className="max-md:min-h-11 max-md:min-w-11 rounded-lg bg-foreground px-3 py-2 text-sm font-medium text-background hover:opacity-90 disabled:opacity-50"
             >
               {working === "preview" ? t.supportPreparing : t.supportPreview}
             </button>
@@ -300,7 +300,7 @@ function SupportDiagnosticsCard() {
                 type="button"
                 onClick={downloadCapsule}
                 disabled={working !== null}
-                className="rounded-lg bg-foreground px-3 py-2 text-sm font-medium text-background hover:opacity-90 disabled:opacity-50"
+                className="max-md:min-h-11 max-md:min-w-11 rounded-lg bg-foreground px-3 py-2 text-sm font-medium text-background hover:opacity-90 disabled:opacity-50"
               >
                 {working === "download"
                   ? t.supportDownloading
@@ -378,7 +378,7 @@ function DeleteMemoriesRow() {
         {state.kind === "idle" && (
           <button
             onClick={() => setState({ kind: "confirming", input: "" })}
-            className="text-sm font-medium border border-destructive/30 text-destructive px-3 py-1.5 rounded-lg hover:bg-destructive/10 transition-colors shrink-0"
+            className="max-md:min-h-11 max-md:min-w-11 text-sm font-medium border border-destructive/30 text-destructive px-3 py-1.5 rounded-lg hover:bg-destructive/10 transition-colors shrink-0"
           >
             {t.settings.common.delete}
           </button>
@@ -416,7 +416,7 @@ function DeleteMemoriesRow() {
           {state.message}{" "}
           <button
             onClick={() => setState({ kind: "idle" })}
-            className="underline"
+            className="max-md:min-h-11 max-md:min-w-11 underline"
           >
             {t.settings.privacy.dismiss}
           </button>
@@ -517,7 +517,7 @@ function DeleteAccountRow({ userEmail }: { userEmail: string }) {
           <button
             onClick={() => setState({ kind: "confirming", input: "" })}
             disabled={!userEmail}
-            className="text-sm font-medium border border-destructive/30 text-destructive px-3 py-1.5 rounded-lg hover:bg-destructive/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+            className="max-md:min-h-11 max-md:min-w-11 text-sm font-medium border border-destructive/30 text-destructive px-3 py-1.5 rounded-lg hover:bg-destructive/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
           >
             {t.settings.privacy.deleteAccountTitle}
           </button>
@@ -571,7 +571,7 @@ function DeleteAccountRow({ userEmail }: { userEmail: string }) {
           </ul>
           <button
             onClick={() => setState({ kind: "idle" })}
-            className="text-muted-foreground hover:text-foreground underline"
+            className="max-md:min-h-11 max-md:min-w-11 text-muted-foreground hover:text-foreground underline"
           >
             {t.settings.privacy.dismiss}
           </button>
@@ -603,7 +603,7 @@ function DeleteAccountRow({ userEmail }: { userEmail: string }) {
           </ul>
           <button
             onClick={() => setState({ kind: "idle" })}
-            className="text-muted-foreground hover:text-foreground underline"
+            className="max-md:min-h-11 max-md:min-w-11 text-muted-foreground hover:text-foreground underline"
           >
             {t.settings.privacy.dismiss}
           </button>
@@ -615,7 +615,7 @@ function DeleteAccountRow({ userEmail }: { userEmail: string }) {
           {state.message}{" "}
           <button
             onClick={() => setState({ kind: "idle" })}
-            className="underline"
+            className="max-md:min-h-11 max-md:min-w-11 underline"
           >
             {t.settings.privacy.dismiss}
           </button>
@@ -654,19 +654,19 @@ function ConfirmBlock({
         onChange={(e) => onChange(e.target.value)}
         // Below `md` the keyboard would pop over the confirm copy (M4).
         autoFocus={!isPhoneViewport()}
-        className="w-full text-[16px] md:text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-destructive/30"
+        className="max-md:min-h-11 w-full text-[16px] md:text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-destructive/30"
       />
-      <div className="flex items-center gap-2 justify-end">
+      <div className="flex max-md:flex-wrap items-center gap-2 justify-end">
         <button
           onClick={onCancel}
-          className="text-xs font-medium px-3 py-1.5 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+          className="max-md:min-h-11 max-md:min-w-11 text-xs font-medium px-3 py-1.5 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
         >
           {t.settings.privacy.confirmCancel}
         </button>
         <button
           onClick={onConfirm}
           disabled={disabled}
-          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          className="max-md:min-h-11 max-md:min-w-11 text-xs font-medium px-3 py-1.5 rounded-lg bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           {confirmLabel}
         </button>

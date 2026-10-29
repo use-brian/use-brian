@@ -13,6 +13,7 @@ import { cpSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { computeSourceHash } from './build-hash.mjs'
+import { copyBrowserControl } from './copy-browser-control.mjs'
 import { buildSidepanel } from './build-sidepanel.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -43,6 +44,4 @@ console.log(
 )
 
 // Replace package re-export shims with browser-loadable shared modules.
-for (const name of ["executor", "snapshot", "dom-settle", "action-cursor", "fill-form", "tab-eligibility", "relay-client", "protocol"]) {
-  cpSync(join(root, '../../packages/browser-control/dist', `${name}.js`), join(dist, `${name}.js`))
-}
+copyBrowserControl(root, dist)

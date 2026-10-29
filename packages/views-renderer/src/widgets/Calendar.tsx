@@ -53,7 +53,7 @@
  * [COMP:views/calendar]
  */
 
-import { type JSX, useMemo, useRef, useState } from 'react'
+import { type JSX, useState } from 'react'
 import type {
   A2UIColumn,
   A2UIRow,
@@ -226,9 +226,8 @@ export function groupRowsByDay(
  * The reschedule overlay mirrors Board's optimistic-move split state:
  * the renderer never writes to a backend — it fires
  * `onAction('reschedule', …)` and lets the host persist, then the next
- * payload re-render replaces the local overlay. We key the overlay off
- * `rowId` and reset it whenever the incoming row identities change so a
- * stale optimistic move can't outlive a refetch.
+ * fresh authoritative rows replace the local overlay, even when row IDs
+ * are unchanged. Same-payload navigation and view updates retain it.
  */
 export function Calendar(props: CalendarProps): JSX.Element {
   const today = props.now ?? new Date()
@@ -237,13 +236,11 @@ export function Calendar(props: CalendarProps): JSX.Element {
   const [cursor, setCursor] = useState<Date>(startOfDay(today))
   const [optimistic, setOptimistic] = useState<Record<string, string>>({})
 
-  // Drop the optimistic overlay when the row set changes (refetch). We
-  // compare a cheap id signature rather than deep-equal so identical
-  // re-renders don't churn — same approach as Board's `columnSignature`.
-  const rowsSignature = useMemo(() => rowIdSignature(props.rows), [props.rows])
-  const lastSignature = useRef(rowsSignature)
-  if (lastSignature.current !== rowsSignature) {
-    lastSignature.current = rowsSignature
+  // Fresh immutable rows or a different date field own a new overlay.
+  // Keep navigation/view state independent from authoritative data refresh.
+  const [source, setSource] = useState(() => ({ rows: props.rows, dateColumnId: props.dateColumnId }))
+  if (source.rows !== props.rows || source.dateColumnId !== props.dateColumnId) {
+    setSource({ rows: props.rows, dateColumnId: props.dateColumnId })
     if (Object.keys(optimistic).length > 0) setOptimistic({})
   }
 
@@ -712,11 +709,10 @@ export function buildGridCells(cursor: Date, view: CalendarView): Date[] {
 }
 
 /**
- * Cheap signature of the row set's identities — the ordered list of
- * `row.id`s. Used to decide when an incoming refetch should drop the
- * optimistic-reschedule overlay (Board uses the same idea in
- * `columnSignature`). Rows without a string id contribute their index
- * so re-ordering still changes the signature.
+ * Identity-only signature retained for public helper compatibility.
+ * Stateful reconciliation uses the incoming rows reference instead, since
+ * fresh canonical values can have unchanged IDs. Rows without a string
+ * id contribute their index so re-ordering still changes the signature.
  */
 export function rowIdSignature(rows: A2UIRow[]): string {
   return rows.map((r, i) => resolveRowId(r, i)).join('|')

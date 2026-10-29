@@ -738,16 +738,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     // A room's turn belongs to the room: any reader stops it, the addresser
     // or an admin answers its confirmations.
     const scope = roomBinding ? roomInteractionScope(senderScope) : senderScope
-    if (!unaddressed && !actionData && !workflowCallback && (roomBinding
-      ? await channelConfirmations.handleRoom(scope, { kind: 'text', text: incoming.text }, {
-          senderId: incoming.userId,
-          // An admin is a linked account; a shadow sender never is.
-          isAdmin: async () => {
-            const linked = await options.linkedAccountStore?.findByProvider('feishu', senderScope.senderId)
-            return linked?.userId ? isWorkspaceAdmin(linked.userId, roomBinding.workspaceId) : false
-          },
-        })
-      : channelConfirmations.handle(scope, { kind: 'text', text: incoming.text })).handled) return
+    if (!unaddressed && !actionData && !workflowCallback && channelConfirmations.handleStop(scope, incoming.text)) return
 
     // Link-code claim. A signed-in user mints this in Settings and sends it
     // through Feishu/Lark. Claim before sender resolution so the next normal
@@ -793,7 +784,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       }
     }
 
-    let channelUserId = ownerId
+    let resolvedUserId: string | null = null
     let isIdentified = false
     let foundLinked = false
     // One provider lookup per inbound turn, shared with email resolution.
@@ -821,7 +812,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           const user = await findUserById(linked.userId)
           if (user) {
             await ensureAssistantMember(routing.assistantId, user.id)
-            channelUserId = user.id
+            resolvedUserId = user.id
             isIdentified = true
             foundLinked = true
           }
@@ -839,12 +830,28 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           routing.assistantId,
           getSenderProfile,
         )
-        channelUserId = resolved.user.id
+        resolvedUserId = resolved.user.id
         isIdentified = resolved.isIdentified
       } catch (error) {
         console.error('[feishu] channel user resolution failed:', error)
       }
     }
+
+    if (!resolvedUserId) {
+      if (!unaddressed) await adapter.sendMessage(incoming.channelId, { text: 'Your identity could not be verified. Please try again shortly.' },
+        incoming.messageId ? { threadTs: incoming.messageId } : undefined).catch(() => {})
+      return
+    }
+
+    const channelUserId = resolvedUserId
+
+    if (!unaddressed && !actionData && !workflowCallback && (roomBinding
+      ? await channelConfirmations.handleRoom(scope, { kind: 'text', text: incoming.text }, {
+          senderId: incoming.userId,
+          // Use the same current actor as the turn, never a rejected link.
+          isAdmin: async () => isIdentified && isWorkspaceAdmin(channelUserId, roomBinding.workspaceId),
+        })
+      : channelConfirmations.handle(scope, { kind: 'text', text: incoming.text })).handled) return
 
     // Use the identity lookup's same profile snapshot for its display label,
     // even when the bridge supplied a cached roster name. Explicit links only

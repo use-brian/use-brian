@@ -43,12 +43,31 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
-  async function render(mobile = false, activeSurface: WorkspaceSurface = "tasks") {
-    await act(async () => root.render(<I18nProvider locale="en" dict={en}><WorkspaceAppRail workspaceId={workspaceId} activeSurface={activeSurface} activeApp="tasks" homeApps={homeApps} customApps={customApps} liveCount={0} studioNudge={false} onDismissStudioNudge={() => {}} mobile={mobile} /></I18nProvider>));
+  async function render(mobile = false, activeSurface: WorkspaceSurface = "tasks", liveCount = 0) {
+    await act(async () => root.render(<I18nProvider locale="en" dict={en}><WorkspaceAppRail workspaceId={workspaceId} activeSurface={activeSurface} activeApp="tasks" homeApps={homeApps} customApps={customApps} liveCount={liveCount} studioNudge={false} onDismissStudioNudge={() => {}} mobile={mobile} /></I18nProvider>));
   }
   const button = (name: string) => document.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!;
   const railLink = (name: string) => container.querySelector<HTMLAnchorElement>(`a[aria-label="${name}"]`);
   async function click(element: HTMLElement) { await act(async () => element.click()); }
+
+  it.each([false, true])("keeps Live counts and navigation accessible through the capped badge (mobile: %s)", async (mobile) => {
+    const close = vi.fn(); window.addEventListener("doc:sidebar-close", close);
+    try {
+      for (const count of [1, 99, 100]) {
+        await render(mobile, "tasks", count);
+        const live = container.querySelector<HTMLAnchorElement>('a[href="/w/workspace-a/live"]')!;
+        const badge = live.querySelector('[data-live-active-count]')!;
+        expect(badge.textContent).toBe(count > 99 ? "99+" : String(count));
+        expect(badge.getAttribute("data-live-active-count")).toBe(String(count));
+        expect(live.getAttribute("aria-label")).toBe(badge.getAttribute("aria-label"));
+        expect(live.getAttribute("aria-label")).toContain(String(count));
+        await click(live);
+      }
+      expect(close).toHaveBeenCalledTimes(3);
+      await render(mobile);
+      expect(container.querySelector('[data-live-active-count]')).toBeNull();
+    } finally { window.removeEventListener("doc:sidebar-close", close); }
+  });
 
   it("reveals a rail item's name after 100ms of hover", async () => {
     vi.useFakeTimers();
@@ -81,6 +100,10 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     await render();
     expect(container.querySelector('a')?.getAttribute('aria-label')).toBe(en.workspaceNav.homeAria);
     const workspaceSlot = container.querySelector('[data-workspace-menu-slot]')!;
+    // Exclude the overlaid menu button and the rail gutters from native dragging.
+    expect(workspaceSlot.hasAttribute("data-no-drag")).toBe(true);
+    expect(workspaceSlot.classList.contains("w-14")).toBe(true);
+    expect(workspaceSlot.classList.contains("h-16")).toBe(true);
     expect(workspaceSlot.compareDocumentPosition(railLink(en.workspaceNav.homeAria)!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(container.querySelector('[data-workspace-sidebar-toggle]')).toBeNull();
     const more = button(en.workspaceNav.more);

@@ -4,7 +4,7 @@
  * [COMP:workflow/scheduled-trigger]
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   createScheduleWorkflowTool,
   syncWorkflowScheduleTrigger,
@@ -311,6 +311,48 @@ describe('[COMP:workflow/scheduled-trigger] scheduleWorkflow tool', () => {
       makeContext(),
     )
     expect(result.isError).toBe(true)
+  })
+})
+
+describe('[COMP:workflow/scheduled-trigger] scheduling result relative time', () => {
+  it.each([
+    { now: '2030-01-01T00:00:45Z', next: '2030-01-01T00:01:00', relativeTime: 'in less than a minute' },
+    { now: '2030-01-01T00:00:30Z', next: '2030-01-01T00:01:00', relativeTime: 'in 1 minute' },
+    { now: '2030-01-01T00:00:31Z', next: '2030-01-01T00:02:00', relativeTime: 'in 1 minute' },
+    { now: '2030-01-01T00:00:00Z', next: '2030-01-01T01:00:00', relativeTime: 'in 1 hour' },
+    { now: '2030-01-01T00:00:00Z', next: '2030-01-01T03:15:00', relativeTime: 'in 3 hours 15 minutes' },
+    { now: '2030-01-01T00:00:00Z', next: '2030-01-02T00:00:00', relativeTime: 'in 24 hours' },
+    { now: '2030-01-01T00:00:00Z', next: '2030-01-02T00:01:00', relativeTime: undefined },
+    { now: '2030-01-01T00:02:00Z', next: '2030-01-01T00:01:00', relativeTime: undefined },
+  ])('returns $relativeTime for $next from $now', async ({ now, next, relativeTime }) => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(now))
+    try {
+      const jobStore = makeJobStore()
+      const workflowStore = makeWorkflowStore([SAMPLE_WORKFLOW])
+      const tool = createScheduleWorkflowTool({
+        workflowStore,
+        jobStore,
+        resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      })
+      const schedule = { type: 'once' as const, datetime: next }
+      const result = await tool.execute({ workflowId: SAMPLE_WORKFLOW.id, schedule, timezone: 'UTC' }, makeContext())
+      expect(result.isError).toBeFalsy()
+      expect(result.data).toMatchObject({
+        workflowId: SAMPLE_WORKFLOW.id,
+        workflowName: SAMPLE_WORKFLOW.name,
+        nextRun: `${next}.000Z`,
+        schedule,
+        timezone: 'UTC',
+      })
+      if (relativeTime === undefined) expect(result.data).not.toHaveProperty('relativeTime')
+      else expect(result.data).toHaveProperty('relativeTime', relativeTime)
+      expect(jobStore.rows).toHaveLength(1)
+      expect(jobStore.rows[0].nextRunAt.toISOString()).toBe(`${next}.000Z`)
+      expect((await workflowStore.getById(USER_ID, SAMPLE_WORKFLOW.id))?.trigger).toEqual({ kind: 'schedule', schedule, timezone: 'UTC' })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

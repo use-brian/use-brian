@@ -69,14 +69,33 @@ export type FirefoxNativeHostDeps = {
 export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise<void> {
   const decoder = new NativeMessageDecoder();
   let executor: FirefoxBidiExecutor | null = null;
+  let generation = 0;
+  let transportClosed = false;
+  const stopped = () => new FirefoxBidiError("The task ended before this browser operation completed.", "stopped");
+  const check = (expected: number) => { if (transportClosed || expected !== generation) throw stopped(); };
   const profilesRoots = firefoxProfilesRoots(deps.platform, deps.env, deps.home);
 
-  const ensureExecutor = async (): Promise<FirefoxBidiExecutor> => {
+  const retireExecutor = async (): Promise<void> => {
+    generation++;
+    const active = executor;
+    executor = null;
+    await active?.stop();
+  };
+  let transportRetirement: Promise<void> | null = null;
+  const retireTransport = (): Promise<void> => {
+    if (transportRetirement) return transportRetirement;
+    transportClosed = true;
+    return transportRetirement = retireExecutor();
+  };
+
+  const ensureExecutor = async (expected: number): Promise<FirefoxBidiExecutor> => {
+    check(expected);
     if (executor) return executor;
     if (profilesRoots.length === 0) {
       throw new FirefoxBidiError("Firefox is not supported on this platform.", "unsupported_browser");
     }
     const endpoint = await discoverFirefoxRemoteEndpoint(profilesRoots);
+    check(expected);
     if (!endpoint) {
       throw new FirefoxBidiError(
         "Firefox was not started for My Browser. Quit Firefox, then run use-brian-firefox start or choose Start Firefox for My Browser in the Use Brian desktop app.",
@@ -89,10 +108,13 @@ export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise
     );
     try {
       await candidate.connect();
+      check(expected);
       executor = candidate;
       return candidate;
     } catch (error) {
-      executor = null;
+      // This candidate owns only its own connection, never a newer task's executor.
+      if (executor === candidate) executor = null;
+      await candidate.stop().catch(() => {});
       throw error;
     }
   };
@@ -101,16 +123,23 @@ export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise
     deps.output.write(encodeNativeMessage(value));
   };
 
-  const handle = async (value: unknown): Promise<void> => {
+  const handle = async (value: unknown, expected = generation): Promise<void> => {
     const req = parseRequest(value);
     if (!req) {
       reply({ id: null, ok: false, error: "Invalid native-host request.", code: "backend_error" });
       return;
     }
     try {
+      if (req.type === "stop") {
+        await retireExecutor();
+        reply({ id: req.id, ok: true, data: { stopped: true } });
+        return;
+      }
+      check(expected);
       if (req.type === "status") {
         try {
-          await ensureExecutor();
+          await ensureExecutor(expected);
+          check(expected);
           reply({ id: req.id, ok: true, data: { ready: true } });
         } catch (error) {
           reply({
@@ -125,15 +154,14 @@ export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise
         return;
       }
       if (req.type === "bind") {
-        const active = await ensureExecutor();
-        reply({
-          id: req.id,
-          ok: true,
-          data: await active.bindFocusedContext({
-            ...(typeof req.args?.url === "string" ? { url: req.args.url } : {}),
-            ...(typeof req.args?.title === "string" ? { title: req.args.title } : {}),
-          }),
+        const active = await ensureExecutor(expected);
+        check(expected);
+        const data = await active.bindFocusedContext({
+          ...(typeof req.args?.url === "string" ? { url: req.args.url } : {}),
+          ...(typeof req.args?.title === "string" ? { title: req.args.title } : {}),
         });
+        check(expected);
+        reply({ id: req.id, ok: true, data });
         return;
       }
       if (req.type === "openDesktop") {
@@ -144,21 +172,20 @@ export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise
           );
         }
         await deps.openControl();
+        check(expected);
         reply({ id: req.id, ok: true, data: { opened: true } });
         return;
       }
-      if (req.type === "stop") {
-        await executor?.stop();
-        executor = null;
-        reply({ id: req.id, ok: true, data: { stopped: true } });
-        return;
-      }
       if (!req.op) throw new FirefoxBidiError("Missing browser operation.", "backend_error");
-      const active = await ensureExecutor();
-      reply({ id: req.id, ok: true, data: await active.execute(req.op, req.args ?? {}) });
+      const active = await ensureExecutor(expected);
+      check(expected);
+      const data = await active.execute(req.op, req.args ?? {});
+      check(expected);
+      reply({ id: req.id, ok: true, data });
     } catch (error) {
+      if (req.type !== "stop" && expected !== generation) error = stopped();
       const code = error instanceof FirefoxBidiError ? error.code : "backend_error";
-      if (code === "detached") executor = null;
+      if (code === "detached" && expected === generation) executor = null;
       reply({
         id: req.id,
         ok: false,
@@ -170,20 +197,29 @@ export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise
 
   await new Promise<void>((resolve, reject) => {
     let queue = Promise.resolve();
+    const fail = (error: unknown): void => {
+      void retireTransport().then(() => reject(error), () => reject(error));
+    };
     deps.input.on("data", (chunk: Buffer | string) => {
+      if (transportClosed) return;
       try {
         for (const message of decoder.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))) {
           if ((message as { type?: unknown } | null)?.type === "stop") void handle(message);
-          else queue = queue.then(() => handle(message));
+          else {
+            const expected = generation; // Capture at receipt, before queued work can outlive Stop.
+            queue = queue.then(() => handle(message, expected));
+          }
         }
-        queue.catch(reject);
+        void queue.catch(fail);
       } catch (error) {
-        reject(error);
+        fail(error);
       }
     });
-    deps.input.on("end", () => queue.finally(resolve));
-    deps.input.on("error", reject);
+    deps.input.on("end", () => {
+      void retireTransport().then(() => queue).then(resolve, reject);
+    });
+    deps.input.on("error", fail);
   }).finally(async () => {
-    await executor?.stop();
+    await retireTransport();
   });
 }

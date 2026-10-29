@@ -4,6 +4,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
+import { ja } from "@/lib/i18n/dictionaries/ja";
+import { zh } from "@/lib/i18n/dictionaries/zh";
+import { zhCN } from "@/lib/i18n/dictionaries/zh-cn";
+import type { Dictionary } from "@/lib/i18n/dictionaries";
+import type { Locale } from "@/lib/i18n/config";
 import type { DesktopBridge, DesktopUpdateStatus } from "@/lib/desktop-auth-source";
 import type { OfflineSyncState } from "@/lib/offline/use-offline-sync";
 import { WorkspaceStatus } from "../workspace-status";
@@ -12,6 +17,7 @@ import { WorkspaceStatus } from "../workspace-status";
 
 const healthy: OfflineSyncState = { connectivity: "online", offline: false, reconnecting: false, pending: 0, paused: 0 };
 const release = "1.2.3";
+const languages = [["en", en], ["ja", ja], ["zh", zh], ["zh-CN", zhCN]] as const;
 
 describe("[COMP:app-web/workspace-status] shared connection and update control", () => {
   let root: Root;
@@ -29,9 +35,9 @@ describe("[COMP:app-web/workspace-status] shared connection and update control",
     } satisfies DesktopBridge;
   }
 
-  async function render(offlineState = healthy, sidebarOpen = true) {
+  async function render(offlineState = healthy, sidebarOpen = true, language: readonly [Locale, Dictionary] = languages[0]) {
     await act(async () => root.render(
-      <I18nProvider dict={en} locale="en">
+      <I18nProvider dict={language[1]} locale={language[0]}>
         <WorkspaceStatus offlineState={offlineState} sidebarOpen={sidebarOpen} />
       </I18nProvider>,
     ));
@@ -161,4 +167,72 @@ describe("[COMP:app-web/workspace-status] shared connection and update control",
     await act(async () => resolveInitial({ phase: "ready", version: release }));
     expect(host.innerHTML).toBe("");
   });
+  it.each(languages)("keeps pending counts visible through connection changes until acknowledgement (%s)", async (locale, dict) => {
+    const t = dict.docPage;
+    const language = [locale, dict] as const;
+    await render({ ...healthy, pending: 7 }, true, language);
+    await openDetails();
+    expect(state()).toBe("attention");
+    expect(trigger().getAttribute("aria-label")).toBe(t.offlineSyncPendingTitle);
+    const announcement = host.querySelector('[role="status"]')!;
+    expect(announcement.getAttribute("aria-live")).toBe("polite");
+    expect(announcement.getAttribute("aria-atomic")).toBe("true");
+    const pendingDescription = (count: number) => {
+      // Identify the rendered description by its interpolated count, rather
+      // than pinning a new translation or echoing the dictionary template.
+      const description = [...dialog().querySelectorAll("p")]
+        .find(p => p.textContent?.includes(String(count)))?.textContent ?? "";
+      expect(description).not.toBe("");
+      expect(description).not.toContain("{count}");
+      expect(liveText()).toContain(description);
+      expect(dialog().querySelectorAll("button, a[href]")).toHaveLength(0);
+      return description;
+    };
+    const onlineDescription = pendingDescription(7);
+
+    await render({ ...healthy, connectivity: "offline", offline: true, pending: 7 }, true, language);
+    expect(state()).toBe("attention");
+    expect(trigger().getAttribute("aria-label")).toBe(t.offlineBannerTitle);
+    expect(pendingDescription(7)).not.toBe(onlineDescription);
+
+    await render({ ...healthy, connectivity: "offline", offline: true, pending: 2 }, true, language);
+    expect(pendingDescription(2)).not.toContain("7");
+    expect(liveText()).not.toContain("7");
+    await render({ ...healthy, pending: 2 }, true, language);
+    expect(state()).toBe("attention");
+    expect(trigger().getAttribute("aria-label")).toBe(t.offlineSyncPendingTitle);
+    pendingDescription(2);
+
+    // A connectivity recovery alone leaves pending attention in place. Only
+    // the supplied acknowledged-zero state removes that description.
+    await render(healthy, true, language);
+    expect(state()).toBe("online");
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+    expect(dialog().textContent).toBe(t.offlineStatusOnline);
+    expect(liveText()).toBe(t.offlineStatusOnline);
+    expect(dialog().querySelectorAll("button, a[href]")).toHaveLength(0);
+    expect(installUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each(languages)("keeps paused Feed recovery distinct and desktop restart explicit (%s)", async (locale, dict) => {
+    const t = dict.docPage;
+    installBridge({ phase: "ready", version: release });
+    await render({ ...healthy, connectivity: "offline", offline: true, pending: 7, paused: 2 }, true, [locale, dict]);
+    await openDetails();
+    expect(state()).toBe("attention");
+    expect(trigger().getAttribute("aria-label")).toBe(`${t.offlineSyncPausedTitle}. ${t.desktopUpdateReady}`);
+    const description = [...dialog().querySelectorAll("p")]
+      .find(p => p.textContent?.includes("Feed"))?.textContent ?? "";
+    expect(description).toContain("2");
+    expect(description).not.toContain("7");
+    expect(liveText()).toContain(description);
+    const actions = dialog().querySelectorAll<HTMLButtonElement>("button");
+    expect(actions).toHaveLength(1);
+    expect(actions[0].textContent).toContain(t.desktopUpdateRestart);
+    expect(installUpdate).not.toHaveBeenCalled();
+    await act(async () => actions[0].click());
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    expect(actions[0].disabled).toBe(true);
+  });
+
 });

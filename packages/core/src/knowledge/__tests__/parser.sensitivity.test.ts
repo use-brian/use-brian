@@ -21,6 +21,7 @@ sensitivity: public
 Body.`
     const entry = parseMarkdownFile('faq.md', content)
     expect(entry.sensitivity).toBe('public')
+    expect(entry.sensitivityExplicit).toBe(true)
     expect(warnSpy).not.toHaveBeenCalled()
   })
 
@@ -33,6 +34,7 @@ sensitivity: internal
 Body.`
     const entry = parseMarkdownFile('roadmap.md', content)
     expect(entry.sensitivity).toBe('internal')
+    expect(entry.sensitivityExplicit).toBe(true)
   })
 
   it('extracts sensitivity=confidential from frontmatter', () => {
@@ -44,7 +46,19 @@ sensitivity: confidential
 Body.`
     const entry = parseMarkdownFile('fundraising/cap-table.md', content)
     expect(entry.sensitivity).toBe('confidential')
+    expect(entry.sensitivityExplicit).toBe(true)
   })
+
+  it.each(['constructor', 'toString', '__proto__', 'hasOwnProperty'])(
+    'warns and treats inherited object name %s as an invalid, non-explicit stamp', value => {
+      const entry = parseMarkdownFile('fictional-invalid.md', `---\ntitle: Fictional entry\nsensitivity: ${value}\n---\nBody.`)
+      expect(entry.sensitivity).toBe('internal')
+      expect(entry.sensitivityExplicit).toBe(false)
+      expect(warnSpy).toHaveBeenCalledOnce()
+      expect(warnSpy.mock.calls[0]![0]).toContain('invalid sensitivity')
+      expect(warnSpy.mock.calls[0]![0]).toContain('fictional-invalid.md')
+    },
+  )
 
   it('defaults to internal when sensitivity is absent', () => {
     const content = `---

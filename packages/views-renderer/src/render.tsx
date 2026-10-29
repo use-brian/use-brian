@@ -9,7 +9,7 @@
  * [COMP:views/render]
  */
 
-import { Fragment, type JSX } from 'react'
+import { Fragment, type JSX, useMemo } from 'react'
 // Import directly from the views/a2ui module rather than the core
 // package barrel: the barrel re-exports `skills/loader` which uses
 // Node's `fs`, breaking client bundles that include this renderer
@@ -45,12 +45,18 @@ import { Timeline } from './widgets/Timeline.js'
 import { PROPERTIES } from './properties/index.js'
 
 export function ViewRenderer(props: ViewRendererProps): JSX.Element {
+  const validated = props.validated === true
+  // Parsing clones arrays. Preserve the same incoming payload's identity
+  // across parent renders so local widget optimism is not mistaken for stale data.
+  const parsed = useMemo(
+    () => validated ? null : viewPayloadSchema.safeParse(props.payload),
+    [props.payload, validated],
+  )
   let payload: ViewPayload
-  if (props.validated) {
+  if (validated) {
     payload = props.payload as ViewPayload
   } else {
-    const parsed = viewPayloadSchema.safeParse(props.payload)
-    if (!parsed.success) {
+    if (!parsed || !parsed.success) {
       return (
         <div
           className="text-xs text-rose-700 dark:text-rose-300"

@@ -4,13 +4,21 @@ export * from '../../src/lib/auth-fetch';
 const encode = (event: string, data: unknown = {}) => new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 let running: ReadableStreamDefaultController<Uint8Array> | undefined;
 const pendingInputs: string[] = [];
-export const requests: { url: string; body: Record<string, unknown> }[] = [];
+export const requests: { url: string; body: Record<string, unknown>; method: string; cache: RequestCache | undefined }[] = [];
 export const getAccessToken = () => null;
 export async function authFetch(input: string, init?: RequestInit): Promise<Response> {
   const url = new URL(input, location.origin);
   const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
-  requests.push({ url: url.pathname, body });
-  if (url.pathname.startsWith('/api/doc-files/')) return new Response('<svg xmlns="http://www.w3.org/2000/svg" width="480" height="320"><rect width="480" height="320" fill="steelblue"/></svg>', { headers: { 'Content-Type': 'image/svg+xml' } });
+  const method = (init?.method ?? 'GET').toUpperCase();
+  requests.push({ url: url.pathname, body, method, cache: init?.cache });
+  if (method === 'GET' && /^\/api\/doc-files\/fictional-workspace\/[^/]+$/.test(url.pathname) && url.search === '?redirect=0') {
+    return new Response('<svg xmlns="http://www.w3.org/2000/svg" width="480" height="320"><rect width="480" height="320" fill="steelblue"/></svg>', {
+      headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'private, no-store', 'X-Brian-Media-Valid-For-Ms': '30000' },
+    });
+  }
+  if (method === 'PATCH' && url.pathname === '/api/workspaces/fictional-workspace/picker-preferences' && url.search === '' && body.opened === true && Object.keys(body).length === 1) {
+    return Response.json({ pickerPinnedAt: null, pickerHiddenAt: null, pickerLastOpenedAt: '2026-01-01T00:00:00.000Z' });
+  }
   if (url.pathname === '/api/chat/stop') {
     for (const inputId of pendingInputs.splice(0)) running?.enqueue(encode('input_applied', { inputId, messageId: `applied-${inputId}` }));
     running?.enqueue(encode('done')); running?.close(); running = undefined;

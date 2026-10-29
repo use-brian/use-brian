@@ -46,7 +46,7 @@ describe('[COMP:api/research-delivery] Research delivery', () => {
       activity: activity(), observation: obs.snapshot(), finalText: '## Findings\nMarket grew.', outputMessageId: 'm1', requestText: 'Research the widget market',
     })
     expect(d.writeDefaultPage).toHaveBeenCalledTimes(1)
-    expect(d.writeDefaultPage).toHaveBeenCalledWith(expect.objectContaining({ pageId: PLANNED, title: 'Research the widget market', sensitivity: 'internal' }))
+    expect(d.writeDefaultPage).toHaveBeenCalledWith(expect.objectContaining({ activityId: activity().id, requestMessageId: 'm0', pageId: PLANNED, title: 'Research the widget market', sensitivity: 'internal' }))
     expect(d.inspect).toHaveBeenCalledWith(ACTOR, 'page', PLANNED)
     expect(out.status).toBe('saved')
     expect(settled[0]).toMatchObject({ status: 'saved', outputMessageId: 'm1', saveError: null,

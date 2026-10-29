@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { applyOfficeCommand } from '../commands.js'
+import { applyOfficeCommand, OfficeCommandSchema } from '../commands.js'
+import { preflightOfficeCandidate } from '../capabilities.js'
 import { documentFixture, id, presentationFixture } from './fixtures.js'
 
 const actor = { type: 'user' as const, id: id(90) }
@@ -79,5 +80,44 @@ describe('[COMP:office/commands] Office command vocabulary', () => {
       ],
     })).toThrow(/was not found/)
     expect(base.slides[0].objects[0].geometry.widthPt).toBe(816)
+  })
+})
+
+describe('[COMP:office/commands] Presentation reading order admission', () => {
+  it.each([
+    ['duplicate', [id(17), id(17)]],
+    ['missing', [id(17)]],
+    ['unknown', [id(17), id(999)]],
+    ['extra', [id(17), id(42), id(42)]],
+  ] as const)('refuses a %s canonical order command without mutating its source', (_kind, order) => {
+    const snapshot = presentationFixture()
+    snapshot.slides[0].objects.push({ id: id(42), kind: 'shape', shape: 'rectangle', geometry: { ...snapshot.slides[0].objects[0].geometry }, locked: false, strokeWidthPt: 1, text: [] })
+    snapshot.slides[0].readingOrder = [id(17), id(42)]
+    const before = structuredClone(snapshot)
+    const command = {
+      commandId: id(920), artifactId: snapshot.artifactId, baseVersion: 0, actor, origin: 'manual' as const,
+      kind: 'setObjectProperty' as const, targetId: id(16), path: ['readingOrder'], value: [...order],
+    }
+    expect(() => OfficeCommandSchema.parse(command)).not.toThrow()
+    let rejection: unknown
+    try { applyOfficeCommand(snapshot, command) } catch (error) { rejection = error }
+    expect({ rejected: rejection instanceof Error, source: snapshot }).toEqual({
+      rejected: true, source: before,
+    })
+  })
+
+  it('accepts a reversed canonical order without changing object stacking or the source', () => {
+    const snapshot = presentationFixture()
+    snapshot.slides[0].objects.push({ id: id(42), kind: 'shape', shape: 'rectangle', geometry: { ...snapshot.slides[0].objects[0].geometry }, locked: false, strokeWidthPt: 1, text: [] })
+    snapshot.slides[0].readingOrder = [id(17), id(42)]
+    const before = structuredClone(snapshot)
+    const next = applyOfficeCommand(snapshot, {
+      commandId: id(921), artifactId: snapshot.artifactId, baseVersion: 0, actor, origin: 'manual',
+      kind: 'setObjectProperty', targetId: id(16), path: ['readingOrder'], value: [id(42), id(17)],
+    })
+    expect(snapshot).toEqual(before)
+    expect(next.family === 'presentation' && next.slides[0].readingOrder).toEqual([id(42), id(17)])
+    expect(next.family === 'presentation' && next.slides[0].objects.map(object => object.id)).toEqual([id(17), id(42)])
+    expect(preflightOfficeCandidate(next).ok).toBe(true)
   })
 })

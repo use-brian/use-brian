@@ -4730,7 +4730,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         >
           <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-6">
             {activeSessionId && activeContextSession ? <ClientDeliveryOversight key={activeSessionId}
-              workspaceId={workspaceId} chatId={activeSessionId}
+              workspaceId={workspaceId} chatId={activeSessionId} hideWhileLoading
               scope={activeContextSession.contextProjectId ? {kind:"project",id:activeContextSession.contextProjectId}
                 : activeContextSession.contextGroupId ? {kind:"department",id:activeContextSession.contextGroupId} : {kind:"personal"}}
               onDraft={draft=>{setInput(draft);requestAnimationFrame(focusComposer)}}/> : null}

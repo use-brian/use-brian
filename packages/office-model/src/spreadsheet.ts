@@ -291,7 +291,6 @@ class Parser {
 
   private functionValue(name: string, args: Value[]): Value {
     const values = flatten(args)
-    if (name === 'IF') return truthy(scalar(args[0] ?? false)) ? (args[1] ?? true) : (args[2] ?? false)
     if (name === 'OR') return values.some(truthy)
     if (name === 'ROW') return this.currentRow
     if (name === 'ROUND') {

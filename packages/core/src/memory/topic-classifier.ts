@@ -432,7 +432,13 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
   // happens to pass. One invocation has one continuous authority window.
   let refusal: unknown
   let pending: Promise<void> | undefined
+  let closed = false
+  const closedError = new Error('The topic classifier authority window has closed')
   const check = async () => {
+    // A canceled transport may unwind after fallback has returned and the
+    // caller has added annotation/history evidence to its live accumulator.
+    // That work no longer owns a model boundary in the continuing turn.
+    if (closed) throw closedError
     if (refusal) throw refusal
     if (pending) return pending
     pending = (async () => {
@@ -469,24 +475,32 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
   })
   let result: TopicClassification
   try {
-    result = await Promise.race([
-      classifyTopicCurrent({ ...opts, ...input, assertInputAuthority: check, signal, deadlineAt }),
-      deadline,
-    ])
-  } catch (error) {
-    if (isInputAuthorityError(error)) throw error
-    if (error !== timeoutError) throw error
-    // A deadline may interrupt an authority check. Await that same check;
-    // never admit the fallback through a second, independently healthy probe.
-    await check()
-    console.warn('[topic-classifier] deadline exceeded; using uncategorized fallback', {
-      timeoutMs: TOPIC_CLASSIFIER_TIMEOUT_MS,
-    })
-    result = { ...FALLBACK }
+    try {
+      result = await Promise.race([
+        classifyTopicCurrent({ ...opts, ...input, assertInputAuthority: check, signal, deadlineAt }),
+        deadline,
+      ])
+    } catch (error) {
+      if (isInputAuthorityError(error)) throw error
+      if (error !== timeoutError) throw error
+      // A deadline may interrupt an authority check. Await that same check;
+      // never admit the fallback through a second, independently healthy probe.
+      await check()
+      console.warn('[topic-classifier] deadline exceeded; using uncategorized fallback', {
+        timeoutMs: TOPIC_CLASSIFIER_TIMEOUT_MS,
+      })
+      result = { ...FALLBACK }
+    }
+    // Start (or join) the last check, then close new callback entries before
+    // awaiting it. A losing cascade cannot start another check in the
+    // microtask between this validation completing and our return.
+    const finalCheck = check()
+    closed = true
+    await finalCheck
+    return bindScopeSources(result, observed)
   } finally {
+    closed = true
     if (timer !== undefined) clearTimeout(timer)
     controller.abort()
   }
-  await check()
-  return bindScopeSources(result, observed)
 }

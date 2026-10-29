@@ -178,6 +178,7 @@ export const WORKSPACE_FLUSH_TABLES = [
   // also cascade with their sessions. `assistant_playbook_rules` carries a
   // workspace_id only on research lessons, so the workspace delete removes
   // exactly the lessons learned from this workspace's flushed follow-ups.
+  'research_feedback_attempts',
   'research_feedback_revisions',
   'research_feedback',
   'research_artifact_links',

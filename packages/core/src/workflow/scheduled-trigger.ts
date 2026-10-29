@@ -22,6 +22,7 @@
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import { computeNextRun, type StructuredSchedule } from '../scheduling/schedule.js'
+import { formatRelativeTime } from '../scheduling/delivery-resolution.js'
 import type { JobStore, ScheduledJob, ScheduledJobMode } from '../scheduling/types.js'
 import type { WorkflowStore } from './types.js'
 import { pinToolAuthoringAuthority } from '../security/tool-authority.js'
@@ -304,16 +305,4 @@ export function createScheduleWorkflowTool(deps: ScheduleWorkflowToolDeps): Tool
       }
     },
   })
-}
-
-function formatRelativeTime(nextRunAt: Date): { relativeTime?: string } {
-  const diffMs = nextRunAt.getTime() - Date.now()
-  if (diffMs < 0 || diffMs > 24 * 60 * 60 * 1000) return {}
-  const totalMinutes = Math.round(diffMs / 60_000)
-  const hours = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
-  const parts: string[] = []
-  if (hours > 0) parts.push(`${hours} hour${hours !== 1 ? 's' : ''}`)
-  if (minutes > 0) parts.push(`${minutes} minute${minutes !== 1 ? 's' : ''}`)
-  return { relativeTime: `in ${parts.join(' ') || 'less than a minute'}` }
 }

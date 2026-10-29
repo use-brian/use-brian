@@ -514,7 +514,7 @@ export function DocSidebar(props: Props) {
       </div>
       <WorkspaceAppRail workspaceId={workspaceId} activeSurface={props.activeSurface} activeApp={activeOperatorApp} homeApps={props.homeApps} customApps={props.customApps} liveCount={liveActiveCount} studioNudge={props.studioNudge} onDismissStudioNudge={props.onDismissStudioNudge} />
       <div id="workspace-context-sidebar" data-doc-context-sidebar className={`doc-sidebar-surface flex h-full min-w-0 flex-1 flex-col border-r border-sidebar-border md:mb-2 md:h-[calc(100%-0.5rem)] md:w-[var(--workspace-sidebar-width,14rem)] md:flex-none md:rounded-l-2xl md:border-y md:border-l ${props.sidebarCollapsed ? "md:hidden" : ""}`}>
-      <div data-doc-chrome data-workspace-context-heading className="flex h-14 md:h-16 shrink-0 items-center gap-1 px-2 md:px-4">
+      <div data-doc-chrome data-workspace-context-heading className={`flex h-14 shrink-0 items-center gap-1 px-2 ${sidebarSurface === "chat" ? "md:h-14 md:px-5" : "md:h-16 md:px-4"}`}>
         <WorkspaceAppTitleHost className="pl-14 md:pl-0" />
         <div className="flex shrink-0 items-center gap-0.5">
           <button type="button" data-inbox-trigger aria-haspopup="dialog" aria-controls="workspace-inbox" aria-expanded={props.inboxOpen} aria-label={t.iconInboxAria} aria-pressed={props.inboxOpen} title={t.iconInboxAria} onClick={props.onToggleInbox} className="relative flex size-11 items-center justify-center rounded-md text-sidebar-foreground/55 hover:bg-sidebar-accent hover:text-sidebar-foreground md:size-8">
@@ -546,7 +546,7 @@ export function DocSidebar(props: Props) {
 
       <WorkspaceAppRail mobile workspaceId={workspaceId} activeSurface={props.activeSurface} activeApp={activeOperatorApp} homeApps={props.homeApps} customApps={props.customApps} liveCount={liveActiveCount} studioNudge={props.studioNudge} onDismissStudioNudge={props.onDismissStudioNudge} />
 
-      <div className="doc-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-4 pt-2 md:px-3">
+      <div className={`doc-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-4 pt-2 md:px-3 ${sidebarSurface === "chat" ? "md:pt-0.5 md:[scrollbar-gutter:auto]" : ""}`}>
         {(sidebarSurface === "projects" || sidebarSurface === "organization") && <WorkspaceStructureSwitcher workspaceId={workspaceId} view={sidebarSurface} />}
         {/* Surface-aware body. Suggested borrows `/p` for its content pane but
             resolves this body from the sticky Home app, so first load keeps the

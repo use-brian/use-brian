@@ -300,6 +300,10 @@ export const NAME_ORIGINS = ['placeholder', 'auto', 'user'] as const
 export type NameOrigin = (typeof NAME_ORIGINS)[number]
 
 export type SavedView = {
+  /** SELECT-only current actor capability; create/mutation results omit it. */
+  effectiveRole?: 'view' | 'comment' | 'edit' | 'full'
+  /** Includes the independent root mutation scope; advisory until SQL rechecks. */
+  canEdit?: boolean
   id: string
   workspaceId: string
   /** users.id — the user who created the view. Matches workflows.created_by pattern. */
@@ -425,6 +429,8 @@ export type SavedView = {
 
 export type SavedViewListRow = Pick<
   SavedView,
+  | 'effectiveRole'
+  | 'canEdit'
   | 'id'
   | 'workspaceId'
   | 'name'
@@ -603,12 +609,17 @@ export type PageWriteActor = 'user' | 'system'
 
 // ── Store interface ───────────────────────────────────────────────────
 
-/** Internal-only evidence supplied by an authenticated, source-free human
- * authoring adapter. Never deserialize from request/tool JSON, infer from the
- * row creator, or attach to imports, copies, generated bodies or source pages.
+/** Internal-only provenance, never deserialized from request/tool JSON.
+ * Human evidence is limited to authenticated source-free authoring, never
+ * imports/copies/generated bodies. Research pointers require current native
+ * source admission and do not enable ready-mode source-derived writes.
  * A parent proves placement, not content provenance. */
 export type SavedViewCreationOptions = {
-  provenance: { kind: 'human-authored'; actorId: string }
+  provenance: { kind: 'human-authored'; actorId: string } | {
+    /** Server-only persisted research pointers, never caller-supplied authority.
+     * This remains unsupported by ready-mode source-derived admission. */
+    kind: 'research-private'; actorId: string; activityId: string; requestMessageId: string; pageId: string
+  }
 }
 
 export type SavedViewStore = {

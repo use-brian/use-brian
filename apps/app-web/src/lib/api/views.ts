@@ -1,6 +1,6 @@
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { currentOfflineWriteAuthority, sameOfflineWriteAuthority, pinOfflineWriteSession,
-  offlineWriteUnavailable, type PinnedOfflineSession } from "@/lib/offline/application-write-authority";
+  offlineWriteUnavailable, type OfflineWriteAuthority, type PinnedOfflineSession } from "@/lib/offline/application-write-authority";
 /**
  * SDK for the Notion-redesign Views surface (apps/web).
  *
@@ -23,6 +23,7 @@ import { currentOfflineWriteAuthority, sameOfflineWriteAuthority, pinOfflineWrit
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import { getUserInfo } from "@/lib/user";
 import { desktopBridge, isDesktopAuth } from "@/lib/desktop-auth-source";
 import type { ViewPayload } from "@use-brian/views-renderer";
 import type {
@@ -56,6 +57,45 @@ export type ViewEntity =
   | "workflow_runs";
 export type ViewType = "table" | "board" | "calendar";
 export type ViewState = "draft" | "saved";
+
+/** SELECT-only Page-local read decision; mutation/local metadata may omit it.
+ * It never substitutes for canonical mutation, comment, share or destination checks. */
+export type PageReadCapabilities = {
+  effectiveRole?: "view" | "comment" | "edit" | "full";
+  canEdit?: boolean;
+};
+
+/** Cached/local content remains readable without claiming a current edit decision. */
+export function withoutPageReadCapabilities<T extends PageReadCapabilities>(value: T): T {
+  const content = { ...value };
+  delete content.effectiveRole;
+  delete content.canEdit;
+  return content;
+}
+
+/** A per-request fingerprint also binds reads with no complete routing owner. */
+type PageReadIdentity = {
+  owner: OfflineWriteAuthority | null;
+  viewerId: string | null;
+  apiOrigin: string;
+};
+function pageReadIdentity(workspaceId?: string): PageReadIdentity {
+  return {
+    owner: currentOfflineWriteAuthority(workspaceId),
+    viewerId: getUserInfo()?.id ?? null,
+    apiOrigin: (publicRuntimeConfig().apiUrl ?? "http://localhost:4000").replace(/\/$/, ""),
+  };
+}
+
+/** Bind an asynchronous read to its original identity, never a role guess. */
+function assertPageReadOwner(identity: PageReadIdentity, workspaceId?: string): void {
+  const current = pageReadIdentity(workspaceId ?? identity.owner?.workspaceId);
+  if (identity.viewerId !== current.viewerId || identity.apiOrigin !== current.apiOrigin
+    || (identity.owner ? !sameOfflineWriteAuthority(identity.owner, current.owner) : current.owner !== null)) {
+    throw offlineWriteUnavailable();
+  }
+}
+
 
 /**
  * Title provenance (migration 218). `'placeholder'` is a fresh, untouched
@@ -391,7 +431,7 @@ export type Page = {
  *    sidebar builds its tree purely from these two fields
  *    (`lib/sidebar-tree.ts`).
  */
-export type ViewListRow = {
+export type ViewListRow = PageReadCapabilities & {
   id: string;
   workspaceId: string;
   name: string;
@@ -468,7 +508,7 @@ export type ScheduledJobSummary = {
  * mutating endpoints (`PATCH /page`, `/save`, `/unsave`,
  * `POST /workspaces/:wid/views/draft`).
  */
-export type ViewMetadata = {
+export type ViewMetadata = PageReadCapabilities & {
   id: string;
   workspaceId: string;
   /** Stable Project context inherited by the page subtree. */
@@ -603,63 +643,84 @@ export async function listViews(params: {
   workspaceId: string;
   state?: ViewState | "all";
 }): Promise<ViewListRow[]> {
+  const readIdentity = pageReadIdentity(params.workspaceId);
+  const owner = readIdentity.owner;
   const qs = new URLSearchParams();
   if (params.state) qs.set("state", params.state);
-  const url = `${API_URL}/api/workspaces/${params.workspaceId}/saved-views${
+  const url = `${readIdentity.apiOrigin}/api/workspaces/${params.workspaceId}/saved-views${
     qs.toString() ? `?${qs.toString()}` : ""
   }`;
   const { mergeLocalPages, sidebarCacheKey } = await import("@/lib/offline/offline-pages");
   const { idbGet, idbSet, idbDelete } = await import("@/lib/offline/idb");
-  // Viewer-scoped (`sidebar:<kind>:<wid>:<viewer>`); `null` with no signed-in
-  // viewer, in which case the disk tier is skipped rather than shared across
-  // every account on the device.
+  assertPageReadOwner(readIdentity, params.workspaceId);
   const key = sidebarCacheKey(
     params.state === "saved" ? "saved" : params.state === "draft" ? "drafts" : "all",
     params.workspaceId,
   );
   const cached = key ? await idbGet<ViewListRow[]>(key) : null;
-  if (typeof navigator !== "undefined" && !navigator.onLine) {
-    return mergeLocalPages(cached ?? [], params.workspaceId, params.state);
-  }
+  assertPageReadOwner(readIdentity, params.workspaceId);
+  const withLocal = async (rows: ViewListRow[]): Promise<ViewListRow[]> => {
+    const merged = await mergeLocalPages(rows, params.workspaceId, params.state);
+    assertPageReadOwner(readIdentity, params.workspaceId);
+    return owner ? merged : merged.map(withoutPageReadCapabilities);
+  };
+  const fallback = () => withLocal((cached ?? []).map(withoutPageReadCapabilities));
+  if (typeof navigator !== "undefined" && !navigator.onLine) return fallback();
   try {
     const res = await authFetch(url);
-    if (transientViewResponse(res.status)) {
-      return mergeLocalPages(cached ?? [], params.workspaceId, params.state);
-    }
+    assertPageReadOwner(readIdentity, params.workspaceId);
+    if (transientViewResponse(res.status)) return fallback();
     if (res.status === 401 || res.status === 403 || res.status === 404) {
       if (key) await idbDelete(key);
+      assertPageReadOwner(readIdentity, params.workspaceId);
       return json<{ savedViews: ViewListRow[] }>(res).then((body) => body.savedViews);
     }
     const body = await json<{ savedViews: ViewListRow[] }>(res);
+    assertPageReadOwner(readIdentity, params.workspaceId);
+    if (body.savedViews.some(row => row.workspaceId !== params.workspaceId)) throw offlineWriteUnavailable();
     if (key) await idbSet(key, body.savedViews);
-    return mergeLocalPages(body.savedViews, params.workspaceId, params.state);
+    assertPageReadOwner(readIdentity, params.workspaceId);
+    return withLocal(body.savedViews);
   } catch (error) {
-    if (error instanceof TypeError || /^HTTP 5\d\d/.test(String((error as Error).message))) {
-      return mergeLocalPages(cached ?? [], params.workspaceId, params.state);
-    }
+    assertPageReadOwner(readIdentity, params.workspaceId);
+    if (error instanceof TypeError || /^HTTP 5\d\d/.test(String((error as Error).message))) return fallback();
     throw error;
   }
 }
 
 // ── Read ──────────────────────────────────────────────────────────────
 
-export async function getView(viewId: string): Promise<ViewMetadata> {
+/** networkOnly reconciles current canonical decisions, never local/disk fallback. */
+export async function getView(viewId: string, options?: { networkOnly?: boolean }): Promise<ViewMetadata> {
+  const readIdentity = pageReadIdentity();
+  const owner = readIdentity.owner;
   const { readLocalPage, readCachedPage, cachePage, evictCachedPage } = await import("@/lib/offline/offline-pages");
-  const local = await readLocalPage(viewId);
-  if (local) return local.view;
-  const cached = await readCachedPage(viewId);
+  assertPageReadOwner(readIdentity);
+  if (!options?.networkOnly) {
+    const local = await readLocalPage(viewId);
+    assertPageReadOwner(readIdentity);
+    if (local) return withoutPageReadCapabilities(local.view);
+  }
+  const cached = options?.networkOnly ? null : await readCachedPage(viewId);
+  assertPageReadOwner(readIdentity);
   if (cached && typeof navigator !== "undefined" && !navigator.onLine) return cached;
   try {
-    const res = await authFetch(`${API_URL}/api/views/${viewId}`);
+    const res = await authFetch(`${readIdentity.apiOrigin}/api/views/${viewId}`);
+    assertPageReadOwner(readIdentity);
     if (cached && transientViewResponse(res.status)) return cached;
     if (res.status === 401 || res.status === 403 || res.status === 404) {
-      await evictCachedPage(viewId);
+      if (owner) await evictCachedPage(viewId, owner);
+      assertPageReadOwner(readIdentity);
       return json<ViewMetadata>(res);
     }
     const view = await json<ViewMetadata>(res);
-    await cachePage(view);
-    return view;
+    assertPageReadOwner(readIdentity);
+    if (view.id !== viewId || owner && view.workspaceId !== owner.workspaceId) throw offlineWriteUnavailable();
+    if (owner) await cachePage(view, owner);
+    assertPageReadOwner(readIdentity);
+    return owner ? view : withoutPageReadCapabilities(view);
   } catch (error) {
+    assertPageReadOwner(readIdentity);
     if (cached && (error instanceof TypeError || /^HTTP 5\d\d/.test(String((error as Error).message)))) return cached;
     throw error;
   }

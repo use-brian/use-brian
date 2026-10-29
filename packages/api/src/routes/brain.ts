@@ -520,6 +520,7 @@ export function brainRoutes(deps: {
       return
     }
 
+    const strictIdentity = req.get('X-Strict-Identity') === 'true'
     let rollup
     try {
       rollup = await entitiesStore.getEntity(ctx, id)
@@ -530,6 +531,11 @@ export function brainRoutes(deps: {
     }
     if (rollup === null) {
       res.status(404).json({ error: 'Not found' })
+      return
+    }
+
+    if (strictIdentity && rollup.followedSupersession) {
+      res.status(410).json({ error: 'superseded' })
       return
     }
 

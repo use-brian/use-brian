@@ -124,3 +124,33 @@ describe('[COMP:security/access-ceiling] Shared Project admission in ceilings (p
     expect(() => intersectAccessCeilings(ceiling({ p1: 'owner' as never }), ceiling())).toThrow('access_ceiling_missing')
   })
 })
+
+describe('[COMP:security/access-ceiling] exact sensitivity vocabulary at authority boundaries', () => {
+  const invalidTiers = ['constructor', 'toString', '__proto__', 'hasOwnProperty']
+  const departmentRead = { workspaceId: 'workspace', userId: 'actor', assistantId: 'caller',
+    base: 'public' as const, departments: { product: 'internal' as const }, contextDepartment: null,
+    binding: null, cap: null }
+
+  it.each(invalidTiers)('refuses inherited clearance %s before pinning an execution ceiling', value => {
+    expect(() => pinAccessCeiling({ ...context, clearance: value as never })).toThrow('access_ceiling_missing')
+  })
+
+  it.each(['clearance', 'base', 'cap', 'department'] as const)(
+    'refuses inherited object names in persisted %s tiers', field => {
+      const valid = pinAuthoringAuthority({ ...context, departmentRead })
+      for (const value of invalidTiers) {
+        const stored = JSON.parse(JSON.stringify(valid))
+        if (field === 'clearance') stored.ceiling.clearance = value
+        else if (field === 'department') stored.ceiling.departmentRead.departments.product = value
+        else stored.ceiling.departmentRead[field] = value
+        expect(parseAuthoringAuthority(stored)).toBeNull()
+      }
+    },
+  )
+
+  it.each(['public', 'internal', 'confidential'] as const)('keeps valid %s authority round-trips intact', clearance => {
+    const valid = pinAuthoringAuthority({ ...context, clearance, departmentRead: { ...departmentRead, base: clearance,
+      departments: { product: clearance }, cap: clearance } })
+    expect(parseAuthoringAuthority(JSON.parse(JSON.stringify(valid)))).toEqual(valid)
+  })
+})

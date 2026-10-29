@@ -38,6 +38,8 @@ import { fetchCrmConfig } from "@/lib/api/crm";
 import { fetchWorkspaceTasks } from "@/lib/api/tasks";
 import { leaseSurfaceContent, surfaceContentRemaining } from "@/lib/offline/surface-content-cache";
 import { getUserInfo } from "@/lib/user";
+import { currentOfflineWriteAuthority } from "@/lib/offline/application-write-authority";
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { getView, listWorkspaceAssistants } from "@/lib/api/views";
 import { listWorkflows } from "@/lib/api/workflow";
 import { fetchConnectorsList } from "@/lib/api/connectors";
@@ -447,9 +449,15 @@ export function kbTabCacheKey(assistantId: string): string {
  * across `/p/<pageId>` swaps and re-fetches only the centre pane's metadata, so
  * the unit worth caching is one page, not the surface. Hovering a sidebar row
  * warms it; opening the page paints the cached copy and revalidates.
+ * Viewer/workspace/API/application identity partitions this existing metadata slot;
+ * a cache key is routing isolation, never an edit grant.
  */
 export function docPageCacheKey(pageId: string): string {
-  return `page:${pageId}`;
+  const owner = currentOfflineWriteAuthority();
+  const scope = owner
+    ? [owner.apiOrigin, owner.viewerId, owner.workspaceId, owner.applicationId]
+    : ["unbound", (publicRuntimeConfig().apiUrl ?? "http://localhost:4000").replace(/\/$/, ""), getUserInfo()?.id ?? ""];
+  return `page:${pageId}:${scope.map(encodeURIComponent).join(":")}`;
 }
 
 /**

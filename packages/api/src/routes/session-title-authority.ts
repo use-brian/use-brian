@@ -3,7 +3,7 @@ import {ContextScopeAccumulator,DerivedScopeError,bindScopeSources,boundScopeSou
 import {getPool} from '../db/client.js'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import {authSessionStore,type AuthTokenClaims} from '../db/auth-session-store.js'
-import {findSessionById} from '../db/sessions.js'
+import {readSessionById} from '../db/sessions.js'
 import {getUserAssistant} from '../db/users.js'
 import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
 import {publishSessionTitle,readSessionTitle,sessionTitleHead} from '../db/session-title-store.js'
@@ -21,7 +21,8 @@ function denied():never{throw new DerivedScopeError('scope_evidence_missing')}
 export async function resolveSessionTitleAuthority(input:{claims:NativeClaims|null;sessionId:string;readOnly:boolean}):Promise<SessionContextAuthority>{
  const command=structuredClone(input),claims=command.claims
  if(!claims||!await authSessionStore.validateAccess(claims))denied()
- const session=await findSessionById(command.sessionId)
+ // Admission is a read: a recency UPDATE can block behind a turn's row lock.
+ const session=await readSessionById(command.sessionId)
  if(!session||await gateSessionRead(claims.userId,session))denied()
  if(!command.readOnly&&policyFor(session).lifecycle.rename!=='participants'&&session.userId!==claims.userId)denied()
  const assistant=await getUserAssistant(claims.userId,session.assistantId)

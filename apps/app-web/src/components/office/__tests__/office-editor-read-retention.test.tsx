@@ -2,7 +2,7 @@
 import {act} from 'react';
 import {createRoot,type Root} from 'react-dom/client';
 import {beforeEach,afterEach,describe,it,expect,vi} from 'vitest';
-import {snapshotToYDoc,appendOfficeCommand,type OfficeArtifactSnapshot,type OfficeCommand} from '@use-brian/office-model';
+import {snapshotToYDoc,appendOfficeCommand,type OfficeArtifactSnapshot,type OfficeCommand,type PdfSnapshot} from '@use-brian/office-model';
 import type {Doc} from 'yjs';
 import {OfficeEditorShell} from '../office-editor-shell';
 import {documentFixture,presentationFixture,spreadsheetFixture,uid} from './editor-fixtures';
@@ -31,6 +31,8 @@ vi.mock('@/lib/chat-dock-suppress',()=>({chatDockSuppression:{suppress:()=>()=>{
 vi.mock('../document-editor',()=>({DocumentEditor:({snapshot,onCommand,onSelectTargets}:{snapshot:OfficeArtifactSnapshot;onCommand:(command:OfficeCommand)=>void;onSelectTargets:(ids:string[])=>void})=>{state.command=onCommand;return <div data-editor>{snapshot.title}{snapshot.family==='document'?JSON.stringify(snapshot.sections):null}<button onClick={()=>onSelectTargets(['block-a'])}>Select block</button></div>;}}));
 vi.mock('../presentation-editor',()=>({PresentationEditor:({snapshot}:{snapshot:OfficeArtifactSnapshot})=><div data-editor>{snapshot.title}</div>}));
 vi.mock('../presentation-presenter',()=>({PresentationPresenter:({snapshot}:{snapshot:OfficeArtifactSnapshot})=><div data-presenter>{snapshot.title}</div>}));
+vi.mock('pdfjs-dist',()=>({GlobalWorkerOptions:{workerSrc:''},getDocument:()=>({promise:Promise.resolve({destroy:vi.fn(async()=>undefined)}),destroy:vi.fn(async()=>undefined)})}));
+vi.mock('../pdf/page-canvas',()=>({PdfPageCanvas:()=> <div data-pdf-page-fixture/>}));
 vi.mock('../office-review',()=>({OfficeReview:({onPresent}:{onPresent:()=>void})=><button onClick={onPresent}>Present fixture</button>}));
 vi.mock('../job-activity',()=>({OfficeJobActivity:({targetIds}:{targetIds:string[]})=><div data-selection>{targetIds.join('|')}</div>}));
 vi.mock('../template-routing-inspector',()=>({TemplateRoutingInspector:()=>null}));
@@ -60,6 +62,22 @@ async function advance(ms:number){await act(async()=>vi.advanceTimersByTime(ms))
 async function click(label:string){await act(async()=>{const button=[...host.querySelectorAll('button')].find(row=>row.textContent===label||row.getAttribute('aria-label')===label);expect(button).toBeDefined();button!.click();});}
 
 describe('[COMP:app-web/office-editor-shell] bounded online editor reads',()=>{
+  it('opens a ready version-zero PDF session without a generation job',async()=>{
+    const {sections:_sections,...common}=documentFixture();
+    const pdf:PdfSnapshot={...common,family:'pdf',templateVersionId:null,resources:[],title:'Fictional PDF form',
+      source:{fileId:uid(300),sha256:'a'.repeat(64),byteLength:100,originalFileName:'fictional-form.pdf',pageCount:1},
+      pages:[{id:uid(301),sourcePageIndex:0,mediaBox:{x:0,y:0,width:612,height:792},cropBox:{x:0,y:0,width:612,height:792},rotation:0,fields:[],overlays:[],placementTargets:[]}]};
+    state.doc=snapshotToYDoc(pdf);
+    setup();const normal=state.fetch.getMockImplementation()!;
+    state.fetch.mockImplementation((url:string)=>url.endsWith('/snapshot')?Promise.resolve(response({snapshot:pdf,seq:1,baseVersion:0}))
+      :url.endsWith(`/artifacts/${uid(1)}`)?Promise.resolve(response({artifact:{...artifact(),family:'pdf',mode:'session',version:0,expiresAt:'2099-01-01T00:00:00.000Z'}}))
+      :url.endsWith('/pdf/source')?Promise.resolve(new Response(new Uint8Array([37,80,68,70]),{headers:{'X-Brian-Media-Valid-For-Ms':'6000'}})):normal(url));
+    await render();
+    expect(host.querySelector('[data-pdf-editor]')).not.toBeNull();
+    expect(state.collabTarget).toBe(`office:${uid(1)}`);
+    expect(host.textContent).not.toContain(en.office.startFailedTitle);
+    expect(host.textContent).not.toContain(en.office.moveToTrash);
+  });
   it.each(['focus','visibilitychange'])('retains the mounted editor and selection during %s revalidation',async event=>{
     setup();await render();await click('Select block');
     const editor=host.querySelector('[data-editor]');

@@ -13,6 +13,7 @@
  * [COMP:api/research-source-authority]
  */
 import type pg from 'pg'
+import { pinFeedbackAttempt, completeFeedbackAttempt, type AttemptLease } from './research-feedback-attempt-store.js'
 import {
   researchSourceRefSchema,
   type ResearchActivityStatus,
@@ -165,6 +166,75 @@ export async function withResearchTransaction<T>(work: (client: pg.PoolClient) =
   }
 }
 
+/** Exact persisted identity, not an audience/envelope supplied by a caller. */
+export type ResearchDefaultPageRefs = {
+  userId: string; workspaceId: string; activityId: string; requestMessageId: string | null; pageId: string
+}
+
+type ResearchPageSourceRow = SessionKindRow & {
+  sessionId: string; sessionOwner: string; projectId: string | null; sessionProjectId: string | null
+  expectedVersion: string | null; actualVersion: string | null; requestText: unknown
+  sensitivity: string; messageSensitivity: string | null; sessionSensitivity: string | null
+  compartments: string[]; messageCompartments: string[] | null; sessionCompartments: string[] | null; messageProjects: string[] | null
+}
+export type ResearchDefaultPageSource = {
+  private: boolean; sessionId: string; projectId: string | null; requestText: string
+}
+export function researchSourceUnavailable(): Error & { code: string } {
+  return Object.assign(new Error('Research source is not currently available'), { code: 'research_source_unavailable' })
+}
+
+/** Current native policies are inherited by this app-client SELECT. Never run
+ * inside readAdmissionPolicy's temporary metadata elevation or an owner query. */
+export async function readResearchDefaultPageSource(client: pg.PoolClient, refs: ResearchDefaultPageRefs): Promise<ResearchDefaultPageSource> {
+  const elevated = (await client.query<{ value: string | null }>("SELECT current_setting('app.system_bypass',true) AS value")).rows[0]?.value
+  if (elevated === 'true' || !refs.requestMessageId) throw researchSourceUnavailable()
+  const r = await client.query<ResearchPageSourceRow>(`SELECT s.id AS "sessionId",s.user_id AS "sessionOwner",
+    s.visibility,s.mode,s.channel_type AS "channelType",s.channel_id AS "channelId",s.anchor_kind AS "anchorKind",
+    s.anchor_ref AS "anchorRef",s.app_origin AS "appOrigin",s.transient,
+    a.project_id AS "projectId",s.context_project_id AS "sessionProjectId",
+    a.request_message_version::text AS "expectedVersion",m.scope_version::text AS "actualVersion",m.content AS "requestText",
+    a.sensitivity,m.sensitivity AS "messageSensitivity",s.effective_clearance AS "sessionSensitivity",
+    a.compartments,m.compartments AS "messageCompartments",s.context_compartments AS "sessionCompartments",m.project_ids AS "messageProjects"
+    FROM research_activities a JOIN sessions s ON s.id=a.session_id
+    JOIN session_messages m ON m.id=a.request_message_id AND m.session_id=s.id
+    JOIN workspace_members wm ON wm.workspace_id=a.workspace_id AND wm.user_id=$1
+    WHERE a.id=$2 AND a.workspace_id=$3 AND a.actor_user_id=$1 AND a.planned_page_id=$4
+      AND a.request_message_id=$5 AND s.workspace_id=a.workspace_id AND s.assistant_id=a.assistant_id
+      AND m.workspace_id=a.workspace_id AND m.assistant_id=a.assistant_id AND m.role='user'`,
+  [refs.userId,refs.activityId,refs.workspaceId,refs.pageId,refs.requestMessageId])
+  const row = r.rows[0]
+  if (!row || !row.expectedVersion || row.expectedVersion !== row.actualVersion || row.projectId !== row.sessionProjectId) throw researchSourceUnavailable()
+  const kind = classifySession(row)
+  const personalWeb = kind.audience === 'personal' && kind.transport === 'web' && kind.anchor.kind === 'none' && row.projectId === null
+  if (personalWeb) {
+    const tiers = [row.sensitivity,row.messageSensitivity,row.sessionSensitivity]
+    const labels = [row.compartments,row.messageCompartments,row.sessionCompartments,row.messageProjects]
+    if (kind.lane !== 'conversation' || row.sessionOwner !== refs.userId
+      || tiers.some(t => t !== 'public' && t !== 'internal')
+      || labels.some(l => !Array.isArray(l) || l.length !== 0)) throw researchSourceUnavailable()
+  }
+  const content = row.requestText
+  const requestText = typeof content === 'string' ? content : Array.isArray(content)
+    ? content.flatMap((b: unknown) => b && typeof b === 'object' && (b as {type?:unknown}).type === 'text' && typeof (b as {text?:unknown}).text === 'string' ? [(b as {text:string}).text] : []).join('\n') : ''
+  return { private: personalWeb, sessionId: row.sessionId, projectId: row.projectId, requestText }
+}
+
+export async function researchDefaultPageSourceForViewer(refs: ResearchDefaultPageRefs): Promise<ResearchDefaultPageSource> {
+  return asViewer(refs.userId, client => readResearchDefaultPageSource(client,refs))
+}
+
+/** Selected native personal rows can be pinned under their own policies. The
+ * workspace barrier is held by withPagePlacement before this helper runs. */
+export async function pinResearchPrivatePageSource(client: pg.PoolClient, refs: ResearchDefaultPageRefs): Promise<void> {
+  const source = await readResearchDefaultPageSource(client,refs)
+  if (!source.private) throw researchSourceUnavailable()
+  const member = await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE', [refs.workspaceId,refs.userId])
+  const session = await client.query('SELECT id FROM sessions WHERE id=$1 AND user_id=$2 FOR SHARE', [source.sessionId,refs.userId])
+  const message = await client.query('SELECT id FROM session_messages WHERE id=$1 AND session_id=$2 FOR SHARE', [refs.requestMessageId,source.sessionId])
+  if (!member.rows.length || !session.rows.length || !message.rows.length || !(await readResearchDefaultPageSource(client,refs)).private) throw researchSourceUnavailable()
+}
+
 // ── Activity writes ───────────────────────────────────────────────────────
 
 export type OpenResearchActivityInput = {
@@ -266,6 +336,8 @@ export async function settleResearchActivitySystem(input: SettleResearchActivity
 // ── Follow-up writes ──────────────────────────────────────────────────────
 
 export type RecordResearchFeedbackInput = {
+  /** Internal retry CAS, never a public request or authority token. */
+  attemptLease?: AttemptLease
   workspaceId: string
   activityId: string
   sessionId: string
@@ -290,6 +362,7 @@ export type RecordResearchFeedbackInput = {
  */
 export async function recordResearchFeedbackSystem(input: RecordResearchFeedbackInput): Promise<{ feedback: ResearchFeedback; inserted: boolean }> {
   return withResearchTransaction(async (client) => {
+    if (input.attemptLease) await pinFeedbackAttempt(client,input,input.attemptLease)
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO research_feedback (workspace_id, activity_id, message_id, message_version, actor_user_id, output_key,
          association, project_id, sensitivity, compartments)
@@ -325,6 +398,7 @@ export async function recordResearchFeedbackSystem(input: RecordResearchFeedback
       `SELECT ${FEEDBACK_COLUMNS} FROM research_feedback f
          JOIN research_feedback_revisions r ON r.feedback_id = f.id AND r.revision = f.current_revision
        WHERE f.message_id = $1`, [input.messageId])
+    if (input.attemptLease) await completeFeedbackAttempt(client,input.attemptLease)
     return { feedback: row.rows[0] as ResearchFeedback, inserted: !!id }
   })
 }
@@ -626,6 +700,10 @@ const COMPARISON_COLUMNS = `c.id, c.improvement_id AS "improvementId", c.recorde
   c.case_set_version AS "caseSetVersion", c.dataset_version AS "datasetVersion", c.judge_identity AS "judgeIdentity",
   c.baseline_identity AS "baselineIdentity", c.candidate_identity AS "candidateIdentity", c.result, c.created_at AS "createdAt"`
 
+export class ResearchNotFoundError extends Error {
+  constructor() { super('research_not_found') }
+}
+
 export async function insertResearchImprovementSystem(input: {
   workspaceId: string
   createdBy: string
@@ -639,19 +717,34 @@ export async function insertResearchImprovementSystem(input: {
   compartments: string[]
   idempotencyKey: string
 }): Promise<{ improvement: ResearchImprovement; created: boolean }> {
-  const pool = getPool()
-  const inserted = await pool.query<ResearchImprovement>(
-    `INSERT INTO research_improvements AS i (workspace_id, created_by, title, pattern, desired_behavior, task_id, feedback_ids,
-       activity_ids, sensitivity, compartments, idempotency_key)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-     ON CONFLICT (workspace_id, idempotency_key) DO NOTHING RETURNING ${IMPROVEMENT_COLUMNS}`,
-    [input.workspaceId, input.createdBy, input.title, input.pattern, input.desiredBehavior, input.taskId, input.feedbackIds,
-      input.activityIds, input.sensitivity, input.compartments, input.idempotencyKey])
-  if (inserted.rows[0]) return { improvement: inserted.rows[0], created: true }
-  const existing = await pool.query<ResearchImprovement>(
-    `SELECT ${IMPROVEMENT_COLUMNS} FROM research_improvements i WHERE i.workspace_id = $1 AND i.idempotency_key = $2`,
-    [input.workspaceId, input.idempotencyKey])
-  return { improvement: existing.rows[0]!, created: false }
+  const result = await withResearchTransaction(async (client) => {
+    // Canonical lock order: workspace, then the exact current membership.
+    // The member lock also serializes direct removal and role/clearance edits.
+    const workspace = await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [input.workspaceId])
+    if (!workspace.rows.length) throw new ResearchNotFoundError()
+    const member = await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE',
+      [input.workspaceId, input.createdBy])
+    if (!member.rows.length) throw new ResearchNotFoundError()
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO research_improvements (workspace_id, created_by, title, pattern, desired_behavior, task_id, feedback_ids,
+         activity_ids, sensitivity, compartments, idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+       ON CONFLICT (workspace_id, idempotency_key) DO NOTHING RETURNING id`,
+      [input.workspaceId, input.createdBy, input.title, input.pattern, input.desiredBehavior, input.taskId, input.feedbackIds,
+        input.activityIds, input.sensitivity, input.compartments, input.idempotencyKey])
+    if (inserted.rows[0]) return { id: inserted.rows[0].id, created: true }
+    // The key resolves identity only. It never grants access to the candidate.
+    const existing = await client.query<{ id: string }>(
+      'SELECT id FROM research_improvements WHERE workspace_id=$1 AND idempotency_key=$2',
+      [input.workspaceId, input.idempotencyKey])
+    if (!existing.rows[0]) throw new ResearchNotFoundError()
+    return { id: existing.rows[0].id, created: false }
+  })
+  // Finish/release the owner transaction before a viewer checkout: embedded
+  // mode shares one connection. RLS remains the canonical candidate read gate.
+  const visible = await getResearchImprovementForViewer(input.createdBy, input.workspaceId, result.id)
+  if (!visible) throw new ResearchNotFoundError()
+  return { improvement: visible.improvement, created: result.created }
 }
 
 export async function listResearchImprovementsForViewer(userId: string, workspaceId: string): Promise<ResearchImprovement[]> {

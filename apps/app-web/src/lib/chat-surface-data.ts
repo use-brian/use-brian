@@ -72,16 +72,18 @@ import {
 } from "@/lib/surface-prefetch";
 import {
   isSurfaceCacheStale,
+  invalidateSurfaceCache,
   loadSurfaceCache,
   markSurfaceCacheStale,
   mutateSurfaceCache,
   readSurfaceCache,
   useCachedResource,
+  SurfaceCacheEvictionError,
 } from "@/lib/surface-cache";
 import { idbDelete, idbGet, idbSet } from "@/lib/offline/idb";
 import { getUserInfo } from "@/lib/user";
 import { CHAT_SESSIONS_REFRESH_EVENT, dispatchChatSessionsRefresh } from "@/lib/chat-session-events";
-import { leaseSurfaceContent, surfaceContentRemaining, useLeasedResource } from "@/lib/offline/surface-content-cache";
+import { leaseSurfaceContent, OFFLINE_AUTHORITY_MS, surfaceContentRemaining, useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 // ── Disk tier ────────────────────────────────────────────────────────────
 
@@ -149,12 +151,14 @@ function isEnvelope(value: unknown): value is StoredSnapshot {
 async function readChatSessionsSnapshot(
   viewerId: string,
   workspaceId: string,
-): Promise<ChatSessionsSnapshot | null> {
+): Promise<{ snapshot: ChatSessionsSnapshot; expiresAt: number } | null> {
   const stored = await idbGet<unknown>(
     chatSessionsSnapshotKey(viewerId, workspaceId),
   );
   if (!isEnvelope(stored) || !isChatSessionsSnapshot(stored.value)) return null;
-  return stored.value;
+  const age = Date.now() - stored.updatedAt;
+  if (!Number.isFinite(age) || age >= OFFLINE_AUTHORITY_MS || age < -60_000) return null;
+  return { snapshot: stored.value, expiresAt: stored.updatedAt + OFFLINE_AUTHORITY_MS };
 }
 
 /** Best-effort last-known-good replacement. */
@@ -180,16 +184,22 @@ async function deleteChatSessionsSnapshot(
 }
 
 /**
- * `listWorkspaceAssistants` throws `Failed to list workspace assistants:
- * <status>` on a non-OK response; the two session fetchers swallow their
- * status and return `[]`. The roster is therefore the one fetch on this
- * workspace that can tell an access loss from a transient failure, and it
- * decides the disk eviction for all three keys.
+ * Roster and strict session readers include the HTTP status in their errors.
+ * An authoritative denial must evict history rather than use a disk copy.
  */
 export function isAuthoritativeRosterDenial(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const status = /:\s*(\d{3})\s*$/.exec(error.message)?.[1];
   return status === "401" || status === "403" || status === "404";
+}
+
+/** Commit access eviction with the request that still owns this cache key. */
+async function readChatResource<T>(fetch: () => Promise<T>): Promise<T> {
+  try { return await fetch(); }
+  catch (error) {
+    if (isAuthoritativeRosterDenial(error)) throw new SurfaceCacheEvictionError(error);
+    throw error;
+  }
 }
 
 // ── Fetchers ─────────────────────────────────────────────────────────────
@@ -198,8 +208,8 @@ export function isAuthoritativeRosterDenial(error: unknown): boolean {
  * The roster the personal-sessions fetch fans out over. A fresh cached copy
  * is read synchronously; a cold or stale one joins (or starts) the roster
  * load under the same key the roster hook uses, so the two never race two
- * requests. A failed roster load falls back to the last cached roster, then
- * to an empty one (an empty fan-out returns no rows rather than throwing).
+ * requests. A failed roster load remains a failed list read; it must never
+ * manufacture empty history or grant a new lease from an older roster.
  */
 async function resolveRoster(
   workspaceId: string,
@@ -208,10 +218,11 @@ async function resolveRoster(
   const entry = readSurfaceCache<WorkspaceAssistantSummary[]>(key);
   if (entry.data !== undefined && !isSurfaceCacheStale(key)) return entry.data;
   const loaded = await loadSurfaceCache(key, () =>
-    leaseSurfaceContent(() => listWorkspaceAssistants(workspaceId)),
+    leaseSurfaceContent(() => readChatResource(() => listWorkspaceAssistants(workspaceId))),
     { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
   );
-  return loaded ?? entry.data ?? [];
+  if (loaded !== undefined) return loaded;
+  throw readSurfaceCache(key).error ?? new Error("chat_roster_failed");
 }
 
 /** The fetcher behind `chat-sessions:<wid>:<viewer>`. */
@@ -220,17 +231,18 @@ export async function fetchPersonalChatSessions(
 ): Promise<DocSession[]> {
   const roster = await resolveRoster(workspaceId);
   if (roster.length === 0) return [];
-  return listSessionsForAssistants({
+  return readChatResource(() => listSessionsForAssistants({
     workspaceId,
     assistantIds: roster.map((assistant) => assistant.id),
-  });
+    strict: true,
+  }));
 }
 
 /** The fetcher behind `chat-shared:<wid>:<viewer>`. */
 function fetchSharedChatSessions(
   workspaceId: string,
 ): Promise<WorkspaceSession[]> {
-  return listWorkspaceSessions({ workspaceId });
+  return readChatResource(() => listWorkspaceSessions({ workspaceId, strict: true }));
 }
 
 /** Project-filtered pages share the session invalidation prefix and viewer key. */
@@ -359,6 +371,7 @@ export type ChatSessionsData = {
    *  that paints the rail skeleton. */
   personal: DocSession[] | null;
   shared: WorkspaceSession[] | null;
+  personalError: unknown;
   /** Any of the three loads is in flight behind painted rows. */
   revalidating: boolean;
   /** Force every list to revalidate (rows stay painted). */
@@ -378,7 +391,7 @@ export function useChatSessionsData(
   const sharedKey = wid ? chatSharedSessionsCacheKey(wid) : null;
 
   const roster = useLeasedResource<WorkspaceAssistantSummary[]>(rosterKey, () =>
-    listWorkspaceAssistants(wid as string),
+    readChatResource(() => listWorkspaceAssistants(wid as string)),
   );
   const personal = useLeasedResource<DocSession[]>(sessionsKey, () =>
     fetchPersonalChatSessions(wid as string),
@@ -386,6 +399,10 @@ export function useChatSessionsData(
   const shared = useLeasedResource<WorkspaceSession[]>(sharedKey, () =>
     fetchSharedChatSessions(wid as string),
   );
+  const rosterDenied = isAuthoritativeRosterDenial(roster.error);
+  const personalDenied = rosterDenied || isAuthoritativeRosterDenial(personal.error);
+  const sharedDenied = rosterDenied || isAuthoritativeRosterDenial(shared.error);
+  const denied = personalDenied || sharedDenied;
 
   // Disk tier: read once per (viewer, workspace); the memory tier out-ranks
   // it as soon as either list lands.
@@ -394,34 +411,42 @@ export function useChatSessionsData(
   const [persisted, setPersisted] = useState<{
     scope: string;
     snapshot: ChatSessionsSnapshot;
+    expiresAt: number;
   } | null>(null);
   useEffect(() => {
-    if (!viewerId || !wid || !scope) return;
+    if (!viewerId || !wid || !scope || denied) return;
     let cancelled = false;
-    void readChatSessionsSnapshot(viewerId, wid).then((snapshot) => {
-      if (cancelled || !snapshot) return;
-      setPersisted({ scope, snapshot });
+    let expiry: ReturnType<typeof setTimeout> | undefined;
+    void readChatSessionsSnapshot(viewerId, wid).then((stored) => {
+      if (cancelled || !stored) return;
+      setPersisted({ scope, ...stored });
+      expiry = setTimeout(() => setPersisted(current => current?.scope === scope ? null : current), Math.max(0, stored.expiresAt - Date.now()));
     });
     return () => {
       cancelled = true;
+      clearTimeout(expiry);
     };
-  }, [scope, viewerId, wid]);
-  // Persist only a healthy pair: with the roster in error the personal list
-  // is a degraded `[]` (the fan-out had nothing to fan over), and after an
-  // authoritative denial the eviction below must be the last write.
+  }, [denied, scope, viewerId, wid]);
+  // Persist only a healthy pair; a failed refresh must not overwrite the
+  // previous snapshot or race the authoritative-denial eviction below.
   useEffect(() => {
     if (!viewerId || !wid || !personal.data || !shared.data) return;
-    if (roster.error !== undefined) return;
+    if (roster.error !== undefined || personal.error !== undefined || shared.error !== undefined) return;
     void writeChatSessionsSnapshot(viewerId, wid, {
       personal: personal.data,
       shared: shared.data,
     });
-  }, [personal.data, roster.error, shared.data, viewerId, wid]);
+  }, [personal.data, personal.error, roster.error, shared.data, shared.error, viewerId, wid]);
   useEffect(() => {
-    if (!viewerId || !wid || !isAuthoritativeRosterDenial(roster.error)) return;
+    if (!viewerId || !wid || !denied) return;
     setPersisted(null);
     void deleteChatSessionsSnapshot(viewerId, wid);
-  }, [roster.error, viewerId, wid]);
+  }, [denied, viewerId, wid]);
+  useEffect(() => {
+    if (!rosterDenied || !sessionsKey || !sharedKey) return;
+    invalidateSurfaceCache(sessionsKey);
+    invalidateSurfaceCache(sharedKey);
+  }, [rosterDenied, sessionsKey, sharedKey]);
 
   // The same-tab refresh signal (a rename, a delete, a turn settling with an
   // auto-title, a room created) marks both lists stale; the hook's own load
@@ -438,8 +463,7 @@ export function useChatSessionsData(
     return () => window.removeEventListener(CHAT_SESSIONS_REFRESH_EVENT, handler);
   }, [wid]);
 
-  const denied = isAuthoritativeRosterDenial(roster.error);
-  const disk = !denied && persisted && persisted.scope === scope ? persisted.snapshot : null;
+  const disk = !denied && persisted && persisted.scope === scope && persisted.expiresAt > Date.now() ? persisted.snapshot : null;
 
   const refreshShared = shared.refresh;
   const refreshPersonal = personal.refresh;
@@ -451,8 +475,9 @@ export function useChatSessionsData(
   return {
     assistants: roster.data ?? EMPTY_ASSISTANTS,
     assistantsLoaded: roster.data !== undefined || roster.error !== undefined,
-    personal: personal.data ?? disk?.personal ?? null,
-    shared: shared.data ?? disk?.shared ?? null,
+    personal: personalDenied ? null : personal.data ?? disk?.personal ?? null,
+    shared: sharedDenied ? null : shared.data ?? disk?.shared ?? null,
+    personalError: personal.error ?? roster.error,
     revalidating: roster.revalidating || personal.revalidating || shared.revalidating,
     refresh,
     refreshShared,

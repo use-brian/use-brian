@@ -49,7 +49,7 @@ import type {
 } from '../types.js'
 import { renderRowValue } from '../render.js'
 import { getCoverImageRef, PROPERTIES } from '../properties/index.js'
-import { runtimePublicApiUrl } from '../properties/files.js'
+import { previewUrlFor } from '../properties/files.js'
 
 export type GalleryProps = {
   rows: A2UIRow[]
@@ -188,23 +188,6 @@ function GalleryCard(props: GalleryCardProps): JSX.Element {
 }
 
 // ── Cover ─────────────────────────────────────────────────────────────
-
-/**
- * Resolve a `FileRef` to a browser-loadable preview URL. Mirrors the
- * `previewUrlFor` policy in `properties/files.tsx` — kept private to
- * this widget so the property module stays untouched (per task
- * constraint). The legacy `file_cache` bucket streams via the existing
- * `/api/files/:id/preview` route; true GCS refs return `null` until
- * the signed-URL endpoint lands.
- */
-function previewUrlFor(ref: FileRef): string | null {
-  const base = runtimePublicApiUrl()
-  if (ref.bucket === 'file_cache') {
-    const prefix = base.length > 0 ? base.replace(/\/+$/, '') : ''
-    return `${prefix}/api/files/${encodeURIComponent(ref.path)}/preview`
-  }
-  return null
-}
 
 function GalleryCover(props: { refValue: FileRef | null }): JSX.Element {
   if (!props.refValue) {

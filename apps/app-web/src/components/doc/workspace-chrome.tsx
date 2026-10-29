@@ -43,6 +43,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -72,6 +73,8 @@ import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { useWorkspaceEvents } from "@/lib/workspace-events";
 import { useSurfaceCacheInvalidation } from "@/lib/surface-cache-invalidation";
 import { SIDEBAR_CLOSE_EVENT } from "@/lib/sidebar-close";
+import { isPhoneViewport } from "@/lib/viewport";
+import { subscribeAppViewport } from "@/lib/app-viewport";
 import { cn } from "@/lib/utils";
 import { CHAT_SEED_EVENT, type ChatSeed } from "@/lib/chat-seed";
 import {
@@ -269,6 +272,28 @@ export function WorkspaceChrome({
     handleLeaveTeamspace,
     handleDeleteTeamspace,
   } = useSidebarData();
+
+  const phone = useSyncExternalStore(subscribeAppViewport, isPhoneViewport, () => false);
+  const mobileMenuRef = useRef<HTMLButtonElement>(null);
+  // Restore only an explicit user dismissal. M7 navigation/modal handoffs keep
+  // their existing close path so they never lose focus to the hamburger.
+  const dismissSidebar = useCallback(() => {
+    setSidebarOpen(false);
+    mobileMenuRef.current?.focus({ preventScroll: true });
+  }, [setSidebarOpen]);
+  useEffect(() => {
+    if (!phone || !sidebarOpen) return;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+      event.preventDefault();
+      dismissSidebar();
+    };
+    // Bubble on window: Base UI child popups consume their Escape on the popup
+    // or document first. A second, unconsumed Escape dismisses navigation,
+    // including when focus has reached the underlying surface.
+    window.addEventListener("keydown", onEscape);
+    return () => window.removeEventListener("keydown", onEscape);
+  }, [phone, sidebarOpen, dismissSidebar]);
 
   // ── Teamspace dialogs (settings modal + create) ───────────────────────
   // Owned here, beside the sidebar mount: the sidebar raises intent
@@ -587,12 +612,13 @@ export function WorkspaceChrome({
           <button
             type="button"
             aria-label={t.sidebarCloseAria}
-            onClick={() => setSidebarOpen(false)}
+            onClick={dismissSidebar}
             className="fixed inset-0 z-30 bg-foreground/30 backdrop-blur-[1px] md:hidden"
           />
         )}
         {/* Sidebar — drawer-style on mobile, normal flex child on md+. */}
         <div
+          id="workspace-navigation-drawer"
           className={[
             "z-40 h-full shrink-0 ease-out",
             // Tailwind v4 maps translate utilities to the CSS `translate` property,
@@ -700,8 +726,11 @@ export function WorkspaceChrome({
             available so the user has a way back to the sidebar regardless of
             surface. */}
         <button
+          ref={mobileMenuRef}
           type="button"
           aria-label={t.sidebarOpenAria}
+          aria-expanded={sidebarOpen}
+          aria-controls="workspace-navigation-drawer"
           onClick={() => setSidebarOpen(true)}
           // data-doc-mobile-menu: in the desktop shell a narrow window drops to
           // this mobile layout, so globals.css nudges this below the traffic lights.
@@ -823,6 +852,17 @@ export function WorkspaceChrome({
         )}
       >
         <div className={cn("pointer-events-auto flex w-full justify-center px-2", !sidebarOpen && "max-md:hidden")}>
+          <button
+            type="button"
+            data-doc-mobile-menu-close
+            aria-label={t.sidebarCloseAria}
+            onClick={dismissSidebar}
+            className="inline-flex size-11 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:hidden"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+              <path d="m6 6 12 12M18 6 6 18" />
+            </svg>
+          </button>
           <WorkspaceThemePicker />
         </div>
         <div className={cn("flex w-64 max-w-[100vw] self-start items-center pb-[calc(0.5rem+env(safe-area-inset-bottom))] md:w-[calc(3.5rem+var(--workspace-sidebar-width,14rem))]", WORKSPACE_STATUS_ROW_HEIGHT_CLASS)}>

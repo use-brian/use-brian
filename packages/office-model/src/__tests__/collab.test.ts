@@ -1,6 +1,8 @@
 import * as Y from 'yjs'
 import { describe, expect, it } from 'vitest'
-import { appendOfficeCommand, applyOfficeUpdate, createOfficeUndoManager, encodeOfficeState, hasOfficeBaseSnapshot, observeOfficeHistory, officeCommandIds, replaceOfficeSnapshot, snapshotToYDoc, yDocToSnapshot } from '../collab.js'
+import { appendOfficeCommand, applyOfficeUpdate, createOfficeUndoManager, encodeOfficeState, hasOfficeBaseSnapshot, observeOfficeHistory, officeCommandIds, officeCommandMatches, replaceOfficeSnapshot, snapshotToYDoc, yDocToSnapshot } from '../collab.js'
+import { OfficeCommandSchema, type OfficeCommand } from '../commands.js'
+import { officeSnapshotPreconditionHash } from '../snapshot-hash.js'
 import { documentFixture, id, presentationFixture, spreadsheetFixture } from './fixtures.js'
 
 describe('[COMP:office/collab-codec] Office Yjs codec', () => {
@@ -300,5 +302,126 @@ describe('[COMP:office/collab-codec] Office Yjs codec', () => {
     expect(current.family === 'presentation' && current.slides).toHaveLength(1)
     expect(current.resources).toContainEqual(expect.objectContaining({ id: id(74) }))
     history.destroy()
+  })
+})
+
+describe('[COMP:office/collab-codec] rejected append admission', () => {
+  it.each(['negative geometry', 'missing target', 'unfenced batch', 'final slide', 'locked cell'] as const)(
+    'refuses %s before changing live bytes, events or history',
+    (failure) => {
+      const snapshot = failure === 'locked cell' ? spreadsheetFixture() : presentationFixture()
+      if (snapshot.family === 'spreadsheet') snapshot.worksheets[0].cells[0].locked = true
+      const common = { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: 'user' as const, id: id(900) }, origin: 'manual' as const }
+      let command: OfficeCommand
+      if (failure === 'negative geometry') {
+        command = { ...common, commandId: id(901), kind: 'setObjectProperty', targetId: id(17), path: ['geometry', 'widthPt'], value: -1 }
+      } else if (failure === 'missing target') {
+        command = { ...common, commandId: id(901), kind: 'deleteObject', targetId: id(999) }
+      } else if (failure === 'unfenced batch') {
+        command = { ...common, commandId: id(901), kind: 'batch', commands: [
+          { ...common, commandId: id(902), kind: 'setObjectProperty', targetId: id(17), path: ['geometry', 'xPt'], value: 100 },
+          { ...common, commandId: id(903), kind: 'deleteObject', targetId: id(999) },
+        ] }
+      } else if (failure === 'final slide') {
+        command = { ...common, commandId: id(901), kind: 'deleteSlide', slideId: id(16) }
+      } else {
+        command = { ...common, commandId: id(901), kind: 'setSpreadsheetCell', sheetId: id(23), cellId: id(24), address: 'A1', valueType: 'number', value: 99 }
+      }
+      // Every input is a real valid-shaped command; refusal must come from
+      // canonical semantics before the shared document publishes anything.
+      expect(() => OfficeCommandSchema.parse(command)).not.toThrow()
+      const doc = snapshotToYDoc(snapshot)
+      const history = createOfficeUndoManager(doc)
+      const beforeBytes = encodeOfficeState(doc)
+      const beforeVector = Y.encodeStateVector(doc)
+      const beforeSnapshot = yDocToSnapshot(doc)
+      const beforeCommands = doc.getMap<string>('commands').toJSON()
+      const beforeOrder = doc.getArray<string>('commandOrder').toArray()
+      let updates = 0
+      doc.on('update', () => { updates += 1 })
+      try {
+        let rejection: unknown
+        try { appendOfficeCommand(doc, command) } catch (error) { rejection = error }
+        const afterBytes = encodeOfficeState(doc)
+        const afterVector = Y.encodeStateVector(doc)
+        // Report all real boundary outcomes together, so the original failure
+        // shows publication as well as the absent semantic rejection.
+        expect({
+          rejected: rejection instanceof Error,
+          encodedBytesUnchanged: beforeBytes.length === afterBytes.length && beforeBytes.every((byte, index) => byte === afterBytes[index]),
+          stateVectorUnchanged: beforeVector.length === afterVector.length && beforeVector.every((byte, index) => byte === afterVector[index]),
+          commands: doc.getMap<string>('commands').toJSON(),
+          commandOrder: doc.getArray<string>('commandOrder').toArray(),
+          updateEvents: updates,
+          canUndo: history.canUndo(),
+        }).toEqual({
+          rejected: true,
+          encodedBytesUnchanged: true,
+          stateVectorUnchanged: true,
+          commands: beforeCommands,
+          commandOrder: beforeOrder,
+          updateEvents: 0,
+          canUndo: false,
+        })
+        expect(yDocToSnapshot(doc)).toEqual(beforeSnapshot)
+        expect(officeCommandIds(doc)).toEqual([])
+      } finally {
+        history.destroy()
+        doc.destroy()
+      }
+    },
+  )
+
+  it('keeps ordinary and fenced appends, exact retry, peer delivery and local Undo compatible', () => {
+    const snapshot = presentationFixture()
+    const doc = snapshotToYDoc(snapshot)
+    const peer = new Y.Doc()
+    applyOfficeUpdate(peer, encodeOfficeState(doc))
+    const history = createOfficeUndoManager(doc)
+    const common = { artifactId: snapshot.artifactId, baseVersion: 0, actor: { type: 'user' as const, id: id(910) }, origin: 'manual' as const }
+    try {
+      appendOfficeCommand(doc, { ...common, commandId: id(911), kind: 'setObjectProperty', targetId: id(17), path: ['geometry', 'xPt'], value: 100 })
+      history.stopCapturing()
+      const fenced: OfficeCommand = {
+        ...common, commandId: id(912), kind: 'batch',
+        expectedSnapshotHash: officeSnapshotPreconditionHash(yDocToSnapshot(doc)),
+        commands: [
+          { ...common, commandId: id(913), kind: 'setObjectProperty', targetId: id(17), path: ['geometry', 'widthPt'], value: -1 },
+          { ...common, commandId: id(914), kind: 'setObjectProperty', targetId: id(17), path: ['geometry', 'widthPt'], value: 500 },
+        ],
+      }
+      let updates = 0
+      doc.on('update', () => { updates += 1 })
+      appendOfficeCommand(doc, fenced)
+      expect(updates).toBe(1)
+      expect(JSON.parse(doc.getMap<string>('commands').get(fenced.commandId)!)).not.toHaveProperty('expectedSnapshotHash')
+      expect(officeCommandMatches(doc, fenced)).toBe(true)
+      const once = encodeOfficeState(doc)
+      const vector = Y.encodeStateVector(doc)
+      appendOfficeCommand(doc, fenced)
+      expect(encodeOfficeState(doc)).toEqual(once)
+      expect(Y.encodeStateVector(doc)).toEqual(vector)
+      expect(updates).toBe(1)
+
+      applyOfficeUpdate(peer, encodeOfficeState(doc))
+      expect(yDocToSnapshot(peer)).toEqual(yDocToSnapshot(doc))
+      appendOfficeCommand(peer, { ...common, commandId: id(915), kind: 'setObjectProperty', targetId: id(17), path: ['verticalAlignment'], value: 'middle' })
+      applyOfficeUpdate(doc, encodeOfficeState(peer))
+      history.undo()
+      expect(yDocToSnapshot(doc)).toMatchObject({
+        slides: [{ objects: [{ geometry: { xPt: 100, widthPt: 816 }, verticalAlignment: 'middle' }] }],
+      })
+      expect(officeCommandIds(doc)).not.toContain(fenced.commandId)
+      history.redo()
+      expect(yDocToSnapshot(doc)).toMatchObject({
+        slides: [{ objects: [{ geometry: { xPt: 100, widthPt: 500 }, verticalAlignment: 'middle' }] }],
+      })
+      applyOfficeUpdate(peer, encodeOfficeState(doc))
+      expect(yDocToSnapshot(peer)).toEqual(yDocToSnapshot(doc))
+    } finally {
+      history.destroy()
+      peer.destroy()
+      doc.destroy()
+    }
   })
 })

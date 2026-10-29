@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import type { A2UIRowValue } from '../types.js'
 import { LastEditedByProperty } from '../properties/last-edited-by.js'
+import { CreatedByProperty } from '../properties/created-by.js'
 
 function elName(el: ReactElement): string {
   if (typeof el.type === 'string') return el.type
@@ -53,19 +54,25 @@ describe('[COMP:views/property-last-edited-by] last_edited_by property', () => {
   })
 
   it('Editor is read-only — no input/select affordance', () => {
+    const onCommit = vi.fn()
+    const onCancel = vi.fn()
     const editorHtml = renderToStaticMarkup(
       React.createElement(Editor!, {
         value: { type: 'person', id: 'wm_2', name: 'Bob', initials: 'B' },
-        onCommit: vi.fn(),
-        onCancel: vi.fn(),
+        onCommit,
+        onCancel,
+        hints: { members: [{ type: 'person', id: 'wm_3', name: 'Charlie' }] },
       }),
     )
     expect(editorHtml).not.toMatch(/<(input|select|textarea)\b/)
     expect(editorHtml).toContain('Bob')
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(onCancel).not.toHaveBeenCalled()
   })
 
   it('Icon renders an svg', () => {
     expect(elName(Icon({}))).toBe('svg')
+    expect(renderToStaticMarkup(Icon({}))).not.toBe(renderToStaticMarkup(CreatedByProperty.Icon({})))
   })
 
   it('sortFn orders alphabetically by name with nulls last', () => {
@@ -80,5 +87,44 @@ describe('[COMP:views/property-last-edited-by] last_edited_by property', () => {
     expect((v[1] as { name: string }).name).toBe('Bob')
     expect((v[2] as { name: string }).name).toBe('Charlie')
     expect(v[3]).toBeNull()
+  })
+
+  it('uses name initials without an avatar and refuses unresolved raw member ids', () => {
+    const html = renderToStaticMarkup(Cell({ value: { type: 'person', id: 'wm_4', name: 'Dana' } }))
+    expect(html).toContain('>D</span>')
+    expect(html).toContain('Dana')
+    expect(html).not.toContain('<img')
+    expect(isEmptyMarker(Cell({ value: 'wm_4' }))).toBe(true)
+    expect(sortFn('wm_4', { type: 'person', id: 'wm_4', name: 'Dana' })).toBeGreaterThan(0)
+  })
+
+  it('renders the delegated avatar URL and escaped name without initials', () => {
+    const html = renderToStaticMarkup(Cell({ value: {
+      type: 'person', id: 'member_avatar', name: 'River & Reed', initials: 'RR', avatarUrl: 'https://avatar.example/editor.png',
+    } }))
+    expect(html).toContain('<img src="https://avatar.example/editor.png" alt=""')
+    expect(html).toContain('>River &amp; Reed</span>')
+    expect(html).not.toContain('>RR</span>')
+  })
+
+  it('preserves explicit initials and the empty marker for unrelated widgets', () => {
+    const html = renderToStaticMarkup(Cell({ value: { type: 'person', id: 'member_initials', name: 'River', initials: 'ZZ' } }))
+    expect(html).toContain('>ZZ</span>')
+    expect(html).toContain('>River</span>')
+    expect(html).not.toContain('<img')
+    expect(renderToStaticMarkup(Cell({ value: { type: 'text', text: 'Not a member' } })))
+      .toBe('<span class="text-muted-foreground/60">\u2014</span>')
+  })
+
+  it('keeps equal display names tied and unresolved values last in stable input order', () => {
+    const first = { type: 'person' as const, id: 'member_first', name: 'River' }
+    const second = { type: 'person' as const, id: 'member_second', name: 'River', avatarUrl: 'https://avatar.example/second.png' }
+    expect(sortFn(first, second)).toBe(0)
+    expect(sortFn(null, null)).toBe(0)
+    expect(sortFn('member_unresolved', null)).toBe(0)
+    const values: A2UIRowValue[] = [null, second, 'member_unresolved', first]
+    values.sort(sortFn)
+    expect(values).toEqual([second, first, null, 'member_unresolved'])
+    expect(LastEditedByProperty.kind).toBe('last_edited_by')
   })
 })

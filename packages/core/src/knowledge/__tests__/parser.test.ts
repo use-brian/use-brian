@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { parseMarkdownFile } from '../parser.js'
+import { parseMarkdownFile as parsePublicMarkdownFile, parseYamlSubset, readFrontmatter } from '@use-brian/brian-kb'
 
 describe('[COMP:knowledge/parser] parseMarkdownFile', () => {
   describe('frontmatter parsing (Tier 1)', () => {
@@ -134,5 +135,87 @@ tags: [index]
       expect(entry.tags).toEqual([])
       expect(entry.metadata).toEqual({})
     })
+  })
+})
+
+const lineEndings = [['LF', '\n'], ['CRLF', '\r\n']] as const
+
+describe.each([['single', "'"], ['double', '"']] as const)(
+  '[COMP:knowledge/parser] %s-quoted scalar strings', (_name, quote) => {
+    it.each(lineEndings)('preserves %s scalar types through the actual public low-level parsers', (_ending, eol) => {
+      const yaml = [
+        `affirmative: ${quote}true${quote}`,
+        `negative: ${quote}false${quote}`,
+        `numeric: ${quote}123${quote}`,
+        `reference: ${quote}001${quote}`,
+        `empty: ${quote}${quote}`,
+        `prose: ${quote}Quoted prose${quote}`,
+        'enabled: true',
+        'amount: 123',
+      ].join(eol)
+      const body = ['', '# Unchanged body', '', 'Literal text.', ''].join(eol)
+      const expected = {
+        affirmative: 'true', negative: 'false', numeric: '123', reference: '001',
+        empty: '', prose: 'Quoted prose', enabled: true, amount: 123,
+      }
+      const scalarValues = parseYamlSubset(yaml)
+      const frontmatter = readFrontmatter(`---${eol}${yaml}${eol}---${eol}${body}`)
+      expect(frontmatter.body).toBe(body)
+      expect(scalarValues).toEqual(expected)
+      expect(frontmatter).toEqual({ frontmatter: expected, body, hasFrontmatter: true })
+    })
+
+    it.each(['true', 'false', '123', '001', '', 'Quoted prose'].flatMap(value =>
+      lineEndings.map(([ending, eol]) => ({ value, ending, eol })),
+    ))(
+      '$ending retains "$value" as title, summary and metadata through public and compatibility parsers', ({ value, eol }) => {
+        const body = ['# Fallback heading', '', 'Unchanged body.'].join(eol)
+        const raw = [
+          '---', `title: ${quote}${value}${quote}`, `description: ${quote}${value}${quote}`,
+          `reference: ${quote}${value}${quote}`, 'enabled: true', 'amount: 7',
+          'tags: [fixture, quoted]', 'sensitivity: internal', '---', '', body,
+        ].join(eol)
+        const filePath = '/notes/fixture/index.md'
+        // Exercise both actual entrypoints before comparing their complete results.
+        const publicEntry = parsePublicMarkdownFile(filePath, raw)
+        const compatibilityEntry = parseMarkdownFile(filePath, raw)
+        const expected = {
+          path: 'notes/fixture', title: value, summary: value, content: body,
+          tags: ['fixture', 'quoted'], related: [], sensitivity: 'internal', sensitivityExplicit: true,
+          metadata: { reference: value, enabled: true, amount: 7 },
+        }
+        expect(publicEntry.content).toBe(body)
+        expect(compatibilityEntry.content).toBe(body)
+        expect(publicEntry).toEqual(expected)
+        expect(compatibilityEntry).toEqual(expected)
+        expect(typeof publicEntry.title).toBe('string')
+        expect(typeof publicEntry.summary).toBe('string')
+        expect(typeof publicEntry.metadata.reference).toBe('string')
+      },
+    )
+  },
+)
+
+describe('[COMP:knowledge/parser] unquoted scalar compatibility', () => {
+  it.each(lineEndings)('retains %s boolean and numeric inference with the existing typed parser fallbacks', (_ending, eol) => {
+    const yaml = ['title: true', 'description: 123', 'reference: 001', 'enabled: false', 'amount: 7', 'tags: [fixture]', 'sensitivity: internal'].join(eol)
+    const body = ['# Fallback heading', '', 'Unchanged body.'].join(eol)
+    const raw = ['---', yaml, '---', body].join(eol)
+    const scalarValues = parseYamlSubset(yaml)
+    const frontmatter = readFrontmatter(raw)
+    const publicEntry = parsePublicMarkdownFile('fixture.md', raw)
+    const compatibilityEntry = parseMarkdownFile('fixture.md', raw)
+    expect(scalarValues).toEqual({ title: true, description: 123, reference: 1, enabled: false, amount: 7, tags: ['fixture'], sensitivity: 'internal' })
+    expect(frontmatter.frontmatter).toEqual(scalarValues)
+    const expected = {
+      path: 'fixture', title: 'Fallback heading', summary: null, content: body,
+      tags: ['fixture'], related: [], sensitivity: 'internal', sensitivityExplicit: true,
+      metadata: { reference: 1, enabled: false, amount: 7 },
+    }
+    expect(frontmatter.body).toBe(body)
+    expect(publicEntry.content).toBe(body)
+    expect(compatibilityEntry.content).toBe(body)
+    expect(publicEntry).toEqual(expected)
+    expect(compatibilityEntry).toEqual(expected)
   })
 })

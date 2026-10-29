@@ -25,7 +25,7 @@ export const RANK: Record<Sensitivity, number> = {
 }
 
 export function isSensitivity(v: unknown): v is Sensitivity {
-  return typeof v === 'string' && v in RANK
+  return v === 'public' || v === 'internal' || v === 'confidential'
 }
 
 export function maxSensitivity(...values: Sensitivity[]): Sensitivity {

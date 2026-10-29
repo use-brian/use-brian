@@ -170,6 +170,23 @@ afterEach(() => {
   container = null;
 });
 
+describe("[COMP:app-web/sidebar-panel-chat] failed history loads", () => {
+  it("shows recovery instead of empty history and loads the chats when retried", async () => {
+    navigation.search = "";
+    sessionApi.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed"));
+    await renderPanel();
+    expect(container?.querySelector('[role="alert"]')?.textContent).toContain("Could not load chats.");
+    expect(container?.textContent).not.toContain(en.chatApp.railEmpty);
+    sessionApi.listSessionsForAssistants.mockResolvedValue([
+      { id: "recovered-chat", title: "Recovered plan", channelId: "channel-2", lastActive: "2026-10-01", appOrigin: "chat", assistantId: "assistant-1" },
+    ]);
+    await act(async () => buttonNamed("Retry").click());
+    await flushEffects();
+    expect(container?.textContent).toContain("Recovered plan");
+    expect(container?.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
 describe("[COMP:app-web/sidebar-panel-chat] direct archive action", () => {
   it("archives from the row without opening the overflow menu or closing the chat", async () => {
     sessionApi.setSessionArchived.mockImplementationOnce(async () => { sessionApi.listWorkspaceSessions.mockResolvedValue([]); });
@@ -572,6 +589,83 @@ describe("[COMP:app-web/sidebar-panel-chat] group disclosure persistence", () =>
   });
 });
 
+
+describe("[COMP:app-web/sidebar-panel-chat] recent chat windows", () => {
+  const recent = (count: number, fields = {}) => Array.from({ length: count }, (_, i) => ({
+    id: `recent-${i}`, title: `Recent discussion ${i}`, channelId: `channel-${i}`,
+    lastActive: `2026-10-${String(28 - Math.floor(i / 24)).padStart(2, "0")}T${String(23 - i % 24).padStart(2, "0")}:00:00.000Z`,
+    appOrigin: "chat", transport: "web", assistantId: "assistant-1", status: "idle", ...fields,
+  }));
+  const group = () => container!.querySelector<HTMLElement>("[data-personal-chat-group=general], [data-workspace-chat-group=general]")!;
+  const links = () => [...group().querySelectorAll<HTMLAnchorElement>("a")];
+  const more = () => group().querySelector<HTMLButtonElement>("[data-chat-show-more]")!;
+
+  it.each(["personal", "workspace"])("reveals five %s chats at a time and preserves the window across refresh", async view => {
+    navigation.search = view === "workspace" ? "v=workspace" : "";
+    const rows = recent(12);
+    sessionApi.listSessionsForAssistants.mockResolvedValue(rows);
+    sessionApi.listWorkspaceSessions.mockResolvedValue(rows);
+    await renderPanel();
+    expect(links()).toHaveLength(5);
+    expect(more().textContent).toBe(en.chatApp.moreChats);
+    expect(more().getAttribute("aria-label")).toContain(en.chatApp.generalChats);
+    const requests = sessionApi.listWorkspaceSessions.mock.calls.length;
+    await act(async () => more().click());
+    expect(links()).toHaveLength(10);
+    expect(sessionApi.listWorkspaceSessions.mock.calls).toHaveLength(requests);
+    await act(async () => mutateSurfaceCache(
+      view === "workspace" ? chatSharedSessionsCacheKey("workspace-1", null) : chatSessionsCacheKey("workspace-1"),
+      () => rows.map(row => ({ ...row })),
+    ));
+    expect(links()).toHaveLength(10);
+    await act(async () => more().click());
+    expect(links()).toHaveLength(12);
+    expect(more()).toBeNull();
+  });
+
+  it.each(["personal", "workspace"])("keeps an older selected %s chat visible without revealing the intervening history", async view => {
+    navigation.search = `${view === "workspace" ? "v=workspace&" : ""}s=recent-11`;
+    sessionApi.listSessionsForAssistants.mockResolvedValue(recent(12));
+    sessionApi.listWorkspaceSessions.mockResolvedValue(recent(12));
+    await renderPanel();
+    expect(links()).toHaveLength(6);
+    expect(links().at(-1)?.getAttribute("aria-current")).toBe("page");
+    expect(group().querySelector('a[href*="s=recent-5"]')).toBeNull();
+    await act(async () => more().click());
+    expect(links()).toHaveLength(11);
+    expect(links().filter(link => link.href.includes("s=recent-11"))).toHaveLength(1);
+  });
+
+  it("resets the display window when switching workspaces", async () => {
+    navigation.search = "";
+    sessionApi.listSessionsForAssistants.mockResolvedValue(recent(12));
+    await renderPanel();
+    await act(async () => more().click());
+    expect(links()).toHaveLength(10);
+    await act(async () => root!.render(<I18nProvider locale="en" dict={en}><ChatSidebarPanel workspaceId="workspace-2" /></I18nProvider>));
+    await flushEffects();
+    expect(links()).toHaveLength(5);
+  });
+
+  it("reveals cached Work chats before fetching another page and retains a pagination error", async () => {
+    navigation.search = "v=workspace";
+    sessionApi.listWorkspaceSessions.mockResolvedValue(recent(50));
+    await renderPanel();
+    const requests = sessionApi.listWorkspaceSessions.mock.calls.length;
+    for (let i = 0; i < 9; i++) await act(async () => more().click());
+    expect(links()).toHaveLength(50);
+    expect(sessionApi.listWorkspaceSessions.mock.calls).toHaveLength(requests);
+    sessionApi.listWorkspaceSessions.mockRejectedValueOnce(new Error("unavailable"));
+    await act(async () => more().click());
+    expect(group().querySelector('[role="alert"]')?.textContent).toBe(en.chatApp.projectChatsFailed);
+    expect(links()).toHaveLength(50);
+    sessionApi.listWorkspaceSessions.mockResolvedValueOnce(recent(50).map((row, i) => ({ ...row, id: `older-${i}` })));
+    await act(async () => more().click());
+    expect(links()).toHaveLength(55);
+    expect(links().filter(link => link.href.includes("s=older-"))).toHaveLength(5);
+    expect(sessionApi.listWorkspaceSessions.mock.calls).toHaveLength(requests + 2);
+  }, 15_000);
+});
 
 describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel groups", () => {
   const chat = (id: string, fields = {}) => ({

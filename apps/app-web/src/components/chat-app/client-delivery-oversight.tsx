@@ -20,8 +20,8 @@ import { workspaceSearchHref } from "@/lib/workspace-search-navigation";
 import { brainRowUrl } from "@/lib/brain-deep-link";
 
 const lifecycle={expiresInMs:projectionRemainingMs,keepInflightOnExpiry:true};
-export function ClientDeliveryOversight({workspaceId,scope,onDraft,chatId,hideWhenEmpty=true}:{
-  workspaceId:string;scope:WorkScope;onDraft:(draft:string)=>void;chatId?:string;hideWhenEmpty?:boolean;
+export function ClientDeliveryOversight({workspaceId,scope,onDraft,chatId,hideWhenEmpty=true,hideWhileLoading=false}:{
+  workspaceId:string;scope:WorkScope;onDraft:(draft:string)=>void;chatId?:string;hideWhenEmpty?:boolean;hideWhileLoading?:boolean;
 }) {
   const t=useT().clientDelivery;
   const [cursor,setCursor]=useState<string|undefined>();
@@ -29,10 +29,10 @@ export function ClientDeliveryOversight({workspaceId,scope,onDraft,chatId,hideWh
   const scopeKey=deliveryCommitmentsCacheKey(workspaceId,scope,'',chatId);
   const key=deliveryCommitmentsCacheKey(workspaceId,scope,cursor,chatId);
   const resource=useCachedResource<ProtectedProjection<DeliveryPage>>(key,()=>fetchDeliveryCommitments(workspaceId,scope,cursor,chatId),lifecycle);
-  const page=useProtectedProjection(key,resource.data,()=>setSelected(null));
+  const page=useProtectedProjection(key,resource.data,()=>setSelected(null),resource.refresh);
   useEffect(()=>{setCursor(undefined);setSelected(null)},[scopeKey]);
   if(!page) return resource.error ? <div role="alert" className="space-y-2 text-sm"><p>{t.unavailable}</p><Button variant="outline" onClick={()=>void resource.refresh()} className="min-h-8 max-sm:min-h-11">{t.retry}</Button></div>
-    : <div aria-label={t.loading} className="space-y-2"><Skeleton className="h-8 w-40"/><Skeleton className="h-11 w-full"/></div>;
+    : hideWhileLoading ? null : <div aria-label={t.loading} className="space-y-2"><Skeleton className="h-8 w-40"/><Skeleton className="h-11 w-full"/></div>;
   if(page.commitments.length===0)return hideWhenEmpty?null:<p className="text-sm text-muted-foreground">{t.empty}</p>;
   return <section aria-label={t.title} className="min-w-0 space-y-3 border-t pt-3" data-testid="client-delivery-oversight">
     <h2 className="text-sm font-medium">{t.title}</h2>

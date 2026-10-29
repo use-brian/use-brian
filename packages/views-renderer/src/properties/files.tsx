@@ -120,7 +120,7 @@ function formatBytes(n: number): string {
  * route streams those bytes inline. True GCS refs return `null` until
  * the signed-URL endpoint lands (P2D).
  */
-function previewUrlFor(ref: FileRef): string | null {
+export function previewUrlFor(ref: FileRef): string | null {
   const base = runtimePublicApiUrl()
   if (ref.bucket === 'file_cache') {
     const prefix = base.length > 0 ? base.replace(/\/+$/, '') : ''

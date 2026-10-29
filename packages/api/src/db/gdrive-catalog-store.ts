@@ -339,14 +339,7 @@ export async function listStaleGDriveCatalogArtifacts(input: {
   connectorInstanceId: string
   generation: string
 }): Promise<string[]> {
-  const { rows } = await query<{ artifact_file_id: string }>(
-    `SELECT artifact_file_id
-       FROM gdrive_file_catalog
-      WHERE workspace_id = $1 AND connector_instance_id = $2
-        AND last_seen_generation <> $3 AND artifact_file_id IS NOT NULL`,
-    [input.workspaceId, input.connectorInstanceId, input.generation],
-  )
-  return rows.map((row) => row.artifact_file_id)
+  return listGDriveCatalogArtifactsOutsideGeneration(input)
 }
 
 export async function completeGDriveCatalogSync(input: {

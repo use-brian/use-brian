@@ -5,7 +5,9 @@
  * Department floors and erasure do to those projections (R01, R08, R18).
  * Runs only through scripts/crm/local-fixture.mjs. Fictional identities.
  */
-import { afterAll, describe, expect, it } from 'vitest'
+import express, { type RequestHandler } from 'express'
+import request from 'supertest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { getAppPool, getPool } from '../../db/client.js'
 import {
   countResearchActivitiesForViewer,
@@ -16,6 +18,8 @@ import {
 import { briefFixture, researchMessage, researchSession, savedResearch } from './fixture.js'
 import { flushWorkspaceData, WORKSPACE_FLUSH_PRESERVED_TABLES, WORKSPACE_FLUSH_TABLES } from '../../db/workspace-flush.js'
 import { beginResearchActivity, captureResearchFollowupForMessage } from '../runtime.js'
+import { researchRoutes } from '../../routes/research.js'
+import * as notifications from '../../brain-stream/notify.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -171,5 +175,186 @@ describe('[COMP:api/research-source-authority] research visibility follows its s
     await flushWorkspaceData(f.people.owner, f.workspaceId)
     expect((await pool.query('SELECT count(*)::int n FROM research_activities WHERE workspace_id=$1', [f.workspaceId])).rows[0].n).toBe(0)
     expect((await pool.query('SELECT count(*)::int n FROM research_artifact_links WHERE activity_id=$1', [activity.id])).rows[0].n).toBe(0)
+  })
+})
+
+
+function researchApp(userId: string) {
+  const auth: RequestHandler = (req, _res, next) => { req.userId = userId; next() }
+  const app = express()
+  app.use(express.json())
+  app.use('/api', researchRoutes({ auth }))
+  return app
+}
+
+const nomination = (idempotencyKey: string) => ({
+  title: 'Coverage needs a second source',
+  pattern: 'Comparisons rely on one source',
+  desiredBehavior: 'Check independent source coverage',
+  idempotencyKey,
+})
+const improvementsPath = (workspaceId: string) => `/api/workspaces/${workspaceId}/research/improvements`
+const improvementRows = async (workspaceId: string) => (await pool.query(
+  'SELECT id,created_by,revision,title,pattern,desired_behavior,feedback_ids,activity_ids FROM research_improvements WHERE workspace_id=$1 ORDER BY id',
+  [workspaceId],
+)).rows
+
+// Authentication supplies a real fixture identity; routes, commands, owner
+// writes and app_user permission projections below are the production code.
+describe('[COMP:api/research-source-authority] nomination admission and replay on the real REST route', () => {
+  it('R13: admits empty-evidence member nominations and visible creator/admin replay without extra writes', async () => {
+    const f = await briefFixture(), path = improvementsPath(f.workspaceId), input = nomination('member-empty')
+    const created = await request(researchApp(f.people.member)).post(path).send(input)
+    expect(created.status).toBe(200)
+    expect(created.body).toMatchObject({ replayed: false, improvement: { createdBy: f.people.member, feedbackIds: [], activityIds: [] } })
+    const before = await improvementRows(f.workspaceId)
+    for (const viewer of [f.people.member, f.people.lead]) {
+      const visible = await request(researchApp(viewer)).get(`${path}/${created.body.improvement.id}`)
+      expect(visible.status).toBe(200)
+      const replay = await request(researchApp(viewer)).post(path).send(input)
+      expect(replay.status).toBe(200)
+      expect(replay.body).toMatchObject({ replayed: true, improvement: { id: visible.body.improvement.id } })
+    }
+    expect(await improvementRows(f.workspaceId)).toEqual(before)
+  })
+
+  it('R08/R13: refuses an actor belonging only to a different workspace without an insert or notification', async () => {
+    const target = await briefFixture(), foreign = await briefFixture()
+    const before = await improvementRows(target.workspaceId)
+    const emitted = vi.spyOn(notifications, 'notifyWorkspaceChange')
+    try {
+      const response = await request(researchApp(foreign.people.member)).post(improvementsPath(target.workspaceId)).send(nomination('foreign-empty'))
+      expect(response.status).toBe(404)
+      expect(response.body).toEqual({ error: 'research_not_found' })
+      expect(await improvementRows(target.workspaceId)).toEqual(before)
+      expect(emitted).not.toHaveBeenCalled()
+    } finally { emitted.mockRestore() }
+  })
+
+  it('R08/R13: refuses a removed workspace member without an insert or notification', async () => {
+    const f = await briefFixture()
+    await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId, f.people.outsider])
+    const before = await improvementRows(f.workspaceId)
+    const emitted = vi.spyOn(notifications, 'notifyWorkspaceChange')
+    try {
+      const response = await request(researchApp(f.people.outsider)).post(improvementsPath(f.workspaceId)).send(nomination('removed-empty'))
+      expect(response.status).toBe(404)
+      expect(response.body).toEqual({ error: 'research_not_found' })
+      expect(await improvementRows(f.workspaceId)).toEqual(before)
+      expect(emitted).not.toHaveBeenCalled()
+    } finally { emitted.mockRestore() }
+  })
+
+  it('R08/R13: a workspace-wide idempotency key cannot hydrate another member\'s hidden candidate', async () => {
+    const f = await briefFixture(), path = improvementsPath(f.workspaceId), input = nomination('private-key')
+    const created = await request(researchApp(f.people.member)).post(path).send(input)
+    expect(created.status).toBe(200)
+    expect((await request(researchApp(f.people.outsider)).get(`${path}/${created.body.improvement.id}`)).status).toBe(404)
+    const before = await improvementRows(f.workspaceId)
+    const emitted = vi.spyOn(notifications, 'notifyWorkspaceChange')
+    try {
+      const replay = await request(researchApp(f.people.outsider)).post(path).send(input)
+      expect(replay.status).toBe(404)
+      expect(replay.body).toEqual({ error: 'research_not_found' })
+      expect(await improvementRows(f.workspaceId)).toEqual(before)
+      expect(emitted).not.toHaveBeenCalled()
+    } finally { emitted.mockRestore() }
+  })
+
+  it('R08: replay retains the Department floor for both a creator and an admin', async () => {
+    const f = await briefFixture(), path = improvementsPath(f.workspaceId), input = nomination('department-key')
+    await f.edge('user', f.people.member)
+    const research = await savedResearch(f, f.people.member, null)
+    await pool.query('UPDATE research_activities SET compartments=$2 WHERE id=$1', [research.activity.id, [`team:${f.finance}`]])
+    const created = await request(researchApp(f.people.member)).post(path).send({ ...input, activityIds: [research.activity.id] })
+    expect(created.status).toBe(200)
+    expect((await request(researchApp(f.people.member)).post(path).send(input)).status).toBe(200)
+    await pool.query('DELETE FROM department_edges WHERE department_id=$1 AND user_id=$2', [f.finance, f.people.member])
+    const before = await improvementRows(f.workspaceId)
+    const emitted = vi.spyOn(notifications, 'notifyWorkspaceChange')
+    try {
+      for (const viewer of [f.people.member, f.people.lead]) {
+        expect((await request(researchApp(viewer)).get(`${path}/${created.body.improvement.id}`)).status).toBe(404)
+        const replay = await request(researchApp(viewer)).post(path).send(input)
+        expect(replay.status).toBe(404)
+        expect(replay.body).toEqual({ error: 'research_not_found' })
+      }
+      expect(await improvementRows(f.workspaceId)).toEqual(before)
+      expect(emitted).not.toHaveBeenCalled()
+    } finally { emitted.mockRestore() }
+  })
+
+  it('R08/R13: withholds a post-commit result after revocation while preserving the committed candidate', async () => {
+    const f = await briefFixture(), viewerPool = getAppPool()
+    expect(viewerPool).not.toBe(pool) // This maintained fixture has a real app_user pool.
+    const input = nomination('postcommit-revocation')
+    let atProjection = false
+    let resumeProjection!: () => void
+    const projectionGate = new Promise<void>(resolve => { resumeProjection = resolve })
+    const realConnect = viewerPool.connect.bind(viewerPool)
+    // Empty evidence performs no viewer read before persistence. Pause the
+    // actual next app checkout, without replacing its query or permission result.
+    const checkout = vi.spyOn(viewerPool, 'connect').mockImplementationOnce((async () => {
+      atProjection = true
+      await projectionGate
+      return realConnect()
+    }) as typeof viewerPool.connect)
+    const emitted = vi.spyOn(notifications, 'notifyWorkspaceChange')
+    let pending: Promise<request.Response> | undefined
+    try {
+      pending = request(researchApp(f.people.outsider)).post(improvementsPath(f.workspaceId)).send(input).then(response => response)
+      await expect.poll(() => atProjection).toBe(true)
+      // A separate owner read proves the insert is committed, not merely
+      // visible inside an in-flight write transaction at this boundary.
+      const committed = await improvementRows(f.workspaceId)
+      expect(committed).toHaveLength(1)
+      expect(committed[0]).toMatchObject({ created_by: f.people.outsider, title: input.title, revision: '1' })
+      await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId, f.people.outsider])
+      resumeProjection()
+      const response = await pending
+      expect(response.status).toBe(404)
+      expect(response.body).toEqual({ error: 'research_not_found' })
+      expect(await improvementRows(f.workspaceId)).toEqual(committed)
+      expect(emitted).not.toHaveBeenCalled()
+    } finally {
+      resumeProjection()
+      await pending?.catch(() => undefined)
+      checkout.mockRestore()
+      emitted.mockRestore()
+    }
+  })
+
+  it('R08/R13: waits for the workspace barrier and observes a membership revocation committed by its holder', async () => {
+    const f = await briefFixture(), holder = await pool.connect()
+    const before = await improvementRows(f.workspaceId)
+    const emitted = vi.spyOn(notifications, 'notifyWorkspaceChange')
+    let pending: Promise<request.Response> | undefined
+    let settled = false
+    try {
+      await holder.query('BEGIN')
+      await holder.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [f.workspaceId])
+      const pid = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid
+      pending = request(researchApp(f.people.outsider)).post(improvementsPath(f.workspaceId)).send(nomination('waiting-member'))
+        .then(response => { settled = true; return response })
+      // Observe either a response or the real PostgreSQL blocking relation.
+      // The original INSERT may also wait here for its workspace foreign key;
+      // it must still refuse after the holder commits the membership removal.
+      await expect.poll(async () => settled || (await holder.query<{ blocked: boolean }>(
+        'SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS blocked', [pid],
+      )).rows[0]!.blocked).toBe(true)
+      expect(settled).toBe(false)
+      await holder.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId, f.people.outsider])
+      await holder.query('COMMIT')
+      const response = await pending
+      expect(response.status).toBe(404)
+      expect(response.body).toEqual({ error: 'research_not_found' })
+      expect(await improvementRows(f.workspaceId)).toEqual(before)
+      expect(emitted).not.toHaveBeenCalled()
+    } finally {
+      await holder.query('ROLLBACK')
+      holder.release()
+      await pending
+      emitted.mockRestore()
+    }
   })
 })

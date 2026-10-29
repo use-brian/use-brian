@@ -10,6 +10,7 @@
  * the site. Spec: docs/architecture/engine/computer-use.md §5.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { runInNewContext } from 'node:vm'
 import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach, hostMatchesSite } from '../executor.js'
 import { ACTION_CURSOR_BEFORE_CAPTURE, ACTION_CURSOR_MARKER } from '../action-cursor.js'
 
@@ -697,7 +698,17 @@ describe('[COMP:ext/agent] Site suffix match', () => {
 
 describe('[COMP:sandbox/session-capture] Session capture (D2/D3)', () => {
   function mockCdp(handlers: Record<string, unknown>): void {
-    dbg.sendCommand.mockImplementation(async (_target, method) => {
+    dbg.sendCommand.mockImplementation(async (_target, method, params) => {
+      if (method === 'Runtime.evaluate') {
+        // Existing golden entries are page-state inputs, never a canned result
+        // for an origin guard. Execute the production expression itself.
+        const entries = (handlers[method] as { result: { value: Array<[string, string]> } }).result.value
+        const tab = await tabsGet()
+        const value = runInNewContext(String(params.expression), {
+          location: { origin: new URL(tab.url).origin }, localStorage: Object.fromEntries(entries),
+        }, { timeout: 1000 })
+        return { result: { value } }
+      }
       if (method in handlers) return handlers[method]
       return {}
     })
@@ -827,4 +838,111 @@ describe('[COMP:sandbox/session-capture] Session capture (D2/D3)', () => {
     expect(err).toBeInstanceOf(ExecutorError)
     expect(err.code).toBe('detached')
   })
+})
+
+
+describe('[COMP:sandbox/session-capture] atomic origin-bound storage read', () => {
+  const initialOrigin = 'https://app.example.com'
+  function vmPage(entries: Array<[string, string]> = [['token', 'synthetic-session']]) {
+    const location = { origin: initialOrigin }
+    const storage = Object.fromEntries(entries)
+    const storageRead = vi.fn(() => storage)
+    const page = { location, get localStorage() { return storageRead() } }
+    return { location, storageRead, page }
+  }
+  function evaluate(expression: unknown, page: ReturnType<typeof vmPage>['page']) {
+    return { result: { value: runInNewContext(String(expression), page, { timeout: 1000 }) } }
+  }
+
+  for (const boundary of ['Network.enable', 'Network.getAllCookies']) {
+    for (const changedOrigin of ['https://other.example.net', 'https://login.example.com']) {
+      it(`refuses an origin change during ${boundary} to ${changedOrigin} before reading storage`, async () => {
+        tabsGet.mockResolvedValue({ url: `${initialOrigin}/dashboard`, status: 'complete' })
+        const vm = vmPage([['unrelated-session', 'synthetic-other-origin-value']])
+        let reached!: () => void, release!: () => void
+        const atBoundary = new Promise<void>(resolve => { reached = resolve })
+        const resumed = new Promise<void>(resolve => { release = resolve })
+        dbg.sendCommand.mockImplementation(async (_target, method, params) => {
+          if (method === boundary) { reached(); await resumed }
+          if (method === 'Network.getAllCookies') return { cookies: [] }
+          if (method === 'Runtime.evaluate') return evaluate(params.expression, vm.page)
+          return {}
+        })
+        const executor = new TabExecutor()
+        await executor.attach(42)
+        const pending = executor.captureState('example.com').then(bundle => ({ bundle }), error => ({ error }))
+        try {
+          await atBoundary
+          vm.location.origin = changedOrigin
+        } finally { release() }
+        const outcome = await pending
+        expect.soft(vm.storageRead).not.toHaveBeenCalled()
+        expect.soft(outcome).toMatchObject({ error: { code: 'site_mismatch' } })
+        expect(outcome).not.toHaveProperty('bundle')
+      })
+    }
+  }
+
+  for (const entries of [[], [['token', 'synthetic-session'], ['empty', '']]] as Array<Array<[string, string]>>) {
+    it(`keeps a valid same-origin capture with ${entries.length} storage entries`, async () => {
+      tabsGet.mockResolvedValue({ url: `${initialOrigin}/dashboard`, status: 'complete' })
+      const vm = vmPage(entries)
+      dbg.sendCommand.mockImplementation(async (_target, method, params) => {
+        if (method === 'Network.getAllCookies') return { cookies: [] }
+        if (method === 'Runtime.evaluate') return evaluate(params.expression, vm.page)
+        return {}
+      })
+      const executor = new TabExecutor()
+      await executor.attach(42)
+      const bundle = await executor.captureState('example.com')
+      expect(bundle.localStorage).toEqual({ [initialOrigin]: Object.fromEntries(entries) })
+      expect(vm.storageRead).toHaveBeenCalledOnce()
+    })
+  }
+
+  for (const [label, response] of [
+    ['absent result', {}],
+    ['absent value', { result: {} }],
+    ['null value', { result: { value: null } }],
+    ['object value', { result: { value: { token: 'synthetic-session' } } }],
+    ['non-string name', { result: { value: [[12, 'value']] } }],
+    ['non-string value', { result: { value: [['token', 12]] } }],
+    ['short pair', { result: { value: [['token']] } }],
+    ['long pair', { result: { value: [['token', 'value', 'extra']] } }],
+    ['exception despite value', { result: { value: [] }, exceptionDetails: { text: 'Synthetic private page error' } }],
+  ]) {
+    it(`refuses ${label} rather than emitting a successful empty or malformed bundle`, async () => {
+      tabsGet.mockResolvedValue({ url: `${initialOrigin}/dashboard`, status: 'complete' })
+      dbg.sendCommand.mockImplementation(async (_target, method) => {
+        if (method === 'Network.getAllCookies') return { cookies: [] }
+        if (method === 'Runtime.evaluate') return response
+        return {}
+      })
+      const executor = new TabExecutor()
+      await executor.attach(42)
+      const outcome = await executor.captureState('example.com').then(bundle => ({ bundle }), error => ({ error }))
+      expect(outcome).toMatchObject({ error: { code: 'site_mismatch', message: expect.stringMatching(/retry/i) } })
+      expect(outcome).not.toHaveProperty('bundle')
+      expect(String('error' in outcome ? outcome.error.message : '')).not.toContain('Synthetic private page error')
+    })
+  }
+
+  for (const detached of [false, true]) {
+    it(`preserves the refusal identity when storage evaluation ${detached ? 'detaches' : 'fails'}`, async () => {
+      tabsGet.mockResolvedValue({ url: `${initialOrigin}/dashboard`, status: 'complete' })
+      dbg.sendCommand.mockImplementation(async (_target, method) => {
+        if (method === 'Network.getAllCookies') return { cookies: [] }
+        if (method === 'Runtime.evaluate') throw new Error(detached
+          ? 'Debugger is not attached to the tab with id: 42.' : 'Synthetic private evaluation failure')
+        return {}
+      })
+      const executor = new TabExecutor()
+      await executor.attach(42)
+      const outcome = await executor.captureState('example.com').then(bundle => ({ bundle }), error => ({ error }))
+      expect(outcome).toMatchObject({ error: { code: detached ? 'detached' : 'site_mismatch' } })
+      expect(outcome).not.toHaveProperty('bundle')
+      if (detached) expect(executor.attachedTab()).toBeNull()
+      else expect(String('error' in outcome ? outcome.error.message : '')).not.toContain('Synthetic private evaluation failure')
+    })
+  }
 })

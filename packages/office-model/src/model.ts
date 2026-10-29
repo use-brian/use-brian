@@ -390,7 +390,7 @@ export const PresentationSlideSchema = z
   .strict()
   .superRefine((slide, ctx) => {
     const ids = new Set(slide.objects.map((object) => object.id))
-    if (slide.readingOrder.length !== ids.size || slide.readingOrder.some((id) => !ids.has(id))) {
+    if (slide.readingOrder.length !== ids.size || new Set(slide.readingOrder).size !== slide.readingOrder.length || slide.readingOrder.some((id) => !ids.has(id))) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['readingOrder'], message: 'Reading order must contain every slide object exactly once' })
     }
   })

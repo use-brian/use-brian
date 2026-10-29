@@ -1,6 +1,6 @@
 import type { FeishuApi } from '@use-brian/channels'
 import { channelQuestions } from '../channel-questions.js'
-import { channelConfirmations } from '../channel-interactions.js'
+import { channelConfirmations, roomInteractionScope } from '../channel-interactions.js'
 import express from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -71,8 +71,10 @@ vi.mock('../../channel-room/room.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../channel-room/room.js')>()),
   resolveRoomBinding: vi.fn(async () => null),
   postPassiveChannelMessage: vi.fn(async () => false),
+  isWorkspaceAdmin: vi.fn(async (userId: string) => userId === 'stale-admin' || userId === 'current-admin'),
 }))
 
+import { resolveRoomBinding, isWorkspaceAdmin } from '../../channel-room/room.js'
 import { feishuRoutes, resolveFeishuThreadScope, type FeishuRouteOptions } from '../feishu.js'
 
 const CHANNEL_ROW_ID = '11111111-1111-4111-8111-111111111111'
@@ -164,6 +166,7 @@ function setup(over: {
     tools: new Map(),
     memoryStore: {},
     capabilityStore: {},
+    channelUserStore: {},
     ...over.route,
   } as unknown as FeishuRouteOptions
   const app = express()
@@ -175,6 +178,7 @@ function setup(over: {
 describe('[COMP:api/feishu-route] bridge route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(resolveRoomBinding).mockResolvedValue(null)
     mocks.api.streamingCards = undefined
     mocks.claimChannelEvent.mockResolvedValue(true)
     mocks.getChannelForWebhook.mockResolvedValue({
@@ -183,6 +187,7 @@ describe('[COMP:api/feishu-route] bridge route', () => {
       status: 'active',
       enabledCapabilities: ['chat', 'broadcast'],
     })
+    mocks.resolveChannelUser.mockResolvedValue({ user: { id: 'channel-user-1' }, isIdentified: false })
     mocks.resolveRoutingForSurface.mockResolvedValue({ assistantId: ASSISTANT_ID, modelAlias: 'pro' })
     mocks.findAssistantById.mockResolvedValue({
       id: ASSISTANT_ID,
@@ -978,6 +983,59 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     }))
   })
 
+  it.each([
+    ['anonymous-shadow', false, 'other-addresser', false],
+    ['current-user', true, 'other-addresser', false],
+    ['current-admin', true, 'other-addresser', true],
+    ['anonymous-shadow', false, 'ou_sender', true],
+  ] as const)('uses resolved actor %s for room approval (identified=%s, addresser=%s)', async (actorId, identified, addresser, allowed) => {
+    vi.mocked(resolveRoomBinding).mockResolvedValue({ workspaceId: 'workspace-1', channelIntegrationId: 'integration-1' })
+    const linkedAccountStore = { findByProvider: vi.fn(async () => ({ userId: 'stale-admin', assistantId: ASSISTANT_ID, providerMetadata: { reason: 'email-discovery' } })) }
+    mocks.resolveChannelUser.mockResolvedValueOnce({ user: { id: actorId }, isIdentified: identified })
+    const { app } = setup({ config: { requireMention: false }, route: { linkedAccountStore, channelUserStore: {} as never } as never })
+    const scope = roomInteractionScope({ channelType: 'feishu', integrationId: CHANNEL_ROW_ID, conversationId: 'oc_chat', senderId: addresser, sessionId: 'oc_chat:thread:om_1' })
+    const resolve = vi.fn()
+    const disposeTurn = channelConfirmations.registerTurn(scope, new AbortController(), { addresserId: addresser, onAbort: () => {} })
+    const disposeConfirmation = channelConfirmations.register(scope,
+      { toolCallId: 'feishu-room-approval', toolName: 'sendEmail', input: {}, allowPersistentApproval: false } as never, { resolve } as never)
+    try {
+      await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+        .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage({ chatType: 'group', content: 'approve' }) }).expect(202)
+      await vi.waitFor(() => expect(mocks.resolveChannelUser).toHaveBeenCalled())
+      await new Promise(r => setImmediate(r))
+      if (allowed) expect(resolve).toHaveBeenCalledExactlyOnceWith('feishu-room-approval', 'allow', undefined)
+      else {
+        expect(resolve).not.toHaveBeenCalled()
+        expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({ userId: actorId, isIdentified: identified }))
+      }
+      expect(linkedAccountStore.findByProvider).toHaveBeenCalledOnce()
+      if (addresser !== 'ou_sender' && identified) expect(isWorkspaceAdmin).toHaveBeenCalledWith(actorId, 'workspace-1')
+    } finally { disposeConfirmation(); disposeTurn() }
+  })
+
+  it.each(['missing', 'failed'])('keeps room cancel available when identity resolution is %s', async mode => {
+    vi.mocked(resolveRoomBinding).mockResolvedValue({ workspaceId: 'workspace-1', channelIntegrationId: 'integration-1' })
+    const { app } = setup({ config: { requireMention: false }, route: mode === 'missing' ? { channelUserStore: undefined } : {} })
+    if (mode === 'failed') mocks.resolveChannelUser.mockRejectedValue(new Error('identity lookup unavailable'))
+    const scope = roomInteractionScope({ channelType: 'feishu', integrationId: CHANNEL_ROW_ID, conversationId: 'oc_chat', senderId: 'other-addresser', sessionId: 'oc_chat:thread:om_1' })
+    const controller = new AbortController()
+    const onAbort = vi.fn()
+    const resolve = vi.fn()
+    const disposeTurn = channelConfirmations.registerTurn(scope, controller, { addresserId: 'other-addresser', onAbort })
+    const disposeConfirmation = channelConfirmations.register(scope,
+      { toolCallId: 'feishu-stop', toolName: 'sendEmail', input: {}, allowPersistentApproval: false } as never, { resolve } as never)
+    try {
+      await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
+        .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage({ chatType: 'group', content: '/cancel' }) }).expect(202)
+      await vi.waitFor(() => expect(controller.signal.aborted).toBe(true))
+      expect(resolve).toHaveBeenCalledExactlyOnceWith('feishu-stop', 'deny')
+      expect(onAbort).toHaveBeenCalledOnce()
+      expect(mocks.resolveChannelUser).not.toHaveBeenCalled()
+      expect(mocks.processChannelMessage).not.toHaveBeenCalled()
+      expect(isWorkspaceAdmin).not.toHaveBeenCalled()
+    } finally { disposeConfirmation(); disposeTurn() }
+  })
+
   it('enriches a linked nameless account with its exact Feishu sender profile', async () => {
     mocks.findUserById.mockResolvedValue({ id: 'linked-user-1', name: null, email: 'alex@example.com' })
     mocks.api.getUserProfile.mockResolvedValue({ email: 'other@example.com', displayName: 'Alex Example' })
@@ -1129,15 +1187,14 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     }))
   })
 
-  it.each(['missing', 'failed'])('does not identify an owner-fallback sender when resolution is %s', async mode => {
-    mocks.resolveChannelUser.mockRejectedValueOnce(new Error('resolution failed'))
-    const { app } = setup({ route: mode === 'failed' ? { channelUserStore: {} as never } : {} })
+  it.each(['missing', 'failed'])('refuses an unresolved sender when resolution is %s', async mode => {
+    if (mode === 'failed') mocks.resolveChannelUser.mockRejectedValueOnce(new Error('resolution failed'))
+    const { app } = setup({ route: mode === 'failed' ? { channelUserStore: {} as never } : { channelUserStore: undefined } })
     await request(app).post('/internal/feishu/inbound').set('X-Connector-Secret', 'shared-secret')
       .send({ channelId: CHANNEL_ROW_ID, message: normalizedMessage() }).expect(202)
-    await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
-      userId: 'owner-1', isIdentified: false, questionIntegrationId: 'integration-1',
-      incomingMessage: expect.objectContaining({ userId: 'ou_sender', raw: expect.objectContaining({ messageId: 'om_1' }) }),
-    })))
+    await vi.waitFor(() => expect(mocks.api.send).toHaveBeenCalled())
+    expect(mocks.processChannelMessage).not.toHaveBeenCalled()
+    expect(JSON.stringify(mocks.api.send.mock.calls)).toContain('Your identity could not be verified. Please try again shortly.')
   })
 
   it('binds the delivered confirmation card and recovers its thread only for the exact actor and message', async () => {
@@ -1202,7 +1259,7 @@ describe('[COMP:api/feishu-route] bridge route', () => {
   it('forwards native question answers only after actor and resolved identity checks', async () => {
     const { app } = setup()
     const actions = channelQuestions.create({
-      integrationId: CHANNEL_ROW_ID, assistantId: ASSISTANT_ID, userId: 'owner-1',
+      integrationId: CHANNEL_ROW_ID, assistantId: ASSISTANT_ID, userId: 'channel-user-1',
       incoming: { userId: 'ou_sender', channelId: 'oc_chat', text: 'question', isGroupChat: false,
         timestamp: Date.now(), raw: normalizedMessage() },
     }, ['approve abc123'])
@@ -1216,7 +1273,7 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     await click('ou_sender').expect(202)
     await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledOnce())
     expect(mocks.processChannelMessage).toHaveBeenCalledWith(expect.objectContaining({
-      messageText: 'approve abc123', conversationalAnswer: true, sessionChannelId: 'oc_chat:thread:om_1',
+      messageText: 'approve abc123', conversationalAnswer: true, userId: 'channel-user-1', isIdentified: false, ownerId: 'owner-1', sessionChannelId: 'oc_chat:thread:om_1',
       interactionScope: expect.objectContaining({ integrationId: CHANNEL_ROW_ID, senderId: 'ou_sender' }),
     }))
     await click('ou_sender').expect(202)

@@ -25,6 +25,7 @@ import {
   listResearchActivitiesForViewer,
   listResearchImprovementsForViewer,
   ResearchStaleError,
+  ResearchNotFoundError,
   taskReadableForViewer,
   type ResearchSensitivity,
 } from '../db/research-store.js'
@@ -72,6 +73,7 @@ function translate(error: unknown): never {
   if (error instanceof ResearchCommandError) throw error
   if (error instanceof ResearchLessonError) throw new ResearchCommandError(error.code, error.status)
   if (error instanceof ResearchStaleError) throw new ResearchCommandError('research_stale', 409)
+  if (error instanceof ResearchNotFoundError) throw notFound()
   if (error instanceof ResearchComparisonError) throw new ResearchCommandError('research_invalid', 400, error.reason)
   throw error
 }
@@ -187,13 +189,17 @@ export async function nominateImprovement(actor: ResearchActor, workspaceId: str
     a.activity.compartments.forEach((c) => compartments.add(c))
   }
   if (body.taskId && !(await taskReadableForViewer(actor.userId, body.taskId))) throw notFound()
-  const { improvement, created } = await insertResearchImprovementSystem({
-    workspaceId, createdBy: actor.userId, title: body.title, pattern: body.pattern, desiredBehavior: body.desiredBehavior,
-    taskId: body.taskId ?? null, feedbackIds: body.feedbackIds, activityIds: body.activityIds, sensitivity,
-    compartments: [...compartments].sort(), idempotencyKey: body.idempotencyKey,
-  })
-  if (created) notifyWorkspaceChange(workspaceId, 'research', 'create', improvement.id)
-  return { improvement, replayed: !created }
+  try {
+    const { improvement, created } = await insertResearchImprovementSystem({
+      workspaceId, createdBy: actor.userId, title: body.title, pattern: body.pattern, desiredBehavior: body.desiredBehavior,
+      taskId: body.taskId ?? null, feedbackIds: body.feedbackIds, activityIds: body.activityIds, sensitivity,
+      compartments: [...compartments].sort(), idempotencyKey: body.idempotencyKey,
+    })
+    if (created) notifyWorkspaceChange(workspaceId, 'research', 'create', improvement.id)
+    return { improvement, replayed: !created }
+  } catch (error) {
+    translate(error)
+  }
 }
 
 const recordComparisonSchema = z.object({

@@ -48,30 +48,67 @@ try {
       const composer = textarea.parentElement.parentElement;
       const rect = composer.getBoundingClientRect();
       const footer = composer.lastElementChild;
-      const controlCenters = [...footer.children].map(element => {
+      const visible = element => {
+        const box = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return box.width > 0 && box.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const controlCenters = [...footer.children].filter(visible).map(element => {
         const box = element.getBoundingClientRect();
         return box.top + box.height / 2;
       });
-      const buttons = [...composer.querySelectorAll('button')].map(button => {
+      const describe = (button, boundary) => {
         const box = button.getBoundingClientRect();
-        const inset = box.width && box.height && box.left >= rect.left && box.right <= rect.right + 0.5 && box.top >= rect.top && box.bottom <= rect.bottom + 0.5;
-        const center = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+        const shown = visible(button);
+        const inset = shown && box.left >= boundary.left && box.right <= boundary.right + 0.5 && box.top >= boundary.top && box.bottom <= boundary.bottom + 0.5;
+        const center = shown ? document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) : null;
         return { label: button.getAttribute('aria-label') || button.title || button.textContent, width: box.width, height: box.height,
-          right: box.right, inside: Boolean(inset), reachable: center === button || button.contains(center) };
-      });
-      return { composer: { width: rect.width, right: rect.right }, buttons, send: dict.feedPage.tuningChat.send, stop: dict.feedPage.tuningChat.stop,
+          left: box.left, top: box.top, right: box.right, bottom: box.bottom, visible: shown,
+          inside: Boolean(inset), reachable: shown && (center === button || button.contains(center)) };
+      };
+      const buttons = [...composer.querySelectorAll('button')].map(button => describe(button, rect));
+      const viewport = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+      const floatingButtons = [...document.querySelectorAll('[data-floating-recorder] button')].map(button => describe(button, viewport));
+      const visibleRecorderCounts = Object.fromEntries([dict.recorder.start, dict.recorder.audioOptions].map(label => [label,
+        [...document.querySelectorAll('button')].filter(button => (button.getAttribute('aria-label') || button.title || button.textContent) === label && visible(button)).length]));
+      return { theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light', textareaFont: getComputedStyle(textarea).fontSize, viewport: { width: innerWidth, height: innerHeight }, composer: { width: rect.width, right: rect.right }, buttons, floatingButtons, visibleRecorderCounts,
+        record: dict.recorder.start, recordingOptions: dict.recorder.audioOptions, model: dict.chat.modelLabel,
+        send: dict.feedPage.tuningChat.send, stop: dict.feedPage.tuningChat.stop,
         queue: dict.chat.queue.send, overflow: document.documentElement.scrollWidth > innerWidth,
         controlsShareRow: controlCenters.length < 2 || Math.max(...controlCenters) - Math.min(...controlCenters) < 1 };
     });
-    const failures = row.buttons.filter(button => !button.inside || !button.reachable).map(button => `clipped/unreachable ${button.label}`);
-    if (row.overflow) failures.push('document overflow');
-    if (!phone && !streaming && !row.controlsShareRow) failures.push('idle controls wrapped to a second row');
-    if (phone) for (const label of [streaming ? row.queue : row.send, ...(streaming ? [row.stop] : [])]) {
-      const action = row.buttons.find(button => button.label === label);
-      if (!action || action.width < 44 || action.height < 44) failures.push(`touch target ${label}`);
+    const failures = [];
+    const recorderLabels = [row.record, row.recordingOptions];
+    const desktopFloating = row.viewport.width >= 1024;
+    for (const button of row.buttons) {
+      const desktopInlineRecorder = desktopFloating && recorderLabels.includes(button.label);
+      if (desktopInlineRecorder) {
+        if (button.visible) failures.push(`desktop inline recorder must yield to floating host ${button.label}`);
+      } else if (!button.visible || !button.inside || !button.reachable) failures.push(`clipped/unreachable ${button.label}`);
     }
-    results.push({ name, failures, ...row });
+    for (const label of recorderLabels) {
+      const inline = row.buttons.filter(button => button.label === label);
+      const floating = row.floatingButtons.filter(button => button.label === label && button.visible);
+      if (inline.length !== 1) failures.push(`missing or duplicate inline recorder ${label}`);
+      if (row.visibleRecorderCounts[label] !== 1) failures.push(`expected exactly one visible recorder ${label}`);
+      if (!desktopFloating) {
+        if (floating.length !== 0) failures.push(`floating recorder must yield to inline below lg ${label}`);
+      } else if (floating.length !== 1 || !floating[0].inside || !floating[0].reachable) failures.push(`clipped/unreachable floating recorder ${label}`);
+    }
+    const primaryLabels = [row.record, row.recordingOptions, row.model, streaming ? row.queue : row.send, ...(streaming ? [row.stop] : [])];
+    for (const label of primaryLabels) {
+      const action = row.buttons.find(button => button.label === label);
+      if (!recorderLabels.includes(label) || !desktopFloating) {
+        if (!action || !action.visible) failures.push(`missing primary control ${label}`);
+        if (phone && (!action || action.width < 44 || action.height < 44)) failures.push(`touch target ${label}`);
+      }
+    }
+    if (row.overflow) failures.push('document overflow');
+    if (phone && parseFloat(row.textareaFont) < 16) failures.push('phone text entry must remain at least 16px');
+    if (!phone && !streaming && !row.controlsShareRow) failures.push('idle controls wrapped to a second row');
+    results.push({ name, failures, recorderMode: desktopFloating ? 'floating' : 'inline', ...row });
     await page.locator('[data-fixture-rail]').screenshot({ path: join(output, `${name}.png`) });
+    if (!phone) await page.screenshot({ path: join(output, `${name}-viewport.png`) });
   }
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 844 });
@@ -79,6 +116,17 @@ try {
     const preview = page.locator('[data-feed-pending-image]').first();
     await page.locator('.ProseMirror p').last().click();
     await preview.locator('img').waitFor();
+    const image = await preview.locator('img').evaluate(async element => {
+      await element.decode();
+      return { src: element.getAttribute('src'), width: element.naturalWidth };
+    });
+    assert.match(image.src ?? '', /^blob:/, 'Image preview must use the real protected-media object URL');
+    assert.ok(image.width > 0, 'Protected fixture image bytes must decode');
+    const requests = await page.evaluate(() => window.feedComposerFixture.requests);
+    assert.ok(requests.some(request => request.method === 'GET' && /^\/api\/doc-files\/fictional-workspace\/[^/]+$/.test(request.url) && request.cache === 'no-store'), 'Image bytes must use the current workspace authenticated no-store transport');
+    const preference = requests.find(request => request.method === 'PATCH' && request.url === '/api/workspaces/fictional-workspace/picker-preferences');
+    assert.ok(preference, 'The real workspace provider must announce the synthetic workspace open');
+    assert.deepEqual(preference.body, { opened: true }, 'Only the synthetic workspace open preference is written');
     await preview.scrollIntoViewIfNeeded();
     const scroll = page.locator('[data-image-scroll]');
     const before = await scroll.evaluate(el => el.scrollTop);
@@ -163,14 +211,27 @@ try {
     assert.equal(commands[0][0].text, 'A concrete example would help.');
     results.push({ name: `comment-${width}`, failures: [], width, anchorTop, rect, submitted: true });
   }
-  if (!process.env.FEED_COMMENT_ONLY && !process.env.FEED_WORKFLOW_ONLY) for (const locale of ['en', 'ja', 'zh', 'zh-cn']) for (const width of [320, 360, 390]) {
-    const phone = width === 390;
-    await page.setViewportSize({ width: phone ? 390 : 1440, height: 844 });
+  const composerCases = [
+    { width: 320, viewportWidth: 1440, height: 844, phone: false },
+    { width: 360, viewportWidth: 1440, height: 844, phone: false },
+    { width: 390, viewportWidth: 390, height: 844, phone: true },
+    { width: 360, viewportWidth: 360, height: 780, phone: true },
+    { width: 667, viewportWidth: 667, height: 375, phone: true },
+    { width: 320, viewportWidth: 768, height: 1024, phone: false, name: 'tablet-768x1024-rail-320', onlyLocale: 'en' },
+    { width: 320, viewportWidth: 1440, height: 900, phone: false, name: 'desktop-1440x900-rail-320', onlyLocale: 'en' },
+    { width: 390, viewportWidth: 390, height: 844, phone: true, name: 'phone-390-dark', theme: 'dark' },
+    { width: 320, viewportWidth: 1440, height: 900, phone: false, name: 'desktop-1440x900-rail-320-dark', theme: 'dark', onlyLocale: 'en' },
+  ];
+  if (!process.env.FEED_COMMENT_ONLY && !process.env.FEED_WORKFLOW_ONLY) for (const locale of ['en', 'ja', 'zh', 'zh-cn']) for (const { width, viewportWidth, height, phone, name: caseName, onlyLocale, theme = 'light' } of composerCases) {
+    if (onlyLocale && onlyLocale !== locale) continue;
+    await page.setViewportSize({ width: viewportWidth, height });
     for (const long of [false, true]) {
-      const name = `${locale}-${phone ? 'phone' : 'rail'}-${width}${long ? '-long' : ''}`;
+      const name = `${locale}-${caseName ?? `${phone ? 'phone' : 'rail'}-${width}`}${long ? '-long' : ''}`;
       await page.goto(`http://127.0.0.1:${port}/scripts/fixtures/feed-composer-browser.html?locale=${locale}&width=${width}${long ? '&long=1' : ''}`);
+      await page.evaluate(theme => document.documentElement.classList.toggle('dark', theme === 'dark'), theme);
       await page.locator('textarea').waitFor();
       const copy = await page.evaluate(() => window.feedComposerFixture.dict.feedPage.tuningChat);
+      await page.getByRole('button', { name: await page.evaluate(() => window.feedComposerFixture.dict.recorder.start), exact: true }).waitFor({ state: 'visible' });
       await page.locator('textarea').fill('Improve the fictional opening.');
       await page.locator(`button[title=${JSON.stringify(copy.send)}]`).waitFor({ state: 'visible' });
       await page.waitForFunction(label => !document.querySelector(`button[title="${label}"]`)?.disabled, copy.send);
@@ -183,18 +244,39 @@ try {
       assert.equal((await picker.innerText()).trim(), copy.modelMax);
       await picker.click();
       await page.getByRole('option').nth(0).click();
-      await page.locator('button[aria-pressed]').filter({ has: page.locator('svg path[d^="M12 3l2"]') }).click();
+      assert.equal(await page.getByRole('button', { name: copy.research, exact: true }).count(), 0, 'Ordinary Feed requests must not require a manual Research control');
       await page.locator('textarea').press('Enter');
       await page.locator(`button[title=${JSON.stringify(copy.stop)}]`).waitFor();
-      await page.waitForFunction(() => document.body.textContent.includes('9/10'));
+      const initialRequests = await page.evaluate(() => window.feedComposerFixture.requests.filter(request => request.method === 'POST' && request.url === '/api/chat' && !request.body.inputId));
+      assert.equal(initialRequests.length, 1, 'Submitting an ordinary draft must start exactly one turn');
+      const initialBody = initialRequests[0].body;
+      assert.deepEqual(Object.fromEntries(['message', 'assistantId', 'workspaceId', 'sessionId', 'model'].map(key => [key, initialBody[key]])), {
+        message: 'Improve the fictional opening.', assistantId: 'fictional-writer', workspaceId: 'fictional-workspace', sessionId: 'fictional-draft', model: 'standard',
+      }, 'Ordinary requests must preserve the task, workspace, session, assistant and selected tier');
+      assert.equal(Object.hasOwn(initialBody, 'mode'), false, 'An unseeded Feed request must not pin an explicit research or default mode');
+      await page.locator('[data-fixture-rail] .chat-markdown').filter({ hasText: 'Updating the fictional draft.' }).waitFor();
       await page.locator('textarea').fill('Keep the example.');
       await measure(`${name}-streaming`, phone, true);
       const queue = await page.evaluate(() => window.feedComposerFixture.dict.chat.queue.send);
       await page.locator(`button[title=${JSON.stringify(queue)}]`).click();
       await page.waitForFunction(() => window.feedComposerFixture.requests.some(({ body }) => body.message === 'Keep the example.' && body.inputId));
+      const queuedRequest = await page.evaluate(() => window.feedComposerFixture.requests.find(request => request.method === 'POST' && request.url === '/api/chat' && request.body.message === 'Keep the example.' && request.body.inputId));
+      assert.ok(queuedRequest, 'Queue must post the actual mid-turn input');
+      assert.deepEqual(Object.fromEntries(['message', 'assistantId', 'workspaceId', 'sessionId', 'midTurn'].map(key => [key, queuedRequest.body[key]])), {
+        message: 'Keep the example.', assistantId: 'fictional-writer', workspaceId: 'fictional-workspace', sessionId: 'fictional-draft', midTurn: true,
+      }, 'Queued input must stay with its current task and session');
+      assert.equal(Object.hasOwn(queuedRequest.body, 'mode'), false, 'Queued input must not pin an explicit research or default mode');
+      await page.locator('[data-fixture-rail]').getByText('Keep the example.', { exact: true }).waitFor();
+      const pendingLabel = await page.evaluate(() => window.feedComposerFixture.dict.chat.queue.pending);
+      const pendingInput = page.locator('[data-fixture-rail]').getByText(pendingLabel, { exact: true });
+      await pendingInput.waitFor();
+      await page.locator(`button[title=${JSON.stringify(copy.stop)}]`).waitFor();
       await page.locator(`button[title=${JSON.stringify(copy.stop)}]`).click();
       await page.locator(`button[title=${JSON.stringify(copy.stop)}]`).waitFor({ state: 'detached' });
       assert.equal(await page.evaluate(() => window.feedComposerFixture.requests.some(({ url }) => url === '/api/chat/stop')), true);
+      const stopped = await page.evaluate(() => window.feedComposerFixture.requests.find(request => request.method === 'POST' && request.url === '/api/chat/stop'));
+      assert.deepEqual(stopped?.body, { sessionId: 'fictional-draft' }, 'Stop must target the owning session');
+      await pendingInput.waitFor({ state: 'hidden' });
     }
   }
   await writeFile(join(output, 'results.json'), JSON.stringify({ errors, results }, null, 2));

@@ -978,32 +978,41 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     } catch (err) {
       debugDocumentFlow('tool_completion', { toolName: t.name, sessionId: options.context.sessionId, error: true, timeout: timeoutController.signal.aborted, aborted: mergedSignal.aborted })
       if (timer) clearTimeout(timer)
-      if (isAuthorityBoundaryError(err)) {
-        t.status = 'completed'
-        fatalError = err
-        wake()
-        return
-      }
-      // Same cap as the success path — a thrown error is tool-produced,
-      // unbounded content too. The pathological case is a `ZodError` (from
-      // the `inputSchema.parse` above or a tool's own internal validation):
-      // `ZodError.message` is `JSON.stringify(issues)` and `invalid_union`
-      // recursively expands every branch, so `formatToolError` collapses it
-      // to a compact, actionable list before the token cap is even reached.
-      const content = capToolResultTokens(`Error: ${formatToolError(err)}`)
-      t.result = { type: 'tool_result', toolUseId: t.id, name: t.name, content, isError: true }
-      t.status = 'completed'
-      // A thrown error (incl. the `inputSchema.parse` ZodError behind
-      // "Validation failed: …") is a real failure — feed the streak breaker.
-      options.loopDetector.recordOutcome(t.name, true)
-
-      // Abort siblings if this tool has abortSiblingsOnError
-      if (toolDef.abortSiblingsOnError) {
-        hasErrored = true
-        siblingAbort.abort('sibling_error')
-      }
+      completeFailure(t, err, toolDef)
+      return
     }
 
+    wake()
+  }
+
+  // All started tasks must settle, including rejected async policy setup.
+  // Keep neutral error copy: this also serves execution failures, for which
+  // a side effect may already have happened. Authority errors remain fatal.
+  function completeFailure(t: TrackedTool, err: unknown, toolDef: Tool | undefined): void {
+    if (isAuthorityBoundaryError(err)) {
+      t.status = 'completed'
+      fatalError = err
+      wake()
+      return
+    }
+    // Same cap as the success path — a thrown error is tool-produced,
+    // unbounded content too. The pathological case is a `ZodError` (from
+    // the `inputSchema.parse` above or a tool's own internal validation):
+    // `ZodError.message` is `JSON.stringify(issues)` and `invalid_union`
+    // recursively expands every branch, so `formatToolError` collapses it
+    // to a compact, actionable list before the token cap is even reached.
+    const content = capToolResultTokens(`Error: ${formatToolError(err)}`)
+    t.result = { type: 'tool_result', toolUseId: t.id, name: t.name, content, isError: true }
+    t.status = 'completed'
+    // A thrown error (incl. the `inputSchema.parse` ZodError behind
+    // "Validation failed: …") is a real failure — feed the streak breaker.
+    options.loopDetector.recordOutcome(t.name, true)
+
+    // Abort siblings if this tool has abortSiblingsOnError
+    if (toolDef?.abortSiblingsOnError) {
+      hasErrored = true
+      siblingAbort.abort('sibling_error')
+    }
     wake()
   }
 
@@ -1017,7 +1026,10 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       if (t.status !== 'queued') continue
       if (t.promise) continue // already started — waiting for async setup (e.g. resolveConfirmation)
       if (!canExecute(t.isConcurrencySafe)) break // can't start until exclusive slot opens
-      t.promise = executeTool(t)
+      // Attach immediately: setup can reject before executeTool reaches its
+      // execution catch, and an ordered collector may already be waiting.
+      const toolDef = options.tools.get(t.name)
+      t.promise = executeTool(t).catch((err) => completeFailure(t, err, toolDef))
     }
   }
 

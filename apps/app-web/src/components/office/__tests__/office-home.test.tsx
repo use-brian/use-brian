@@ -13,7 +13,7 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/components/doc/doc-sidebar-data", () => ({ useSidebarData: () => ({ sidebarCollapsed: false, setSidebarCollapsed: vi.fn() }) }));
 import { OfficeHome as RealOfficeHome } from "../office-home";
 import { attachOfficeMetadata } from "@/lib/office/metadata";
-import type { OfficeArtifact } from "@/lib/office/api";
+import { isOfficeStartFailed, type OfficeArtifact } from "@/lib/office/api";
 vi.mock("@/lib/workspace-context", () => ({useOptionalWorkspaceContext: () => ({workspaceId: navigation.workspaceId, me: {id: "fixture-viewer"}})}));
 function OfficeHome(props: {workspaceId: string; initialArtifacts?: OfficeArtifact[]}) {
   navigation.workspaceId = props.workspaceId;
@@ -23,6 +23,20 @@ function OfficeHome(props: {workspaceId: string; initialArtifacts?: OfficeArtifa
 describe("[COMP:app-web/office-home] Office home", () => {
   beforeEach(() => {
     navigation.search = "";
+  });
+
+  it.each([
+    { mode: "session", family: "pdf", version: 0, expected: false },
+    { mode: "template", family: "document", version: 0, expected: false },
+    { mode: "artifact", family: "presentation", version: 0, expected: true },
+    { mode: undefined, family: "document", version: 0, expected: true },
+    { mode: "artifact", family: "presentation", version: "0", expected: true },
+  ] as const)("classifies a $family $mode shell at version $version", ({ expected, ...row }) => {
+    expect(isOfficeStartFailed({ ...row, artifactId: "fixture-artifact", title: "Fictional file", lifecycleState: "active", role: "edit" } as OfficeArtifact)).toBe(expected);
+  });
+
+  it("does not classify a job-bearing version-zero shell as an orphan", () => {
+    expect(isOfficeStartFailed({ artifactId: "fixture-artifact", family: "presentation", mode: "artifact", title: "Fictional file", version: 0, lifecycleState: "active", role: "edit", job: { id: "fixture-job", status: "queued", stage: "queued", errorCode: null } })).toBe(false);
   });
 
   it("keeps file-type filters and template-first New in the top bar", () => {

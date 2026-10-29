@@ -12,7 +12,7 @@ vi.mock('../../db/channel-user-store.js', () => ({ resolveChannelUser: mocks.res
 vi.mock('../../billing-party.js', () => ({ billingPartyForAssistant: async () => 'owner' }))
 vi.mock('../../db/chat-lock.js', () => ({ withChatLock: (_key: string, fn: () => unknown) => fn() }))
 vi.mock('../../db/channel-event-dedup.js', () => ({ claimChannelEvent: async () => true }))
-vi.mock('../../feishu/client.js', () => ({ createFeishuApi: () => ({}) }))
+vi.mock('../../feishu/client.js', () => ({ createFeishuApi: () => ({ getUserProfile: async () => ({ email: null, displayName: 'Fictional Sender' }) }) }))
 vi.mock('../../db/client.js', () => ({ query: async () => ({ rows: [{ id: 'abcdef12' }] }) }))
 import { denormalizeActions } from '@use-brian/channels'
 import { discordRoutes } from '../discord.js'
@@ -22,6 +22,12 @@ import { channelQuestions } from '../channel-questions.js'
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
+    if (String(url) !== 'https://transport.example/ilink/bot/sendmessage') {
+      throw new Error(`Unexpected fixture transport: ${String(url)}`)
+    }
+    return new Response(JSON.stringify({ ret: 0 }), { status: 200 })
+  }))
   mocks.channelType = 'wechat'
   mocks.pipeline.mockResolvedValue(undefined)
   mocks.resolveUser.mockResolvedValue({ user: { id: 'actor' }, isIdentified: true })
@@ -45,12 +51,12 @@ it.each(['bound', 'shadow', 'resolver failure', 'no resolver'])('WeChat identity
   vi.spyOn(console, 'error').mockImplementation(() => {})
   const app = express(); app.use(express.json())
   app.use('/wechat', wechatRoutes({ connectorSecret: 'secret', tools: new Map(), channelUserStore: mode === 'no resolver' ? undefined : {},
-    integrationStore: integrationStore({ bot_token: 'token', base_url: 'https://example.com', bound_user_id: 'owner-wechat' }),
+    integrationStore: integrationStore({ bot_token: 'token', base_url: 'https://transport.example', bound_user_id: 'owner-wechat' }),
   } as never))
   await request(app).post('/wechat/inbound').set('X-Connector-Secret', 'secret').send({ channelId: 'channel', message: {
     userId: mode === 'bound' ? 'owner-wechat' : 'other-wechat', channelId: 'peer', messageId: 'message', text: 'hello', isGroupChat: false, timestamp: 1, raw: {},
   } }).expect(200)
-  await new Promise(resolve => setTimeout(resolve, 20))
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
   expect(mocks.pipeline).not.toHaveBeenCalled()
   expect(mocks.resolveUser).not.toHaveBeenCalled()
 })
@@ -108,13 +114,14 @@ it.each([2000, 2001])('Discord selects delivery using rendered action length %i'
     await p.hooks.onCleanup()
   })
   const app = express(); app.use(express.json())
-  app.use('/discord', discordRoutes({ connectorSecret: 'secret', tools: new Map(),
+  app.use('/discord', discordRoutes({ connectorSecret: 'secret', tools: new Map(), channelUserStore: {},
     integrationStore: integrationStore({ bot_token: 'token' }),
   } as never))
   await request(app).post('/discord/inbound').set('X-Connector-Secret', 'secret').send({ channelId: 'channel', message: {
     userId: 'sender', channelId: 'room', messageId: 'original', text: 'hello', isGroupChat: false, timestamp: 1, raw: {},
   } }).expect(200)
   await vi.waitFor(() => expect(delivered).toHaveBeenCalledOnce())
+  expect(mocks.pipeline).toHaveBeenCalledWith(expect.objectContaining({ userId: 'actor' }))
   if (renderedLength === 2000) {
     expect(calls.map(c => c.method)).toEqual(['POST', 'PATCH'])
     expect(calls[1].body.content).toBe(denormalizeActions({ text, actions }).text)

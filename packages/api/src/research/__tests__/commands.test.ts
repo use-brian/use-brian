@@ -24,11 +24,14 @@ const learning = vi.hoisted(() => ({
 
 vi.mock('../../db/research-store.js', async (orig) => ({ ...(await orig<object>()), ...store }))
 vi.mock('../learning.js', async (orig) => ({ ...(await orig<object>()), ...learning }))
+// Notifications are a side-effect boundary; unit command tests never dial a DB.
+vi.mock('../../brain-stream/notify.js', async (orig) => ({ ...(await orig<object>()), notifyWorkspaceChange: vi.fn() }))
 
 const { researchRoutes } = await import('../../routes/research.js')
 const { createResearchTools } = await import('../tools.js')
 const { bridgeCoreTool } = await import('../../brain-mcp/tools.js')
-const { ResearchStaleError } = await import('../../db/research-store.js')
+const { ResearchStaleError, ResearchNotFoundError } = await import('../../db/research-store.js')
+const notifications = await import('../../brain-stream/notify.js')
 const { ResearchLessonError } = await import('../learning.js')
 
 const WS = '00000000-0000-4000-8000-000000000010'
@@ -147,6 +150,43 @@ describe('[COMP:api/research-commands] One research command service across REST,
     store.taskReadableForViewer.mockResolvedValue(false)
     expect((await request(app()).post(`/api/workspaces/${WS}/research/improvements`).send({
       title: 'x y z', pattern: 'p q r', desiredBehavior: 'd e f', taskId: task, idempotencyKey: 'n3' })).status).toBe(404)
+  })
+
+  it('R13: empty-evidence nomination preserves direct, attended Brian and credential parity', async () => {
+    store.insertResearchImprovementSystem.mockImplementation(async (i) => ({ improvement: { id: IMP, ...i }, created: true }))
+    const input = { title: 'Broaden source coverage', pattern: 'Reports rely on one source', desiredBehavior: 'Check an independent source', idempotencyKey: 'empty-direct' }
+    const direct = await request(app()).post(`/api/workspaces/${WS}/research/improvements`).send(input)
+    expect(direct.status).toBe(200)
+    const toolInput = { title: input.title, pattern: input.pattern, desired_behavior: input.desiredBehavior }
+    expect((await tools.nominateResearchImprovement.execute(toolInput, ctx())).isError).toBeUndefined()
+    const credential = await mcp('nominateResearchImprovement', ctx({
+      attended: false, workspaceActorUserId: undefined, programmaticPrincipal: { credentialId: 'fictional-key' } as never,
+    })).handler(toolInput)
+    expect(credential.isError).toBeFalsy()
+    expect(store.insertResearchImprovementSystem.mock.calls.map(([i]) => ({
+      workspaceId: i.workspaceId, createdBy: i.createdBy, feedbackIds: i.feedbackIds, activityIds: i.activityIds, taskId: i.taskId,
+    }))).toEqual(Array.from({ length: 3 }, () => ({ workspaceId: WS, createdBy: MEMBER, feedbackIds: [], activityIds: [], taskId: null })))
+  })
+
+  it('R13: unavailable nomination admission or projection is opaque on REST, Brian and MCP', async () => {
+    store.insertResearchImprovementSystem.mockRejectedValue(new ResearchNotFoundError())
+    const emitted = vi.spyOn(notifications, 'notifyWorkspaceChange')
+    const input = { title: 'Broaden source coverage', pattern: 'Reports rely on one source', desiredBehavior: 'Check an independent source', idempotencyKey: 'hidden' }
+    const toolInput = { title: input.title, pattern: input.pattern, desired_behavior: input.desiredBehavior }
+    try {
+      const direct = await request(app()).post(`/api/workspaces/${WS}/research/improvements`).send(input)
+      expect(direct.status).toBe(404)
+      expect(direct.body).toEqual({ error: 'research_not_found' })
+      const brian = await tools.nominateResearchImprovement.execute(toolInput, ctx())
+      expect(brian).toMatchObject({ isError: true, data: expect.stringMatching(/Nothing you can see/) })
+      const noMutationClaim = /nothing (?:was |has been )?(?:changed|saved|written)|no changes?|roll(?:ed)? back|rollback/i
+      expect(brian.data).not.toMatch(noMutationClaim)
+      const credential = await mcp('nominateResearchImprovement', ctx({ programmaticPrincipal: { credentialId: 'fictional-key' } as never })).handler(toolInput)
+      expect(credential.isError).toBe(true)
+      expect(body(credential as never)).toMatch(/Nothing you can see/)
+      expect(body(credential as never)).not.toMatch(noMutationClaim)
+      expect(emitted).not.toHaveBeenCalled()
+    } finally { emitted.mockRestore() }
   })
 
   it('R14/R15: trace bundles are recomputed as locally verified; reports stay reported; an opaque pass is refused', async () => {

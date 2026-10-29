@@ -28,7 +28,7 @@ type FlatRow = { x: string | number } & Record<string, string | number>
  * the x-axis is shared (categorical).
  *
  * We collapse the per-series points into a single wide-table dataset
- * (each row = { x, series-name-1: y1, series-name-2: y2, … }) because
+ * (each row = { x, series_0: y1, series_1: y2, … }) because
  * that's the shape Recharts expects for multi-line charts. The union
  * of x values from every series is sorted by first-occurrence to
  * preserve the order the resolver intended.
@@ -37,8 +37,9 @@ type FlatRow = { x: string | number } & Record<string, string | number>
  */
 export function ChartLine(props: { widget: LineChartWidget }): JSX.Element {
   const { widget } = props
-  const { data, seriesNames } = useMemo(() => flattenSeries(widget.series), [widget.series])
-  const multiSeries = seriesNames.length > 1
+  const { data, seriesEntries } = useMemo(() => flattenSeries(widget.series), [widget.series])
+  const multiSeries = seriesEntries.length > 1
+  const labelForKey = (key: unknown): string => seriesEntries.find((entry) => entry.key === key)?.name ?? ''
 
   return (
     <figure className="flex w-full flex-col gap-2">
@@ -69,6 +70,7 @@ export function ChartLine(props: { widget: LineChartWidget }): JSX.Element {
               }
             />
             <Tooltip
+              formatter={(value, _name, item) => [value, labelForKey(item.dataKey)]}
               contentStyle={{
                 background: 'var(--background)',
                 border: '1px solid var(--border)',
@@ -76,12 +78,13 @@ export function ChartLine(props: { widget: LineChartWidget }): JSX.Element {
                 fontSize: 12,
               }}
             />
-            {multiSeries && <Legend wrapperStyle={{ fontSize: 12 }} />}
-            {seriesNames.map((name, idx) => (
+            {multiSeries && <Legend formatter={(_value, entry) => labelForKey(entry.dataKey)} wrapperStyle={{ fontSize: 12 }} />}
+            {seriesEntries.map(({ key, name }, idx) => (
               <Line
-                key={name}
+                key={key}
                 type="monotone"
-                dataKey={name}
+                dataKey={key}
+                name={name}
                 stroke={PALETTE[idx % PALETTE.length]}
                 strokeWidth={2}
                 dot={false}
@@ -96,13 +99,13 @@ export function ChartLine(props: { widget: LineChartWidget }): JSX.Element {
 
 function flattenSeries(series: LineChartWidget['series']): {
   data: FlatRow[]
-  seriesNames: string[]
+  seriesEntries: { key: string; name: string }[]
 } {
-  const seriesNames = series.map((s) => s.name)
+  const seriesEntries = series.map((s, index) => ({ key: `series_${index}`, name: s.name }))
   const xOrder: (string | number)[] = []
   const seen = new Set<string>()
   const byX = new Map<string, FlatRow>()
-  for (const s of series) {
+  for (const [index, s] of series.entries()) {
     for (const p of s.points) {
       const xKey = String(p.x)
       if (!seen.has(xKey)) {
@@ -110,10 +113,10 @@ function flattenSeries(series: LineChartWidget['series']): {
         xOrder.push(p.x)
       }
       const row = byX.get(xKey) ?? { x: p.x }
-      row[s.name] = p.y
+      row[seriesEntries[index]!.key] = p.y
       byX.set(xKey, row)
     }
   }
   const data = xOrder.map((x) => byX.get(String(x))!)
-  return { data, seriesNames }
+  return { data, seriesEntries }
 }

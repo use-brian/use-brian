@@ -342,6 +342,130 @@ describe('[COMP:memory/context-builder] Memory context builder', () => {
   })
 })
 
+describe('[COMP:memory/context-builder] Knowledge summary dedup', () => {
+  const indexPreamble = '## Memory Index\nUse getMemory to fetch details for any entry below. Treat these as background context — let them guide your responses; cite them when directly asked, otherwise shape invisibly.\n\n'
+  const controlLine = '[id:control1] A disjoint control fact [control]'
+  const vocabulary = Array.from({ length: 20 }, (_, index) => `word${index + 1}`)
+
+  it.each([
+    { overlap: 17, retained: false },
+    { overlap: 16, retained: true },
+    { overlap: 18, retained: false },
+  ])('preserves the 0.85 boundary for $overlap of 20 shared words', ({ overlap, retained }) => {
+    const summary = vocabulary.slice(0, overlap).join(' ')
+    const context = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [
+        { id: 'boundary', summary, tags: ['candidate'], appId: null },
+        { id: 'control1', summary: 'A disjoint control fact', tags: ['control'], appId: null },
+      ],
+      knowledgeSummaries: [{ summary: vocabulary.join(' ') }],
+    })
+
+    expect(context).toBe(indexPreamble + (retained ? `[id:boundary] ${summary} [candidate]\n` : '') + controlLine)
+  })
+
+  it('deduplicates case and repeated words across mixed whitespace', () => {
+    const context = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [
+        { id: 'matching', summary: '  ALPHA alpha\tBeta\n beta  ', tags: [], appId: null },
+        { id: 'control1', summary: 'A disjoint control fact', tags: ['control'], appId: null },
+      ],
+      knowledgeSummaries: [{ summary: 'alpha beta' }],
+    })
+
+    expect(context).toBe(indexPreamble + controlLine)
+  })
+
+  it.each([
+    { label: 'absent', knowledgeSummaries: undefined },
+    { label: 'empty list', knowledgeSummaries: [] },
+    { label: 'null summary', knowledgeSummaries: [{ summary: null }] },
+    { label: 'empty summary', knowledgeSummaries: [{ summary: '' }] },
+    { label: 'whitespace summary', knowledgeSummaries: [{ summary: ' \t\n ' }] },
+  ])('retains the original index with $label KB input', ({ knowledgeSummaries }) => {
+    const context = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [{ id: 'control1', summary: 'A disjoint control fact', tags: ['control'], appId: null }],
+      knowledgeSummaries,
+    })
+
+    expect(context).toBe(indexPreamble + controlLine)
+  })
+
+  it('ignores null and empty KB summaries beside a matching summary', () => {
+    const context = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [
+        { id: 'matching', summary: 'A repeated process fact', tags: [], appId: null },
+        { id: 'control1', summary: 'A disjoint control fact', tags: ['control'], appId: null },
+      ],
+      knowledgeSummaries: [{ summary: null }, { summary: '' }, { summary: 'A repeated process fact' }],
+    })
+
+    expect(context).toBe(indexPreamble + controlLine)
+  })
+
+  it.each([
+    { label: 'empty', summary: '' },
+    { label: 'whitespace-only', summary: ' \t\n ' },
+  ])('retains an $label memory when both word sets are empty', ({ summary }) => {
+    const context = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [
+        { id: 'empty123', summary, tags: [], appId: null },
+        { id: 'control1', summary: 'A disjoint control fact', tags: ['control'], appId: null },
+      ],
+      knowledgeSummaries: [{ summary: ' \t ' }],
+    })
+
+    expect(context).toBe(indexPreamble + `[id:empty123] ${summary}\n` + controlLine)
+  })
+
+  it('preserves identity, team, self-profile, row order, tags, dates and hidden-row footer', () => {
+    const context = buildMemoryContext({
+      identityMemories: [{ id: 'identity', summary: 'A repeated process fact', detail: 'A fictional profile detail' }],
+      workspaceIdentityMemories: [{ id: 'teamiden', summary: 'A repeated process fact', detail: null }],
+      teamMemoryIndex: [{ id: 'teamrow1', summary: 'A repeated process fact', tags: ['team'], appId: null }],
+      memoryIndex: [
+        { id: 'profile1', summary: 'A separate profile fact', tags: ['self-profile'], appId: null },
+        { id: 'matching', summary: 'A repeated process fact', tags: [], appId: null },
+        { id: 'first123', summary: 'The first retained observation', tags: ['first'], appId: null, createdAt: new Date('2026-01-02T00:00:00Z') },
+        { id: 'second12', summary: 'The second retained observation', tags: [], appId: null },
+      ],
+      knowledgeSummaries: [{ summary: 'A repeated process fact' }],
+      totalNonIdentityCount: 5,
+    })
+
+    expect(context).toBe([
+      '## Identity\n- [id:identity] A repeated process fact\n  A fictional profile detail',
+      '## Team Context\nThese memories are shared across all team members. Use scope "team" when saving team-relevant facts.\n- [id:teamiden] A repeated process fact\n[id:teamrow1] Team: A repeated process fact [team]',
+      indexPreamble + '[id:first123 | 2026-01-02] The first retained observation [first]\n[id:second12] The second retained observation\n\n3 more memories stored beyond the top 2 shown here (ranked by recency of recall). Use getMemory with a keyword to search the full set when a topic above hints at relevant context you cannot see.',
+    ].join('\n\n'))
+  })
+
+  it('keeps the existing empty-context response when every indexed row matches KB', () => {
+    const context = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [{ id: 'matching', summary: 'A repeated process fact', tags: [], appId: null }],
+      knowledgeSummaries: [{ summary: 'A repeated process fact' }],
+    })
+
+    expect(context).toBe('## Memory\nNo memories yet. Save important facts about the user as you learn them.')
+  })
+
+  it('retains the identity-only signal when KB filtering removes the remaining index', () => {
+    const context = buildMemoryContext({
+      identityMemories: [{ id: 'identity', summary: 'A fictional identity fact', detail: null }],
+      memoryIndex: [{ id: 'matching', summary: 'A repeated process fact', tags: [], appId: null }],
+      knowledgeSummaries: [{ summary: 'A repeated process fact' }],
+    })
+
+    expect(context).toBe('## Identity\n- [id:identity] A fictional identity fact\n\n## Memory Index\n(Identity only — no other memories are stored. Do not keyword-search for anything beyond the identity entries above; if the user references something you do not see, ask them to remind you rather than guessing.)')
+  })
+})
+
 describe('[COMP:memory/context-builder] Assistant name override', () => {
   it('emits the ## Your Name override for a custom name', () => {
     const section = buildAssistantNameSection('SDR')

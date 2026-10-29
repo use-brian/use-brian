@@ -32,6 +32,9 @@ export type ResearchFeedbackDeps = {
   listSessionActivities(actorUserId: string, workspaceId: string, sessionId: string): Promise<ResearchActivity[]>
   /** One activity (any session) visible to the actor, with its links. */
   getActivity(actorUserId: string, workspaceId: string, activityId: string): Promise<{ activity: ResearchActivity; artifacts: ResearchArtifactLink[] } | null>
+  findReplyActivity?(actorUserId: string, workspaceId: string, outputMessageId: string): Promise<{ activity: ResearchActivity; artifacts: ResearchArtifactLink[] } | null>
+  /** Production uses bounded durable state; legacy in-memory ports remain usable. */
+  replayDurable?(params: { workspaceId:string;sessionId:string;assistantId:string;actorUserId:string;excludeMessageId?:string|null }): Promise<number>
   record(input: {
     workspaceId: string
     activityId: string
@@ -106,9 +109,16 @@ export async function captureResearchFollowup(deps: ResearchFeedbackDeps, params
   if (params.selectedActivityId) {
     // Cross-chat feedback must explicitly name an activity the actor can see.
     selected = await deps.getActivity(actor, params.workspaceId, params.selectedActivityId)
-    if (selected && selected.activity.status !== 'running' && !candidates.some((c) => c.activityId === selected!.activity.id)) {
+    // An explicit unavailable target is not permission to choose another result.
+    if (!selected || selected.activity.status === 'running') return candidates.length
+      ? { outcome: 'unlinked', reason: 'not_visible' } : { outcome: 'no_research' }
+    if (!candidates.some((c) => c.activityId === selected!.activity.id)) {
       candidates.push({ activityId: selected.activity.id, outputMessageId: selected.activity.outputMessageId })
     }
+  }
+  if (params.replyToMessageId && deps.findReplyActivity && !candidates.some(c => c.outputMessageId === params.replyToMessageId)) {
+    const replied = await deps.findReplyActivity(actor, params.workspaceId, params.replyToMessageId)
+    if (replied && replied.activity.status !== 'running') candidates.push({ activityId: replied.activity.id, outputMessageId: replied.activity.outputMessageId })
   }
   if (candidates.length === 0) return { outcome: 'no_research' }
 
@@ -154,6 +164,7 @@ export async function replayResearchFollowups(deps: ResearchFeedbackDeps & {
 }, params: { workspaceId: string; sessionId: string; assistantId: string; actorUserId: string; limit?: number
   /** The message being captured explicitly right after; replay must not pre-empt its association. */
   excludeMessageId?: string | null }): Promise<number> {
+  if (deps.replayDurable) return deps.replayDurable(params)
   const activities = (await deps.listSessionActivities(params.actorUserId, params.workspaceId, params.sessionId))
     .filter((a) => a.status !== 'running' && a.outputMessageId)
   const latest = activities[0]
