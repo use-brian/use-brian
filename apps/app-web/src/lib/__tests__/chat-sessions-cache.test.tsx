@@ -9,8 +9,7 @@
  * frame; (c) a thread switch never shows the previous session's transcript;
  * (d) the IndexedDB tier is keyed by viewer, so two accounts on one device
  * never read each other's threads, and an authoritative denial evicts it.
- * Plus the N7 rule the personal fetcher holds: the roster comes from the
- * cache entry, never a second roster request beside the roster hook's own.
+ * Personal history starts independently of the roster (N7, no waterfall).
  */
 
 import { act } from "react";
@@ -29,7 +28,7 @@ vi.mock("@/lib/user", () => ({
 
 const api = vi.hoisted(() => ({
   listWorkspaceAssistants: vi.fn(),
-  listSessionsForAssistants: vi.fn(),
+  listPersonalSessions: vi.fn(),
   listWorkspaceSessions: vi.fn(),
 }));
 vi.mock("@/lib/api/views", () => ({
@@ -37,7 +36,7 @@ vi.mock("@/lib/api/views", () => ({
   getView: vi.fn(),
 }));
 vi.mock("@/lib/api/sessions", () => ({
-  listSessionsForAssistants: (...args: unknown[]) => api.listSessionsForAssistants(...args),
+  listPersonalSessions: (...args: unknown[]) => api.listPersonalSessions(...args),
   listWorkspaceSessions: (...args: unknown[]) => api.listWorkspaceSessions(...args),
   fetchSessionMessages: vi.fn(),
 }));
@@ -151,7 +150,7 @@ beforeEach(() => {
   idb.store.clear();
   user.id = "u1";
   api.listWorkspaceAssistants.mockReset();
-  api.listSessionsForAssistants.mockReset();
+  api.listPersonalSessions.mockReset();
   api.listWorkspaceSessions.mockReset();
 });
 
@@ -190,7 +189,7 @@ describe("[COMP:app-web/chat-sessions-cache] keys", () => {
       const source = src(rel);
       expect(source).toContain("useChatSessionsData(workspaceId)");
       // No private list fetch, no refetch listener of its own (N3).
-      expect(source).not.toContain("listSessionsForAssistants(");
+      expect(source).not.toContain("listPersonalSessions(");
       expect(source).not.toContain("listWorkspaceSessions(");
       expect(source).not.toContain("addEventListener(CHAT_SESSIONS_REFRESH_EVENT");
     }
@@ -207,7 +206,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     await loadSurfaceCache(chatSessionsCacheKey("w1"), async () => PERSONAL);
     await loadSurfaceCache(chatSharedSessionsCacheKey("w1"), async () => SHARED);
     api.listWorkspaceAssistants.mockImplementation(never);
-    api.listSessionsForAssistants.mockImplementation(never);
+    api.listPersonalSessions.mockImplementation(never);
     api.listWorkspaceSessions.mockImplementation(never);
 
     mount(<Probe />);
@@ -217,7 +216,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     expect(text("assistants")).toBe("Brian");
     // Fresh keys: nothing refetches on mount.
     expect(api.listWorkspaceAssistants).not.toHaveBeenCalled();
-    expect(api.listSessionsForAssistants).not.toHaveBeenCalled();
+    expect(api.listPersonalSessions).not.toHaveBeenCalled();
     expect(api.listWorkspaceSessions).not.toHaveBeenCalled();
   });
 
@@ -229,7 +228,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     api.listWorkspaceSessions.mockImplementation(
       () => new Promise<typeof SHARED>((r) => { resolveShared = r; }),
     );
-    api.listSessionsForAssistants.mockResolvedValue(PERSONAL);
+    api.listPersonalSessions.mockResolvedValue(PERSONAL);
     mount(<Probe />);
     expect(text("shared")).toBe("Launch room");
 
@@ -277,14 +276,14 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
   it("keeps the mounted rail's newest snapshot through memory expiry during a slow renewal", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
     api.listWorkspaceAssistants.mockResolvedValue(ROSTER);
-    api.listSessionsForAssistants.mockResolvedValue(PERSONAL);
+    api.listPersonalSessions.mockResolvedValue(PERSONAL);
     api.listWorkspaceSessions.mockResolvedValue(SHARED);
     let latest: ChatSessionsData | undefined;
     mount(<Probe onData={data => { latest = data; }} />);
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(text("personal")).toBe("Quarterly plan");
     api.listWorkspaceAssistants.mockImplementation(never);
-    api.listSessionsForAssistants.mockImplementation(never);
+    api.listPersonalSessions.mockImplementation(never);
     api.listWorkspaceSessions.mockImplementation(never);
     await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
     expect(readSurfaceCache(chatSessionsCacheKey("w1")).data).toBeUndefined();
@@ -296,6 +295,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     expect(text("shared")).toBe("SKELETON");
     // A known denial still removes the snapshot immediately.
     api.listWorkspaceSessions.mockResolvedValue(SHARED);
+    api.listPersonalSessions.mockRejectedValue(new Error("chat_list_failed: 403"));
     api.listWorkspaceAssistants.mockRejectedValue(new Error("Failed to list workspace assistants: 403"));
     act(() => resetSurfaceCache());
     await act(async () => { await latest!.refresh(); await vi.advanceTimersByTimeAsync(0); });
@@ -307,7 +307,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     await loadSurfaceCache(chatRosterCacheKey("w1"), async () => ROSTER);
     await loadSurfaceCache(chatSessionsCacheKey("w1"), async () => PERSONAL);
     let finish!: (rows: typeof PERSONAL) => void;
-    api.listSessionsForAssistants.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    api.listPersonalSessions.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     const pending = loadSurfaceCache(chatSessionsCacheKey("w1"), () => fetchPersonalChatSessions("w1"));
     await Promise.resolve();
     const created = { ...PERSONAL[0], id: "s-new", title: "Newly submitted work" };
@@ -316,7 +316,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     finish(PERSONAL);
     await pending;
     expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data?.map(row => row.id)).toEqual(["s-new", "s1"]);
-    api.listSessionsForAssistants.mockResolvedValue([{ ...created, title: "Server title" }, ...PERSONAL]);
+    api.listPersonalSessions.mockResolvedValue([{ ...created, title: "Server title" }, ...PERSONAL]);
     await loadSurfaceCache(chatSessionsCacheKey("w1"), () => fetchPersonalChatSessions("w1"));
     expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data?.[0].title).toBe("Server title");
   });
@@ -324,7 +324,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
   it("seeds a cold in-flight personal read immediately and updates only the created room's group", async () => {
     await loadSurfaceCache(chatRosterCacheKey("w1"), async () => ROSTER);
     let finish!: (rows: typeof PERSONAL) => void;
-    api.listSessionsForAssistants.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    api.listPersonalSessions.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     const pending = loadSurfaceCache(chatSessionsCacheKey("w1"), () => fetchPersonalChatSessions("w1"));
     await Promise.resolve();
     const created = { ...PERSONAL[0], id: "s-new" };
@@ -341,45 +341,42 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     expect(readSurfaceCache(chatSharedSessionsCacheKey("w2")).data).toBeUndefined();
   });
 
-  it("the personal fetcher reads a fresh roster from the cache and never fires a second roster request (N7)", async () => {
+  it("the personal fetcher needs no roster request or assistant IDs (N7)", async () => {
     await loadSurfaceCache(chatRosterCacheKey("w1"), async () => ROSTER);
-    api.listSessionsForAssistants.mockResolvedValue(PERSONAL);
+    api.listPersonalSessions.mockResolvedValue(PERSONAL);
     await fetchPersonalChatSessions("w1");
     expect(api.listWorkspaceAssistants).not.toHaveBeenCalled();
-    expect(api.listSessionsForAssistants).toHaveBeenCalledWith({
+    expect(api.listPersonalSessions).toHaveBeenCalledWith({
       workspaceId: "w1",
-      assistantIds: ["a1"],
       strict: true,
     });
   });
 
-  it("a cold mount fetches the roster and the shared list in parallel, then joins the roster load for the personal list", async () => {
+  it("a cold mount paints both lists while the independent roster is still pending", async () => {
     let resolveRoster: (rows: typeof ROSTER) => void = () => {};
     api.listWorkspaceAssistants.mockImplementation(
       () => new Promise<typeof ROSTER>((r) => { resolveRoster = r; }),
     );
     api.listWorkspaceSessions.mockResolvedValue(SHARED);
-    api.listSessionsForAssistants.mockResolvedValue(PERSONAL);
+    api.listPersonalSessions.mockResolvedValue(PERSONAL);
     mount(<Probe />);
     expect(text("personal")).toBe("SKELETON");
     await act(async () => {
       await settle();
     });
-    // Roster and shared list both started before the roster answered;
-    // exactly one roster request between the roster hook and the personal
-    // fetcher.
+    // Both lists finish without waiting for the roster.
     expect(api.listWorkspaceAssistants).toHaveBeenCalledTimes(1);
     expect(api.listWorkspaceSessions).toHaveBeenCalledTimes(1);
     expect(text("shared")).toBe("Launch room");
+    expect(text("personal")).toBe("Quarterly plan");
     await act(async () => {
       resolveRoster(ROSTER);
       await settle();
       await settle();
     });
     expect(api.listWorkspaceAssistants).toHaveBeenCalledTimes(1);
-    expect(api.listSessionsForAssistants).toHaveBeenCalledWith({
+    expect(api.listPersonalSessions).toHaveBeenCalledWith({
       workspaceId: "w1",
-      assistantIds: ["a1"],
       strict: true,
     });
     expect(text("personal")).toBe("Quarterly plan");
@@ -389,7 +386,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
 describe("[COMP:app-web/chat-sessions-cache] list failures", () => {
   async function healthyLists() {
     api.listWorkspaceAssistants.mockResolvedValue(ROSTER);
-    api.listSessionsForAssistants.mockResolvedValue(PERSONAL);
+    api.listPersonalSessions.mockResolvedValue(PERSONAL);
     api.listWorkspaceSessions.mockResolvedValue(SHARED);
     let latest: ChatSessionsData;
     mount(<Probe onData={(data) => { latest = data; }} />);
@@ -397,22 +394,26 @@ describe("[COMP:app-web/chat-sessions-cache] list failures", () => {
     return () => latest!;
   }
 
-  it("does not turn a failed cold roster read into successful empty history", async () => {
+  it("loads independently authorized history even when the roster is unavailable", async () => {
     api.listWorkspaceAssistants.mockRejectedValue(new Error("Failed to list workspace assistants: 503"));
-    await expect(fetchPersonalChatSessions("w1")).rejects.toThrow();
-    expect(api.listSessionsForAssistants).not.toHaveBeenCalled();
+    api.listPersonalSessions.mockResolvedValue(PERSONAL);
+    api.listWorkspaceSessions.mockResolvedValue(SHARED);
+    mount(<Probe />);
+    await act(async () => { await settle(); await settle(); });
+    expect(text("personal")).toBe("Quarterly plan");
+    expect(api.listPersonalSessions).toHaveBeenCalledTimes(1);
   });
 
   it("retains healthy rows and disk history after a failed list refresh", async () => {
     api.listWorkspaceAssistants.mockResolvedValue(ROSTER);
-    api.listSessionsForAssistants.mockResolvedValue(PERSONAL);
+    api.listPersonalSessions.mockResolvedValue(PERSONAL);
     api.listWorkspaceSessions.mockResolvedValue(SHARED);
     let latest: ChatSessionsData | undefined;
     mount(<Probe onData={(data) => { latest = data; }} />);
     await act(async () => { await settle(); await settle(); });
     const snapshot = idb.store.get(chatSessionsSnapshotKey("u1", "w1"));
     const failure = new Error("chat_list_failed: 500");
-    api.listSessionsForAssistants.mockRejectedValue(failure);
+    api.listPersonalSessions.mockRejectedValue(failure);
     await act(async () => { await latest!.refreshPersonal(); await settle(); });
     expect(text("personal")).toBe("Quarterly plan");
     expect(latest?.personalError).toBe(failure);
@@ -421,11 +422,11 @@ describe("[COMP:app-web/chat-sessions-cache] list failures", () => {
 
   it("evicts a denied personal value so a later server failure cannot restore it", async () => {
     const latest = await healthyLists();
-    api.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed: 403"));
+    api.listPersonalSessions.mockRejectedValue(new Error("chat_list_failed: 403"));
     await act(async () => { await latest().refreshPersonal(); await settle(); });
     expect(latest().personal).toBeNull();
     expect(readSurfaceCache(chatSessionsCacheKey("w1")).data).toBeUndefined();
-    api.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed: 500"));
+    api.listPersonalSessions.mockRejectedValue(new Error("chat_list_failed: 500"));
     await act(async () => { await latest().refresh(); await settle(); });
     expect(latest().personal).toBeNull();
     expect(text("personal")).not.toBe("Quarterly plan");
@@ -444,7 +445,7 @@ describe("[COMP:app-web/chat-sessions-cache] list failures", () => {
   it("cannot restore denied history when only the roster recovers", async () => {
     const latest = await healthyLists();
     api.listWorkspaceAssistants.mockRejectedValue(new Error("Failed to list workspace assistants: 403"));
-    api.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed: 500"));
+    api.listPersonalSessions.mockRejectedValue(new Error("chat_list_failed: 500"));
     api.listWorkspaceSessions.mockRejectedValue(new Error("chat_list_failed: 500"));
     await act(async () => { await latest().refresh(); await settle(); await settle(); });
     expect(latest().personal).toBeNull();
@@ -460,7 +461,7 @@ describe("[COMP:app-web/chat-sessions-cache] list failures", () => {
     const stored = idb.store.get(chatSessionsSnapshotKey("u1", "w1")) as { updatedAt: number };
     stored.updatedAt = Date.now() - 60 * 60_000 - 1;
     api.listWorkspaceAssistants.mockImplementation(never);
-    api.listSessionsForAssistants.mockImplementation(never);
+    api.listPersonalSessions.mockImplementation(never);
     api.listWorkspaceSessions.mockImplementation(never);
     mount(<Probe />);
     await act(async () => { await settle(); });
@@ -515,7 +516,7 @@ describe("[COMP:app-web/chat-sessions-cache] IndexedDB tier", () => {
     expect(chatSessionsSnapshotKey("u1", "w1")).not.toBe(chatSessionsSnapshotKey("u2", "w1"));
     await writeChatSessionsSnapshot("u1", "w1", { personal: PERSONAL, shared: SHARED });
     api.listWorkspaceAssistants.mockImplementation(never);
-    api.listSessionsForAssistants.mockImplementation(never);
+    api.listPersonalSessions.mockImplementation(never);
     api.listWorkspaceSessions.mockImplementation(never);
 
     // Another account on the same device: nothing to paint.
@@ -543,7 +544,7 @@ describe("[COMP:app-web/chat-sessions-cache] IndexedDB tier", () => {
 
   it("writes the snapshot once both lists have landed, and an authoritative roster denial evicts it", async () => {
     api.listWorkspaceAssistants.mockResolvedValue(ROSTER);
-    api.listSessionsForAssistants.mockResolvedValue(PERSONAL);
+    api.listPersonalSessions.mockResolvedValue(PERSONAL);
     api.listWorkspaceSessions.mockResolvedValue(SHARED);
     mount(<Probe />);
     await act(async () => {
@@ -560,7 +561,7 @@ describe("[COMP:app-web/chat-sessions-cache] IndexedDB tier", () => {
     api.listWorkspaceAssistants.mockRejectedValue(
       new Error("Failed to list workspace assistants: 403"),
     );
-    api.listSessionsForAssistants.mockResolvedValue([]);
+    api.listPersonalSessions.mockResolvedValue([]);
     api.listWorkspaceSessions.mockResolvedValue([]);
     mount(<Probe />);
     await act(async () => {

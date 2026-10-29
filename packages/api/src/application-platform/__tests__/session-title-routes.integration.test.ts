@@ -12,6 +12,7 @@ import {getPool,getAppPool} from '../../db/client.js'
 import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
+import * as sessionQueries from '../../db/session-query-reader.js'
 import {publishSessionTitle} from '../../db/session-title-store.js'
 import {pinSessionTitleClaims,readCurrentSessionTitle,renameCurrentSessionTitle,resolveSessionTitleAuthority,sessionTitleProjection} from '../../routes/session-title-authority.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
@@ -98,6 +99,19 @@ describe.sequential('[COMP:api/application-persistence] actual browser title DTO
   expect((await c.f.pool.query('SELECT session_id FROM session_title_heads WHERE workspace_id=$1',[c.f.workspaceId])).rows).toEqual([])
   expect((await c.patch('Fictional explicit saved choice')).status).toBe(200)
   expect((await c.get('/'+c.session.id)).body).toMatchObject({title:'Fictional explicit saved choice',titleRevisionId:expect.any(String)})
+ })
+ it('admits only the first useful user prefix for list titles and revalidates that exact prefix',async()=>{
+  const c=await setup()
+  await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'Fictional bounded preview'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
+  for(let n=0;n<9;n++)await addSessionMessage({sessionId:c.session.id,role:'assistant',content:[{type:'text',text:'Fictional later response'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
+  // Observe the real admitted SQL path without replacing any authority check.
+  const reads=vi.spyOn(sessionQueries,'readAdmittedSessionQuery')
+  const response=await c.list()
+  expect(response.status,JSON.stringify(response.body)).toBe(200)
+  expect(response.body.find((row:{id:string})=>row.id===c.session.id)).toMatchObject({title:'Fictional bounded preview',titleRevisionId:null})
+  const prefixes=reads.mock.calls.filter(([input])=>input.sessionId===c.session.id).map(([input])=>input.throughSequence)
+  expect(prefixes.length).toBeGreaterThanOrEqual(2)
+  expect(prefixes.every(through=>through===1)).toBe(true)
  })
  it('keeps tool-only and assistant-only histories as placeholders',async()=>{
   const c=await setup()

@@ -316,27 +316,6 @@ export async function listPersonalSessions(opts: {
 }
 
 /**
- * The caller's sessions across EVERY given assistant, merged newest-first —
- * the Chat app's unified rail. One `listSessions` call per assistant (the
- * list route is assistant-scoped); a workspace holds a handful of assistants,
- * so the fan-out stays small and the server needs no new query shape. Each
- * row carries the `assistantId` it was fetched under, which is what lets the
- * rail show per-thread assistant icons and the surface send with the RIGHT
- * assistant when an old thread is reopened.
- */
-export async function listSessionsForAssistants(opts: {
-  workspaceId: string;
-  assistantIds: string[];
-  archived?: boolean;
-  strict?: boolean;
-  before?: { lastActive: string; id: string };
-  signal?: AbortSignal;
-}): Promise<DocSession[]> {
-  if (!opts.assistantIds.length) return [];
-  return listPersonalSessions({ ...opts, assistantId: opts.assistantIds[0] });
-}
-
-/**
  * A workspace-shared chat row — the Chat app's Workspace rail. Same shape as
  * `DocSession` plus the starter identity for the "Started by" chip and the
  * live `status` (a `running` session has a teammate mid-turn).

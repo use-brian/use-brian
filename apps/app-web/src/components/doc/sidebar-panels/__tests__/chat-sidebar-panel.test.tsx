@@ -59,11 +59,10 @@ vi.mock("next/link", () => ({
 const sessionApi = vi.hoisted(() => ({
   createWorkspaceSession: vi.fn(),
   deleteSession: vi.fn(),
-  listSessionsForAssistants: vi.fn(),
+  listPersonalSessions: vi.fn(),
   listWorkspaceSessions: vi.fn(),
   renameSessionTitle: vi.fn(),
   setSessionArchived: vi.fn(),
-  listPersonalSessions: vi.fn(),
 }));
 
 vi.mock("@/lib/api/sessions", () => sessionApi);
@@ -144,7 +143,7 @@ beforeEach(() => {
       iconSeed: null,
     },
   ]);
-  sessionApi.listSessionsForAssistants.mockResolvedValue([]);
+  sessionApi.listPersonalSessions.mockResolvedValue([]);
   sessionApi.listWorkspaceSessions.mockResolvedValue([
     {
       id: "room-1",
@@ -161,7 +160,6 @@ beforeEach(() => {
   ]);
   sessionApi.deleteSession.mockResolvedValue(undefined);
   sessionApi.setSessionArchived.mockResolvedValue(undefined);
-  sessionApi.listPersonalSessions.mockResolvedValue([]);
   dialogs.confirmDialog.mockResolvedValue(true);
 });
 
@@ -176,17 +174,17 @@ afterEach(() => {
 describe("[COMP:app-web/sidebar-panel-chat] failed history loads", () => {
   it("does not restart skeletons when a loaded rail loses access and Retry is pending", async () => {
     navigation.search = "";
-    sessionApi.listSessionsForAssistants.mockResolvedValue([
+    sessionApi.listPersonalSessions.mockResolvedValue([
       { id: "loaded-chat", title: "Existing plan", channelId: "channel-2", lastActive: "2026-10-01", appOrigin: "chat", assistantId: "assistant-1" },
     ]);
     await renderPanel();
     expect(container?.textContent).toContain("Existing plan");
-    sessionApi.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed: 403"));
+    sessionApi.listPersonalSessions.mockRejectedValue(new Error("chat_list_failed: 403"));
     await act(async () => { invalidateSurfaceCache(chatSessionsCacheKey("workspace-1")); });
     await flushEffects();
     expect(container?.textContent).not.toContain("Existing plan");
     expect(container?.querySelector(".skeleton")).toBeNull();
-    sessionApi.listSessionsForAssistants.mockImplementation(() => new Promise(() => {}));
+    sessionApi.listPersonalSessions.mockImplementation(() => new Promise(() => {}));
     act(() => buttonNamed("Retry").click());
     await flushEffects();
     expect(container?.querySelector(".skeleton")).toBeNull();
@@ -195,11 +193,11 @@ describe("[COMP:app-web/sidebar-panel-chat] failed history loads", () => {
 
   it("shows recovery instead of empty history and loads the chats when retried", async () => {
     navigation.search = "";
-    sessionApi.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed"));
+    sessionApi.listPersonalSessions.mockRejectedValue(new Error("chat_list_failed"));
     await renderPanel();
     expect(container?.querySelector('[role="alert"]')?.textContent).toContain("Could not load chats.");
     expect(container?.textContent).not.toContain(en.chatApp.railEmpty);
-    sessionApi.listSessionsForAssistants.mockResolvedValue([
+    sessionApi.listPersonalSessions.mockResolvedValue([
       { id: "recovered-chat", title: "Recovered plan", channelId: "channel-2", lastActive: "2026-10-01", appOrigin: "chat", assistantId: "assistant-1" },
     ]);
     await act(async () => buttonNamed("Retry").click());
@@ -363,7 +361,7 @@ describe("[COMP:app-web/sidebar-panel-chat] one row renderer for both rails (cha
       transport: "telegram", lastActive: "2026-08-01T01:00:00.000Z",
       appOrigin: "chat", assistantId: "assistant-1", status: "idle", humanCount: 1,
     };
-    sessionApi.listSessionsForAssistants.mockResolvedValue([row]);
+    sessionApi.listPersonalSessions.mockResolvedValue([row]);
     sessionApi.listWorkspaceSessions.mockResolvedValue([{ ...row, startedByUserId: "user-1", startedByName: "Alex" }]);
     await renderPanel();
     const link = container!.querySelector<HTMLAnchorElement>('a[href*="s=transport-chat"]')!;
@@ -419,7 +417,7 @@ describe("[COMP:app-web/sidebar-panel-chat] one row renderer for both rails (cha
 
   it("shows a running-personal-chat spinner exactly as it does for a room", async () => {
     navigation.search = "";
-    sessionApi.listSessionsForAssistants.mockResolvedValue([personalRow]);
+    sessionApi.listPersonalSessions.mockResolvedValue([personalRow]);
     await renderPanel();
     const working = container!.querySelector('[data-chat-working="true"]');
     expect(working).not.toBeNull();
@@ -429,7 +427,7 @@ describe("[COMP:app-web/sidebar-panel-chat] one row renderer for both rails (cha
   it("never dots a conversation with one human", async () => {
     seen.isRoomUnread.mockReturnValue(true);
     navigation.search = "";
-    sessionApi.listSessionsForAssistants.mockResolvedValue([{ ...personalRow, status: "idle" }]);
+    sessionApi.listPersonalSessions.mockResolvedValue([{ ...personalRow, status: "idle" }]);
     await renderPanel();
     expect(container!.querySelector(`[aria-label="${en.chatApp.unreadDotAria}"]`)).toBeNull();
     seen.isRoomUnread.mockReturnValue(false);
@@ -625,7 +623,7 @@ describe("[COMP:app-web/sidebar-panel-chat] recent chat windows", () => {
   it.each(["personal", "workspace"])("reveals five %s chats at a time and preserves the window across refresh", async view => {
     navigation.search = view === "workspace" ? "v=workspace" : "";
     const rows = recent(12);
-    sessionApi.listSessionsForAssistants.mockResolvedValue(rows);
+    sessionApi.listPersonalSessions.mockResolvedValue(rows);
     sessionApi.listWorkspaceSessions.mockResolvedValue(rows);
     await renderPanel();
     expect(links()).toHaveLength(5);
@@ -647,7 +645,7 @@ describe("[COMP:app-web/sidebar-panel-chat] recent chat windows", () => {
 
   it.each(["personal", "workspace"])("keeps an older selected %s chat visible without revealing the intervening history", async view => {
     navigation.search = `${view === "workspace" ? "v=workspace&" : ""}s=recent-11`;
-    sessionApi.listSessionsForAssistants.mockResolvedValue(recent(12));
+    sessionApi.listPersonalSessions.mockResolvedValue(recent(12));
     sessionApi.listWorkspaceSessions.mockResolvedValue(recent(12));
     await renderPanel();
     expect(links()).toHaveLength(6);
@@ -660,7 +658,7 @@ describe("[COMP:app-web/sidebar-panel-chat] recent chat windows", () => {
 
   it("resets the display window when switching workspaces", async () => {
     navigation.search = "";
-    sessionApi.listSessionsForAssistants.mockResolvedValue(recent(12));
+    sessionApi.listPersonalSessions.mockResolvedValue(recent(12));
     await renderPanel();
     await act(async () => more().click());
     expect(links()).toHaveLength(10);
@@ -704,7 +702,7 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
   });
 
   it("groups private web chats by Project and gives source channels precedence without sharing", async () => {
-    sessionApi.listSessionsForAssistants.mockResolvedValue([
+    sessionApi.listPersonalSessions.mockResolvedValue([
       chat("channel-a", { transport: "slack", channelId: "C_SAMPLE:thread:100.001", contextProjectId: project.id }),
       chat("project-a", { contextProjectId: project.id }),
       chat("general-a"),
@@ -733,7 +731,7 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
   });
 
   it("shows provider icons and resolved channel/topic names while retaining source IDs in hover details", async () => {
-    sessionApi.listSessionsForAssistants.mockResolvedValue([
+    sessionApi.listPersonalSessions.mockResolvedValue([
       chat("slack-a", { transport: "slack", channelId: "C_ONE:thread:1.001" }),
       chat("slack-b", { transport: "slack", channelId: "C_ONE:thread:2.001", channelName: "#engineering" }),
       chat("topic-a", { transport: "telegram", channelId: "-1000000000000:topic:12", channelName: "Product team › Launch" }),
@@ -752,7 +750,7 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
   });
 
   it("keeps channels, transports and topics distinct, while Feishu threads share a heading", async () => {
-    sessionApi.listSessionsForAssistants.mockResolvedValue([
+    sessionApi.listPersonalSessions.mockResolvedValue([
       chat("slack-a", { transport: "slack", channelId: "C_ONE" }),
       chat("slack-b", { transport: "slack", channelId: "C_TWO" }),
       chat("feishu-a", { transport: "feishu", channelId: "C_ONE:thread:one" }),
@@ -771,7 +769,7 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
 
   it("resolves archived Project names and preserves unknown Projects without exposing identifiers", async () => {
     projectsApi.listContextProjects.mockResolvedValue([{ ...project, status: "archived" }]);
-    sessionApi.listSessionsForAssistants.mockResolvedValue([
+    sessionApi.listPersonalSessions.mockResolvedValue([
       chat("archived", { contextProjectId: project.id }),
       chat("missing", { contextProjectId: "undiscoverable-project-id" }),
     ]);
@@ -786,14 +784,14 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
   it("keeps readable chats available when Project metadata fails", async () => {
     projectsApi.listContextProjects.mockRejectedValue(new Error("unavailable"));
     navigation.search = "s=project-a";
-    sessionApi.listSessionsForAssistants.mockResolvedValue([chat("project-a", { contextProjectId: project.id })]);
+    sessionApi.listPersonalSessions.mockResolvedValue([chat("project-a", { contextProjectId: project.id })]);
     await renderPanel();
     expect(container!.querySelector('[role="alert"]')?.textContent).toBe(en.chatApp.personalProjectsFailed);
     expect(group(en.chatApp.otherProjects).textContent).toContain("Discussion project-a");
   });
 
   it("places General first and orders other groups and rows by newest activity", async () => {
-    sessionApi.listSessionsForAssistants.mockResolvedValue([
+    sessionApi.listPersonalSessions.mockResolvedValue([
       chat("channel-new", { transport: "slack", channelId: "C_SAMPLE", lastActive: "2026-10-27T03:00:00.000Z" }),
       chat("project-a", { contextProjectId: project.id, lastActive: "2026-10-27T02:00:00.000Z" }),
       chat("channel-old", { transport: "slack", channelId: "C_SAMPLE" }),
@@ -812,7 +810,7 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
   it("retains private group choices through refresh/reload and reveals a different selected chat", async () => {
     navigation.search = "s=channel-a";
     const rows = [chat("channel-a", { transport: "slack", channelId: "C_SAMPLE" }), chat("project-a", { contextProjectId: project.id })];
-    sessionApi.listSessionsForAssistants.mockResolvedValue(rows);
+    sessionApi.listPersonalSessions.mockResolvedValue(rows);
     await renderPanel();
     expect(buttonNamed("Slack: C_SAMPLE").getAttribute("aria-expanded")).toBe("true");
     await act(async () => buttonNamed("Slack: C_SAMPLE").click());

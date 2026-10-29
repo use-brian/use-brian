@@ -76,22 +76,28 @@ async function assertPreviewOutput(sessionId:string,authority:SessionContextAuth
 /** Compatibility labels use admitted current history, never the held legacy scalar. */
 async function prepareTitlePreview(sessionId:string,authority:SessionContextAuthority,originalThrough?:number){
  if(await hasSavedTitle(sessionId,authority))return null
- const through=originalThrough??(await getPool().query<{sequence:number}>(`SELECT coalesce(max(sequence_num),0)::int AS sequence FROM
-  (SELECT sequence_num FROM session_messages WHERE workspace_id=$1 AND session_id=$2 ORDER BY sequence_num LIMIT 10) original`,
-  [authority.execution.security.access.workspaceId,sessionId])).rows[0].sequence
- if(through===0)return null
- const query=await readAdmittedSessionQuery({sessionId,throughSequence:through,topicThroughSequence:0,authority})
- let title=''
- for(const row of query.history){
-  if(row.role!=='user')continue
-  const text=typeof row.content==='string'?row.content:Array.isArray(row.content)?row.content.flatMap(block=>
-   typeof block==='object'&&block!==null&&block.type==='text'&&typeof block.text==='string'?[block.text]:[]).join('\n'):''
-  title=sanitizeTitle(text.trim())
-  if(title)break
+ // Sequence/role metadata narrows the query; it never admits message bytes.
+ // Stop at the first usable user text instead of capturing later model/tool
+ // ancestry that cannot contribute to its label. Output reuses this exact prefix.
+ const candidates=originalThrough!==undefined?[originalThrough]:(await getPool().query<{sequence:number}>(`SELECT sequence_num AS sequence FROM
+  (SELECT sequence_num,role FROM session_messages WHERE workspace_id=$1 AND session_id=$2 ORDER BY sequence_num LIMIT 10) original
+  WHERE role='user' ORDER BY sequence_num`,[authority.execution.security.access.workspaceId,sessionId])).rows.map(row=>row.sequence)
+ for(const through of candidates){
+  const query=await readAdmittedSessionQuery({sessionId,throughSequence:through,topicThroughSequence:0,authority})
+  let title=''
+  for(const row of query.history){
+   if(row.role!=='user')continue
+   const text=typeof row.content==='string'?row.content:Array.isArray(row.content)?row.content.flatMap(block=>
+    typeof block==='object'&&block!==null&&block.type==='text'&&typeof block.text==='string'?[block.text]:[]).join('\n'):''
+   title=sanitizeTitle(text.trim())
+   if(title)break
+  }
+  if(!title)continue
+  if(await hasSavedTitle(sessionId,authority))return null
+  await assertPreviewOutput(sessionId,authority)
+  return{projection:bindScopeSources(Object.freeze({title,titleRevisionId:null}),boundScopeSources(query)),through}
  }
- if(!title||await hasSavedTitle(sessionId,authority))return null
- await assertPreviewOutput(sessionId,authority)
- return{projection:bindScopeSources(Object.freeze({title,titleRevisionId:null}),boundScopeSources(query)),through}
+ return null
 }
 function heldTitleProjection():TitleProjection{
  const projection=Object.freeze({title:null,titleRevisionId:null})
