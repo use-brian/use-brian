@@ -3,7 +3,7 @@
  * Direct work pickup (project-briefs.md -> "Work"; chat-app.md -> "Work
  * entry"): real claim / follow-up commands, answer and detail links,
  * draft-only chat pickup, resolved-card removal, typed errors, loading vs
- * unavailable vs empty, the Chat work entry and its dock attention links.
+ * unavailable vs empty.
  * The HTTP layer is mocked; component state, the surface cache and the
  * commands' wiring are real.
  */
@@ -14,8 +14,7 @@ import type { WorkItem, WorkProjection } from "@/lib/api/work";
 
 const api = vi.hoisted(() => ({
   fetchWork: vi.fn(), claimWorkTask: vi.fn(), adjustBrainRow: vi.fn(), listWorkspaceAssistants: vi.fn(),
-  requestBrainRefresh: vi.fn(), markSuggestedShown: vi.fn(),
-  sidebar: { dock: null as unknown, dockLoading: false },
+  requestBrainRefresh: vi.fn(),
 }));
 vi.mock("@/lib/api/work", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/work")>()),
@@ -24,8 +23,6 @@ vi.mock("@/lib/api/work", async (importOriginal) => ({
 vi.mock("@/lib/api/brain-inbox", () => ({ adjustBrainRow: api.adjustBrainRow }));
 vi.mock("@/lib/api/views", () => ({ listWorkspaceAssistants: api.listWorkspaceAssistants }));
 vi.mock("@/lib/brain-events", () => ({ requestBrainRefresh: api.requestBrainRefresh }));
-vi.mock("@/lib/suggested-landing", () => ({ markSuggestedShown: api.markSuggestedShown }));
-vi.mock("@/components/doc/doc-sidebar-data", () => ({ useSidebarData: () => api.sidebar }));
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a>,
 }));
@@ -45,7 +42,6 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import { resetSurfaceCache } from "@/lib/surface-cache";
 import { WorkRequestError } from "@/lib/api/work";
 import { BriefWork } from "../brief-work";
-import { WorkEntry, attentionHref } from "../../chat-app/work-entry";
 
 const t = en.briefs.work;
 let host: HTMLDivElement, root: Root;
@@ -77,7 +73,7 @@ describe("[COMP:app-web/brief-work] direct work pickup", () => {
   beforeEach(() => {
     resetSurfaceCache();
     host = document.createElement("div"); document.body.appendChild(host); root = createRoot(host);
-    for (const fn of [api.fetchWork, api.claimWorkTask, api.adjustBrainRow, api.listWorkspaceAssistants, api.requestBrainRefresh, api.markSuggestedShown]) fn.mockReset();
+    for (const fn of [api.fetchWork, api.claimWorkTask, api.adjustBrainRow, api.listWorkspaceAssistants, api.requestBrainRefresh]) fn.mockReset();
     api.sidebar = { dock: null, dockLoading: false };
   });
   afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
@@ -172,63 +168,5 @@ describe("[COMP:app-web/brief-work] direct work pickup", () => {
     await click(t.retry);
     expect(host.textContent).toContain(t.empty);
     expect(host.querySelector('[role="alert"]')).toBeNull();
-  });
-});
-
-describe("[COMP:app-web/brief-work] Chat work entry", () => {
-  beforeEach(() => {
-    resetSurfaceCache();
-    host = document.createElement("div"); document.body.appendChild(host); root = createRoot(host);
-    for (const fn of [api.fetchWork, api.markSuggestedShown]) fn.mockReset();
-  });
-  afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
-
-  it("explains the work entry, shows an authoritative empty queue without a duplicate title, and records the landing watermark", async () => {
-    api.fetchWork.mockResolvedValue(work({}));
-    api.sidebar = { dock: { needsYou: [{ kind: "approvals", count: 4, caption: null }], approvalGroups: undefined }, dockLoading: false };
-    await render(<WorkEntry workspaceId="w1" scope={{ kind: "personal" }} onDraft={vi.fn()} />); await flush();
-    expect(host.querySelector('[data-testid="brief-work"]')).not.toBeNull();
-    expect(host.textContent).toContain(t.description);
-    expect(host.textContent).toContain(t.empty);
-    expect(host.querySelector('h3')).toBeNull();
-    expect(api.markSuggestedShown).toHaveBeenCalledWith("w1", 4);
-    const attention = Array.from(host.querySelectorAll("nav a")).map((a) => a.getAttribute("href"));
-    expect(attention).toEqual(["/w/w1/p?panel=approvals"]);
-  });
-
-  it("fills the composer with a task-bound draft and links a picked scope to its Brief", async () => {
-    api.fetchWork.mockResolvedValue({ ...work({ myWork: [mine] }), scope: { kind: "project", id: "p1" } });
-    api.sidebar = { dock: null, dockLoading: false };
-    const onDraft = vi.fn();
-    await render(<WorkEntry workspaceId="w1" scope={{ kind: "project", id: "p1" }} onDraft={onDraft} />); await flush();
-    expect(api.fetchWork).toHaveBeenCalledWith("w1", { kind: "project", id: "p1" });
-    expect(host.querySelector('[data-testid="brief-work"]')?.getAttribute('aria-label')).toBe(t.scopedTitle);
-    expect(Array.from(host.querySelectorAll("a")).some((a) => a.getAttribute("href") === "/w/w1/briefs/project/p1")).toBe(true);
-    await click(t.actions.continueInChat);
-    expect(onDraft).toHaveBeenCalledWith('Work on task "My own task" (task mine).');
-  });
-
-  it("keeps a failed embedded read distinct from an empty queue and recovers with Retry", async () => {
-    api.fetchWork.mockRejectedValueOnce(new WorkRequestError("work_unavailable", 503));
-    api.sidebar = { dock: null, dockLoading: false };
-    await render(<WorkEntry workspaceId="w1" scope={{ kind: "personal" }} onDraft={vi.fn()} includeDelivery={false} />); await flush();
-    expect(host.querySelector('h3')).toBeNull();
-    expect(host.querySelector('[role="alert"]')?.textContent).toBe(t.unavailable);
-    expect(host.textContent).not.toContain(t.empty);
-    expect(host.querySelector('[data-testid="brief-work"]')?.className).not.toContain('border');
-    api.fetchWork.mockResolvedValue(work({}));
-    await click(t.retry);
-    expect(host.querySelector('[role="alert"]')).toBeNull();
-    expect(host.textContent).toContain(t.empty);
-  });
-
-  it("maps every dock attention kind to its canonical destination", () => {
-    expect(attentionHref("w1", "brain_review")).toBe("/w/w1/brain?pending=true");
-    expect(attentionHref("w1", "autopilot")).toBe("/w/w1/p?panel=goals");
-    expect(attentionHref("w1", "task_triage")).toBe("/w/w1/p?panel=triage");
-    expect(attentionHref("w1", "task_cleanup")).toBe("/w/w1/tasks?filter=stale");
-    expect(attentionHref("w1", "deal_attention")).toBe("/w/w1/crm?filter=overdue");
-    expect(attentionHref("w1", "connector_attention")).toBe("/w/w1/studio/connectors");
-    expect(attentionHref("w1", "workflow_attention")).toBe("/w/w1/workflow");
   });
 });

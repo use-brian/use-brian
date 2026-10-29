@@ -2,9 +2,8 @@
 
 /**
  * Direct work pickup (project-briefs.md -> "Work"): the viewer-bound Needs
- * you / My work / Needs assignment lists, shared by the Chat work entry and
- * the Brief pane. Rows and counts come from the server projection, which
- * already applied the viewer's access, so nothing here decides visibility.
+ * you / My work / Needs assignment lists in the Brief pane. Rows and counts
+ * come from the server projection, which already applied the viewer's access, so nothing here decides visibility.
  *
  * Every action is a canonical command: the guarded claim, the Brain inbox
  * adjust for an explicit follow-up, the Approvals panel for an answer, the
@@ -51,9 +50,9 @@ export function BriefWork({ workspaceId, scope, onContinueInChat, emptyState, ti
   /** What an authoritative empty queue shows instead of the default line. */
   emptyState?: ReactNode;
   title?: string;
-  /** Render nothing for an authoritative empty queue (Chat: the composer above is the empty state). */
+  /** Render nothing for an authoritative empty queue. */
   hideWhenEmpty?: boolean;
-  /** The Chat disclosure already supplies the visible title and container. */
+  /** The parent supplies the visible title and container. */
   embedded?: boolean;
 }) {
   const t = useT().briefs.work;
