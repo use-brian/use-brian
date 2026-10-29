@@ -38,6 +38,21 @@ must not masquerade as a successful empty transcript and erase visible messages.
 Authoritative 401/403/404 responses evict the transcript cache and painted rows;
 previously readable content must not remain visible after access is withdrawn.
 
+## Database contention
+
+The 2026-10-29 home-server incident included a deadlock between a workspace
+picker update and session-history admission. Increasing the API pools to 16
+removed checkout timeouts after the 23:33 HKT restart, but 49 SQL statement
+timeouts remained. Pool capacity and conflicting row locks are separate limits.
+
+Migration `8142_workspace_navigation_policy_revision.sql` excludes picker-only
+membership updates from the older workspace access-policy revision trigger.
+Compare every old/new column except `picker_pinned_at`, `picker_hidden_at` and
+`picker_last_opened_at`, so present and future authority fields stay protected.
+Inserts, deletes and all other membership changes retain their workspace lock,
+revision and notification protocol. The application-policy epoch trigger
+already excludes personal navigation changes.
+
 ## Regression coverage
 
 - Burst notifications coalesce under a paused consumer with unchanged text,
