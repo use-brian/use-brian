@@ -30,19 +30,23 @@
  */
 
 import * as Y from 'yjs'
+import { applyDrawingActions, drawingActionsSchema, type DrawingEditOp, type DrawingEditResult } from '@use-brian/shared/drawing'
 import type { Block, Page } from '@use-brian/core/dist/views/blocks.js'
 import { blockSchema } from '@use-brian/core/dist/views/blocks.js'
 import { FRAGMENT_FIELD, ID_NODE_TYPES, META_MAP } from './schema.js'
 import { pageToYDoc, yDocToSnapshot } from './encode.js'
-import { DrawingCollaboration, findDrawing } from './drawing.js'
+import { DrawingCollaboration, drawingNamespace, findDrawing } from './drawing.js'
 
 /**
- * The doc op vocabulary, structurally identical to `Op` in
+ * The page op vocabulary mirrors `Op` in
  * `@use-brian/core` `doc/page-types.ts`. Declared locally so this
  * fs-free package doesn't take a runtime import on the core doc module;
  * the shapes are asserted compatible by the chat-route wiring that feeds it.
+ * The internal drawing variant carries host-resolved shape actions for the
+ * live drawing gateway; it is not part of patchPage's public Op schema.
  */
 export type DocOp =
+  | DrawingEditOp
   | { op: 'add'; after?: string | 'start' | 'end'; block: Block }
   | { op: 'edit'; blockId: string; patch: Partial<Block> }
   | { op: 'delete'; blockId: string }
@@ -55,6 +59,7 @@ export type DocOp =
   | { op: 'setIcon'; icon: string | null }
 
 export type ApplyOpsResult = {
+  drawings?: Record<string, DrawingEditResult>
   /** tmpId → server-assigned real id, for `add` ops carrying a `tmp-*` id. */
   idMap: Record<string, string>
   /** Ops that could not apply (target gone, or unsupported shape). */
@@ -358,6 +363,7 @@ export function applyOpsToYDoc(doc: Y.Doc, ops: DocOp[]): ApplyOpsResult {
   const frag = doc.getXmlFragment(FRAGMENT_FIELD)
   const idMap: Record<string, string> = {}
   const skipped: { opIndex: number; reason: string }[] = []
+  const drawings: Record<string, DrawingEditResult> = Object.create(null)
 
   doc.transact(() => {
     // Heal blockId forks AND stamp missing ids BEFORE applying this turn's
@@ -380,7 +386,8 @@ export function applyOpsToYDoc(doc: Y.Doc, ops: DocOp[]): ApplyOpsResult {
       // matches the legacy CAS write path (`doc/tools.ts`), which already
       // applies ops one-at-a-time and tolerantly skips the ones that throw.
       try {
-        applyOne(doc, frag, op, opIndex, idMap, skipped)
+        if (op.op === 'drawing') drawings[op.blockId] = applyDrawingOp(doc, op)
+        else applyOne(doc, frag, op, opIndex, idMap, skipped)
       } catch (err) {
         skipped.push({
           opIndex,
@@ -391,7 +398,7 @@ export function applyOpsToYDoc(doc: Y.Doc, ops: DocOp[]): ApplyOpsResult {
     healBlockIds(frag)
   })
 
-  return { idMap, skipped }
+  return { idMap, skipped, ...(Object.keys(drawings).length ? { drawings } : {}) }
 }
 
 /** Apply a single op to the live fragment. May throw (node build / schema
@@ -570,4 +577,22 @@ function applyOne(
       return
     }
   }
+}
+
+/** Shape actions keep the embed epoch/base and publish only element registers. */
+function applyDrawingOp(doc: Y.Doc, op: DrawingEditOp): DrawingEditResult {
+  const actions = drawingActionsSchema.parse(op.actions)
+  const base = findDrawing(doc, op.blockId)
+  if (!base) throw new Error('Drawing not found; read the page again')
+  const namespace = drawingNamespace(doc, base)
+  if (actions.length && op.namespace !== namespace) throw new Error('Drawing was replaced; getDrawing again before editing')
+  const live = new DrawingCollaboration(doc, base, () => true)
+  try {
+    const current = live.read()
+    const next = actions.length ? applyDrawingActions(current.scene, actions) : current.scene
+    if (actions.length && !live.write(current.scene, next)) throw new Error('Drawing is no longer editable')
+    const before = new Map(current.scene.elements.map(e => [e.id, JSON.stringify(e)]))
+    return { namespace, scene: live.read().scene, title: current.title,
+      changedElementIds: next.elements.filter(e => JSON.stringify(e) !== before.get(e.id)).map(e => e.id) }
+  } finally { live.dispose() }
 }

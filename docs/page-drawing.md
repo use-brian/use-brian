@@ -1,5 +1,28 @@
 # Page Drawings
 
+## Live Drawing Actions
+
+The internal live-doc gateway accepts a drawing operation scoped to a block ID
+and its current drawing namespace. Empty actions read the authoritative scene.
+Move, resize, connect and host-resolved library insertion actions compute against
+current server geometry and publish one validated DrawingCollaboration delta.
+The immutable embed base and epoch stay unchanged, so mounted editors receive
+updates immediately and independent human shape edits survive. Same-element races
+retain Yjs resolution, and active human gestures remain protected until release.
+Assistant changes do not enter a human editor's local undo history.
+
+Moves include grouped shapes and bound labels. Resize scales shape geometry and
+recenters labels. Straight bound arrows follow transformed endpoints; unsupported
+elbow/rotated bound arrow transforms are refused. Connect creates bound arrows
+between distinct rectangles, diamonds or ellipses. Library insertion assigns fresh
+element/group IDs, preserves internal references, removes external references and
+keeps item stacking order. Existing raster assets remain intact.
+
+Missing, locked or replaced shapes, invalid batches and retention overflow reject
+before any geometry is written. Reads do not emit assistant write progress. The
+existing server mutation access and Brief Direction protection gate drawing ops.
+No whole-scene snapshot fallback or database migration is introduced.
+
 ## Live Collaboration
 
 ### Page Transport And Preview

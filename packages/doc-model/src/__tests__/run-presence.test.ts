@@ -25,6 +25,12 @@ describe('[COMP:doc-model/run-presence] Assistant-run step derivation', () => {
     expect(deriveRunStep(ops)).toEqual({ op: 'add', blockType: 'heading', count: 2 })
   })
 
+  it('projects drawing actions into existing edit progress without exposing a new UI operation', () => {
+    const ops: DocOp[] = [{ op: 'drawing', blockId: 'diagram', namespace: 'drawing:diagram:base', actions: [{ type: 'move', elementIds: ['shape'], dx: 20, dy: 0 }] }]
+    expect(deriveRunStep(ops)).toEqual({ op: 'edit', blockType: 'drawing', count: 1 })
+    expect(deriveRunBlockId(ops)).toBe('diagram')
+  })
+
   it('carries the block kind for an add op', () => {
     const ops: DocOp[] = [{ op: 'add', after: 'start', block: textBlock('a') }]
     expect(deriveRunStep(ops)).toEqual({ op: 'add', blockType: 'text', count: 1 })

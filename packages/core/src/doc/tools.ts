@@ -61,6 +61,7 @@
  */
 
 import { z } from 'zod'
+import type { DrawingAction, DrawingEditResult } from '@use-brian/shared/drawing'
 import { stripFollowUps } from '@use-brian/shared'
 import type { Tool } from '../tools/types.js'
 import { buildDrawingAwareTool as buildTool } from './drawing-result.js'
@@ -232,6 +233,15 @@ export type DocPageStore = {
  * `docs/architecture/features/doc.md` → "Real-time collaboration".
  */
 export type DocGateway = {
+  /** Live shape reads/actions, resolved against the authoritative Y.Doc. */
+  drawing?(params: {
+    userId: string
+    pageId: string
+    blockId: string
+    namespace?: string
+    actions: DrawingAction[]
+  }): Promise<DrawingEditResult | { error: string }>
+
   applyOps(params: {
     userId: string
     pageId: string

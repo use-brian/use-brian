@@ -95,8 +95,9 @@ export const ASSISTANT_RUN_TTL_MS = 90_000
 export function deriveRunStep(ops: DocOp[]): AssistantRunStep | undefined {
   if (!ops || ops.length === 0) return undefined
   const last = ops[ops.length - 1]
-  const step: AssistantRunStep = { op: last.op, count: ops.length }
-  if (last.op === 'add') step.blockType = last.block.kind
+  const step: AssistantRunStep = { op: last.op === 'drawing' ? 'edit' : last.op, count: ops.length }
+  if (last.op === 'drawing') step.blockType = 'drawing'
+  else if (last.op === 'add') step.blockType = last.block.kind
   else if (last.op === 'edit' && last.patch.kind) step.blockType = last.patch.kind
   return step
 }
@@ -110,7 +111,7 @@ export function deriveRunStep(ops: DocOp[]): AssistantRunStep | undefined {
 export function deriveRunBlockId(ops: DocOp[]): string | undefined {
   if (!ops || ops.length === 0) return undefined
   const last = ops[ops.length - 1]
-  if (last.op === 'edit' || last.op === 'delete' || last.op === 'move') {
+  if (last.op === 'edit' || last.op === 'delete' || last.op === 'move' || last.op === 'drawing') {
     return last.blockId
   }
   return undefined
