@@ -3087,6 +3087,7 @@ export const en = {
       downloadFailed: "Couldn't download. Click to retry.",
     },
     // Inline system notices (e.g. budget downgrade).
+    noticePostReplyAuthorityChanged: "Your reply was saved. Some follow-up processing stopped because access changed. Your next message will use the current permissions.",
     noticeBudgetDowngraded:
       "You've used this month's credit allowance. Running on the standard model until it resets.",
     noticeCustomModelImageFallback:

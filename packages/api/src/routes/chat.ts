@@ -17,6 +17,7 @@ import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
 import { debugDocumentFlow, executionToolContext, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
 import { closeProviderError } from './chat-provider-error.js'
+import { createChatPostReplyBoundary } from './chat-post-reply.js'
 import type { FeedGenerationService } from '../content-planning/generation.js'
 import { resolveFeedTurnContext, formatFeedTurnContext } from '../content-planning/collaboration-service.js'
 import { loadFeedReviewContext, recordFeedContextApplication } from '../content-planning/review-context.js'
@@ -2319,6 +2320,7 @@ export function chatRoutes(options: WebChatOptions): Router {
     // the outer catch to send a clean `done` event instead of the
     // generic `error`, since the user already saw a useful message.
     let recoveryDelivered = false
+    const postReply = createChatPostReplyBoundary()
     // Set when this turn opened an assistant-run presence entry on a doc
     // page (see below) so the outer `finally` can close it on every exit path.
     let docRunPageId: string | null = null
@@ -7124,6 +7126,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               },
             })
           }
+          if (saved.isLast) postReply.recordPublishedReply(saved.stored.content as ContentBlock[])
         }
 
         // Flush the per-turn memory recall buffer once the final assistant
@@ -7560,7 +7563,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           // section 6). See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
           },
-          sink: { kind: 'sse', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async () => {
+          sink: { kind: 'sse', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async (result) => {
+            postReply.beginFinalization(result, !!queryLoopError, abortController.signal)
             await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
             if (!options.sessionStateStore) return
             try {
@@ -8905,20 +8909,27 @@ export function chatRoutes(options: WebChatOptions): Router {
       sendEvent('done', {})
       res.end()
     } catch (err) {
-      turnTimingOutcome = 'error'
+      const postReplyNotice = postReply.notice(err)
+      turnTimingOutcome = postReplyNotice ? 'completed_follow_up_interrupted' : 'error'
       // A `ChatTurnRefusal` is not a crash — it is this route declining the
       // turn after the SSE headers went out, and it arrives here only
       // because the catch owns the cleanup (see the class doc). It carries
       // its own sentence; the whole point is that the user reads THAT and
       // not the generic banner, so it must not be flattened into one.
       const refusal = err instanceof ChatTurnRefusal ? err : null
-      if (!refusal) console.error('Chat error:', err)
+      if (postReplyNotice) console.info('[chat] post-reply processing stopped: authority_changed')
+      else if (!refusal) console.error('Chat error:', err)
       // When the inner catch already delivered a context-aware recovery
       // message, surface a clean `done` so the client treats the turn
       // as complete (it is — the user already saw the recovery text).
       // The generic `error` here would render a red banner and offer a
       // retry that could duplicate side effects.
-      if (recoveryDelivered) {
+      if (postReplyNotice) {
+        // No stale output or further work: only a fixed outcome notice. The
+        // ordinary catch/finally still releases the turn and its resources.
+        sendEvent('notice', postReplyNotice)
+        sendEvent('done', {})
+      } else if (recoveryDelivered) {
         sendEvent('done', {})
       } else {
         sendEvent('error', chatTurnErrorEvent(err, { sharedAudience: sharedAudienceForError }))
@@ -8955,7 +8966,15 @@ export function chatRoutes(options: WebChatOptions): Router {
       // triage while making a working deployment look broken, and the count
       // that actually matters for a refusal is how often users hit the dead
       // end — which is a `reason`, not a stack.
-      if (userIdForError && refusal) {
+      if (userIdForError && postReplyNotice) {
+        options.analytics?.logEvent({
+          userId: userIdForError,
+          assistantId: assistantIdForError ?? undefined,
+          sessionId: sessionIdForError ?? undefined,
+          eventName: 'chat_post_reply_interrupted', channelType: 'web',
+          metadata: { reason: sanitize('authority_changed') },
+        })
+      } else if (userIdForError && refusal) {
         options.analytics?.logEvent({
           userId: userIdForError,
           assistantId: assistantIdForError ?? undefined,

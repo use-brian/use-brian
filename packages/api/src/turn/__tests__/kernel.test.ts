@@ -30,6 +30,8 @@ vi.mock('@use-brian/core', async (importOriginal) => {
 import { runAssistantTurn, TurnRefusal, servedTurnModel, turnUsageIdentity, type TurnSinkKind } from '../kernel.js'
 import { resolveTurnBilling } from '../billing.js'
 import { isTurnLeaseLive, releaseTurnLease } from '../../db/sessions.js'
+import { createChatPostReplyBoundary } from '../../routes/chat-post-reply.js'
+import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
 
 const textTurn = (text: string) => ({
   type: 'assistant_turn',
@@ -58,6 +60,30 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/turn-kernel] runAssistantTurn', () => {
+  it('distinguishes a refused follow-up after a published reply from a failed publication', async () => {
+    for (const publicationFails of [false, true]) {
+      loopEvents = [textTurn('hello')]
+      const boundary = createChatPostReplyBoundary(), abortController = new AbortController()
+      const laterWork = vi.fn()
+      let failure: unknown
+      try {
+        await runAssistantTurn(params('sse', { abortController, sink: {
+          kind: 'sse', afterLoop: async result => {
+            boundary.beginFinalization(result, false, abortController.signal)
+            if (publicationFails) throw new AuthorityChangedError()
+            boundary.recordPublishedReply([{ type: 'text', text: 'hello' }])
+            throw new AuthorityChangedError()
+          },
+        } }))
+        laterWork()
+      } catch (error) { failure = error }
+      expect(laterWork).not.toHaveBeenCalled()
+      expect(leaseCalls.at(-1)).toBe('release')
+      expect(boundary.notice(failure)?.code ?? null)
+        .toBe(publicationFails ? null : 'post_reply_authority_changed')
+    }
+  })
+
   for (const sink of ['sse', 'adapter', 'json', 'return', 'none'] as const) {
     it(`${sink} sink: takes the lease, runs, and releases it on success`, async () => {
       loopEvents = [textTurn('hello')]

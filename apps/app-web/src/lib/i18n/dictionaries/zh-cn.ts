@@ -3045,6 +3045,7 @@ export const zhCN: Dictionary = {
       downloading: "下载中…",
       downloadFailed: "下载失败，点一下重试。",
     },
+    noticePostReplyAuthorityChanged: "回复已保存。由于访问权限变更，部分后续处理已停止。下一条消息将使用当前权限。",
     noticeBudgetDowngraded: "本月额度已用罄，重置前将以标准模型运作。",
     noticeCustomModelImageFallback: "此工作区的模型端点无法读取图片，因此本则消息由 Brian 内置模型回答。",
     noticeCustomModelEndpointFallback: "此工作区的模型端点在本条消息上失败，因此改由 Brian 内置模型回答。",

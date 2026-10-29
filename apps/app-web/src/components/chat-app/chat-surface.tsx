@@ -3211,7 +3211,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           }
           case "notice": {
             const code = typeof payload.code === "string" ? payload.code : "";
-            if (code === "custom_model_image_fallback") {
+            if (code === "post_reply_authority_changed") {
+              setTurnNotice(tChat.noticePostReplyAuthorityChanged);
+            } else if (code === "custom_model_image_fallback") {
               setTurnNotice(tChat.noticeCustomModelImageFallback);
             } else if (code === "custom_model_endpoint_fallback") {
               setTurnNotice(tChat.noticeCustomModelEndpointFallback);
