@@ -61,6 +61,7 @@
  */
 
 import { z } from 'zod'
+import { createDrawingTools } from './drawing-tools.js'
 import type { DrawingAction, DrawingEditResult } from '@use-brian/shared/drawing'
 import { stripFollowUps } from '@use-brian/shared'
 import type { Tool } from '../tools/types.js'
@@ -1841,11 +1842,14 @@ export function createCreateSubPageTool(deps: DocToolDeps): Tool {
 // ── Aggregate factory ───────────────────────────────────────────────
 
 /**
- * Build all ten doc tools at once. The inject site
+ * Build the doc tools, including live drawing reads and shape actions. The inject site
  * (`packages/api/src/doc/inject.ts`, owned by Agent P1I) calls this
  * and merges the result into the per-turn tool map.
  */
 export function createDocTools(deps: DocToolDeps): {
+  getDrawing: Tool
+  listDrawingLibrary: Tool
+  editDrawing: Tool
   renderPage: Tool
   patchPage: Tool
   getBlock: Tool
@@ -1858,6 +1862,7 @@ export function createDocTools(deps: DocToolDeps): {
   importToPage: Tool
 } {
   return {
+    ...createDrawingTools(deps),
     renderPage: createRenderPageTool(deps),
     patchPage: createPatchPageTool(deps),
     getBlock: createGetBlockTool(deps),

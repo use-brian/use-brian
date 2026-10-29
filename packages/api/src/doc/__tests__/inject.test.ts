@@ -135,13 +135,13 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/doc-inject] injectDocTools', () => {
-  it('injects nine reads plus one edit gateway and reports the count', async () => {
+  it('injects eleven reads plus one edit gateway and reports the count', async () => {
     const tools = new Map<string, Tool>()
     const result = await injectDocTools({ ...baseOpts, tools })
 
     expect(result.injected).toBe(true)
-    expect(result.injectedCount).toBe(10)
-    expect(tools.size).toBe(10)
+    expect(result.injectedCount).toBe(12)
+    expect(tools.size).toBe(12)
   })
 
   it('keeps raw page mutations out of the conversational tool map', async () => {
@@ -151,6 +151,9 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
     expect(tools.has('delegateDocEdit')).toBe(true)
     expect(tools.has('renderPage')).toBe(false)
     expect(tools.has('patchPage')).toBe(false)
+    expect(tools.has('editDrawing')).toBe(false)
+    expect(tools.has('getDrawing')).toBe(true)
+    expect(tools.has('listDrawingLibrary')).toBe(true)
     expect(tools.has('getBlock')).toBe(true)
     expect(tools.has('queryDataBlock')).toBe(true)
     expect(tools.has('getCurrentPage')).toBe(true)
@@ -194,7 +197,7 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
       filesApi: noopStore<import('@use-brian/core').FilesApi>(),
     })
     expect(wired.has('fetchSiteIcon')).toBe(true)
-    expect(result.injectedCount).toBe(11)
+    expect(result.injectedCount).toBe(13)
   })
 
   it('removes the global renderView tool from the doc surface', async () => {
@@ -250,8 +253,25 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
     })
 
     expect(result.injected).toBe(true)
-    expect(result.injectedCount).toBe(10)
+    expect(result.injectedCount).toBe(12)
     expect(tools.has('delegateDocEdit')).toBe(true)
+  })
+
+  it('lets the governed document editor invoke live drawing actions and records the mutation', async () => {
+    const drawing = vi.fn().mockResolvedValue({ namespace: 'drawing:diagram:epoch:base', scene: { version: 1, elements: [], files: {}, appState: { viewBackgroundColor: '#fff' } }, changedElementIds: [] })
+    const provider = providerFrom((_request, call) => call === 0
+      ? toolTurn('editDrawing', { pageId: 'page', blockId: 'diagram', namespace: 'drawing:diagram:epoch:base', actions: [{ type: 'move', elementIds: ['shape'], dx: 40, dy: 0 }] })
+      : textTurn('Moved the shape.'))
+    const tools = new Map<string, Tool>()
+    await injectDocTools({ ...baseOpts, tools, provider, pageId: 'page', fallbackModel: undefined,
+      docGateway: { applyOps: vi.fn(), drawing } })
+    const result = await tools.get('delegateDocEdit')!.execute({ intent: 'edit', pageId: 'page', instruction: 'Move the shape right.' }, {
+      activeCapabilities: new Set(['page', 'home_app:page:read', 'home_app:page:write']),
+      userId: 'user-1', assistantId: 'primary-1', sessionId: 'session-1', appId: 'Use Brian', channelType: 'web', channelId: 'channel-1', workspaceId: 'ws-1', abortSignal: new AbortController().signal,
+    })
+    expect(result.data).toMatchObject({ status: 'completed', mutationTools: ['editDrawing'] })
+    expect(drawing).toHaveBeenCalledWith(expect.objectContaining({ pageId: 'page', blockId: 'diagram', actions: [{ type: 'move', elementIds: ['shape'], dx: 40, dy: 0 }] }))
+    expect(tools.has('editDrawing')).toBe(false)
   })
 
   it('loads and mutation-anchors an allowed full-Chat Page pin to the selected id', async () => {
@@ -428,7 +448,7 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
 
     expect(tools.has('pre-existing')).toBe(true)
     expect(tools.get('pre-existing')).toBe(existing)
-    expect(tools.size).toBe(11) // 10 injected + 1 pre-existing
+    expect(tools.size).toBe(13) // 12 injected + 1 pre-existing
   })
 
   it('fails closed by removing a pre-seeded raw mutation tool', async () => {

@@ -1,27 +1,44 @@
 # Page Drawings
 
-## Live Drawing Actions
+## Assistant Live Drawing Tools
 
-The internal live-doc gateway accepts a drawing operation scoped to a block ID
-and its current drawing namespace. Empty actions read the authoritative scene.
-Move, resize, connect and host-resolved library insertion actions compute against
-current server geometry and publish one validated DrawingCollaboration delta.
-The immutable embed base and epoch stay unchanged, so mounted editors receive
-updates immediately and independent human shape edits survive. Same-element races
-retain Yjs resolution, and active human gestures remain protected until release.
+`getDrawing` reads the authoritative live drawing and returns its namespace and
+compact shape metadata (IDs, geometry, text, groups and bindings). `editDrawing`
+accepts bounded move, resize, connect and insertLibraryItem actions, targeting a
+page, block and the namespace from that read. It requires the live-doc gateway;
+there is no whole-scene snapshot fallback. A replaced/deleted drawing, missing or
+locked shape, invalid action or retention overflow rejects the action batch before
+any geometry is written. Operations resolve against the current server scene,
+then publish one validated element delta through DrawingCollaboration. The embed
+base and epoch stay unchanged, so mounted editors receive changes immediately.
+Independent human shape edits survive; same-element races retain Yjs resolution.
+An active human gesture remains protected until release by the existing editor.
 Assistant changes do not enter a human editor's local undo history.
 
-Moves include grouped shapes and bound labels. Resize scales shape geometry and
-recenters labels. Straight bound arrows follow transformed endpoints; unsupported
-elbow/rotated bound arrow transforms are refused. Connect creates bound arrows
-between distinct rectangles, diamonds or ellipses. Library insertion assigns fresh
-element/group IDs, preserves internal references, removes external references and
-keeps item stacking order. Existing raster assets remain intact.
+Move applies a relative offset to the selected shapes and their bound labels.
+Resize changes one shape's dimensions, scaling line/freehand points and text
+metrics where applicable. Bound labels remain centered. Straight bound connectors
+are recomputed after geometry edits; unsupported elbow connectors and frame
+transforms are refused instead of leaving invalid geometry. Connect creates a
+straight bound arrow between two rectangle, diamond or ellipse shapes, maintaining
+both endpoint binding lists. Insert clones a validated library item at the requested
+scene position, assigning fresh shape/group IDs and remapping internal references;
+external references are removed. All actions preserve existing raster assets.
 
-Missing, locked or replaced shapes, invalid batches and retention overflow reject
-before any geometry is written. Reads do not emit assistant write progress. The
-existing server mutation access and Brief Direction protection gate drawing ops.
-No whole-scene snapshot fallback or database migration is introduced.
+`listDrawingLibrary` lists bounded, searchable item metadata from the shared Brian
+default library or an attached `.excalidrawlib` cached file. Insertion takes the
+returned item ID and optional file ID; the model never supplies scene JSON.
+Chat uploads recognize `.excalidrawlib` even with a generic MIME type and validate
+the bounded library before caching its text. File reads use the caller's
+workspace/clearance context. Browser-local personal libraries remain local: export
+and attach one to make its items available to the assistant. No browser preferences are uploaded automatically. Legacy library
+strokes are normalized and library sizes/assets obey the existing import limits.
+The assistant tools are available in the selected Page's governed document editor
+and the read tools in the conversational loop. Server page mutation authorization
+and Brief Direction protection apply through the existing internal apply endpoint.
+
+Run `node apps/app-web/scripts/drawing-assistant-browser.mjs` for the isolated
+two-editor regression of server-originated actions over real WebSockets.
 
 ## Live Collaboration
 
