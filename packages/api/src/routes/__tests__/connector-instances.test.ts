@@ -107,6 +107,43 @@ describe('[COMP:api/connector-instances-route] connector instance routes', () =>
     mockDiscoverMcpServer.mockReset()
   })
 
+  it('saves a typed bearer on the exact workspace custom instance for its owner without returning the secret', async () => {
+    const { app, get, getRole, update } = makeApp()
+    get.mockResolvedValue(instance({ custom: true, provider: 'custom-fixture' }))
+    getRole.mockResolvedValue('owner')
+    const response = await request(app).post(`/api/workspaces/${WS}/connectors/${IID}/credentials`)
+      .send({ authType: 'bearer', bearerToken: 'fictional-bearer' })
+    expect(response.status).toBe(200)
+    expect(update).toHaveBeenCalledWith('u1', IID, expect.objectContaining({ credentials: { type: 'bearer', token: 'fictional-bearer' } }))
+    expect(JSON.stringify(response.body)).not.toContain('fictional-bearer')
+  })
+
+  it.each(['member', 'admin'])('refuses custom credential rotation by a %s', async role => {
+    const { app, get, getRole, update } = makeApp()
+    get.mockResolvedValue(instance({ custom: true }))
+    getRole.mockResolvedValue(role)
+    expect((await request(app).post(`/api/workspaces/${WS}/connectors/${IID}/credentials`)
+      .send({ authType: 'bearer', bearerToken: 'fictional-bearer' })).status).toBe(403)
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it.each([{ clientSecret: 'fictional-secret' }, { authType: 'bearer', bearerToken: 'bad\r\nheader' }, { authType: 'bearer', bearerToken: '' }])('refuses invalid custom credentials %#', async body => {
+    const { app, get, getRole, update } = makeApp()
+    get.mockResolvedValue(instance({ custom: true }))
+    getRole.mockResolvedValue('owner')
+    expect((await request(app).post(`/api/workspaces/${WS}/connectors/${IID}/credentials`).send(body)).status).toBe(400)
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('preserves the built-in PAT contract and rejects custom bearer bodies for built-ins', async () => {
+    const { app, update } = makeApp()
+    expect((await request(app).post(`/api/workspaces/${WS}/connectors/${IID}/credentials`).send({ clientSecret: 'fictional-pat' })).status).toBe(200)
+    expect(update).toHaveBeenCalledWith('u1', IID, expect.objectContaining({ credentials: { client_id: '', client_secret: 'fictional-pat' } }))
+    update.mockClear()
+    expect((await request(app).post(`/api/workspaces/${WS}/connectors/${IID}/credentials`).send({ authType: 'bearer', bearerToken: 'fictional-bearer' })).status).toBe(400)
+    expect(update).not.toHaveBeenCalled()
+  })
+
   it('lists the caller grants for the Studio contract', async () => {
     const { app, listByGrantor } = makeApp()
     listByGrantor.mockResolvedValue([{ id: GID, connectorInstanceId: IID, targetType: 'workspace', targetId: WS }])

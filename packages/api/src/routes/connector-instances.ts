@@ -1,3 +1,4 @@
+import { workspaceCredentialsBody, workspaceCredentials } from '../connectors/workspace-credentials.js'
 /**
  * Standalone OSS and Outpost connector-instance sharing and workspace-owned
  * connector management.
@@ -42,10 +43,6 @@ const PatchInstanceBody = z.object({
   connected: z.boolean().optional(),
 })
 
-const SetCredentialsBody = z.object({
-  clientSecret: z.string().min(8).max(4096),
-  clientId: z.string().max(256).optional(),
-})
 
 const CreateGrantBody = z.object({
   targetType: z.literal('workspace'),
@@ -158,11 +155,17 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
   router.post('/:instanceId/credentials', async (req, res) => {
     const gate = await requireConnectorClearance(req, res)
     if (!gate) return
-    const parsed = SetCredentialsBody.safeParse(req.body)
+    if (gate.instance.custom && await opts.workspaceStore.getRole(gate.userId, gate.instance.workspaceId!) !== 'owner') {
+      res.status(403).json({ error: 'Only the workspace owner can configure shared custom credentials' }); return
+    }
+    const parsed = workspaceCredentialsBody.safeParse(req.body)
     if (!parsed.success) {
       res.status(400).json({ error: 'Invalid body', details: parsed.error.flatten() })
       return
     }
+    const credentials = workspaceCredentials(parsed.data, gate.instance.custom)
+    if (!credentials) { res.status(400).json({ error: 'Credential type does not match the connector' }); return }
+
     try {
       const workspaceId = (req.params as Record<string, string>).workspaceId
       const instance = await lifecycle.attachCredentials({
@@ -170,10 +173,7 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
         provider: gate.instance.provider,
         instanceId: req.params.instanceId,
         fallbackLabel: gate.instance.label,
-        credentials: {
-          client_id: parsed.data.clientId ?? '',
-          client_secret: parsed.data.clientSecret,
-        },
+        credentials,
       })
       void opts.auditStore.append({
         workspaceId,
