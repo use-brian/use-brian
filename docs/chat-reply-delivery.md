@@ -64,6 +64,16 @@ LOCKED` before updating `last_active_at`. A busy row must remain readable.
 Authorization uses `readSessionById`, which performs no recency write. This
 never skips turn ownership, heartbeat, cancellation, publication or scope writes.
 
+Historical-label projection identifies immutable non-history selectors in one
+metadata read. Do not recursively admit every ordinary field merely to
+determine that its selector is not Memory history. Skip these probes only for
+positively identified ordinary selectors. Unknown resources, including metadata
+not yet committed by the current transaction, retain the original RPC on that
+transaction. Every history root still receives its current SQL proof on the
+exact supplied tuple; all ordinary fields keep their full existing validation.
+Repeat classification and authorization at the final footprint check. Metadata
+discovery grants no permission, and no authorization result is cached between calls.
+
 ## Regression coverage
 
 - Burst notifications coalesce under a paused consumer with unchanged text,
