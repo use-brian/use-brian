@@ -27,6 +27,7 @@ export const DOC_EDIT_GATEWAY_TOOL = 'delegateDocEdit'
 export const DOC_MUTATION_TOOLS = new Set([
   'renderPage',
   'patchPage',
+  'editDrawing',
   'createSubPage',
   'importToPage',
   'createEntityType',

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
+import { isAllowedMime } from '../files.js'
 
 // Mock DB + core modules
 vi.mock('../../db/users.js', () => ({
@@ -1034,5 +1035,14 @@ describe('[COMP:api/files-route] GET /ingest-jobs/:jobId', () => {
     mockGetJob.mockResolvedValue(null as never)
     expect((await request(app()).get('/api/files/ingest-jobs/job-1')).status).toBe(404)
     expect((await request(app(null)).get('/api/files/ingest-jobs/job-1')).status).toBe(401)
+  })
+})
+
+
+describe('[COMP:doc/drawing-tools] library upload admission', () => {
+  it('accepts Excalidraw libraries with generic or vendor MIME types while keeping other binary uploads excluded', () => {
+    expect(isAllowedMime('application/octet-stream', 'Shapes.EXCALIDRAWLIB')).toBe(true)
+    expect(isAllowedMime('application/vnd.excalidrawlib+json', 'Shapes.excalidrawlib')).toBe(true)
+    expect(isAllowedMime('application/octet-stream', 'unknown.bin')).toBe(false)
   })
 })

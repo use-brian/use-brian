@@ -3,10 +3,11 @@
  * assistant authoring on the doc SURFACE (`docSurface: true`) — the
  * workspace primary by default. Doc is a skill, not an app type.
  *
- * Builds twenty-two raw tools for the context-clean editor, while exposing
- * only nine reads + `delegateDocEdit` to the conversational model:
+ * Builds twenty-five raw tools for the context-clean editor, while exposing
+ * only eleven reads + `delegateDocEdit` to the conversational model:
  *
- *   - 10 doc page tools (`packages/core/src/doc/tools.ts`):
+ *   - 13 doc page tools (`packages/core/src/doc/tools.ts`):
+ *     `getDrawing` / `editDrawing` / `listDrawingLibrary` /
  *     `renderPage` / `patchPage` / `getBlock` / `queryDataBlock` /
  *     `getCurrentPage` / `getSection` / `getBlockRange` / `createSubPage` /
  *     `exportPage` / `importToPage` (the doc-format-conversion tools).
@@ -394,7 +395,7 @@ export async function injectDocTools(
     options.commentThreadStore ??
     (cachedCommentThreadStore ??= createDbCommentThreadStore())
 
-  // Build the 10 doc page tools. The dep bag matches `DocToolDeps`
+  // Build the doc page tools, including live drawing reads and actions. The dep bag matches `DocToolDeps`
   // in `packages/core/src/doc/tools.ts`.
   // Live-doc gateway: when DOC_SYNC_URL/SECRET are configured, `patchPage`
   // routes ops to the collaborative Y.Doc (humans see AI edits live) instead
@@ -455,6 +456,9 @@ export async function injectDocTools(
     const childTools: Tool[] = [
       targetPageTools.renderPage,
       targetPageTools.patchPage,
+      targetPageTools.editDrawing,
+      targetPageTools.getDrawing,
+      targetPageTools.listDrawingLibrary,
       targetPageTools.getBlock,
       targetPageTools.queryDataBlock,
       targetPageTools.getCurrentPage,
@@ -483,6 +487,8 @@ export async function injectDocTools(
   // inspect the requested section, and assemble a precise edit brief without
   // paying a child call for every read. Raw writes are structurally absent.
   const mainTools: Tool[] = [
+    pageTools.getDrawing,
+    pageTools.listDrawingLibrary,
     pageTools.getBlock,
     pageTools.queryDataBlock,
     pageTools.getCurrentPage,
