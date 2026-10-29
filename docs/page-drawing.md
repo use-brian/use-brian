@@ -281,6 +281,10 @@ This does not disable image export or change Brian's Save/PNG preview generation
 
 ## Libraries
 
+Library parsing, validation and Brian default item generation are shared between
+the browser editor and server consumers; item IDs and local-library migration
+behavior remain identical across those consumers.
+
 ### Default Brian Assets
 
 The bundled library contains 38 assets from https://usebrian.ai/brand/interns:

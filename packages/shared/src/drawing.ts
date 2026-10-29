@@ -175,3 +175,6 @@ export const drawingBlockSchema = z.object({
 })
 export type DrawingScene = z.infer<typeof drawingSceneSchema>
 export type DrawingBlock = z.infer<typeof drawingBlockSchema>
+
+export { defaultDrawingLibrary } from './drawing-default-library.js'
+export { parseLibrary, validateLibraryItems, type DrawingLibraryItem } from './drawing-library.js'
