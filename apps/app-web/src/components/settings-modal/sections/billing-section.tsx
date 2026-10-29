@@ -484,7 +484,7 @@ export function BillingSection() {
                   href={`${WEB_APP}/plans`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-start gap-3 p-4 rounded-lg border border-border hover:border-primary/40 hover:bg-muted/40 transition-colors"
+                  className="flex items-start gap-3 p-4 rounded-lg border border-border hover:border-interaction/40 hover:bg-muted/40 transition-colors"
                 >
                   <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                     <upgrade.Icon className="w-5 h-5 text-primary" />

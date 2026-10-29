@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearChatLocation,
+  navigateChatLocation,
   readChatLocation,
   seedChatLocation,
   writeChatLocation,
@@ -77,5 +78,42 @@ describe("[COMP:app-web/chat-last-location] remembered chat location", () => {
     expect(seedChatLocation(null, false)).toBeNull();
     // The remembered location IS what a bare URL already means.
     expect(seedChatLocation({ view: "personal", sessionId: null }, false)).toBeNull();
+  });
+});
+
+describe("[COMP:app-web/chat-last-location] immediate same-screen navigation", () => {
+  afterEach(() => { vi.restoreAllMocks(); window.history.replaceState(null, "", "/"); });
+
+  it("pushes a chat selection synchronously and lets Next supply its history fields", () => {
+    window.history.replaceState({ __NA: true }, "", "/w/w1/chat?s=first");
+    const push = vi.spyOn(window.history, "pushState");
+    expect(navigateChatLocation("/w/w1/chat?v=workspace&s=second")).toBe(true);
+    expect(window.location.search).toBe("?v=workspace&s=second");
+    expect(push).toHaveBeenCalledWith(null, "", expect.stringContaining("/w/w1/chat?v=workspace&s=second"));
+    // Clicking the selected row must not create a second Back step.
+    navigateChatLocation("/w/w1/chat?v=workspace&s=second");
+    expect(push).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces adoption/restoration and accepts query-only Chat Home selection", () => {
+    window.history.replaceState(null, "", "/w/w1");
+    const replace = vi.spyOn(window.history, "replaceState");
+    expect(navigateChatLocation("/w/w1?s=created", true)).toBe(true);
+    expect(replace).toHaveBeenCalledOnce();
+    expect(window.location.search).toBe("?s=created");
+  });
+
+  it.each(["/w/w2/chat?s=second", "/w/w1/brain", "https://outside.example/w/w1/chat?s=second"])("leaves other routes and origins to the router: %s", href => {
+    window.history.replaceState(null, "", "/w/w1/chat?s=first");
+    const push = vi.spyOn(window.history, "pushState");
+    expect(navigateChatLocation(href)).toBe(false);
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it("leaves the desktop hash route and non-Chat pages to their router", () => {
+    window.history.replaceState(null, "", "/renderer/index.html#/w/w1/chat?s=first");
+    expect(navigateChatLocation("/w/w1/chat?s=second")).toBe(false);
+    window.history.replaceState(null, "", "/w/w1/brain");
+    expect(navigateChatLocation("?s=second")).toBe(false);
   });
 });

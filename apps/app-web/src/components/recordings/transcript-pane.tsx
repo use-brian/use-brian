@@ -224,7 +224,7 @@ export function TranscriptPane({
                 }}
                 className={`flex w-full gap-3 rounded px-2 py-2 text-left text-sm hover:bg-muted/60 md:py-1 ${
                   cited
-                    ? "bg-primary/10 ring-1 ring-primary/40"
+                    ? "bg-interaction/10 ring-1 ring-interaction/40"
                     : active
                       ? "bg-muted"
                       : ""

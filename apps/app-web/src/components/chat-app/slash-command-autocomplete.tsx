@@ -430,7 +430,7 @@ export function SlashCommandIndicator(props: {
         onClick={props.commands.clearActiveCommand}
         aria-label={format(t.slashClearAria, { slug: active.command.slug })}
         title={format(t.slashClearAria, { slug: active.command.slug })}
-        className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-primary/10 hover:text-foreground"
+        className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-interaction/10 hover:text-foreground"
       >
         <X className="size-3.5" aria-hidden />
       </button>

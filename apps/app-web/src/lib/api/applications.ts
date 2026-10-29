@@ -9,9 +9,9 @@ const url=(workspaceId:string)=>`${publicRuntimeConfig().apiUrl??'http://localho
 export class ApplicationManagementError extends Error {
  constructor(readonly code:string,readonly uncertain=false){super(code);}
 }
-export async function fetchApplicationManagement(workspaceId:string,viewerId:string,appId?:string,moduleKey?:string){
+export async function fetchApplicationManagement(workspaceId:string,viewerId:string,appId?:string,moduleKey?:string,connectorInstanceId?:string){
  const started=performance.now();
- const query=new URLSearchParams();if(appId)query.set('appId',appId);if(moduleKey)query.set('moduleKey',moduleKey);
+ const query=new URLSearchParams();if(connectorInstanceId)query.set('connectorInstanceId',connectorInstanceId);if(appId)query.set('appId',appId);if(moduleKey)query.set('moduleKey',moduleKey);
  const response=await authFetch(`${url(workspaceId)}${query.size?`?${query}`:''}`,{cache:'no-store'});
  if(!response.ok){const error=new ApplicationManagementError('access_unavailable');if([401,403,404].includes(response.status))throw new SurfaceCacheEvictionError(error);throw error;}
  const body=await response.json() as ApplicationManagementOverview;

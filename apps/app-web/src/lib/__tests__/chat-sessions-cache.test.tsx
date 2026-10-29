@@ -77,6 +77,7 @@ import { LIVE_REFRESH_EVENT } from "@/lib/workspace-events";
 import { applySpineEventToSurfaceCache } from "@/lib/surface-cache-invalidation";
 import { dispatchChatSessionsRefresh } from "@/lib/chat-session-events";
 import {
+  cacheCreatedChatSession,
   chatSessionsSnapshotKey,
   fetchPersonalChatSessions,
   isAuthoritativeRosterDenial,
@@ -158,6 +159,8 @@ afterEach(() => {
   act(() => {
     root?.unmount();
   });
+  resetSurfaceCache();
+  vi.useRealTimers();
   container?.remove();
   root = null;
   container = null;
@@ -269,6 +272,73 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     });
     dispatchChatSessionsRefresh("w9");
     expect(isSurfaceCacheStale(chatSharedSessionsCacheKey("w1"))).toBe(false);
+  });
+
+  it("keeps the mounted rail's newest snapshot through memory expiry during a slow renewal", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    api.listWorkspaceAssistants.mockResolvedValue(ROSTER);
+    api.listSessionsForAssistants.mockResolvedValue(PERSONAL);
+    api.listWorkspaceSessions.mockResolvedValue(SHARED);
+    let latest: ChatSessionsData | undefined;
+    mount(<Probe onData={data => { latest = data; }} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(text("personal")).toBe("Quarterly plan");
+    api.listWorkspaceAssistants.mockImplementation(never);
+    api.listSessionsForAssistants.mockImplementation(never);
+    api.listWorkspaceSessions.mockImplementation(never);
+    await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
+    expect(readSurfaceCache(chatSessionsCacheKey("w1")).data).toBeUndefined();
+    expect(text("personal")).toBe("Quarterly plan");
+    expect(text("shared")).toBe("Launch room");
+    // A presentation fallback never extends the one-hour offline boundary.
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_600_001); });
+    expect(text("personal")).toBe("SKELETON");
+    expect(text("shared")).toBe("SKELETON");
+    // A known denial still removes the snapshot immediately.
+    api.listWorkspaceSessions.mockResolvedValue(SHARED);
+    api.listWorkspaceAssistants.mockRejectedValue(new Error("Failed to list workspace assistants: 403"));
+    act(() => resetSurfaceCache());
+    await act(async () => { await latest!.refresh(); await vi.advanceTimersByTimeAsync(0); });
+    expect(text("personal")).toBe("SKELETON");
+    expect(idb.store.has(chatSessionsSnapshotKey("u1", "w1"))).toBe(false);
+  });
+
+  it("publishes a confirmed personal chat before an older list request settles and reconciles on the next read", async () => {
+    await loadSurfaceCache(chatRosterCacheKey("w1"), async () => ROSTER);
+    await loadSurfaceCache(chatSessionsCacheKey("w1"), async () => PERSONAL);
+    let finish!: (rows: typeof PERSONAL) => void;
+    api.listSessionsForAssistants.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const pending = loadSurfaceCache(chatSessionsCacheKey("w1"), () => fetchPersonalChatSessions("w1"));
+    await Promise.resolve();
+    const created = { ...PERSONAL[0], id: "s-new", title: "Newly submitted work" };
+    cacheCreatedChatSession("w1", created, "personal");
+    expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data?.[0]).toEqual(created);
+    finish(PERSONAL);
+    await pending;
+    expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data?.map(row => row.id)).toEqual(["s-new", "s1"]);
+    api.listSessionsForAssistants.mockResolvedValue([{ ...created, title: "Server title" }, ...PERSONAL]);
+    await loadSurfaceCache(chatSessionsCacheKey("w1"), () => fetchPersonalChatSessions("w1"));
+    expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data?.[0].title).toBe("Server title");
+  });
+
+  it("seeds a cold in-flight personal read immediately and updates only the created room's group", async () => {
+    await loadSurfaceCache(chatRosterCacheKey("w1"), async () => ROSTER);
+    let finish!: (rows: typeof PERSONAL) => void;
+    api.listSessionsForAssistants.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const pending = loadSurfaceCache(chatSessionsCacheKey("w1"), () => fetchPersonalChatSessions("w1"));
+    await Promise.resolve();
+    const created = { ...PERSONAL[0], id: "s-new" };
+    cacheCreatedChatSession("w1", created, "personal");
+    expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data).toEqual([created]);
+    finish(PERSONAL);
+    await pending;
+    expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data).toEqual([created, ...PERSONAL]);
+    const room = { ...SHARED[0], contextProjectId: "project-1" };
+    cacheCreatedChatSession("w1", room, "workspace");
+    expect(readSurfaceCache(chatSharedSessionsCacheKey("w1")).data).toEqual([room]);
+    expect(readSurfaceCache(chatSharedSessionsCacheKey("w1", "project-1")).data).toEqual([room]);
+    expect(readSurfaceCache(chatSharedSessionsCacheKey("w1", null)).data).toBeUndefined();
+    expect(readSurfaceCache(chatSharedSessionsCacheKey("w2")).data).toBeUndefined();
   });
 
   it("the personal fetcher reads a fresh roster from the cache and never fires a second roster request (N7)", async () => {

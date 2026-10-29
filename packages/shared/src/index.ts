@@ -56,4 +56,4 @@ export { feedLinkedInPayloadSchema, feedLinkedInCloudRequestSchema, type FeedLin
 export {CaptureConfigurationSchema,EngineeringCaptureReceiptSchema,EngineeringHistoryQuerySchema,EngineeringHistoryCommandSchema,
  type CaptureConfiguration,type EngineeringCaptureReceipt,type EngineeringHistoryQuery,type EngineeringHistoryCommand} from './engineering-history.js'
 
-export type { ManagedApplication, ManagedGrant, ManagedCredential, ManagedSchema, ManagedSource, ApplicationManagementOverview, ApplicationManagementCommand, ManagementReview, ManagementGovernanceCatalog, ApplicationManagementResult } from './application-management.js'
+export type { AttendedConnectorSetupInput, ManagedApplication, ManagedGrant, ManagedCredential, ManagedSchema, ManagedSource, ApplicationManagementOverview, ApplicationManagementCommand, ManagementReview, ManagementGovernanceCatalog, ApplicationManagementResult } from './application-management.js'

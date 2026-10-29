@@ -1,7 +1,7 @@
 /**
  * [COMP:app-web/focus-treatment] Frameless action focus treatment.
  *
- * Text-entry fields turn their existing border blue through the app-wide
+ * Text-entry fields turn their existing border neutral through the app-wide
  * `:focus-visible` override in `app/globals.css`. Composite fields put that
  * border change on their `focus-within` wrapper and suppress every nested
  * focus shadow. Discrete keyboard controls use a neutral background fill;
@@ -57,7 +57,7 @@ const appSourceFiles = tsxFiles(SOURCE_ROOT).map((file) => ({
 describe("[COMP:app-web/focus-treatment] source contract", () => {
   it("suppresses pointer and keyboard frames and gives keyboard actions a neutral fill", () => {
     expect(GLOBALS_CSS).toMatch(/:focus\s*\{\s*outline: none !important;\s*box-shadow: none !important;/);
-    expect(GLOBALS_CSS).toMatch(/:not\(:is\([^{}]+\)\):focus-visible\s*\{\s*background-image: linear-gradient\([\s\S]*?currentColor 16%, transparent[\s\S]*?\) !important;/);
+    expect(GLOBALS_CSS).toMatch(/:not\(:is\([^{}]+\)\):focus-visible\s*\{\s*background-image: linear-gradient\([\s\S]*?oklch\(from currentColor l 0 h\) 16%, transparent[\s\S]*?\) !important;/);
     expect(GLOBALS_CSS).not.toContain("0 0 0 2px var(--background), 0 0 0 4px");
     expect(GLOBALS_CSS).not.toMatch(/:focus-visible[^{}]*\{[^{}]*border-radius: inherit/);
   });
@@ -69,7 +69,7 @@ describe("[COMP:app-web/focus-treatment] source contract", () => {
     ]) {
       const css = readFileSync(new URL(path, import.meta.url), "utf8");
       const normalCss = css.split("@media (forced-colors: active)")[0];
-      expect(normalCss).toContain("currentColor 16%, transparent");
+      expect(normalCss).toContain("oklch(from currentColor l 0 h) 16%, transparent");
       expect(normalCss).not.toMatch(/outline:\s*\d+px solid/);
       expect(css).toContain("outline: 2px solid Highlight");
     }

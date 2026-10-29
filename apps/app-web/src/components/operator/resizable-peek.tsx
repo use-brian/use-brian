@@ -152,8 +152,8 @@ export function PeekResizeHandle({
     >
       <div
         className={cn(
-          "mx-auto h-full w-px bg-transparent transition-colors group-hover/resize:bg-primary/40",
-          resizing && "bg-primary/60 group-hover/resize:bg-primary/60",
+          "mx-auto h-full w-px bg-transparent transition-colors group-hover/resize:bg-interaction/20",
+          resizing && "bg-interaction/30 group-hover/resize:bg-interaction/30",
         )}
       />
     </div>

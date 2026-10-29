@@ -506,12 +506,12 @@ export function CrmEmailReviewWorkspace({
             aria-valuemin={REVIEW_MAIN_MIN_WIDTH}
             aria-valuenow={reviewWidth !== null ? Math.round(reviewWidth) : undefined}
             {...handleProps}
-            className="group/resize absolute inset-y-0 left-0 z-10 w-2 -translate-x-1/2 cursor-col-resize touch-none select-none outline-none focus-visible:bg-primary/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/50"
+            className="group/resize absolute inset-y-0 left-0 z-10 w-2 -translate-x-1/2 cursor-col-resize touch-none select-none outline-none focus-visible:bg-interaction/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-interaction/50"
           >
             <div
               className={cn(
-                "mx-auto h-full w-px bg-transparent transition-colors group-hover/resize:bg-primary/40",
-                resizing && "bg-primary/60 group-hover/resize:bg-primary/60",
+                "mx-auto h-full w-px bg-transparent transition-colors group-hover/resize:bg-interaction/20",
+                resizing && "bg-interaction/30 group-hover/resize:bg-interaction/30",
               )}
             />
           </div>

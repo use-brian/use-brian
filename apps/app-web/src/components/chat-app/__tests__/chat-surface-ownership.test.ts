@@ -186,6 +186,8 @@ function directStream(initialSession: string | null = "A") {
     sessionAssistantRef: { current: new Map() }, target: { id: "assistant" },
     chat: { setSession: vi.fn(), dispatch: vi.fn() }, selectSession: vi.fn(),
     dispatchChatSessionsRefresh: vi.fn(), dispatchChatSessionActivity: vi.fn(), workspaceId: "workspace",
+    cacheCreatedChatSession: vi.fn(), trimmed: "Plan a new release", channelId: "fresh-channel",
+    pickedContextGroupId: null, pickedContextProjectId: "project",
     midTurn: { take: vi.fn() }, applyQueuedInput: vi.fn(), buildStreamedTurnMessage: vi.fn().mockReturnValue(null),
     turnTextRef: { current: "text" }, resetTurnActivity: vi.fn(),
     flushQueuedInputs: vi.fn(), setQueuedNotice: vi.fn(),
@@ -228,6 +230,11 @@ describe("[COMP:app-web/chat-sessions-cache] stream completion ownership", () =>
   it.each(["onDone", "onError"])("%s flushes the newly minted session, not the null initial owner", (name) => {
     const { scope, handlers } = directStream(null);
     handlers.onEvent({ event: "session", data: { sessionId: "minted" } });
+    expect(scope.cacheCreatedChatSession).toHaveBeenCalledWith("workspace", expect.objectContaining({
+      id: "minted", title: "Plan a new release", assistantId: "assistant",
+      channelId: "fresh-channel", contextProjectId: "project", appOrigin: "chat",
+    }), "personal");
+    expect(scope.flushQueuedInputs).not.toHaveBeenCalled();
     handlers.onEvent({ event: "input_applied", data: { inputId: "input", messageId: "message" } });
     handlers[name]();
     expect(scope.sessionIdRef.current).toBe("minted");
@@ -363,5 +370,44 @@ describe("main chat live interaction ownership", () => {
     expect(mapTranscriptRows).toHaveBeenCalledWith(rows, false); // no cross-job assistant coalescing
     onCanonical("main", rows, ids);
     expect(chat.dispatch).toHaveBeenCalledTimes(4);
+  });
+});
+
+function hydrationEffect() {
+  return (find(node => ts.isCallExpression(node) && node.expression.getText(tree) === "useLayoutEffect" &&
+    node.arguments[0]?.getText(tree).includes("activeSessionId === hydratedRef.current")) as ts.CallExpression).arguments[0].getText(tree);
+}
+
+describe("[COMP:app-web/chat-sessions-cache] selection before paint", () => {
+  it.each([true, false])("installs only the selected transcript synchronously while its read is pending (cached: %s)", cached => {
+    const oldMessages = [{ id: "old-message", text: "Previous chat" }];
+    const selectedMessages = [{ id: "selected-message", text: "Selected chat" }];
+    const scope = {
+      ...base(), activeSessionId: "B", hydratedRef: { current: "A" },
+      setPendingQuestion: vi.fn(), setStartingShared: vi.fn(), responseGroupAbortRef: { current: false },
+      directTurnSessionRef: { current: "A" }, stream: { abort: vi.fn() },
+      chat: { state: {sessionId: "A", messages: oldMessages}, setSession: vi.fn(), loadMessages: vi.fn(), dispatch: vi.fn() },
+      resetTurnActivity: vi.fn(), att: { clear: vi.fn() }, setError: vi.fn(), setReplyTo: vi.fn(), setSelectionQuote: vi.fn(),
+      freshChannelIdRef: {current: null}, panePolicy: {presence: false}, setReconnectSessionId: vi.fn(),
+      readCachedTranscript: vi.fn().mockReturnValue(cached ? selectedMessages : undefined),
+      setTranscriptCold: vi.fn(), loadTranscript: vi.fn(() => new Promise(() => {})),
+      writeTranscriptCache: vi.fn(),
+    };
+    const cleanup = evaluate(hydrationEffect(), scope)();
+    expect(scope.chat.setSession).toHaveBeenCalledWith("B");
+    expect(scope.chat.loadMessages).toHaveBeenCalledWith(cached ? selectedMessages : []);
+    expect(scope.setTranscriptCold).toHaveBeenCalledWith(!cached);
+    expect(scope.sessionIdRef.current).toBe("B");
+    expect(scope.stream.abort).toHaveBeenCalledOnce();
+    // Layout effects can flush older passive effects before their rerender.
+    // The outgoing reducer identity must never write its messages under B.
+    const write = (find(node => ts.isCallExpression(node) && node.expression.getText(tree) === "useEffect" &&
+      node.arguments[0]?.getText(tree).includes("writeTranscriptCache(activeSessionId")) as ts.CallExpression).arguments[0].getText(tree);
+    evaluate(write, scope)();
+    expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
+    scope.chat.state = {sessionId: "B", messages: selectedMessages};
+    evaluate(write, scope)();
+    expect(scope.writeTranscriptCache).toHaveBeenCalledWith("B", selectedMessages);
+    cleanup();
   });
 });

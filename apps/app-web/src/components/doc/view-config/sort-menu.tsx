@@ -164,7 +164,7 @@ export function SortMenu({ columns, value, onChange, className }: SortMenuProps)
                 className={
                   "inline-flex h-9 flex-1 items-center justify-center gap-1 rounded-md border px-2 text-xs md:h-7 " +
                   (value?.direction === "asc"
-                    ? "border-primary bg-primary/10 text-foreground"
+                    ? "border-interaction/35 bg-interaction/10 text-foreground"
                     : "border-border bg-background text-muted-foreground hover:bg-muted")
                 }
               >
@@ -179,7 +179,7 @@ export function SortMenu({ columns, value, onChange, className }: SortMenuProps)
                 className={
                   "inline-flex h-9 flex-1 items-center justify-center gap-1 rounded-md border px-2 text-xs md:h-7 " +
                   (value?.direction === "desc"
-                    ? "border-primary bg-primary/10 text-foreground"
+                    ? "border-interaction/35 bg-interaction/10 text-foreground"
                     : "border-border bg-background text-muted-foreground hover:bg-muted")
                 }
               >

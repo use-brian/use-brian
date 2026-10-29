@@ -81,6 +81,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -101,6 +102,7 @@ import {
 import remarkGfm from "remark-gfm";
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { navigateChatLocation } from "@/lib/chat-last-location";
 import {
   ArrowUp,
   AtSign,
@@ -182,6 +184,7 @@ import { Skeleton } from "@/components/skeleton";
 import { listWorkspaceAssistants, type WorkspaceAssistantSummary } from "@/lib/api/views";
 import {
   patchSharedChatSessions,
+  cacheCreatedChatSession,
   readCachedTranscript,
   useChatSessionsData,
   writeTranscriptCache,
@@ -1003,7 +1006,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       // A user-driven move always outranks a restore still catching up.
       seededRef.current = null;
       setRestoring(null);
-      router.replace(buildHref(id, nextView), { scroll: false });
+      const href = buildHref(id, nextView);
+      if (!navigateChatLocation(href, true)) router.replace(href, { scroll: false });
     },
     [buildHref, router, view],
   );
@@ -1028,7 +1032,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     if (!seed) return;
     seededRef.current = seed;
     setRestoring(seed);
-    router.replace(buildHref(seed.sessionId, seed.view), { scroll: false });
+    const href = buildHref(seed.sessionId, seed.view);
+    if (!navigateChatLocation(href, true)) router.replace(href, { scroll: false });
   }, [buildHref, router, urlPinsLocation, workspaceId]);
 
   // The rewrite landed — every restorable location produces a `?v=`/`?s=` URL
@@ -1390,16 +1395,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // Write-through (N1): every reducer change on the open session - the
   // optimistic user row, a turn streaming in, a teammate's post - lands on
   // the session's cache key, so a revisit paints them before the refetch.
-  // Guarded on `hydratedRef` so a frame from the thread being LEFT never
-  // writes under the thread being entered.
+  // Check both the hydration ref and the rendered reducer identity: a layout
+  // switch may flush the outgoing render's passive effects before rerendering.
   useEffect(() => {
-    if (!activeSessionId || hydratedRef.current !== activeSessionId) return;
+    if (!activeSessionId || hydratedRef.current !== activeSessionId || chat.state.sessionId !== activeSessionId) return;
     const messages = chat.state.messages as SurfaceMessage[];
     if (messages.length === 0) return;
     writeTranscriptCache(activeSessionId, messages);
-  }, [activeSessionId, chat.state.messages]);
+  }, [activeSessionId, chat.state.sessionId, chat.state.messages]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (activeSessionId === hydratedRef.current) return;
     sessionEpochRef.current += 1;
     setPendingQuestion(null);
@@ -1424,6 +1429,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     freshChannelIdRef.current = null;
     hydratedRef.current = activeSessionId;
     sessionIdRef.current = activeSessionId;
+    chat.setSession(activeSessionId);
     // A personal session opened from the outside (deep link, rail row,
     // reload) may have a turn running that no stream in this tab is
     // painting. Want a re-attach once: the route answers `status` then
@@ -2174,7 +2180,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     freshChannelIdRef.current = null;
     setError(null);
     setInput("");
-    // A new chat starts with an empty pane.
+    // A new chat starts with an empty pane and no previous reducer owner.
+    chat.setSession(null);
     resetFreshChatPane(workspaceId);
     att.clear();
     chat.loadMessages([]);
@@ -2215,11 +2222,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       );
       if(!creationContext.isCurrent())return;
       resetPane();
-      patchSharedChatSessions(
-        workspaceId,
-        (rows) => [created, ...rows.filter((row) => row.id !== created.id)],
-        { seed: true },
-      );
+      cacheCreatedChatSession(workspaceId, created, "workspace");
       hydratedRef.current = created.id;
       sessionIdRef.current = created.id;
       if (created.assistantId) {
@@ -2603,11 +2606,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         owningSessionId = created.id;
         sessionIdRef.current = created.id;
         hydratedRef.current = created.id;
-        patchSharedChatSessions(
-          workspaceId,
-          (rows) => [created, ...rows.filter((row) => row.id !== created.id)],
-          { seed: true },
-        );
+        cacheCreatedChatSession(workspaceId, created, "workspace");
         sessionAssistantRef.current.set(created.id, interlocutor.id);
         chat.setSession(created.id);
         selectSession(created.id, "workspace");
@@ -2793,7 +2792,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               adoptFreshChatPane(workspaceId, id);
               chat.setSession(id);
               selectSession(id);
-              // The fresh thread is now listable — tell the sidebar rail.
+              // Paint the real session immediately; title/status reconcile in the background.
+              cacheCreatedChatSession(workspaceId, {
+                id, title: trimmed.slice(0, 120) || t.newChat,
+                channelId: channelId ?? id, transport: "web", appOrigin: "chat",
+                lastActive: new Date().toISOString(), assistantId: target.id,
+                contextGroupId: pickedContextGroupId, contextProjectId: pickedContextProjectId,
+                status: "running", humanCount: 1,
+              }, "personal");
               dispatchChatSessionsRefresh(workspaceId);
             }
             break;

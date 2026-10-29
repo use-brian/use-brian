@@ -388,7 +388,7 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
       >
         {afterActive && (
           <div
-            className="absolute left-0 right-1 top-0 h-0.5 rounded-full bg-primary"
+            className="absolute left-0 right-1 top-0 h-0.5 rounded-full bg-interaction"
             style={indentStyle}
           />
         )}

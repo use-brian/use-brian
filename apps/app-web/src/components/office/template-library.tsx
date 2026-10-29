@@ -425,7 +425,7 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
                 className={cn(
                   "group relative flex min-h-44 w-full flex-col items-center justify-center rounded-2xl border border-dashed px-6 py-7 text-center outline-none transition-all focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60",
                   uploadDrop.isDragging
-                    ? "scale-[1.01] border-primary bg-primary/[0.06] shadow-sm"
+                    ? "scale-[1.01] border-interaction/50 bg-interaction/[0.06] shadow-sm"
                     : uploadFile
                       ? "border-foreground/20 bg-muted/35 hover:border-foreground/35 hover:bg-muted/55"
                       : "border-border bg-muted/20 hover:border-foreground/30 hover:bg-muted/40",

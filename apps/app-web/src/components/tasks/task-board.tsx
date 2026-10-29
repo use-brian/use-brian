@@ -98,7 +98,7 @@ export function TaskBoard({
             }}
             className={cn(
               "flex w-72 shrink-0 flex-col rounded-2xl bg-muted/30 transition-shadow",
-              overColumn === status && "ring-2 ring-primary/40",
+              overColumn === status && "ring-2 ring-interaction/40",
             )}
           >
             <div className="flex items-center gap-1.5 px-3.5 pb-1 pt-2.5 text-[12.5px] font-semibold text-foreground/80">

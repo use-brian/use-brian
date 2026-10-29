@@ -65,7 +65,7 @@ export const applicationManagementCommandSchema = z.discriminatedUnion('kind', [
 export class ApplicationManagementService {
   /** Bounded metadata only. All record/field policy remains in the existing canonical readers. */
   async overview(actorId:string,workspaceId:string,rawSelection:unknown = {}):Promise<ApplicationManagementOverview> {
-    const selection=z.object({appId:z.string().uuid().optional(),moduleKey:z.string().min(1).max(128).optional(),assistantId:z.string().uuid().optional()}).strict().safeParse(rawSelection)
+    const selection=z.object({connectorInstanceId:z.string().uuid().optional(),appId:z.string().uuid().optional(),moduleKey:z.string().min(1).max(128).optional(),assistantId:z.string().uuid().optional()}).strict().safeParse(rawSelection)
     if(!selection.success)throw new ApplicationPlatformError('invalid_value','The management selection is invalid.')
     const execution=await this.nativeSchemaExecution(actorId,workspaceId,selection.data.assistantId)
     const clients=await this.list(actorId,workspaceId)
@@ -73,8 +73,8 @@ export class ApplicationManagementService {
     if(appId&&!clients.some(app=>app.id===appId))throw new ApplicationPlatformError('access_unavailable','The application is unavailable.')
     const metadata=await this.transaction(actorId,workspaceId,async client=>{
       const validity=await projectionLifetime(client,workspaceId,actorId)
-      const sources=(await client.query<{id:string;connectorInstanceId:string;status:string;revision:string}>(`SELECT id,original_connector_instance_id AS "connectorInstanceId",status,revision::text
-        FROM connector_source_profiles WHERE workspace_id=$1 ORDER BY id LIMIT 100`,[workspaceId])).rows
+      const sources=(await client.query<{id:string;connectorInstanceId:string;status:string;revision:string;attendedProfile:string|null}>(`SELECT id,original_connector_instance_id AS "connectorInstanceId",status,revision::text,attended_profile AS "attendedProfile"
+        FROM connector_source_profiles WHERE workspace_id=$1 AND ($2::uuid IS NULL OR original_connector_instance_id=$2) ORDER BY (status='revoked'),updated_at DESC,id LIMIT 100`,[workspaceId,selection.data.connectorInstanceId??null])).rows
       return {validForMs:validity,sources}
     })
     const grants=appId?await this.listGrants(actorId,workspaceId,appId):[]

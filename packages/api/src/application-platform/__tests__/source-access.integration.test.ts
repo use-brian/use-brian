@@ -154,6 +154,10 @@ describe.sequential('[COMP:api/external-source-access] independent persisted sou
       await expect(queryWithRLS(owner,"INSERT INTO connector_attended_setup_approvals(id,review_id,actor_id,snapshot,proof_digest,expires_at) VALUES($1,$2,$3,'fake','fake',now()+interval '1 hour')",[randomUUID(),review.reviewId,owner])).rejects.toMatchObject({code:'42501'})
       await expect(queryWithRLS(owner,"UPDATE connector_source_profiles SET attended_profile=NULL WHERE id=$1",[sourceProfile])).rejects.toMatchObject({code:'22023'})
       expect(await manage({kind:'connector.source.apply',reviewId:review.reviewId})).toMatchObject({profileId:sourceProfile,state:'qualified'})
+      const setupOverview = await management.overview(owner,workspace,{assistantId:assistant,connectorInstanceId:instance.id})
+      expect(setupOverview.sources.items).toEqual([expect.objectContaining({id:sourceProfile,connectorInstanceId:instance.id,status:'qualified',attendedProfile:'attended_governed_read_v1'})])
+      expect((await management.overview(owner,workspace,{assistantId:assistant,connectorInstanceId:randomUUID()})).sources.items).toEqual([])
+
       expect(await manage({kind:'connector.source.apply',reviewId:review.reviewId})).toMatchObject({profileId:sourceProfile,state:'qualified'})
       expect((await pool.query('SELECT attended_profile,scoped_app_id,revision::text FROM connector_source_profiles WHERE id=$1',[sourceProfile])).rows[0])
         .toEqual({attended_profile:'attended_governed_read_v1',scoped_app_id:null,revision:'2'})

@@ -1,6 +1,7 @@
 "use client";
 
 
+import { AttendedSourceSetup } from "@/components/connectors/attended-source-setup";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Studio -> Connectors (app-web) — the master-detail connectors surface.
@@ -2344,9 +2345,6 @@ function ConnectorsList() {
       />
     )}
     {/* Settings tab — custom connector or built-in config */}
-    {sel.custom && wsOwned && (
-      <p className="text-[11px] text-muted-foreground">{tc.wsOwnedEditorUnavailable}</p>
-    )}
     {sel.custom && !wsOwned && (
       <div className="space-y-3">
         <input
@@ -4034,6 +4032,8 @@ function ConnectorsList() {
                     )}
                   </div>
 
+                  {sel.custom && <AttendedSourceSetup instanceId={iid} onCredentialsSaved={fetchConnectors} />}
+
                   {wsManageError && (
                     <div className="text-[11px] text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2">
                       {wsManageError}
@@ -4047,7 +4047,7 @@ function ConnectorsList() {
                       Rotation goes through the imap connect form instead
                       (same address reconnects the team mailbox in place). */}
                   <div className="flex flex-wrap items-center gap-2">
-                    {!isOauth && sel.id !== "imap" && (
+                    {!isOauth && !sel.custom && sel.id !== "imap" && (
                       <button
                         type="button"
                         onClick={() => {

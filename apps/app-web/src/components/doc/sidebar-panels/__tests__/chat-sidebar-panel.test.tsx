@@ -14,7 +14,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
-import { mutateSurfaceCache, resetSurfaceCache } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, mutateSurfaceCache, resetSurfaceCache } from "@/lib/surface-cache";
 import { chatSessionsCacheKey, chatSharedSessionsCacheKey } from "@/lib/surface-prefetch";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -43,9 +43,11 @@ vi.mock("next/link", () => ({
   default: ({
     href,
     children,
+    prefetch: _prefetch,
     ...props
   }: {
     href: string;
+    prefetch?: boolean;
     children: React.ReactNode;
   } & React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
     <a href={href} {...props}>
@@ -165,12 +167,32 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root?.unmount());
+  window.history.replaceState(null, "", "/");
   container?.remove();
   root = null;
   container = null;
 });
 
 describe("[COMP:app-web/sidebar-panel-chat] failed history loads", () => {
+  it("does not restart skeletons when a loaded rail loses access and Retry is pending", async () => {
+    navigation.search = "";
+    sessionApi.listSessionsForAssistants.mockResolvedValue([
+      { id: "loaded-chat", title: "Existing plan", channelId: "channel-2", lastActive: "2026-10-01", appOrigin: "chat", assistantId: "assistant-1" },
+    ]);
+    await renderPanel();
+    expect(container?.textContent).toContain("Existing plan");
+    sessionApi.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed: 403"));
+    await act(async () => { invalidateSurfaceCache(chatSessionsCacheKey("workspace-1")); });
+    await flushEffects();
+    expect(container?.textContent).not.toContain("Existing plan");
+    expect(container?.querySelector(".skeleton")).toBeNull();
+    sessionApi.listSessionsForAssistants.mockImplementation(() => new Promise(() => {}));
+    act(() => buttonNamed("Retry").click());
+    await flushEffects();
+    expect(container?.querySelector(".skeleton")).toBeNull();
+    expect(container?.textContent).toContain(en.chatApp.railLoadFailed);
+  });
+
   it("shows recovery instead of empty history and loads the chats when retried", async () => {
     navigation.search = "";
     sessionApi.listSessionsForAssistants.mockRejectedValue(new Error("chat_list_failed"));
@@ -808,5 +830,31 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
     act(() => root!.unmount()); container!.remove();
     await renderPanel();
     expect(buttonNamed("Sample Project").getAttribute("aria-expanded")).toBe("false");
+  });
+});
+
+
+describe("[COMP:app-web/sidebar-panel-chat] immediate selection", () => {
+  it("changes a same-screen chat URL immediately without a route transition", async () => {
+    window.history.replaceState(null, "", "/w/workspace-1/chat?v=workspace");
+    await renderPanel();
+    const row = container!.querySelector<HTMLAnchorElement>('a[href*="s=room-1"]')!;
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    act(() => row.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(true);
+    expect(window.location.search).toBe("?v=workspace&s=room-1");
+    expect(navigation.push).not.toHaveBeenCalled();
+    expect(navigation.replace).not.toHaveBeenCalled();
+  });
+
+  it.each([{ctrlKey:true}, {metaKey:true}, {shiftKey:true}, {button:1}])("preserves modified clicks: %s", async modifiers => {
+    // The handler's ordinary-link behavior is exercised through the real row.
+      window.history.replaceState(null, "", "/w/workspace-1/chat?v=workspace");
+      await renderPanel();
+      const row = container!.querySelector<HTMLAnchorElement>('a[href*="s=room-1"]')!;
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true, ...modifiers });
+      act(() => row.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(false);
+      expect(window.location.search).toBe("?v=workspace");
   });
 });

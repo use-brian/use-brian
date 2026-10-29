@@ -4,7 +4,7 @@ export type ManagedApplication = { id:string;workspaceId:string;moduleKey:string
 export type ManagedGrant = {id:string;principalKind:string;principalUserId:string;origin:unknown;typeKey:string;actions:string[];readFields:string[];writeFields:string[];selector:unknown;status:string;version:string;startsAt:string;expiresAt:string|null;parentGrantId:string|null;compartments:string[];projectIds:string[];clearance:string};
 export type ManagedCredential = {id:string;name:string;kind:string;serviceUserId:string;status:string;expiresAt:string|null;lastUsedAt:string|null;version:string};
 export type ManagedSchema = {id:string;name:string;schemaVersion:number;properties:unknown[]};
-export type ManagedSource = {id:string;connectorInstanceId:string;status:string;revision:string;mappingStatus:'unavailable';keyStatus:'deployment_managed';retentionStatus:'unavailable'};
+export type ManagedSource = {attendedProfile?:string|null;id:string;connectorInstanceId:string;status:string;revision:string;mappingStatus:'unavailable';keyStatus:'deployment_managed';retentionStatus:'unavailable'};
 export interface ApplicationManagementOverview {
  workspaceId:string;actor:{userId:string;assistantId:string};validForMs:number;
  readiness:{qualified:false;reason:'consumer_qualification_incomplete';canActivate:false};
@@ -13,7 +13,15 @@ export interface ApplicationManagementOverview {
  governance?:{state:'available'|'unavailable';moduleKey:string|null;catalog:ManagementGovernanceCatalog|null};
  links:{miniApps:string;connectors:string;programmaticAccess:string;access:string};
 }
+export type AttendedConnectorSetupInput = {
+ instanceId:string;tenant:string;audience:string;sourceBaseUrl:string;httpReadPath?:string;
+ probeTool:string;probeInput:Record<string,unknown>;actions?:{tools:string[];idempotencyMetadataKey:string};
+};
 export type ApplicationManagementCommand =
+ | {kind:'connector.identity.prepare';assistantId?:string}
+ | {kind:'connector.source.review';assistantId?:string;input:AttendedConnectorSetupInput}
+ | {kind:'connector.source.apply';assistantId?:string;reviewId:string}
+ | {kind:'connector.source.revoke';profileId:string}
  | {kind:'legacy.view';reviewId:string;assistantId?:string}
  | {kind:'legacy.apply'|'legacy.cancel';reviewId:string;expectedVersion:string;payloadHash:string;assistantId?:string}
  | {kind:'register';input:Omit<ApplicationClientInput,'workspaceId'>}

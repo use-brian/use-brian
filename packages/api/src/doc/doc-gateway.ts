@@ -20,6 +20,7 @@
  * [COMP:api/doc-model-gateway]
  */
 
+import type { DrawingEditOp, DrawingEditResult } from '@use-brian/shared/drawing'
 import type { DocGateway, Page } from '@use-brian/core'
 
 export type DocGatewayOptions = {
@@ -79,53 +80,65 @@ export function createDocGateway(
   if (!resolved) return undefined
   const { httpBase, syncSecret, doFetch, timeoutMs } = resolved
 
-  return {
-    async applyOps({ userId, pageId, ops }) {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
-      try {
-        const res = await doFetch(`${httpBase}/internal/apply`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            'x-doc-sync-secret': syncSecret,
-          },
-          body: JSON.stringify({ pageId, ops, userId }),
-          signal: controller.signal,
-        })
-        if (!res.ok) {
-          const body = (await res.json().catch(() => null)) as { error?: string } | null
-          // A bound Brief's Direction is owner-governed (project-briefs.md):
-          // name the refusal and the governed path instead of a bare status.
-          if (body?.error === 'brief_direction_protected') {
-            return {
-              error: 'brief_direction_protected: this page is a Brief and its Direction changes only through an owner\'s Apply direction. Propose the change with manageBrief instead; Current context can still be edited.',
-            }
+  async function request(userId: string, pageId: string, ops: unknown[]): Promise<Awaited<ReturnType<DocGateway['applyOps']>> & { drawings?: Record<string, DrawingEditResult> }> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const res = await doFetch(`${httpBase}/internal/apply`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-doc-sync-secret': syncSecret,
+        },
+        body: JSON.stringify({ pageId, ops, userId }),
+        signal: controller.signal,
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null
+        // A bound Brief's Direction is owner-governed (project-briefs.md):
+        // name the refusal and the governed path instead of a bare status.
+        if (body?.error === 'brief_direction_protected') {
+          return {
+            error: 'brief_direction_protected: this page is a Brief and its Direction changes only through an owner\'s Apply direction. Propose the change with manageBrief instead; Current context can still be edited.',
           }
-          return { error: `sync apply HTTP ${res.status}` }
         }
-        const json = (await res.json()) as {
-          idMap?: Record<string, string>
-          skipped?: { opIndex: number; reason: string }[]
-          seq?: number
-          // Authoritative post-apply state from the live in-memory doc; absent
-          // on an older doc-sync, in which case patchPage re-reads the snapshot.
-          page?: { blocks: unknown[] }
-          title?: string
-        }
-        return {
-          idMap: json.idMap ?? {},
-          skipped: json.skipped ?? [],
-          version: typeof json.seq === 'number' ? json.seq : 0,
-          ...(json.page ? { page: json.page as Page, title: json.title } : {}),
-        }
-      } catch (err) {
-        return {
-          error: `sync unreachable: ${err instanceof Error ? err.message : String(err)}`,
-        }
-      } finally {
-        clearTimeout(timer)
+        return { error: `sync apply HTTP ${res.status}` }
       }
+      const json = (await res.json()) as {
+        idMap?: Record<string, string>
+        skipped?: { opIndex: number; reason: string }[]
+        seq?: number
+        // Authoritative post-apply state from the live in-memory doc; absent
+        // on an older doc-sync, in which case patchPage re-reads the snapshot.
+        page?: { blocks: unknown[] }
+        title?: string
+        drawings?: Record<string, DrawingEditResult>
+      }
+      return {
+        ...(json.drawings ? { drawings: json.drawings } : {}),
+        idMap: json.idMap ?? {},
+        skipped: json.skipped ?? [],
+        version: typeof json.seq === 'number' ? json.seq : 0,
+        ...(json.page ? { page: json.page as Page, title: json.title } : {}),
+      }
+    } catch (err) {
+      return {
+        error: `sync unreachable: ${err instanceof Error ? err.message : String(err)}`,
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  return {
+    applyOps: ({ userId, pageId, ops }) => request(userId, pageId, ops),
+    async drawing({ userId, pageId, blockId, namespace, actions }) {
+      const op: DrawingEditOp = { op: 'drawing', blockId, namespace, actions }
+      const result = await request(userId, pageId, [op])
+      if ('error' in result) return result
+      if (result.skipped.length) return { error: result.skipped[0].reason }
+      return result.drawings && Object.hasOwn(result.drawings, blockId)
+        ? result.drawings[blockId]
+        : { error: 'Live drawing tools require an updated doc-sync service' }
     },
   }
 }

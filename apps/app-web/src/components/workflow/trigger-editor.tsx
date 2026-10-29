@@ -125,7 +125,7 @@ export function TriggerEditor({
                 "flex flex-col items-start gap-1.5 rounded-lg border p-3 text-left transition",
                 selected
                   ? "border-primary bg-primary/5 ring-1 ring-primary/25"
-                  : "border-border hover:border-primary/40 hover:bg-muted/40",
+                  : "border-border hover:border-interaction/40 hover:bg-muted/40",
                 disabled && "cursor-not-allowed opacity-60",
               )}
             >

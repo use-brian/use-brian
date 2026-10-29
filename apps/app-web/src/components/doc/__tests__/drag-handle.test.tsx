@@ -133,9 +133,9 @@ describe("[COMP:app-web/drag-handle] Drop-indicator styling", () => {
     "utf8",
   );
 
-  it("themes the REAL prosemirror dropcursor class to --primary", () => {
+  it("themes the REAL prosemirror dropcursor class to neutral interaction ink", () => {
     expect(css).toMatch(
-      /\.prosemirror-dropcursor-block[\s\S]{0,200}background-color:[^;]*var\(--primary\)/,
+      /\.prosemirror-dropcursor-block[\s\S]{0,200}background-color:[^;]*var\(--interaction\)/,
     );
   });
 

@@ -927,7 +927,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
               type="button"
               disabled={bulkBusy}
               onClick={selectAllFiltered}
-              className="inline-flex h-9 items-center rounded-md px-2 text-[12.5px] font-medium text-primary hover:bg-primary/10 disabled:opacity-50 md:h-7"
+              className="inline-flex h-9 items-center rounded-md px-2 text-[12.5px] font-medium text-primary hover:bg-interaction/10 disabled:opacity-50 md:h-7"
             >
               {format(t.selectAllFiltered, {
                 count: String(filtered.length),
@@ -1356,7 +1356,7 @@ function TaskTableRow({
     <div
       className={cn(
         "group/task grid grid-cols-[28px_minmax(0,1fr)_128px_150px_96px_110px_100px] items-center gap-1 px-4 py-1.5 transition-colors",
-        selected ? "bg-primary/5" : "hover:bg-muted/40",
+        selected ? "bg-interaction/10" : "hover:bg-muted/40",
       )}
     >
       <Checkbox
@@ -1470,7 +1470,7 @@ function TaskCardRow({
       data-task-card-row
       className={cn(
         "flex items-start gap-3 border-b border-border/40 px-4 py-3 transition-colors",
-        selected && "bg-primary/5",
+        selected && "bg-interaction/10",
       )}
     >
       <Checkbox

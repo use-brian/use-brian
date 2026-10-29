@@ -13,23 +13,40 @@
 @source "../../../../packages/views-renderer/src";
 @source "../../../../packages/chat-ui/src";
 
+/* Interaction chrome stays achromatic even when a custom palette supplies
+   legacy coloured focus tokens. Specificity outranks the generated theme style. */
+@theme inline {
+  --color-interaction: var(--interaction);
+}
+:root:root {
+  --interaction: #373737;
+  --interaction-border: #737373;
+}
+:root:root.dark {
+  --interaction: #D4D4D4;
+  --interaction-border: #A3A3A3;
+}
+:root:root,
+:root:root[data-palette="custom"] {
+  --ring: var(--interaction-border);
+  --sidebar-ring: var(--interaction-border);
+  --selection-2: var(--interaction);
+}
+
 /* The `custom` palette — an AI-generated theme whose core tokens are injected as
-   a <style> at runtime (see lib/theme.tsx) — opts into branded navigation,
-   selection, and sidebar treatments keyed off its own hues. Filled actions stay
+   a <style> at runtime (see lib/theme.tsx) — keeps its branded sidebar surface.
+   Navigation and selection use neutral interaction feedback. Filled actions stay
    on the neutral --action pair and therefore inherit the generated theme's own
    foreground/background contrast. */
 [data-palette="custom"] {
-  --nav-active-bg: linear-gradient(135deg, var(--primary), var(--accent-2));
-  --nav-active-fg: var(--primary-foreground);
-  --nav-active-glow:
-    0 1px 2px color-mix(in oklab, var(--foreground) 12%, transparent),
-    0 6px 16px -8px color-mix(in oklab, var(--accent-2) 60%, transparent);
+  --nav-active-bg: color-mix(in srgb, var(--interaction) 12%, transparent);
+  --nav-active-fg: var(--foreground);
+  --nav-active-glow: none;
   --sidebar-surface-image: linear-gradient(
     180deg,
     color-mix(in oklab, var(--primary) 7%, var(--sidebar)) 0%,
     var(--sidebar) 30%
   );
-  --selection-2: var(--accent-2);
 }
 
 /* Block-action "Color" palette — the ONLY place these hues live. The shared
@@ -218,28 +235,16 @@
     cursor: not-allowed;
   }
 
-  /* Text selection — a duotone BLEND (one solid colour; ::selection can't take a
-     gradient): mix `--primary` with `--selection-2`, then 42% alpha so it reads
-     as a tint. `--selection-2` is the brand's second hue on the slate / indigo /
-     emerald / sunset palettes and EQUALS `--primary` on Notion, so it collapses to
-     a single Notion-blue selection there. */
+  /* A neutral selection band preserves legible text in both themes. */
   ::selection {
-    background-color: color-mix(
-      in srgb,
-      color-mix(in oklab, var(--primary) 62%, var(--selection-2)) 42%,
-      transparent
-    );
+    background-color: color-mix(in srgb, var(--interaction) 22%, transparent);
     color: var(--foreground);
   }
-  /* Dark mode: `--foreground` is a light grey (#D4D4D4), and the 42% tint above
-     composites to a mid-tone blue over the dark surface — so light-grey text on
-     it lands at ~3.6:1 and selected text reads washed out (the light-mode pairing
-     of DARK foreground on a LIGHT tint doesn't invert cleanly). Keep the same
-     background tint (highlight prominence then matches light mode) and brighten
-     just the selected text toward white to clear WCAG AA (~4.9:1). Derived from
-     `--foreground` so the custom dark palette keeps its hue. */
   .dark ::selection {
     color: color-mix(in srgb, var(--foreground) 25%, white);
+  }
+  input[type="checkbox"], input[type="radio"], input[type="range"] {
+    accent-color: var(--interaction);
   }
 
   /* Custom scrollbar — slim, primary-tinted, not in your face. */
@@ -338,8 +343,8 @@
     [role="checkbox"], [role="radio"], [role="switch"], [role="slider"]
   ):not(:is(input, textarea, select, [contenteditable], [role="combobox"], [role="separator"])):focus-visible {
     background-image: linear-gradient(
-      color-mix(in srgb, currentColor 16%, transparent),
-      color-mix(in srgb, currentColor 16%, transparent)
+      color-mix(in srgb, oklch(from currentColor l 0 h) 16%, transparent),
+      color-mix(in srgb, oklch(from currentColor l 0 h) 16%, transparent)
     ) !important;
   }
   /* Shared chat actions paint a smaller disc inside a 44px touch target. */
@@ -545,12 +550,12 @@
   }
   /* Drop-target affordance — `doc-media-paste.ts` toggles `.doc-drag-over` on
      the editor DOM while a FILE drag hovers it (block-reorder drags never set
-     it). A soft inset brand ring + wash says "drop to upload"; on drop, an
+     it). A soft inset neutral ring + wash says "drop to upload"; on drop, an
      empty media block inserts and uploads its bytes in place. */
   .doc-collab-editor .ProseMirror.doc-drag-over {
     border-radius: 0.5rem;
-    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--primary) 55%, transparent);
-    background-color: color-mix(in srgb, var(--primary) 6%, transparent);
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--interaction) 55%, transparent);
+    background-color: color-mix(in srgb, var(--interaction) 6%, transparent);
     transition:
       box-shadow 120ms ease,
       background-color 120ms ease;
@@ -1137,16 +1142,16 @@
   }
   .doc-collab-editor .ProseMirror ul[data-type="taskList"] li > label > input[type="checkbox"]:checked,
   .doc-public-body .doc-todo-check > input[type="checkbox"]:checked {
-    background-color: var(--primary);
-    border-color: var(--primary);
+    background-color: var(--action);
+    border-color: var(--action);
   }
-  /* Tick: a mask over a `--primary-foreground` fill, so it stays legible on the
+  /* Tick: a mask over a `--action-foreground` fill, so it stays legible on the
      brand colour in every palette + both themes (the token is the theme's own
      on-primary ink). Scales in on check. */
   .doc-collab-editor .ProseMirror ul[data-type="taskList"] li > label > span,
   .doc-public-body .doc-todo-check > span {
     pointer-events: none;
-    background-color: var(--primary-foreground);
+    background-color: var(--action-foreground);
     transform: scale(0);
     transition: transform 0.12s ease;
     -webkit-mask-image: var(--doc-check-tick);
@@ -1226,7 +1231,7 @@
     content: "";
     position: absolute;
     inset: 0;
-    background: color-mix(in srgb, var(--primary) 14%, transparent);
+    background: color-mix(in srgb, var(--interaction) 14%, transparent);
     pointer-events: none;
   }
   /* Notion-style simple-table edge chrome (`table-view.tsx`). The top/left
@@ -1315,8 +1320,8 @@
     touch-action: none;
     user-select: none;
     border-radius: 6px;
-    background: var(--primary);
-    color: var(--primary-foreground);
+    background: var(--interaction);
+    color: var(--background);
     box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 18%, transparent);
     cursor: grab;
     opacity: 0;
@@ -1344,13 +1349,13 @@
   }
   .doc-collab-editor .ProseMirror .doc-table-axis-handle:hover,
   .doc-collab-editor .ProseMirror .doc-table-axis-handle[aria-expanded="true"] {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 18%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--interaction) 18%, transparent);
   }
   .doc-collab-editor .ProseMirror .doc-table-axis-handle:active {
     cursor: grabbing;
   }
   .doc-collab-editor .ProseMirror .doc-table-axis-handle[data-drop-target="true"] {
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 35%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--interaction) 35%, transparent);
   }
   /* Touch (responsive contract M2): a finger never hovers, so a MOUNTED slot
      (the tapped cell's row + column, see `revealHandlesOnTap`) paints the
@@ -1373,8 +1378,8 @@
     position: absolute;
     z-index: 3;
     pointer-events: none;
-    border: 2px solid var(--primary);
-    background: color-mix(in srgb, var(--primary) 7%, transparent);
+    border: 2px solid var(--interaction);
+    background: color-mix(in srgb, var(--interaction) 7%, transparent);
     border-radius: 2px;
   }
   .doc-collab-editor .ProseMirror .doc-table-drop-indicator-row {
@@ -1386,22 +1391,22 @@
     bottom: 18px;
   }
   .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="row"] tr:has(.selectedCell) > .selectedCell {
-    box-shadow: inset 0 2px var(--primary), inset 0 -2px var(--primary);
+    box-shadow: inset 0 2px var(--interaction), inset 0 -2px var(--interaction);
   }
   .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="row"] tr:has(.selectedCell) > .selectedCell:first-child {
-    box-shadow: inset 2px 0 var(--primary), inset 0 2px var(--primary), inset 0 -2px var(--primary);
+    box-shadow: inset 2px 0 var(--interaction), inset 0 2px var(--interaction), inset 0 -2px var(--interaction);
   }
   .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="row"] tr:has(.selectedCell) > .selectedCell:last-child {
-    box-shadow: inset -2px 0 var(--primary), inset 0 2px var(--primary), inset 0 -2px var(--primary);
+    box-shadow: inset -2px 0 var(--interaction), inset 0 2px var(--interaction), inset 0 -2px var(--interaction);
   }
   .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="column"] .selectedCell {
-    box-shadow: inset 2px 0 var(--primary), inset -2px 0 var(--primary);
+    box-shadow: inset 2px 0 var(--interaction), inset -2px 0 var(--interaction);
   }
   .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="column"] tr:first-child > .selectedCell {
-    box-shadow: inset 2px 0 var(--primary), inset -2px 0 var(--primary), inset 0 2px var(--primary);
+    box-shadow: inset 2px 0 var(--interaction), inset -2px 0 var(--interaction), inset 0 2px var(--interaction);
   }
   .doc-collab-editor .ProseMirror .doc-table-frame[data-selected-axis="column"] tr:last-child > .selectedCell {
-    box-shadow: inset 2px 0 var(--primary), inset -2px 0 var(--primary), inset 0 -2px var(--primary);
+    box-shadow: inset 2px 0 var(--interaction), inset -2px 0 var(--interaction), inset 0 -2px var(--interaction);
   }
   .doc-table-action-menu .doc-table-action-search {
     display: flex;
@@ -1416,7 +1421,7 @@
     color: var(--muted-foreground);
   }
   .doc-table-action-menu .doc-table-action-search:focus-within {
-    border-color: var(--primary);
+    border-color: var(--interaction);
     box-shadow: none;
   }
   .doc-table-action-menu .doc-table-action-search svg {
@@ -1694,7 +1699,7 @@
   .doc-collab-editor .prosemirror-dropcursor-block,
   .doc-collab-editor .prosemirror-dropcursor-inline {
     /* Mostly translucent so the bar reads as a soft guide, not a hard rule. */
-    background-color: color-mix(in oklab, var(--primary) 30%, transparent) !important;
+    background-color: color-mix(in oklab, var(--interaction) 30%, transparent) !important;
     border-radius: 9999px;
   }
   .doc-collab-editor .prosemirror-dropcursor-block {
@@ -1710,8 +1715,8 @@
   .doc-collab-editor .ProseMirror-selectednode {
     outline: none;
     border-radius: 6px;
-    background-color: color-mix(in oklab, var(--primary) 9%, transparent);
-    box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--primary) 30%, transparent);
+    background-color: color-mix(in oklab, var(--interaction) 9%, transparent);
+    box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--interaction) 30%, transparent);
   }
 
   /* ── Multi-block area selection (NodeRange) ─────────────────────────
@@ -1719,13 +1724,13 @@
      `NodeRange` extension (`doc-schema.ts`) decorates each block in the range
      with `.ProseMirror-selectednoderange` (both as a live drag PREVIEW and once
      the `NodeRangeSelection` lands); ProseMirror's native drag then moves the
-     whole selection. Each block gets a translucent `--primary` band — they abut
+     whole selection. Each block gets a translucent neutral band — they abut
      into one continuous selected region, and the band reads in both themes. The
      native text `::selection` blue is suppressed WITHIN selected blocks (scoped
      here, not editor-wide, so a normal text selection elsewhere is untouched)
      so only the block bands show, not a doubled text highlight. */
   .doc-collab-editor .ProseMirror-selectednoderange {
-    background-color: color-mix(in oklab, var(--primary) 16%, transparent);
+    background-color: color-mix(in oklab, var(--interaction) 16%, transparent);
     border-radius: 4px;
   }
   .doc-collab-editor .ProseMirror-selectednoderange ::selection,
@@ -1737,7 +1742,7 @@
      the menu acts on. Applied as a view-only DOM class by `drag-handle.tsx`
      (never a ProseMirror selection, so it doesn't sync through Yjs). */
   .doc-collab-editor .doc-block-selected {
-    background-color: color-mix(in oklab, var(--primary) 16%, transparent);
+    background-color: color-mix(in oklab, var(--interaction) 16%, transparent);
     border-radius: 4px;
   }
   /* During an AREA (range) select, a node-view block (toggle / callout / embed)
@@ -1766,8 +1771,8 @@
      of the area being selected WHILE dragging (the NodeRange bands above only
      tint blocks once the Y-band lands on them; over empty space this is the only
      feedback). Mounted on <body>, so it's NOT scoped under `.doc-collab-editor`
-     — the `--primary` token resolves from `:root`/`.dark`. On-brand BLUE: a
-     translucent `--primary` fill with NO border — a borderless soft band matching
+     — the `--interaction` token resolves from `:root`/`.dark`. Neutral interaction feedback: a
+     translucent neutral fill with NO border — a borderless soft band matching
      the NodeRange block tint, so the sweep reads as one continuous wash rather
      than a hard-outlined box (an earlier version framed the area in a solid 1px
      `--primary` outline). z-index sits above the z-40 sidebar / z-50 chrome.
@@ -1776,7 +1781,7 @@
     position: fixed;
     z-index: 60;
     pointer-events: none;
-    background-color: color-mix(in oklab, var(--primary) 18%, transparent);
+    background-color: color-mix(in oklab, var(--interaction) 18%, transparent);
     border-radius: 2px;
   }
 
@@ -1817,16 +1822,16 @@
 }
 
 /* Deep-link target flash — "Copy link to block" scroll lands here. A brief
-   primary ring + faint tint that fades over ~1.5s. Top-level so the @keyframes
-   is global; dark-aware via the --primary token. */
+   neutral ring + faint tint that fades over ~1.5s. Top-level so the @keyframes
+   is global; dark-aware via the --interaction token. */
 .doc-collab-editor .ProseMirror .doc-block-target {
   border-radius: 4px;
   animation: doc-block-target-fade 1500ms ease-out forwards;
 }
 @keyframes doc-block-target-fade {
   from {
-    box-shadow: 0 0 0 2px var(--primary);
-    background-color: color-mix(in oklab, var(--primary) 14%, transparent);
+    box-shadow: 0 0 0 2px var(--interaction);
+    background-color: color-mix(in oklab, var(--interaction) 14%, transparent);
   }
   to {
     box-shadow: 0 0 0 2px transparent;
@@ -2075,7 +2080,7 @@
   }
   .hover-lift:hover {
     transform: translate3d(0, -1px, 0);
-    box-shadow: 0 6px 22px -12px color-mix(in srgb, var(--primary) 28%, transparent);
+    box-shadow: 0 6px 22px -12px color-mix(in srgb, var(--interaction) 28%, transparent);
   }
 
   /* Press-down feedback for primary buttons. */
@@ -2727,24 +2732,24 @@ html[data-vt-back="true"]::view-transition-new(root) {
   text-decoration: underline;
 }
 .doc-timecode:focus-visible {
-  background: color-mix(in srgb, currentColor 16%, transparent);
+  background: color-mix(in srgb, oklch(from currentColor l 0 h) 16%, transparent);
 }
 
 /* Find on page (⌘F / Ctrl+F) — painted by find-in-page.ts as view-only
-   decorations. Deliberately BLUE, not the comment highlight's warm yellow:
+   decorations. Neutral grey, distinct from the comment highlight's warm yellow:
    a search hit and a commented span are different claims about the same
    text and must never be confused for one another. The active hit is the
    strong swatch (the one the counter is pointing at), the rest are faint.
    See docs/architecture/features/doc.md → "Find on page". */
 .doc-find-match {
-  background: color-mix(in srgb, var(--primary) 22%, transparent);
+  background: color-mix(in srgb, var(--interaction) 22%, transparent);
   border-radius: 2px;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
 .doc-find-match-active {
-  background: color-mix(in srgb, var(--primary) 45%, transparent);
-  box-shadow: 0 0 0 1px var(--primary);
+  background: color-mix(in srgb, var(--interaction) 28%, transparent);
+  box-shadow: 0 0 0 1px var(--interaction);
 }
 
 /* Doc comments (chat-as-threads) — highlight + gutter badge.
@@ -2900,9 +2905,9 @@ button.doc-comment-card:hover {
 
 /* Comment rail card — the right-margin thread card in BOTH states (collapsed
    preview + expanded thread). Flat (no shadow, unlike the floating popover
-   above): a 2px resting-grey border that turns brand-blue only while the card
+   above): a 2px resting-grey border that strengthens to neutral ink only while the card
    holds focus. The focus state is CSS `:focus-within`, NOT a JS flag, so the
-   blue clears the instant focus leaves — including across the collapsed↔expanded
+   emphasis clears the instant focus leaves — including across the collapsed↔expanded
    swap, where a JS flag had no blur to react to and stuck blue.
    The expand/collapse SIZE change is tweened in JS (RailCard, via the Web
    Animations API on `height`) rather than CSS, because the height is content-
@@ -2914,7 +2919,7 @@ button.doc-comment-card:hover {
   transition: border-color 160ms ease;
 }
 .doc-rail-card:focus-within {
-  border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+  border-color: color-mix(in srgb, var(--interaction) 30%, transparent);
 }
 
 /* ── Markdown prose styling for chat / comment messages ──────────

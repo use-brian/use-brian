@@ -41,7 +41,7 @@
  * [COMP:app-web/sidebar-panel-chat]
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Archive, Brain, ChevronRight, Folder, FolderOpen, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
@@ -70,6 +70,7 @@ import {
 import {
   patchPersonalChatSessions,
   patchSharedChatSessions,
+  cacheCreatedChatSession,
   useChatSessionsData,
   useProjectChatSessionsData,
   setChatSessionArchived,
@@ -78,6 +79,7 @@ import { listContextProjects, type ContextProject } from "@/lib/api/context-scop
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { chatArchivedSessionsCacheKey, chatSessionsCacheKey, chatSharedSessionsCacheKey, surfaceDataKey } from "@/lib/surface-prefetch";
 import { isRoomUnread } from "@/lib/chat-seen";
+import { navigateChatLocation } from "@/lib/chat-last-location";
 import { requestSidebarClose } from "@/lib/sidebar-close";
 
 /** Compact single-line rows, with a 44px phone target (M3) and room for the row menu. */
@@ -85,7 +87,7 @@ const rowCls = (active: boolean) =>
   cn(
     "flex min-h-11 w-full items-center rounded-[10px] px-2.5 py-1 text-left text-sm transition-colors md:min-h-8 md:py-0.5",
     active
-      ? "doc-nav-active font-medium text-sidebar-accent-foreground"
+      ? "bg-[#ebedef] text-sidebar-accent-foreground dark:bg-sidebar-accent"
       : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
   );
 
@@ -116,6 +118,13 @@ function SidebarTitle({ children }: { children: string }) {
     } as CSSProperties}>
     <span ref={textRef} className={styles.titleText}>{children}</span>
   </span>;
+}
+
+/** Skeletons describe first entry, never a renewal of a list already painted. */
+function useInitialRailLoad(key: string | null, hasData: boolean): boolean {
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  useEffect(() => { if (hasData) setLoadedKey(key); }, [key, hasData]);
+  return !hasData && loadedKey !== key;
 }
 
 /** Cold-cache fallback: rows shaped like the rail's, never a sentence (N4). */
@@ -180,6 +189,9 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     refresh,
   } = useChatSessionsData(workspaceId);
   const projects = useCachedResource(surfaceDataKey("projects", workspaceId), () => listContextProjects(workspaceId, true));
+  const initialPersonalLoad = useInitialRailLoad(chatSessionsCacheKey(workspaceId), rows !== null);
+  const initialProjectsLoad = useInitialRailLoad(surfaceDataKey("projects", workspaceId), projects.data !== undefined);
+  const personalUnavailable = Boolean(personalError) || (rows === null && !initialPersonalLoad);
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [archiving, setArchiving] = useState<string | null>(null);
@@ -416,6 +428,13 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     }
   };
 
+  const onChatLinkClick = (event: MouseEvent<HTMLAnchorElement>, href: string) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey ||
+        (event.currentTarget.target && event.currentTarget.target !== "_self") || event.currentTarget.hasAttribute("download")) return;
+    if (navigateChatLocation(href)) event.preventDefault();
+    requestSidebarClose();
+  };
+
   const renderRow = (
     row: DocSession | WorkspaceSession,
     href: string,
@@ -460,7 +479,8 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       </span>}>
       <Link
         href={href}
-        onClick={() => requestSidebarClose()}
+        prefetch={false}
+        onClick={event => onChatLinkClick(event, href)}
         aria-current={row.id === activeSessionId ? "page" : undefined}
         className={cn(rowCls(row.id === activeSessionId), styles.conversation)}
       >
@@ -551,17 +571,11 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     try {
       const created = await createWorkspaceSession(workspaceId, undefined, { contextGroupId: null, contextProjectId: projectId });
       setError(null);
-      router.push(
-        `${base}?v=workspace&s=${encodeURIComponent(created.id)}`,
-        { scroll: false },
-      );
+      const href = `${base}?v=workspace&s=${encodeURIComponent(created.id)}`;
+      if (!navigateChatLocation(href)) router.push(href, { scroll: false });
       // The fresh room must resolve as a room the moment the surface reads
       // the list (seeded even on a cold slot); the signal revalidates.
-      patchSharedChatSessions(
-        workspaceId,
-        (rows) => [created, ...rows.filter((r) => r.id !== created.id)],
-        { seed: true },
-      );
+      cacheCreatedChatSession(workspaceId, created, "workspace");
       dispatchChatSessionsRefresh(workspaceId);
     } catch {
       setError(t.newWorkspaceChatFailed);
@@ -575,6 +589,8 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       {view === "personal" ? (
         <Link
           href={base}
+          prefetch={false}
+          onClick={event => onChatLinkClick(event, base)}
           aria-current={onChatSurface && !activeSessionId ? "page" : undefined}
           className={cn(
             rowCls(false),
@@ -607,8 +623,8 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         <div>
           <div className={sectionHeaderCls}>{t.railAria}</div>
           <div className="flex flex-col">
-            {rows === null && !personalError && <RailRowsSkeleton />}
-            {Boolean(personalError) && (
+            {initialPersonalLoad && !personalError && <RailRowsSkeleton />}
+            {personalUnavailable && (
               <div role="alert" className="px-2 py-1 text-xs text-sidebar-foreground/70">
                 <p>{t.railLoadFailed}</p>
                 <button type="button" disabled={revalidating} onClick={() => void refresh()}
@@ -637,7 +653,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         <div className="flex flex-col">
           <ProjectChatGroup workspaceId={workspaceId} project={null} activeSessionId={activeSessionId}
             renderRow={renderRow} onCreate={startWorkspaceChat} creating={creatingShared} />
-          {projects.loading && <RailRowsSkeleton rows={2} />}
+          {projects.loading && initialProjectsLoad && <RailRowsSkeleton rows={2} />}
           {Boolean(projects.error) && <p role="alert" className="px-2 text-xs text-destructive">{t.projectChatsFailed}</p>}
           {(projects.data ?? []).filter(p => p.status === "active" && p.shared?.status !== "quarantined").map(project => (
             <ProjectChatGroup key={project.id} workspaceId={workspaceId} project={project} activeSessionId={activeSessionId}
@@ -734,6 +750,7 @@ function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, on
     activeSessionId, rows.data?.some(row => row.id === activeSessionId) ?? false, project === null,
   );
   const window = useChatGroupWindow(scopeKey, rows.data ?? [], activeSessionId);
+  const initialLoad = useInitialRailLoad(scopeKey, rows.data !== undefined);
   const canCreate = !project || !project.shared || project.shared.myRole === "owner" || project.shared.myRole === "participant";
   const FolderIcon = open ? FolderOpen : Folder;
   return <section className={cn(styles.chatGroup, "flex flex-col gap-0.5")} data-open={open} data-workspace-chat-group={project?.id ?? "general"}>
@@ -754,7 +771,7 @@ function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, on
         disabled={creating} onClick={() => void onCreate(project?.id ?? null)}><SquarePen aria-hidden className="size-4" /></button>}
     </div>
     {open && <div className="flex flex-col gap-0.5" data-chat-group-rows>
-      {rows.loading && <RailRowsSkeleton />}
+      {rows.loading && initialLoad && <RailRowsSkeleton />}
       {Boolean(rows.error) && <p role="alert" className="px-2 text-xs text-destructive">{t.projectChatsFailed}</p>}
       {rows.data?.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">{t.workspaceRailEmpty}</p>}
       {window.visibleRows.map(row => renderRow(row, `/w/${workspaceId}/chat?v=workspace&s=${encodeURIComponent(row.id)}`))}

@@ -101,3 +101,21 @@ export function seedChatLocation(
   if (stored.view === "personal" && !stored.sessionId) return null;
   return stored;
 }
+
+/**
+ * Chat selection is client-owned URL state. Next's patched History API updates
+ * useSearchParams without an RSC request; pass null so Next copies its own
+ * history fields (passing history.state would bypass that integration).
+ * Cross-route moves and the desktop HashRouter remain ordinary router work.
+ */
+export function navigateChatLocation(href: string, replace = false): boolean {
+  if (typeof window === "undefined" || window.location.hash.startsWith("#/")) return false;
+  const current = new URL(window.location.href);
+  const next = new URL(href, current);
+  if (next.origin !== current.origin || next.pathname !== current.pathname ||
+      !/^\/w\/[^/]+(?:\/chat)?\/?$/.test(current.pathname)) return false;
+  if (next.href !== current.href) {
+    window.history[replace ? "replaceState" : "pushState"](null, "", next.href);
+  }
+  return true;
+}
