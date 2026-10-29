@@ -85,7 +85,8 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
       mobile ? "flex max-h-[50dvh] min-h-0 shrink-0 flex-col gap-0.5 px-2 pb-2 md:hidden" : cn(styles.rail, "hidden h-full min-h-0 w-14 shrink-0 flex-col items-center gap-2 px-2 pt-px md:flex"),
     )}>
       {!mobile && <div data-workspace-menu-slot aria-hidden className="h-16 w-full shrink-0" />}
-      <div data-workspace-app-rail-scroll className={cn("flex min-h-0 w-full flex-1 flex-col overflow-y-auto overscroll-contain", mobile ? "gap-0.5" : "items-center gap-2 [scrollbar-width:none]")}>
+      {/* Include the rail gutters in the scroll viewport so corner badges fit. */}
+      <div data-workspace-app-rail-scroll className={cn("flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain", mobile ? "-mx-1 gap-0.5 px-1" : "w-14 items-center gap-2 px-2 [scrollbar-width:none]")}>
       {destinations.map(({ name, aria, icon: Icon, href, active, shortcut, live }) => (
         <div key={href} className="shrink-0">
           {wrap(name, <Link href={href} {...prefetch(href)} onClick={navigate} aria-label={live && liveCount > 0 ? format(copy.liveApp.activeWorkBadgeAria, { count: liveCount }) : aria ?? name} aria-current={active ? "page" : undefined} className={itemClass(active)}>

@@ -83,7 +83,7 @@ import { requestSidebarClose } from "@/lib/sidebar-close";
 /** Compact single-line rows, with a 44px phone target (M3) and room for the row menu. */
 const rowCls = (active: boolean) =>
   cn(
-    "flex min-h-11 w-full items-center rounded-md px-2 py-1 pr-1 text-left text-sm transition-colors md:min-h-8 md:py-0.5",
+    "flex min-h-11 w-full items-center rounded-[10px] px-2.5 py-1 text-left text-sm transition-colors md:min-h-8 md:py-0.5",
     active
       ? "doc-nav-active font-medium text-sidebar-accent-foreground"
       : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
@@ -132,7 +132,21 @@ function RailRowsSkeleton({ rows = 4 }: { rows?: number }) {
 }
 
 const sectionHeaderCls =
-  "px-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45";
+  "px-2.5 pb-2.5 text-sm font-normal text-sidebar-foreground/50";
+
+/** A local display window; selected older chats stay reachable without a long rail. */
+function useChatGroupWindow<T extends { id: string }>(key: string, rows: T[], activeSessionId: string | null) {
+  const [displayWindow, setDisplayWindow] = useState({ key, count: 5 });
+  const count = displayWindow.key === key ? displayWindow.count : 5;
+  const visibleRows = rows.slice(0, count);
+  const selected = rows.find(row => row.id === activeSessionId);
+  if (selected && !visibleRows.some(row => row.id === selected.id)) visibleRows.push(selected);
+  return {
+    visibleRows,
+    hasHidden: rows.length > count,
+    showMore: () => setDisplayWindow(current => ({ key, count: Math.min(rows.length, current.key === key ? current.count : 5) + 5 })),
+  };
+}
 
 const ROOM_ACTIVITY_STATUS_POLL_MS = 3_000;
 const ROOM_ACTIVITY_OVERRIDE_GRACE_MS = 10_000;
@@ -448,7 +462,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         href={href}
         onClick={() => requestSidebarClose()}
         aria-current={row.id === activeSessionId ? "page" : undefined}
-        className={rowCls(row.id === activeSessionId)}
+        className={cn(rowCls(row.id === activeSessionId), styles.conversation)}
       >
         <span className="flex min-w-0 flex-1 items-center gap-1">
           <SidebarTitle>{title}</SidebarTitle>
@@ -557,17 +571,17 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   }, [base, creatingShared, router, t, workspaceId]);
 
   return (
-    <div className="-mx-1 flex min-w-0 flex-col gap-3 pt-1 md:-mx-2 md:gap-2 md:pt-0">
+    <div className="-mx-1 flex min-w-0 flex-col gap-3 pt-1 md:-mx-[3px] md:gap-5 md:pt-0">
       {view === "personal" ? (
         <Link
           href={base}
           aria-current={onChatSurface && !activeSessionId ? "page" : undefined}
           className={cn(
             rowCls(false),
-            "flex items-center gap-3 pr-2 text-base text-sidebar-foreground md:min-h-8 md:gap-2 md:pr-2 md:text-sm",
+            "flex items-center gap-2 text-base text-sidebar-foreground md:min-h-8 md:text-sm",
           )}
         >
-          <SquarePen className="size-[18px] shrink-0" aria-hidden />
+          <SquarePen className="size-4 shrink-0" aria-hidden />
           <span className="min-w-0 flex-1 truncate">{t.newChat}</span>
         </Link>
       ) : (
@@ -577,10 +591,10 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
           disabled={creatingShared}
           className={cn(
             rowCls(false),
-            "flex items-center gap-3 pr-2 text-base text-sidebar-foreground md:min-h-8 md:gap-2 md:pr-2 md:text-sm disabled:opacity-50",
+            "flex items-center gap-2 text-base text-sidebar-foreground md:min-h-8 md:text-sm disabled:opacity-50",
           )}
         >
-          <SquarePen className="size-[18px] shrink-0" aria-hidden />
+          <SquarePen className="size-4 shrink-0" aria-hidden />
           <span className="min-w-0 flex-1 truncate">{t.newWorkspaceChat}</span>
         </button>
       )}
@@ -643,7 +657,7 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
             aria-expanded={showAmbient}
             className={cn(
               sectionHeaderCls,
-              "group flex w-full items-center gap-1 text-left transition-colors hover:text-sidebar-foreground/70",
+              "group flex min-h-11 w-full items-center gap-1 text-left transition-colors hover:text-sidebar-foreground/70 md:min-h-8",
             )}
           >
             <span className="truncate">{t.otherConversations}</span>
@@ -679,14 +693,17 @@ function PersonalChatGroup({ workspaceId, group, activeSessionId, renderRow }: {
   activeSessionId: string | null;
   renderRow: (row: DocSession, href: string) => React.ReactNode;
 }) {
+  const t = useT().chatApp;
+  const scopeKey = `doc:personal-chat-group:${chatSessionsCacheKey(workspaceId)}:${group.id}`;
   const [open, toggleOpen] = useChatGroupDisclosure(
-    `doc:personal-chat-group:${chatSessionsCacheKey(workspaceId)}:${group.id}`,
+    scopeKey,
     activeSessionId, group.rows.some(row => row.id === activeSessionId), group.kind === "general",
   );
+  const window = useChatGroupWindow(scopeKey, group.rows, activeSessionId);
   const Icon = group.kind === "channel" ? MessageSquare : open ? FolderOpen : Folder;
-  return <section className="flex flex-col gap-0.5" data-personal-chat-group={group.kind}>
+  return <section className={cn(styles.chatGroup, "flex flex-col gap-0.5")} data-open={open} data-personal-chat-group={group.kind}>
     <button type="button"
-      className={cn(styles.titleHost, "flex min-h-11 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}
+      className={cn(styles.titleHost, "flex min-h-11 w-full min-w-0 items-center gap-2 rounded-[10px] px-2.5 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}
       aria-expanded={open} onClick={toggleOpen}
       title={group.sourceLabel && group.sourceLabel !== group.label ? `${group.label} (${group.sourceLabel})` : group.label}>
       {group.kind === "channel" ? <span aria-hidden className="flex size-4 shrink-0 items-center justify-center [&>svg]:size-4" data-channel-icon={group.transport}>
@@ -694,8 +711,11 @@ function PersonalChatGroup({ workspaceId, group, activeSessionId, renderRow }: {
       </span> : <Icon aria-hidden className="size-4 shrink-0" />}
       <SidebarTitle>{group.label}</SidebarTitle>
     </button>
-    {open && <div className="flex flex-col gap-0.5 pl-[22px]">
-      {group.rows.map(row => renderRow(row, `/w/${workspaceId}/chat?s=${encodeURIComponent(row.id)}`))}
+    {open && <div className="flex flex-col gap-0.5" data-chat-group-rows>
+      {window.visibleRows.map(row => renderRow(row, `/w/${workspaceId}/chat?s=${encodeURIComponent(row.id)}`))}
+      {window.hasHidden && <button type="button" data-chat-show-more
+        className={cn(rowCls(false), styles.conversation, "text-sidebar-foreground/50")}
+        aria-label={`${t.moreChats}: ${group.label}`} onClick={window.showMore}>{t.moreChats}</button>}
     </div>}
   </section>;
 }
@@ -708,15 +728,17 @@ function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, on
 }) {
   const t = useT().chatApp;
   const rows = useProjectChatSessionsData(workspaceId, project?.id ?? null);
+  const scopeKey = `doc:chat-group:${chatSharedSessionsCacheKey(workspaceId, project?.id ?? null)}`;
   const [open, toggleOpen] = useChatGroupDisclosure(
-    `doc:chat-group:${chatSharedSessionsCacheKey(workspaceId, project?.id ?? null)}`,
+    scopeKey,
     activeSessionId, rows.data?.some(row => row.id === activeSessionId) ?? false, project === null,
   );
+  const window = useChatGroupWindow(scopeKey, rows.data ?? [], activeSessionId);
   const canCreate = !project || !project.shared || project.shared.myRole === "owner" || project.shared.myRole === "participant";
   const FolderIcon = open ? FolderOpen : Folder;
-  return <section className="flex flex-col gap-0.5" data-workspace-chat-group={project?.id ?? "general"}>
-    <div className={cn(styles.actionHost, styles.titleHost, "relative flex items-center rounded-md hover:bg-sidebar-accent")}>
-      <button type="button" className={cn(styles.groupToggle, "flex min-h-11 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}
+  return <section className={cn(styles.chatGroup, "flex flex-col gap-0.5")} data-open={open} data-workspace-chat-group={project?.id ?? "general"}>
+    <div className={cn(styles.actionHost, styles.titleHost, "relative flex items-center rounded-[10px] hover:bg-sidebar-accent")}>
+      <button type="button" className={cn(styles.groupToggle, "flex min-h-11 w-full min-w-0 items-center gap-2 rounded-[10px] px-2.5 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}
         aria-expanded={open} onClick={toggleOpen} title={project?.name ?? t.generalChats}
         onPointerUp={event => {
           // Safari need not focus a tapped button. Give hoverless users a
@@ -731,12 +753,15 @@ function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, on
         title={format(t.newChatInProject, { name: project?.name ?? t.generalChats })}
         disabled={creating} onClick={() => void onCreate(project?.id ?? null)}><SquarePen aria-hidden className="size-4" /></button>}
     </div>
-    {open && <div className="flex flex-col gap-0.5 pl-[22px]">
+    {open && <div className="flex flex-col gap-0.5" data-chat-group-rows>
       {rows.loading && <RailRowsSkeleton />}
       {Boolean(rows.error) && <p role="alert" className="px-2 text-xs text-destructive">{t.projectChatsFailed}</p>}
       {rows.data?.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">{t.workspaceRailEmpty}</p>}
-      {rows.data?.map(row => renderRow(row, `/w/${workspaceId}/chat?v=workspace&s=${encodeURIComponent(row.id)}`))}
-      {rows.hasMore && (rows.data?.length ?? 0) >= 50 && <button type="button" className="min-h-8 max-sm:min-h-11 px-2 text-sm text-muted-foreground" disabled={rows.paging} onClick={() => void rows.more()}>{t.moreChats}</button>}
+      {window.visibleRows.map(row => renderRow(row, `/w/${workspaceId}/chat?v=workspace&s=${encodeURIComponent(row.id)}`))}
+      {(window.hasHidden || (rows.hasMore && (rows.data?.length ?? 0) >= 50)) && <button type="button" data-chat-show-more
+        className={cn(rowCls(false), styles.conversation, "text-sidebar-foreground/50 disabled:opacity-50")}
+        aria-label={`${t.moreChats}: ${project?.name ?? t.generalChats}`} aria-busy={rows.paging || undefined}
+        disabled={rows.paging} onClick={async () => { if (!window.hasHidden) await rows.more(); window.showMore(); }}>{t.moreChats}</button>}
     </div>}
   </section>;
 }

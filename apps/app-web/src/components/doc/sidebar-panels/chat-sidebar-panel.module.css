@@ -5,6 +5,15 @@
   --chat-menu-space: 88px;
 }
 
+/* The shared title column moves inside a full-width selection/hover surface. */
+.conversation {
+  padding-left: 34px;
+}
+
+.chatGroup[data-open="true"] {
+  padding-bottom: 12px;
+}
+
 .titleViewport {
   display: block;
   flex: 1;
