@@ -492,7 +492,7 @@ async function handleInternalApply(
       res.end()
       return
     }
-    let result: { idMap: Record<string, string>; skipped: { opIndex: number; reason: string }[] } = {
+    let result: ReturnType<typeof applyOpsToYDoc> = {
       idMap: {},
       skipped: [],
     }
@@ -527,18 +527,21 @@ async function handleInternalApply(
     // when at least one op actually applied: a fully-skipped apply changes the
     // doc nothing, so Hocuspocus schedules no settle to drain the flag — leaving
     // it to mis-mark a later human edit as system.
-    if (result.skipped.length < ops.length) {
+    const skippedIndices = new Set(result.skipped.map(entry => entry.opIndex))
+    const writtenOps = ops.filter((op, index) => !skippedIndices.has(index) &&
+      (op.op !== 'drawing' || (Array.isArray(op.actions) && op.actions.length > 0)))
+    if (writtenOps.length) {
       pagesWithSystemWriteSinceStore.add(pageId)
     }
     // Heartbeat the page's assistant run with a coarse, client-localized step
     // derived from the ops that just landed — perfectly in sync with the blocks
     // appearing in the doc. No-ops if no run is open for this page (e.g. a
     // human-initiated apply outside a tracked turn).
-    runRegistry.progress({
+    if (writtenOps.length) runRegistry.progress({
       pageId,
-      step: deriveRunStep(ops),
-      blockId: deriveRunBlockId(ops),
-      toolName: 'patchPage',
+      step: deriveRunStep(writtenOps),
+      blockId: deriveRunBlockId(writtenOps),
+      toolName: writtenOps.at(-1)?.op === 'drawing' ? 'editDrawing' : 'patchPage',
     })
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(

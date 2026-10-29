@@ -324,3 +324,15 @@ describe('[COMP:files/parsers] parseFileContent — inline data URIs', () => {
   // alphabet has no `:` or `;`, so an encoded payload can never contain a data
   // URI. The image/PDF cases above are the standing contract for that.
 })
+
+
+describe('[COMP:doc/drawing-tools] attached drawing library parsing', () => {
+  const content = JSON.stringify({ type: 'excalidrawlib', version: 2, libraryItems: [{ id: 'shape', elements: [{ id: 'box', type: 'rectangle', x: 0, y: 0, width: 100, height: 100 }] }] })
+  it.each(['application/octet-stream', 'application/vnd.excalidrawlib+json'])('preserves validated library JSON with MIME %s', async mime => {
+    expect(await parseFileContent(Buffer.from(content), mime, 'Shapes.excalidrawlib')).toMatchObject({ text: content, summary: 'Drawing library: Shapes.excalidrawlib (1 items)' })
+  })
+  it('rejects invalid or oversized library uploads before caching', async () => {
+    await expect(parseFileContent(Buffer.from('{}'), 'application/octet-stream', 'invalid.excalidrawlib')).rejects.toThrow()
+    await expect(parseFileContent(Buffer.alloc(2 * 1024 * 1024 + 1), 'application/octet-stream', 'large.excalidrawlib')).rejects.toThrow('library-size')
+  })
+})

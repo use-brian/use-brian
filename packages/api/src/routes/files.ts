@@ -95,6 +95,7 @@ export const ALLOWED_MIME_PREFIXES = [
 export function isAllowedMime(mime: string, fileName?: string): boolean {
   const normalized = mime.toLowerCase().split(';', 1)[0]!.trim()
   return (
+    fileName?.toLowerCase().endsWith('.excalidrawlib') ||
     ALLOWED_MIME_PREFIXES.some((prefix) => normalized.startsWith(prefix)) ||
     isStructuredDocument(normalized, fileName)
   )

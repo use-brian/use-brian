@@ -2,6 +2,7 @@
  * File content parsers.
  * Convert supported documents to model-facing Markdown or native media data.
  */
+import { MAX_DRAWING_BYTES, parseLibrary } from '@use-brian/shared/drawing'
 import { estimateStringTokens } from '../compaction/compact.js'
 import {
   detectDocumentFormat,
@@ -198,6 +199,12 @@ async function parseFileContentInner(
   mimeType: string,
   fileName: string,
 ): Promise<ParsedFileContent> {
+  if (fileName.toLowerCase().endsWith('.excalidrawlib')) {
+    if (buffer.byteLength > MAX_DRAWING_BYTES) throw new Error('library-size')
+    const text = buffer.toString('utf-8')
+    const items = parseLibrary(text)
+    return { text, summary: `Drawing library: ${fileName} (${items.length} items)` }
+  }
   // Ask AnyDoc only about the bytes here. This prevents a truthful image/audio
   // MIME from losing to an unrelated filename extension while still allowing
   // a mislabeled Office/PDF payload to override text/plain.
