@@ -33,6 +33,14 @@ The ChatGPT lane uses Codex-managed OAuth and live model discovery (design:
 [`plans/chatgpt-codex-oauth.md`](./plans/chatgpt-codex-oauth.md)). It stays
 Beta until release validation passes on the supported OS matrix.
 
+Both `USEBRIAN_EDITION=oss` and `USEBRIAN_EDITION=outpost` enable the ChatGPT
+provider through the shared `selfManagedProviders` capability. API startup and
+authenticated connection routes use the same capability as Settings → Models →
+Providers. Outpost keeps its normal teammate authentication; enabling ChatGPT
+does not enable the OSS local-owner login. The ChatGPT connection is shared by
+the installation, rather than stored separately for each member or workspace.
+Hosted deployments and Cloud Run (`K_SERVICE`) do not start this local runtime.
+
 TypeSafe Jev is an optional classifier for small typed decisions, not a chat
 backend. `TYPESAFE_API_KEY` registers its transport, but every operation stays
 LLM-only until the deployment supplies an operation-specific, version-matched

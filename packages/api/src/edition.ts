@@ -17,6 +17,12 @@ export function deploymentCapabilities(): DeploymentCapabilities {
   return deploymentCapabilitiesFor(deploymentProfile())
 }
 
+/** Local provider runtimes are available to OSS and Outpost, independently of
+ * local-owner authentication. Keep hosted Cloud Run processes excluded. */
+export function isSelfManagedProviderEnv(): boolean {
+  return deploymentCapabilities().selfManagedProviders && !process.env.K_SERVICE
+}
+
 /** Open control-plane routes owned by the standalone OSS and Outpost API. */
 export function usesOpenStandaloneRoutes(profile: DeploymentProfile): boolean {
   return profile === 'oss' || profile === 'outpost'

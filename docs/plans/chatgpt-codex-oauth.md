@@ -4,8 +4,8 @@
 > lifecycle, routes, launcher handoff, routing, recovery controls, and
 > localized Settings surface are implemented. Clean-machine and disposable
 > live-account P3 validation remains before Supported.
-> **Scope:** The self-hosted OSS edition only for the first release.
-> **Last updated:** 2026-07-27.
+> **Scope:** Self-hosted OSS and Outpost deployments.
+> **Last updated:** 2026-10-29.
 > **Related:** [`../../../docs/plans/model-registry.md`](../../../docs/plans/model-registry.md),
 > [`../../../docs/architecture/engine/provider-abstraction.md`](../../../docs/architecture/engine/provider-abstraction.md),
 > [`../../packages/core/src/providers/types.ts`](../../packages/core/src/providers/types.ts),
@@ -13,7 +13,7 @@
 
 ## Outcome
 
-An OSS user can choose **Sign in with ChatGPT** during setup, complete the
+An OSS or Outpost user can choose **Sign in with ChatGPT** in Settings, complete the
 browser flow with an eligible ChatGPT account, and run Brian on the OpenAI
 models available to that account. No OpenAI API key is required for this path.
 
@@ -144,10 +144,16 @@ after the authenticated catalog intersects a reviewed active registry row.
 8. **Subscription and API billing stay distinct.** ChatGPT quota is not mapped
    onto Brian's per-token metered ledger. A future `OPENAI_API_KEY` provider is
    a separate OpenAI Platform lane with its own pricing and usage accounting.
-9. **OSS first.** V1 is local single-player only. Hosted/team support is
-   deferred because server-side storage of per-member subscription credentials,
-   workspace routing, compliance, and support boundaries need a separate
-   product decision.
+9. **Self-managed deployments.** OSS and Outpost share the
+   `selfManagedProviders` capability. The Settings card, API startup, and
+   connection routes use this capability rather than `localOwnerSession`:
+   Outpost uses authenticated teammate accounts and never gains local-owner
+   authentication from enabling the provider. The API also retains its
+   `K_SERVICE` exclusion and the embedding host's
+   `startLocalSubscriptionProvider: false` opt-out. Connection routes remain
+   behind `requireAuth`; the Codex account and preference belong to the
+   installation, not an individual workspace or member. Per-member credentials
+   and hosted subscription support remain outside this implementation.
 
 ## Architecture
 
@@ -419,7 +425,7 @@ Every string lands in all locale dictionaries in the same commit.
 | `providers/codex-catalog` | `packages/core/src/providers/codex-app-server/catalog.ts` | pagination, normalization, account-scoped availability |
 | `providers/codex-native-tool-boundary` | pinned app-server + isolated local mock Responses endpoint | captures the exact model-visible tool schema after every supported native feature is disabled |
 | `providers/codex-app-server` | `packages/core/src/providers/codex-app-server/provider.ts` | streaming, tool parking/resume, usage, abort, native-action refusal |
-| `api/codex-provider` | `packages/api/src/boot.ts` + local provider routes + workspace model routes | OSS gating, status, reconnect, exact fail-closed routing |
+| `api/codex-provider` | `packages/api/src/boot.ts` + local provider routes + workspace model routes | OSS/Outpost capability gating, status, reconnect, exact fail-closed routing |
 | `app-web/codex-provider` | Settings → Models → Providers + launcher handoff | localized connection states and actions |
 
 Add every row to the platform
