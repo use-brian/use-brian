@@ -3,14 +3,14 @@ import { z } from 'zod'
 /**
  * Minimal reviewed fixture from:
  *   codex app-server generate-json-schema --experimental
- *   inference: @openai/codex 0.146.0-alpha.10.1
- *   account/catalog: @openai/codex 0.162.1
+ *   inference: @openai/codex 0.165.0
+ *   account/catalog: @openai/codex 0.165.0
  *
  * Keep this deliberately smaller than the generated bundle. Add method schemas
  * only when Brian starts consuming that method.
  */
-export const PINNED_CODEX_VERSION = '0.146.0-alpha.10.1'
-export const PINNED_CODEX_CATALOG_VERSION = '0.162.1'
+export const PINNED_CODEX_VERSION = '0.165.0'
+export const PINNED_CODEX_CATALOG_VERSION = PINNED_CODEX_VERSION
 
 const RpcIdSchema = z.union([z.string(), z.number().finite()])
 

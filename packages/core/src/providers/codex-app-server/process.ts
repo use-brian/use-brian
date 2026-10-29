@@ -1,5 +1,6 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
@@ -67,13 +68,16 @@ const DISABLED_INFERENCE_FEATURES = [
   'plugins',
   'remote_plugin',
   'request_permissions_tool',
+  'send_message_to_user_async',
   'shell_snapshot',
   'shell_tool',
+  'sleep_tool',
   'skill_mcp_dependency_install',
   'skill_search',
   'tool_call_mcp_elicitation',
   'tool_suggest',
   'unified_exec',
+  'view_image',
   'workspace_dependencies',
 ] as const
 
@@ -114,6 +118,41 @@ export const CODEX_INFERENCE_HARDENING_ARGS: readonly string[] = [
   'shell_environment_policy.inherit="none"',
   ...DISABLED_INFERENCE_FEATURES.flatMap((feature) => ['--disable', feature]),
 ]
+
+/** Remove model-level native-tool opt-ins without changing account discovery. */
+export async function buildCodexToolSurfaceArgs(
+  command: { command: string; argsPrefix?: readonly string[] },
+  cwd: string,
+  surface: 'inference' | 'image',
+): Promise<readonly string[]> {
+  // Never use the credential home for this metadata-only subprocess: debug
+  // models must read the bundled catalog, not an account's mutable cache.
+  const metadataHome = await mkdtemp(join(cwd, 'catalog-home-'))
+  try {
+    const { stdout } = await promisify(execFile)(command.command,
+      [...(command.argsPrefix ?? []), 'debug', 'models'], {
+        cwd, env: buildCodexEnvironment(metadataHome),
+        timeout: 10_000, maxBuffer: 4 * 1024 * 1024,
+      })
+    const catalog = z.object({ models: z.array(z.object({ slug: z.string() }).passthrough()).min(1) })
+      .parse(JSON.parse(stdout))
+    const catalogPath = join(cwd, 'inference-models.json')
+    await writeFile(catalogPath, JSON.stringify({ models: catalog.models.map(model => ({
+      ...model,
+      tool_mode: null,
+      experimental_supported_tools: [],
+      apply_patch_tool_type: null,
+    })) }), { mode: 0o600 })
+    return [
+      ...(surface === 'image' ? CODEX_IMAGE_HARDENING_ARGS : CODEX_INFERENCE_HARDENING_ARGS),
+      '-c', `model_catalog_json=${JSON.stringify(catalogPath)}`,
+    ]
+  } catch {
+    throw new Error('Could not prepare the pinned Codex tool surface')
+  } finally {
+    await rm(metadataHome, { recursive: true, force: true })
+  }
+}
 
 /** Feed-only image profile; ordinary inference still denies the image tool. */
 export const CODEX_IMAGE_HARDENING_ARGS: readonly string[] = [
@@ -293,12 +332,16 @@ export async function startCodexAppServer(
   }
 
   try {
+    const toolSurfaceArgs = options.surface === 'image' || options.surface === 'inference'
+      ? await buildCodexToolSurfaceArgs(command, cwd, options.surface)
+      : []
+    if (options.signal?.aborted) throw abortError()
     child = spawn(
       command.command,
       [
         ...(command.argsPrefix ?? []),
         'app-server',
-        ...(options.surface === 'image' ? CODEX_IMAGE_HARDENING_ARGS : options.surface === 'inference' ? CODEX_INFERENCE_HARDENING_ARGS : []),
+        ...toolSurfaceArgs,
         '--listen',
         'stdio://',
       ],

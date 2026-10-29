@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import type { StreamChunk } from '../../types.js'
-import { buildCodexEnvironment, CODEX_INFERENCE_HARDENING_ARGS, resolvePinnedCodexCommand } from '../process.js'
+import { buildCodexEnvironment, buildCodexToolSurfaceArgs, resolvePinnedCodexCommand } from '../process.js'
 import { InitializeResponseSchema } from '../protocol.js'
 import { CodexRpcPeer } from '../rpc.js'
 import { createCodexAppServerProvider } from '../provider.js'
@@ -14,13 +14,9 @@ import { createCodexAppServerProvider } from '../provider.js'
 const MODEL = 'gpt-5.6-sol'
 const sse = (events: object[]) => events.map(e => `event: ${(e as { type: string }).type}\ndata: ${JSON.stringify(e)}\n\n`).join('')
 
-// The pinned runtime nests Brian's dynamic tools inside its `exec` envelope,
-// and `exec` YIELDS to the model once its yield_time_ms (default 10 s) passes
-// while a nested call is still pending. A Brian tool held longer than that
-// (a human approval, a slow browser action) therefore does not block the
-// Codex turn: the model is called again while Brian has no send open.
-describe('[COMP:providers/codex-app-server] pinned runtime tool yield', () => {
-  it('a turn that ends while a Brian tool is held resumes on a fresh turn that sees the result', async () => {
+// Direct dynamic calls must stay parked until Brian returns their result.
+describe('[COMP:providers/codex-app-server] pinned runtime tool result', () => {
+  it('waits for a held Brian tool result before requesting the final response', async () => {
     const home = await mkdtemp(join(tmpdir(), 'brian-codex-yield-home-'))
     const cwd = await mkdtemp(join(tmpdir(), 'brian-codex-yield-cwd-'))
     const requests: Array<{ at: number; body: string }> = []
@@ -36,8 +32,7 @@ describe('[COMP:providers/codex-app-server] pinned runtime tool yield', () => {
         const id = `response-fixture-${n}`
         res.writeHead(200, { 'content-type': 'text/event-stream' })
         if (n === 1) {
-          // The model calls one Brian tool through exec, with a short yield.
-          const item = { type: 'custom_tool_call', id: 'exec-item', call_id: 'exec-call', name: 'exec', input: "// @exec: {\"yield_time_ms\": 200}\nconst result = await tools.brian_echo({ value: 'x' });\ntext(JSON.stringify(result));" }
+          const item = { type: 'function_call', id: 'tool-item', call_id: 'tool-call', name: 'brian_echo', arguments: JSON.stringify({ value: 'x' }) }
           res.end(sse([
             { type: 'response.created', response: { id } },
             { type: 'response.output_item.done', item },
@@ -45,7 +40,7 @@ describe('[COMP:providers/codex-app-server] pinned runtime tool yield', () => {
           ]))
           return
         }
-        // Every later call (the post-yield one included) answers in text and ends the turn.
+        // After Brian supplies the result, the model composes the final response.
         const text = `answer ${n}`
         const item = { type: 'message', id: `msg-${n}`, role: 'assistant', content: [{ type: 'output_text', text, annotations: [] }] }
         res.end(sse([
@@ -60,7 +55,7 @@ describe('[COMP:providers/codex-app-server] pinned runtime tool yield', () => {
     server.listen(0, '127.0.0.1'); await once(server, 'listening')
     const { port } = server.address() as { port: number }
     const command = await resolvePinnedCodexCommand()
-    const child = spawn(command.command, [...(command.argsPrefix ?? []), 'app-server', ...CODEX_INFERENCE_HARDENING_ARGS,
+    const child = spawn(command.command, [...(command.argsPrefix ?? []), 'app-server', ...await buildCodexToolSurfaceArgs(command, cwd, 'inference'),
       '-c', 'analytics.enabled=false',
       '-c', 'model_provider="brian_mock"', '-c', 'model_providers.brian_mock.name="Brian mock"',
       '-c', `model_providers.brian_mock.base_url="http://127.0.0.1:${port}/v1"`,
@@ -81,13 +76,9 @@ describe('[COMP:providers/codex-app-server] pinned runtime tool yield', () => {
       const toolUse = first.find((c): c is Extract<StreamChunk, { type: 'tool_use_start' }> => c.type === 'tool_use_start')
       expect(toolUse?.name, JSON.stringify({ first, stderr })).toBe('brian_echo')
 
-      // Hold the tool result well past the exec yield, as an approval wait does.
+      // A slow action or human approval must not trigger another inference.
       await new Promise(resolve => setTimeout(resolve, 1_500))
-      const released = Date.now()
-      // Precondition: Codex called the model again while Brian still held the tool.
-      expect(requests.length, JSON.stringify({ stderr })).toBeGreaterThanOrEqual(2)
-      expect(requests[1]!.at).toBeLessThan(released)
-      expect(requests[1]!.body).toContain('Script running with cell ID')
+      expect(requests).toHaveLength(1)
 
       const second: StreamChunk[] = []
       const drained = (async () => {
@@ -95,13 +86,11 @@ describe('[COMP:providers/codex-app-server] pinned runtime tool yield', () => {
         return 'ended' as const
       })()
       const outcome = await Promise.race([drained, new Promise<'stalled'>(resolve => setTimeout(() => resolve('stalled'), 5_000))])
-      // The yielded turn ended without the result ("answer 2" never saw it), so the
-      // resumed send must end - not stall - on a fresh turn that does see it.
       expect(outcome, JSON.stringify({ second, requests: requests.length, stderr })).toBe('ended')
-      expect(requests).toHaveLength(3)
-      expect(requests[2]!.body).toContain('echo:x')
+      expect(requests).toHaveLength(2)
+      expect(requests[1]!.body).toContain('echo:x')
       const text = second.filter(c => c.type === 'text_delta').map(c => (c as { text: string }).text).join('')
-      expect(text).toBe('answer 3')
+      expect(text).toBe('answer 2')
       expect(second.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
     } finally {
       rpc.close(); child.stdin.end(); child.kill('SIGTERM'); server.closeAllConnections(); server.close()
