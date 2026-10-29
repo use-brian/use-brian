@@ -14,12 +14,9 @@
  *                                   across every assistant, newest first)
  *  - `chat-shared:<wid>:<viewer>`   the workspace's shared rooms
  *
- * The roster and the shared list fetch in PARALLEL. The personal list needs
- * the roster's ids (`listSessionsForAssistants` fans out per assistant), so
- * its fetcher reads the roster from the cache entry synchronously when a
- * fresh copy is there and otherwise JOINS the roster load already in flight
- * (`loadSurfaceCache` dedupes by key) - never a second roster request, never
- * a serial roster -> sessions effect chain.
+ * All three reads start independently. Personal history uses the workspace-wide
+ * sessions endpoint, whose server-side admission does not need roster IDs.
+ * Shared cache keys deduplicate the panel and surface's simultaneous reads.
  *
  * Disk tier (plan section 6.4): the two session lists are mirrored into the
  * offline IndexedDB store under a viewer + workspace key, the way the Brain
@@ -56,7 +53,6 @@ import {
   type WorkspaceAssistantSummary,
 } from "@/lib/api/views";
 import {
-  listSessionsForAssistants,
   listPersonalSessions,
   setSessionArchived,
   listWorkspaceSessions,
@@ -71,7 +67,6 @@ import {
   chatTranscriptCacheKey,
 } from "@/lib/surface-prefetch";
 import {
-  isSurfaceCacheStale,
   invalidateSurfaceCache,
   loadSurfaceCache,
   markSurfaceCacheStale,
@@ -84,7 +79,7 @@ import {
 import { idbDelete, idbGet, idbSet } from "@/lib/offline/idb";
 import { getUserInfo } from "@/lib/user";
 import { CHAT_SESSIONS_REFRESH_EVENT, dispatchChatSessionsRefresh } from "@/lib/chat-session-events";
-import { leaseSurfaceContent, OFFLINE_AUTHORITY_MS, SURFACE_CONTENT_LEASE_MS, surfaceContentRemaining, useLeasedResource } from "@/lib/offline/surface-content-cache";
+import { OFFLINE_AUTHORITY_MS, SURFACE_CONTENT_LEASE_MS, useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 // ── Disk tier ────────────────────────────────────────────────────────────
 
@@ -206,40 +201,12 @@ async function readChatResource<T>(fetch: () => Promise<T>): Promise<T> {
 
 // ── Fetchers ─────────────────────────────────────────────────────────────
 
-/**
- * The roster the personal-sessions fetch fans out over. A fresh cached copy
- * is read synchronously; a cold or stale one joins (or starts) the roster
- * load under the same key the roster hook uses, so the two never race two
- * requests. A failed roster load remains a failed list read; it must never
- * manufacture empty history or grant a new lease from an older roster.
- */
-async function resolveRoster(
-  workspaceId: string,
-): Promise<WorkspaceAssistantSummary[]> {
-  const key = chatRosterCacheKey(workspaceId);
-  const entry = readSurfaceCache<WorkspaceAssistantSummary[]>(key);
-  if (entry.data !== undefined && !isSurfaceCacheStale(key)) return entry.data;
-  const loaded = await loadSurfaceCache(key, () =>
-    leaseSurfaceContent(() => readChatResource(() => listWorkspaceAssistants(workspaceId))),
-    { expiresInMs: surfaceContentRemaining, keepInflightOnExpiry: true },
-  );
-  if (loaded !== undefined) return loaded;
-  throw readSurfaceCache(key).error ?? new Error("chat_roster_failed");
-}
-
-/** The fetcher behind `chat-sessions:<wid>:<viewer>`. */
+/** Workspace-wide history is independently authorized; no roster waterfall. */
 export async function fetchPersonalChatSessions(
   workspaceId: string,
 ): Promise<DocSession[]> {
-  return readChatList(chatSessionsCacheKey(workspaceId), async () => {
-    const roster = await resolveRoster(workspaceId);
-    if (roster.length === 0) return [];
-    return readChatResource(() => listSessionsForAssistants({
-      workspaceId,
-      assistantIds: roster.map((assistant) => assistant.id),
-      strict: true,
-    }));
-  });
+  return readChatList(chatSessionsCacheKey(workspaceId), () =>
+    readChatResource(() => listPersonalSessions({ workspaceId, strict: true })));
 }
 
 /** The fetcher behind `chat-shared:<wid>:<viewer>`. */

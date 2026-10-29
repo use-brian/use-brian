@@ -1,5 +1,5 @@
 import { authFetch } from "../auth-fetch";
-import { fetchLatestSession, listSessionsForAssistants, listWorkspaceSessions, listAuditSessions, getChatSessionSummary, listPersonalSessions, setSessionArchived } from "../api/sessions";
+import { fetchLatestSession, listWorkspaceSessions, listAuditSessions, getChatSessionSummary, listPersonalSessions, setSessionArchived } from "../api/sessions";
 import { PERSONAL_CHAT_POLICY } from "../chat-session-policy";
 vi.mock("../auth-fetch", () => ({ authFetch: vi.fn() }));
 /**
@@ -329,7 +329,7 @@ describe("[COMP:app-web/sessions-sdk] admitted title revision transport", () => 
       const opts = {workspaceId: "fictional-workspace", assistantId: "fictional-assistant"};
       const values = [
         await fetchLatestSession({...opts, appOrigin: "chat"}),
-        ...(await listSessionsForAssistants({...opts, assistantIds: [opts.assistantId]})),
+        ...(await listPersonalSessions(opts)),
         ...(await listWorkspaceSessions(opts)),
         ...(await listAuditSessions(opts)),
         await getChatSessionSummary("fictional-session"),
@@ -344,7 +344,7 @@ describe("[COMP:app-web/sessions-sdk] admitted title revision transport", () => 
 describe("[COMP:app-web/sessions-sdk] provider channel names", () => {
   it.each([500, 503])("preserves personal and shared list HTTP %i as failures for cached readers", async (status) => {
     vi.mocked(authFetch).mockImplementation(async () => new Response("", { status }));
-    await expect(listSessionsForAssistants({ workspaceId: "workspace", assistantIds: ["assistant"], strict: true })).rejects.toThrow();
+    await expect(listPersonalSessions({ workspaceId: "workspace", strict: true })).rejects.toThrow();
     await expect(listWorkspaceSessions({ workspaceId: "workspace", strict: true })).rejects.toThrow();
   });
 

@@ -49,6 +49,7 @@ export function verifyChatWelcomeLayout() {
   browser('wait', '--fn', 'document.querySelector("[data-chat-welcome-icon]")?.complete');
   evaluate('window.__welcomeLayoutInput = document.querySelector("[data-chat-welcome-composer] textarea"); true');
   const empty = measure();
+  assert.equal(evaluate('document.querySelector("[data-chat-work-entry]") !== null'), false, 'Fresh Chat must not render the retired work disclosure');
   assert.ok(empty.welcome.bottom <= empty.viewport && empty.welcome.bottom >= empty.viewport - 80, 'Welcome composer must dock near the bottom');
   assert.ok(empty.icon.bottom < empty.heading.top && empty.heading.bottom < empty.composer.top, 'Brian icon must be above the question and composer');
   assert.ok(empty.iconLoaded && empty.decorative && empty.iconFilter === 'grayscale(1)', 'Use the decorative grey Brian brand icon');

@@ -162,6 +162,4 @@
   }
   .welcomeComposer [data-chat-scope-band] { padding-bottom: 4px; }
   .welcomeComposer [data-chat-context-summary] > svg { width: 14px; height: 14px; }
-  .welcomeComposer [data-chat-work-entry] { margin-top: 4px; }
-  .welcomeComposer [data-chat-work-entry] summary > svg { width: 12px; height: 12px; }
 }

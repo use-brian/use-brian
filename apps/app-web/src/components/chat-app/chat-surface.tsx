@@ -131,7 +131,6 @@ import { QueuedInputs } from "@/components/ui/queued-inputs";
 import { ChatContextBar, useChatVisibleViewport } from "./chat-responsive-controls";
 import { ChatAudienceMenu } from "./chat-audience-menu";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
-import { WorkEntry } from "./work-entry";
 import { ClientDeliveryOversight } from "./client-delivery-oversight";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { ComposerControls } from "@/components/doc/composer-controls";
@@ -392,7 +391,6 @@ type RemoteConfirmation = {
 export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const t = useT().chatApp;
   const searchCopy = useT().workspaceSearch;
-  const workCopy = useT().briefs.work;
   const chatLabel = useT().operatorBar.chat;
   const locale = useLocale();
   // The dock's chat dictionary — tool narration, activity copy, copy/stop
@@ -4701,21 +4699,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               <ChatContextBar context={creationContext} disabled={att.uploading} />
               {composerBox}
               {error && <p role="alert" className="mt-3 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">{error}</p>}
-              <details data-chat-work-entry className="group/work mt-2">
-                <summary className="flex min-h-8 max-sm:min-h-11 cursor-pointer list-none items-center justify-center gap-2 rounded-lg px-3 text-xs text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden">
-                  {workCopy.title}<ChevronDown className="size-3.5 transition-transform group-open/work:rotate-180" aria-hidden />
-                </summary>
-                <div className="max-h-[40dvh] overflow-y-auto pt-2 pb-3">
-              <WorkEntry
-                includeDelivery={view === "personal"}
-                workspaceId={workspaceId}
-                scope={pickedContextProjectId ? { kind: "project", id: pickedContextProjectId }
-                  : pickedContextGroupId ? { kind: "department", id: pickedContextGroupId }
-                  : { kind: "personal" }}
-                onDraft={(draft) => { setInput(draft); requestAnimationFrame(focusComposer); }}
-              />
-                </div>
-              </details>
             </div>
           </div>
         </section>

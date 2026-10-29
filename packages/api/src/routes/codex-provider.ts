@@ -1,7 +1,7 @@
 /**
- * Local-only ChatGPT subscription controls.
+ * Self-managed ChatGPT subscription controls.
  *
- * Mounted only by the OSS composition and re-gated per request. Responses
+ * Mounted for OSS and Outpost behind requireAuth and re-gated per request. Responses
  * contain masked account state, reviewed catalog metadata, or validated login
  * handoff data—never OAuth tokens or raw app-server payloads.
  *
@@ -10,7 +10,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import type { CodexProviderManager } from '../codex-provider-manager.js'
-import { isSelfHostedOssEnv } from './local-session.js'
+import { isSelfManagedProviderEnv } from '../edition.js'
 
 const cancelSchema = z.object({
   loginId: z.string().min(1).max(256),
@@ -21,7 +21,7 @@ const preferenceSchema = z.object({
 
 export function codexProviderRoutes(
   manager: CodexProviderManager,
-  isEnabled: () => boolean = isSelfHostedOssEnv,
+  isEnabled: () => boolean = isSelfManagedProviderEnv,
 ): Router {
   const router = Router()
 
