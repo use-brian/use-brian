@@ -262,8 +262,16 @@ supplied tools are exposed. The separate image surface permits only its
 image generation tool.
 A real inference capture covers every active reviewed model and
 checks the selected wire model as well as the tool surface. The reviewed
-catalog adds GPT-6 Luna (Standard), GPT-6 Sol (Pro), GPT-6.1 Sol (Max), and
-GPT-6 Astra (Research). Older selections and Auto priority are retained;
+catalog adds GPT-6 Luna (Standard), GPT-6.1 Terra and GPT-6.1 Sol (Pro),
+GPT-6.1 Sol (Max), and GPT-6 Astra (Research). Pro Auto routing prefers Terra
+when entitled, then Sol, before older Pro models. Terra is present in the
+updated bundled catalog; it is offered only when account discovery returns
+it, and an authenticated turn verifies access. The Pro Sol selector is `gpt-6.1-sol-pro`, which
+sends the provider's canonical `gpt-6.1-sol` wire id while retaining the Pro
+alias in Brian's stream and usage identity. The existing `gpt-6.1-sol` selector
+remains Max, so saved Max routes and historical classification keep working.
+GPT-6 Sol and GPT-5.6 Terra remain valid exact selections; the other tiers
+retain their existing Auto priority. Older selections remain valid;
 new models remain intersected with picker-visible account discovery. Their
 context budget is the subscription client's conservative 272K default, with
 Brian's existing 32,768-token output cap. Hidden internal and unreviewed models

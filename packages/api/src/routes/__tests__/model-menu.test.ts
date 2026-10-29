@@ -92,6 +92,33 @@ describe('[COMP:api/model-menu] GET /models/menu', () => {
     expect(res.body.classes['standard-pro'].length).toBeGreaterThan(0)
   })
 
+  it('offers GPT-6.1 Terra and Sol for Pro while preserving the existing Sol Max route', async () => {
+    const availability = new MutableProviderAvailability()
+    availability.setModelCatalog('openai-codex', new Set(['gpt-6.1-terra', 'gpt-6.1-sol']))
+    const app = makeApp({ configuredProviders: availability })
+    const menu = await request(app)
+      .get('/api/models/menu?workspaceId=00000000-0000-0000-0000-000000000001').expect(200)
+    expect(menu.body.classes['standard-pro']).toEqual([
+      expect.objectContaining({ alias: 'gpt-6.1-terra', displayName: 'GPT-6.1 Terra', tier: 'pro' }),
+      expect.objectContaining({ alias: 'gpt-6.1-sol-pro', apiModelId: 'gpt-6.1-sol', displayName: 'GPT-6.1 Sol', tier: 'pro' }),
+    ])
+    expect(menu.body.classes.max).toEqual([
+      expect.objectContaining({ alias: 'gpt-6.1-sol', tier: 'max' }),
+    ])
+
+    availability.setModelCatalog('openai-codex', new Set(['gpt-6.1-sol']))
+    const refreshed = await request(app)
+      .get('/api/models/menu?workspaceId=00000000-0000-0000-0000-000000000001').expect(200)
+    expect(refreshed.body.classes['standard-pro']).toEqual([
+      expect.objectContaining({ alias: 'gpt-6.1-sol-pro', tier: 'pro' }),
+    ])
+    availability.setModelCatalog('openai-codex', new Set([]))
+    const disconnected = await request(app)
+      .get('/api/models/menu?workspaceId=00000000-0000-0000-0000-000000000001').expect(200)
+    expect(disconnected.body.classes['standard-pro']).toEqual([])
+    expect(disconnected.body.classes.max).toEqual([])
+  })
+
   it('shows only the account-scoped Codex catalog intersection', async () => {
     const availability = new MutableProviderAvailability()
     availability.setModelCatalog(
