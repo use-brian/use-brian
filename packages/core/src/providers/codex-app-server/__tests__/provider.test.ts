@@ -181,6 +181,31 @@ async function startToolTurn(
 }
 
 describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', () => {
+  it.each(['gpt-6.1-sol', 'gpt-6-sol'])('maps the Pro Sol alias and validates the returned wire model (%s)', async (returnedModel) => {
+    const harness = createHarness()
+    const provider = createCodexAppServerProvider({
+      transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' },
+      models: ['gpt-6.1-sol-pro', 'gpt-6.1-sol'],
+    })
+    try {
+      const chunks = collect(provider.stream({
+        model: 'gpt-6.1-sol-pro', systemPrompt: 'You are Brian.',
+        messages: [{ role: 'user', content: 'Hello' }], assertInputAuthority: async () => {},
+      }))
+      const result = returnedModel === 'gpt-6.1-sol'
+        ? expect(chunks).resolves.toEqual(expect.arrayContaining([{ type: 'message_start', model: 'gpt-6.1-sol-pro' }]))
+        : expect(chunks).rejects.toThrow('Codex silently substituted the requested model')
+      const thread = await waitForMethod(harness, 'thread/start')
+      expect(thread.params).toMatchObject({ model: 'gpt-6.1-sol' })
+      respond(harness, thread, { thread: { id: 'thread-1' }, model: returnedModel, modelProvider: 'openai' })
+      if (returnedModel === 'gpt-6.1-sol') {
+        respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
+        complete(harness, 'thread-1', 'turn-1')
+        respond(harness, await waitForMethod(harness, 'thread/unsubscribe'), { status: 'unsubscribed' })
+      }
+      await result
+    } finally { harness.peer.close() }
+  })
   it.each([false,true])('refuses before a thread payload and keeps the refusal terminal (stateless=%s)', async stateless => {
     const harness = createHarness(); let revoked = true
     const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer,cwd: '/tmp/brian-codex-test' },models: [MODEL] })

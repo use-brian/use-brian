@@ -220,7 +220,7 @@ import { findAssistantById, findUserByAuthProvider, findUserByEmail, findUserByI
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem } from './context-scope/execution-context.js'
 import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWorkflowAuthoringScope, resolveWorkflowRunScope } from './context-scope/workflow-authority.js'
-import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
+import { deploymentProfile, isSelfManagedProviderEnv, usesOpenStandaloneRoutes } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
 import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
 import { bindTaskClosedHook, bindTaskExecutorChangeHook, getTaskByIdSystem } from './db/tasks.js'
@@ -2124,7 +2124,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     )
     configuredProviders.setStaticProvider(dashscopeProviderId, true)
   }
-  if (isSelfHostedOssEnv() && opts.startLocalSubscriptionProvider !== false) {
+  if (isSelfManagedProviderEnv() && opts.startLocalSubscriptionProvider !== false) {
     try {
       codexProviderManager = await startCodexProviderManager({
         availability: configuredProviders,

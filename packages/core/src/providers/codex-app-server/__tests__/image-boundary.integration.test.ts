@@ -7,7 +7,7 @@ import { once } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import sharp from 'sharp'
 import { z } from 'zod'
-import { buildCodexEnvironment, CODEX_IMAGE_HARDENING_ARGS, resolvePinnedCodexCommand } from '../process.js'
+import { buildCodexEnvironment, buildCodexToolSurfaceArgs, resolvePinnedCodexCommand } from '../process.js'
 import { CodexRpcPeer } from '../rpc.js'
 import { InitializeResponseSchema } from '../protocol.js'
 import { generateCodexImage } from '../image.js'
@@ -22,7 +22,9 @@ describe('[COMP:core/codex-image] pinned image runtime', () => {
     await writeFile(join(home, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { id_token: token, access_token: token, refresh_token: 'local-fixture-only', account_id: 'image-fixture-account' }, last_refresh: new Date().toISOString() }))
     const requests: Array<{ path: string; body: any }> = []
     const server = createServer((req, res) => {
-      if (req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ models: [] })); return }
+      if (req.method === 'GET') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ models: [], accounts: [{ id: 'image-fixture-account', account_id: 'image-fixture-account',
+        name: 'Fixture', email: 'image-test@example.com', plan_type: 'pro', workspace_backend_origin: 'https://chatgpt.com', account_routing_override: 'NO_CONSTRAINT' }],
+        account_ordering: ['image-fixture-account'], default_account_id: 'image-fixture-account' })); return }
       const chunks: Buffer[] = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
         const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push({ path: req.url!, body })
         if (req.url?.includes('/images/generations')) {
@@ -30,11 +32,8 @@ describe('[COMP:core/codex-image] pinned image runtime', () => {
           return
         }
         const responseNumber = requests.filter(r => r.path.includes('/responses')).length
-        if (req.url?.includes('/responses') && responseNumber <= 2) {
-          const cellId = JSON.stringify(body).match(/Script running with cell ID ([A-Za-z0-9_-]+)/)?.[1]
-          const item = responseNumber === 1
-            ? { type: 'custom_tool_call', id: 'call-item', call_id: 'image-call', name: 'exec', input: "// @exec: {\"yield_time_ms\": 25}\nconst result = await tools.image_gen__imagegen({ prompt: 'One simple diagram' }); generatedImage(result);" }
-            : { type: 'custom_tool_call', id: 'wait-item', call_id: 'wait-call', name: 'wait', input: JSON.stringify({ cell_id: cellId ?? 'missing-cell', yield_time_ms: 5000 }) }
+        if (req.url?.includes('/responses') && responseNumber === 1) {
+          const item = { type: 'function_call', id: 'image-item', call_id: 'image-call', name: 'imagegen', namespace: 'image_gen', arguments: JSON.stringify({ prompt: 'One simple diagram' }) }
           res.writeHead(200, { 'content-type': 'text/event-stream' })
           for (const event of [
             { type: 'response.created', response: { id: `response-fixture-${responseNumber}` } },
@@ -56,7 +55,7 @@ describe('[COMP:core/codex-image] pinned image runtime', () => {
     })
     server.listen(0, '127.0.0.1'); await once(server, 'listening')
     const { port } = server.address() as { port: number }; const command = await resolvePinnedCodexCommand()
-    const child = spawn(command.command, [...(command.argsPrefix ?? []), 'app-server', ...CODEX_IMAGE_HARDENING_ARGS,
+    const child = spawn(command.command, [...(command.argsPrefix ?? []), 'app-server', ...await buildCodexToolSurfaceArgs(command, cwd, 'image'),
       '-c', 'analytics.enabled=false', '-c', `chatgpt_base_url="http://127.0.0.1:${port}"`,
       '-c', 'model_provider="brian_mock"', '-c', 'model_providers.brian_mock.name="Brian mock"',
       '-c', `model_providers.brian_mock.base_url="http://127.0.0.1:${port}/v1"`,
@@ -73,14 +72,12 @@ describe('[COMP:core/codex-image] pinned image runtime', () => {
       const request = requests.find(r => r.path.includes('/responses'))!.body
       const envelopes = request.input.find((item: any) => item.type === 'additional_tools').tools
       expect(request.tools ?? []).toEqual([])
-      expect(envelopes.map((tool: any) => tool.name)).toEqual(['exec', 'wait'])
-      const description = envelopes.find((tool: any) => tool.name === 'exec').description
-      expect(Array.from(description.matchAll(/^### `([^`]+)`$/gm), (match: any) => match[1])).toEqual(['image_gen__imagegen'])
+      expect(envelopes.map((tool: any) => tool.name)).toEqual(['image_gen'])
+      expect(envelopes[0].tools.map((tool: any) => tool.name)).toEqual(['imagegen'])
       expect(receipt.image, JSON.stringify({ receipt, paths: requests.map(r => r.path), stderr })).toEqual({ data: png, mimeType: 'image/png' })
       expect(requests.filter(r => r.path.includes('/images/generations'))).toHaveLength(1)
       const responseRequests = requests.filter(r => r.path.includes('/responses'))
-      expect(responseRequests.length).toBeGreaterThanOrEqual(2)
-      expect(JSON.stringify(responseRequests[1]?.body)).toContain('Script running with cell ID')
+      expect(responseRequests).toHaveLength(1)
       expect(requests.find(r => r.path.includes('/images/generations'))?.body.model).toBe('gpt-image-2')
     } finally {
       rpc.close(); child.stdin.end(); child.kill('SIGTERM'); server.closeAllConnections(); server.close()

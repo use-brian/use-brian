@@ -1,6 +1,12 @@
 import readline from 'node:readline'
 import { statSync } from 'node:fs'
 
+if (process.argv.includes('models')) {
+  process.stdout.write(JSON.stringify({ models: [{ slug: 'fixture-model', tool_mode: 'code_mode_only',
+    experimental_supported_tools: ['clock'], apply_patch_tool_type: 'freeform', context_window: 272000 }] }))
+  process.exit(0)
+}
+
 process.stderr.write('fake-diagnostic-output-that-must-be-bounded')
 
 const lines = readline.createInterface({ input: process.stdin })

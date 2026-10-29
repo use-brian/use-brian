@@ -48,12 +48,8 @@ describe('[COMP:core/codex-image] explicit image receipt bridge', () => {
       expect(diagnosticJson).not.toContain('/etc/never-read-this')
       const thread = f.calls.find(c => c.method === 'thread/start')?.params
       expect(thread).toMatchObject({ environments: [], dynamicTools: [], sandbox: 'read-only', ephemeral: true })
-      expect(thread?.baseInstructions).toContain('tools.image_gen__imagegen')
-      expect(thread?.baseInstructions).toContain('generatedImage(result)')
-      expect(thread?.baseInstructions).toContain('// @exec: {"yield_time_ms": 120000}')
-      expect(thread?.baseInstructions).toContain('call wait with that same cell_id and yield_time_ms 120000')
-      expect(thread?.baseInstructions).toContain('Never call tools.image_gen__imagegen more than once')
-      expect(thread?.baseInstructions).not.toContain('image_gen.imagegen')
+      expect(thread?.baseInstructions).toContain('Call image_gen.imagegen exactly once')
+      expect(thread?.baseInstructions).not.toContain('Use exec')
       expect(f.calls.filter(c => c.method === 'turn/start')).toHaveLength(1)
       expect(f.calls.some(c => c.method === 'turn/interrupt')).toBe(true)
     } finally { f.rpc.close() }
