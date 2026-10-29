@@ -1,5 +1,7 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease} from '../../db/client.js'
+import {findSessionById} from '../../db/sessions.js'
+import {createDeliveryAudienceAuthorizer} from '../../context-scope/delivery-authority.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -44,4 +46,20 @@ describe.sequential('[COMP:api/application-persistence] navigation and authoriza
   }finally{await rollbackAndRelease(writer);await rollbackAndRelease(reader)}
  })
 
+ it.each(['lookup','delivery'] as const)('finishes a %s while another transaction pins the session, without touching recency',async kind=>{
+  fixture=await persistentContextFixture();const f=fixture,reader=await f.pool.connect()
+  const recency=async()=>(await f.pool.query('SELECT last_active_at FROM sessions WHERE id=$1',[f.session.id])).rows[0].last_active_at
+  const before=await recency()
+  let pending:Promise<unknown>|undefined,finished=false
+  try{
+   await reader.query('BEGIN');await reader.query('SELECT id FROM sessions WHERE id=$1 FOR SHARE',[f.session.id])
+   pending=(kind==='lookup'?findSessionById(f.session.id):createDeliveryAudienceAuthorizer()({
+    workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.ownerId,sessionId:f.session.id,
+    channelType:'web',channelId:f.session.channelId,scopeEvidence:{},
+   })).then(value=>{finished=true;return value})
+   await expect.poll(()=>finished,{timeout:1500}).toBe(true)
+   expect(await pending).toMatchObject(kind==='lookup'?{id:f.session.id}:{allowed:true})
+   expect(await recency()).toEqual(before)
+  }finally{await reader.query('ROLLBACK');await rollbackAndRelease(reader);await pending?.catch(()=>{})}
+ })
 })

@@ -38,6 +38,12 @@ must not masquerade as a successful empty transcript and erase visible messages.
 Authoritative 401/403/404 responses evict the transcript cache and painted rows;
 previously readable content must not remain visible after access is withdrawn.
 
+Session lookups inside source and recipient authorization are read-only. They
+must not refresh session recency while another authorization transaction holds
+that session's row lock. Ordinary UI recency updates skip a currently locked
+row; this never changes turn heartbeat or publication guarantees. See
+the contention contract below.
+
 ## Database contention
 
 The 2026-10-29 home-server incident included a deadlock between a workspace
@@ -52,6 +58,11 @@ Compare every old/new column except `picker_pinned_at`, `picker_hidden_at` and
 Inserts, deletes and all other membership changes retain their workspace lock,
 revision and notification protocol. The application-policy epoch trigger
 already excludes personal navigation changes.
+
+Recency is best effort: select the session row with `FOR NO KEY UPDATE SKIP
+LOCKED` before updating `last_active_at`. A busy row must remain readable.
+Authorization uses `readSessionById`, which performs no recency write. This
+never skips turn ownership, heartbeat, cancellation, publication or scope writes.
 
 ## Regression coverage
 
