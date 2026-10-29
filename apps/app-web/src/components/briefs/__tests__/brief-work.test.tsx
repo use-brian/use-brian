@@ -74,7 +74,6 @@ describe("[COMP:app-web/brief-work] direct work pickup", () => {
     resetSurfaceCache();
     host = document.createElement("div"); document.body.appendChild(host); root = createRoot(host);
     for (const fn of [api.fetchWork, api.claimWorkTask, api.adjustBrainRow, api.listWorkspaceAssistants, api.requestBrainRefresh]) fn.mockReset();
-    api.sidebar = { dock: null, dockLoading: false };
   });
   afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 
