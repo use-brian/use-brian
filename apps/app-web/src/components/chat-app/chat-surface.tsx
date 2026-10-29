@@ -185,6 +185,8 @@ import {
   patchSharedChatSessions,
   cacheCreatedChatSession,
   readCachedTranscript,
+  evictTranscriptCache,
+  isAuthoritativeRosterDenial,
   useChatSessionsData,
   writeTranscriptCache,
 } from "@/lib/chat-surface-data";
@@ -1366,7 +1368,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       // would let a superseded force refresh overwrite a newer cached turn.
       // Publish to the shared cache only after both ownership checks pass.
       try {
-        const rows = mapTranscriptRows(await fetchSessionMessages(sessionId));
+        const rows = mapTranscriptRows(await fetchSessionMessages(sessionId, { strict: true }));
         if (
           sessionEpochRef.current !== epoch ||
           sessionIdRef.current !== sessionId ||
@@ -1375,14 +1377,23 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         writeTranscriptCache(sessionId, rows);
         chat.loadMessages(rows);
         return rows;
-      } catch {
-        // Keep the already-painted cache on a failed revalidation.
+      } catch (error) {
+        if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId
+          && transcriptRequestRef.current === request) {
+          // Transient failures preserve the painted history. Actual access
+          // denial must clear protected content instead of retaining it.
+          if (isAuthoritativeRosterDenial(error)) {
+            evictTranscriptCache(sessionId);
+            chat.loadMessages([]);
+          }
+          setError(t.errorGeneric);
+        }
         return undefined;
       }
     },
     // `chat.loadMessages` is a stable useCallback from the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mapTranscriptRows],
+    [mapTranscriptRows, t.errorGeneric],
   );
 
   /** True from a switch onto a session with NO cached transcript until its

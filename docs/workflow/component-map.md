@@ -7,9 +7,14 @@ import regressions. The opt-in browser test uses the live official catalog.
 
 | COMP tag | doc path | source path | test path |
 | --- | --- | --- | --- |
+| api/session-query-floor | docs/chat-reply-delivery.md | packages/api/src/db/session-context-revisions.ts | packages/api/src/db/__tests__/session-query-floor.test.ts |
 | providers/model-registry | docs/plans/chatgpt-codex-oauth.md | packages/shared/src/model-registry.ts | packages/shared/src/__tests__/model-registry.test.ts |
 | providers/codex-process | docs/plans/chatgpt-codex-oauth.md | packages/core/src/providers/codex-app-server/process.ts | packages/core/src/providers/codex-app-server/__tests__/process.test.ts |
 | providers/codex-native-tool-boundary | docs/plans/chatgpt-codex-oauth.md | packages/core/src/providers/codex-app-server/process.ts | packages/core/src/providers/codex-app-server/__tests__/native-tool-boundary.integration.test.ts |
+| providers/codex-app-server | docs/chat-reply-delivery.md; docs/plans/chatgpt-codex-oauth.md | packages/core/src/providers/codex-app-server/provider.ts | packages/core/src/providers/codex-app-server/__tests__/provider.test.ts |
+| api/session-history | docs/chat-reply-delivery.md | packages/api/src/routes/sessions.ts; packages/api/src/db/session-context-revisions.ts | packages/api/src/application-platform/__tests__/session-history-routes.integration.test.ts |
+| app-web/sessions-sdk | docs/chat-reply-delivery.md | apps/app-web/src/lib/api/sessions.ts; apps/app-web/src/components/chat-app/chat-surface.tsx | apps/app-web/src/lib/__tests__/sessions-sdk.test.ts |
+| app-web/chat-sessions-cache | docs/chat-reply-delivery.md | apps/app-web/src/lib/chat-surface-data.ts; apps/app-web/src/components/chat-app/chat-surface.tsx | apps/app-web/src/components/chat-app/__tests__/chat-surface-ownership.test.ts; apps/app-web/src/lib/__tests__/chat-sessions-cache.test.tsx |
 | api/deployment-edition | docs/self-hosting.md; docs/plans/chatgpt-codex-oauth.md | packages/api/src/edition.ts; packages/api/src/boot.ts | packages/api/src/__tests__/edition.test.ts |
 | api/codex-provider | docs/plans/chatgpt-codex-oauth.md | packages/api/src/codex-provider-manager.ts; packages/api/src/routes/codex-provider.ts; packages/api/src/boot.ts | packages/api/src/__tests__/codex-provider-manager.test.ts; packages/api/src/routes/__tests__/codex-provider.test.ts |
 | ext/chrome-release | docs/workflow/browser-extension-release.md | scripts/publish-browser-extension.sh | apps/browser-extension/src/__tests__/chrome-release.test.ts |

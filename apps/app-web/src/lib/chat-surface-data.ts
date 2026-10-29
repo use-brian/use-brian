@@ -75,6 +75,7 @@ import {
   seedSurfaceCache,
   useCachedResource,
   SurfaceCacheEvictionError,
+  evictSurfaceCacheKey,
 } from "@/lib/surface-cache";
 import { idbDelete, idbGet, idbSet } from "@/lib/offline/idb";
 import { getUserInfo } from "@/lib/user";
@@ -492,6 +493,11 @@ export function useChatSessionsData(
 /** The cached transcript for a session, or `undefined` when cold. */
 export function readCachedTranscript<T>(sessionId: string): T[] | undefined {
   return readSurfaceCache<T[]>(chatTranscriptCacheKey(sessionId)).data;
+}
+
+/** An authoritative history denial invalidates previously painted content. */
+export function evictTranscriptCache(sessionId: string): void {
+  evictSurfaceCacheKey(chatTranscriptCacheKey(sessionId));
 }
 
 /**
