@@ -7,6 +7,7 @@ import regressions. The opt-in browser test uses the live official catalog.
 
 | COMP tag | doc path | source path | test path |
 | --- | --- | --- | --- |
+| api/session-query-floor | docs/chat-reply-delivery.md | packages/api/src/db/session-context-revisions.ts | packages/api/src/db/__tests__/session-query-floor.test.ts |
 | providers/model-registry | docs/plans/chatgpt-codex-oauth.md | packages/shared/src/model-registry.ts | packages/shared/src/__tests__/model-registry.test.ts |
 | providers/codex-process | docs/plans/chatgpt-codex-oauth.md | packages/core/src/providers/codex-app-server/process.ts | packages/core/src/providers/codex-app-server/__tests__/process.test.ts |
 | providers/codex-native-tool-boundary | docs/plans/chatgpt-codex-oauth.md | packages/core/src/providers/codex-app-server/process.ts | packages/core/src/providers/codex-app-server/__tests__/native-tool-boundary.integration.test.ts |

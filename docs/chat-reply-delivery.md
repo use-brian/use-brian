@@ -29,6 +29,8 @@ the captured evidence at the actual JSON response boundary, after profile
 lookups. Never fall back to an owner-pool history read or use source IDs supplied
 by the browser as authority. Keep the existing session and anchor access gates.
 
+A null native query floor means admission was lost: normalize it to a scope
+refusal, rather than throwing a JSON schema error that poisons the session list.
 The chat surface uses strict SDK history reads: transient failures reject and
 must not masquerade as a successful empty transcript and erase visible messages.
 Authoritative 401/403/404 responses evict the transcript cache and painted rows;
@@ -42,4 +44,5 @@ previously readable content must not remain visible after access is withdrawn.
 - Reload returns a saved assistant reply with protected native dependencies to
   its authorized reader, and refuses a withdrawn or unrelated reader.
 - Admission is checked again after asynchronous response preparation.
-- Failed browser history fetches reject.
+- Missing query floors fail closed without exposing content or crashing title
+  projections, and failed browser history fetches reject.

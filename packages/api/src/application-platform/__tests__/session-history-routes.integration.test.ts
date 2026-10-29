@@ -1,7 +1,7 @@
 import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import {boundScopeSources} from '@use-brian/core'
+import {boundScopeSources,DerivedScopeError} from '@use-brian/core'
 import {requireAuth} from '../../auth/middleware.js'
 import {createTokens} from '../../auth/jwt.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
@@ -69,4 +69,17 @@ describe.sequential('[COMP:api/session-history] authenticated browser transcript
     expect(JSON.stringify(response.body)).not.toContain('Fictional protected reply')
   })
 
+  it('normalizes a null native floor to a scope refusal instead of a schema crash',async()=>{
+    const {f}=await setup(),authority=await f.modelContext()
+    // Fault-inject only a denial result for this synthetic workspace. All
+    // caller/source admission remains real, and other fixture workspaces keep
+    // the original SQL. A nullable metadata result must never become a 500.
+    const original=(await f.pool.query<{definition:string}>("SELECT pg_get_functiondef('read_native_session_query_floor(uuid,uuid)'::regprocedure) AS definition")).rows[0].definition
+    const denied=original.replace('BEGIN\n',`BEGIN\n IF w='${f.workspaceId}'::uuid THEN RETURN NULL; END IF;\n`)
+    expect(denied).not.toBe(original)
+    try {
+      await f.pool.query(denied)
+      await expect(readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:0,authority})).rejects.toBeInstanceOf(DerivedScopeError)
+    } finally {await f.pool.query(original)}
+  })
 })
