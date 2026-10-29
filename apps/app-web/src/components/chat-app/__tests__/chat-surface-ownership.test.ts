@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { isAuthoritativeRosterDenial } from "@/lib/chat-surface-data";
 
 /**
  * [COMP:app-web/chat-sessions-cache] Execute the actual surface callbacks with
@@ -64,13 +65,48 @@ function base() {
     registerCleanup: vi.fn(() => vi.fn()),
   };
   return {
-    sessionIdRef, sessionEpochRef, chatController,
+    sessionIdRef, sessionEpochRef, chatController, isAuthoritativeRosterDenial,
     switchTo(id: string | null) { sessionEpochRef.current++; sessionIdRef.current = id; },
   };
 }
 afterEach(() => vi.useRealTimers());
 
 describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
+  it.each([401, 403, 404])("evicts protected history on an authoritative denial (%s)", async (status) => {
+    const scope = {
+      ...base(), transcriptRequestRef: { current: 0 },
+      fetchSessionMessages: vi.fn().mockRejectedValue(new Error(`chat_history_failed: ${status}`)),
+      mapTranscriptRows: (rows: unknown) => rows,
+      writeTranscriptCache: vi.fn(), evictTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
+      setError: vi.fn(), t: { errorGeneric: "History unavailable" },
+    };
+    await evaluate(callback("loadTranscript"), scope)("A");
+    expect(scope.evictTranscriptCache).toHaveBeenCalledWith("A");
+    expect(scope.chat.loadMessages).toHaveBeenCalledWith([]);
+    expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
+    expect(scope.setError).toHaveBeenCalledWith("History unavailable");
+  });
+
+  it.each([false, true])("reports failed history without erasing cache or changing another session (switched: %s)", async (switched) => {
+    const response = deferred<string[]>();
+    const scope = {
+      ...base(), transcriptRequestRef: { current: 0 },
+      fetchSessionMessages: vi.fn().mockReturnValue(response.promise),
+      mapTranscriptRows: (rows: unknown) => rows,
+      writeTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
+      setError: vi.fn(), t: { errorGeneric: "History unavailable" },
+    };
+    const load = evaluate(callback("loadTranscript"), scope);
+    const loading = load("A");
+    if (switched) scope.switchTo("B");
+    response.reject(new Error("forbidden"));
+    await loading;
+    expect(scope.fetchSessionMessages).toHaveBeenCalledWith("A", { strict: true });
+    expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
+    expect(scope.chat.loadMessages).not.toHaveBeenCalled();
+    expect(scope.setError).toHaveBeenCalledTimes(switched ? 0 : 1);
+  });
+
   it.each([false, true])("drops late transcript responses after a switch (round trip: %s), including cache writes", async (roundTrip) => {
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
