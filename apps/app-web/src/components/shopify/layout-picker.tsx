@@ -196,10 +196,10 @@ export function LayoutPicker({
                   title={dead ? t.shopifyApp.sectionNoneLeft : format(t.shopifyApp.sectionRemaining, { count: remaining })}
                   className={`rounded-full border px-2.5 py-2 text-[12px] transition-colors md:py-1 ${
                     on
-                      ? "border-primary bg-primary/5 font-medium"
+                      ? "border-interaction/35 bg-interaction/10 font-medium"
                       : dead
                         ? "cursor-not-allowed border-border/60 text-muted-foreground/40"
-                        : "border-border bg-background hover:border-primary/40"
+                        : "border-border bg-background hover:border-interaction/40"
                   }`}
                 >
                   {sectionLabel(f.type)}{" "}
@@ -351,7 +351,7 @@ function ShapeCard({
   return (
     <div
       className={`rounded-xl border p-3 transition-colors ${
-        selected ? "border-primary bg-primary/5" : "border-border bg-card"
+        selected ? "border-interaction/35 bg-interaction/10" : "border-border bg-card"
       }`}
     >
       <button

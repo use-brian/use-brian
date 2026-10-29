@@ -55,8 +55,8 @@
 [data-brian-chat-action]:focus-visible { outline: none !important; box-shadow: none !important; background-image: none !important; }
 [data-brian-chat-action]:focus-visible::before {
   background-image: linear-gradient(
-    color-mix(in srgb, currentColor 16%, transparent),
-    color-mix(in srgb, currentColor 16%, transparent)
+    color-mix(in srgb, oklch(from currentColor l 0 h) 16%, transparent),
+    color-mix(in srgb, oklch(from currentColor l 0 h) 16%, transparent)
   );
 }
 @media (forced-colors: active) {

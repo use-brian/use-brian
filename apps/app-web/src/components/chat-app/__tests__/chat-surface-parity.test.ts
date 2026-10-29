@@ -73,7 +73,7 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
   it("invalidates the upload channel synchronously on user navigation unless preservation is explicit", () => {
     const navigation = source.slice(source.indexOf("const selectSession = useCallback("), source.indexOf("const restoreAttemptedRef"));
     expect(navigation).toContain("(id: string | null, nextView: ChatView = view, preserveUpload = false)");
-    expect(navigation).toMatch(/if \(!preserveUpload\) freshChannelIdRef\.current = null;[\s\S]*router\.replace\(buildHref\(id, nextView\)/);
+    expect(navigation).toMatch(/if \(!preserveUpload\) freshChannelIdRef\.current = null;[\s\S]*const href = buildHref\(id, nextView\);[\s\S]*if \(!navigateChatLocation\(href, true\)\) router\.replace\(href/);
   });
 
   it("invalidates pending uploads on pane changes and freezes routing picks while uploading", () => {

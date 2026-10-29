@@ -39,7 +39,8 @@
    Hoverless taps navigate normally; keyboard focus works with either pointer. */
 @media (hover: hover) and (prefers-reduced-motion: no-preference) {
   .titleHost:hover .titleViewport[data-overflow] {
-    animation: reveal-title-edges var(--chat-title-duration) linear infinite alternate;
+    mask-size: 100% 100%;
+    mask-position: 0 0;
   }
 
   .titleHost:hover .titleViewport[data-overflow] > .titleText {
@@ -50,7 +51,8 @@
 @media (prefers-reduced-motion: no-preference) {
   .titleHost:has(:focus-visible) .titleViewport[data-overflow],
   .titleHost:focus-visible .titleViewport[data-overflow] {
-    animation: reveal-title-edges var(--chat-title-duration) linear infinite alternate;
+    mask-size: 100% 100%;
+    mask-position: 0 0;
   }
 
   .titleHost:has(:focus-visible) .titleViewport[data-overflow] > .titleText,
@@ -62,11 +64,6 @@
 @keyframes reveal-title {
   0%, 15% { transform: translateX(0); }
   85%, 100% { transform: translateX(var(--chat-title-travel)); }
-}
-
-@keyframes reveal-title-edges {
-  0%, 15% { mask-position: 100% 0; }
-  85%, 100% { mask-position: 0 0; }
 }
 
 @media (min-width: 768px) {
@@ -86,6 +83,18 @@
 .hoverAction[data-open] {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* Contextual controls replace the visual working indicator. Opacity preserves
+   its accessible status and avoids shifting the title when actions appear. */
+.actionHost[data-chat-sidebar-row]:is(:has(:focus-visible), :has(> [data-open])) [data-chat-working] {
+  opacity: 0;
+}
+
+@media (hover: hover) {
+  .actionHost[data-chat-sidebar-row]:hover [data-chat-working] {
+    opacity: 0;
+  }
 }
 
 /* Reclaim the hidden slot for text. Make room only during reveal so labels,

@@ -162,7 +162,7 @@ export function WorkspaceSidebarResizeHandle({ width, maxWidth, resizing, ...eve
     style={{ left: "calc(3.5rem + var(--workspace-sidebar-width, 14rem) - 4px)", WebkitAppRegion: "no-drag" } as CSSProperties}
     className="group/sidebar-resize absolute bottom-2 top-3 z-40 hidden w-2 cursor-col-resize touch-none select-none outline-none md:block"
   >
-    <div data-sidebar-resize-track aria-hidden className={`mx-auto h-full transition-colors group-hover/sidebar-resize:bg-primary/50 group-focus-visible/sidebar-resize:w-0.5 group-focus-visible/sidebar-resize:bg-ring ${resizing ? "w-0.5 bg-primary/60" : "w-px bg-transparent"}`} />
-    <span data-sidebar-resize-grip aria-hidden className={`absolute inset-x-0 top-[calc(50%-1rem)] mx-auto h-8 w-1 rounded-full group-focus-visible/sidebar-resize:bg-ring ${resizing ? "bg-primary/60" : "bg-transparent"}`} />
+    <div data-sidebar-resize-track aria-hidden className={`mx-auto h-full w-px transition-colors group-hover/sidebar-resize:bg-foreground/15 group-focus-visible/sidebar-resize:bg-foreground/25 ${resizing ? "bg-foreground/20" : "bg-transparent"}`} />
+    <span data-sidebar-resize-grip aria-hidden className={`absolute inset-x-0 top-[calc(50%-1rem)] mx-auto h-8 w-1 rounded-full group-hover/sidebar-resize:bg-foreground/30 ${resizing ? "bg-foreground/40" : "bg-transparent group-focus-visible/sidebar-resize:bg-ring"}`} />
   </div>;
 }

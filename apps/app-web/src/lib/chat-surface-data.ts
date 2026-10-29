@@ -77,13 +77,14 @@ import {
   markSurfaceCacheStale,
   mutateSurfaceCache,
   readSurfaceCache,
+  seedSurfaceCache,
   useCachedResource,
   SurfaceCacheEvictionError,
 } from "@/lib/surface-cache";
 import { idbDelete, idbGet, idbSet } from "@/lib/offline/idb";
 import { getUserInfo } from "@/lib/user";
 import { CHAT_SESSIONS_REFRESH_EVENT, dispatchChatSessionsRefresh } from "@/lib/chat-session-events";
-import { leaseSurfaceContent, OFFLINE_AUTHORITY_MS, surfaceContentRemaining, useLeasedResource } from "@/lib/offline/surface-content-cache";
+import { leaseSurfaceContent, OFFLINE_AUTHORITY_MS, SURFACE_CONTENT_LEASE_MS, surfaceContentRemaining, useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 // ── Disk tier ────────────────────────────────────────────────────────────
 
@@ -166,10 +167,11 @@ export async function writeChatSessionsSnapshot(
   viewerId: string,
   workspaceId: string,
   value: ChatSessionsSnapshot,
+  updatedAt = Date.now(),
 ): Promise<void> {
   const envelope: StoredSnapshot = {
     version: SNAPSHOT_VERSION,
-    updatedAt: Date.now(),
+    updatedAt,
     value,
   };
   await idbSet(chatSessionsSnapshotKey(viewerId, workspaceId), envelope);
@@ -229,26 +231,30 @@ async function resolveRoster(
 export async function fetchPersonalChatSessions(
   workspaceId: string,
 ): Promise<DocSession[]> {
-  const roster = await resolveRoster(workspaceId);
-  if (roster.length === 0) return [];
-  return readChatResource(() => listSessionsForAssistants({
-    workspaceId,
-    assistantIds: roster.map((assistant) => assistant.id),
-    strict: true,
-  }));
+  return readChatList(chatSessionsCacheKey(workspaceId), async () => {
+    const roster = await resolveRoster(workspaceId);
+    if (roster.length === 0) return [];
+    return readChatResource(() => listSessionsForAssistants({
+      workspaceId,
+      assistantIds: roster.map((assistant) => assistant.id),
+      strict: true,
+    }));
+  });
 }
 
 /** The fetcher behind `chat-shared:<wid>:<viewer>`. */
 function fetchSharedChatSessions(
   workspaceId: string,
 ): Promise<WorkspaceSession[]> {
-  return readChatResource(() => listWorkspaceSessions({ workspaceId, strict: true }));
+  return readChatList(chatSharedSessionsCacheKey(workspaceId), () =>
+    readChatResource(() => listWorkspaceSessions({ workspaceId, strict: true })));
 }
 
 /** Project-filtered pages share the session invalidation prefix and viewer key. */
 export function useProjectChatSessionsData(workspaceId: string, projectId: string | null) {
   const key = chatSharedSessionsCacheKey(workspaceId, projectId);
-  const rows = useCachedResource(key, () => listWorkspaceSessions({ workspaceId, contextProjectId: projectId, strict: true }));
+  const rows = useCachedResource(key, () => readChatList(key, () =>
+    readChatResource(() => listWorkspaceSessions({ workspaceId, contextProjectId: projectId, strict: true }))));
   const [paging, setPaging] = useState(false);
   const [exhaustedCursor, setExhaustedCursor] = useState<string | null>(null);
   const [pageError, setPageError] = useState<unknown>(null);
@@ -265,6 +271,32 @@ export function useProjectChatSessionsData(workspaceId: string, projectId: strin
     } catch (error) { setPageError(error); } finally { setPaging(false); }
   };
   return { ...rows, error: rows.error ?? pageError, paging, hasMore: rows.data?.at(-1)?.id !== exhaustedCursor, more };
+}
+
+/** Keep creations made during an older read; the next read is authoritative. */
+async function readChatList<T extends DocSession>(key: string, fetch: () => Promise<T[]>): Promise<T[]> {
+  const before = new Set(readSurfaceCache<T[]>(key).data?.map(row => row.id));
+  const rows = await fetch();
+  const added = (readSurfaceCache<T[]>(key).data ?? []).filter(row =>
+    !before.has(row.id) && !rows.some(fetched => fetched.id === row.id));
+  return [...added, ...rows];
+}
+
+/** Publish a server-confirmed creation in every list that renders its audience. */
+export function cacheCreatedChatSession(workspaceId: string, row: DocSession | WorkspaceSession, audience: "personal" | "workspace"): void {
+  const keys = audience === "personal" ? [chatSessionsCacheKey(workspaceId)] : [
+    chatSharedSessionsCacheKey(workspaceId),
+    chatSharedSessionsCacheKey(workspaceId, row.contextProjectId ?? null),
+  ];
+  for (const key of keys) {
+    if (readSurfaceCache<DocSession[]>(key).data !== undefined) {
+      mutateSurfaceCache<DocSession[]>(key, rows => [row, ...rows.filter(old => old.id !== row.id)]);
+    } else {
+      // Seed immediately, even while the original list read is pending. A
+      // confirmed create grants only this row a bounded presentation lifetime.
+      seedSurfaceCache(key, [row], { expiresInMs: () => SURFACE_CONTENT_LEASE_MS, keepInflightOnExpiry: true }, true);
+    }
+  }
 }
 
 // ── Optimistic patches ───────────────────────────────────────────────────
@@ -416,27 +448,30 @@ export function useChatSessionsData(
   useEffect(() => {
     if (!viewerId || !wid || !scope || denied) return;
     let cancelled = false;
-    let expiry: ReturnType<typeof setTimeout> | undefined;
     void readChatSessionsSnapshot(viewerId, wid).then((stored) => {
       if (cancelled || !stored) return;
-      setPersisted({ scope, ...stored });
-      expiry = setTimeout(() => setPersisted(current => current?.scope === scope ? null : current), Math.max(0, stored.expiresAt - Date.now()));
+      setPersisted(current => current?.scope === scope && current.expiresAt >= stored.expiresAt ? current : { scope, ...stored });
     });
     return () => {
       cancelled = true;
-      clearTimeout(expiry);
     };
   }, [denied, scope, viewerId, wid]);
+  useEffect(() => {
+    if (!persisted) return;
+    const expiry = setTimeout(() => setPersisted(current => current === persisted ? null : current), Math.max(0, persisted.expiresAt - Date.now()));
+    return () => clearTimeout(expiry);
+  }, [persisted]);
   // Persist only a healthy pair; a failed refresh must not overwrite the
   // previous snapshot or race the authoritative-denial eviction below.
   useEffect(() => {
-    if (!viewerId || !wid || !personal.data || !shared.data) return;
+    if (!viewerId || !wid || !scope || !personal.data || !shared.data) return;
     if (roster.error !== undefined || personal.error !== undefined || shared.error !== undefined) return;
-    void writeChatSessionsSnapshot(viewerId, wid, {
-      personal: personal.data,
-      shared: shared.data,
-    });
-  }, [personal.data, personal.error, roster.error, shared.data, shared.error, viewerId, wid]);
+    const snapshot = { personal: personal.data, shared: shared.data };
+    const updatedAt = Math.min(personal.updatedAt, shared.updatedAt);
+    if (!Number.isFinite(updatedAt) || updatedAt <= 0) return;
+    setPersisted({ scope, snapshot, expiresAt: updatedAt + OFFLINE_AUTHORITY_MS });
+    void writeChatSessionsSnapshot(viewerId, wid, snapshot, updatedAt);
+  }, [personal.data, personal.error, personal.updatedAt, roster.error, shared.data, shared.error, shared.updatedAt, scope, viewerId, wid]);
   useEffect(() => {
     if (!viewerId || !wid || !denied) return;
     setPersisted(null);

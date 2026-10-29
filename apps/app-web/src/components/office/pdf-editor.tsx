@@ -288,7 +288,7 @@ export function PdfEditor(props: PdfEditorProps) {
     {notice ? <p className="border-b bg-background px-3 py-2 text-xs" role="status">{notice}</p> : null}
     <div className="flex min-h-0 flex-1 overflow-hidden">
       <aside className="hidden w-36 shrink-0 overflow-y-auto border-r bg-background p-2 md:block" aria-label={t.pages}>
-        {snapshot.pages.map((candidate, index) => <button key={candidate.id} type="button" onClick={() => { setPageId(candidate.id); setSelectedOverlayId(null); }} className={cn("mb-2 w-full rounded border p-1 text-xs", candidate.id === page.id && "border-primary ring-2 ring-primary/20")} aria-current={candidate.id === page.id ? "page" : undefined}>
+        {snapshot.pages.map((candidate, index) => <button key={candidate.id} type="button" onClick={() => { setPageId(candidate.id); setSelectedOverlayId(null); }} className={cn("mb-2 w-full rounded border p-1 text-xs", candidate.id === page.id && "border-neutral-500 ring-2 ring-neutral-500/20")} aria-current={candidate.id === page.id ? "page" : undefined}>
           {protectedPdf.document ? <PdfPageCanvas document={protectedPdf.document} sourcePageIndex={candidate.sourcePageIndex} rotation={candidate.rotation} width={112} className="mx-auto bg-white shadow-sm" /> : <span className="block aspect-[3/4] animate-pulse bg-muted" />}
           <span className="mt-1 block">{t.page.replace("{page}", String(index + 1))}</span>
         </button>)}
@@ -299,9 +299,9 @@ export function PdfEditor(props: PdfEditorProps) {
             {protectedPdf.document ? <PdfPageCanvas document={protectedPdf.document} sourcePageIndex={page.sourcePageIndex} rotation={page.rotation} width={canvasWidth} className="block max-w-full bg-white" /> : <div className="aspect-[3/4] w-[min(760px,calc(100vw-1rem))] animate-pulse bg-muted" aria-label={protectedPdf.state === "failed" ? t.sourceFailed : t.sourceLoading} />}
             <div className="absolute inset-0" data-pdf-overlay-layer>
               {page.fields.flatMap((field) => field.widgets.filter((widget) => widget.pageId === page.id).map((widget) => <Position key={widget.id} page={page} rect={widget.rect}><FieldControl field={field} disabled={!canEdit || busy} t={t} onChange={(value) => void run(fieldCommand(field, value))} onFocus={() => onSelectTargets([field.id])} /></Position>))}
-              {page.overlays.map((overlay) => <Position key={overlay.id} page={page} rect={overlay.rect} className={cn("group border-2 bg-blue-50/50 text-[10px] text-blue-950", selectedOverlayId === overlay.id ? "border-blue-600" : "border-transparent hover:border-blue-400")}>
+              {page.overlays.map((overlay) => <Position key={overlay.id} page={page} rect={overlay.rect} className={cn("group border-2 bg-background/50 text-[10px] text-foreground", selectedOverlayId === overlay.id ? "border-neutral-500" : "border-transparent hover:border-neutral-500")}>
                 <button type="button" className="flex size-full min-h-8 max-sm:min-h-11 cursor-move items-center justify-center overflow-hidden px-1 touch-none" onClick={() => setSelectedOverlayId(overlay.id)} onPointerDown={(event) => beginDrag(event, overlay, "move")} onPointerUp={finishDrag}>{overlayText(overlay)}</button>
-                {selectedOverlayId === overlay.id ? <button type="button" aria-label={t.resizeOverlay} className="absolute -bottom-2 -right-2 size-11 rounded-full bg-blue-600 touch-none md:size-4" onPointerDown={(event) => beginDrag(event, overlay, "resize")} onPointerUp={finishDrag} /> : null}
+                {selectedOverlayId === overlay.id ? <button type="button" aria-label={t.resizeOverlay} className="absolute -bottom-2 -right-2 size-11 rounded-full bg-neutral-500 touch-none md:size-4" onPointerDown={(event) => beginDrag(event, overlay, "resize")} onPointerUp={finishDrag} /> : null}
               </Position>)}
               {ghost ? <Position page={page} rect={ghost.rect} className="border-2 border-dashed border-violet-600 bg-violet-200/35"><span className="flex size-full items-center justify-center text-xs font-semibold text-violet-950">{t.signatureGhost}</span></Position> : null}
             </div>

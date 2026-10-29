@@ -471,13 +471,13 @@ export function KnowledgeTab({
                         <button
                           key={entry.id}
                           onClick={() => handleBrowse(entry.path)}
-                          className="w-full flex items-center gap-3 py-2.5 px-3 rounded-lg hover:bg-primary/5 border border-transparent hover:border-primary/10 transition-all text-left group"
+                          className="w-full flex items-center gap-3 py-2.5 px-3 rounded-lg hover:bg-interaction/5 border border-transparent hover:border-interaction/15 transition-all text-left group"
                         >
                           <div className="w-7 h-7 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
                             <FolderIcon />
                           </div>
                           <div className="flex-1 min-w-0">
-                            <div className="text-[13px] font-medium group-hover:text-primary transition-colors">{entry.title}</div>
+                            <div className="text-[13px] font-medium group-hover:text-foreground transition-colors">{entry.title}</div>
                             {entry.summary && <div className="text-[11px] text-muted-foreground truncate">{entry.summary}</div>}
                           </div>
                           {entry.tags.length > 0 && (

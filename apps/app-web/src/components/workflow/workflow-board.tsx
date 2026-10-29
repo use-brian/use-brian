@@ -729,7 +729,7 @@ export function WorkflowBoard({
               ? "border-emerald-500"
               : tone === "false"
                 ? "border-red-500"
-                : "border-muted-foreground/70 hover:border-primary",
+                : "border-muted-foreground/70 hover:border-interaction",
           )}
         />
       </span>
@@ -1070,7 +1070,7 @@ export function WorkflowBoard({
                 }}
                 className={cn(
                   "absolute flex items-start gap-2.5 rounded-xl border bg-card p-3 text-left shadow-sm transition",
-                  "hover:shadow-md hover:border-primary/50",
+                  "hover:shadow-md hover:border-interaction/50",
                   blocksPanning ? "cursor-grab active:cursor-grabbing" : "cursor-pointer",
                   orphan && "border-dashed opacity-75 hover:opacity-100",
                   nodeDrag?.key === node.key && nodeDrag.moved && "z-30 shadow-lg opacity-100",

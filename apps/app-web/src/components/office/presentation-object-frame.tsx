@@ -306,7 +306,7 @@ export function PresentationObjectFrame({
       style={style}
       className={cn(
         "absolute touch-none overflow-visible border border-transparent outline-none",
-        selected && "border-primary ring-1 ring-primary",
+        selected && "border-neutral-500 ring-1 ring-neutral-500",
         editable && !editingText && "cursor-move",
         object.locked && "cursor-default",
       )}
@@ -328,12 +328,12 @@ export function PresentationObjectFrame({
           : <PresentationObjectVisual artifactId={artifactId} object={object} slideSize={slideSize} />}
       </div>
       {selected && primary && editable && !editingText ? <>
-        <span aria-hidden className="pointer-events-none absolute left-1/2 top-[-1.4rem] h-[1.15rem] border-l border-primary" />
+        <span aria-hidden className="pointer-events-none absolute left-1/2 top-[-1.4rem] h-[1.15rem] border-l border-neutral-500" />
         <button
           type="button"
           data-rotate-handle="true"
           aria-label={t.rotation}
-          className="absolute left-1/2 top-[-1.9rem] size-3 -translate-x-1/2 cursor-grab rounded-full border border-primary bg-background shadow-sm before:absolute before:-inset-3 before:content-['']"
+          className="absolute left-1/2 top-[-1.9rem] size-3 -translate-x-1/2 cursor-grab rounded-full border border-neutral-500 bg-background shadow-sm before:absolute before:-inset-3 before:content-['']"
           onPointerDown={(event) => startTransform(event, "rotate")}
           onClick={(event) => event.stopPropagation()}
         />
@@ -342,7 +342,7 @@ export function PresentationObjectFrame({
           type="button"
           data-resize-handle={handle.id}
           aria-label={handleLabel(handle.dimensions)}
-          className={cn("absolute size-3 rounded-sm border border-primary bg-background shadow-sm before:absolute before:-inset-3 before:content-['']", handle.className)}
+          className={cn("absolute size-3 rounded-sm border border-neutral-500 bg-background shadow-sm before:absolute before:-inset-3 before:content-['']", handle.className)}
           onPointerDown={(event) => startTransform(event, handle.id)}
           onClick={(event) => event.stopPropagation()}
         />)}

@@ -2197,7 +2197,7 @@ function DealsTable({
         return (
           <div
             key={row.id}
-            className={cn("group/crm grid items-center gap-1 px-4 py-1.5 transition-colors", selected.has(row.id) ? "bg-primary/5" : "hover:bg-muted/40")}
+            className={cn("group/crm grid items-center gap-1 px-4 py-1.5 transition-colors", selected.has(row.id) ? "bg-interaction/10" : "hover:bg-muted/40")}
             style={crmGrid(columns)}
           >
             <RowCheckbox
@@ -2275,7 +2275,7 @@ function ContactsTable({
       {rows.map((row) => (
         <div
           key={row.id}
-          className={cn("group/crm grid items-center gap-1 px-4 py-1.5 transition-colors", selected.has(row.id) ? "bg-primary/5" : "hover:bg-muted/40")}
+          className={cn("group/crm grid items-center gap-1 px-4 py-1.5 transition-colors", selected.has(row.id) ? "bg-interaction/10" : "hover:bg-muted/40")}
           style={crmGrid(columns)}
         >
           <RowCheckbox
@@ -2357,7 +2357,7 @@ function CompaniesTable({
       {rows.map((row) => (
           <div
             key={row.id}
-            className={cn("group/crm grid items-center gap-1 px-4 py-1.5 transition-colors", selected.has(row.id) ? "bg-primary/5" : "hover:bg-muted/40")}
+            className={cn("group/crm grid items-center gap-1 px-4 py-1.5 transition-colors", selected.has(row.id) ? "bg-interaction/10" : "hover:bg-muted/40")}
             style={crmGrid(columns)}
           >
             <RowCheckbox

@@ -154,7 +154,7 @@ export function ComposerControls({
             "inline-flex shrink-0 items-center justify-center rounded-lg transition-colors",
             phoneTargets ? "size-11 md:size-7" : "size-7",
             aiOn
-              ? "bg-primary/15 text-primary hover:bg-primary/20"
+              ? "bg-interaction/15 text-foreground hover:bg-interaction/20"
               : "text-muted-foreground hover:bg-muted hover:text-foreground",
           )}
         >

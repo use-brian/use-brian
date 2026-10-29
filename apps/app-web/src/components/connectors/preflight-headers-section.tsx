@@ -22,7 +22,7 @@ import {
 } from "@/lib/connector-preflight-headers";
 
 const FIELD =
-  "flex-1 min-w-0 text-[16px] md:text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30";
+  "flex-1 min-w-0 text-[16px] md:text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-ring/30";
 
 export function PreflightHeadersSection({
   initial,

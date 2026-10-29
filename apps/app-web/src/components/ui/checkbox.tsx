@@ -7,7 +7,7 @@
  * `@base-ui/react/checkbox` the same way `searchable-select.tsx` wraps the
  * combobox. Native checkboxes render OS chrome that ignores the app palette and
  * reads "unfinished" next to the base-ui / shadcn surfaces — this gives a soft
- * rounded box that fills with `--primary` on check, animates the tick in/out,
+ * rounded box that fills with `--action` on check, animates the tick in/out,
  * and supports the `indeterminate` (partial select-all) state.
  *
  * The tick and minus scale with the box: the Root carries a 2px inset and the
@@ -63,14 +63,14 @@ export function Checkbox({
       disabled={disabled}
       aria-label={ariaLabel}
       className={cn(
-        // Box — soft rounded square that fills with the primary on check.
+        // Box — soft rounded square that fills with neutral ink on check.
         "inline-flex size-4 shrink-0 items-center justify-center rounded-[5px] border p-[2px]",
-        "border-muted-foreground/35 bg-background text-primary-foreground",
+        "border-muted-foreground/35 bg-background text-action-foreground",
         "shadow-sm outline-none transition-[background-color,border-color,box-shadow,opacity]",
         "hover:border-muted-foreground/55",
         "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-1 focus-visible:ring-offset-background",
-        "data-[checked]:border-primary data-[checked]:bg-primary",
-        "data-[indeterminate]:border-primary data-[indeterminate]:bg-primary",
+        "data-[checked]:border-action data-[checked]:bg-action",
+        "data-[indeterminate]:border-action data-[indeterminate]:bg-action",
         "data-[disabled]:cursor-not-allowed data-[disabled]:opacity-50",
         "cursor-pointer",
         className,

@@ -3406,7 +3406,7 @@ export function FloatingChat({
             >
               <span
                 aria-hidden
-                className="absolute left-1 top-1 size-1.5 rounded-tl-sm border-l-2 border-t-2 border-muted-foreground/30 transition-colors group-hover/resize:border-primary/70"
+                className="absolute left-1 top-1 size-1.5 rounded-tl-sm border-l-2 border-t-2 border-muted-foreground/30 transition-colors group-hover/resize:border-interaction/50"
               />
             </div>
             <div

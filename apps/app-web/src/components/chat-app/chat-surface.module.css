@@ -129,8 +129,8 @@
 .actionTarget:focus-visible::before,
 .effortControl [data-slot="select-trigger"]:focus-visible::before {
   background-image: linear-gradient(
-    color-mix(in srgb, currentColor 16%, transparent),
-    color-mix(in srgb, currentColor 16%, transparent)
+    color-mix(in srgb, oklch(from currentColor l 0 h) 16%, transparent),
+    color-mix(in srgb, oklch(from currentColor l 0 h) 16%, transparent)
   );
 }
 

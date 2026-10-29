@@ -114,7 +114,7 @@ export function GoalAcknowledgement({
           onClick={onDismiss}
           aria-label={labels.dismiss}
           title={labels.dismiss}
-          className="absolute right-2 top-2 rounded-md p-1 text-muted-foreground transition-colors hover:bg-primary/10 hover:text-foreground"
+          className="absolute right-2 top-2 rounded-md p-1 text-muted-foreground transition-colors hover:bg-interaction/10 hover:text-foreground"
         >
           <X className="size-3.5" aria-hidden />
         </button>
