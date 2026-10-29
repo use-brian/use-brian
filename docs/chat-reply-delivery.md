@@ -19,6 +19,8 @@ Every combined chunk still crosses the existing current source and recipient
 authorization checks. There is no permission cache, TTL, or revocation bypass.
 This reduces work from one expensive authorization round per provider token to
 one round per bounded queued chunk when the consumer is behind.
+Coalescing reduces repeated checks under backpressure; it does not shorten an
+individual permission check or the provider's own inference time.
 
 ## Authenticated transcript reads
 
