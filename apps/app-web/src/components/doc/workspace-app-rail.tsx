@@ -84,7 +84,9 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
     <nav data-workspace-app-rail data-doc-chrome aria-label={copy.contextScope.workspaceNavigation} className={cn(
       mobile ? "flex max-h-[50dvh] min-h-0 shrink-0 flex-col gap-0.5 px-2 pb-2 md:hidden" : cn(styles.rail, "hidden h-full min-h-0 w-14 shrink-0 flex-col items-center gap-2 px-2 pt-px md:flex"),
     )}>
-      {!mobile && <div data-workspace-menu-slot aria-hidden className="h-16 w-full shrink-0" />}
+      {/* The sibling switcher overlays this slot. Electron drag regions ignore
+          its z-index, so exclude the full rail width from native window dragging. */}
+      {!mobile && <div data-workspace-menu-slot data-no-drag aria-hidden className="h-16 w-14 shrink-0" />}
       {/* Include the rail gutters in the scroll viewport so corner badges fit. */}
       <div data-workspace-app-rail-scroll className={cn("flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain", mobile ? "-mx-1 gap-0.5 px-1" : "w-14 items-center gap-2 px-2 [scrollbar-width:none]")}>
       {destinations.map(({ name, aria, icon: Icon, href, active, shortcut, live }) => (

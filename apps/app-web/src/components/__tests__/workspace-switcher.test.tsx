@@ -13,7 +13,7 @@
  * follow.
  */
 
-import { act, type ReactNode } from "react";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -61,7 +61,6 @@ vi.mock("@/lib/api/workspaces", () => ({
 vi.mock("@/lib/accounts", () => ({ getAccountsDir: () => [] }));
 vi.mock("@/lib/route-progress", () => ({ routeProgress: { start: vi.fn() } }));
 vi.mock("@/components/team-avatar", () => ({ TeamAvatar: ({ iconUrl }: { iconUrl: string | null }) => <img alt="" data-workspace-avatar src={iconUrl ?? undefined} /> }));
-vi.mock("@/components/ui/tooltip", () => ({ Tooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/desktop-accounts", () => ({ DesktopAccounts: () => null }));
 vi.mock("@/components/ui/user-avatar", () => ({ UserAvatar: () => null }));
 vi.mock("@/components/create-workspace-form", () => ({

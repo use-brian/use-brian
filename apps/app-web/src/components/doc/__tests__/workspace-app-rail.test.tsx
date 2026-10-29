@@ -100,6 +100,10 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
     await render();
     expect(container.querySelector('a')?.getAttribute('aria-label')).toBe(en.workspaceNav.homeAria);
     const workspaceSlot = container.querySelector('[data-workspace-menu-slot]')!;
+    // Exclude the overlaid menu button and the rail gutters from native dragging.
+    expect(workspaceSlot.hasAttribute("data-no-drag")).toBe(true);
+    expect(workspaceSlot.classList.contains("w-14")).toBe(true);
+    expect(workspaceSlot.classList.contains("h-16")).toBe(true);
     expect(workspaceSlot.compareDocumentPosition(railLink(en.workspaceNav.homeAria)!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(container.querySelector('[data-workspace-sidebar-toggle]')).toBeNull();
     const more = button(en.workspaceNav.more);
