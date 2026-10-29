@@ -107,13 +107,13 @@ describe("[COMP:app-web/doc-schema] NodeRange (area select)", () => {
     );
   });
 
-  it("CSS gives the selected range a translucent --primary band", () => {
+  it("CSS gives the selected range a translucent neutral --interaction band", () => {
     const css = readFileSync(
       resolve(dirname(fileURLToPath(import.meta.url)), "../../../app/globals.css"),
       "utf8",
     );
     expect(css).toMatch(
-      /\.ProseMirror-selectednoderange\s*\{[\s\S]{0,160}background-color:[^;]*var\(--primary\)/,
+      /\.ProseMirror-selectednoderange\s*\{[\s\S]{0,160}background-color:[^;]*var\(--interaction\)/,
     );
   });
 
@@ -191,7 +191,7 @@ describe("[COMP:app-web/doc-schema] NodeRange (area select)", () => {
     ).toBe(true);
   });
 
-  it("CSS: the live marquee is a fixed, non-interactive on-brand --primary box", () => {
+  it("CSS: the live marquee is a fixed, non-interactive neutral --interaction box", () => {
     const css = readFileSync(
       resolve(dirname(fileURLToPath(import.meta.url)), "../../../app/globals.css"),
       "utf8",
@@ -200,11 +200,11 @@ describe("[COMP:app-web/doc-schema] NodeRange (area select)", () => {
     expect(rule).toMatch(/position:\s*fixed/);
     // must never eat the drag it's drawing
     expect(rule).toMatch(/pointer-events:\s*none/);
-    // on-brand blue: a borderless translucent --primary fill (no outline — the
+    // Neutral interaction ink: a borderless translucent fill (no outline; the
     // sweep reads as a soft band matching the NodeRange block tint). Keyed off
-    // --primary so it resolves in both themes.
+    // --interaction so it resolves in both themes.
     expect(rule).not.toMatch(/border:\s*\d+px\s+solid/);
-    expect(rule).toMatch(/background-color:[^;]*var\(--primary\)/);
+    expect(rule).toMatch(/background-color:[^;]*var\(--interaction\)/);
   });
 });
 
