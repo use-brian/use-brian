@@ -7,6 +7,9 @@ import regressions. The opt-in browser test uses the live official catalog.
 
 | COMP tag | doc path | source path | test path |
 | --- | --- | --- | --- |
+| providers/model-registry | docs/plans/chatgpt-codex-oauth.md | packages/shared/src/model-registry.ts | packages/shared/src/__tests__/model-registry.test.ts |
+| providers/codex-process | docs/plans/chatgpt-codex-oauth.md | packages/core/src/providers/codex-app-server/process.ts | packages/core/src/providers/codex-app-server/__tests__/process.test.ts |
+| providers/codex-native-tool-boundary | docs/plans/chatgpt-codex-oauth.md | packages/core/src/providers/codex-app-server/process.ts | packages/core/src/providers/codex-app-server/__tests__/native-tool-boundary.integration.test.ts |
 | api/deployment-edition | docs/self-hosting.md; docs/plans/chatgpt-codex-oauth.md | packages/api/src/edition.ts; packages/api/src/boot.ts | packages/api/src/__tests__/edition.test.ts |
 | api/codex-provider | docs/plans/chatgpt-codex-oauth.md | packages/api/src/codex-provider-manager.ts; packages/api/src/routes/codex-provider.ts; packages/api/src/boot.ts | packages/api/src/__tests__/codex-provider-manager.test.ts; packages/api/src/routes/__tests__/codex-provider.test.ts |
 | ext/chrome-release | docs/workflow/browser-extension-release.md | scripts/publish-browser-extension.sh | apps/browser-extension/src/__tests__/chrome-release.test.ts |

@@ -6,10 +6,10 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import { providerModelIds } from '@use-brian/shared/model-registry'
+import { providerModelIds, registryRow } from '@use-brian/shared/model-registry'
 import {
   buildCodexEnvironment,
-  CODEX_INFERENCE_HARDENING_ARGS,
+  buildCodexToolSurfaceArgs,
   resolvePinnedCodexCommand,
   startCodexAppServer,
 } from '../process.js'
@@ -69,7 +69,7 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
     try {
       const catalog = await new CodexCatalogClient(client.rpc).listModels()
       expect(catalog.models.map(model => model.model)).toEqual(expect.arrayContaining([
-        'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra',
+        'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-astra',
       ]))
       for (const method of ['thread/start', 'turn/start']) {
         await expect(client.rpc.request(method, {}, z.unknown())).rejects.toThrow(`RPC method is not enabled: ${method}`)
@@ -81,6 +81,7 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
   })
 
   it.each(providerModelIds('openai-codex'))('exposes only Brian dynamic tools for %s', async (model) => {
+    const wireModel = registryRow(model)!.apiModelId
     const codexHome = await mkdtemp(join(tmpdir(), 'use-brian-codex-boundary-home-'))
     const cwd = await mkdtemp(join(tmpdir(), 'use-brian-codex-boundary-cwd-'))
     const bodies: unknown[] = []
@@ -110,7 +111,7 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
       [
         ...(command.argsPrefix ?? []),
         'app-server',
-        ...CODEX_INFERENCE_HARDENING_ARGS,
+        ...await buildCodexToolSurfaceArgs(command, cwd, 'inference'),
         '-c',
         'model_provider="brian_mock"',
         '-c',
@@ -161,7 +162,7 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
       const started = await rpc.request(
         'thread/start',
         {
-          model,
+          model: wireModel,
           modelProvider: 'brian_mock',
           cwd,
           ephemeral: true,
@@ -224,7 +225,7 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
         })
         .passthrough()
         .parse(bodies[0])
-      expect(request.model).toBe(model)
+      expect(request.model).toBe(wireModel)
       const additionalTools = request.input
         .map((item) =>
           z
@@ -242,8 +243,9 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
             .passthrough()
             .safeParse(item),
         )
-        .find((result) => result.success)
-      if (!additionalTools?.success) {
+        .filter((result) => result.success)
+        .flatMap((result) => result.data.tools)
+      if (additionalTools.length === 0) {
         expect(request.tools.map((tool) => tool.name)).toEqual(['brian_echo'])
         expect(request.tools.map((tool) => tool.type)).toEqual(['function'])
         return
@@ -251,13 +253,11 @@ describe('[COMP:providers/codex-native-tool-boundary] pinned runtime tool surfac
 
       const directNames = request.tools.map((tool) => tool.name ?? tool.type ?? 'unknown')
       expect(directNames).toEqual([])
-      const names = additionalTools.data.tools.map((tool) => tool.name)
-      const tools = names[0] === 'functions'
-        ? z.object({ tools: z.array(z.object({ name: z.string(), description: z.string().optional() }).passthrough()) }).parse(additionalTools.data.tools[0]).tools
-        : additionalTools.data.tools
-      expect(tools.map((tool) => tool.name)).toEqual(['exec', 'wait'])
-      const description = tools.find((tool) => tool.name === 'exec')?.description ?? ''
-      expect(Array.from(description.matchAll(/^### `([^`]+)`$/gm), (match) => match[1])).toEqual(['brian_echo'])
+      const tools = additionalTools.flatMap((tool) => tool.name === 'functions'
+        ? z.object({ tools: z.array(z.object({ name: z.string(), type: z.string() }).passthrough()) }).parse(tool).tools
+        : [tool])
+      expect(tools.map((tool) => tool.name)).toEqual(['brian_echo'])
+      expect(tools.map((tool) => tool.type)).toEqual(['function'])
     } catch (error) {
       throw new Error(
         `Codex native-tool boundary probe failed (stderr=${JSON.stringify(stderr)}): ${

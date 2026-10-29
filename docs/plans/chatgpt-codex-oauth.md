@@ -67,11 +67,11 @@ The implementation now reaches the OSS launcher, API, model menus, routing,
 query loop, and localized Settings surface:
 
 - `@openai/codex` inference and the `@openai/codex-catalog` account-only alias
-  have separate exact schema-reviewed pins.
+  share one exact schema-reviewed version; their RPC allowlists remain separate.
 - A bounded, Zod-validated JSONL RPC peer owns initialization, correlation,
   notifications, server requests, cancellation, and shutdown.
 - A managed process seam starts the pinned package over stdio with an isolated
-  `CODEX_HOME`, an empty private working directory under `CODEX_HOME/runtime/`, and an allowlisted
+  `CODEX_HOME`, a private working directory under `CODEX_HOME/runtime/`, and an allowlisted
   environment that excludes OpenAI/Codex API keys and access tokens.
 - The managed P0 peer allowlists only `initialize` and `initialized`; generic
   callers cannot use it to start a thread or turn.
@@ -82,9 +82,8 @@ query loop, and localized Settings surface:
 - Model discovery is paginated, bounded, duplicate-rejecting, and returns a
   reviewed normalized catalog; hidden models stay absent by default.
 - The pinned-runtime request-capture test proves that the hardened inference
-  profile exposes either the supplied functions directly or Codex's isolated
-  `exec`/`wait` code-mode envelope, and that the only callable operations are the
-  Brian-supplied dynamic tools. Planning, skills, collaboration, shell, file,
+  profile exposes only the Brian-supplied dynamic functions directly.
+  Planning, skills, collaboration, shell, file,
   browser, computer, app, MCP, and hosted-search capabilities are absent.
 - The `openai-codex` registry identities and provider factory exist. Routing
   accepts a live per-model entitlement catalog, so a cached provider cannot
@@ -133,14 +132,13 @@ after the authenticated catalog intersects a reviewed active registry row.
    Brian still owns memory, context assembly, tool policy, confirmations, tool
    execution, analytics, compaction, and persistence.
 7. **Native Codex actions fail closed.** The provider starts ephemeral threads
-   with no environment access, an empty working directory, no configured MCP
+   with no environment access, a private working directory, no configured MCP
    servers, and Brian tools registered only as dynamic tools. The managed
    process disables every native capability and instruction surface supported
    by the pinned runtime under `--strict-config`. A request-capture contract
-   test verifies that the residual `exec`/`wait` envelope is an isolated V8
-   dispatcher whose complete nested tool set is exactly the Brian dynamic
-   tools. Observing a native action and aborting afterward is not a security
-   boundary; any extra nested or direct tool fails the contract.
+   test verifies that the complete tool set is exactly the Brian dynamic
+   functions. Observing a native action and aborting afterward is not a security
+   boundary; any extra tool fails the contract.
 8. **Subscription and API billing stay distinct.** ChatGPT quota is not mapped
    onto Brian's per-token metered ledger. A future `OPENAI_API_KEY` provider is
    a separate OpenAI Platform lane with its own pricing and usage accounting.
@@ -244,16 +242,36 @@ Supported.
 
 ### 3. Query-loop bridge
 
-Inference and images keep the tested `@openai/codex` runtime
-`0.146.0-alpha.10.1`. A separate `@openai/codex-catalog` npm alias pins
-`0.162.1` for account/login/catalog discovery only, reviewed against
-its generated experimental schemas. It cannot start a thread or turn. Newer
-model presets add native tools that are not reliably disabled by the existing
-strict profile; separating discovery from inference preserves Brian's tool
-authority. A real inference capture covers every active reviewed model and
+Inference, images, and account discovery use the same reviewed Codex version,
+`0.165.0`. The `@openai/codex-catalog` alias remains account-only and cannot
+start a thread or turn. Keeping both pins equal prevents incompatible cache
+formats from sharing Brian's isolated credential home. The account catalog
+is a discovery list, not proof of inference access: a successful authenticated
+turn is required to verify that a model is usable. Runtime upgrades must pass
+the strict native-tool boundary before inference can use the new version.
+The hardened profile disables `send_message_to_user_async`, `sleep_tool`, and
+`view_image` alongside the existing native capability switches. New runtime
+model metadata can opt into native Code Mode tools independently of those
+switches. Inference therefore uses a private, startup-only copy of the pinned
+runtime's bundled model metadata with native tool opt-ins removed. This copy
+changes only tool registration, preserves model IDs and model capabilities,
+and never supplies the account discovery list or proves account entitlement.
+Brian's dynamic tools are passed directly; they remain parked until Brian
+returns their result. The wire-capture test must prove that only Brian's
+supplied tools are exposed. The separate image surface permits only its
+image generation tool.
+A real inference capture covers every active reviewed model and
 checks the selected wire model as well as the tool surface. The reviewed
-catalog adds GPT-6 Luna (Standard), GPT-6 Sol (Pro), GPT-6.1 Sol (Max), and
-GPT-6 Astra (Research). Older selections and Auto priority are retained;
+catalog adds GPT-6 Luna (Standard), GPT-6.1 Terra and GPT-6.1 Sol (Pro),
+GPT-6.1 Sol (Max), and GPT-6 Astra (Research). Pro Auto routing prefers Terra
+when entitled, then Sol, before older Pro models. Terra is present in the
+updated bundled catalog; it is offered only when account discovery returns
+it, and an authenticated turn verifies access. The Pro Sol selector is `gpt-6.1-sol-pro`, which
+sends the provider's canonical `gpt-6.1-sol` wire id while retaining the Pro
+alias in Brian's stream and usage identity. The existing `gpt-6.1-sol` selector
+remains Max, so saved Max routes and historical classification keep working.
+GPT-6 Sol and GPT-5.6 Terra remain valid exact selections; the other tiers
+retain their existing Auto priority. Older selections remain valid;
 new models remain intersected with picker-visible account discovery. Their
 context budget is the subscription client's conservative 272K default, with
 Brian's existing 32,768-token output cap. Hidden internal and unreviewed models

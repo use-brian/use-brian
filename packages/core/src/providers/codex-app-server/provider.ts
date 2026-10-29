@@ -1,5 +1,6 @@
 import { debugDocumentFlow } from '../../engine/document-flow-debug.js'
 import { Buffer } from 'node:buffer'
+import { providerAliasMap } from '@use-brian/shared/model-registry'
 import { renderSystemContext } from '../system-context.js'
 import { assertInputAuthority, isInputAuthorityError } from '../input-authority.js'
 import { z } from 'zod'
@@ -36,6 +37,7 @@ import {
 } from './protocol.js'
 
 const MAX_SYSTEM_PROMPT_BYTES = 512 * 1024
+const MODEL_ALIASES = providerAliasMap('openai-codex')
 const MAX_HISTORY_TEXT_FIELD_BYTES = 256 * 1024
 // Inference app-server peers use an 8 MiB JSONL frame (process.ts). Keep the
 // injected items array below that outer envelope while allowing ordinary
@@ -503,10 +505,11 @@ class CodexProviderSession implements ProviderSession {
   }
 
   async #startThread(): Promise<void> {
+    const wireModel = MODEL_ALIASES[this.#options.model] ?? this.#options.model
     const response = await this.#transport.rpc.request(
       'thread/start',
       {
-        model: this.#options.model,
+        model: wireModel,
         baseInstructions: this.#options.systemPrompt,
         developerInstructions: null,
         dynamicTools: Array.from(this.#allowedTools.values(), (tool) => ({
@@ -536,7 +539,7 @@ class CodexProviderSession implements ProviderSession {
       ThreadStartResponseSchema,
       { signal: this.#options.signal, assertInputAuthority: () => this.#assertInputAuthority() },
     )
-    if (response.model !== this.#options.model) {
+    if (response.model !== wireModel) {
       throw new CodexProviderProtocolError('Codex silently substituted the requested model')
     }
     this.#threadId = response.thread.id

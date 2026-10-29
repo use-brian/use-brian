@@ -330,17 +330,40 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
 
   it('serves every current Codex tier when only current models are entitled', () => {
     const codex = new MutableProviderAvailability()
-    codex.setModelCatalog('openai-codex', new Set(['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra']))
+    codex.setModelCatalog('openai-codex', new Set(['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-astra']))
     expect(ensureServableModel('gemini-3.6-flash-standard', codex)).toBe('gpt-6-luna')
-    expect(ensureServableModel('gemini-3.6-flash-pro', codex)).toBe('gpt-6-sol')
+    expect(ensureServableModel('gemini-3.6-flash-pro', codex)).toBe('gpt-6.1-terra')
     expect(ensureServableModel('gemini-3.8-flash', codex)).toBe('gpt-6.1-sol')
     expect(ensureServableModel('gemini-4-argon-research', codex)).toBe('gpt-6-astra')
     codex.setPreferredProvider('openai-codex')
     expect(backgroundModelFor(codex)).toBe('gpt-6-luna')
     expect(providerVisionModelFor(codex, 'openai-codex')).toBe('gpt-6-luna')
-    for (const model of ['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-astra']) {
+    for (const model of ['gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-astra']) {
       expect(ensureServableModel(model, codex)).toBe(model)
     }
+  })
+
+  it('prefers GPT-6.1 Terra for Pro Auto while preserving exact older picks and catalog gating', () => {
+    const codex = new MutableProviderAvailability()
+    codex.setStaticProvider('gemini', true)
+    codex.setPreferredProvider('openai-codex')
+    codex.setModelCatalog('openai-codex', new Set(['gpt-5.6-terra', 'gpt-6-sol', 'gpt-6.1-terra']))
+    expect(ensureServableModel('gemini-3.6-flash-pro', codex)).toBe('gpt-6.1-terra')
+    expect(ensureServableModel('gpt-6-sol', codex)).toBe('gpt-6-sol')
+    expect(ensureServableModel('gpt-5.6-terra', codex)).toBe('gpt-5.6-terra')
+
+    codex.setModelCatalog('openai-codex', new Set(['gpt-6-sol']))
+    expect(ensureServableModel('gemini-3.6-flash-pro', codex)).toBe('gpt-6-sol')
+    expect(ensureServableModel('gpt-6.1-terra', codex)).toBe('gpt-6.1-terra')
+  })
+
+  it('uses GPT-6.1 Sol for Pro when Terra is absent without changing the Max identity', () => {
+    const codex = new MutableProviderAvailability()
+    codex.setModelCatalog('openai-codex', new Set(['gpt-6-luna', 'gpt-5.6-terra', 'gpt-6-sol', 'gpt-6.1-sol']))
+    expect(ensureServableModel('gemini-3.6-flash-pro', codex)).toBe('gpt-6.1-sol-pro')
+    expect(ensureServableModel('gemini-3.8-flash', codex)).toBe('gpt-6.1-sol')
+    expect(ensureServableModel('gpt-6.1-sol-pro', codex)).toBe('gpt-6.1-sol-pro')
+    expect(ensureServableModel('gpt-6.1-sol', codex)).toBe('gpt-6.1-sol')
   })
 
   it('honors the OSS preferred provider for auto tier rows in a mixed deployment', () => {

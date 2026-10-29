@@ -109,6 +109,8 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
     expect([...tierModelIds('pro')].sort()).toEqual([
       'pro', 'gemini-3.6-flash-pro', 'gemini-flash-3', 'gemini-3-flash-preview', 'gemini-flash',
       'gpt-5.6-terra',
+      'gpt-6.1-terra',
+      'gpt-6.1-sol-pro',
       'gpt-6-sol',
     ].sort())
     expect([...tierModelIds('max')].sort()).toEqual([
@@ -244,11 +246,13 @@ describe('[COMP:providers/model-registry] provider derivations', () => {
     expect(providerModelIds('anthropic')).toEqual(['claude-haiku-4-5'])
     expect(providerModelIds('openai-codex')).toEqual([
       'gpt-5.6-luna',
+      'gpt-6-luna',
+      'gpt-6.1-terra',
+      'gpt-6.1-sol-pro',
       'gpt-5.6-terra',
       'gpt-5.6-sol',
       'gpt-5.5',
       'gpt-5.2',
-      'gpt-6-luna',
       'gpt-6-sol',
       'gpt-6.1-sol',
       'gpt-6-astra',
@@ -295,8 +299,10 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
       'gemini-3.6-flash-standard',
       'gemini-3.6-flash-pro',
       'gpt-5.6-luna',
-      'gpt-5.6-terra',
       'gpt-6-luna',
+      'gpt-6.1-terra',
+      'gpt-6.1-sol-pro',
+      'gpt-5.6-terra',
       'gpt-6-sol',
     ])
     expect(menuForClass('max').map((r) => r.alias)).toEqual([
