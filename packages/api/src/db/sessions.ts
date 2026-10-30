@@ -700,7 +700,11 @@ export async function findSessionById(id: string): Promise<Session | null> {
   // sweeper for ~31 minutes. Liveness has its own column that only the
   // running turn writes (`turn_heartbeat_at`, migration 424). Never move the
   // sweep predicate back onto `last_active_at`.
-  await query(`UPDATE sessions SET last_active_at = now() WHERE id = $1`, [id])
+  // A source/history reader can pin this row on another connection. Recency
+  // must not queue behind it (or make an authorization read wait for itself).
+  // Turn liveness and scope mutations keep their own mandatory write protocol.
+  await query(`UPDATE sessions SET last_active_at = now()
+    WHERE id IN (SELECT id FROM sessions WHERE id = $1 FOR NO KEY UPDATE SKIP LOCKED)`, [id])
   return session
 }
 

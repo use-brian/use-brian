@@ -155,8 +155,22 @@ async function validateScopeEvidence(
   const projectHistory=async(inputRoots:readonly ScopeSource[])=>{
     const roots=structuredClone(inputRoots)
     const scopes:Array<{root:ScopeSource;scopes:ResourceScope[]}>=[]
-    if(client)for(const source of roots){
-      if(source.resourceKind!=='application_field')continue
+    if(!client)return scopes
+    const fields=roots.filter(source=>source.resourceKind==='application_field')
+    if(!fields.length)return scopes
+    // Metadata discovery grants nothing. Probing every ordinary field with the
+    // history RPC recursively validates its entire closure just to determine
+    // that it is not history, four times across the initial/final checks.
+    // Skip only positively identified immutable non-history selectors. An
+    // unknown/uncommitted resource still takes its original RPC on this client.
+    // Every field keeps full ordinary validation. Repeat discovery at the
+    // final footprint check, without caching an authorization result.
+    const ordinaryIds=new Set((await getPool().query<{id:string}>(`SELECT id FROM application_field_resources
+      WHERE workspace_id=$1 AND id=ANY($2::uuid[])
+        AND NOT (origin='{"kind":"native","moduleKey":"native"}'::jsonb
+          AND type_key='memory' AND selection='history')`,[ceiling.workspaceId,fields.map(source=>source.resourceId)])).rows.map(row=>row.id))
+    for(const source of fields){
+      if(ordinaryIds.has(source.resourceId))continue
       const value=await readNativeSessionEvidence(client,ceiling.workspaceId,[source])
       if(value?.kind!=='memory_history')continue
       if(!value.available)throw unavailable(kind,'source_unverifiable')

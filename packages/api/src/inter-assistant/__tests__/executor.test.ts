@@ -54,6 +54,7 @@ vi.mock('../../db/sessions.js', () => ({
   addSessionMessage: vi.fn().mockResolvedValue({ id: 'msg-1' }),
   getSessionMessages: vi.fn().mockResolvedValue([]),
   findSessionById: vi.fn().mockResolvedValue(null),
+  readSessionById: vi.fn().mockResolvedValue(null),
   findSessionByChannel: vi.fn().mockResolvedValue(null),
   toStampedMessages: vi.fn((m: unknown) => m),
   // Delivery-conversation lookup for the session-state bridge. Empty by

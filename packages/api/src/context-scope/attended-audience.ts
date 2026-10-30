@@ -13,7 +13,7 @@ import {pinPreparedExternalSourceAuthority,assertPreparedExternalSourceAuthority
 import {validateAudienceScopeEvidence,validateCallerScopeEvidence,scopeEvidenceFailureOf} from './caller-evidence.js'
 import {createDeliveryAudienceAuthorizer,createDeliveryAudienceEnvelopeResolver,DeliveryAudienceUnverifiedError,type AuthorizeDeliveryAudience} from './delivery-authority.js'
 import {classifySession,isWebTransport,policyFor} from '../session-kind.js'
-import {findSessionById} from '../db/sessions.js'
+import {readSessionById} from '../db/sessions.js'
 import {findAssistantById} from '../db/users.js'
 
 type Prepare=(execution:ExecutionContext,sources:readonly ScopeSource[],action:'context'|'deliver')=>Promise<PreparedExternalSourceAuthority>
@@ -120,7 +120,7 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
    ||pinned.recipientType==='group'||pinned.recipientMode&&pinned.recipientMode!=='member')return fallback()
   try{
    await execution.security.authority.assertCurrent()
-   const session=await findSessionById(pinned.sessionId!)
+   const session=await readSessionById(pinned.sessionId!)
    if(!session)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'session_missing'}
    if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||classifySession(session).surface!=='chat'
     ||session.channelType!==pinned.channelType||session.channelId!==pinned.channelId)return fallback()
