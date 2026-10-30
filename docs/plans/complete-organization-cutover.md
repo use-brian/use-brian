@@ -132,3 +132,12 @@ original target was applied.
 replayable with the same review after a lost response; a stale or expired review
 requires a new preview. The mode projection returns `cutoverReceiptId` and
 `canFinalize`, independently of ordinary administration and record read access.
+
+## Completing setup after deployment
+
+Deploy the migrations and updated API/worker processes together. Sign in as the
+workspace owner, open **Organization → Access → Migration progress**, and choose
+**Finish setup**. Review the existing default department and saved schedule
+conversion count, then confirm. If the workspace is busy or evidence changes,
+retry with a fresh review. The mode changes to Ready only after the atomic
+receipt commits. Deployment alone does not activate a workspace.

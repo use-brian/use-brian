@@ -1,5 +1,5 @@
 "use client";
-/** Bounded principal/resource progress. No mode activation. [COMP:app-web/workspace-access] */
+/** Reviewed principal/resource progress and owner completion. [COMP:app-web/workspace-access] */
 import {useEffect,useRef,useState} from 'react';
 import type {DepartmentCommandReview,DepartmentAccessCommand,WorkspaceDepartmentRegistry} from '@use-brian/shared';
 import {useT} from '@/lib/i18n/client';
@@ -7,7 +7,7 @@ import {useWorkspaceContext} from '@/lib/workspace-context';
 import {useCachedResource,invalidateSurfaceCache,markSurfaceCacheStale} from '@/lib/surface-cache';
 import {useProtectedProjection,projectionRemainingMs} from '@/lib/use-protected-projection';
 import {workspaceAccessModeCacheKey,workspaceAccessMigrationCacheKey,workspaceDepartmentRegistryCacheKey} from '@/lib/surface-prefetch';
-import {fetchWorkspaceDepartmentRegistry,fetchWorkspaceAccessMode,fetchMigrationPlans,fetchMigrationPlan,prepareMigrationItem,applyMigrationItem,setMigrationPlanState,ORGANIZATION_CHANGED_EVENT,isResourceMigrationItem,type MigrationItem,type PrincipalMigrationItem,type ResourceMigrationItem,type MigrationItemReviewResult,type MigrationItemApplyResult,type MigrationProjection} from '@/lib/api/workspace-access';
+import {prepareOrganizationCutover,applyOrganizationCutover,type OrganizationCutoverPreview,fetchWorkspaceDepartmentRegistry,fetchWorkspaceAccessMode,fetchMigrationPlans,fetchMigrationPlan,prepareMigrationItem,applyMigrationItem,setMigrationPlanState,ORGANIZATION_CHANGED_EVENT,isResourceMigrationItem,type MigrationItem,type PrincipalMigrationItem,type ResourceMigrationItem,type MigrationItemReviewResult,type MigrationItemApplyResult,type MigrationProjection} from '@/lib/api/workspace-access';
 import {WORKSPACE_IDENTITY_REFRESH_EVENT,isCatchUpRefresh} from '@/lib/workspace-identity-events';
 import {Button} from '@/components/ui/button';
 import {RefreshCw} from 'lucide-react';
@@ -22,6 +22,8 @@ import {DepartmentChangeFeedback} from './use-department-change';
 type Copy=ReturnType<typeof useT>['accessMigration'];
 export function migrationMessage(code:string,t:Copy):string|undefined {
   switch(code){
+    case 'organization_cutover_target_changed':
+    case 'organization_cutover_review_required':
     case 'full_inventory_required':case 'intake_certification_required':case 'mode_finalizer_unavailable':
     case 'scope_review_action_unsupported':case 'migration_source_floor_review_required':case 'scope_review_source_floor_unsupported':case 'scope_review_changed':case 'scope_review_expired':case 'scope_review_impact_missing':case 'scope_review_impact_too_large':case 'scope_review_conflict':
     case 'migration_busy':case 'migration_not_active':case 'migration_item_applied':return t[code];
@@ -31,7 +33,7 @@ export function migrationMessage(code:string,t:Copy):string|undefined {
   }
 }
 function statusLabel(status:string,t:Copy){
-  switch(status){case 'proposed':case 'awaiting_confirmation':case 'paused':case 'cancelled':case 'blocked':case 'pending':case 'applied':case 'stale':return t[status];
+  switch(status){case 'completed':return t.completed;case 'proposed':case 'awaiting_confirmation':case 'paused':case 'cancelled':case 'blocked':case 'pending':case 'applied':case 'stale':return t[status];
     case 'applying':case 'verifying':return t.processing;default:return t.unknown;}
 }
 type Names=Pick<WorkspaceDepartmentRegistry,'people'|'assistants'|'teams'>;
@@ -95,9 +97,32 @@ function LoadState({error,refresh}:{error:unknown;refresh:()=>Promise<unknown>})
 function ModeSummary(){
   const {workspaceId,me}=useWorkspaceContext(),t=useT().accessMigration;
   const key=workspaceAccessModeCacheKey(workspaceId,me.id),resource=useCachedResource(key,()=>fetchWorkspaceAccessMode(workspaceId));
-  const mode=useProtectedProjection(key,resource.data,()=>{},resource.refresh);
-  return mode?<dl className="grid gap-2 text-sm sm:grid-cols-3">{([[t.current,t[mode.mode]],[t.setup,t[mode.setupState]],[t.defaultDepartment,mode.defaultDepartmentName??t.missing]] as const).map(([label,value])=>
-    <div key={label} className="min-w-0 rounded-lg bg-muted/50 px-3 py-2"><dt className="text-xs text-muted-foreground">{label}</dt><dd className="break-words font-medium">{value}</dd></div>)}</dl>:<LoadState error={resource.error} refresh={resource.refresh}/>;
+  const {reviewBusy:useBusyCopy,stale:useStaleCopy}=useT().workspaceAccess;
+  const [blockers,setBlockers]=useState<NonNullable<OrganizationCutoverPreview['blockers']>>([]);
+  type Prepared={id:string;payloadHash:string;validForMs:number;result:OrganizationCutoverPreview};
+  const change=useReviewedCommand<string,Prepared,{setupState:string;reviewId:string}>({workspaceId,contextKey:'cutover',cachePrefix:'workspace-access',
+    prepare:async departmentId=>{
+      setBlockers([]);const result=await prepareOrganizationCutover(workspaceId,departmentId);
+      if(result.status==='already_ready'){await resource.refresh();return null;}
+      if(result.status==='blocked'){setBlockers(result.blockers??[]);return null;}
+      if(result.status!=='prepared'||!result.reviewId||!result.payloadHash||!result.expiresAt)throw new Error('cutover_review_changed');
+      return {id:result.reviewId,payloadHash:result.payloadHash,validForMs:Date.parse(result.expiresAt)-Date.now(),result};
+    },
+    apply:async saved=>{
+      try{return await applyOrganizationCutover(workspaceId,saved.id,saved.payloadHash);}
+      catch(error){if(error instanceof Error&&['cutover_review_changed','cutover_review_expired','cutover_review_unavailable'].includes(error.message))change.discardReview();throw error;}
+    },
+    renderReview:saved=><div className="max-h-[40dvh] space-y-2 overflow-y-auto text-sm"><p>{t.cutoverPreserved}</p>
+      <p>{t.defaultDepartment}: {mode?.defaultDepartmentName??t.missing}</p>
+      <p>{t.cutoverSchedules}: {saved.result.changes?.scheduleConversions.length??0}</p><p>{t.cutoverFamilies}: {saved.result.inventory?.families.length??0}</p>
+      <p>{t.revision}: {saved.result.policyRevision}</p><p className="break-all">{t.hash}: {saved.payloadHash}</p><p>{saved.result.expiresAt}</p></div>,
+    errorMessage:code=>code==='cutover_busy'?useBusyCopy:code.startsWith('cutover_review_')?useStaleCopy:undefined,
+    onApplied:()=>{window.dispatchEvent(new CustomEvent(ORGANIZATION_CHANGED_EVENT,{detail:{workspaceId}}));},
+  });
+  const mode=useProtectedProjection(key,resource.data,()=>{change.cancelReview();setBlockers([]);},resource.refresh);
+  return mode?<><dl className="grid gap-2 text-sm sm:grid-cols-3">{([[t.current,t[mode.mode]],[t.setup,t[mode.setupState]],[t.defaultDepartment,mode.defaultDepartmentName??t.missing]] as const).map(([label,value])=>
+    <div key={label} className="min-w-0 rounded-lg bg-muted/50 px-3 py-2"><dt className="text-xs text-muted-foreground">{label}</dt><dd className="break-words font-medium">{value}</dd></div>)}</dl>
+    {mode.canFinalize&&!mode.cutoverReceiptId&&mode.defaultDepartmentId?<div className="space-y-2"><Button className="max-sm:min-h-11" disabled={change.busy||change.retryAvailable} onClick={()=>void change.save(mode.defaultDepartmentId!,{title:t.finishSetup,description:t.cutoverReview})}>{t.finishSetup}</Button><DepartmentChangeFeedback change={change}/>{blockers.length?<div role="alert"><p>{t.cutoverBlocked}</p><ul>{blockers.map((blocker,index)=><li className="break-all text-sm" key={index}>{blocker.code==='cutover_schedule_not_quiet'?t.cutoverActiveWork:blocker.code==='cutover_assistant_binding_required'?t.cutoverAssistants:blocker.code==='cutover_knowledge_source_binding_required'||blocker.code==='cutover_intake_configuration_required'?t.cutoverSources:t.cutoverRecords}{blocker.id?` (${blocker.id})`:''}</li>)}</ul></div>:null}</div>:null}</>:<LoadState error={resource.error} refresh={resource.refresh}/>;
 }
 function PlanList({after,setAfter,inspect}:{after:string;setAfter:(value:string)=>void;inspect:(id:string)=>void}){
   const {workspaceId,me}=useWorkspaceContext(),t=useT().accessMigration,a=useT().workspaceAccess;

@@ -13,10 +13,10 @@ import {CommandReviewEffects} from '../command-review-effects';
 import {invalidateSurfaceCache,SurfaceCacheEvictionError} from '@/lib/surface-cache';
 import {protectProjection} from '@/lib/use-protected-projection';
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
-const mocks=vi.hoisted(()=>({registry:vi.fn(),mode:vi.fn(),list:vi.fn(),detail:vi.fn(),prepare:vi.fn(),apply:vi.fn(),state:vi.fn(),confirm:vi.fn(),viewer:{workspaceId:'w',me:{id:'admin'}}}));
+const mocks=vi.hoisted(()=>({registry:vi.fn(),mode:vi.fn(),list:vi.fn(),detail:vi.fn(),prepare:vi.fn(),apply:vi.fn(),state:vi.fn(),confirm:vi.fn(),cutoverPrepare:vi.fn(),cutoverApply:vi.fn(),viewer:{workspaceId:'w',me:{id:'admin'}}}));
 vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>mocks.viewer}));
 vi.mock('@/lib/surface-prefetch',()=>({workspaceDepartmentRegistryCacheKey:(w:string,u:string)=>`workspace-access:${w}:${u}:registry`,workspaceAccessModeCacheKey:(w:string,u:string)=>`workspace-access:${w}:${u}:mode`,workspaceAccessMigrationCacheKey:(w:string,u:string,k:string,c:string)=>`workspace-access:${w}:${u}:migration:${k}:${c}`}));
-vi.mock('@/lib/api/workspace-access',()=>({isResourceMigrationItem:(item:{proposed_action:{type:string}})=>item.proposed_action.type==='resource.scope',fetchWorkspaceDepartmentRegistry:mocks.registry,fetchWorkspaceAccessMode:mocks.mode,fetchMigrationPlans:mocks.list,fetchMigrationPlan:mocks.detail,prepareMigrationItem:mocks.prepare,applyMigrationItem:mocks.apply,setMigrationPlanState:mocks.state,ORGANIZATION_CHANGED_EVENT:'brian:organization-changed'}));
+vi.mock('@/lib/api/workspace-access',()=>({prepareOrganizationCutover:mocks.cutoverPrepare,applyOrganizationCutover:mocks.cutoverApply,isResourceMigrationItem:(item:{proposed_action:{type:string}})=>item.proposed_action.type==='resource.scope',fetchWorkspaceDepartmentRegistry:mocks.registry,fetchWorkspaceAccessMode:mocks.mode,fetchMigrationPlans:mocks.list,fetchMigrationPlan:mocks.detail,prepareMigrationItem:mocks.prepare,applyMigrationItem:mocks.apply,setMigrationPlanState:mocks.state,ORGANIZATION_CHANGED_EVENT:'brian:organization-changed'}));
 vi.mock('@/components/ui/confirm-dialog',()=>({confirmDialog:mocks.confirm}));
 vi.mock('@/components/chrome/surface-skeleton',()=>({SurfaceSkeletonFor:()=> <div data-skeleton/>}));
 const t=en.accessMigration;
@@ -49,6 +49,34 @@ beforeEach(()=>{
 });
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('workspace-access:');});
 describe('[COMP:app-web/workspace-access] principal migration progress',()=>{
+ it('offers owner completion, confirms the frozen review and retries the same receipt',async()=>{
+   mocks.mode.mockImplementation(async()=>protectedData({mode:'departments',setupState:'legacy',defaultDepartmentId:'team',defaultDepartmentName:'Personal',canFinalize:true}));
+   mocks.cutoverPrepare.mockResolvedValue({status:'prepared',reviewId:'cutover',payloadHash:'frozen',expiresAt:new Date(Date.now()+600000).toISOString(),policyRevision:'12',changes:{scheduleConversions:['job'],recordsDeleted:0,grantsChanged:false},inventory:{families:[{family:'memory',count:1}]}});
+   mocks.cutoverApply.mockRejectedValueOnce(new Error('network')).mockResolvedValue({setupState:'ready',reviewId:'cutover'});
+   await render();await click(t.finishSetup);
+   expect(mocks.cutoverPrepare).toHaveBeenCalledWith('w','team');
+   const review=renderToStaticMarkup(<I18nProvider locale="en" dict={en}>{mocks.confirm.mock.calls[0][0].content}</I18nProvider>);
+   for(const text of [t.cutoverPreserved,'Personal','frozen'])expect(review).toContain(text);
+   await click(en.workspaceAccess.retryChange);
+   expect(mocks.cutoverPrepare).toHaveBeenCalledTimes(1);expect(mocks.cutoverApply.mock.calls).toEqual([['w','cutover','frozen'],['w','cutover','frozen']]);
+ });
+ it('does not offer activation for a blocked review or to a non-owner',async()=>{
+   await render();expect(host.textContent).not.toContain(t.finishSetup);
+   mocks.mode.mockImplementation(async()=>protectedData({mode:'departments',setupState:'legacy',defaultDepartmentId:'team',canFinalize:true}));
+   await act(async()=>invalidateSurfaceCache('workspace-access:w:admin:mode'));
+   mocks.cutoverPrepare.mockResolvedValue({status:'blocked',blockers:[{code:'cutover_schedule_not_quiet',id:'job'}]});
+   await click(t.finishSetup);expect(host.textContent).toContain(t.cutoverBlocked);expect(host.textContent).toContain('job');
+   expect(mocks.confirm).not.toHaveBeenCalled();expect(mocks.cutoverApply).not.toHaveBeenCalled();
+ });
+ it('shows the finalized setup and completed plan without obsolete finalization blockers',async()=>{
+   const completed={...plan(),status:'completed',blockers:[],summary_counts:{applied:2,total:2}};
+   mocks.mode.mockImplementation(async()=>protectedData({mode:'departments',setupState:'ready',defaultDepartmentName:'Personal',cutoverReceiptId:'receipt'}));
+   mocks.list.mockImplementation(async()=>protectedData({plans:[completed]}));mocks.detail.mockImplementation(async()=>protectedData(completed));
+   await render();expect(host.textContent).toContain(t.ready);expect(host.textContent).toContain(t.completed);expect(host.textContent).toContain('Personal');
+   await click(t.inspect);expect(host.textContent).not.toContain(t.mode_finalizer_unavailable);
+   for(const dict of [en,ja,zh,zhCN])expect(migrationMessage('organization_cutover_review_required',dict.accessMigration)).toBe(dict.accessMigration.organization_cutover_review_required);
+ });
+
  it('reports actual mode and setup, applied counts, blockers and irreversible warning without activation controls',async()=>{
    await render();expect(host.textContent).toContain(t.departments);expect(host.textContent).toContain(t.legacy);expect(host.textContent).toContain(t.missing);
    await click(t.inspect);expect(host.textContent).toContain(`${t.appliedCount}: 1 / 2`);expect(host.textContent).toContain(t.warning);

@@ -594,6 +594,19 @@ export const zhCN: Dictionary = {
     "migration": "管理员可以查看已保存的迁移计划，并请 Brian 准备明确的提案。应用批次不会激活模式。"
 },
   accessMigration: {
+    organization_cutover_target_changed: "此计划的目标模式与工作区不同。请检查或取消计划；已完成的设置不会改变。",
+    cutoverActiveWork: "请等待运行中的工作完成后重试。",
+    cutoverAssistants: "请检查助手的所属部门。",
+    cutoverSources: "请检查数据来源的存储位置。",
+    cutoverRecords: "请检查记录的存储位置及权限。",
+
+    finishSetup: "完成设置",
+    cutoverReview: "确认切换至部门架构的最后步骤。保留的记录和权限不会改变。",
+    cutoverBlocked: "完成前仍有项目需要处理。请检查所列记录后重试。",
+    cutoverPreserved: "不会删除记录或新增权限。",
+    cutoverSchedules: "需要转换的计划任务",
+    cutoverFamilies: "已检查的数据类别",
+
     "title": "访问模式与迁移",
     "simple": "简单",
     "departments": "部门",
@@ -613,7 +626,7 @@ export const zhCN: Dictionary = {
     "scope_review_impact_missing": "缺少冻结的影响证据。应用前请创建新审核。",
     "scope_review_impact_too_large": "资源影响超出了支持的审核规模。请使用较小的受支持提案。",
     "scope_review_conflict": "资源审核不再符合当前权限或计划状态。请刷新并创建新审核。",
-    "limitation": "有界计划可以更改人员、助手和受支持资源，但不改变工作区模式。目前无法激活模式或完成迁移。请与 Brian 创建明确提案；此处不会猜测分配。",
+    "limitation": "计划管理已审核的人员、助手及资源变更。完成工作区设置需要所有者另行审核。",
     "plans": "迁移计划",
     "empty": "没有已保存的计划",
     "inspect": "查看",
@@ -630,6 +643,8 @@ export const zhCN: Dictionary = {
     "full_inventory_required": "需要完整的清单审核。",
     "intake_certification_required": "需要认证数据接入路径。",
     "mode_finalizer_unavailable": "模式最终激活尚不可用。",
+    "organization_cutover_review_required": "请工作区所有者审核并完成设置。",
+    "completed": "已完成",
     "migration_busy": "另一个迁移操作正在运行。请刷新后重试。",
     "migration_not_active": "此计划未处于活动状态。请刷新状态。",
     "migration_item_applied": "此项目已应用。请刷新进度。",
