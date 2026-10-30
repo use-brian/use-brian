@@ -46,6 +46,99 @@ async function workflowHistory(f:Awaited<ReturnType<typeof fixture>>){
 }
 describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selective cleanup',()=>{
  afterAll(async()=>{await getAppPool().end();await pool.end()})
+ it('erases explicitly consented Personal dependencies with their General source and retains other Personal data',async()=>{
+  const f=await fixture()
+  try{
+   const source=(await pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,f.memory.id])).rows[0].source
+   const derived=await createMemory({workspaceId:f.workspaceId,userId:null,assistantId:f.assistantId,summary:'Fictional migrated dependent',
+    sensitivity:'internal',compartments:[f.team.compartmentKey!],createdByUserId:f.ownerId,
+    derivation:{producer:'fixture:consented-cleanup',sources:[source]}})
+   const consent={kind:'memory',id:derived.id},body={selections:[...f.proposal.selections,consent],reason:'Erase exactly selected fictional dependencies'}
+   const read=async()=>(await pool.query('SELECT to_jsonb(m) AS row FROM memories m WHERE id=$1',[f.retained.id])).rows[0].row
+   const before=await read()
+   await expect(f.prepare()).rejects.toMatchObject({code:'legacy_cleanup_retained_dependency'})
+   const r=await preview(f.workspaceId,f.ownerId,{...body,eraseDepartmentRecords:[consent]})
+   expect(r.departmentErasures).toEqual([{...consent,version:expect.any(String),compartments:[f.team.compartmentKey]}])
+   expect((await f.confirm(r)).status).toBe('applied')
+   expect((await f.confirm(r)).status).toBe('applied')
+   expect((await pool.query('SELECT id FROM memories WHERE id=ANY($1::uuid[])',[[derived.id,f.memory.id]])).rowCount).toBe(0)
+   expect(await read()).toEqual(before)
+  }finally{await f.cleanup()}
+ })
+ it('requires exact selected consent and freezes consented scope, content and unrelated retention',async()=>{
+  const f=await fixture(),consent={kind:'memory',id:randomUUID()}
+  try{
+   for(const body of [
+    {...f.proposal,eraseDepartmentRecords:[consent]},
+    {...f.proposal,selections:[consent],eraseDepartmentRecords:[consent,consent]},
+    {...f.proposal,eraseDepartmentRecords:[{kind:'recording',id:f.memory.id}]},
+   ])await expect(preview(f.workspaceId,f.ownerId,body)).rejects.toMatchObject({code:'invalid_command'})
+   await expect(preview(f.workspaceId,f.ownerId,{...f.proposal,eraseDepartmentRecords:f.proposal.selections})).rejects.toMatchObject({code:'legacy_cleanup_department_consent_invalid'})
+   const selected={kind:'memory',id:f.retained.id},body={selections:[selected],eraseDepartmentRecords:[selected],reason:'Erase selected fictional migrated record'}
+   let r=await preview(f.workspaceId,f.ownerId,body)
+   await pool.query("UPDATE memories SET summary='Fictional changed consented body' WHERE id=$1",[f.retained.id])
+   await expect(f.confirm(r)).rejects.toMatchObject({code:'legacy_cleanup_changed'})
+   r=await preview(f.workspaceId,f.ownerId,body)
+   await pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[f.retained.id])
+   await expect(f.confirm(r)).rejects.toMatchObject({code:'legacy_cleanup_changed'})
+   expect((await pool.query('SELECT id FROM memories WHERE id=$1',[f.retained.id])).rowCount).toBe(1)
+  }finally{await f.cleanup()}
+ })
+ it('does not extend department consent to an unselected descendant',async()=>{
+  const f=await fixture()
+  try{
+   const source=(await pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,f.retained.id])).rows[0].source
+   await createMemory({workspaceId:f.workspaceId,userId:null,assistantId:f.assistantId,summary:'Fictional protected descendant',
+    sensitivity:'internal',compartments:[f.team.compartmentKey!],createdByUserId:f.ownerId,
+    derivation:{producer:'fixture:protected-cleanup',sources:[source]}})
+   const selected={kind:'memory',id:f.retained.id}
+   await expect(preview(f.workspaceId,f.ownerId,{selections:[selected],eraseDepartmentRecords:[selected],reason:'Do not expand selected erasure'})).rejects.toMatchObject({code:'legacy_cleanup_retained_dependency'})
+  }finally{await f.cleanup()}
+ })
+ it('erases a selected Personal episode and file with their General recording cascade',async()=>{
+  const f=await fixture(),episode=randomUUID(),file=randomUUID()
+  try{
+   await pool.query(`INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri,created_by_user_id)
+    VALUES($1,$2,'/fictional.wav','fictional.wav','fixture://recording',$3)`,[file,f.workspaceId,f.ownerId])
+   await pool.query(`INSERT INTO episodes(id,workspace_id,source_kind,source_ref,occurred_at,created_by_user_id)
+    VALUES($1,$2,'recording','{}',now(),$3)`,[episode,f.workspaceId,f.ownerId])
+   await pool.query(`INSERT INTO recordings(id,workspace_id,mime,gcs_key,media_file_id,created_by_user_id)
+    VALUES($1,$2,'audio/wav','fixture-recording',$3,$4)`,[episode,f.workspaceId,file,f.ownerId])
+   // Model an old General recording whose anchor and file were later migrated.
+   await pool.query('UPDATE episodes SET compartments=$2 WHERE id=$1',[episode,[f.team.compartmentKey]])
+   await pool.query('UPDATE workspace_files SET source_episode_id=$2,compartments=$3 WHERE id=$1',[file,episode,[f.team.compartmentKey]])
+   expect((await pool.query('SELECT compartments FROM recordings WHERE id=$1',[episode])).rows[0].compartments).toEqual([])
+   const consent=[{kind:'episode',id:episode},{kind:'workspace_file',id:file}]
+   const body={selections:[...consent,{kind:'recording',id:episode}],reason:'Erase selected fictional recording dependencies',eraseDepartmentRecords:consent}
+   await expect(preview(f.workspaceId,f.ownerId,{selections:[consent[0],{kind:'recording',id:episode}],eraseDepartmentRecords:[consent[0]],reason:body.reason})).rejects.toMatchObject({code:'legacy_cleanup_retained_dependency'})
+   await expect(preview(f.workspaceId,f.ownerId,{selections:[consent[1]],eraseDepartmentRecords:[consent[1]],reason:body.reason})).rejects.toMatchObject({code:'legacy_cleanup_retained_dependency'})
+   const r=await preview(f.workspaceId,f.ownerId,body)
+   expect(r.erasedReferences.map(row=>row.kind).sort()).toEqual(['episode','recording','workspace_file'])
+   expect((await f.confirm(r)).receipt).toMatchObject({retainedVerified:true})
+   for(const [table,id] of [['episodes',episode],['recordings',episode],['workspace_files',file]])
+    expect((await pool.query(`SELECT id FROM ${table} WHERE id=$1`,[id])).rowCount).toBe(0)
+   expect((await pool.query('SELECT id FROM memories WHERE id=$1',[f.retained.id])).rowCount).toBe(1)
+  }finally{await pool.query('DELETE FROM recordings WHERE id=$1',[episode]);await f.cleanup()}
+ })
+ it('independently rejects forged, missing, stale or unselected department consent in SQL evidence',async()=>{
+  const f=await fixture()
+  try{
+   const selected={kind:'memory',id:f.retained.id}
+   const r=await preview(f.workspaceId,f.ownerId,{selections:[selected],eraseDepartmentRecords:[selected],reason:'Review fictional exact department consent'})
+   const saved=(await pool.query('SELECT evidence,selection FROM workspace_legacy_cleanup_reviews WHERE id=$1',[r.id])).rows[0]
+   const consent=saved.evidence.departmentErasures[0]
+   for(const [evidence,selection] of [
+    [{...saved.evidence,departmentErasures:[]},saved.selection],
+    [saved.evidence,f.proposal.selections],
+    [{...saved.evidence,departmentErasures:[{...consent,compartments:['team:'+randomUUID()]}]},saved.selection],
+    [{...saved.evidence,departmentErasures:[{...consent,version:'invented'}]},saved.selection],
+    [{...saved.evidence,departmentErasures:[consent,consent]},saved.selection],
+   ])await expect(pool.query(`INSERT INTO workspace_legacy_cleanup_reviews(id,workspace_id,actor_user_id,policy_revision,selection,evidence,payload_hash,expires_at)
+    SELECT $2,workspace_id,actor_user_id,policy_revision,$3::jsonb,$4::jsonb,payload_hash,expires_at FROM workspace_legacy_cleanup_reviews WHERE id=$1`,
+    [r.id,randomUUID(),JSON.stringify(selection),JSON.stringify(evidence)])).rejects.toThrow('legacy_cleanup_reference_invalid')
+   expect((await f.confirm(r)).status).toBe('applied')
+  }finally{await f.cleanup()}
+ })
  it('erases copied General run history before deleting its legacy workflow',async()=>{
   const f=await fixture()
   try{
