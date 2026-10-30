@@ -32,6 +32,7 @@ import { buildTool, type Tool } from '../tools/types.js'
 import { classifyTool, defaultPolicy } from './classifier.js'
 import { mcpResultToToolResult } from './tool-result.js'
 import { jsonSchemaFromZod } from '../engine/query-loop.js'
+import { createMcpInputSchema, getMcpInputJsonSchema, mcpArgumentError } from './input-schema.js'
 import { declinedToolResult, timedOutToolResult, blockedThisTurnToolResult, policyBlockedToolResult, alwaysDeniedToolResult } from '../engine/decline-copy.js'
 import { describeMcpToolError } from './errors.js'
 import type { EngineHooks, PreToolUseDirective } from '../engine/hooks.js'
@@ -105,6 +106,7 @@ type IndexedToolBase = {
 
 type RemoteIndexedTool = IndexedToolBase & {
   kind: 'remote'
+  argumentSchema: ReturnType<typeof createMcpInputSchema>
   serverUrl: string
   /** Host-only exact-source transport. Never serialize this into search/model output. */
   dispatch: RemoteSource['callMcpTool']
@@ -165,6 +167,7 @@ export function buildToolIndex(sources: ToolSource[]): McpToolIndex {
       for (const tool of server.tools) {
         entries.push({
           kind: 'remote',
+          argumentSchema: createMcpInputSchema(tool.inputSchema ?? {}),
           server: identity,
           ...(source.sourceId ? { displayName: server.name } : {}),
           serverUrl: source.serverUrl,
@@ -338,7 +341,9 @@ function formatToolResult(entry: IndexedTool): string {
   }
 
   const label = entry.kind === 'remote' && entry.displayName ? ` (${entry.displayName})` : ''
-  return `[${entry.server}]${label} ${entry.toolName}: ${entry.description}${schemaStr}`
+  const externalSchema = entry.kind === 'remote' || getMcpInputJsonSchema(entry.tool.inputSchema)
+    ? `\n  Input JSON Schema: ${JSON.stringify(schema)}` : ''
+  return `[${entry.server}]${label} ${entry.toolName}: ${entry.description}${schemaStr}${externalSchema}`
 }
 
 // ── Tool factories ────────────────────────────────────────────
@@ -593,7 +598,7 @@ export function createMcpSearchTools(params: {
       directTools.push(buildTool({
         name,
         description: `[${entry.displayName ?? entry.server}] ${entry.description}`,
-        inputSchema: z.record(z.unknown()),
+        inputSchema: entry.argumentSchema,
         isConcurrencySafe: classification === 'read',
         isReadOnly: classification === 'read',
         requiresConfirmation: fallbackPolicy === 'ask',
@@ -732,6 +737,9 @@ async function dispatchRemote(params: {
     }
   }
 
+  const parsed = entry.argumentSchema.safeParse(args)
+  if (!parsed.success) return { data: mcpArgumentError(tool, parsed.error), isError: true }
+
   // ── Confirmation gate for 'ask' policy ──────────────────────
   // 'ask' = pause, show user the
   // tool details, wait for decision. Uses confirmationResolver and
@@ -859,6 +867,10 @@ async function dispatchRemote(params: {
       if (directive.headers) headerOverride = directive.headers
     }
   }
+
+  // Hooks may rewrite the input, so validate the actual outbound arguments too.
+  const outbound = entry.argumentSchema.safeParse(effInput)
+  if (!outbound.success) return { data: mcpArgumentError(tool, outbound.error), isError: true }
 
   const startedAt = Date.now()
   try {
