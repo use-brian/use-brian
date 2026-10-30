@@ -61,8 +61,29 @@ row, including one in another workspace, never qualifies as a removed reference.
 Failures identify a bounded metadata blocker. An unsupported erasure is never
 replaced with an unchecked SQL cleanup, a fake General confirmation or a force
 release. Complete cleanup requires a fresh inventory after all reviewed batches.
+Database blockers return only SQLSTATE and validated table, constraint and
+PL/pgSQL function names. Error messages, detail, SQL text and stack context are
+never returned. Immutable-state refusals are conflicts; unexpected database
+failures remain server errors with JSON metadata so owners can report the
+blocker without accessing production logs or content.
 
 ## Schema and verification
+
+Owners may explicitly request `eraseUnclassifiedLegacy: true` for selected
+unclassified resources or the messages of selected unbound conversations. The
+preview identifies these exact records and freezes their versions and bodies.
+This is erasure consent, never a classification or read grant. Unknown records
+outside those explicit selections remain protected, as do all known department
+records and dependencies. The immutable ledger independently validates consent
+and membership of each unclassified erasure; apply checks physical absence.
+Migration 8146 extends that independent validation without changing runtime
+readers, resource labels, deletion triggers or historical applied receipts.
+
+Impact-only records use their exact registered derivation root when checking
+descendants. They have no canonical supersession ancestry; asking the canonical
+ancestor walker to resolve a cache or Office artifact incorrectly blocks cleanup.
+Direct and transitive derivations and real foreign-key retention checks still
+apply. Tests cover General impacts and department-labelled dependents.
 
 Migration 8145 adds owner-host cleanup review storage with immutable proposals and
 owner-only erased-resource reference reading. No content table, runtime grants or
