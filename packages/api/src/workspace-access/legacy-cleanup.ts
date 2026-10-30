@@ -19,10 +19,11 @@ const confirmationSchema=z.object({reviewId:z.string().uuid(),payloadHash:z.stri
 type Selection=z.infer<typeof selectionSchema>
 type Reference={kind:string;id:string;version:string}
 type Source={version:string;compartments:string[]|null;held:boolean;[key:string]:unknown}
-type Evidence={roots:Array<Selection&{fingerprint:string}>,descendants:Record<string,unknown>[],erasures:Reference[],retained:string,reason:string}
+type Evidence={roots:Array<Selection&{fingerprint:string}>,descendants:Record<string,unknown>[],dependencies:unknown[],erasureFingerprints:Record<string,string>,candidates:Reference[],erasures:Reference[],retained:string,reason:string}
 type Review={id:string;workspace_id:string;actor_user_id:string;policy_revision:string;selection:Selection[];evidence:Evidence;payload_hash:string;expires_at:Date;status:'preview'|'applied'|'cancelled';receipt:unknown}
 function fail(code:string,status=409):never{throw new WorkspaceAccessError(code,status)}
 const equal=(a:unknown,b:unknown)=>hashCommandReviewIntent(a)===hashCommandReviewIntent(b)
+const MAX_RETAINED=5_000
 const isSource=(kind:Selection['kind']):kind is (typeof SCOPE_REVIEW_KINDS)[number]=>SCOPE_REVIEW_KINDS.includes(kind as (typeof SCOPE_REVIEW_KINDS)[number])
 
 async function owner(c:PoolClient,w:string,u:string){
@@ -38,12 +39,13 @@ async function transaction<T>(w:string,u:string,run:(c:PoolClient,revision:strin
  const c=await getPool().connect()
  try{
   await c.query('BEGIN')
+  await c.query("SET LOCAL lock_timeout='5s';SET LOCAL statement_timeout='30s'")
   const result=await run(c,await owner(c,w,u));await c.query('COMMIT');return result
  }catch(error){
   await c.query('ROLLBACK')
   if(error instanceof WorkspaceAccessError)throw error
   const code=(error as {code?:string}).code
-  if(code&&['23503','23505','23514','P0001','22023','40001','40P01'].includes(code))fail('legacy_cleanup_blocked')
+  if(code&&['23503','23505','23514','42501','P0001','22023','40001','40P01'].includes(code))fail('legacy_cleanup_blocked')
   if(code==='57014'||code==='55P03')fail('legacy_cleanup_busy',503)
   throw error
  }finally{c.release()}
@@ -73,9 +75,9 @@ async function retained(c:PoolClient,w:string){
    FROM ${a.from} WHERE ${a.workspacePredicate}
    AND CASE WHEN jsonb_typeof(read_scope_review_source($1,$2,r.id)->'compartments')='array'
     THEN jsonb_array_length(read_scope_review_source($1,$2,r.id)->'compartments')>0 ELSE true END
-   ORDER BY r.id LIMIT 501 FOR SHARE OF r`,[w,kind])
+   ORDER BY r.id LIMIT ${MAX_RETAINED+1} FOR SHARE OF r`,[w,kind])
   rows.push(...selected.rows.map(row=>({kind,...row})))
-  if(rows.length>500)fail('legacy_cleanup_retention_too_large')
+  if(rows.length>MAX_RETAINED)fail('legacy_cleanup_retention_too_large')
  }
  // A dependent immutable revision can belong to a department even when its
  // parent is General. Its bytes and hold state are part of retention too.
@@ -102,16 +104,17 @@ async function retained(c:PoolClient,w:string){
  for(const [table,predicate] of extra){
   const selected=await c.query<{id:string;fingerprint:string}>(`SELECT r.ctid::text AS id,
    encode(sha256(convert_to(to_jsonb(r)::text,'UTF8')),'hex') AS fingerprint FROM ${table} r
-   WHERE ${predicate} ORDER BY r.ctid LIMIT 501 FOR SHARE OF r`,[w])
+   WHERE ${predicate} ORDER BY r.ctid LIMIT ${MAX_RETAINED+1} FOR SHARE OF r`,[w])
   rows.push(...selected.rows.map(row=>({kind:table,...row})))
-  if(rows.length>500)fail('legacy_cleanup_retention_too_large')
+  if(rows.length>MAX_RETAINED)fail('legacy_cleanup_retention_too_large')
  }
  return hashCommandReviewIntent(rows)
 }
 /** Check real FK reach, including rows whose own workspace is inconsistent.
  * No tenant content is returned. Empty branches stop immediately; cycles are
  * checked at their edge before traversal stops. Unknown/deep reach refuses. */
-async function foreignKeyReach(c:PoolClient,w:string,row:Selection){
+async function foreignKeyReach(c:PoolClient,w:string,row:Selection,onSource:(kind:(typeof SCOPE_REVIEW_KINDS)[number],id:string)=>Promise<void>){
+ const evidence:unknown[]=[]
  const quote=(s:string)=>`"${s.replaceAll('"','""')}"`
  const a=adapter(row)
  const walk=async(table:string,sql:string,seen:Set<string>,depth:number,budget:{n:number}):Promise<void>=>{
@@ -135,18 +138,41 @@ async function foreignKeyReach(c:PoolClient,w:string,row:Selection){
      OR to_jsonb(r)->>'context_group_id' IS NOT NULL OR to_jsonb(r)->>'context_project_id' IS NOT NULL) AS scoped`,[w,row.id])).rows[0]
    if(state.foreign)fail('legacy_cleanup_foreign_dependency')
    if(state.scoped)fail('legacy_cleanup_retained_dependency')
-   if(state.present&&!seen.has(child))await walk(child,reached,new Set([...seen,child]),depth+1,budget)
+   const frozen=(await c.query<{n:number;fingerprint:string}>(`SELECT count(*)::int AS n,
+    encode(sha256(convert_to(coalesce(jsonb_agg(body ORDER BY body),'[]'::jsonb)::text,'UTF8')),'hex') AS fingerprint
+    FROM (SELECT encode(sha256(convert_to(to_jsonb(r)::text,'UTF8')),'hex') AS body
+     FROM (${reached} LIMIT 501 FOR SHARE OF r) r) bounded`,[w,row.id])).rows[0]
+   if(frozen.n>500)fail('legacy_cleanup_impact_too_large')
+   evidence.push({table:child,columns:key.columns,parents:key.parents,...frozen})
+   if(state.present)for(const kind of SCOPE_REVIEW_KINDS){
+    const source=sourceAdapter(kind)
+    if(source.table!==key.table)continue
+    const ids=(await c.query<{id:string}>(`SELECT r.id FROM ${source.from} WHERE ${source.workspacePredicate}
+     AND r.id IN(SELECT id FROM (${reached}) reached) ORDER BY r.id LIMIT 501`,[w,row.id])).rows
+    for(const item of ids)await onSource(kind,item.id)
+   }
+   const reachKey=`${child}:${frozen.fingerprint}`
+   if(state.present&&!seen.has(reachKey))await walk(child,reached,new Set([...seen,reachKey]),depth+1,budget)
   }
  }
- await walk(`public.${a.table}`,`SELECT r.* FROM ${a.from} WHERE ${a.workspacePredicate} AND r.id=$2`,new Set([`"public".${quote(a.table)}`]),0,{n:0})
+ await walk(`public.${a.table}`,`SELECT r.* FROM ${a.from} WHERE ${a.workspacePredicate} AND r.id=$2`,new Set(),0,{n:0})
+ return evidence
 }
 async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:string):Promise<Evidence>{
  const roots:Evidence['roots']=[],erasures=new Map<string,Reference>(),descendants=new Map<string,Record<string,unknown>>()
- const addErasure=async(kind:string,id:string)=>{
+ const dependencies:unknown[]=[],erasureFingerprints:Record<string,string>={}
+ const remember=async(kind:(typeof SCOPE_REVIEW_KINDS)[number],id:string)=>{
+  if(erasures.has(`${kind}:${id}`))return
   const source=await scope(c,w,kind,id)
   if(!source||!Array.isArray(source.compartments)||source.compartments.length)fail('legacy_cleanup_scoped_record')
   erasures.set(`${kind}:${id}`,{kind,id,version:source.version})
+  const hash=await fingerprint(c,w,{kind,id})
+  if(!hash)fail('legacy_cleanup_changed')
+  erasureFingerprints[`${kind}:${id}`]=hash
   if(erasures.size>500)fail('legacy_cleanup_impact_too_large')
+ }
+ const addErasure=async(kind:(typeof SCOPE_REVIEW_KINDS)[number],id:string)=>{
+  await remember(kind,id)
   const graph=(await c.query<{kind:string;id:string}>(`SELECT resource_kind AS kind,resource_id AS id
    FROM scope_descendant_resources($1,$2,$3) ORDER BY resource_kind,resource_id LIMIT 501`,[w,kind,id])).rows
   for(const node of graph){
@@ -159,6 +185,7 @@ async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:stri
    if(isSource(node.kind as Selection['kind'])){
     const full=await scope(c,w,node.kind,node.id)
     if(full?.compartments?.length)fail('legacy_cleanup_retained_dependency')
+    if(full)await remember(node.kind as (typeof SCOPE_REVIEW_KINDS)[number],node.id)
    }
    descendants.set(`${node.kind}:${node.id}`,{kind:node.kind,id:node.id,...current})
    if(descendants.size>500)fail('legacy_cleanup_impact_too_large')
@@ -168,7 +195,7 @@ async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:stri
   const hash=await fingerprint(c,w,row)
   if(!hash)fail('legacy_cleanup_selection_unavailable')
   roots.push({...row,fingerprint:hash})
-  if(row.kind!=='assistant_binding')await foreignKeyReach(c,w,row)
+  if(row.kind!=='assistant_binding')dependencies.push({kind:row.kind,id:row.id,rows:await foreignKeyReach(c,w,row,remember)})
   if(isSource(row.kind)){
    if(row.kind==='session_message'){
     const parent=(await c.query<{status:string;context_group_id:string|null;context_project_id:string|null}>(`SELECT s.status,s.context_group_id,s.context_project_id
@@ -201,7 +228,8 @@ async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:stri
    if(row.kind==='goal'&&(await c.query("SELECT id FROM goals WHERE id=$1 AND status IN('running','awaiting_approval','done')",[row.id])).rowCount)fail('legacy_cleanup_running')
   }
  }
- return{roots,erasures:[...erasures.values()].sort((a,b)=>`${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`)),descendants:[...descendants.values()].sort((a,b)=>`${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`)),retained:await retained(c,w),reason}
+ const candidates=[...erasures.values()].sort((a,b)=>`${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`))
+ return{roots,dependencies,erasureFingerprints,candidates,erasures:candidates,descendants:[...descendants.values()].sort((a,b)=>`${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`)),retained:await retained(c,w),reason}
 }
 async function perform(c:PoolClient,w:string,selections:Selection[]){
  const changes:Array<Selection&{action:'erased'|'bound'}>=[]
@@ -223,9 +251,23 @@ async function perform(c:PoolClient,w:string,selections:Selection[]){
  }
  return changes
 }
-async function simulate(c:PoolClient,w:string,selections:Selection[],expected:string){
+async function removedReferences(c:PoolClient,candidates:Reference[]){
+ const present=new Set<string>()
+ for(const kind of SCOPE_REVIEW_KINDS){
+  const ids=candidates.filter(row=>row.kind===kind).map(row=>row.id)
+  if(!ids.length)continue
+  const rows=(await c.query<{id:string}>(`SELECT id FROM ${sourceAdapter(kind).table} WHERE id=ANY($1::uuid[])`,[ids])).rows
+  for(const row of rows)present.add(`${kind}:${row.id}`)
+ }
+ return candidates.filter(row=>!present.has(`${row.kind}:${row.id}`))
+}
+async function simulate(c:PoolClient,w:string,selections:Selection[],evidence:Evidence){
  await c.query('SAVEPOINT cleanup_simulation')
- try{await perform(c,w,selections);if(await retained(c,w)!==expected)fail('legacy_cleanup_retained_dependency')}
+ try{
+  await perform(c,w,selections)
+  if(await retained(c,w)!==evidence.retained)fail('legacy_cleanup_retained_dependency')
+  return await removedReferences(c,evidence.candidates)
+ }
  finally{await c.query('ROLLBACK TO SAVEPOINT cleanup_simulation');await c.query('RELEASE SAVEPOINT cleanup_simulation')}
 }
 function view(r:Review){return{id:r.id,payloadHash:r.payload_hash,status:r.status,expiresAt:r.expires_at.toISOString(),selections:r.selection,
@@ -235,7 +277,7 @@ export async function previewLegacyCleanup(w:string,u:string,input:unknown){
  return transaction(w,u,async(c,revision)=>{
   const selections=parsed.data.selections.sort((a,b)=>`${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`))
   const evidence=await snapshot(c,w,selections,parsed.data.reason)
-  await simulate(c,w,selections,evidence.retained)
+  evidence.erasures=await simulate(c,w,selections,evidence)
   const id=randomUUID(),expiresAt=new Date(Date.now()+15*60_000)
   const payloadHash=hashCommandReviewIntent({id,w,u,revision,selections,evidence,expiresAt:expiresAt.toISOString()})
   const row=(await c.query<Review>(`INSERT INTO workspace_legacy_cleanup_reviews(id,workspace_id,actor_user_id,policy_revision,selection,evidence,payload_hash,expires_at)
@@ -255,8 +297,10 @@ export async function applyLegacyCleanup(w:string,u:string,input:unknown,cancel=
   if(r.expires_at.getTime()<=Date.now())fail('legacy_cleanup_expired')
   if(String(r.policy_revision)!==revision)fail('legacy_cleanup_changed')
   const current=await snapshot(c,w,r.selection,r.evidence.reason)
+  current.erasures=r.evidence.erasures
   if(!equal(current,r.evidence))fail('legacy_cleanup_changed')
   const changes=await perform(c,w,r.selection)
+  if(!equal(await removedReferences(c,current.candidates),r.evidence.erasures))fail('legacy_cleanup_changed')
   if(await retained(c,w)!==r.evidence.retained)fail('legacy_cleanup_retained_dependency')
   const receipt={changes,retainedVerified:true}
   const applied=(await c.query<Review>("UPDATE workspace_legacy_cleanup_reviews SET status='applied',receipt=$2::jsonb WHERE id=$1 RETURNING *",[r.id,JSON.stringify(receipt)])).rows[0]

@@ -32,15 +32,23 @@ BEGIN
    RAISE EXCEPTION 'legacy_cleanup_review_immutable';END IF;
   RETURN OLD;
  END IF;
+ IF TG_OP='INSERT' AND (NEW.status<>'preview' OR NEW.receipt IS NOT NULL) THEN
+  RAISE EXCEPTION 'legacy_cleanup_review_immutable';END IF;
  IF TG_OP='UPDATE' THEN
   IF (to_jsonb(NEW)-ARRAY['status','receipt']) IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['status','receipt'])
    OR OLD.status<>'preview' THEN RAISE EXCEPTION 'legacy_cleanup_review_immutable';END IF;
  END IF;
  IF jsonb_typeof(NEW.evidence->'erasures') IS DISTINCT FROM 'array'
   OR jsonb_array_length(NEW.evidence->'erasures')>500 THEN RAISE EXCEPTION 'legacy_cleanup_reference_invalid';END IF;
+ IF (SELECT count(*)<>count(DISTINCT (value->>'kind')||':'||(value->>'id'))
+  FROM jsonb_array_elements(NEW.evidence->'erasures')) THEN RAISE EXCEPTION 'legacy_cleanup_reference_invalid';END IF;
  FOR ref IN SELECT value FROM jsonb_array_elements(NEW.evidence->'erasures') LOOP
   tab:=scope_review_source_table(ref->>'kind');
-  IF tab IS NULL OR ref-ARRAY['kind','id','version']<>'{}' OR NOT ref ?& ARRAY['kind','id','version'] THEN
+  IF tab IS NULL OR NOT coalesce(jsonb_typeof(ref)='object' AND ref ?& ARRAY['kind','id','version']
+   AND jsonb_typeof(ref->'kind')='string' AND jsonb_typeof(ref->'id')='string'
+   AND ref->>'id'~'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+   AND jsonb_typeof(ref->'version')='string' AND length(ref->>'version')>0
+   AND ref-ARRAY['kind','id','version']='{}'::jsonb,false) THEN
    RAISE EXCEPTION 'legacy_cleanup_reference_invalid';END IF;
   IF TG_OP='INSERT' THEN
    source:=read_scope_review_source(NEW.workspace_id,ref->>'kind',(ref->>'id')::uuid);

@@ -33,7 +33,11 @@ cross-workspace references, department-labelled cascade children, unsupported
 schemas and unbounded/deep dependency walks refuse cleanup. Immutable context
 and Knowledge revision data and required file/recording payloads are included in
 retention. Unknown canonical compartment metadata is protected rather than
-treated as General. At most 500 protected/dependent references are supported.
+treated as General. At most 5,000 retained records and 500 dependent references
+are supported. Erasure evidence also freezes database-side hashes of message
+bodies and reachable foreign-key rows, including membership of each dependency
+set. A changed cascade child invalidates the preview even if its scope version
+did not change. Lock waits and individual statements have bounded timeouts.
 
 Legacy assistant bindings can instead be confirmed against their active home
 department. This operation preserves the existing unlimited legacy audience and
@@ -43,11 +47,16 @@ compartments; finite/unknown legacy audiences refuse rather than being widened.
 Normal binding readiness checks still apply. No membership is recreated and no
 clearance is changed.
 
-Every erased scope resource leaves a content-free cleanup receipt. The ordinary
+Every erased scope resource leaves a content-free cleanup receipt. The
+preview includes canonical resources removed by foreign-key cascades, and apply
+verifies the exact erased set again before committing. The ordinary
 impact reader recognizes a physically absent resource only through that applied
 receipt, so a reviewed deletion does not leave unreviewable descendant edges.
 Such evidence is frozen as removed/unavailable and cannot authorize source reads,
 release holds, restore content or relabel immutable historical snapshots.
+The database independently requires newly inserted reviews to be previews and
+rejects malformed, duplicate or invented erasure references. An existing physical
+row, including one in another workspace, never qualifies as a removed reference.
 
 Failures identify a bounded metadata blocker. An unsupported erasure is never
 replaced with an unchecked SQL cleanup, a fake General confirmation or a force
@@ -62,3 +71,12 @@ real canonical source writes, deletion invalidation and application-role denial.
 They cover authorization, tenant boundaries, scoped-record retention, stale
 content/evidence, cancellation/replay, unknown dependencies, and assistant
 binding conversion without changes to grants or clearance.
+Conversation tests include real immutable context revisions: General snapshot
+bytes follow the normal purge trigger, while a Personal snapshot prevents the
+conversation deletion and remains byte-for-byte unchanged. Content-free held
+revision metadata remains as the existing evidence contract requires.
+
+`workspace_legacy_cleanup_reviews` stores `id`, `workspace_id`, `actor_user_id`,
+`policy_revision`, `selection`, `evidence`, `payload_hash`, `expires_at`, `status`,
+`receipt` and `created_at`. The actor reference is retained for account teardown;
+workspace flush preserves the ledger, and workspace deletion cascades it.

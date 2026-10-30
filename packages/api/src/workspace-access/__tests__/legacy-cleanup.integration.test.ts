@@ -1,4 +1,5 @@
 import {randomUUID} from 'node:crypto'
+import {ContextScopeAccumulator} from '@use-brian/core'
 import express from 'express'
 import request from 'supertest'
 import {afterAll,describe,expect,it,vi} from 'vitest'
@@ -6,7 +7,8 @@ import {getAppPool,getPool} from '../../db/client.js'
 import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
 import {persistentContextFixture} from '../../application-platform/__tests__/fixtures/persistent-context.js'
 import {createMemory} from '../../db/memories.js'
-import {addSessionMessage} from '../../db/sessions.js'
+import {addSessionMessage,createWorkspaceChatSession} from '../../db/sessions.js'
+import {sessionContextGeneration,writeSessionContextRevision} from '../../db/session-context-revisions.js'
 import {workspaceAccessRoutes} from '../../routes/workspace-access.js'
 import {previewLegacyCleanup as preview,applyLegacyCleanup as apply} from '../legacy-cleanup.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -195,6 +197,113 @@ describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selectiv
    const result=await request(app).post(`/api/workspaces/${f.workspaceId}/access/legacy-cleanup/preview`).send(f.proposal)
    expect(result.status).toBe(200);expect(result.body.status).toBe('preview')
    expect(JSON.stringify(result.body)).not.toContain('Fictional retained private memory')
+  }finally{await f.cleanup()}
+ })
+ it('independently rejects duplicate, malformed, invented and pre-applied SQL proofs',async()=>{
+  const f=await fixture()
+  try{
+   const r=await f.prepare(),valid=r.erasedReferences[0]
+   for(const erasures of [[valid,valid],[{...valid,version:1}],[{...valid,id:randomUUID()}],
+    [{...valid,version:'999'}],[{...valid,kind:'unsupported'}],[{...valid,id:f.retained.id}],
+    [{...valid,extra:'unreviewed'}],[{...valid,id:valid.id.toUpperCase()}]]){
+    await expect(pool.query(`INSERT INTO workspace_legacy_cleanup_reviews(id,workspace_id,actor_user_id,policy_revision,selection,evidence,payload_hash,expires_at)
+     SELECT $2,workspace_id,actor_user_id,policy_revision,selection,jsonb_set(evidence,'{erasures}',$3::jsonb),payload_hash,expires_at
+     FROM workspace_legacy_cleanup_reviews WHERE id=$1`,[r.id,randomUUID(),JSON.stringify(erasures)])).rejects.toThrow('legacy_cleanup_reference_invalid')
+   }
+   await expect(pool.query(`INSERT INTO workspace_legacy_cleanup_reviews(id,workspace_id,actor_user_id,policy_revision,selection,evidence,payload_hash,expires_at,status,receipt)
+    SELECT $2,workspace_id,actor_user_id,policy_revision,selection,evidence,payload_hash,expires_at,'applied','{}'
+    FROM workspace_legacy_cleanup_reviews WHERE id=$1`,[r.id,randomUUID()])).rejects.toThrow('legacy_cleanup_review_immutable')
+  }finally{await f.cleanup()}
+ })
+ it('invalidates a conversation preview when a message body changes without a scope change',async()=>{
+  const f=await fixture()
+  try{
+   const message=await addSessionMessage({sessionId:f.session.id,role:'user',content:'Fictional initial body',scope:f.envelope})
+   const r=await preview(f.workspaceId,f.ownerId,{selections:[{kind:'session',id:f.session.id}],reason:'Remove fictional conversation'})
+   await pool.query("UPDATE session_messages SET content='\"Fictional changed body\"'::jsonb WHERE id=$1",[message.id])
+   await expect(f.confirm(r)).rejects.toMatchObject({code:'legacy_cleanup_changed'})
+   expect((await pool.query('SELECT id FROM session_messages WHERE id=$1',[message.id])).rowCount).toBe(1)
+  }finally{await f.cleanup()}
+ })
+ it('invalidates a changed General cascade child and supports more than 500 retained records',async()=>{
+  const f=await fixture(),name='cleanup_probe_'+randomUUID().replaceAll('-','')
+  try{
+   await pool.query(`INSERT INTO memories(workspace_id,assistant_id,summary,sensitivity,compartments,created_by_user_id)
+    SELECT $1,$2,'Fictional retained bulk memory','internal',$3::text[],$4 FROM generate_series(1,510)`,[f.workspaceId,f.assistantId,[f.team.compartmentKey],f.ownerId])
+   await pool.query(`CREATE TABLE ${name}(id uuid PRIMARY KEY,workspace_id uuid REFERENCES workspaces(id) ON DELETE CASCADE,
+    source_id uuid REFERENCES memories(id) ON DELETE CASCADE,note text)`)
+   await pool.query(`INSERT INTO ${name} VALUES($1,$2,$3,'Fictional initial child')`,[randomUUID(),f.workspaceId,f.memory.id])
+   const r=await f.prepare()
+   await pool.query(`UPDATE ${name} SET note='Fictional changed child'`)
+   await expect(f.confirm(r)).rejects.toMatchObject({code:'legacy_cleanup_changed'})
+   expect((await f.confirm(await f.prepare())).status).toBe('applied')
+   expect((await pool.query("SELECT count(*)::int AS n FROM memories WHERE workspace_id=$1 AND cardinality(compartments)>0",[f.workspaceId])).rows[0].n).toBe(511)
+  }finally{await pool.query(`DROP TABLE IF EXISTS ${name}`);await f.cleanup()}
+ })
+ it('rejects removed-reference evidence from another workspace or a restored physical ID',async()=>{
+  const f=await fixture(),other=await persistentContextFixture()
+  try{
+   await f.confirm(await f.prepare())
+   expect((await pool.query("SELECT read_scope_review_impact_source($1,'memory',$2) AS ref",[other.workspaceId,f.memory.id])).rows[0].ref).toBeNull()
+   await pool.query(`INSERT INTO memories(id,workspace_id,assistant_id,summary,sensitivity,compartments)
+    VALUES($1,$2,$3,'Fictional restored foreign memory','internal','{}')`,[f.memory.id,other.workspaceId,other.assistantId])
+   expect((await pool.query("SELECT read_scope_review_impact_source($1,'memory',$2) AS ref",[f.workspaceId,f.memory.id])).rows[0].ref).toBeNull()
+  }finally{await other.cleanup();await f.cleanup()}
+ })
+ it('records removal proof for canonical sources erased by a foreign-key cascade',async()=>{
+  const f=await fixture(),column='cleanup_parent_'+randomUUID().replaceAll('-','')
+  try{
+   await pool.query(`ALTER TABLE memories ADD COLUMN ${column} uuid REFERENCES memories(id) ON DELETE CASCADE`)
+   const child=await createMemory({workspaceId:f.workspaceId,userId:null,assistantId:f.assistantId,
+    summary:'Fictional General cascade child',sensitivity:'internal',createdByUserId:f.ownerId})
+   await pool.query(`UPDATE memories SET ${column}=$2 WHERE id=$1`,[child.id,f.memory.id])
+   const grandchild=await createMemory({workspaceId:f.workspaceId,userId:null,assistantId:f.assistantId,
+    summary:'Fictional General cascade grandchild',sensitivity:'internal',createdByUserId:f.ownerId})
+   await pool.query(`UPDATE memories SET ${column}=$2 WHERE id=$1`,[grandchild.id,child.id])
+   const r=await f.prepare()
+   expect(r.erasedReferences).toContainEqual({kind:'memory',id:child.id,version:'1'})
+   expect(r.erasedReferences).toContainEqual({kind:'memory',id:grandchild.id,version:'1'})
+   expect((await f.confirm(r)).status).toBe('applied')
+   expect((await pool.query("SELECT read_scope_review_impact_source($1,'memory',$2) AS ref",[f.workspaceId,child.id])).rows[0].ref)
+    .toEqual({version:`erased:${r.id}:1`,held:true,removed:true})
+   expect((await pool.query("SELECT read_scope_review_impact_source($1,'memory',$2) AS ref",[f.workspaceId,grandchild.id])).rows[0].ref)
+    .toEqual({version:`erased:${r.id}:1`,held:true,removed:true})
+  }finally{await pool.query(`ALTER TABLE memories DROP COLUMN ${column}`);await f.cleanup()}
+ })
+ it.each(['General','Personal'] as const)('purges General conversation snapshots while protecting %s context revisions',async department=>{
+  const f=await fixture()
+  try{
+   let session=f.session
+   if(department==='Personal'){
+    await createDbWorkspaceGroupStore().setTeamAssistant(f.ownerId,f.team.id,f.assistantId,true)
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[f.workspaceId])
+    session=await createWorkspaceChatSession({workspaceId:f.workspaceId,assistantId:f.assistantId,starterUserId:f.ownerId,
+     effectiveClearance:'internal',contextGroupId:f.team.id,authenticatedHuman:true})
+   }
+   const source=(await pool.query("SELECT read_scope_source($1,'memory',$2) AS source",[f.workspaceId,f.memory.id])).rows[0].source
+   const now=Date.now()
+   const revision=await writeSessionContextRevision({sessionId:session.id,parentId:randomUUID(),kind:'session_state',
+    content:{key:'Fictional cleanup context',summary:'Fictional snapshot bytes',detail:null,status:'open',source:'tool',createdAt:now,updatedAt:now,resolvedAt:null},
+    authority:{execution:await f.execution(f.ownerId,session),accumulator:new ContextScopeAccumulator()},expectedGeneration:await sessionContextGeneration(session.id),
+    derivation:{producer:'fixture:cleanup-context',sources:[source]}})
+   if(!revision)throw Error('Expected a canonical context revision')
+   if(department==='Personal'){
+    expect(revision.source.compartments).toContain(f.team.compartmentKey)
+    // Model a historical departmental snapshot whose conversation binding is
+    // now General; immutable snapshot labels and bytes stay untouched.
+    await pool.query("UPDATE sessions SET context_group_id=NULL,context_compartments='{}' WHERE id=$1",[session.id])
+   }
+   const read=async()=>(await pool.query(`SELECT to_jsonb(r) AS header,to_jsonb(c) AS payload FROM session_context_scope_revisions r
+    LEFT JOIN session_context_revision_contents c ON c.workspace_id=r.workspace_id AND c.revision_id=r.id WHERE r.id=$1`,[revision.id])).rows[0]
+   const before=await read(),body={selections:[{kind:'session',id:session.id}],reason:'Remove fictional obsolete conversation and its snapshots'}
+   if(department==='Personal'){
+    await expect(preview(f.workspaceId,f.ownerId,body)).rejects.toMatchObject({code:'legacy_cleanup_retained_dependency'})
+    expect(await read()).toEqual(before)
+    expect((await pool.query('SELECT id FROM sessions WHERE id=$1',[session.id])).rowCount).toBe(1)
+   }else{
+    expect((await f.confirm(await preview(f.workspaceId,f.ownerId,body))).status).toBe('applied')
+    expect(await read()).toEqual({header:{...before.header,scope_held:true},payload:null})
+   }
   }finally{await f.cleanup()}
  })
 })
