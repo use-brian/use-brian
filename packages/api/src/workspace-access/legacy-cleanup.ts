@@ -25,7 +25,7 @@ type Selection=z.infer<typeof selectionSchema>
 type InternalSelection=Selection|{kind:'workflow_run';id:string}
 type Reference={kind:string;id:string;version:string}
 type DepartmentErasure=z.infer<typeof departmentSelectionSchema>&{version:string;compartments:string[]}
-type WorkflowScheduleBinding={id:string;workflowId:string;fingerprint:string;groupId:string;projectId:string|null;compartments:string[];projectIds:string[]}
+type WorkflowScheduleBinding={id:string;workflowId:string;fingerprint:string;retainedFingerprint:string;groupId:string;projectId:string|null;compartments:string[];projectIds:string[]}
 type WorkflowRunEvidence={id:string;workflowId:string;fingerprint:string}
 type Source={version:string;compartments:string[]|null;held:boolean;[key:string]:unknown}
 type Evidence={roots:Array<Selection&{fingerprint:string}>,descendants:Record<string,unknown>[],dependencies:unknown[],erasureFingerprints:Record<string,string>,candidates:Reference[],erasures:Reference[],unclassified:Reference[],eraseUnclassifiedLegacy:boolean,departmentErasures:DepartmentErasure[],workflowRuns:WorkflowRunEvidence[],workflowScheduleBindings:WorkflowScheduleBinding[],retained:string,reason:string}
@@ -315,9 +315,10 @@ async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:stri
    if(!(await c.query('SELECT 1 FROM workflows WHERE workspace_id=$1 AND id=$2 AND NOT schedule_authoring_pinned',[w,row.id])).rowCount)fail('legacy_cleanup_binding_unsupported')
    const parent=await readWorkflowScheduleAuthority(c,w,row.id)
    if(!parent.contextGroupId||!parent.compartments.length)fail('legacy_cleanup_binding_unsupported')
-   const jobs=(await c.query<{id:string;workspace_id:string;assistant_id:string;user_id:string;context_group_id:string|null;context_project_id:string|null;context_compartments:string[]|null;context_project_ids:string[]|null;pinned:boolean;claimed:boolean;fingerprint:string}>(`SELECT j.id,a.workspace_id,j.assistant_id,j.user_id,j.context_group_id,j.context_project_id,j.context_compartments,j.context_project_ids,
+   const jobs=(await c.query<{id:string;workspace_id:string;assistant_id:string;user_id:string;context_group_id:string|null;context_project_id:string|null;context_compartments:string[]|null;context_project_ids:string[]|null;pinned:boolean;claimed:boolean;fingerprint:string;retainedFingerprint:string}>(`SELECT j.id,a.workspace_id,j.assistant_id,j.user_id,j.context_group_id,j.context_project_id,j.context_compartments,j.context_project_ids,
     j.workflow_authoring_snapshot IS NOT NULL AS pinned,j.schedule_claim_id IS NOT NULL AS claimed,
-    encode(sha256(convert_to(to_jsonb(j)::text,'UTF8')),'hex') AS fingerprint
+    encode(sha256(convert_to(to_jsonb(j)::text,'UTF8')),'hex') AS fingerprint,
+    encode(sha256(convert_to((to_jsonb(j)-ARRAY['context_group_id','context_project_id','context_compartments','context_project_ids','updated_at'])::text,'UTF8')),'hex') AS "retainedFingerprint"
     FROM scheduled_jobs j JOIN assistants a ON a.id=j.assistant_id
     WHERE j.workflow_id=$1 AND j.workflow_step_run_id IS NULL ORDER BY j.id LIMIT 501 FOR UPDATE OF j`,[row.id])).rows
    if(!jobs.length)fail('legacy_cleanup_selection_unavailable')
@@ -327,7 +328,7 @@ async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:stri
     if(job.pinned||job.claimed||job.assistant_id!==parent.assistantId||job.user_id!==parent.userId
      ||job.context_group_id||job.context_project_id||!Array.isArray(job.context_compartments)||job.context_compartments.length
      ||!Array.isArray(job.context_project_ids)||job.context_project_ids.length)fail('legacy_cleanup_binding_unsupported')
-    workflowScheduleBindings.push({id:job.id,workflowId:row.id,fingerprint:job.fingerprint,groupId:parent.contextGroupId,
+    workflowScheduleBindings.push({id:job.id,workflowId:row.id,fingerprint:job.fingerprint,retainedFingerprint:job.retainedFingerprint,groupId:parent.contextGroupId,
      projectId:parent.contextProjectId,compartments:parent.compartments,projectIds:parent.projectIds})
    }
   }else if(row.kind==='assistant_binding'){
@@ -370,9 +371,13 @@ async function perform(c:PoolClient,w:string,selections:Selection[],workflowRuns
     const changed=await c.query(`UPDATE scheduled_jobs SET context_group_id=$2,context_project_id=$3,
      context_compartments=$4,context_project_ids=$5,updated_at=now()
      WHERE id=$1 AND workflow_id=$6 AND workflow_step_run_id IS NULL AND workflow_authoring_snapshot IS NULL
-     RETURNING context_group_id AS "groupId",context_project_id AS "projectId",context_compartments AS compartments,context_project_ids AS "projectIds"`,
+     RETURNING context_group_id AS "groupId",context_project_id AS "projectId",context_compartments AS compartments,context_project_ids AS "projectIds",
+     encode(sha256(convert_to((to_jsonb(scheduled_jobs)-ARRAY['context_group_id','context_project_id','context_compartments','context_project_ids','updated_at'])::text,'UTF8')),'hex') AS "retainedFingerprint"`,
      [job.id,job.groupId,job.projectId,job.compartments,job.projectIds,row.id])
-    if(changed.rowCount!==1||!equal(changed.rows[0],{groupId:job.groupId,projectId:job.projectId,compartments:job.compartments,projectIds:job.projectIds}))fail('legacy_cleanup_changed')
+    if(changed.rowCount!==1)fail('legacy_cleanup_changed')
+    const {retainedFingerprint,...binding}=changed.rows[0]
+    if(retainedFingerprint!==job.retainedFingerprint)fail('legacy_cleanup_retained_dependency')
+    if(!equal(binding,{groupId:job.groupId,projectId:job.projectId,compartments:job.compartments,projectIds:job.projectIds}))fail('legacy_cleanup_changed')
    }
    changes.push({...row,action:'bound'})
   }else if(row.kind==='workflow_history'){

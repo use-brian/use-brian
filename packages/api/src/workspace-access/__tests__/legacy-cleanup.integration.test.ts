@@ -79,6 +79,44 @@ describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selectiv
    expect((await pool.query('SELECT id FROM workflow_runs WHERE id=$1',[run])).rowCount).toBe(1)
   }finally{await f.cleanup()}
  })
+ it('inherits the saved workflow author rather than the cleanup owner',async()=>{
+  const f=await fixture()
+  try{
+   const h=await legacySchedule(f)
+   await pool.query('INSERT INTO workspace_group_members(group_id,user_id) VALUES($1,$2)',[f.team.id,f.firstId])
+   await createDbWorkspaceGroupStore().setTeamAssistant(f.ownerId,f.team.id,f.assistantId,true)
+   const authority=await captureAuthoringAuthoritySystem({workspaceId:f.workspaceId,userId:f.firstId,assistantId:f.assistantId,contextGroupId:f.team.id,contextProjectId:null})
+   await pool.query('UPDATE workflows SET created_by=$2,authoring_authority=$3 WHERE id=$1',[h.workflowId,f.firstId,authority])
+   await pool.query('UPDATE scheduled_jobs SET user_id=$2 WHERE id=$1',[h.job.id,f.firstId])
+   const r=await preview(f.workspaceId,f.ownerId,h.body)
+   expect((await f.confirm(r)).status).toBe('applied')
+   expect((await pool.query('SELECT user_id,context_group_id FROM scheduled_jobs WHERE id=$1',[h.job.id])).rows[0]).toEqual({user_id:f.firstId,context_group_id:f.team.id})
+   expect((await pool.query('SELECT authoring_authority FROM workflows WHERE id=$1',[h.workflowId])).rows[0].authoring_authority).toEqual(authority)
+  }finally{await f.cleanup()}
+ })
+ it('refuses a firing row attached to another workspace assistant',async()=>{
+  const f=await fixture(),other=await fixture()
+  try{
+   const h=await legacySchedule(f)
+   await pool.query('UPDATE scheduled_jobs SET assistant_id=$2 WHERE id=$1',[h.job.id,other.assistantId])
+   const read=async()=>(await pool.query('SELECT to_jsonb(j) AS row FROM scheduled_jobs j WHERE id=$1',[h.job.id])).rows[0].row
+   const before=await read()
+   await expect(preview(f.workspaceId,f.ownerId,h.body)).rejects.toMatchObject({code:'legacy_cleanup_foreign_dependency'})
+   expect(await read()).toEqual(before)
+  }finally{await f.cleanup();await other.cleanup()}
+ })
+ it('rolls back unexpected non-binding changes made by a real row trigger',async()=>{
+  const f=await fixture(),name='cleanup_schedule_'+randomUUID().replaceAll('-','')
+  try{
+   const h=await legacySchedule(f),read=async()=>(await pool.query('SELECT to_jsonb(j) AS row FROM scheduled_jobs j WHERE id=$1',[h.job.id])).rows[0].row
+   const before=await read()
+   await pool.query(`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+    IF NEW.id='${h.job.id}'::uuid THEN NEW.instructions='Fictional unexpected rewrite';END IF;RETURN NEW;END $$`)
+   await pool.query(`CREATE TRIGGER ${name} BEFORE UPDATE ON scheduled_jobs FOR EACH ROW EXECUTE FUNCTION ${name}()`)
+   await expect(preview(f.workspaceId,f.ownerId,h.body)).rejects.toMatchObject({code:'legacy_cleanup_retained_dependency'})
+   expect(await read()).toEqual(before)
+  }finally{await pool.query(`DROP TRIGGER IF EXISTS ${name} ON scheduled_jobs`);await pool.query(`DROP FUNCTION IF EXISTS ${name}()`);await f.cleanup()}
+ })
  it('rejects changed firing rows or parent consent before binding migration',async()=>{
   const f=await fixture()
   try{

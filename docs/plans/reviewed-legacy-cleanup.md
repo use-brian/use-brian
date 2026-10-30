@@ -139,6 +139,8 @@ workflow wait/resume rows are excluded. Apply copies only the exact validated
 department/Project binding into the frozen General firing rows. IDs, schedules,
 timezone, instructions, delivery targets, enablement, history and nag settings
 stay unchanged. Existing triggers stay enabled. Revalidation, simulation and
+database-side hashes of every non-binding field reject unexpected trigger
+rewrites; foreign-workspace rows refuse without changing their parent. The
 immutable receipts use the same cleanup protocol, without activating ready mode
 or modifying historical runs. This adds no migration or runtime grants.
 Conversation tests include real immutable context revisions: General snapshot
