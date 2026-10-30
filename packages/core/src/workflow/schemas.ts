@@ -255,6 +255,12 @@ const approvalSchema = z.object({
   expiresAfterHours: z.number().int().min(1).max(24 * 30).optional(),
 })
 
+export const ToolCallDeliverySchema = z.object({
+  channelType: z.enum(['telegram', 'slack', 'whatsapp', 'msteams', 'custom', 'feishu']),
+  channelId: z.string().min(1).max(256).refine(value => !value.includes('{{') && !value.includes('}}'), 'Tool delivery requires a literal destination.'),
+  channelIntegrationId: z.string().uuid().optional(),
+}).strict()
+
 const toolCallStepSchema = z.object({
   ...commonSchema,
   type: z.literal('tool_call'),
@@ -264,8 +270,10 @@ const toolCallStepSchema = z.object({
     .max(128)
     .regex(/^[a-zA-Z0-9_.:-]+$/, 'toolName contains unsupported characters.'),
   arguments: z.record(z.unknown()),
+  deliver: ToolCallDeliverySchema.optional(),
+  deliveryText: z.string().min(1).max(8000).optional(),
   approval: approvalSchema.optional(),
-})
+}).strict()
 
 const REVIEWED_REPLY_TOOL = 'imapSendMessage'
 const REVIEWED_REPLY_TO = '{{input.event.sender}}'
@@ -285,6 +293,7 @@ function canonicalToolName(toolName: string): string {
  * shape against legacy/directly persisted definitions at run time.
  */
 export function reviewedClientReplyViolation(step: ToolCallStep): string | null {
+  if (step.deliver !== undefined || step.deliveryText !== undefined) return 'the reviewed IMAP reply cannot configure another output delivery'
   if (canonicalToolName(step.toolName) !== REVIEWED_REPLY_TOOL) {
     return 'only imapSendMessage may cross the reviewed external-client reply boundary'
   }
@@ -424,7 +433,11 @@ export const WorkflowStepSchema = z.discriminatedUnion('type', [
   waitStepSchema,
   branchStepSchema,
   sendPageStepSchema,
-])
+]).superRefine((step, ctx) => {
+  if (step.type === 'tool_call' && (step.deliver !== undefined) !== (step.deliveryText !== undefined)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Tool delivery requires both deliver and deliveryText.', path: ['deliveryText'] })
+  }
+})
 
 /**
  * A step, tolerating the JSON-string form. Models recurrently emit
@@ -809,7 +822,7 @@ export const WorkflowDefinitionSchema = z
       })
     for (const [i, step] of def.steps.entries()) {
       if (
-        step.type === 'assistant_call' &&
+        (step.type === 'assistant_call' || step.type === 'tool_call') &&
         step.deliver &&
         'channelId' in step.deliver &&
         step.deliver.channelId === CURRENT_CHAT_CHANNEL_ID
@@ -830,7 +843,7 @@ export const WorkflowDefinitionSchema = z
     // selection runtime would ignore.
     for (const [i, step] of def.steps.entries()) {
       if (
-        step.type === 'assistant_call' &&
+        (step.type === 'assistant_call' || step.type === 'tool_call') &&
         step.deliver &&
         'channelIntegrationId' in step.deliver &&
         step.deliver.channelIntegrationId &&

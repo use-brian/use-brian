@@ -354,7 +354,7 @@ async function dependencyIssues(
       // against (listTeamsChannels is a P5 follow-up), so they skip reachability
       // validation — the send attempts at run time. Mirrors workflow/tools.ts.
       if (
-        step.type !== 'assistant_call' ||
+        (step.type !== 'assistant_call' && step.type !== 'tool_call') ||
         !step.deliver ||
         !('channelId' in step.deliver) ||
         step.deliver.channelType === 'web' ||
@@ -364,7 +364,7 @@ async function dependencyIssues(
       ) continue
       // The integration is attached to the delivering assistant — the step's
       // concrete target, or the workspace primary for the 'primary' sentinel.
-      const assistantId = UUID_SHAPE.test(step.target.assistantId)
+      const assistantId = step.type === 'assistant_call' && UUID_SHAPE.test(step.target.assistantId)
         ? step.target.assistantId
         : opts.resolvePrimary
           ? await opts.resolvePrimary(ctx.workspaceId)

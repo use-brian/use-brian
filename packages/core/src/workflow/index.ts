@@ -6,6 +6,7 @@ export {
   type AssistantCallStep,
   type WorkflowDelivery,
   type ToolCallStep,
+  type ToolCallDelivery,
   type WaitStep,
   type WaitDuration,
   type BranchStep,
@@ -74,6 +75,7 @@ export {
   type RunOutcome,
   type ExecutorError,
   type ExecutorDeps,
+  type ToolCallNotification,
   type EmitAuditEvent,
   type WorkflowAuditEvent,
   type ResolvePrimaryAssistant,
@@ -83,6 +85,8 @@ export {
   type DeliveryAudienceDenialDetail,
   type SendPageResult,
 } from './executor.js'
+
+export { deliverToolCallNotification } from './tool-delivery.js'
 
 export {
   createWorkflowTools,

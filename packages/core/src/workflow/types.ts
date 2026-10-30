@@ -200,11 +200,22 @@ export type WorkflowDelivery =
       replyToTrigger: true
     }
 
+/** Fixed deterministic delivery: no dynamic recipient, thread, or question. */
+export type ToolCallDelivery = {
+  channelType: Exclude<Extract<WorkflowDelivery, { channelId: string }>['channelType'], 'web'>
+  channelId: string
+  channelIntegrationId?: string
+}
+
 export type ToolCallStep = WorkflowStepCommon & {
   type: 'tool_call'
   toolName: string
   /** Values may interpolate `{{vars.X}}` / `{{input.X}}` (deep walk). */
   arguments: Record<string, unknown>
+  /** Send an authored template after a successful tool result. */
+  deliver?: ToolCallDelivery
+  /** Text-only interpolation; {{prev.X}} reads this tool's result. */
+  deliveryText?: string
   /**
    * Phase C — used only when the resolved tool is `ask`-policy. Optional;
    * omitted = use workflow-level default; missing both = web-UI-only delivery.

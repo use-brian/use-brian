@@ -244,6 +244,8 @@ export type ToolCallStep = {
   storeOutputAs?: string;
   toolName: string;
   arguments: Record<string, unknown>;
+  deliver?: { channelType: Exclude<DeliverChannelType, "web">; channelId: string; channelIntegrationId?: string };
+  deliveryText?: string;
   approval?: {
     required?: boolean;
     deliveryChannel?: "web" | "recent" | "telegram" | "slack" | "whatsapp" | "msteams" | "feishu";

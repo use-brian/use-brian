@@ -3221,3 +3221,34 @@ describe('executor cancellation', () => {
     },
   )
 })
+
+describe('[COMP:workflow/tool-delivery] tool execution and notification settlement', () => {
+  it.each(['success', 'error', 'ask'] as const)('notifies only after an allowed successful tool (%s)', async state => {
+    const source = { workspaceId: WORKSPACE_ID, userId: null, assistantId: null, sensitivity: 'internal' as const,
+      compartments: [], projectIds: [], resourceKind: 'entity', resourceId: USER_ID, version: '1' }
+    const execute = vi.fn(async () => ({ data: { reference: 'ENQ-42', channelId: 'C_EVIL', __delivery: 'untrusted' }, scopeEvidence: { sources: [source] }, isError: state === 'error' }))
+    const tool = buildTool({ name: 'readEnquiry', description: 'Read fixture enquiry', inputSchema: z.object({}), requiresConfirmation: state === 'ask', execute })
+    const deliverToChannel = vi.fn(async (params) => ({ status: 'skipped' as const, channelType: params.channelType, reason: 'delivery_audience_unverified' as const }))
+    const requestApproval = vi.fn(async () => undefined)
+    const deps = makeDeps({ buildToolRegistry: async () => new Map([[tool.name, tool]]), deliverToChannel, requestApproval })
+    const { run } = await seedWorkflowAndRun(deps, { startStepId: 'notify', steps: [{ id: 'notify', type: 'tool_call', toolName: tool.name,
+      arguments: {}, deliver: { channelType: 'slack', channelId: 'C_APPROVED' }, deliveryText: 'Saved {{prev.reference}}' }] })
+    await deps.runStore.updateRun(run.id, { vars: { __contextScopeEvidence: { sensitivity: 'internal', compartments: [], projectIds: [], sources: [{ ...source, resourceKind: 'crm_event', resourceId: WORKSPACE_ID }] } } })
+    const result = await advanceWorkflowRun(deps, run.id)
+    if (state === 'success') {
+      expect(result.kind).toBe('completed')
+      expect(execute).toHaveBeenCalledTimes(1)
+      expect(deliverToChannel).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ assistantId: PRIMARY_ASSISTANT_ID, channelId: 'C_APPROVED', text: 'Saved ENQ-42',
+        scopeEvidence: expect.objectContaining({ sources: expect.arrayContaining([source, expect.objectContaining({ resourceKind: 'crm_event' })]) }) }))
+      expect((await deps.runStore.listStepRuns(USER_ID, run.id))[0].output).toMatchObject({ reference: 'ENQ-42', __delivery: { status: 'skipped', reason: 'delivery_audience_unverified' } })
+      await advanceWorkflowRun(deps, run.id)
+      expect(execute).toHaveBeenCalledTimes(1); expect(deliverToChannel).toHaveBeenCalledTimes(1)
+    } else {
+      expect(deliverToChannel).not.toHaveBeenCalled()
+      if (state === 'ask') {
+        expect(execute).not.toHaveBeenCalled()
+        expect(requestApproval).toHaveBeenCalledWith(expect.objectContaining({ toolNotification: expect.objectContaining({ stepId: 'notify', deliver: { channelType: 'slack', channelId: 'C_APPROVED' }, deliveryText: 'Saved {{prev.reference}}', scope: expect.objectContaining({ vars: expect.any(Object) }) }) }))
+      }
+    }
+  })
+})

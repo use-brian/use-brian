@@ -46,6 +46,7 @@ import { evaluateBoolean, JsonLogicEvalError } from './condition.js'
 import { buildReachability, startStepIds, stepSuccessors } from './graph.js'
 import { interpolateString, interpolateValue, interpolateBoundValue, type InterpolationScope } from './interpolation.js'
 import { reviewedClientReplyViolation } from './schemas.js'
+import { deliverToolCallNotification } from './tool-delivery.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 
@@ -226,7 +227,7 @@ export type DeliverToChannel = (params: {
   text: string
   /** Trusted run/turn high-water evidence checked against the current audience. */
   scopeEvidence?: import('../security/context-scope.js').ScopeEvidence
-  /** Only the engine's generated-output step sets this; never tool or question delivery. */
+  /** Engine-owned workflow step identity; never supplied by tool result data. */
   publication?: { runId: string; stepId: string }
   question?: import('../tools/base/ask-question.js').AssistantQuestion
   questionResponse?: { toolName: string; arguments: Record<string, unknown>; answerField: string }
@@ -354,6 +355,14 @@ export type SendPageResult =
       message: string
     }
 
+export type ToolCallNotification = {
+  stepId: string
+  deliver: NonNullable<ToolCallStep['deliver']>
+  deliveryText: string
+  scope: InterpolationScope
+  scopeEvidence: ScopeEvidence
+}
+
 export type ExecutorDeps = {
   /** Cooperative cancellation for this advance pass; persisted as failed/workflow_cancelled. */
   abortSignal?: AbortSignal
@@ -477,6 +486,8 @@ export type ExecutorDeps = {
     expiresAt: Date | null
     /** Exact out-of-band application id from the immediately upstream model step. */
     decisionApplicationId?: string
+    /** Exact authored notification and its source context, frozen before approval. */
+    toolNotification?: ToolCallNotification
   }) => Promise<void>
   /**
    * Called once a run has been fully persisted as paused on an approval
@@ -876,6 +887,8 @@ export async function advanceWorkflowRun(
         projectIds: runtimeScope.turnScope.writeProjectIds,
       }
     : undefined)
+  scopeAccumulator.note({ compartments: run.contextCompartments ?? [],
+    projectIds: run.contextProjectIds ?? (run.contextProjectId ? [run.contextProjectId] : []) })
   const persistedScopeEvidence = run.vars[WORKFLOW_SCOPE_EVIDENCE_VAR]
   scopeAccumulator.note(runtimeScope?.inputScopeEvidence)
   if (persistedScopeEvidence && typeof persistedScopeEvidence === 'object') {
@@ -1289,6 +1302,7 @@ export async function advanceWorkflowRun(
       deliveryChannel: result.deliveryChannel,
       expiresAt: result.expiresAt,
       decisionApplicationId: result.decisionApplicationId,
+      toolNotification: result.toolNotification,
     })
     try {
       await (executeWithAuthority ? executeWithAuthority(requestApproval) : requestApproval())
@@ -1465,6 +1479,7 @@ type StepDispatchResult =
       deliveryChannel: 'recent' | 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
       expiresAt: Date | null
       decisionApplicationId?: string
+      toolNotification?: ToolCallNotification
     }
 
 type DispatchContext = {
@@ -2210,8 +2225,15 @@ async function dispatchToolCall(
     }
   }
   ctx.scopeAccumulator.note(result.scopeEvidence)
-
-  return { kind: 'success', output: result.data }
+  const delivery = await deliverToolCallNotification({
+    step, output: result.data, scope: ctx.scope, run: ctx.run, workflow: ctx.workflow,
+    assistantId: ctx.toolAssistantId, scopeEvidence: ctx.scopeAccumulator.evidence, deps: ctx.deps,
+  })
+  if (delivery) {
+    fireAndForgetAudit(ctx.deps, { type: 'workflow.step_delivered', workspaceId: ctx.run.workspaceId,
+      actorUserId: ctx.run.triggeredBy, runId: ctx.run.id, workflowId: ctx.workflow.id, stepId: step.id, delivery })
+  }
+  return { kind: 'success', output: result.data, ...(delivery ? { delivery } : {}) }
 }
 
 /**
@@ -2250,6 +2272,10 @@ function askPolicyOutcome(
       deliveryChannel,
       expiresAt,
       decisionApplicationId,
+      ...(step.deliver && step.deliveryText !== undefined ? { toolNotification: {
+        stepId: step.id, deliver: structuredClone(step.deliver), deliveryText: step.deliveryText,
+        scope: structuredClone(ctx.scope), scopeEvidence: ctx.scopeAccumulator.evidence,
+      } } : {}),
     }
   }
   // Phase A guard.

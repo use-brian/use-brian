@@ -685,6 +685,7 @@ function summarize(def: WorkflowDefinition): string {
       case 'tool_call':
         detail = `tool_call → ${step.toolName}`
         if (step.approval?.required) detail += ' (approval required every run)'
+        if (step.deliver) detail += ` (sends authored notification to ${step.deliver.channelType} ${step.deliver.channelId})`
         break
       case 'wait':
         detail = step.until
@@ -1109,7 +1110,7 @@ async function dependencyIssues(
     }> = []
     for (const step of def.steps) {
       if (
-        step.type === 'assistant_call' &&
+        (step.type === 'assistant_call' || step.type === 'tool_call') &&
         step.deliver &&
         'channelId' in step.deliver &&
         step.deliver.channelType !== 'web' &&
@@ -1123,7 +1124,7 @@ async function dependencyIssues(
       ) {
         targets.push({
           location: `Step "${step.id}"`,
-          assistantTarget: step.target.assistantId,
+          assistantTarget: step.type === 'assistant_call' ? step.target.assistantId : 'primary',
           channelType: step.deliver.channelType,
           channelId: step.deliver.channelId,
           channelIntegrationId: step.deliver.channelIntegrationId,
@@ -1701,7 +1702,7 @@ async function resolveCurrentChatDeliveries(
   if (Array.isArray(definition.steps)) {
     const steps: unknown[] = []
     for (const step of definition.steps) {
-      if (!isRecord(step) || step.type !== 'assistant_call' || !isRecord(step.deliver)) {
+      if (!isRecord(step) || !['assistant_call', 'tool_call'].includes(String(step.type)) || !isRecord(step.deliver)) {
         steps.push(step)
         continue
       }
@@ -1781,7 +1782,7 @@ const MESSAGING_OUTPUT_PHRASE = /\b(?:the|a|your|this)\s+(?:slack|telegram|whats
  * lints: channel ids in prompt prose do not deliver.
  */
 function deliveryIntentWarnings(def: WorkflowDefinition, trigger?: WorkflowTrigger): string[] {
-  const anyDeliver = def.steps.some((s) => s.type === 'assistant_call' && s.deliver !== undefined)
+  const anyDeliver = def.steps.some((s) => (s.type === 'assistant_call' || s.type === 'tool_call') && s.deliver !== undefined)
   if (anyDeliver) return []
   if (trigger?.kind === 'schedule' && trigger.delivery) return [] // sugar stamps the terminal step at persist
   const composers = def.steps.filter((s): s is AssistantCallStep =>
@@ -2722,8 +2723,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         // explicitly rather than slip through as a side effect of an edit.
         const deliverBindings = (d: WorkflowDefinition) => [
           ...d.steps
-            .filter((s): s is AssistantCallStep => s.type === 'assistant_call' && s.deliver !== undefined)
-            .map((s) => s.deliver!),
+            .flatMap((s) => (s.type === 'assistant_call' || s.type === 'tool_call') && s.deliver ? [s.deliver] : []),
           ...(d.failureDelivery ? [d.failureDelivery] : []),
         ]
         const oldDelivers = deliverBindings(existing.definition)

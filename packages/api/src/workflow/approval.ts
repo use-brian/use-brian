@@ -35,6 +35,8 @@ import {
   ContextScopeAccumulator,
   stepSuccessors,
   WORKFLOW_SCOPE_EVIDENCE_VAR,
+  deliverToolCallNotification,
+  crmOperationsSha256,
 } from '@use-brian/core'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type { PendingApprovalsStore, PendingApproval } from '../db/pending-approvals-store.js'
@@ -93,6 +95,7 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
     deliveryChannel,
     expiresAt,
     decisionApplicationId,
+    toolNotification,
   }) => {
     // Look up the workflow name for the audit + delivery message.
     const run = await deps.runStore.getRunSystem(runId)
@@ -118,6 +121,7 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
         ...(recentTarget ? { deliveryTarget: recentTarget } : {}),
         ...(displayLines ? { displayLines } : {}),
         ...(decisionApplicationId ? { decisionApplicationId } : {}),
+        ...(toolNotification ? { toolNotification: structuredClone(toolNotification) } : {}),
       },
       approverUserId,
       deliveryChannelType,
@@ -368,8 +372,20 @@ async function continueAfterDecision(
       }
     : undefined)
   const persistedScopeEvidence = run.vars[WORKFLOW_SCOPE_EVIDENCE_VAR]
+  scopeAccumulator.note({
+    compartments: run.contextCompartments ?? [],
+    projectIds: run.contextProjectIds ?? (run.contextProjectId ? [run.contextProjectId] : []),
+  })
+  scopeAccumulator.note(runtimeScope?.inputScopeEvidence)
   if (persistedScopeEvidence && typeof persistedScopeEvidence === 'object') {
     scopeAccumulator.note(persistedScopeEvidence)
+  }
+  const notification = updated.approvalPayload.toolNotification as
+    Parameters<NonNullable<ExecutorDeps['requestApproval']>>[0]['toolNotification']
+  scopeAccumulator.note(notification?.scopeEvidence)
+  if (notification && (workflow.definition.principal || run.vars.__externalClientPrincipal)) {
+    await failStep(deps, run, workflow, updated, 'client_principal_delivery_forbidden', 'External-client workflows cannot deliver tool notifications.')
+    return { status: 'failed', runId: run.id }
   }
 
   let registry: Awaited<ReturnType<ApprovalBridgeDeps['buildToolRegistry']>>
@@ -487,6 +503,55 @@ async function continueAfterDecision(
 
   toolCompleted = true
   if (abortSignal?.aborted) return cancelResume()
+
+  // The approved effect is already durable. Its notification is a separate,
+  // best-effort publication and can never cause the tool to be retried.
+  if (notification) {
+    const evidence = scopeAccumulator.evidence
+    await deps.runStore.updateRun(run.id, {
+      vars: { ...run.vars, [WORKFLOW_SCOPE_EVIDENCE_VAR]: evidence },
+    })
+    // The durable authority source follows this pass's own persisted high-water
+    // update, as in the ordinary executor; it never replaces the saved ceiling.
+    const authority = runtimeScope?.executionContext?.security.authority
+    const source = authority?.snapshotSource?.()
+    if (authority && source?.kind === 'workflow') {
+      authority.snapshotSource = () => ({ ...source, persistedFingerprint: crmOperationsSha256(evidence) })
+    }
+    const deliver = deps.executorDeps.deliverToChannel
+    const delivery = await deliverToolCallNotification({
+      step: { id: notification.stepId, deliver: notification.deliver, deliveryText: notification.deliveryText },
+      output: result.data,
+      scope: notification.scope,
+      run,
+      workflow,
+      assistantId: toolAssistantId,
+      scopeEvidence: evidence,
+      deps: {
+        abortSignal: toolContext.abortSignal,
+        deliverToChannel: deliver && (params => {
+          const send = () => {
+            toolContext.abortSignal.throwIfAborted()
+            return deliver(params)
+          }
+          return runtimeScope?.executeWithAuthority ? runtimeScope.executeWithAuthority(send) : send()
+        }),
+      },
+    })
+    if (delivery) {
+      await deps.runStore.updateStepRun(updated.workflowStepRunId, {
+        output: { ...wrapOutput(result.data), __delivery: delivery },
+      })
+      deps.auditStore.append({
+        workspaceId: run.workspaceId,
+        actorUserId: run.triggeredBy,
+        eventType: 'workflow.step_delivered',
+        subjectId: run.id,
+        details: { workflowId: workflow.id, stepId: notification.stepId, delivery },
+      }).catch(() => { /* fire-and-forget */ })
+    }
+    if (abortSignal?.aborted) return cancelResume()
+  }
 
   // Resolve the steps that follow the gated step — possibly several, when
   // the approved step fans out (`nextStepId` array).

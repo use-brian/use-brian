@@ -17,7 +17,7 @@ import { createBrowserSkillGrantInTransaction } from './browser-skill-grant-stor
 import { getPool, query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { appendDecisionEvent } from './decision-event-store.js'
-import type { ApprovalResolutionOrigin, DerivedWriteEvidence } from '@use-brian/core'
+import type { ApprovalResolutionOrigin, DerivedWriteEvidence, ExecutorDeps } from '@use-brian/core'
 import { readSessionById } from './sessions.js'
 import { gateSessionRead } from '../session-read-authority.js'
 import { captureHumanDecisionSupport } from '../approval-review/patterns.js'
@@ -190,6 +190,8 @@ export type CreateApprovalParams = {
   /** Server-resolved confirmation details displayed by the approvals queue. */
   approvalPayload?: {
     displayLines?: string[]
+    /** Frozen notification and interpolation inputs reviewed with this operation. */
+    toolNotification?: Parameters<NonNullable<ExecutorDeps['requestApproval']>>[0]['toolNotification']
     /** Exact learned-rule application frozen before this approval existed. */
     decisionApplicationId?: string
   }

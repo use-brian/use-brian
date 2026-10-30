@@ -3469,3 +3469,33 @@ describe('[COMP:workflow/tools] channelId "current" resolves to the authoring ch
     expect(messages.filter((m) => m.includes('no authoring chat'))).toHaveLength(2)
   })
 })
+
+describe('[COMP:workflow/tool-delivery] deterministic notification authoring parity', () => {
+  const definition: WorkflowDefinition = { startStepId: 'notify', steps: [{ id: 'notify', type: 'tool_call', toolName: 'listTasks', arguments: {},
+    deliver: { channelType: 'slack', channelId: 'C_APPROVED' }, deliveryText: 'Result {{prev.name}}' }] }
+  it('preflights the primary integration even when authored from another assistant and names the destination in review', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const result = await tools.proposeWorkflow.execute({ name: 'Fixture', definition }, makeContext({ assistantId: AUTHORING_ASSISTANT_ID }))
+    expect(result.isError).toBeFalsy()
+    expect(validateDeliveryTarget).toHaveBeenCalledWith(expect.objectContaining({ assistantId: PRIMARY_ASSISTANT_ID, channelId: 'C_APPROVED' }))
+    expect(JSON.stringify(result.data)).toContain('sends authored notification to slack C_APPROVED')
+  })
+  it('preserves removal confirmation for deterministic posting bindings', async () => {
+    const { tools } = makeAllTools()
+    const created = await tools.createWorkflow.execute({ name: 'Fixture', definition }, makeContext())
+    const workflowId = (created.data as { id: string }).id
+    const replacement = { startStepId: 'notify', steps: [{ id: 'notify', type: 'tool_call', toolName: 'listTasks', arguments: {} }] }
+    const blocked = await tools.updateWorkflow.execute({ workflowId, definition: replacement }, makeContext())
+    expect(blocked.isError).toBe(true)
+    expect(JSON.stringify(blocked.data)).toContain('confirmDeliveryRemoval')
+  })
+  it('resolves current chat before validating a deterministic notification', async () => {
+    const { tools } = makeAllTools()
+    const result = await tools.proposeWorkflow.execute({ name: 'Fixture', definition: { ...definition,
+      steps: definition.steps.map(step => ({ ...step, deliver: { channelType: 'slack', channelId: 'current' } })) } },
+    makeContext({ channelType: 'slack', channelId: 'C_CURRENT' }))
+    expect(result.isError).toBeFalsy()
+    expect(JSON.stringify(result.data)).toContain('C_CURRENT')
+  })
+})

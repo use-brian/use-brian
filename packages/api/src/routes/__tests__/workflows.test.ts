@@ -459,3 +459,17 @@ describe('[COMP:api/workflows-route] GET /pages/:pageId/workflow-runs', () => {
     expect(runStore.listRunsForPage).toHaveBeenCalledWith('u-1', PAGE, { limit: 100 })
   })
 })
+
+describe('[COMP:api/workflows-route] deterministic delivery target validation', () => {
+  it('validates a tool notification against the primary assistant and refuses unreachable targets', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    const definition = { startStepId: 'notify', steps: [{ id: 'notify', type: 'tool_call', toolName: 'getCrmSubmission', arguments: {},
+      deliver: { channelType: 'slack', channelId: 'C_APPROVED' }, deliveryText: '{{prev.reference}}' }] }
+    mockDefParse.mockReturnValueOnce({ success: true, data: definition })
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: false, reason: 'channel_not_found' }))
+    const response = await request(app('u-1', { resolvePrimary, validateDeliveryTarget })).post('/api/workflows')
+      .send({ workspaceId: WS, name: 'Fixture deterministic delivery', definition })
+    expect(response.status).toBe(400)
+    expect(validateDeliveryTarget).toHaveBeenCalledWith(expect.objectContaining({ assistantId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', channelId: 'C_APPROVED' }))
+  })
+})
