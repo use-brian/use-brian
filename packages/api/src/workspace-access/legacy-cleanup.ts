@@ -4,6 +4,7 @@
 import {randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
 import {z} from 'zod'
+import {readWorkflowScheduleAuthority} from './operational-admission.js'
 import {getPool} from '../db/client.js'
 import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 import {assertContextActivationReady,getContextReadinessSystem} from '../context-scope/context-readiness.js'
@@ -11,7 +12,7 @@ import {hashCommandReviewIntent} from './command-review.js'
 import {WorkspaceAccessError} from './policy.js'
 import {SCOPE_REVIEW_KINDS,sourceAdapter,descendantAdapter} from './scope-review-registry.js'
 
-const kinds=[...SCOPE_REVIEW_KINDS,'session','workflow','workflow_history','goal','assistant_binding'] as const
+const kinds=[...SCOPE_REVIEW_KINDS,'session','workflow','workflow_history','workflow_schedule_binding','goal','assistant_binding'] as const
 const selectionSchema=z.object({kind:z.enum(kinds),id:z.string().uuid().transform(id=>id.toLowerCase())}).strict()
 const departmentSelectionSchema=z.object({kind:z.enum(['memory','episode','workspace_file']),id:z.string().uuid().transform(id=>id.toLowerCase())}).strict()
 const previewSchema=z.object({selections:z.array(selectionSchema).min(1).max(25)
@@ -24,9 +25,10 @@ type Selection=z.infer<typeof selectionSchema>
 type InternalSelection=Selection|{kind:'workflow_run';id:string}
 type Reference={kind:string;id:string;version:string}
 type DepartmentErasure=z.infer<typeof departmentSelectionSchema>&{version:string;compartments:string[]}
+type WorkflowScheduleBinding={id:string;workflowId:string;fingerprint:string;retainedFingerprint:string;groupId:string;projectId:string|null;compartments:string[];projectIds:string[]}
 type WorkflowRunEvidence={id:string;workflowId:string;fingerprint:string}
 type Source={version:string;compartments:string[]|null;held:boolean;[key:string]:unknown}
-type Evidence={roots:Array<Selection&{fingerprint:string}>,descendants:Record<string,unknown>[],dependencies:unknown[],erasureFingerprints:Record<string,string>,candidates:Reference[],erasures:Reference[],unclassified:Reference[],eraseUnclassifiedLegacy:boolean,departmentErasures:DepartmentErasure[],workflowRuns:WorkflowRunEvidence[],retained:string,reason:string}
+type Evidence={roots:Array<Selection&{fingerprint:string}>,descendants:Record<string,unknown>[],dependencies:unknown[],erasureFingerprints:Record<string,string>,candidates:Reference[],erasures:Reference[],unclassified:Reference[],eraseUnclassifiedLegacy:boolean,departmentErasures:DepartmentErasure[],workflowRuns:WorkflowRunEvidence[],workflowScheduleBindings:WorkflowScheduleBinding[],retained:string,reason:string}
 type Review={id:string;workspace_id:string;actor_user_id:string;policy_revision:string;selection:Selection[];evidence:Evidence;payload_hash:string;expires_at:Date;status:'preview'|'applied'|'cancelled';receipt:unknown}
 function fail(code:string,status=409):never{throw new WorkspaceAccessError(code,status)}
 const equal=(a:unknown,b:unknown)=>hashCommandReviewIntent(a)===hashCommandReviewIntent(b)
@@ -78,7 +80,7 @@ async function transaction<T>(w:string,u:string,run:(c:PoolClient,revision:strin
 }
 function adapter(row:InternalSelection){
  if(isSource(row.kind))return sourceAdapter(row.kind)
- const table={session:'sessions',workflow:'workflows',workflow_history:'workflows',workflow_run:'workflow_runs',goal:'goals',assistant_binding:'assistants'}[row.kind]
+ const table={session:'sessions',workflow:'workflows',workflow_history:'workflows',workflow_schedule_binding:'workflows',workflow_run:'workflow_runs',goal:'goals',assistant_binding:'assistants'}[row.kind]
  return{table,from:`${table} r`,workspacePredicate:'r.workspace_id=$1'}
 }
 async function scope(c:PoolClient,w:string,kind:string,id:string){
@@ -257,7 +259,7 @@ async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:stri
  const addErasure=async(kind:(typeof SCOPE_REVIEW_KINDS)[number],id:string)=>{
   await remember(kind,id);await captureDescendants(kind,id)
  }
- const workflowRuns:WorkflowRunEvidence[]=[]
+ const workflowRuns:WorkflowRunEvidence[]=[],workflowScheduleBindings:WorkflowScheduleBinding[]=[]
  for(const row of selections.filter(row=>row.kind==='workflow'||row.kind==='workflow_history')){
   const history=row.kind==='workflow_history'
   const runs=(await c.query<{id:string;workflow_id:string;status:string;scoped:boolean;unknown:boolean}>(`SELECT r.id,r.workflow_id,r.status,
@@ -291,7 +293,7 @@ async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:stri
   const hash=await fingerprint(c,w,row)
   if(!hash)fail('legacy_cleanup_selection_unavailable')
   roots.push({...row,fingerprint:hash})
-  if(row.kind!=='assistant_binding'&&row.kind!=='workflow_history')dependencies.push({kind:row.kind,id:row.id,rows:await foreignKeyReach(c,w,row,remember,departmentErasures)})
+  if(row.kind!=='assistant_binding'&&row.kind!=='workflow_history'&&row.kind!=='workflow_schedule_binding')dependencies.push({kind:row.kind,id:row.id,rows:await foreignKeyReach(c,w,row,remember,departmentErasures)})
   if(isSource(row.kind)){
    if(row.kind==='session_message'){
     const parent=(await c.query<{status:string;context_group_id:string|null;context_project_id:string|null}>(`SELECT s.status,s.context_group_id,s.context_project_id
@@ -307,6 +309,28 @@ async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:stri
    const messages=(await c.query<{id:string}>('SELECT id FROM session_messages WHERE session_id=$1 ORDER BY id LIMIT 501 FOR UPDATE',[row.id])).rows
    if(messages.length>500)fail('legacy_cleanup_impact_too_large')
    for(const message of messages)await addErasure('session_message',message.id)
+  }else if(row.kind==='workflow_schedule_binding'){
+   if(!(await c.query("SELECT 1 FROM workspace_access_policies WHERE workspace_id=$1 AND setup_state='legacy'",[w])).rowCount)fail('legacy_cleanup_binding_unsupported')
+   // Inherit the parent's existing validated author, never the cleanup owner's access.
+   if(!(await c.query('SELECT 1 FROM workflows WHERE workspace_id=$1 AND id=$2 AND NOT schedule_authoring_pinned',[w,row.id])).rowCount)fail('legacy_cleanup_binding_unsupported')
+   const parent=await readWorkflowScheduleAuthority(c,w,row.id)
+   if(!parent.contextGroupId||!parent.compartments.length)fail('legacy_cleanup_binding_unsupported')
+   const jobs=(await c.query<{id:string;workspace_id:string;assistant_id:string;user_id:string;context_group_id:string|null;context_project_id:string|null;context_compartments:string[]|null;context_project_ids:string[]|null;pinned:boolean;claimed:boolean;fingerprint:string;retainedFingerprint:string}>(`SELECT j.id,a.workspace_id,j.assistant_id,j.user_id,j.context_group_id,j.context_project_id,j.context_compartments,j.context_project_ids,
+    j.workflow_authoring_snapshot IS NOT NULL AS pinned,j.schedule_claim_id IS NOT NULL AS claimed,
+    encode(sha256(convert_to(to_jsonb(j)::text,'UTF8')),'hex') AS fingerprint,
+    encode(sha256(convert_to((to_jsonb(j)-ARRAY['context_group_id','context_project_id','context_compartments','context_project_ids','updated_at'])::text,'UTF8')),'hex') AS "retainedFingerprint"
+    FROM scheduled_jobs j JOIN assistants a ON a.id=j.assistant_id
+    WHERE j.workflow_id=$1 AND j.workflow_step_run_id IS NULL ORDER BY j.id LIMIT 501 FOR UPDATE OF j`,[row.id])).rows
+   if(!jobs.length)fail('legacy_cleanup_selection_unavailable')
+   if(jobs.length+workflowScheduleBindings.length>500)fail('legacy_cleanup_impact_too_large')
+   for(const job of jobs){
+    if(job.workspace_id!==w)fail('legacy_cleanup_foreign_dependency')
+    if(job.pinned||job.claimed||job.assistant_id!==parent.assistantId||job.user_id!==parent.userId
+     ||job.context_group_id||job.context_project_id||!Array.isArray(job.context_compartments)||job.context_compartments.length
+     ||!Array.isArray(job.context_project_ids)||job.context_project_ids.length)fail('legacy_cleanup_binding_unsupported')
+    workflowScheduleBindings.push({id:job.id,workflowId:row.id,fingerprint:job.fingerprint,retainedFingerprint:job.retainedFingerprint,groupId:parent.contextGroupId,
+     projectId:parent.contextProjectId,compartments:parent.compartments,projectIds:parent.projectIds})
+   }
   }else if(row.kind==='assistant_binding'){
    const a=(await c.query<{context_binding_origin:string;team_scope_mode:string;compartments:string[]|null;home_department_id:string|null;default_workspace_group_id:string|null}>(
     'SELECT context_binding_origin,team_scope_mode,compartments,home_department_id,default_workspace_group_id FROM assistants WHERE workspace_id=$1 AND id=$2',[w,row.id])).rows[0]
@@ -326,9 +350,9 @@ async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:stri
  }
  const candidates=[...erasures.values()].sort((a,b)=>`${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`))
  const unknown=[...unclassified.values()].sort((a,b)=>`${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`))
- return{roots,dependencies,erasureFingerprints,candidates,erasures:candidates,unclassified:unknown,eraseUnclassifiedLegacy,departmentErasures,workflowRuns,descendants:[...descendants.values()].sort((a,b)=>`${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`)),retained:await retained(c,w,[...unknown,...departmentErasures],departmentErasures),reason}
+ return{roots,dependencies,erasureFingerprints,candidates,erasures:candidates,unclassified:unknown,eraseUnclassifiedLegacy,departmentErasures,workflowRuns,workflowScheduleBindings,descendants:[...descendants.values()].sort((a,b)=>`${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`)),retained:await retained(c,w,[...unknown,...departmentErasures],departmentErasures),reason}
 }
-async function perform(c:PoolClient,w:string,selections:Selection[],workflowRuns:WorkflowRunEvidence[]=[]){
+async function perform(c:PoolClient,w:string,selections:Selection[],workflowRuns:WorkflowRunEvidence[]=[],workflowScheduleBindings:WorkflowScheduleBinding[]=[]){
  const changes:Array<Selection&{action:'erased'|'bound'|'erased_history'}>=[]
  const runIds=workflowRuns.map(row=>row.id)
  if(runIds.length){
@@ -341,6 +365,20 @@ async function perform(c:PoolClient,w:string,selections:Selection[],workflowRuns
   if(row.kind==='assistant_binding'){
    await c.query(`UPDATE assistants SET team_scope_mode='all',default_workspace_group_id=home_department_id,
     context_binding_origin='reviewed',updated_at=now() WHERE workspace_id=$1 AND id=$2`,[w,row.id])
+   changes.push({...row,action:'bound'})
+  }else if(row.kind==='workflow_schedule_binding'){
+   for(const job of workflowScheduleBindings.filter(job=>job.workflowId===row.id)){
+    const changed=await c.query(`UPDATE scheduled_jobs SET context_group_id=$2,context_project_id=$3,
+     context_compartments=$4,context_project_ids=$5,updated_at=now()
+     WHERE id=$1 AND workflow_id=$6 AND workflow_step_run_id IS NULL AND workflow_authoring_snapshot IS NULL
+     RETURNING context_group_id AS "groupId",context_project_id AS "projectId",context_compartments AS compartments,context_project_ids AS "projectIds",
+     encode(sha256(convert_to((to_jsonb(scheduled_jobs)-ARRAY['context_group_id','context_project_id','context_compartments','context_project_ids','updated_at'])::text,'UTF8')),'hex') AS "retainedFingerprint"`,
+     [job.id,job.groupId,job.projectId,job.compartments,job.projectIds,row.id])
+    if(changed.rowCount!==1)fail('legacy_cleanup_changed')
+    const {retainedFingerprint,...binding}=changed.rows[0]
+    if(retainedFingerprint!==job.retainedFingerprint)fail('legacy_cleanup_retained_dependency')
+    if(!equal(binding,{groupId:job.groupId,projectId:job.projectId,compartments:job.compartments,projectIds:job.projectIds}))fail('legacy_cleanup_changed')
+   }
    changes.push({...row,action:'bound'})
   }else if(row.kind==='workflow_history'){
    changes.push({...row,action:'erased_history'})
@@ -372,14 +410,14 @@ async function removedReferences(c:PoolClient,candidates:Reference[]){
 async function simulate(c:PoolClient,w:string,selections:Selection[],evidence:Evidence){
  await c.query('SAVEPOINT cleanup_simulation')
  try{
-  await perform(c,w,selections,evidence.workflowRuns)
+  await perform(c,w,selections,evidence.workflowRuns,evidence.workflowScheduleBindings)
   if(await retained(c,w,[...evidence.unclassified,...(evidence.departmentErasures??[])],evidence.departmentErasures)!==evidence.retained)fail('legacy_cleanup_retained_dependency')
   return await removedReferences(c,evidence.candidates)
  }
  finally{await c.query('ROLLBACK TO SAVEPOINT cleanup_simulation');await c.query('RELEASE SAVEPOINT cleanup_simulation')}
 }
 function view(r:Review){return{id:r.id,payloadHash:r.payload_hash,status:r.status,expiresAt:r.expires_at.toISOString(),selections:r.selection,
- reason:r.evidence.reason,erasedReferences:r.evidence.erasures,erasedWorkflowRuns:(r.evidence.workflowRuns??[]).map(({id,workflowId})=>({id,workflowId})),departmentErasures:r.evidence.departmentErasures??[],unclassifiedReferences:r.evidence.unclassified??[],dependentCount:r.evidence.descendants.length,receipt:r.receipt}}
+ reason:r.evidence.reason,erasedReferences:r.evidence.erasures,erasedWorkflowRuns:(r.evidence.workflowRuns??[]).map(({id,workflowId})=>({id,workflowId})),boundScheduledJobs:(r.evidence.workflowScheduleBindings??[]).map(({id,workflowId,groupId,projectId})=>({id,workflowId,groupId,projectId})),departmentErasures:r.evidence.departmentErasures??[],unclassifiedReferences:r.evidence.unclassified??[],dependentCount:r.evidence.descendants.length,receipt:r.receipt}}
 export async function previewLegacyCleanup(w:string,u:string,input:unknown){
  const parsed=previewSchema.safeParse(input);if(!parsed.success)fail('invalid_command',400)
  return transaction(w,u,async(c,revision)=>{
@@ -406,9 +444,10 @@ export async function applyLegacyCleanup(w:string,u:string,input:unknown,cancel=
   if(String(r.policy_revision)!==revision)fail('legacy_cleanup_changed')
   const current=await snapshot(c,w,r.selection,r.evidence.reason,r.evidence.eraseUnclassifiedLegacy,r.evidence.departmentErasures??[])
   if(!('departmentErasures' in r.evidence))delete (current as Partial<Evidence>).departmentErasures
+  if(!('workflowScheduleBindings' in r.evidence))delete (current as Partial<Evidence>).workflowScheduleBindings
   current.erasures=r.evidence.erasures
   if(!equal(current,r.evidence))fail('legacy_cleanup_changed')
-  const changes=await perform(c,w,r.selection,current.workflowRuns)
+  const changes=await perform(c,w,r.selection,current.workflowRuns,current.workflowScheduleBindings)
   if(!equal(await removedReferences(c,current.candidates),r.evidence.erasures))fail('legacy_cleanup_changed')
   if(await retained(c,w,[...r.evidence.unclassified,...(r.evidence.departmentErasures??[])],r.evidence.departmentErasures)!==r.evidence.retained)fail('legacy_cleanup_retained_dependency')
   const receipt={changes,retainedVerified:true}

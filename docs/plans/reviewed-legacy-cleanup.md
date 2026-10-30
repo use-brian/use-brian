@@ -121,6 +121,28 @@ real canonical source writes, deletion invalidation and application-role denial.
 They cover authorization, tenant boundaries, scoped-record retention, stale
 content/evidence, cancellation/replay, unknown dependencies, and assistant
 binding conversion without changes to grants or clearance.
+
+### Existing legacy schedule bindings
+
+Changing a workflow's department does not move its existing firing rows. An
+owner may select `workflow_schedule_binding` with a workflow ID to review that
+workflow's General firing rows against its already saved department and authoring
+authority. This is binding migration, with no deletion or permission widening.
+The parent must be an enabled scheduled workflow with a valid current department
+and saved authoring authority. The workspace must still be in legacy setup.
+The normal ready-mode schedule review remains the only path for pinned schedules.
+
+Preview freezes every firing row's complete database-side fingerprint and the
+parent's current authority, scope and body. Unknown/scoped, pinned, claimed,
+foreign-workspace, or different-principal firing rows refuse this operation;
+workflow wait/resume rows are excluded. Apply copies only the exact validated
+department/Project binding into the frozen General firing rows. IDs, schedules,
+timezone, instructions, delivery targets, enablement, history and nag settings
+stay unchanged. Existing triggers stay enabled. Revalidation, simulation and
+database-side hashes of every non-binding field reject unexpected trigger
+rewrites; foreign-workspace rows refuse without changing their parent. The
+immutable receipts use the same cleanup protocol, without activating ready mode
+or modifying historical runs. This adds no migration or runtime grants.
 Conversation tests include real immutable context revisions: General snapshot
 bytes follow the normal purge trigger, while a Personal snapshot prevents the
 conversation deletion and remains byte-for-byte unchanged. Content-free held

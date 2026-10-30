@@ -6,6 +6,8 @@ import {afterAll,describe,expect,it,vi} from 'vitest'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
 import {persistentContextFixture} from '../../application-platform/__tests__/fixtures/persistent-context.js'
+import {createDbJobStore} from '../../db/job-store.js'
+import {captureAuthoringAuthoritySystem} from '../../context-scope/workflow-authority.js'
 import {createMemory} from '../../db/memories.js'
 import {addSessionMessage,createWorkspaceChatSession} from '../../db/sessions.js'
 import {sessionContextGeneration,writeSessionContextRevision} from '../../db/session-context-revisions.js'
@@ -44,8 +46,101 @@ async function workflowHistory(f:Awaited<ReturnType<typeof fixture>>){
  await pool.query('INSERT INTO workflow_run_copy_sources(workspace_id,run_id,source_run_id) VALUES($1,$2,$3)',[f.workspaceId,copy,source])
  return{workflowId,source,copy}
 }
+async function legacySchedule(f:Awaited<ReturnType<typeof fixture>>){
+ const workflowId=randomUUID(),jobs=createDbJobStore(),schedule={type:'daily' as const,time:'08:30'}
+ await pool.query(`INSERT INTO workflows(id,workspace_id,created_by,name,definition,trigger)
+  VALUES($1,$2,$3,'Fictional scheduled workflow','{"steps":[]}',$4)`,[workflowId,f.workspaceId,f.ownerId,JSON.stringify({kind:'schedule',schedule,timezone:'UTC'})])
+ const job=await jobs.create({assistantId:f.assistantId,userId:f.ownerId,schedule,timezone:'UTC',mode:'local',
+  instructions:'Fictional preserved delivery instructions',channelType:'telegram',channelId:'123456',nextRunAt:new Date(Date.now()+86400000),
+  workflowId,silentUntilFire:true,nagIntervalMins:5,nagUntilKeyword:'done'})
+ const authority=await captureAuthoringAuthoritySystem({workspaceId:f.workspaceId,userId:f.ownerId,assistantId:f.assistantId,contextGroupId:f.team.id,contextProjectId:null})
+ await pool.query('UPDATE workflows SET context_group_id=$2,authoring_authority=$3 WHERE id=$1',[workflowId,f.team.id,authority])
+ return{workflowId,job,body:{selections:[{kind:'workflow_schedule_binding',id:workflowId}],reason:'Migrate fictional General firing context to its existing Personal workflow'}}
+}
 describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selective cleanup',()=>{
  afterAll(async()=>{await getAppPool().end();await pool.end()})
+ it('reviews General firing bindings without deleting or changing schedules, delivery targets or history',async()=>{
+  const f=await fixture()
+  try{
+   const h=await legacySchedule(f),run=randomUUID()
+   await pool.query(`INSERT INTO workflow_runs(id,workflow_id,workspace_id,trigger_kind,status) VALUES($1,$2,$3,'manual','completed')`,[run,h.workflowId,f.workspaceId])
+   const read=async()=>(await pool.query('SELECT to_jsonb(j) AS row FROM scheduled_jobs j WHERE id=$1',[h.job.id])).rows[0].row
+   const parent=async()=>(await pool.query('SELECT to_jsonb(w) AS row FROM workflows w WHERE id=$1',[h.workflowId])).rows[0].row
+   const before=await read(),beforeParent=await parent(),r=await preview(f.workspaceId,f.ownerId,h.body)
+   expect(r.erasedReferences).toEqual([])
+   expect(r.boundScheduledJobs).toEqual([{id:h.job.id,workflowId:h.workflowId,groupId:f.team.id,projectId:null}])
+   expect(await read()).toEqual(before)
+   expect((await f.confirm(r)).status).toBe('applied')
+   const after=await read(),omit=(value:Record<string,unknown>)=>Object.fromEntries(Object.entries(value).filter(([key])=>!['context_group_id','context_project_id','context_compartments','context_project_ids','updated_at'].includes(key)))
+   expect(omit(after)).toEqual(omit(before))
+   expect(after).toMatchObject({context_group_id:f.team.id,context_compartments:[f.team.compartmentKey],context_project_id:null,context_project_ids:[]})
+   expect((await f.confirm(r)).status).toBe('applied');expect(await read()).toEqual(after)
+   expect(await parent()).toEqual(beforeParent)
+   expect((await pool.query('SELECT id FROM workflow_runs WHERE id=$1',[run])).rowCount).toBe(1)
+  }finally{await f.cleanup()}
+ })
+ it('inherits the saved workflow author rather than the cleanup owner',async()=>{
+  const f=await fixture()
+  try{
+   const h=await legacySchedule(f)
+   await pool.query('INSERT INTO workspace_group_members(group_id,user_id) VALUES($1,$2)',[f.team.id,f.firstId])
+   await createDbWorkspaceGroupStore().setTeamAssistant(f.ownerId,f.team.id,f.assistantId,true)
+   const authority=await captureAuthoringAuthoritySystem({workspaceId:f.workspaceId,userId:f.firstId,assistantId:f.assistantId,contextGroupId:f.team.id,contextProjectId:null})
+   await pool.query('UPDATE workflows SET created_by=$2,authoring_authority=$3 WHERE id=$1',[h.workflowId,f.firstId,authority])
+   await pool.query('UPDATE scheduled_jobs SET user_id=$2 WHERE id=$1',[h.job.id,f.firstId])
+   const r=await preview(f.workspaceId,f.ownerId,h.body)
+   expect((await f.confirm(r)).status).toBe('applied')
+   expect((await pool.query('SELECT user_id,context_group_id FROM scheduled_jobs WHERE id=$1',[h.job.id])).rows[0]).toEqual({user_id:f.firstId,context_group_id:f.team.id})
+   expect((await pool.query('SELECT authoring_authority FROM workflows WHERE id=$1',[h.workflowId])).rows[0].authoring_authority).toEqual(authority)
+  }finally{await f.cleanup()}
+ })
+ it('refuses a firing row attached to another workspace assistant',async()=>{
+  const f=await fixture(),other=await fixture()
+  try{
+   const h=await legacySchedule(f)
+   await pool.query('UPDATE scheduled_jobs SET assistant_id=$2 WHERE id=$1',[h.job.id,other.assistantId])
+   const read=async()=>(await pool.query('SELECT to_jsonb(j) AS row FROM scheduled_jobs j WHERE id=$1',[h.job.id])).rows[0].row
+   const before=await read()
+   await expect(preview(f.workspaceId,f.ownerId,h.body)).rejects.toMatchObject({code:'legacy_cleanup_foreign_dependency'})
+   expect(await read()).toEqual(before)
+  }finally{await f.cleanup();await other.cleanup()}
+ })
+ it('rolls back unexpected non-binding changes made by a real row trigger',async()=>{
+  const f=await fixture(),name='cleanup_schedule_'+randomUUID().replaceAll('-','')
+  try{
+   const h=await legacySchedule(f),read=async()=>(await pool.query('SELECT to_jsonb(j) AS row FROM scheduled_jobs j WHERE id=$1',[h.job.id])).rows[0].row
+   const before=await read()
+   await pool.query(`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+    IF NEW.id='${h.job.id}'::uuid THEN NEW.instructions='Fictional unexpected rewrite';END IF;RETURN NEW;END $$`)
+   await pool.query(`CREATE TRIGGER ${name} BEFORE UPDATE ON scheduled_jobs FOR EACH ROW EXECUTE FUNCTION ${name}()`)
+   await expect(preview(f.workspaceId,f.ownerId,h.body)).rejects.toMatchObject({code:'legacy_cleanup_retained_dependency'})
+   expect(await read()).toEqual(before)
+  }finally{await pool.query(`DROP TRIGGER IF EXISTS ${name} ON scheduled_jobs`);await pool.query(`DROP FUNCTION IF EXISTS ${name}()`);await f.cleanup()}
+ })
+ it('rejects changed firing rows or parent consent before binding migration',async()=>{
+  const f=await fixture()
+  try{
+   const h=await legacySchedule(f)
+   let r=await preview(f.workspaceId,f.ownerId,h.body)
+   await pool.query("UPDATE scheduled_jobs SET instructions='Fictional changed job' WHERE id=$1",[h.job.id])
+   await expect(f.confirm(r)).rejects.toMatchObject({code:'legacy_cleanup_changed'})
+   r=await preview(f.workspaceId,f.ownerId,h.body)
+   await pool.query("UPDATE workflows SET name='Fictional changed parent' WHERE id=$1",[h.workflowId])
+   await expect(f.confirm(r)).rejects.toMatchObject({code:'legacy_cleanup_changed'})
+   expect((await pool.query('SELECT context_group_id FROM scheduled_jobs WHERE id=$1',[h.job.id])).rows[0].context_group_id).toBeNull()
+  }finally{await f.cleanup()}
+ })
+ it.each(['scoped','claimed','principal','ready'] as const)('does not silently migrate %s schedule bindings',async state=>{
+  const f=await fixture()
+  try{
+   const h=await legacySchedule(f)
+   if(state==='scoped')await pool.query('UPDATE scheduled_jobs SET context_group_id=$2,context_compartments=$3 WHERE id=$1',[h.job.id,f.team.id,[f.team.compartmentKey]])
+   if(state==='claimed')await pool.query('UPDATE scheduled_jobs SET schedule_claim_id=$2 WHERE id=$1',[h.job.id,randomUUID()])
+   if(state==='principal')await pool.query('UPDATE scheduled_jobs SET user_id=$2 WHERE id=$1',[h.job.id,f.firstId])
+   if(state==='ready')await pool.query("UPDATE workspace_access_policies SET setup_state='ready' WHERE workspace_id=$1",[f.workspaceId])
+   await expect(preview(f.workspaceId,f.ownerId,h.body)).rejects.toMatchObject({code:'legacy_cleanup_binding_unsupported'})
+  }finally{await f.cleanup()}
+ })
  it('erases explicitly consented Personal dependencies with their General source and retains other Personal data',async()=>{
   const f=await fixture()
   try{
