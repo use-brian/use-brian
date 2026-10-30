@@ -35,8 +35,65 @@ async function legacyMessage(f:Awaited<ReturnType<typeof fixture>>){
   await c.query('COMMIT');return id
  }catch(error){await c.query('ROLLBACK');throw error}finally{c.release()}
 }
+async function workflowHistory(f:Awaited<ReturnType<typeof fixture>>){
+ const workflowId=randomUUID(),source=randomUUID(),copy=randomUUID()
+ await pool.query(`INSERT INTO workflows(id,workspace_id,created_by,name,definition)
+  VALUES($1,$2,$3,'Fictional legacy workflow','{"steps":[]}')`,[workflowId,f.workspaceId,f.ownerId])
+ for(const id of [source,copy])await pool.query(`INSERT INTO workflow_runs(id,workflow_id,workspace_id,trigger_kind,status,vars)
+  VALUES($1,$2,$3,'manual','completed','{"__contextScopeEvidence":{"sensitivity":"internal","compartments":[],"projectIds":[],"sources":[]}}')`,[id,workflowId,f.workspaceId])
+ await pool.query('INSERT INTO workflow_run_copy_sources(workspace_id,run_id,source_run_id) VALUES($1,$2,$3)',[f.workspaceId,copy,source])
+ return{workflowId,source,copy}
+}
 describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selective cleanup',()=>{
  afterAll(async()=>{await getAppPool().end();await pool.end()})
+ it('erases copied General run history before deleting its legacy workflow',async()=>{
+  const f=await fixture()
+  try{
+   const h=await workflowHistory(f)
+   const r=await preview(f.workspaceId,f.ownerId,{selections:[{kind:'workflow',id:h.workflowId}],reason:'Erase fictional legacy workflow and copied history'})
+   expect(r.erasedWorkflowRuns.map(row=>row.id).sort()).toEqual([h.source,h.copy].sort())
+   expect((await f.confirm(r)).status).toBe('applied')
+   expect((await pool.query('SELECT id FROM workflow_runs WHERE id=ANY($1::uuid[])',[[h.source,h.copy]])).rowCount).toBe(0)
+   expect((await pool.query('SELECT id FROM workflows WHERE id=$1',[h.workflowId])).rowCount).toBe(0)
+  }finally{await f.cleanup()}
+ })
+ it('erases only General history while retaining the workflow and unrelated Personal runs',async()=>{
+  const f=await fixture(),personal=randomUUID()
+  try{
+   const h=await workflowHistory(f)
+   await pool.query('UPDATE workflows SET context_group_id=$2 WHERE id=$1',[h.workflowId,f.team.id])
+   await pool.query(`INSERT INTO workflow_runs(id,workflow_id,workspace_id,trigger_kind,status,context_group_id,context_compartments)
+    VALUES($1,$2,$3,'manual','completed',$4,$5)`,[personal,h.workflowId,f.workspaceId,f.team.id,[f.team.compartmentKey]])
+   await pool.query('UPDATE workflows SET context_group_id=NULL WHERE id=$1',[h.workflowId])
+   const read=async()=>(await pool.query(`SELECT to_jsonb(w) AS workflow,to_jsonb(r) AS personal FROM workflows w
+    JOIN workflow_runs r ON r.id=$2 WHERE w.id=$1`,[h.workflowId,personal])).rows[0]
+   const before=await read()
+   const r=await preview(f.workspaceId,f.ownerId,{selections:[{kind:'workflow_history',id:h.workflowId}],reason:'Erase fictional General history'})
+   expect(r.erasedWorkflowRuns.map(row=>row.id).sort()).toEqual([h.source,h.copy].sort())
+   expect((await f.confirm(r)).status).toBe('applied')
+   expect(await read()).toEqual(before)
+  }finally{await f.cleanup()}
+ })
+ it('rejects stale copied-run content and does not erase a Personal consumer or active history',async()=>{
+  const f=await fixture()
+  try{
+   const h=await workflowHistory(f),body={selections:[{kind:'workflow',id:h.workflowId}],reason:'Review fictional copied history'}
+   const r=await preview(f.workspaceId,f.ownerId,body)
+   await pool.query(`UPDATE workflow_runs SET outcome='{"text":"Fictional changed output"}' WHERE id=$1`,[h.copy])
+   await expect(f.confirm(r)).rejects.toMatchObject({code:'legacy_cleanup_changed'})
+   const personal=randomUUID()
+   await pool.query('UPDATE workflows SET context_group_id=$2 WHERE id=$1',[h.workflowId,f.team.id])
+   await pool.query(`INSERT INTO workflow_runs(id,workflow_id,workspace_id,trigger_kind,status,context_group_id,context_compartments,vars)
+    VALUES($1,$2,$3,'manual','completed',$4,$5,'{"__contextScopeEvidence":{"sensitivity":"internal","compartments":[],"projectIds":[],"sources":[]}}')`,[personal,h.workflowId,f.workspaceId,f.team.id,[f.team.compartmentKey]])
+   await pool.query('INSERT INTO workflow_run_copy_sources(workspace_id,run_id,source_run_id) VALUES($1,$2,$3)',[f.workspaceId,personal,h.source])
+   await pool.query('UPDATE workflows SET context_group_id=NULL WHERE id=$1',[h.workflowId])
+   await expect(preview(f.workspaceId,f.ownerId,body)).rejects.toMatchObject({code:'legacy_cleanup_retained_dependency'})
+   await expect(preview(f.workspaceId,f.ownerId,{...body,selections:[{kind:'workflow_history',id:h.workflowId}]})).rejects.toMatchObject({code:'legacy_cleanup_workflow_copy_dependency'})
+   await pool.query('DELETE FROM workflow_runs WHERE id=$1',[personal])
+   await pool.query("UPDATE workflow_runs SET status='running' WHERE id=$1",[h.copy])
+   await expect(preview(f.workspaceId,f.ownerId,body)).rejects.toMatchObject({code:'legacy_cleanup_running'})
+  }finally{await f.cleanup()}
+ })
  it.each([['55000',409,'legacy_cleanup_blocked'],['XX000',500,'legacy_cleanup_database_error']] as const)(
   'returns only bounded database blocker metadata for SQLSTATE %s',async(sqlState,status,code)=>{
   const f=await fixture(),name='cleanup_guard_'+randomUUID().replaceAll('-',''),app=express()

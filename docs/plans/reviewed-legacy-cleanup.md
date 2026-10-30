@@ -21,6 +21,18 @@ and pending, running or waiting workflow runs refuse cleanup. Assistant identiti
 credentials and department/project access memberships are never erased here.
 Immutable evidence guards and foreign-key restrictions still apply.
 
+Deleting a legacy workflow also reviews its General run history. A
+`workflow_history` selection reviews General history of a named workflow while
+retaining its definition and future schedule. Department-bound or labelled runs,
+active executions and foreign-workspace dependencies block erasure. Personal run
+history outside the selected General set stays protected. Preview lists every
+run ID to erase and freezes complete run bodies, canonical descendants and FK
+reach. A surviving consumer of a selected run blocks deletion; its General
+history must be explicitly selected too. Apply removes copy receipts only for
+runs in the frozen erasure set, then removes those runs in one statement before
+deleting a selected legacy workflow. Ordinary foreign keys and deletion triggers
+remain enabled; no receipt is severed from a surviving consumer.
+
 Preview simulates the exact deletes in a savepoint and rolls them back. It
 compares complete database-side fingerprints of retained department records,
 including scope/hold state and content, without projecting their content. Apply
