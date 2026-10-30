@@ -20,7 +20,9 @@ it('bounds metadata pages, reconciles before-cursor insert/update/delete, never 
   await pool.query("INSERT INTO assistants(id,workspace_id,name,system_prompt) VALUES($1,$2,'inventory','SECRET BODY')",[a,w])
   // Principal insertion advances policy. Explicitly bind the fixture draft to current policy.
   await pool.query('UPDATE workspace_access_migration_plans SET policy_revision=(SELECT revision FROM workspace_access_policies WHERE workspace_id=$1) WHERE id=$2',[w,p])
-  for(let i=0;i<51;i++)await pool.query("INSERT INTO sessions(workspace_id,assistant_id,user_id,channel_type,channel_id,compact_summary) VALUES($1,$2,$3,'web',gen_random_uuid()::text,'SECRET BODY')",[w,a,u])
+  // Legacy metadata can be inventoried without forging a protected compact
+  // summary publication (which now requires canonical revision evidence).
+  for(let i=0;i<51;i++)await pool.query("INSERT INTO sessions(workspace_id,assistant_id,user_id,channel_type,channel_id) VALUES($1,$2,$3,'web',gen_random_uuid()::text)",[w,a,u])
   const page=()=>inspectMigrationInventory(w,u,p,{family:'sessions'})
   await pool.query("INSERT INTO assistant_chat_links(assistant_id,token,created_by) VALUES($1,'SECRET-LINK-TOKEN',$2)",[a,u])
   const permissionsBefore=(await pool.query('SELECT revision,access_mode FROM workspace_access_policies WHERE workspace_id=$1',[w])).rows
@@ -34,7 +36,7 @@ it('bounds metadata pages, reconciles before-cursor insert/update/delete, never 
   const early='00000000-0000-0000-0000-000000000001'
   await pool.query("INSERT INTO sessions(id,workspace_id,assistant_id,user_id,channel_type,channel_id) VALUES($1,$2,$3,$4,'web',gen_random_uuid()::text)",[early,w,a,u])
   expect((await page()).rows[0].id).toBe(early)
-  await pool.query("UPDATE sessions SET compact_summary='CHANGED SECRET' WHERE id=$1",[early])
+  await pool.query('UPDATE sessions SET context_locked_at=now() WHERE id=$1',[early])
   const changed=await page();expect(changed.rows).toHaveLength(1);expect(JSON.stringify(changed)).not.toContain('SECRET')
   await pool.query('DELETE FROM sessions WHERE id=$1',[early])
   expect((await page()).rows[0]).toMatchObject({id:early,deleted:true,metadata:{}})
@@ -158,8 +160,8 @@ it('projects 640-645 binding floors and references without configuration session
     await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[w,u])
     await pool.query("INSERT INTO assistants(id,workspace_id,name,kind,clearance) VALUES($1,$2,'SECRET ASSISTANT','primary','internal')",[a,w])
     const team=await createDbWorkspaceGroupStore().createTeam(u,w,{name:'SECRET TEAM',key:'binding'})
-    for(const visibility of ['owner','workspace'])await pool.query(`INSERT INTO sessions(workspace_id,assistant_id,user_id,visibility,channel_type,channel_id,app_origin,context_group_id,context_compartments,compact_summary)
-      VALUES($1,$2,$3,$4,'web',gen_random_uuid()::text,'chat',$5,$6,'SECRET SUMMARY')`,[w,a,u,visibility,team.id,[team.compartmentKey]])
+    for(const visibility of ['owner','workspace'])await pool.query(`INSERT INTO sessions(workspace_id,assistant_id,user_id,visibility,channel_type,channel_id,app_origin,context_group_id,context_compartments)
+      VALUES($1,$2,$3,$4,'web',gen_random_uuid()::text,'chat',$5,$6)`,[w,a,u,visibility,team.id,[team.compartmentKey]])
     await pool.query("INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri,created_by_user_id) VALUES($1,$2,'/SECRET','SECRET','SECRET STORAGE',$3)",[file,w,u])
     await pool.query("INSERT INTO episodes(id,workspace_id,source_kind,source_ref,occurred_at,created_by_user_id) VALUES($1,$2,'recording','{\"private\":\"SECRET SOURCE\"}',now(),$3)",[recording,w,u])
     await pool.query("INSERT INTO recordings(id,workspace_id,mime,gcs_key,media_file_id,created_by_user_id) VALUES($1,$2,'audio/wav','SECRET STORAGE',$3,$4)",[recording,w,file,u])
@@ -216,7 +218,7 @@ it('projects 640-645 binding floors and references without configuration session
     for(const secret of ['SECRET',f.session,foreign.session,foreign.w,foreign.u])expect(JSON.stringify(result),family).not.toContain(secret)
   }
   const sessions=await page('sessions')
-  expect(sessions.rows.map(r=>r.metadata.visibility).sort()).toEqual(['owner','workspace'])
+  expect(sessions.rows.map(r=>r.metadata.visibility).sort()).toEqual(['personal','workspace'])
   expect(sessions.rows.every(r=>r.metadata.app_origin==='chat'&&r.metadata.context_group_id===f.team.id)).toBe(true)
   await pool.query('UPDATE auth_sessions SET revoked_at=clock_timestamp() WHERE id=$1',[f.session])
   for(const family of ['brain_keys','programmatic_capture_profiles'])expect((await page(family)).rows[0].metadata.configuration_revoked_at).not.toBeNull()
