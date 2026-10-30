@@ -1,5 +1,6 @@
 import { debugDocumentFlow } from '../../engine/document-flow-debug.js'
 import { Buffer } from 'node:buffer'
+import { providerAliasMap } from '@use-brian/shared/model-registry'
 import { renderSystemContext } from '../system-context.js'
 import { assertInputAuthority, isInputAuthorityError } from '../input-authority.js'
 import { z } from 'zod'
@@ -36,6 +37,7 @@ import {
 } from './protocol.js'
 
 const MAX_SYSTEM_PROMPT_BYTES = 512 * 1024
+const MODEL_ALIASES = providerAliasMap('openai-codex')
 const MAX_HISTORY_TEXT_FIELD_BYTES = 256 * 1024
 // Inference app-server peers use an 8 MiB JSONL frame (process.ts). Keep the
 // injected items array below that outer envelope while allowing ordinary
@@ -46,6 +48,7 @@ const MAX_HISTORY_ITEMS = 2_000
 const MAX_TOOL_CALLS_PER_BATCH = 64
 const MAX_TOOL_OUTPUT_BYTES = 1024 * 1024
 const TOOL_BATCH_QUIET_MS = 10
+const MAX_QUEUED_DELTA_CHARS = 4_096
 const TOOL_RESULT_TIMEOUT_MS = 2 * 60 * 1000
 const SESSION_IDLE_UNSUBSCRIBE_MS = 5 * 60 * 1000
 const TRUNCATION_MARKER = '\n\n[truncated by Brian at the provider boundary]'
@@ -297,7 +300,7 @@ class CodexProviderSession implements ProviderSession {
   #activeTurnId: string | undefined
   #turnStartReady: Promise<void> | undefined
   #releaseTurnStart: (() => void) | undefined
-  #activeQueue: AsyncStreamQueue<StreamChunk> | undefined
+  #activeQueue: AsyncStreamQueue | undefined
   #parked = new Map<string, ParkedToolCall>()
   // Codex nests Brian's tools in its `exec` envelope, which hands control back
   // to the model once yield_time_ms (10 s by default) passes with a Brian tool
@@ -366,7 +369,7 @@ class CodexProviderSession implements ProviderSession {
 
     this.#sendActive = true
     this.#cancelIdleTimer()
-    const queue = new AsyncStreamQueue<StreamChunk>()
+    const queue = new AsyncStreamQueue()
     this.#activeQueue = queue
     queue.push({ type: 'message_start', model: this.#options.model })
 
@@ -503,10 +506,11 @@ class CodexProviderSession implements ProviderSession {
   }
 
   async #startThread(): Promise<void> {
+    const wireModel = MODEL_ALIASES[this.#options.model] ?? this.#options.model
     const response = await this.#transport.rpc.request(
       'thread/start',
       {
-        model: this.#options.model,
+        model: wireModel,
         baseInstructions: this.#options.systemPrompt,
         developerInstructions: null,
         dynamicTools: Array.from(this.#allowedTools.values(), (tool) => ({
@@ -536,7 +540,7 @@ class CodexProviderSession implements ProviderSession {
       ThreadStartResponseSchema,
       { signal: this.#options.signal, assertInputAuthority: () => this.#assertInputAuthority() },
     )
-    if (response.model !== this.#options.model) {
+    if (response.model !== wireModel) {
       throw new CodexProviderProtocolError('Codex silently substituted the requested model')
     }
     this.#threadId = response.thread.id
@@ -669,7 +673,7 @@ class CodexProviderSession implements ProviderSession {
       && message.content.some((block) => block.type === 'tool_result' && this.#expired.has(block.toolUseId)))
   }
 
-  #flushDetached(queue: AsyncStreamQueue<StreamChunk>): void {
+  #flushDetached(queue: AsyncStreamQueue): void {
     const chunks = this.#detached.splice(0)
     for (const chunk of chunks) queue.push(chunk)
     for (const entry of this.#parked.values()) entry.surfaced = true
@@ -927,8 +931,8 @@ export class CodexTurnError extends Error {
   }
 }
 
-class AsyncStreamQueue<T> implements AsyncIterable<T> {
-  #values: T[] = []
+class AsyncStreamQueue implements AsyncIterable<StreamChunk> {
+  #values: StreamChunk[] = []
   #waiters: Array<() => void> = []
   #ended = false
   #error: Error | undefined
@@ -937,8 +941,18 @@ class AsyncStreamQueue<T> implements AsyncIterable<T> {
     return this.#ended
   }
 
-  push(value: T): void {
+  push(value: StreamChunk): void {
     if (this.#ended) return
+    const last = this.#values.at(-1)
+    // Notifications keep arriving while the consumer awaits current authority.
+    // Combine only queued text; already yielded chunks and tool boundaries
+    // remain untouched, and each combined chunk still undergoes authorization.
+    if ((value.type === 'text_delta' || value.type === 'thinking_delta')
+      && last?.type === value.type && 'text' in last
+      && last.text.length + value.text.length <= MAX_QUEUED_DELTA_CHARS) {
+      this.#values[this.#values.length - 1] = { ...value, text: last.text + value.text }
+      return
+    }
     this.#values.push(value)
     this.#wake()
   }
@@ -956,7 +970,7 @@ class AsyncStreamQueue<T> implements AsyncIterable<T> {
     this.#wake()
   }
 
-  async *[Symbol.asyncIterator](): AsyncIterator<T> {
+  async *[Symbol.asyncIterator](): AsyncIterator<StreamChunk> {
     while (true) {
       while (this.#values.length > 0) yield this.#values.shift()!
       if (this.#error) throw this.#error

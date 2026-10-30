@@ -1,5 +1,5 @@
 import { authFetch } from "../auth-fetch";
-import { fetchLatestSession, listWorkspaceSessions, listAuditSessions, getChatSessionSummary, listPersonalSessions, setSessionArchived } from "../api/sessions";
+import { fetchLatestSession, fetchSessionMessages, listWorkspaceSessions, listAuditSessions, getChatSessionSummary, listPersonalSessions, setSessionArchived } from "../api/sessions";
 import { PERSONAL_CHAT_POLICY } from "../chat-session-policy";
 vi.mock("../auth-fetch", () => ({ authFetch: vi.fn() }));
 /**
@@ -21,6 +21,19 @@ import {
 } from "../api/sessions";
 
 describe("[COMP:app-web/sessions-sdk] archived history", () => {
+  it("distinguishes empty transcripts from failed or malformed history reads", async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response("[]"));
+    await expect(fetchSessionMessages("chat-id", { strict: true })).resolves.toEqual([]);
+    for (const status of [403, 500]) {
+      vi.mocked(authFetch).mockResolvedValueOnce(new Response("{}", { status }));
+      await expect(fetchSessionMessages("chat-id", { strict: true })).rejects.toThrow(`chat_history_failed: ${status}`);
+    }
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response("{}"));
+    await expect(fetchSessionMessages("chat-id", { strict: true })).rejects.toThrow("chat_history_invalid_response");
+    vi.mocked(authFetch).mockRejectedValueOnce(new Error("offline"));
+    await expect(fetchSessionMessages("chat-id", { strict: true })).rejects.toThrow("offline");
+  });
+
   it("sends a strict per-viewer archive command", async () => {
     vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({ archived: true })));
     await setSessionArchived("chat-id", true);

@@ -15,6 +15,7 @@ import { describeMcpToolError } from './errors.js'
 import { buildTool, type Tool } from '../tools/types.js'
 import { classifyTool, defaultPolicy } from './classifier.js'
 import { mcpResultToToolResult } from './tool-result.js'
+import { createMcpInputSchema, mcpArgumentError } from './input-schema.js'
 import type { McpSettingsStore, McpServerConfig, McpToolInfo } from './types.js'
 
 /** Sanitize a string for use in LLM tool names (Gemini restriction). */
@@ -43,10 +44,11 @@ export function createMcpGateway(params: {
   for (const t of server.tools) {
     toolMap.set(t.name, t)
   }
+  const argumentSchemas = new Map(server.tools.map(t => [t.name, createMcpInputSchema(t.inputSchema)]))
 
   // Build the tool list summary (shown when action=list)
   const toolSummary = server.tools
-    .map((t) => `- **${t.name}**: ${t.description}`)
+    .map((t) => `- **${t.name}**: ${t.description}\n  Input JSON Schema: ${JSON.stringify(t.inputSchema)}`)
     .join('\n')
 
   const gatewayName = sanitizeToolName(`mcp_${server.name}`).slice(0, 128)
@@ -117,8 +119,11 @@ export function createMcpGateway(params: {
         }
       }
 
+      const parsed = argumentSchemas.get(mcpTool.name)!.safeParse(args ?? {})
+      if (!parsed.success) return { data: mcpArgumentError(mcpTool.name, parsed.error), isError: true }
+
       try {
-        const result = await callMcpTool(server.name, mcpTool.name, args ?? {})
+        const result = await callMcpTool(server.name, mcpTool.name, parsed.data)
 
         // Track usage
         settingsStore.recordUsage({

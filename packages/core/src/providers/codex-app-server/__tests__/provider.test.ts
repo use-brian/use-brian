@@ -181,6 +181,68 @@ async function startToolTurn(
 }
 
 describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', () => {
+  it('coalesces bounded queued deltas behind a slow consumer without crossing reasoning boundaries', async () => {
+    const harness = createHarness()
+    const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' }, models: [MODEL] })
+    const session = provider.createSession!({ model: MODEL, systemPrompt: 'You are Brian.', tools: [] })
+    const iterator = session.send([{ role: 'user', content: 'Hello' }])[Symbol.asyncIterator]()
+    try {
+      const first = iterator.next()
+      respondToThreadStart(harness, await waitForMethod(harness, 'thread/start'))
+      respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
+      expect((await first).value).toEqual({ type: 'message_start', model: MODEL })
+      notify(harness, 'item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'message-1', delta: 'prefix' })
+      const yielded = (await iterator.next()).value
+      expect(yielded).toEqual({ type: 'text_delta', text: 'prefix' })
+      // The consumer is paused at an authorization boundary while RPC input
+      // continues. The first yielded object must never be changed afterward.
+      for (let i = 0; i < 200; i++) notify(harness, 'item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'message-1', delta: 'x'.repeat(100) })
+      notify(harness, 'item/reasoning/textDelta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'message-1', delta: 'reason one' })
+      notify(harness, 'item/reasoning/textDelta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'message-1', delta: ' reason two' })
+      notify(harness, 'item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'message-1', delta: 'tail' })
+      usage(harness, 'thread-1', 'turn-1')
+      complete(harness, 'thread-1', 'turn-1')
+      await new Promise<void>(resolve => setImmediate(resolve))
+      const chunks: StreamChunk[] = []
+      for (let next = await iterator.next(); !next.done; next = await iterator.next()) chunks.push(next.value)
+      const text = chunks.filter((chunk): chunk is Extract<StreamChunk, { type: 'text_delta' }> => chunk.type === 'text_delta')
+      expect(yielded).toEqual({ type: 'text_delta', text: 'prefix' })
+      expect(text.map(chunk => chunk.text).join('')).toBe('x'.repeat(20_000) + 'tail')
+      expect(text).toHaveLength(6)
+      expect(text.every(chunk => chunk.text.length <= 4096)).toBe(true)
+      expect(chunks.slice(-3)).toEqual([
+        { type: 'thinking_delta', text: 'reason one reason two' },
+        { type: 'text_delta', text: 'tail' },
+        expect.objectContaining({ type: 'message_end', stopReason: 'end_turn' }),
+      ])
+    } finally { await iterator.return?.(); harness.peer.close() }
+  })
+
+  it.each(['gpt-6.1-sol', 'gpt-6-sol'])('maps the Pro Sol alias and validates the returned wire model (%s)', async (returnedModel) => {
+    const harness = createHarness()
+    const provider = createCodexAppServerProvider({
+      transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' },
+      models: ['gpt-6.1-sol-pro', 'gpt-6.1-sol'],
+    })
+    try {
+      const chunks = collect(provider.stream({
+        model: 'gpt-6.1-sol-pro', systemPrompt: 'You are Brian.',
+        messages: [{ role: 'user', content: 'Hello' }], assertInputAuthority: async () => {},
+      }))
+      const result = returnedModel === 'gpt-6.1-sol'
+        ? expect(chunks).resolves.toEqual(expect.arrayContaining([{ type: 'message_start', model: 'gpt-6.1-sol-pro' }]))
+        : expect(chunks).rejects.toThrow('Codex silently substituted the requested model')
+      const thread = await waitForMethod(harness, 'thread/start')
+      expect(thread.params).toMatchObject({ model: 'gpt-6.1-sol' })
+      respond(harness, thread, { thread: { id: 'thread-1' }, model: returnedModel, modelProvider: 'openai' })
+      if (returnedModel === 'gpt-6.1-sol') {
+        respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
+        complete(harness, 'thread-1', 'turn-1')
+        respond(harness, await waitForMethod(harness, 'thread/unsubscribe'), { status: 'unsubscribed' })
+      }
+      await result
+    } finally { harness.peer.close() }
+  })
   it.each([false,true])('refuses before a thread payload and keeps the refusal terminal (stateless=%s)', async stateless => {
     const harness = createHarness(); let revoked = true
     const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer,cwd: '/tmp/brian-codex-test' },models: [MODEL] })

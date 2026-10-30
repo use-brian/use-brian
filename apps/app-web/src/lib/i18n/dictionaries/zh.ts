@@ -3040,6 +3040,7 @@ export const zh: Dictionary = {
       downloading: "下載中…",
       downloadFailed: "下載失敗，點一下重試。",
     },
+    noticePostReplyAuthorityChanged: "回覆已儲存。由於存取權限變更，部分後續處理已停止。下一則訊息將使用目前的權限。",
     noticeBudgetDowngraded: "本月額度已用罄，重置前將以標準模型運作。",
     noticeCustomModelImageFallback: "此工作區的模型端點無法讀取圖片，因此本則訊息由 Brian 內建模型回答。",
     noticeCustomModelEndpointFallback: "此工作區的模型端點在本則訊息上失敗，因此改由 Brian 內建模型回答。",

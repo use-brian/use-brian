@@ -129,9 +129,11 @@ export type ScopeReviewConsolidation = {
   audiences:Array<{userId:string;assistantId:string|null;readBefore:boolean;readAfter:boolean;editBefore:boolean;editAfter:boolean}>
   futureDefaultMembersWarning:string
 }
+/** Dependent immutable revisions are impact references, never selectable roots. */
+export type ScopeReviewDescendantKind = ScopeReviewKind|'session_context_revision'|'knowledge_entry_revision'
 export type ScopeReviewImpact =
   | {version:1;descendants:Array<{resourceId:string;version:string;held:boolean}>}
-  | {version:2;descendants:Array<{resourceKind:ScopeReviewKind;resourceId:string;version:string;held:boolean}>;dependents:Record<string,string>;consolidation?:ScopeReviewConsolidation;release?:ScopeHoldReleasePlan}
+  | {version:2;descendants:Array<{resourceKind:ScopeReviewDescendantKind;resourceId:string;version:string;held:boolean;removed?:true}>;dependents:Record<string,string>;consolidation?:ScopeReviewConsolidation;release?:ScopeHoldReleasePlan}
 export type ScopeReviewCoverageFamily = {
   family:string;category:'source'|'impact'|'binding'|'job';total:string;unresolved:string;held:string
 }

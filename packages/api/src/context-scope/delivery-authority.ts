@@ -9,7 +9,7 @@ import {
 } from '@use-brian/core'
 import { parseTopicChannelId } from '@use-brian/channels'
 import { getGroupAudienceBindingsSystem, type ChannelIntegrationStore, type DeliveryAudienceBinding } from '../db/channel-integrations.js'
-import { findSessionByChannel, findSessionById, type Session } from '../db/sessions.js'
+import { findSessionByChannel, readSessionById, type Session } from '../db/sessions.js'
 import { policyFor } from '../session-kind.js'
 import { findAssistantById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
@@ -137,7 +137,7 @@ type Dependencies = {
   integrationStore?: ChannelIntegrationStore
   now?: () => number
   findAssistant?: typeof findAssistantById
-  findSession?: typeof findSessionById
+  findSession?: typeof readSessionById
   findChannelSession?: typeof findSessionByChannel
   getWorkspaceRole?: typeof getWorkspaceRoleSystem
   resolveLiveAccess?: typeof resolveLiveAccessCeilingSystem
@@ -271,7 +271,7 @@ function resolvedDependencies(dependencies: Dependencies) {
   return {
     now: dependencies.now ?? Date.now,
     findAssistant: dependencies.findAssistant ?? findAssistantById,
-    findSession: dependencies.findSession ?? findSessionById,
+    findSession: dependencies.findSession ?? readSessionById,
     findChannelSession: dependencies.findChannelSession ?? findSessionByChannel,
     getWorkspaceRole: dependencies.getWorkspaceRole ?? getWorkspaceRoleSystem,
     resolveLiveAccess: dependencies.resolveLiveAccess ?? resolveLiveAccessCeilingSystem,

@@ -3043,6 +3043,7 @@ export const ja: Dictionary = {
       downloading: "ダウンロード中…",
       downloadFailed: "ダウンロードできませんでした。クリックして再試行してください。",
     },
+    noticePostReplyAuthorityChanged: "返信は保存されました。アクセス権が変更されたため、一部の後続処理が停止しました。次のメッセージには現在の権限が適用されます。",
     noticeBudgetDowngraded:
       "今月のクレジット枠を使い切ったため、リセットまでスタンダードモデルで動作しています。",
     noticeCustomModelImageFallback:

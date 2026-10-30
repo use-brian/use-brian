@@ -294,9 +294,22 @@ describe.sequential('[COMP:corrections/row-history] current native Memory audit 
   expect(new Set(padding.map(source=>source.resourceId)).size).toBe(101)
   const mixed=[...roots,...padding],host=await authority()
   await expect(readRetainedContextFrame(host,mixed,async client=>{
-   expect((await validateCallerScopeEvidence({sources:mixed},host.execution.security.ceiling,client)).sources?.some(source=>source.resourceId===roots[0].resourceId)).toBe(true)
-   await validateAudienceScopeEvidence({sources:roots},host.execution.security.ceiling,client)
-   await expect(validateAudienceScopeEvidence({sources:roots},{...host.execution.security.ceiling,clearance:'public',departmentRead:undefined},client)).rejects.toBeDefined()
+   const ordinaryFields=new Set(padding.filter(source=>source.resourceKind==='application_field').map(source=>source.resourceId))
+   const original=client.query;let unnecessaryHistoryProbes=0
+   client.query=function(...args:unknown[]){
+    const ids=(args[1] as unknown[]|undefined)?.[2]
+    if(typeof args[0]==='string'&&args[0].includes('read_native_attended_memory_evidence')
+     &&Array.isArray(ids)&&ids.length===1&&ordinaryFields.has(ids[0]))unnecessaryHistoryProbes++
+    return Reflect.apply(original,client,args)
+   }
+   try{
+    expect((await validateCallerScopeEvidence({sources:mixed},host.execution.security.ceiling,client)).sources?.some(source=>source.resourceId===roots[0].resourceId)).toBe(true)
+    await validateAudienceScopeEvidence({sources:roots},host.execution.security.ceiling,client)
+    await expect(validateAudienceScopeEvidence({sources:roots},{...host.execution.security.ceiling,clearance:'public',departmentRead:undefined},client)).rejects.toBeDefined()
+    // Every ordinary field is still admitted by the complete validator. It
+    // must not also run a recursive history RPC merely to classify its selector.
+    expect(unnecessaryHistoryProbes).toBe(0)
+   }finally{client.query=original}
    return true
   })).resolves.toBe(true)
   // More than100 distinct roots precede this independently supplied old tuple.

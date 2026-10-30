@@ -1,6 +1,6 @@
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import {ContextScopeAccumulator,boundScopeSources,executionToolContext,type LLMProvider} from '@use-brian/core'
-import {getAppPool,getPool} from '../../db/client.js'
+import {getAppPool,getPool,rollbackAndRelease} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
 import {findAssistantById} from '../../db/users.js'
@@ -57,6 +57,18 @@ describe.sequential('[COMP:api/application-persistence] [COMP:api/delivery-autho
   const original=createDeliveryAudienceAuthorizer({validateEvidence:(evidence,recipient)=>validateAttendedAudienceEvidence(current.execution,evidence,recipient,{directHumanSource:true})})
   const before=structuredClone(current.input),actual=await current.authorize(current.input),expected=await original(current.input)
   expect(actual).toEqual(expected);expect(actual.allowed).toBe(true);expect(current.input).toEqual(before)
+ })
+ it('authorizes a current private recipient while a source reader pins the session without refreshing recency',async()=>{
+  const f=await setup(),current=await context(f),reader=await f.pool.connect()
+  const recency=async()=>(await f.pool.query('SELECT last_active_at FROM sessions WHERE id=$1',[current.session.id])).rows[0].last_active_at
+  const before=await recency();let pending:ReturnType<typeof current.authorize>|undefined,finished=false
+  try{
+   await reader.query('BEGIN');await reader.query('SELECT id FROM sessions WHERE id=$1 FOR SHARE',[current.session.id])
+   pending=current.authorize(current.input).then(value=>{finished=true;return value})
+   await expect.poll(()=>finished,{timeout:1500}).toBe(true)
+   expect(await pending).toMatchObject({allowed:true})
+   expect(await recency()).toEqual(before)
+  }finally{await reader.query('ROLLBACK');await rollbackAndRelease(reader);await pending?.catch(()=>{})}
  })
  it('keeps a private reply authorized after a timed-out classifier finishes unwinding',async()=>{
   const f=await setup(),current=await context(f)

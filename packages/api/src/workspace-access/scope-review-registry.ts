@@ -3,6 +3,7 @@ import type {
   ScopeReviewAction,
   ScopeReviewCoverage,
   ScopeReviewKind,
+  ScopeReviewDescendantKind,
 } from '@use-brian/shared'
 
 export const SCOPE_REVIEW_REGISTRY_REVISION = 2
@@ -51,6 +52,17 @@ export const SCOPE_REVIEW_KINDS = Object.freeze(Object.keys(SCOPE_REVIEW_SOURCE_
 
 export function sourceAdapter(kind: ScopeReviewKind): SourceAdapter {
   return SCOPE_REVIEW_SOURCE_ADAPTERS[kind]
+}
+
+// Holding an immutable derived revision does not make it a selectable source.
+// Keep this closed list aligned with read_scope_review_impact_source (SQL8143).
+const descendantAdapters: Readonly<Record<ScopeReviewDescendantKind, Pick<SourceAdapter,'from'|'workspacePredicate'>>> = Object.freeze({
+  ...SCOPE_REVIEW_SOURCE_ADAPTERS,
+  session_context_revision:{from:'session_context_scope_revisions r',workspacePredicate:'r.workspace_id=$1'},
+  knowledge_entry_revision:{from:'knowledge_entry_scope_revisions r',workspacePredicate:'r.workspace_id=$1'},
+})
+export function descendantAdapter(kind:string):Pick<SourceAdapter,'from'|'workspacePredicate'>|undefined {
+  return Object.hasOwn(descendantAdapters,kind)?descendantAdapters[kind as ScopeReviewDescendantKind]:undefined
 }
 
 type QueryPort = {query<T extends Record<string,unknown>>(text:string,values?:unknown[]):Promise<{rows:T[]}>}

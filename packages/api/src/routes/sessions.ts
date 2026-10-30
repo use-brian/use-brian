@@ -1,5 +1,7 @@
-import {pinSessionTitleClaims,sessionTitleProjection,sessionTitleProjections,renameCurrentSessionTitle} from './session-title-authority.js'
-import {DerivedScopeError} from '@use-brian/core'
+import {pinSessionTitleClaims,sessionTitleProjection,sessionTitleProjections,renameCurrentSessionTitle,resolveSessionTitleAuthority} from './session-title-authority.js'
+import {DerivedScopeError,executionToolContext} from '@use-brian/core'
+import {readAttendedSessionHistory} from './attended-session-context.js'
+import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 import { z } from 'zod'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
@@ -10,7 +12,7 @@ import { createSessionStreamAuthority } from '../session-stream-authority.js'
 import { guardFeedStream } from '../content-planning/source-authority.js'
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { addSessionMessage, countSessionHumans, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, readSessionById, rebindSessionAssistant, updateSessionMessageText } from '../db/sessions.js'
+import { addSessionMessage, countSessionHumans, createPersonalWebSession, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, readSessionById, rebindSessionAssistant, updateSessionMessageText } from '../db/sessions.js'
 import { isWorkspaceAdmin, setRoomCapture } from '../channel-room/room.js'
 import { mayAssistantAnswerInRoom, DOC_DOCK_RESUME_ROW } from './_room-binding.js'
 import { query } from '../db/client.js'
@@ -1255,6 +1257,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   })
 
   router.get('/:id/messages', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store')
     try {
       const jwtUserId = (req as { userId?: string }).userId
       if (!jwtUserId) {
@@ -1269,7 +1272,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // `visibility='workspace'` (doc comment threads, migration 223) or
       // `mode='draft'` session; every other session stays owner-only. See
       // docs/plans/doc-brain-distillation.md → "Session model".
-      const session = await findSessionById(req.params.id)
+      const session = await readSessionById(req.params.id)
       if (!session) {
         res.status(404).json({ error: 'Session not found' })
         return
@@ -1280,7 +1283,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
-      const messages = await getSessionMessages(req.params.id)
+      const authority = await resolveSessionTitleAuthority({
+        claims: pinSessionTitleClaims(req), sessionId: session.id, readOnly: true,
+      })
+      const messages = await readAttendedSessionHistory(authority, session.id)
       // Resolve sender profiles (name + avatar) so the client can attribute
       // *other* members' messages (a comment thread otherwise only knows the
       // current viewer's identity and renders a "?" avatar for everyone else).
@@ -1300,6 +1306,12 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         classifySession(session).anchor.kind === 'doc_thread'
           ? await guestAuthorNameForSession(session.id)
           : null
+      // Profiles and anchor attribution may await other reads. Recheck the
+      // original query's sources and caller at the actual response boundary.
+      await assertSourceModelOutputAuthority({
+        ...executionToolContext(authority.execution, { appId: 'native-session-history' }),
+        scopeAccumulator: authority.accumulator,
+      })
       res.json(messages.map((m) => {
         const guest = guestSenderProfile(m.senderUserId, guestName)
         return {
@@ -1325,6 +1337,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         }
       }))
     } catch (err) {
+      if (err instanceof DerivedScopeError || isAuthorityChangedError(err)
+        || err instanceof Error && 'code' in err && err.code === 'source_access_denied') {
+        res.status(403).json({ error: 'Session history is unavailable with your current access', code: 'session_history_unavailable' })
+        return
+      }
       console.error('Messages load error:', err)
       res.status(500).json({ error: 'Failed to load messages' })
     }

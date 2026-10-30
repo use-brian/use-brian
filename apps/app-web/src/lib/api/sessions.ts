@@ -818,22 +818,21 @@ export async function deleteSession(sessionId: string): Promise<void> {
 }
 
 /**
- * Fetch the message history for one session. Returns `[]` on any error
- * or when the session has no messages — the caller treats both as
- * "start fresh".
+ * Strict readers reject failures so they can preserve the painted transcript.
+ * Legacy callers retain their best-effort empty fallback.
  */
 export async function fetchSessionMessages(
   sessionId: string,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; strict?: boolean },
 ): Promise<DocSessionMessage[]> {
   try {
     const res = await authFetch(
       `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
       opts?.signal ? { signal: opts.signal } : {},
     );
-    if (!res.ok) return [];
+    if (!res.ok) throw new Error(`chat_history_failed: ${res.status}`);
     const data = (await res.json()) as RawMessageRow[];
-    if (!Array.isArray(data)) return [];
+    if (!Array.isArray(data)) throw new Error("chat_history_invalid_response");
     return data.map((m) => ({
       id: m.id,
       role: (m.role as DocSessionMessage["role"]) ?? "assistant",
@@ -847,7 +846,8 @@ export async function fetchSessionMessages(
       senderAvatarUrl: m.senderAvatarUrl ?? null,
       replyToText: m.replyToText ?? null,
     }));
-  } catch {
+  } catch (error) {
+    if (opts?.strict) throw error;
     return [];
   }
 }

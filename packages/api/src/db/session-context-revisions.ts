@@ -212,7 +212,9 @@ const queryFloor=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid(
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid())}).strict()
 async function pinNativeSessionQueryFloor(authority:SessionContextAuthority,client:PoolClient){
  const {execution}=authority,actor=execution.security.access.userId,workspaceId=execution.security.access.workspaceId
- const floor=queryFloor.parse((await client.query<{scope:unknown}>('SELECT read_native_session_query_floor($1,$2) AS scope',[workspaceId,execution.lifecycle.sessionId])).rows[0]?.scope)
+ const scope=(await client.query<{scope:unknown}>('SELECT read_native_session_query_floor($1,$2) AS scope',[workspaceId,execution.lifecycle.sessionId])).rows[0]?.scope
+ if(scope==null)changed()
+ const floor=queryFloor.parse(scope)
  if(floor.workspaceId!==workspaceId||floor.userId!==null&&floor.userId!==actor)changed()
  if(floor.userId===null&&execution.security.access.sharedAudience){
   const maximum={workspaceId,userId:actor,clearance:floor.sensitivity,compartments:floor.compartments,mutationCompartments:[],

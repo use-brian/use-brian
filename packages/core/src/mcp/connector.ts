@@ -5,7 +5,7 @@
  * as Use Brian Tool instances with policy enforcement.
  */
 
-import { z } from 'zod'
+import { createMcpInputSchema, mcpArgumentError } from './input-schema.js'
 import { policyBlockedToolResult } from '../engine/decline-copy.js'
 import { describeMcpToolError } from './errors.js'
 import { buildTool, type Tool } from '../tools/types.js'
@@ -61,11 +61,12 @@ export function wrapMcpTools(params: {
   return server.tools.map((mcpTool) => {
     const classification = classifyTool(mcpTool.name, mcpTool.description)
     const policy = defaultPolicy(classification)
+    const inputSchema = createMcpInputSchema(mcpTool.inputSchema)
 
     return buildTool({
       name: sanitizeToolName(`mcp_${server.name}_${mcpTool.name}`).slice(0, 128),
       description: `[${server.name}] ${mcpTool.description}`,
-      inputSchema: z.record(z.unknown()),
+      inputSchema,
       isConcurrencySafe: classification === 'read',
       isReadOnly: classification === 'read',
       requiresConfirmation: policy === 'ask',
@@ -85,8 +86,11 @@ export function wrapMcpTools(params: {
           return { data: policyBlockedToolResult(mcpTool.name), isError: true }
         }
 
+        const parsed = inputSchema.safeParse(input)
+        if (!parsed.success) return { data: mcpArgumentError(mcpTool.name, parsed.error), isError: true }
+
         try {
-          const result = await callMcpTool(server.name, mcpTool.name, input as Record<string, unknown>)
+          const result = await callMcpTool(server.name, mcpTool.name, parsed.data)
 
           // Track usage
           settingsStore.recordUsage({

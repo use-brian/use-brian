@@ -20,6 +20,15 @@ afterEach(async () => {
 })
 
 describe('[COMP:providers/codex-process] managed Codex app-server process', () => {
+  it('fails closed and cleans up when the pinned model metadata cannot be validated', async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), 'codex-invalid-catalog-test-'))
+    cleanupPaths.push(codexHome)
+    await expect(startCodexAppServer({ codexHome, surface: 'inference', command: {
+      command: process.execPath, argsPrefix: ['-e', 'process.stdout.write("untrusted-runtime-output")', '--'],
+    } })).rejects.toThrow('Could not prepare the pinned Codex tool surface')
+    expect(await readdir(join(codexHome, 'runtime'))).toEqual([])
+  })
+
   it('survives an OS temporary-directory sweep and removes only its owned cwd on close', async () => {
     const codexHome = await mkdtemp(join(tmpdir(), 'codex-durable-home-test-'))
     const sweptTemp = await mkdtemp(join(tmpdir(), 'codex-swept-temp-test-'))
@@ -40,7 +49,11 @@ describe('[COMP:providers/codex-process] managed Codex app-server process', () =
       await expect(client.rpc.request('thread/start', { cwd: client.cwd }, z.object({ cwd: z.string() })))
         .resolves.toEqual({ cwd: client.cwd })
       expect(client.cwd).toContain(join(await realpath(codexHome), 'runtime', 'process-'))
-      expect(await readdir(client.cwd)).toEqual([])
+      expect(await readdir(client.cwd)).toEqual(['inference-models.json'])
+      expect(JSON.parse(await readFile(join(client.cwd, 'inference-models.json'), 'utf8'))).toEqual({
+        models: [{ slug: 'fixture-model', tool_mode: null, experimental_supported_tools: [],
+          apply_patch_tool_type: null, context_window: 272000 }],
+      })
       if (process.platform !== 'win32') expect((await stat(client.cwd)).mode & 0o777).toBe(0o700)
       await client.close()
       await expect(access(client.cwd)).rejects.toThrow()
@@ -55,17 +68,21 @@ describe('[COMP:providers/codex-process] managed Codex app-server process', () =
   it('resolves the exact pinned package entry instead of a global binary', async () => {
     const command = await resolvePinnedCodexCommand()
 
-    expect(PINNED_CODEX_VERSION).toBe('0.146.0-alpha.10.1')
+    expect(PINNED_CODEX_VERSION).toBe('0.165.0')
     expect(command.command).toBe(process.execPath)
     expect(command.argsPrefix).toHaveLength(1)
-    expect(command.argsPrefix?.[0]).toContain('@openai+codex@0.146.0-alpha.10.1')
+    expect(command.argsPrefix?.[0]).toContain('@openai+codex@0.165.0')
     expect(command.argsPrefix?.[0]).toMatch(/bin[/\\]codex\.js$/)
   })
 
-  it('resolves the separate account-only discovery pin', async () => {
+  it('keeps discovery and inference on the same cache-compatible runtime pin', async () => {
     const command = await resolvePinnedCodexCommand('account')
-    expect(PINNED_CODEX_CATALOG_VERSION).toBe('0.162.1')
-    expect(command.argsPrefix?.[0]).toContain('@openai+codex@0.162.1')
+    expect(PINNED_CODEX_CATALOG_VERSION).toBe('0.165.0')
+    expect(PINNED_CODEX_CATALOG_VERSION).toBe(PINNED_CODEX_VERSION)
+    const manifest = JSON.parse(await readFile(new URL('../../../../package.json', import.meta.url), 'utf8'))
+    expect(manifest.dependencies['@openai/codex']).toBe(PINNED_CODEX_VERSION)
+    expect(manifest.dependencies['@openai/codex-catalog']).toBe(`npm:@openai/codex@${PINNED_CODEX_VERSION}`)
+    expect(command.argsPrefix?.[0]).toContain('@openai+codex@0.165.0')
     expect((await resolvePinnedCodexCommand('image')).argsPrefix).toEqual((await resolvePinnedCodexCommand('inference')).argsPrefix)
   })
 
