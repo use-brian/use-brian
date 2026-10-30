@@ -61,6 +61,11 @@ row, including one in another workspace, never qualifies as a removed reference.
 Failures identify a bounded metadata blocker. An unsupported erasure is never
 replaced with an unchecked SQL cleanup, a fake General confirmation or a force
 release. Complete cleanup requires a fresh inventory after all reviewed batches.
+Database blockers return only SQLSTATE and validated table, constraint and
+PL/pgSQL function names. Error messages, detail, SQL text and stack context are
+never returned. Immutable-state refusals are conflicts; unexpected database
+failures remain server errors with JSON metadata so owners can report the
+blocker without accessing production logs or content.
 
 ## Schema and verification
 

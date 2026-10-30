@@ -37,6 +37,22 @@ async function legacyMessage(f:Awaited<ReturnType<typeof fixture>>){
 }
 describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selective cleanup',()=>{
  afterAll(async()=>{await getAppPool().end();await pool.end()})
+ it.each([['55000',409,'legacy_cleanup_blocked'],['XX000',500,'legacy_cleanup_database_error']] as const)(
+  'returns only bounded database blocker metadata for SQLSTATE %s',async(sqlState,status,code)=>{
+  const f=await fixture(),name='cleanup_guard_'+randomUUID().replaceAll('-',''),app=express()
+  try{
+   await pool.query(`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+    RAISE EXCEPTION 'Fictional secret bytes must not escape' USING ERRCODE='${sqlState}',DETAIL='Fictional protected detail';END $$`)
+   await pool.query(`CREATE TRIGGER ${name} BEFORE DELETE ON memories FOR EACH ROW EXECUTE FUNCTION ${name}()`)
+   app.use(express.json());app.use((req,_res,next)=>{req.userId=f.ownerId;next()});app.use('/api',workspaceAccessRoutes())
+   const r=await request(app).post(`/api/workspaces/${f.workspaceId}/access/legacy-cleanup/preview`).send(f.proposal)
+   expect(r.status).toBe(status)
+   expect(r.body).toEqual({error:code,blocker:{sqlState,function:name}})
+   expect((await pool.query('SELECT id FROM memories WHERE id=$1',[f.memory.id])).rowCount).toBe(1)
+  }finally{
+   await pool.query(`DROP TRIGGER IF EXISTS ${name} ON memories`);await pool.query(`DROP FUNCTION IF EXISTS ${name}()`);await f.cleanup()
+  }
+ })
  it('requires explicit consent for unclassified history and retains unknown records outside the selection',async()=>{
   const f=await fixture(),other=await fixture()
   try{

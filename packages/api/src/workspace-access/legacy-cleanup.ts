@@ -26,6 +26,22 @@ const equal=(a:unknown,b:unknown)=>hashCommandReviewIntent(a)===hashCommandRevie
 const MAX_RETAINED=5_000
 const isSource=(kind:Selection['kind']):kind is (typeof SCOPE_REVIEW_KINDS)[number]=>SCOPE_REVIEW_KINDS.includes(kind as (typeof SCOPE_REVIEW_KINDS)[number])
 
+/** Only database identifiers, never a database error's message or query text. */
+export class LegacyCleanupDatabaseError extends WorkspaceAccessError{
+ readonly blocker:Record<string,string>
+ constructor(code:string,status:number,error:{table?:unknown;constraint?:unknown;where?:unknown},sqlState:string){
+  super(code,status);this.blocker={sqlState}
+  for(const key of ['table','constraint'] as const){
+   const value=error[key]
+   if(typeof value==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/.test(value))this.blocker[key]=value
+  }
+  if(typeof error.where==='string'){
+   const name=error.where.match(/PL\/pgSQL function ([a-z_][a-z0-9_]{0,127})\(/)?.[1]
+   if(name)this.blocker.function=name
+  }
+ }
+}
+
 async function owner(c:PoolClient,w:string,u:string){
  if(![w,u].every(id=>z.string().uuid().safeParse(id).success))fail('invalid_command',400)
  if(!(await c.query(`SELECT w.id FROM workspaces w JOIN workspace_members m ON m.workspace_id=w.id AND m.user_id=$2 AND m.role='owner'
@@ -44,9 +60,12 @@ async function transaction<T>(w:string,u:string,run:(c:PoolClient,revision:strin
  }catch(error){
   await c.query('ROLLBACK')
   if(error instanceof WorkspaceAccessError)throw error
-  const code=(error as {code?:string}).code
-  if(code&&['23503','23505','23514','42501','P0001','22023','40001','40P01'].includes(code))fail('legacy_cleanup_blocked')
-  if(code==='57014'||code==='55P03')fail('legacy_cleanup_busy',503)
+  const database=error as {code?:string;table?:unknown;constraint?:unknown;where?:unknown},code=database.code
+  if(code&&/^[0-9A-Z]{5}$/.test(code)){
+   if(['23503','23505','23514','42501','P0001','22023','40001','40P01','55000'].includes(code))throw new LegacyCleanupDatabaseError('legacy_cleanup_blocked',409,database,code)
+   if(code==='57014'||code==='55P03')throw new LegacyCleanupDatabaseError('legacy_cleanup_busy',503,database,code)
+   throw new LegacyCleanupDatabaseError('legacy_cleanup_database_error',500,database,code)
+  }
   throw error
  }finally{c.release()}
 }
