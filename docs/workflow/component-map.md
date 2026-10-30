@@ -2,7 +2,7 @@
 
 | COMP tag | doc path | source path | test path |
 |---|---|---|---|
-| api/workspace-scope-review | docs/plans/scope-review-derived-revisions.md | packages/api/src/workspace-access/scope-review.ts; packages/api/src/workspace-access/scope-review-registry.ts; packages/api/migrations/8143_scope_review_derived_revisions.sql | packages/api/src/workspace-access/__tests__/scope-review.integration.test.ts; packages/api/src/workspace-access/__tests__/scope-review-revisions.integration.test.ts |
+| api/workspace-scope-review | docs/plans/scope-review-derived-revisions.md | packages/api/src/workspace-access/scope-review.ts; packages/api/src/workspace-access/scope-review-registry.ts; packages/api/migrations/8143_scope_review_derived_revisions.sql; packages/api/migrations/8144_scope_review_removed_messages.sql | packages/api/src/workspace-access/__tests__/scope-review.integration.test.ts; packages/api/src/workspace-access/__tests__/scope-review-revisions.integration.test.ts; packages/api/src/workspace-access/__tests__/scope-review-removed-messages.integration.test.ts |
 
 Drawing-library coverage includes a direct JSON/search picker for local origins,
 an in-app sandboxed catalog for public HTTPS, origin/source/token
