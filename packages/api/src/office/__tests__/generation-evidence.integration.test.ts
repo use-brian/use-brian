@@ -124,19 +124,21 @@ describe('[COMP:api/organization-cutover] v2 Office generation before and after 
     await expect(queryWithRLS(f.userId,"UPDATE workspace_files SET name='changed' WHERE id=$1 RETURNING id",[file.id])).resolves.toMatchObject({rows:[]})
     expect((await pool.query("SELECT id FROM office_generation_events WHERE job_id=$1 AND code='office.job.completed'",[created.body.jobId])).rows).toHaveLength(1)
   })
-  it.each(['source','session','cancel','quota'] as const)('rolls back late %s changes, including staged bytes',async change=>{
+  it.each(['source','session','assistant','member','cancel','quota'] as const)('rolls back late %s changes, including staged bytes',async change=>{
     const f=await fixture(),created=await f.post(),job=await officeGenerationStore.claim({userId:f.userId,leaseToken:randomUUID(),leaseMs:60_000})
     const snapshot={...f.bundle.snapshot,artifactId:created.body.artifactId,workspaceId:f.workspaceId,templateVersionId:f.version.id}
     const before=new Set(f.blobs.keys())
     f.during(async()=>{
       if(change==='source')await pool.query('UPDATE knowledge_entries SET scope_held=true WHERE id=$1',[f.source])
       if(change==='session')await authSessionStore.revokeForUser(f.userId,f.session.id)
+      if(change==='assistant')await pool.query("DELETE FROM department_edges WHERE department_id=$1 AND principal_kind='assistant' AND principal_id=$2",[f.department.id,f.assistantId])
+      if(change==='member')await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.userId])
       if(change==='cancel')await pool.query('UPDATE office_generation_jobs SET cancel_requested_at=now() WHERE id=$1',[job!.id])
     })
     const resolver=change==='quota'?{...f.resolver,forWorkspace:async()=>({...await f.resolver.forWorkspace(),byo:false})}:f.resolver
     await expect(publishDepartmentOfficeSnapshot({job:job!,leaseToken:job!.leaseToken!,snapshot,resolver,storageLimitBytes:0})).rejects.toThrow()
     expect(new Set(f.blobs.keys())).toEqual(before)
-    expect((await officeArtifactStore.get(f.userId,created.body.artifactId))?.headVersion).toBe(0)
+    expect((await pool.query('SELECT head_version::int AS head_version FROM office_artifacts WHERE id=$1',[created.body.artifactId])).rows[0].head_version).toBe(0)
     expect((await pool.query('SELECT id FROM office_artifact_versions WHERE artifact_id=$1',[created.body.artifactId])).rows).toEqual([])
   })
   it('binds ambient knowledge exactly and refuses publication after it changes',async()=>{
@@ -148,7 +150,7 @@ describe('[COMP:api/organization-cutover] v2 Office generation before and after 
     await bindDepartmentOfficeKnowledge(job!,[entry])
     await pool.query("UPDATE knowledge_entries SET content='Changed ambient' WHERE id=$1",[ambient])
     await expect(publishDepartmentOfficeSnapshot({job:job!,leaseToken:job!.leaseToken!,snapshot:{...f.bundle.snapshot,artifactId:created.body.artifactId,workspaceId:f.workspaceId,templateVersionId:f.version.id},resolver:f.resolver,storageLimitBytes:1e9})).rejects.toThrow('office_source_changed')
-    expect((await officeArtifactStore.get(f.userId,created.body.artifactId))?.headVersion).toBe(0)
+    expect((await pool.query('SELECT head_version::int AS head_version FROM office_artifacts WHERE id=$1',[created.body.artifactId])).rows[0].head_version).toBe(0)
   })
   it('resumes a template choice in a ready v2 workspace using renewed canonical source evidence',async()=>{
     const f=await fixture('presentation'),created=await f.post({templateId:undefined})

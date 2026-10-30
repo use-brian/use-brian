@@ -77,6 +77,9 @@ export type ScheduledJobState = {
 }
 
 export type ScheduledJob = {
+  /** Queue identity used to fence work discovered before organization cutover. */
+  dispatchLeaseId?: string | null
+
   /** Server queue lease identity; absent on legacy/unpinned jobs. */
   scheduleClaimId?: string | null
   /** Discovery only: must claim immediately before invoking the executor. */
@@ -194,6 +197,11 @@ export type JobStore = {
   listEnabledByView(userId: string, viewId: string): Promise<ScheduledJob[]>
 
   getDueJobs(): Promise<ScheduledJob[]>
+  validateDispatchLease?(job: ScheduledJob): Promise<boolean>
+  advanceDispatchLeaseNag?(id: string, leaseId: string, activeNag: NonNullable<ScheduledJobState['activeNag']>, nextRunAt: Date): Promise<boolean>
+  finishDispatchLease?(id: string, leaseId: string, outcome: {
+    success: boolean; nextRunAt: Date; maxConsecutiveFailures: number
+  }): Promise<{ applied: boolean; disabled: boolean; failures: number }>
   /** Pinned schedule discovery is not a lease. Null means skip, not failure. */
   claimDueJob?(id: string): Promise<ScheduledJob | null>
   /** Atomically merge nag state + deadline only for a live, unconsumed claim. */

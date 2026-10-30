@@ -123,3 +123,12 @@ same transaction, so the refreshed list does not retain obsolete finalizer
 blockers. Paused/cancelled and empty plans retain their state. A plan targeting
 a different mode remains explicitly unresolved rather than claiming that its
 original target was applied.
+
+## Authenticated API
+
+`POST /api/workspaces/:workspaceId/access/cutover/preview` accepts the selected
+`targetDepartmentId` and an idempotency UUID. `apply` accepts only the returned
+`reviewId` and `payloadHash`. Both require the current owner session. Apply is
+replayable with the same review after a lost response; a stale or expired review
+requires a new preview. The mode projection returns `cutoverReceiptId` and
+`canFinalize`, independently of ordinary administration and record read access.

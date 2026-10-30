@@ -29,7 +29,15 @@ export const migrationItemApplySchema=z.union([departmentCommandApplySchema,z.ob
 export type MigrationItemApply=z.infer<typeof migrationItemApplySchema>
 const actionSchema=z.union([departmentAccessCommandSchema.refine(c=>allowed.has(c.type)),resourceMigrationActionSchema])
 export const migrationPlanCreateSchema=z.object({targetMode:z.enum(['simple','departments']),idempotencyKey:z.string().uuid(),items:z.array(z.object({command:actionSchema,reason:z.string().trim().min(1).max(1000)}).strict()).max(25)}).strict()
-const blockers=['full_inventory_required','intake_certification_required','mode_finalizer_unavailable']
+const classicBlockers=['full_inventory_required','intake_certification_required','mode_finalizer_unavailable']
+async function modeFinalizationBlockers(c:PoolClient,w:string,planId?:string,targetMode?:string) {
+ const row=(await c.query<{v2:boolean;complete:boolean;mode:string;target:string|null}>(`SELECT workspace.department_read_v2 AS v2,policy.access_mode AS mode,coalesce($3::text,(SELECT target_mode FROM workspace_access_migration_plans WHERE id=$2 AND workspace_id=$1)) AS target,
+   (policy.setup_state='ready' AND review.status='applied') AS complete
+   FROM workspaces workspace JOIN workspace_access_policies policy ON policy.workspace_id=workspace.id
+   LEFT JOIN workspace_organization_cutover_reviews review ON review.id=policy.completed_cutover_id AND review.workspace_id=workspace.id
+   WHERE workspace.id=$1`,[w,planId??null,targetMode??null])).rows[0]
+ return row?.v2?row.complete?(row.target&&row.target!==row.mode?['organization_cutover_target_changed']:[]):['organization_cutover_review_required']:classicBlockers
+}
 type Plan={id:string;actor_user_id:string;status:string;proposal_hash:string;version:string;expires_at:Date;intended_population:{intentHash:string}}
 type Item={id:string;proposed_action:MigrationAction;status:string;version:string;command_review_id:string|null;scope_review_id:string|null;reason:string;evidence_versions:{policyRevision:string;reviewKey:string};idempotency_key:string}
 function fail(code:string):never{throw new WorkspaceAccessError(code,409)}
@@ -88,19 +96,21 @@ async function simulate(c:PoolClient,w:string,u:string,a:PrincipalMigrationActio
 }
 /** Reconcile receipts after a crash/lost response; never re-execute an item here. */
 async function reconcile(c:PoolClient,w:string,p:string){
+  const blockers=await modeFinalizationBlockers(c,w,p)
   await c.query(`UPDATE workspace_access_migration_items i SET status=CASE WHEN r.status='complete' THEN 'applied' ELSE r.status END,
     diagnostic_code=CASE WHEN r.status='stale' THEN 'scope_review_changed' ELSE NULL END
     FROM workspace_scope_reviews r WHERE i.workspace_id=$1 AND i.plan_id=$2 AND r.workspace_id=i.workspace_id
     AND r.id=i.scope_review_id AND r.status IN('complete','stale','cancelled') AND i.status<>CASE WHEN r.status='complete' THEN 'applied' ELSE r.status END`,[w,p])
   await c.query(`UPDATE workspace_access_migration_items i SET command_review_id=r.id FROM workspace_access_command_reviews r,workspace_access_migration_plans p WHERE i.workspace_id=$1 AND i.plan_id=$2 AND p.id=i.plan_id AND p.workspace_id=i.workspace_id AND r.workspace_id=i.workspace_id AND r.actor_user_id=p.actor_user_id AND r.idempotency_key=(i.evidence_versions->>'reviewKey')::uuid AND i.command_review_id IS DISTINCT FROM r.id`,[w,p])
   await c.query(`UPDATE workspace_access_migration_items i SET status='applied',diagnostic_code=NULL FROM workspace_access_command_reviews r WHERE i.workspace_id=$1 AND i.plan_id=$2 AND r.workspace_id=i.workspace_id AND r.id=i.command_review_id AND r.status='applied' AND i.status<>'applied'`,[w,p])
-  await c.query(`UPDATE workspace_access_migration_plans SET summary_counts=jsonb_build_object('applied',(SELECT count(*) FROM workspace_access_migration_items WHERE plan_id=$2 AND status='applied'),'total',(SELECT count(*) FROM workspace_access_migration_items WHERE plan_id=$2),'blockers',$3::jsonb),status=CASE WHEN status IN ('paused','cancelled') THEN status WHEN NOT EXISTS(SELECT 1 FROM workspace_access_migration_items WHERE plan_id=$2) THEN 'draft' WHEN NOT EXISTS(SELECT 1 FROM workspace_access_migration_items WHERE plan_id=$2 AND status<>'applied') THEN 'blocked' ELSE status END WHERE workspace_id=$1 AND id=$2`,[w,p,JSON.stringify(blockers)])
+  await c.query(`UPDATE workspace_access_migration_plans SET summary_counts=jsonb_build_object('applied',(SELECT count(*) FROM workspace_access_migration_items WHERE plan_id=$2 AND status='applied'),'total',(SELECT count(*) FROM workspace_access_migration_items WHERE plan_id=$2),'blockers',$3::jsonb),status=CASE WHEN status IN ('paused','cancelled') THEN status WHEN NOT EXISTS(SELECT 1 FROM workspace_access_migration_items WHERE plan_id=$2) THEN 'draft' WHEN NOT EXISTS(SELECT 1 FROM workspace_access_migration_items WHERE plan_id=$2 AND status<>'applied') THEN CASE WHEN jsonb_array_length($3::jsonb)=0 THEN 'completed' ELSE 'blocked' END ELSE status END WHERE workspace_id=$1 AND id=$2`,[w,p,JSON.stringify(blockers)])
 }
 export async function createMigrationPlan(w:string,u:string,input:unknown){
   const parsed=migrationPlanCreateSchema.safeParse(input);if(!parsed.success)throw new WorkspaceAccessError('invalid_command',400)
   const data=parsed.data,intentHash=hashCommandReviewIntent(data)
   return serialized(w,reservedClient=>withCommandReviewTransaction(async c=>{
     const view=await admin(c,w,u)
+    const blockers=await modeFinalizationBlockers(c,w,undefined,data.targetMode)
     const old=(await c.query<Plan>('SELECT * FROM workspace_access_migration_plans WHERE workspace_id=$1 AND actor_user_id=$2 AND idempotency_key=$3',[w,u,data.idempotencyKey])).rows[0]
     if(old){if(old.intended_population.intentHash!==intentHash)fail('access_idempotency_conflict');return old}
     const policy=(await c.query('SELECT access_mode,coalesce(reviewed_inventory_revision,1)::text AS inventory FROM workspace_access_policies WHERE workspace_id=$1',[w])).rows[0]
@@ -126,7 +136,7 @@ export async function createMigrationPlan(w:string,u:string,input:unknown){
     return plan(c,w,id)
   },reservedClient))
 }
-export async function getMigrationPlan(w:string,u:string,id:string){return serialized(w,reservedClient=>withCommandReviewTransaction(async c=>{await admin(c,w,u);await plan(c,w,id);await reconcile(c,w,id);return {...await plan(c,w,id),items:(await c.query('SELECT * FROM workspace_access_migration_items WHERE workspace_id=$1 AND plan_id=$2 ORDER BY created_at,id',[w,id])).rows,blockers,cancellationNotice:'Applied changes are immediate; pausing or cancellation does not roll them back.'}},reservedClient))}
+export async function getMigrationPlan(w:string,u:string,id:string){return serialized(w,reservedClient=>withCommandReviewTransaction(async c=>{await admin(c,w,u);await plan(c,w,id);await reconcile(c,w,id);const blockers=await modeFinalizationBlockers(c,w,id);return {...await plan(c,w,id),items:(await c.query('SELECT * FROM workspace_access_migration_items WHERE workspace_id=$1 AND plan_id=$2 ORDER BY created_at,id',[w,id])).rows,blockers,cancellationNotice:'Applied changes are immediate; pausing or cancellation does not roll them back.'}},reservedClient))}
 export async function listMigrationPlans(w:string,u:string,after?:string){if(after&&!z.string().uuid().safeParse(after).success)throw new WorkspaceAccessError('invalid_command',400);return withCommandReviewTransaction(async c=>{await admin(c,w,u,false);return (await c.query('SELECT * FROM workspace_access_migration_plans WHERE workspace_id=$1 AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT 50',[w,after??null])).rows})}
 
 /** One item per review. Re-simulate at current policy; never carry blanket approval forward. */
