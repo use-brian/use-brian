@@ -1,6 +1,6 @@
 /** Explicit template selection for an uninitialized generation draft.
  * [COMP:api/office-generation-recovery] */
-import { canRead, scopeGrantContains, OfficeGenerationTemplateSelection, type OfficeTemplateChoice } from '@use-brian/core'
+import { OfficeGenerationBriefSchema, canRead, scopeGrantContains, OfficeGenerationTemplateSelection, type OfficeTemplateChoice } from '@use-brian/core'
 import {dispatchOfficeJobLocal} from './job-event-bus.js'
 import { getAppPool, applyRLSGucs, rollbackAndRelease } from '../db/client.js'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from '../db/office-artifacts.js'
@@ -55,11 +55,11 @@ async function choices(userId: string, root: Root, job: OfficeGenerationJobRow, 
 
 export async function readOfficeGenerationRecovery(userId: string, artifactId: string, jobId: string, ceiling: Ceiling = {}) {
   const {root,job,editable} = await read(userId,artifactId,jobId,defaultOfficeDbQuery)
-  const policy = (await defaultOfficeDbQuery<{setupState:string}>(userId,
-    'SELECT setup_state AS "setupState" FROM workspace_access_policies WHERE workspace_id=$1',[root.workspaceId])).rows[0]
+  const policy = (await defaultOfficeDbQuery<{setupState:string;departmentReadV2:boolean}>(userId,
+    `SELECT p.setup_state AS "setupState",w.department_read_v2 AS "departmentReadV2" FROM workspace_access_policies p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=$1`,[root.workspaceId])).rows[0]
   const canResumeTemplate = editable && root.mode === 'artifact' && root.headVersion === 0
     && job.jobKind === 'create' && job.status === 'needs_input' && job.errorCode === 'template_ambiguous'
-    && (!policy || policy.setupState === 'legacy')
+    && (!policy || policy.setupState === 'legacy' || policy.departmentReadV2)
   return {canResumeTemplate,templateChoices: canResumeTemplate ? await choices(userId,root,job,defaultOfficeDbQuery,ceiling) : []}
 }
 
@@ -79,9 +79,9 @@ export async function resumeOfficeGeneration(userId: string, raw: unknown) {
     await client.query('SELECT id FROM office_generation_jobs WHERE id=$1 FOR UPDATE',[input.jobId])
     const {root,job,editable} = await read(userId,input.artifactId,input.jobId,query)
     if (!editable || root.mode !== 'artifact') throw new WorkspaceAccessError('context_not_available',404)
-    const policy = (await client.query<{setup_state:string}>(
-      'SELECT setup_state FROM workspace_access_policies WHERE workspace_id=$1',[root.workspaceId])).rows[0]
-    if (policy && policy.setup_state !== 'legacy') throw new WorkspaceAccessError('office_admission_provenance_required',409)
+    const policy = (await client.query<{setup_state:string;department_read_v2:boolean}>(
+      'SELECT p.setup_state,w.department_read_v2 FROM workspace_access_policies p JOIN workspaces w ON w.id=p.workspace_id WHERE p.workspace_id=$1',[root.workspaceId])).rows[0]
+    if (policy && policy.setup_state !== 'legacy' && !policy.department_read_v2) throw new WorkspaceAccessError('office_admission_provenance_required',409)
     // A lost acknowledgement may observe progress or completed publication.
     // It must never reset or run an already accepted selection again.
     if (job.templateVersionId === input.templateVersionId && ['queued','running','completed'].includes(job.status)) {
@@ -102,6 +102,16 @@ export async function resumeOfficeGeneration(userId: string, raw: unknown) {
       [input.artifactId,input.jobId,input.templateVersionId])).rows[0]
     if(!sourceLock?.locked)throw conflict()
     if (!(await choices(userId,root,job,query)).some(choice => choice.templateVersionId === input.templateVersionId)) throw conflict()
+    if ((job.authorityProjection as {creationBinding?:{protocol?:string}})?.creationBinding?.protocol==='office_department_v2') {
+      const p=job.authorityProjection as Scope & {creationBinding:{ambientSourceHandles?:string[]}}
+      const {readOfficeGenerationEvidence}=await import('./generation-evidence.js')
+      const brief=OfficeGenerationBriefSchema.parse(job.brief)
+      const source=await readOfficeGenerationEvidence(client,root.workspaceId,{...brief,templateId:input.templateVersionId,
+        sourceHandles:[...brief.sourceHandles,...(p.creationBinding.ambientSourceHandles??[])]})
+      if(!within(source.scope,{clearance:p.sensitivity,compartmentGrant:p.compartments,projectGrant:p.projectIds}))throw conflict()
+      await client.query('UPDATE office_generation_jobs SET authority_projection=$2::jsonb WHERE id=$1',[job.id,JSON.stringify({
+        ...p,creationBinding:{...p.creationBinding,sourceFingerprint:source.fingerprint,sources:source.sources}})])
+    }
     await client.query(`UPDATE office_artifacts SET template_version_id=$2,updated_at=now() WHERE id=$1`,[input.artifactId,input.templateVersionId])
     await client.query(`UPDATE office_generation_jobs SET status='queued',stage='queued',error_code=NULL,error_detail=NULL,
       template_version_id=$2::uuid,brief=jsonb_set(brief,'{templateId}',to_jsonb(($2::uuid)::text)),

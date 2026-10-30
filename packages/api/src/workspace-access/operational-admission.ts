@@ -5,7 +5,7 @@
 import type { PoolClient } from 'pg'
 import { accessCeilingContains, pinAccessCeiling, parseAuthoringAuthority, type WorkflowTrigger, type AuthoringAuthority } from '@use-brian/core'
 import { captureAuthoringAuthoritySystem, resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
-import { readAdmissionPolicy } from './admission-policy-read.js'
+import { readAdmissionPolicy, usesClassicModeAdmission } from './admission-policy-read.js'
 import { admitWorkspaceResource } from './resource-admission.js'
 import { WorkspaceAccessError } from './policy.js'
 
@@ -28,18 +28,19 @@ export async function admitOperationalAuthoring(client: PoolClient, input: {
   authoringAuthority?: AuthoringAuthority | null
 }, human?: OperationalHumanAuthor) {
   const policy = await lockOperationalPolicy(client, input.workspaceId)
-  if (!policy || policy.setupState === 'legacy') return input
-  if (policy.setupState !== 'ready') throw new WorkspaceAccessError('access_mode_setup_required', 409)
+  if (!policy || (!policy.departmentReadV2 && !usesClassicModeAdmission(policy))) return input
+  if (!human && policy.departmentReadV2 && input.authoringAuthority) human={userId:input.userId,assistantId:input.authoringAuthority.assistantId}
+  if (!policy.departmentReadV2 && policy.setupState !== 'ready') throw new WorkspaceAccessError('access_mode_setup_required', 409)
   if (!human || human.userId !== input.userId) throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
   if (human.expectedPolicyRevision !== undefined && human.expectedPolicyRevision !== policy.revision) {
     throw new WorkspaceAccessError('access_policy_conflict', 409)
   }
-  const assistant = (await client.query(`SELECT default_workspace_group_id AS "groupId",default_project_id AS "projectId"
+  const assistant = (await client.query(`SELECT default_workspace_group_id AS "groupId",home_department_id AS "homeId",default_project_id AS "projectId"
     FROM assistants WHERE id=$1 AND workspace_id=$2`, [human.assistantId, input.workspaceId])).rows[0]
   const member = (await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [input.workspaceId, human.userId])).rows[0]
   if (!assistant || !member) throw new WorkspaceAccessError('context_not_available', 404)
   const contextGroupId = input.contextGroupId !== undefined ? input.contextGroupId
-    : policy.mode === 'simple' ? policy.defaultDepartmentId : assistant.groupId
+    : policy.departmentReadV2 ? assistant.homeId ?? assistant.groupId : policy.mode === 'simple' ? policy.defaultDepartmentId : assistant.groupId
   const contextProjectId = input.contextProjectId !== undefined ? input.contextProjectId : assistant.projectId
   if (input.contextGroupId === undefined && !contextGroupId) {
     throw new WorkspaceAccessError(policy.mode === 'simple' ? 'access_mode_default_invalid' : 'context_selection_required', 409)
@@ -70,7 +71,7 @@ export async function assertLegacyJobCreation(client: PoolClient, assistantId: s
   const policy = workspaceId ? await lockOperationalPolicy(client, workspaceId) : undefined
   // Freeze even a non-workspace assistant against transfer into ready mode.
   if (await read(true) !== workspaceId) throw new WorkspaceAccessError('access_policy_conflict', 409)
-  if (policy && policy.setupState !== 'legacy') throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
+  if (usesClassicModeAdmission(policy)) throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
 }
 
 /** Inheritance, never AUTHORING: revalidate the exact saved workflow principal

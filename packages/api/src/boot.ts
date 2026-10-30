@@ -1,3 +1,4 @@
+import { bindDepartmentOfficeKnowledge } from './office/generation-evidence.js'
 import { resolveRetainedTaskGoalAuthority } from './workspace-access/goal-source-admission.js'
 import { assertSourceModelOutputAuthority } from './application-platform/model-source-authority.js'
 import { executionToolContext } from '@use-brian/core'
@@ -34,7 +35,7 @@ import { resolveDepartmentReadGrant } from './context-scope/department-resolver.
 import { createTemplateImportRecovery } from './office/template-import-recovery.js'
 import { triageTaskForGoal } from './db/goal-task-triage.js'
 import { createProgrammaticEpisodeTerminal } from './ingest/programmatic-terminal.js'
-import { checkPromptOnlyAuthority, executePromptOnlyGeneration } from './office/generation-publication.js'
+import { checkPromptOnlyAuthority, executePromptOnlyGeneration, publishDepartmentOfficeSnapshot } from './office/generation-publication.js'
 import { resumeOfficeGeneration } from './office/generation-recovery.js'
 import { withOfficeClassificationActor } from './office/classification.js'
 import { createBrowserFileBridge } from './sandbox/browser-files.js'
@@ -7455,6 +7456,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     finish: officeGenerationStore.finish,
   }) : null
   const commitGeneratedOfficeSnapshot = async (params: { job: import('./db/office-generation.js').OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; expectedSeq?: number; kind: 'generation' | 'revision'; authority?: import('@use-brian/core').OfficeAuthorityProjection }) => {
+    if(params.kind==='generation' && (params.job.authorityProjection as {creationBinding?:{protocol?:string}})?.creationBinding?.protocol==='office_department_v2') {
+      if(!filesResolver || !params.job.leaseToken) throw new Error('Office storage or lease unavailable')
+      return publishDepartmentOfficeSnapshot({job:params.job,leaseToken:params.job.leaseToken,snapshot:params.snapshot,resolver:filesResolver,
+        storageLimitBytes:ports.storageLimitBytesFor?await ports.storageLimitBytesFor(params.job.workspaceId):Number.POSITIVE_INFINITY})
+    }
     if (!filesApi) throw new Error('Office file storage is unavailable')
     if (params.snapshot.family === 'pdf') {
       if (params.kind !== 'revision' || params.expectedSeq === undefined || !pdfSessionService) throw new Error('PDF session revision runtime is unavailable')
@@ -7609,13 +7615,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             Promise.all(terms.map((term) => knowledgeStore.search(context, term, 4).catch(() => []))),
           ])
           const entries = new Map([...explicit.filter((entry) => entry !== null), ...searched.flat()].map((entry) => [entry.id, entry]))
-          return [...entries.values()].slice(0, 12).map((entry) => ({
+          const evidence = [...entries.values()].slice(0, 12).map((entry) => ({
             handle: `knowledge:${entry.id}`,
             excerpt: [entry.title, entry.summary, entry.content].filter(Boolean).join('\n').slice(0, 4_000),
             sensitivity: entry.sensitivity,
             compartments: entry.compartments,
             projectIds: entry.projectIds,
           }))
+          await bindDepartmentOfficeKnowledge(job,evidence)
+          return evidence
         },
         async inspectUrl(url) {
           const response = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { 'User-Agent': 'UseBrian-Office/1.0' } })

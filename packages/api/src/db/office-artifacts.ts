@@ -1,6 +1,7 @@
 /** Office artifact/version/source/grant/audit persistence. [COMP:api/office-store] */
 import { queryWithRLS, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import type { PoolClient } from 'pg'
+import { usesClassicModeAdmission } from '../workspace-access/admission-policy-read.js'
 import { admitOfficeShell, officeCreationPolicy, officeProvenanceRequired, type OfficeCreateOptions } from '../workspace-access/office-create-admission.js'
 import type { QueryResultRow } from 'pg'
 import {officeProjectionQuery} from './office-read-projection.js'
@@ -174,7 +175,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
           // The current copy CTE trusts caller labels and does not validate/lock
           // transitive source, snapshot-file and visibility evidence. Preserve it
           // for legacy only. Never default this derived artifact in ready mode.
-          if (policy?.setupState === 'ready') officeProvenanceRequired()
+          if (usesClassicModeAdmission(policy)) officeProvenanceRequired()
         }
         const result=await query<{id:string;version:number}>(params.userId,`
           WITH artifact AS (
