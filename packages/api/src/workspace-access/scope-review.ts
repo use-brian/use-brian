@@ -62,8 +62,9 @@ async function transaction<T>(workspaceId:string,userId:string,write:boolean,fn:
 async function source(client:PoolClient,workspaceId:string,kind:Kind,id:string):Promise<Snapshot|null>{
   return (await client.query<{source:Snapshot|null}>('SELECT read_scope_review_source($1,$2,$3) AS source',[workspaceId,kind,id])).rows[0].source
 }
-async function impactSource(client:PoolClient,workspaceId:string,kind:ScopeReviewDescendantKind,id:string):Promise<Pick<Snapshot,'version'|'held'>|null>{
-  return (await client.query<{source:Pick<Snapshot,'version'|'held'>|null}>('SELECT read_scope_review_impact_source($1,$2,$3) AS source',[workspaceId,kind,id])).rows[0].source
+type ImpactSource=Pick<Snapshot,'version'|'held'>&{removed?:true}
+async function impactSource(client:PoolClient,workspaceId:string,kind:ScopeReviewDescendantKind,id:string):Promise<ImpactSource|null>{
+  return (await client.query<{source:ImpactSource|null}>('SELECT read_scope_review_impact_source($1,$2,$3) AS source',[workspaceId,kind,id])).rows[0].source
 }
 async function content(client:PoolClient,workspaceId:string,kind:Kind,id:string):Promise<ScopeReviewContent|null>{
   return (await client.query<{content:ScopeReviewContent|null}>('SELECT read_scope_review_content($1,$2,$3) AS content',[workspaceId,kind,id])).rows[0].content
@@ -136,7 +137,7 @@ async function captureImpact(client:PoolClient,workspaceId:string,kind:Kind,id:s
   for(const row of rows){
     const snapshot=await impactSource(client,workspaceId,row.resourceKind,row.resourceId)
     if(!snapshot)throw new WorkspaceAccessError('scope_review_changed',409)
-    descendants.push({resourceKind:row.resourceKind,resourceId:row.resourceId,version:snapshot.version,held:snapshot.held})
+    descendants.push({resourceKind:row.resourceKind,resourceId:row.resourceId,version:snapshot.version,held:snapshot.held,...(snapshot.removed?{removed:true as const}:{})})
   }
   const dependents:Record<string,string>={}
   if(kind==='workspace_file'){
