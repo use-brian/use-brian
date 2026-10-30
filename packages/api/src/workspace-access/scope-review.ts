@@ -12,13 +12,14 @@ import { WorkspaceAccessError } from './policy.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { getDepartmentalReadinessSystem } from './readiness.js'
 import { countOpenReviewRequests, recheckHeldMemory, releaseHeldMemory } from './hold-recovery.js'
-import type { ScopeReview, ScopeReviewContent, ScopeReviewImpact, ScopeReviewInventory, ScopeReviewKind, ScopeReviewSource, ScopeReviewSummary } from '@use-brian/shared'
+import type { ScopeReview, ScopeReviewContent, ScopeReviewDescendantKind, ScopeReviewImpact, ScopeReviewInventory, ScopeReviewKind, ScopeReviewSource, ScopeReviewSummary } from '@use-brian/shared'
 import { departmentIsolationManifestCoverage } from '@use-brian/shared'
 import {
   getScopeReviewCoverage,
   SCOPE_REVIEW_KINDS,
   SCOPE_REVIEW_REGISTRY_REVISION,
   sourceAdapter,
+  descendantAdapter,
 } from './scope-review-registry.js'
 
 const kindSchema = z.enum(SCOPE_REVIEW_KINDS as [ScopeReviewKind, ...ScopeReviewKind[]])
@@ -59,6 +60,9 @@ async function transaction<T>(workspaceId:string,userId:string,write:boolean,fn:
 }
 async function source(client:PoolClient,workspaceId:string,kind:Kind,id:string):Promise<Snapshot|null>{
   return (await client.query<{source:Snapshot|null}>('SELECT read_scope_review_source($1,$2,$3) AS source',[workspaceId,kind,id])).rows[0].source
+}
+async function impactSource(client:PoolClient,workspaceId:string,kind:ScopeReviewDescendantKind,id:string):Promise<Pick<Snapshot,'version'|'held'>|null>{
+  return (await client.query<{source:Pick<Snapshot,'version'|'held'>|null}>('SELECT read_scope_review_impact_source($1,$2,$3) AS source',[workspaceId,kind,id])).rows[0].source
 }
 async function content(client:PoolClient,workspaceId:string,kind:Kind,id:string):Promise<ScopeReviewContent|null>{
   return (await client.query<{content:ScopeReviewContent|null}>('SELECT read_scope_review_content($1,$2,$3) AS content',[workspaceId,kind,id])).rows[0].content
@@ -104,7 +108,7 @@ async function lockSourceAncestry(client:PoolClient,workspaceId:string,kind:Kind
 async function captureImpact(client:PoolClient,workspaceId:string,kind:Kind,id:string,action:Job['action'],held:boolean):Promise<ScopeReviewImpact>{
   // A release writes a replacement and retires the held row; it holds nothing new.
   if(sourceAdapter(kind).category==='impact'||action==='confirm_general'||action==='release'||(action==='hold'&&held))return {version:2,descendants:[],dependents:{}}
-  const read=async()=> (await client.query<{resourceKind:Kind;resourceId:string}>(
+  const read=async()=> (await client.query<{resourceKind:ScopeReviewDescendantKind;resourceId:string}>(
     `SELECT resource_kind AS "resourceKind",resource_id AS "resourceId"
        FROM scope_descendant_resources($1,$2,$3)
       ORDER BY resource_kind,resource_id LIMIT 501`,[workspaceId,kind,id])).rows
@@ -117,7 +121,8 @@ async function captureImpact(client:PoolClient,workspaceId:string,kind:Kind,id:s
     if(additions.length===0)break
     for(const descendantKind of [...new Set(additions.map(row=>row.resourceKind))]){
       const ids=additions.filter(row=>row.resourceKind===descendantKind).map(row=>row.resourceId)
-      const adapter=sourceAdapter(descendantKind)
+      const adapter=descendantAdapter(descendantKind)
+      if(!adapter)throw new WorkspaceAccessError('scope_review_impact_unsupported',409)
       await client.query(`SELECT r.id FROM ${adapter.from} WHERE ${adapter.workspacePredicate}
         AND r.id=ANY($2::uuid[]) ORDER BY r.id FOR UPDATE OF r`,[workspaceId,ids])
       ids.forEach(resourceId=>locked.add(`${descendantKind}:${resourceId}`))
@@ -128,7 +133,7 @@ async function captureImpact(client:PoolClient,workspaceId:string,kind:Kind,id:s
   if(rows.some(row=>!locked.has(`${row.resourceKind}:${row.resourceId}`)))throw new WorkspaceAccessError('scope_review_changed',409)
   const descendants=[] as Extract<ScopeReviewImpact,{version:2}>['descendants']
   for(const row of rows){
-    const snapshot=await source(client,workspaceId,row.resourceKind,row.resourceId)
+    const snapshot=await impactSource(client,workspaceId,row.resourceKind,row.resourceId)
     if(!snapshot)throw new WorkspaceAccessError('scope_review_changed',409)
     descendants.push({resourceKind:row.resourceKind,resourceId:row.resourceId,version:snapshot.version,held:snapshot.held})
   }
@@ -518,7 +523,7 @@ export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient
           ||after.version===item.source.version&&canonical(item.source.compartments)!==canonical([job.targetCompartment]))throw new WorkspaceAccessError('scope_review_changed',409)
         for(const descendant of item.impact!.descendants){
           const kind='resourceKind' in descendant?descendant.resourceKind:'memory'
-          if(!(await source(client,workspaceId,kind,descendant.resourceId))?.held)throw new WorkspaceAccessError('scope_review_changed',409)
+          if(!(await impactSource(client,workspaceId,kind,descendant.resourceId))?.held)throw new WorkspaceAccessError('scope_review_changed',409)
         }
       }
       await client.query("UPDATE workspace_scope_review_items SET status='applied',result_version=$4 WHERE workspace_id=$1 AND review_id=$2 AND resource_id=$3",[workspaceId,job.id,item.resourceId,after.version])
