@@ -64,6 +64,12 @@ release. Complete cleanup requires a fresh inventory after all reviewed batches.
 
 ## Schema and verification
 
+Impact-only records use their exact registered derivation root when checking
+descendants. They have no canonical supersession ancestry; asking the canonical
+ancestor walker to resolve a cache or Office artifact incorrectly blocks cleanup.
+Direct and transitive derivations and real foreign-key retention checks still
+apply. Tests cover General impacts and department-labelled dependents.
+
 Migration 8145 adds owner-host cleanup review storage with immutable proposals and
 owner-only erased-resource reference reading. No content table, runtime grants or
 existing migration is rewritten. Tests use a disposable PostgreSQL fixture with

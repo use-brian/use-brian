@@ -27,6 +27,18 @@ async function fixture(){
 }
 describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selective cleanup',()=>{
  afterAll(async()=>{await getAppPool().end();await pool.end()})
+ it('erases General cache and purged Office impacts without canonical ancestry',async()=>{
+  const f=await fixture()
+  try{
+   const cache=(await pool.query(`INSERT INTO file_cache(session_id,file_name,mime_type,content,size_bytes,expires_at,workspace_id,user_id,assistant_id,sensitivity)
+    VALUES($1,'obsolete.txt','text/plain','Fictional cached bytes',21,now()+interval '1 day',$2,$3,$4,'internal') RETURNING id`,[f.session.id,f.workspaceId,f.ownerId,f.assistantId])).rows[0].id
+   const office=(await pool.query(`INSERT INTO office_artifacts(workspace_id,family,title,creator_user_id,owner_user_id,capability_version,sensitivity,visibility_user_ids,lifecycle_state)
+    VALUES($1,'document','Fictional purged artifact',$2,$2,1,'internal',ARRAY[$2]::uuid[],'purged') RETURNING id`,[f.workspaceId,f.ownerId])).rows[0].id
+   const r=await preview(f.workspaceId,f.ownerId,{selections:[{kind:'file_cache',id:cache},{kind:'office_artifact',id:office}],reason:'Erase fictional obsolete impacts'})
+   expect(r.erasedReferences.map(row=>row.kind).sort()).toEqual(['file_cache','office_artifact'])
+   expect((await f.confirm(r)).status).toBe('applied')
+  }finally{await f.cleanup()}
+ })
  it('previews without deleting, applies once, retains department content and leaves a removed reference',async()=>{
   const f=await fixture()
   try{

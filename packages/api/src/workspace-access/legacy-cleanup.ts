@@ -173,8 +173,17 @@ async function snapshot(c:PoolClient,w:string,selections:Selection[],reason:stri
  }
  const addErasure=async(kind:(typeof SCOPE_REVIEW_KINDS)[number],id:string)=>{
   await remember(kind,id)
-  const graph=(await c.query<{kind:string;id:string}>(`SELECT resource_kind AS kind,resource_id AS id
-   FROM scope_descendant_resources($1,$2,$3) ORDER BY resource_kind,resource_id LIMIT 501`,[w,kind,id])).rows
+  const graph=(await c.query<{kind:string;id:string}>(sourceAdapter(kind).category==='source'
+   ? `SELECT resource_kind AS kind,resource_id AS id FROM scope_descendant_resources($1,$2,$3)
+      ORDER BY resource_kind,resource_id LIMIT 501`
+   : `WITH RECURSIVE descendants(kind,id) AS (
+       SELECT d.resource_kind,d.resource_id FROM scope_derivation_sources s
+       JOIN scope_derivations d ON d.id=s.derivation_id AND d.workspace_id=s.workspace_id
+       WHERE s.workspace_id=$1 AND s.source_kind=$2 AND s.source_id=$3
+       UNION SELECT d.resource_kind,d.resource_id FROM descendants p
+       JOIN scope_derivation_sources s ON s.workspace_id=$1 AND s.source_kind=p.kind AND s.source_id=p.id
+       JOIN scope_derivations d ON d.id=s.derivation_id AND d.workspace_id=s.workspace_id
+      ) SELECT kind,id FROM descendants ORDER BY kind,id LIMIT 501`,[w,kind,id])).rows
   for(const node of graph){
    const a=descendantAdapter(node.kind)
    if(!a)fail('legacy_cleanup_impact_unsupported')
