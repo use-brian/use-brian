@@ -64,6 +64,16 @@ release. Complete cleanup requires a fresh inventory after all reviewed batches.
 
 ## Schema and verification
 
+Owners may explicitly request `eraseUnclassifiedLegacy: true` for selected
+unclassified resources or the messages of selected unbound conversations. The
+preview identifies these exact records and freezes their versions and bodies.
+This is erasure consent, never a classification or read grant. Unknown records
+outside those explicit selections remain protected, as do all known department
+records and dependencies. The immutable ledger independently validates consent
+and membership of each unclassified erasure; apply checks physical absence.
+Migration 8146 extends that independent validation without changing runtime
+readers, resource labels, deletion triggers or historical applied receipts.
+
 Impact-only records use their exact registered derivation root when checking
 descendants. They have no canonical supersession ancestry; asking the canonical
 ancestor walker to resolve a cache or Office artifact incorrectly blocks cleanup.

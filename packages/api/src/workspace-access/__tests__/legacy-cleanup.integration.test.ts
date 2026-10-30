@@ -25,8 +25,99 @@ async function fixture(){
  const confirm=(r:{id:string;payloadHash:string})=>apply(f.workspaceId,f.ownerId,{reviewId:r.id,payloadHash:r.payloadHash})
  return{...f,team,memory,retained,proposal,prepare,confirm}
 }
+/** Model pre-scope rows only in the disposable fixture, never in production. */
+async function legacyMessage(f:Awaited<ReturnType<typeof fixture>>){
+ const id=randomUUID(),c=await pool.connect()
+ try{
+  await c.query('BEGIN');await c.query('SET LOCAL session_replication_role=replica')
+  await c.query(`INSERT INTO session_messages(id,session_id,role,content,workspace_id,sensitivity,compartments,scope_version,sequence_num)
+   VALUES($1,$2,'user','"Fictional unclassified history"',NULL,NULL,NULL,NULL,1)`,[id,f.session.id])
+  await c.query('COMMIT');return id
+ }catch(error){await c.query('ROLLBACK');throw error}finally{c.release()}
+}
 describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selective cleanup',()=>{
  afterAll(async()=>{await getAppPool().end();await pool.end()})
+ it('requires explicit consent for unclassified history and retains unknown records outside the selection',async()=>{
+  const f=await fixture(),other=await fixture()
+  try{
+   const spareSession=await createWorkspaceChatSession({workspaceId:f.workspaceId,assistantId:f.assistantId,starterUserId:f.ownerId,effectiveClearance:'internal',authenticatedHuman:true})
+   const spareId=await legacyMessage({...f,session:spareSession})
+   const id=await legacyMessage(f),otherId=await legacyMessage(other)
+   const body={selections:[{kind:'session',id:f.session.id}],reason:'Erase explicitly selected fictional unclassified history'}
+   await expect(preview(f.workspaceId,f.ownerId,body)).rejects.toMatchObject({code:'legacy_cleanup_scoped_record'})
+   const r=await preview(f.workspaceId,f.ownerId,{...body,eraseUnclassifiedLegacy:true})
+   expect(r.unclassifiedReferences).toEqual([{kind:'session_message',id,version:expect.stringMatching(/^legacy:/)}])
+   await pool.query(`UPDATE session_messages SET content='"Unrelated changed fictional history"' WHERE id=$1`,[spareId])
+   await expect(f.confirm(r)).rejects.toMatchObject({code:'legacy_cleanup_changed'})
+   expect((await f.confirm(await preview(f.workspaceId,f.ownerId,{...body,eraseUnclassifiedLegacy:true}))).status).toBe('applied')
+   expect((await pool.query('SELECT id FROM session_messages WHERE id=$1',[id])).rowCount).toBe(0)
+   expect((await pool.query('SELECT id FROM session_messages WHERE id=$1',[otherId])).rowCount).toBe(1)
+   expect((await pool.query('SELECT id FROM session_messages WHERE id=$1',[spareId])).rowCount).toBe(1)
+   expect((await pool.query('SELECT id FROM memories WHERE id=$1',[f.retained.id])).rowCount).toBe(1)
+  }finally{await other.cleanup();await f.cleanup()}
+ })
+ it('erases explicitly selected unclassified verification and correction history',async()=>{
+  const f=await fixture(),ids=[randomUUID(),randomUUID(),randomUUID()],c=await pool.connect()
+  try{
+   await c.query('BEGIN');await c.query('SET LOCAL session_replication_role=replica')
+   await c.query(`INSERT INTO memory_verifications(id,memory_id,workspace_id,verified_by,action)
+    VALUES($1,$2,$3,$4,'confirm')`,[ids[0],f.memory.id,f.workspaceId,f.ownerId])
+   await c.query(`INSERT INTO brain_verifications(id,target_kind,target_id,workspace_id,verified_by,action)
+    VALUES($1,'task',$2,$3,$4,'confirm')`,[ids[1],randomUUID(),f.workspaceId,f.ownerId])
+   await c.query(`INSERT INTO correction_audit(id,workspace_id,action,primitive,row_id,actor_user_id)
+    VALUES($1,$2,'purge','memory',$3,$4)`,[ids[2],f.workspaceId,f.memory.id,f.ownerId])
+   await c.query('COMMIT')
+   const selections=ids.map((id,index)=>({kind:['memory_verification','brain_verification','correction_audit'][index],id}))
+   const body={selections,reason:'Erase explicitly selected fictional unclassified audit history',eraseUnclassifiedLegacy:true}
+   const r=await preview(f.workspaceId,f.ownerId,body)
+   expect(r.unclassifiedReferences).toHaveLength(3)
+   expect((await f.confirm(r)).status).toBe('applied')
+   expect((await pool.query('SELECT id FROM memories WHERE id=ANY($1::uuid[])',[[f.memory.id,f.retained.id]])).rowCount).toBe(2)
+  }catch(error){await c.query('ROLLBACK');throw error}finally{c.release();await f.cleanup()}
+ })
+ it('follows legacy message derivations even when the old message has no workspace column',async()=>{
+  const f=await fixture(),c=await pool.connect(),derivation=randomUUID()
+  try{
+   const id=await legacyMessage(f)
+   const version=(await pool.query("SELECT read_scope_review_source($1,'session_message',$2)->>'version' AS version",[f.workspaceId,id])).rows[0].version
+   await c.query('BEGIN');await c.query('SET LOCAL session_replication_role=replica')
+   await c.query(`INSERT INTO scope_derivations(id,workspace_id,resource_kind,resource_id,resource_version,producer,user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
+    SELECT $1,workspace_id,'memory',id,scope_version::text,'fixture:historical-message',user_id,assistant_id,sensitivity,compartments,project_ids,1 FROM memories WHERE id=$2`,[derivation,f.retained.id])
+   await c.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+    VALUES($1,$2,'session_message',$3,$4)`,[f.workspaceId,derivation,id,version])
+   await c.query('COMMIT')
+   await expect(preview(f.workspaceId,f.ownerId,{selections:[{kind:'session',id:f.session.id}],reason:'Refuse erasure under retained Personal memory',eraseUnclassifiedLegacy:true})).rejects.toMatchObject({code:'legacy_cleanup_retained_dependency'})
+   expect((await pool.query('SELECT id FROM session_messages WHERE id=$1',[id])).rowCount).toBe(1)
+  }catch(error){await c.query('ROLLBACK');throw error}finally{c.release();await f.cleanup()}
+ })
+ it('pins unclassified message bodies and refuses department selections even with erasure consent',async()=>{
+  const f=await fixture()
+  try{
+   const id=await legacyMessage(f)
+   const r=await preview(f.workspaceId,f.ownerId,{selections:[{kind:'session',id:f.session.id}],reason:'Erase fictional old conversation',eraseUnclassifiedLegacy:true})
+   await pool.query(`UPDATE session_messages SET content='"Changed fictional history"' WHERE id=$1`,[id])
+   await expect(f.confirm(r)).rejects.toMatchObject({code:'legacy_cleanup_changed'})
+   await expect(preview(f.workspaceId,f.ownerId,{selections:[{kind:'memory',id:f.retained.id}],reason:'Cannot erase retained Personal data',eraseUnclassifiedLegacy:true})).rejects.toMatchObject({code:'legacy_cleanup_scoped_record'})
+  }finally{await f.cleanup()}
+ })
+ it('independently rejects missing consent, unselected and department-labelled unclassified SQL proofs',async()=>{
+  const f=await fixture()
+  try{
+   await legacyMessage(f)
+   const r=await preview(f.workspaceId,f.ownerId,{selections:[{kind:'session',id:f.session.id}],reason:'Review fictional unknown history',eraseUnclassifiedLegacy:true})
+   const saved=(await pool.query('SELECT evidence,selection FROM workspace_legacy_cleanup_reviews WHERE id=$1',[r.id])).rows[0]
+   for(const [evidence,selection] of [
+    [{...saved.evidence,eraseUnclassifiedLegacy:false},saved.selection],
+    [{...saved.evidence,unclassified:[]},saved.selection],
+    [saved.evidence,[{kind:'session',id:randomUUID()}]],
+    [{...saved.evidence,unclassified:[{kind:'memory',id:f.retained.id,version:'1'}],erasures:[{kind:'memory',id:f.retained.id,version:'1'}]},[{kind:'memory',id:f.retained.id}]],
+   ]){
+    await expect(pool.query(`INSERT INTO workspace_legacy_cleanup_reviews(id,workspace_id,actor_user_id,policy_revision,selection,evidence,payload_hash,expires_at)
+     SELECT $2,workspace_id,actor_user_id,policy_revision,$3::jsonb,$4::jsonb,payload_hash,expires_at FROM workspace_legacy_cleanup_reviews WHERE id=$1`,
+     [r.id,randomUUID(),JSON.stringify(selection),JSON.stringify(evidence)])).rejects.toThrow('legacy_cleanup_reference_invalid')
+   }
+  }finally{await f.cleanup()}
+ })
  it('erases General cache and purged Office impacts without canonical ancestry',async()=>{
   const f=await fixture()
   try{
