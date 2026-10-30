@@ -111,6 +111,7 @@ export const ACCOUNT_TEARDOWN_RULES: Readonly<Record<string, AccountTeardownRule
 
   // Recorded actors and authority records: kept, shown as a deleted user.
   'workflows.schedule_authoring_user_id': keep,
+  'workspace_legacy_cleanup_reviews.actor_user_id': keep,
   'workspace_knowledge_sources.configured_by_user_id': keep, // binding is held, below
   'pending_approvals.approver_user_id': keep, // pending ones are expired, below
   'assistants.owner_user_id': keep, // transferred to the workspace owner, below
