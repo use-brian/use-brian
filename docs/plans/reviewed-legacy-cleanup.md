@@ -16,10 +16,29 @@ workspace migration by changing a flag.
 
 An erase selection may name a General source or impact from the existing closed
 scope registry, an unbound conversation, or a legacy workflow/goal with missing
-authoring authority. Named department resources are retained. Running sessions
+authoring authority. Named department resources are retained unless the owner
+explicitly names a memory, episode or workspace file both in `selections` and
+`eraseDepartmentRecords`. This narrow consent is required to erase migrated
+records that still depend on obsolete General sources. Preview returns each
+consented record's exact compartments and version; it never expands consent to
+other department descendants. Apply freezes the consent, content, scope and
+complete dependency graph. Unknown and unrelated department data remain protected.
+Running sessions
 and pending, running or waiting workflow runs refuse cleanup. Assistant identities, members, provider
 credentials and department/project access memberships are never erased here.
 Immutable evidence guards and foreign-key restrictions still apply.
+
+Deleting a legacy workflow also reviews its General run history. A
+`workflow_history` selection reviews General history of a named workflow while
+retaining its definition and future schedule. Department-bound or labelled runs,
+active executions and foreign-workspace dependencies block erasure. Personal run
+history outside the selected General set stays protected. Preview lists every
+run ID to erase and freezes complete run bodies, canonical descendants and FK
+reach. A surviving consumer of a selected run blocks deletion; its General
+history must be explicitly selected too. Apply removes copy receipts only for
+runs in the frozen erasure set, then removes those runs in one statement before
+deleting a selected legacy workflow. Ordinary foreign keys and deletion triggers
+remain enabled; no receipt is severed from a surviving consumer.
 
 Preview simulates the exact deletes in a savepoint and rolls them back. It
 compares complete database-side fingerprints of retained department records,
@@ -78,6 +97,16 @@ records and dependencies. The immutable ledger independently validates consent
 and membership of each unclassified erasure; apply checks physical absence.
 Migration 8146 extends that independent validation without changing runtime
 readers, resource labels, deletion triggers or historical applied receipts.
+
+Migration 8147 independently validates the exact selected department erasures,
+including kind, ID, version and nonempty compartment labels. Consent is limited
+to memory, episode and workspace-file roots, and cannot be substituted for
+unclassified erasure consent. Retention excludes only these exact records and
+General payloads whose only department parents are consented records. Other
+department-labelled children, immutable revisions and required files still
+block cleanup. A selected recording already removed by its selected episode's
+ordinary cascade is recorded once as erased. Existing deletion/invalidation
+triggers and foreign keys remain active throughout.
 
 Impact-only records use their exact registered derivation root when checking
 descendants. They have no canonical supersession ancestry; asking the canonical
