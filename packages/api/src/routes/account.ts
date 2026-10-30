@@ -3,6 +3,8 @@ import multer from 'multer'
 import { query, queryWithRLS, getPool } from '../db/client.js'
 import {
   findUserById,
+  getDefaultAssistant,
+  listAccessibleAssistants,
   updateUserTimezone,
   updateUserAvatar,
   clearUserAvatar,
@@ -451,8 +453,10 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
 
   // ── POST /api/account/slack/link-code ───────────────────────────
   // Settings → Account → Connected accounts "Connect" flow for Slack. Same
-  // shape as the Telegram route above: mint a 6-char code bound to the
-  // user's FIRST-OWNED assistant. The user sends the code to the Brian app
+  // shape as the Telegram route above: mint a 6-char code preferring the
+  // account's accessible default assistant, then its first accessible assistant.
+  // Canonical access checks select a link anchor; linking grants no new access.
+  // The user sends the code to the Brian app
   // in Slack (a DM, or an @mention in a channel — the adapter strips the
   // mention) and the Slack message handler redeems it (slack.ts →
   // "5a-link"), upserting the `slack` identity; from then on
@@ -475,14 +479,9 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
     }
 
     try {
-      const assistantRow = await query<{ id: string }>(
-        `SELECT id FROM assistants
-         WHERE owner_user_id = $1
-         ORDER BY created_at ASC
-         LIMIT 1`,
-        [userId],
-      )
-      const assistantId = assistantRow.rows[0]?.id
+      const assistant = await getDefaultAssistant(userId)
+        ?? (await listAccessibleAssistants(userId))[0]
+      const assistantId = assistant?.id
       if (!assistantId) {
         res.status(409).json({ error: 'no_assistant' })
         return
@@ -497,7 +496,7 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
   })
 
   // ── POST /api/account/feishu/link-code ────────────────────────
-  // Same first-owned-assistant handshake as Slack. The user sends the code
+  // Same first-owned-assistant handshake as Telegram. The user sends the code
   // to Brian in Feishu/Lark; routes/feishu.ts redeems it and uses the claimed
   // identity before falling back to an anonymous channel shadow.
 

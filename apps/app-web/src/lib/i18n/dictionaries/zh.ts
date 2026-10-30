@@ -4440,6 +4440,7 @@ export const zh: Dictionary = {
         unavailable: "此頻道暫時無法連接你自己的帳號。",
         unavailableHint: "目前這裡的訊息會以訪客身分處理。",
         notOnInstallation: "此安裝環境無法使用連接功能。",
+        noAssistant: "請先加入有助理的工作區，再重試連接。",
         connect: "連接",
         disconnect: "解除我的帳戶連結",
         howTo: {
@@ -12876,7 +12877,9 @@ export const zh: Dictionary = {
         discordInviteHint: "開啟這個 URL，把 bot 加入你的 Discord 伺服器:",
         discordInviteOpen: "邀請到伺服器",
         copyInvite: "複製邀請 URL",
-        slackWebhookHint: "Slack 應用程式 → Features → Event Subscriptions → Request URL",
+        slackWebhookTitle: "Slack 事件連線",
+        slackWebhookHint: "Slack 應用程式 → Features → Event Subscriptions → Request URL：將現有 URL 替換為此完整 URL，等待顯示 Verified 並儲存變更。然後向 Brian 傳送一則新的私訊，測試是否收到回覆。",
+        slackWebhookCopyError: "無法複製 URL。請選取上方的 URL 並手動複製。",
         copyWebhook: "複製 URL",
         copied: "已複製!",
         done: "完成",

@@ -4413,6 +4413,7 @@ export const zhCN: Dictionary = {
         unavailable: "此渠道暂时无法连接你自己的账号。",
         unavailableHint: "目前这里的消息会以访客身份处理。",
         notOnInstallation: "此部署环境无法使用连接功能。",
+        noAssistant: "请先加入有助手的工作区，再重试连接。",
         connect: "连接",
         disconnect: "解除我的账户关联",
         howTo: {
@@ -13022,7 +13023,9 @@ export const zhCN: Dictionary = {
         discordInviteHint: "打开这个 URL，把 bot 加入你的 Discord 服务器:",
         discordInviteOpen: "邀请到服务器",
         copyInvite: "拷贝邀请 URL",
-        slackWebhookHint: "Slack 应用程序 → Features → Event Subscriptions → Request URL",
+        slackWebhookTitle: "Slack 事件连接",
+        slackWebhookHint: "Slack 应用程序 → Features → Event Subscriptions → Request URL：将现有 URL 替换为此完整 URL，等待显示 Verified 并保存更改。然后向 Brian 发送一条新的私信，测试是否收到回复。",
+        slackWebhookCopyError: "无法复制 URL。请选择上方的 URL 并手动复制。",
         copyWebhook: "拷贝 URL",
         copied: "已拷贝!",
         done: "完成",

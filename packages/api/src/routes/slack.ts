@@ -405,6 +405,13 @@ export function slackRoutes(options: SlackRouteOptions): Router {
       return
     }
 
+    // Setup manifests can still point at the temporary verification URL.
+    // It has no integration; reject it before PostgreSQL casts channel_id to UUID.
+    if (!z.string().uuid().safeParse(channelId).success) {
+      res.status(404).end()
+      return
+    }
+
     const rawBody = (req as Request & { rawBody?: string }).rawBody ?? JSON.stringify(req.body)
 
     // 1. Fetch integration (skips RLS — webhooks arrive pre-auth)

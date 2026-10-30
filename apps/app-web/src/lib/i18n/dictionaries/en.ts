@@ -4650,6 +4650,7 @@ export const en = {
         unavailable: "Connecting your own account isn't available on this channel yet.",
         unavailableHint: "Messages here run as a guest for now.",
         notOnInstallation: "Connecting isn't available on this installation.",
+        noAssistant: "To connect, join a workspace with an assistant, then try again.",
         connect: "Connect",
         disconnect: "Disconnect my account",
         howTo: {
@@ -13182,7 +13183,9 @@ export const en = {
         discordInviteHint: "Open this URL to add the bot to your Discord server:",
         discordInviteOpen: "Invite to server",
         copyInvite: "Copy invite URL",
-        slackWebhookHint: "Slack app → Features → Event Subscriptions → Request URL.",
+        slackWebhookTitle: "Slack event connection",
+        slackWebhookHint: "Slack app → Features → Event Subscriptions → Request URL: replace the existing URL with this exact URL, wait for Verified, and save changes. Then send Brian a new direct message to test replies.",
+        slackWebhookCopyError: "Could not copy the URL. Select it above and copy it manually.",
         copyWebhook: "Copy URL",
         copied: "Copied!",
         done: "Done",

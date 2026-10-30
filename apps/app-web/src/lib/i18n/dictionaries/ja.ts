@@ -4454,6 +4454,7 @@ export const ja: Dictionary = {
         unavailable: "このチャネルでは、まだご自身のアカウントを接続できません。",
         unavailableHint: "現在、ここでのメッセージはゲストとして扱われます。",
         notOnInstallation: "この環境では接続できません。",
+        noAssistant: "接続するには、アシスタントがいるワークスペースに参加して、もう一度お試しください。",
         connect: "接続",
         disconnect: "自分のアカウントを切断",
         howTo: {
@@ -12939,7 +12940,9 @@ export const ja: Dictionary = {
         discordInviteHint: "次の URL を開いて、ボットを Discord サーバーに追加します:",
         discordInviteOpen: "サーバーに招待",
         copyInvite: "招待 URL をコピー",
-        slackWebhookHint: "Slack アプリ → Features → Event Subscriptions → Request URL",
+        slackWebhookTitle: "Slack イベント接続",
+        slackWebhookHint: "Slack アプリ → Features → Event Subscriptions → Request URL で、既存の URL をこの URL に置き換えてください。Verified と表示されるのを待ち、変更を保存します。その後、Brian に新しいダイレクトメッセージを送り、返信を確認してください。",
+        slackWebhookCopyError: "URL をコピーできませんでした。上の URL を選択し、手動でコピーしてください。",
         copyWebhook: "URL をコピー",
         copied: "コピーしました!",
         done: "完了",
