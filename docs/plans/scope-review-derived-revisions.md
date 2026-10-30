@@ -30,6 +30,11 @@ access to revision metadata or review mutation. Regression tests cover derived
 revisions, stale holds, immutable references, tenant separation, unsupported
 descendants and the actual non-owner application role.
 
+Inventory regression fixtures use legacy metadata without fabricating protected
+compact-summary content. Changes to a lock timestamp exercise fingerprint
+reconciliation; legacy owner visibility is asserted using its current canonical
+`personal` value.
+
 Remaining migration work includes explicit session/connector/job authority
 migration, dependent cache regeneration, protected-history exclusions, and full
 inventory/intake certification. Finalization stays blocked until implemented.
