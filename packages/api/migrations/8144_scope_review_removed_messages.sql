@@ -3,7 +3,7 @@
 BEGIN;
 
 CREATE OR REPLACE FUNCTION read_scope_review_impact_source(w uuid,k text,i uuid) RETURNS jsonb
-LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp SET timezone='UTC' AS $$
 DECLARE version_value text; held_value boolean; current_source jsonb; receipts jsonb;
 BEGIN
  IF k='session_context_revision' THEN

@@ -50,7 +50,7 @@ Other missing families and missing messages without a receipt still refuse.
 
 The owner-only impact reader locks up to 500 retained receipts and fingerprints
 their complete metadata, including all output versions, in deterministic ID
-order. The impact reference carries `removed: true`, an opaque
+order and UTC regardless of the pooled connection's time zone. The impact reference carries `removed: true`, an opaque
 `removed:<sha256>` version and `held: true` to represent unavailable history.
 It is included in the saved payload hash and independently checked by the SQL
 guard. Apply recaptures it; restoring a message or changing its retained evidence
@@ -64,3 +64,13 @@ through retained graph nodes and holds existing downstream resources. Tests use
 actual derived messages and deletion in a disposable fixture, checking both
 memory and file roots, stale restoration, forged references, foreign workspace
 records, absent receipts and non-owner application-role access.
+
+Regression coverage also checks the SQL guard directly: omitting or falsifying
+the removal marker, changing its fingerprint/held state, adding unknown fields,
+or labelling a live message as removed must fail independently of the API. A
+preview made before deletion must not acquire removal evidence during apply.
+
+| Migration | Schema change |
+| --- | --- |
+| `8143_scope_review_derived_revisions.sql` | Owner-only revision metadata reader and independent review-impact guard. |
+| `8144_scope_review_removed_messages.sql` | Extends that reader and guard with bounded, fingerprinted removal evidence for absent session messages; no table or grant changes. |
