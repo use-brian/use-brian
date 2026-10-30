@@ -28,6 +28,8 @@
     "@use-brian/office-model": "workspace:*",
     "@use-brian/office-renderer": "workspace:*",
     "@use-brian/shared": "workspace:*",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "crc-32": "^1.2.2",
     "docx": "^9.7.1",
     "e2b": "^2.32.0",

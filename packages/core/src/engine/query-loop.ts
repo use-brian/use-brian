@@ -32,6 +32,7 @@ import { compactConversation } from '../compaction/compact.js'
 import { isContextOverflowError } from '../providers/context-budget.js'
 import { calculateCost } from '../billing/cost-tracker.js'
 import { sanitizeUnicode } from '../security/sanitize.js'
+import { getMcpInputJsonSchema } from '../mcp/input-schema.js'
 
 /**
  * Heap-pressure threshold for graceful loop abort. When the V8 heap exceeds
@@ -2723,6 +2724,8 @@ export function jsonSchemaFromZod(schema: { _def: unknown }): {
   properties: Record<string, ToolParameter>
   required?: string[]
 } {
+  const wireSchema = getMcpInputJsonSchema(schema)
+  if (wireSchema) return wireSchema as { type: 'object'; properties: Record<string, ToolParameter>; required?: string[] }
   type TP = ToolParameter
   const def = schema._def as Record<string, unknown>
 
