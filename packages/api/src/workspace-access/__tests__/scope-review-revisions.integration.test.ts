@@ -4,7 +4,7 @@ import {getAppPool,getPool} from '../../db/client.js'
 import {sessionContextGeneration,writeSessionContextRevision} from '../../db/session-context-revisions.js'
 import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
 import {persistentContextFixture} from '../../application-platform/__tests__/fixtures/persistent-context.js'
-import {executeWorkspaceScopeReview as execute} from '../scope-review.js'
+import {executeWorkspaceScopeReview as execute,executeWorkspaceScopeReviewInTransaction,getWorkspaceScopeInventory as inventory} from '../scope-review.js'
 import {descendantAdapter,SCOPE_REVIEW_KINDS} from '../scope-review-registry.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -64,6 +64,14 @@ describe.sequential('[COMP:api/workspace-scope-review] immutable derived revisio
    expect(descendantAdapter('__proto__')).toBeUndefined()
   }finally{await f.cleanup()}
  })
+ it('does not offer retired roots as classifiable',async()=>{
+  const f=await persistentContextFixture()
+  try{
+   const root=await f.memory('Fictional retired root')
+   await pool.query('UPDATE memories SET valid_to=now() WHERE id=$1',[root.id])
+   expect((await inventory(f.workspaceId,f.ownerId,'memory')).items.find(row=>row.id===root.id)).toMatchObject({canClassify:false})
+  }finally{await f.cleanup()}
+ })
  it('independently rejects forged revision references at the SQL guard',async()=>{
   const f=await fixture()
   try{
@@ -98,5 +106,13 @@ describe.sequential('[COMP:api/workspace-scope-review] immutable derived revisio
    expect(SCOPE_REVIEW_KINDS).not.toContain('knowledge_entry_revision')
   }finally{await client.query('ROLLBACK');client.release();await f.cleanup()}
  })
-
+ it('binds the authenticated reviewer after a pooled local user setting becomes empty',async()=>{
+  const f=await fixture(),client=await pool.connect()
+  try{
+   await client.query('BEGIN')
+   await client.query("SELECT set_config('app.current_user_id','',true)")
+   await executeWorkspaceScopeReviewInTransaction(client,f.workspaceId,f.ownerId,{type:'scope.review.preview',resourceKind:'memory',resourceIds:[f.id],action:'assign_team',targetTeamId:f.team.id,reason:'Fictional review after pooled reset'})
+   expect((await client.query("SELECT current_setting('app.current_user_id') AS actor")).rows[0].actor).toBe(f.ownerId)
+  }finally{await client.query('ROLLBACK');client.release();await f.cleanup()}
+ })
 })

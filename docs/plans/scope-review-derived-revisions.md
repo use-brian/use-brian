@@ -19,6 +19,11 @@ relabel dependent revisions, release holds, widen permissions, rewrite historica
 versions or certify full migration. Private, assistant, sensitivity and Project
 restrictions remain unchanged.
 
+Every review transaction binds its authenticated human actor locally before SQL
+readers run. A pooled connection whose previous local user setting reset to an
+empty string must not break inventory. Retired and retracted roots remain
+inspectable but cannot be offered as classifiable live records.
+
 Migration 8143 adds an owner-only metadata reference reader for these two revision
 families and uses it in the immutable impact guard. It grants no application role
 access to revision metadata or review mutation. Regression tests cover derived

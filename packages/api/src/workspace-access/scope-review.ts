@@ -50,6 +50,7 @@ async function transaction<T>(workspaceId:string,userId:string,write:boolean,fn:
   try {
     await client.query(write?'BEGIN':'BEGIN ISOLATION LEVEL REPEATABLE READ')
     await requireAdmin(client,workspaceId,userId,write)
+    await client.query("SELECT set_config('app.current_user_id',$1,true)",[userId])
     const result=await fn(client);await client.query('COMMIT');return result
   }catch(error){
     await client.query('ROLLBACK')
@@ -310,6 +311,7 @@ export async function getWorkspaceScopeInventory(workspaceId:string,userId:strin
         evidence.body->'projectIds' AS "projectIds",
         evidence.body->>'userId' AS "userId",evidence.body->>'assistantId' AS "assistantId",
         (NOT coalesce((evidence.body->>'held')::boolean,false)
+          AND evidence.body->>'validTo' IS NULL AND evidence.body->>'retractedAt' IS NULL
           AND evidence.body->>'sensitivity' IS NOT NULL
           AND jsonb_typeof(evidence.body->'compartments')='array'
           AND jsonb_typeof(evidence.body->'projectIds')='array') AS "canClassify",
@@ -367,7 +369,7 @@ export async function executeWorkspaceScopeReview(workspaceId:string,userId:stri
  * workspace-first locking remain mandatory, including for migration callers. */
 export async function executeWorkspaceScopeReviewInTransaction(client:PoolClient,workspaceId:string,userId:string,input:unknown){
   await requireAdmin(client,workspaceId,userId,true)
-  await client.query("SELECT set_config('app.scope_review_actor',$1,true)",[userId])
+  await client.query("SELECT set_config('app.scope_review_actor',$1,true),set_config('app.current_user_id',$1,true)",[userId])
   const parsed=scopeReviewCommandSchema.safeParse(input)
   if(!parsed.success)throw new WorkspaceAccessError('invalid_command',400)
   const command=parsed.data
