@@ -23,6 +23,7 @@
  */
 
 import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
+import { isTrivialChatMessage } from '../classification/trivial-chat.js'
 import { DerivedScopeError } from '../security/derived-scope.js'
 import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
 import type { SessionContextAuthority } from './session-state-types.js'
@@ -458,6 +459,14 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
   const input = structuredClone({ recentUserTurns: opts.recentUserTurns, replyToText: opts.replyToText,
     currentMessage: opts.currentMessage, knownTopicsThisSession: opts.knownTopicsThisSession })
   const observed = opts.authority ? structuredClone(opts.authority.accumulator.evidence.sources ?? []) : inputs
+  if (!input.replyToText && isTrivialChatMessage(input.currentMessage)) {
+    const prior = [...input.recentUserTurns].reverse().find(turn => turn.topicLabel)?.topicLabel
+    const finalCheck = check()
+    closed = true
+    await finalCheck
+    return bindScopeSources({ ...FALLBACK, topic_label: prior ? normalizeLabel(prior) || FALLBACK.topic_label : FALLBACK.topic_label,
+      usage: null }, observed)
+  }
   const controller = new AbortController()
   const signal = AbortSignal.any([
     controller.signal,

@@ -4,6 +4,23 @@ Brian must deliver a saved, currently authorized reply both on its live stream
 and after a browser reload. A database row alone does not establish that the
 current reader may see its source-dependent content.
 
+## Trivial conversation overhead
+
+Exact short greetings, acknowledgments and connectivity probes (`test`, `ping`,
+`pong`) use a conservative allowlist. Substantive requests such as `test my API`
+or `compare prices` still use the normal model paths, regardless of length.
+Research assessment skips its provider on these messages. Topic classification
+can continue the last admitted topic with zero confidence when no explicit
+reply target needs interpretation. All original input and final authority checks
+still apply to deterministic results.
+
+Automatic title generation leaves the placeholder in place while every admitted
+user message is trivial; the first substantive turn can generate a meaningful
+title normally. The state-diff model is skipped only when there are no open
+commitments and every supplied user/assistant turn is plain trivial text. An open
+commitment, tool block, substantive answer or non-text content keeps the diff
+pass, so an acknowledgment can still resolve an existing commitment.
+
 ## Streaming under backpressure
 
 ### Latency diagnostics
