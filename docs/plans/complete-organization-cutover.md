@@ -108,7 +108,16 @@ fields are preserved, and the normal dispatcher claims the converted row.
 The final barrier first validates the owner without row locks, acquires the short
 workspace/table writer barrier, then locks/rechecks workspace, policy, session,
 review and selected resources. It refuses contention rather than retaining locks
-across confirmation. Inventory is bounded to 5,000 records per family. Monotonic wall-clock checks bound review/apply work; PostgreSQL 17+ additionally enforces a 20-second transaction timeout, so a slow inventory cannot retain the global writer barrier indefinitely. All API
+across confirmation. Inventory includes every record in every family, including
+large provenance graphs. Read each ordered metadata projection through a
+transaction-local cursor in batches of 500 and incrementally hash the same
+newline-separated ID, row-version and metadata representation. Keep existing
+fingerprints stable, never truncate a family, and retain only one batch in the
+API process. Check the shared 10-second inventory deadline before and after
+every fetch, including the final family; exceeding it refuses the transition
+and rolls back. Monotonic wall-clock checks bound review/apply work; PostgreSQL
+17+ additionally enforces a 20-second transaction timeout, so a slow inventory
+cannot retain the global writer barrier indefinitely. All API
 and worker processes must run the cutover-capable release before activation;
 deployment itself is not performed by the migration client.
 

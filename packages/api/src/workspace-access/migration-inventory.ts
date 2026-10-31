@@ -222,13 +222,31 @@ export async function organizationCutoverInventory(c:PoolClient,w:string) {
   if(missing.length)fail('cutover_inventory_family_unavailable')
   const deadline=performance.now()+10_000
   const families:Array<{family:string;count:string;fingerprint:string}>=[]
+  const checkBudget=()=>{if(performance.now()>deadline)fail('cutover_busy')}
   for(const family of [...MIGRATION_INVENTORY_FAMILIES].sort()) {
-    if(performance.now()>deadline)fail('cutover_busy')
-    const row=(await c.query<{count:string;fingerprint:string}>(`WITH records AS (${queries[family]} LIMIT 5001)
-      SELECT count(*)::text AS count,encode(sha256(convert_to(coalesce(string_agg(
-        id||':'||row_version||':'||metadata::text,E'\n' ORDER BY id),''),'UTF8')),'hex') AS fingerprint FROM records`,[w])).rows[0]
-    if(Number(row.count)>5000)fail('cutover_inventory_limit_exceeded')
-    families.push({family,...row})
+    checkBudget()
+    // The caller holds the writer barrier and owns the transaction. A cursor
+    // bounds API memory without discarding provenance after an arbitrary count.
+    // Keep exactly the previous string_agg encoding for existing review hashes.
+    await c.query(`DECLARE organization_cutover_records NO SCROLL CURSOR FOR
+      SELECT id||':'||row_version||':'||metadata::text AS record
+      FROM (${queries[family]}) records ORDER BY id`,[w])
+    const hash=createHash('sha256')
+    let count=0n
+    while(true) {
+      checkBudget()
+      const {rows}=await c.query<{record:string}>('FETCH FORWARD 500 FROM organization_cutover_records')
+      checkBudget()
+      for(const row of rows) {
+        if(count>0n)hash.update('\n')
+        hash.update(row.record)
+        count++
+      }
+      if(rows.length<500)break
+    }
+    await c.query('CLOSE organization_cutover_records')
+    checkBudget()
+    families.push({family,count:count.toString(),fingerprint:hash.digest('hex')})
   }
   return {manifestVersion:MIGRATION_INVENTORY_MANIFEST,families,
     fingerprint:createHash('sha256').update(JSON.stringify(families)).digest('hex')}
