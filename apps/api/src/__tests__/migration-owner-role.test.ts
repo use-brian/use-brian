@@ -102,7 +102,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
     const facade = 'public.read_admitted_native_scope_snapshot(uuid,text,uuid)'
     const sql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${migration}`, 'utf8'), migration)
     const snapshots = async () => ({
-      functions: (await db.query(`SELECT to_jsonb(p) AS metadata FROM pg_proc p
+      functions: (await db.query<{ metadata: Record<string, unknown> }>(`SELECT to_jsonb(p) AS metadata FROM pg_proc p
         WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows,
       defaults: (await db.query('SELECT to_jsonb(d) AS metadata FROM pg_default_acl d ORDER BY oid')).rows,
       ledger: (await db.query('SELECT * FROM _migrations ORDER BY name')).rows,
@@ -230,7 +230,84 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       const queryRepaired = await snapshots()
       await db.transaction(async tx => { await tx.exec(querySql) })
       assert.deepEqual(await snapshots(), queryRepaired)
+      const scopeRepair = '81690_legacy_native_scope_privileges.sql'
+      const scopeHelper = 'public.application_session_eval_scope_current(uuid,text,uuid,text,jsonb)'
+      const scopeSql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${scopeRepair}`, 'utf8'), scopeRepair)
+      assert.equal(ordered[ordered.indexOf(scopeRepair) - 1], '8168_native_source_edge_dispatch.sql')
+      assert.equal(ordered[ordered.indexOf(scopeRepair) + 1], '8169_native_covered_helper_manifest.sql')
+      await migratePglite(db, migrationsDir, { through: '8168_native_source_edge_dispatch.sql' })
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS legacy`, [scopeHelper])).rows, [{ legacy: true }])
+      const scopeDefinition = (await db.query<{ definition: string }>('SELECT pg_get_functiondef($1::regprocedure) AS definition', [scopeHelper])).rows[0].definition
+      const scopeDefault = scopeDefinition.replace('memo jsonb)', "memo jsonb DEFAULT '{}'::jsonb)")
+      assert.notEqual(scopeDefault, scopeDefinition)
+      const scopeCases = [
+        { name: 'body', change: scopeDefinition.replace('$function$', '$function$\n-- Fictional scope drift\n'), restore: scopeDefinition },
+        { name: 'cost', change: `ALTER FUNCTION ${scopeHelper} COST 101`, restore: `ALTER FUNCTION ${scopeHelper} COST 100` },
+        { name: 'configuration', change: `ALTER FUNCTION ${scopeHelper} SET work_mem='8MB'`, restore: `ALTER FUNCTION ${scopeHelper} RESET work_mem` },
+        { name: 'owner', change: `RESET ROLE; ALTER FUNCTION ${scopeHelper} OWNER TO legacy_privilege_probe; SET ROLE migration_owner`, restore: `RESET ROLE; ALTER FUNCTION ${scopeHelper} OWNER TO migration_owner; SET ROLE migration_owner` },
+        { name: 'unknown principal', change: `GRANT EXECUTE ON FUNCTION ${scopeHelper} TO legacy_privilege_probe`, restore: `REVOKE ALL ON FUNCTION ${scopeHelper} FROM legacy_privilege_probe` },
+        { name: 'PUBLIC access', change: `GRANT EXECUTE ON FUNCTION ${scopeHelper} TO PUBLIC`, restore: `REVOKE ALL ON FUNCTION ${scopeHelper} FROM PUBLIC` },
+        { name: 'grant option', change: `GRANT EXECUTE ON FUNCTION ${scopeHelper} TO app_user WITH GRANT OPTION`, restore: `REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION ${scopeHelper} FROM app_user` },
+        { name: 'missing owner grant', change: `REVOKE ALL ON FUNCTION ${scopeHelper} FROM migration_owner`, restore: `GRANT EXECUTE ON FUNCTION ${scopeHelper} TO migration_owner` },
+      ]
+      for (const scenario of scopeCases) await t.test(`refuses scope ${scenario.name} atomically`, async () => {
+        try {
+          await db.exec(scenario.change)
+          const before = await snapshots()
+          await assert.rejects(migratePglite(db, migrationsDir, { through: scopeRepair }), /Legacy native scope prerequisite changed/)
+          assert.deepEqual(await snapshots(), before)
+        } finally { await db.exec(scenario.restore) }
+      })
+      await t.test('refuses an added scope argument default atomically', async () => {
+        const changed = await openAsOwner({ appUser: true })
+        try {
+          await changed.exec('CREATE TABLE memories(id uuid); CREATE TABLE _migrations(name text PRIMARY KEY)')
+          await changed.exec(scopeDefault)
+          await changed.exec(`REVOKE ALL ON FUNCTION ${scopeHelper} FROM PUBLIC; GRANT EXECUTE ON FUNCTION ${scopeHelper} TO app_user`)
+          const before = (await changed.query('SELECT to_jsonb(p) metadata FROM pg_proc p WHERE oid=$1::regprocedure', [scopeHelper])).rows
+          const repairBody = scopeSql.replace(/^BEGIN;\s*/m, '').replace(/COMMIT;\s*$/, '')
+          await assert.rejects(changed.transaction(tx => tx.exec(repairBody)), /Legacy native scope prerequisite changed/)
+          assert.deepEqual((await changed.query('SELECT to_jsonb(p) metadata FROM pg_proc p WHERE oid=$1::regprocedure', [scopeHelper])).rows, before)
+        } finally { await changed.close() }
+      })
+      await t.test('accepts the exact private scope helper when app_user is absent', async () => {
+        const absent = await openAsOwner()
+        try {
+          await absent.exec('CREATE TABLE memories(id uuid); CREATE TABLE _migrations(name text PRIMARY KEY)')
+          await absent.exec(scopeDefinition)
+          await absent.exec(`REVOKE ALL ON FUNCTION ${scopeHelper} FROM PUBLIC`)
+          const before = (await absent.query('SELECT to_jsonb(p) metadata FROM pg_proc p WHERE oid=$1::regprocedure', [scopeHelper])).rows
+          await absent.exec(scopeSql)
+          assert.deepEqual((await absent.query('SELECT to_jsonb(p) metadata FROM pg_proc p WHERE oid=$1::regprocedure', [scopeHelper])).rows, before)
+          await assertOrdinaryOwner(absent)
+        } finally { await absent.close() }
+      })
+      const beforeScopeRepair = await snapshots()
+      assert.equal(await migratePglite(db, migrationsDir, { through: scopeRepair }), 1)
+      const afterScopeRepair = await snapshots()
+      const scopeOid = (await db.query<{ oid: number }>('SELECT $1::regprocedure::oid oid', [scopeHelper])).rows[0].oid
+      // Exactly one ACL may change; all other full catalog rows and defaults
+      // remain byte-identical, including already installed guard fingerprints.
+      const withoutScopeAcl = (rows: typeof beforeScopeRepair.functions) => rows.map(row => {
+        const metadata = { ...(row.metadata as Record<string, unknown>) }
+        if (Number(metadata.oid) === Number(scopeOid)) delete metadata.proacl
+        return metadata
+      })
+      assert.deepEqual(withoutScopeAcl(afterScopeRepair.functions), withoutScopeAcl(beforeScopeRepair.functions))
+      assert.deepEqual(afterScopeRepair.defaults, beforeScopeRepair.defaults)
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS exposed`, [scopeHelper])).rows, [{ exposed: false }])
+      await db.exec(scopeSql)
+      assert.deepEqual(await snapshots(), afterScopeRepair)
       await migratePglite(db, migrationsDir)
+      const scopeInstalled = await snapshots()
+      await db.exec(scopeSql)
+      assert.deepEqual(await snapshots(), scopeInstalled)
+      await db.exec(`ALTER FUNCTION ${scopeHelper} COST 101`)
+      const installedCustomMetadata = await snapshots()
+      await db.exec(scopeSql)
+      assert.deepEqual(await snapshots(), installedCustomMetadata)
+      await db.exec(`ALTER FUNCTION ${scopeHelper} COST 100`)
+      assert.deepEqual((await db.query('SELECT application_native_covered_evidence_helpers_current() AS current')).rows, [{ current: true }])
       const queryInstalled = await snapshots()
       await db.transaction(async tx => { await tx.exec(querySql) })
       assert.deepEqual(await snapshots(), queryInstalled)
