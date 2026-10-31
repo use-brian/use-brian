@@ -173,7 +173,6 @@ eval "$(node "$ROOT/scripts/rig-env.mjs")" || die "could not resolve DATABASE_UR
 
 # Verify canonical runtime without changing migration-owned function permissions.
 verify_admin_role() {
-  [ "$ADMIN_ONLY" = 1 ] || return 0
   node "$ROOT/scripts/crm/runtime-role.mjs" verify | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
 }
 
@@ -185,7 +184,7 @@ if pid="$(rig_pid)"; then
   recorded_api_port="$(node "$ROOT/scripts/launch-ports.mjs" "$API_PORT_FILE" --recorded)" || die "invalid recorded API port"
   [ "$API_PORT" = "$recorded_api_port" ] || die "rig is running on :$recorded_api_port; run scripts/rig-down.sh --keep-db before changing its API port"
 fi
-if [ "$FRESH" = "0" ] && pid="$(rig_pid)" && api_healthy; then
+if [ "$FRESH" = "0" ] && pid="$(rig_pid)" && { [ "$ADMIN_ONLY" = 1 ] || [ "$(cat "$STATE/runtime-role.pid" 2>/dev/null || true)" = "$pid" ]; } && api_healthy; then
   verify_admin_role
   say "rig is already up (launcher pid $pid); canonical runtime verified, refreshing owner session."
   mint_only=1
@@ -213,6 +212,10 @@ else
 fi
 
 if [ "$mint_only" = "0" ]; then
+  if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+    label="$(docker container inspect -f '{{index .Config.Labels "com.usebrian.rig"}}' "$CONTAINER")"
+    [ "com.usebrian.rig=$label" = "$RIG_LABEL" ] || die "rig container has the wrong ownership label"
+  fi
   # An admin fixture may never adopt a normal or unlabelled database/volume.
   if [ "$ADMIN_ONLY" = 1 ]; then
     if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
@@ -312,9 +315,10 @@ if [ "$mint_only" = "0" ]; then
   # 280_oss_connectors.sql) then no-op — the stack boots and the connector
   # tables are simply absent. The platform `.env` sets it for the hosted tree,
   # so clearing it is not optional.
+  node "$ROOT/scripts/crm/runtime-role.mjs" prepare | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
+  # Recognized narrowing commits independently before unchanged migration gates.
+  # Legacy administrative alias cleanup is specific to those fixtures.
   if [ "$ADMIN_ONLY" = 1 ]; then
-    node "$ROOT/scripts/crm/runtime-role.mjs" prepare | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
-    # Recognized narrowing commits independently before unchanged migration gates.
     node "$ROOT/scripts/crm/runtime-role.mjs" transition | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
   fi
   say "applying open migrations ..."
@@ -327,15 +331,18 @@ if [ "$mint_only" = "0" ]; then
   say "migrations ok (${applied:-0} newly applied; log: ${MIGRATE_LOG#"$ROOT/"})"
 
   if [ "$ADMIN_ONLY" = 1 ]; then
-    node "$ROOT/scripts/crm/runtime-role.mjs" activate | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
-    verify_admin_role
+    BRIAN_RUNTIME_PASSWORD=fixture-only node "$ROOT/scripts/crm/runtime-role.mjs" activate | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
+  else
+    BRIAN_RUNTIME_PASSWORD="$RIG_APP_DB_PASSWORD" node "$ROOT/scripts/crm/runtime-role.mjs" activate | docker exec -i "$CONTAINER" psql -U "$RIG_DB_USER" -d "$RIG_DB_NAME" -v ON_ERROR_STOP=1 -q
   fi
+  verify_admin_role
 
   # ── the stack (the maintained launcher, headless) ─────────────────────────
   say "starting the stack ($([ "$CORE_ONLY" = 1 ] && echo 'core only' || echo 'full')) ..."
   : >"$LOG"
   launch_env=(
     DATABASE_URL="$RIG_DB_URL"
+    DATABASE_URL_APP="$RIG_APP_DB_URL"
     MIGRATION_DIRS=
     USEBRIAN_NO_BROWSER=1
     USEBRIAN_API_PORT="$API_PORT"
@@ -349,6 +356,7 @@ if [ "$mint_only" = "0" ]; then
     node "$ROOT/scripts/launch.mjs" "${launch_args[@]}" >>"$LOG" 2>&1 </dev/null &
   echo $! >"$PIDFILE"
   launcher_pid="$(cat "$PIDFILE")"
+  printf '%s\n' "$launcher_pid" >"$STATE/runtime-role.pid"
   say "launcher pid $launcher_pid (log: ${LOG#"$ROOT/"})"
 fi
 

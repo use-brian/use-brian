@@ -21,6 +21,6 @@ export async function activateRuntimeRole(connection, options) {
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  runtimeRoleSql(process.argv[2], { password: process.argv[2] === 'activate' ? 'fixture-only' : undefined })
+  runtimeRoleSql(process.argv[2], { password: process.argv[2] === 'activate' ? process.env.BRIAN_RUNTIME_PASSWORD ?? 'fixture-only' : undefined })
     .then(sql => process.stdout.write(sql)).catch(error => { console.error(error.message); process.exitCode = 1 })
 }

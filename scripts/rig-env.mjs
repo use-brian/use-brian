@@ -23,6 +23,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { adminDatabaseUrls } from './rig-admin.mjs'
 
 /** Postgres 18 + pgvector, port 5442, throwaway credentials. */
@@ -129,6 +130,19 @@ export function maskUrl(url) {
   return String(url).replace(/(\/\/[^:/?#@]*):[^@/?#]*@/, '$1@')
 }
 
+/** Same owned local database, canonical non-owner role, fresh runtime secret. */
+export function rigRuntimeDatabase(db, password = randomBytes(32).toString('hex')) {
+  if (!db.isLoopback) throw new Error('Runtime database must be loopback')
+  if (!/^[a-f0-9]{64}$/.test(password)) throw new Error('Unsafe runtime password')
+  const url = new URL(db.url)
+  url.username = 'app_user'
+  url.password = password
+  // node-postgres gives query-string credentials precedence over URL authority.
+  url.searchParams.delete('user')
+  url.searchParams.delete('password')
+  return { url: url.href, password }
+}
+
 /** Single-quote for `eval` in sh: wrap, and close/escape/reopen each quote. */
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`
@@ -141,6 +155,7 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   const root = new URL('..', import.meta.url).pathname
   try {
     const db = resolveRigDatabase({ root, env: process.env })
+    const runtime = db.isLoopback ? rigRuntimeDatabase(db) : null
     const out = {
       RIG_DB_URL: db.url,
       RIG_DB_SOURCE: db.source,
@@ -151,6 +166,8 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
       RIG_DB_USER: db.user,
       RIG_DB_PASSWORD: db.password,
       RIG_DB_LOOPBACK: db.isLoopback ? '1' : '0',
+      RIG_APP_DB_URL: runtime?.url ?? '',
+      RIG_APP_DB_PASSWORD: runtime?.password ?? '',
     }
     for (const [key, value] of Object.entries(out)) {
       process.stdout.write(`${key}=${shellQuote(value)}\n`)
