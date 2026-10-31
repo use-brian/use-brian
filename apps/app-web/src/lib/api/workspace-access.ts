@@ -199,13 +199,33 @@ export async function fetchWorkspaceCreationContext(workspaceId:string){
 }
 
 export type OrganizationCutoverPreview={status:string;reviewId?:string;payloadHash?:string;expiresAt?:string;policyRevision?:string;
-  changes?:{scheduleConversions:string[];recordsDeleted:number;grantsChanged:boolean};inventory?:{families:Array<{family:string;count:number}>};
+  changes?:{scheduleConversions:string[];recordsDeleted:number;grantsChanged:boolean;reviewedInventoryRevision?:string};inventory?:{families:Array<{family:string;count:string}>};
   blockers?:Array<{code:string;kind?:string;id?:string}>};
 export async function prepareOrganizationCutover(workspaceId:string,targetDepartmentId:string):Promise<OrganizationCutoverPreview> {
   return cutoverRequest(workspaceId,'preview',{targetDepartmentId,idempotencyKey:crypto.randomUUID(),requireNoGeneral:true});
 }
 export async function applyOrganizationCutover(workspaceId:string,reviewId:string,payloadHash:string):Promise<{setupState:string;reviewId:string}> {
   return cutoverRequest(workspaceId,'apply',{reviewId,payloadHash});
+}
+export type LegacyKnowledgeBindingReview={status:string;reviewId:string;payloadHash:string;expiresAt:string;sourceId:string;
+  targetDepartmentId:string;configuredByUserId:string;entryCount:string;binding:{sensitivity:string;compartments:string[];projectIds:string[]}};
+export async function fetchLegacyKnowledgeBindings(workspaceId:string):Promise<ProtectedProjection<{policyRevision:string;validForMs:number;sources:Array<{id:string;sourceType:string;entryCount:string}>}>> {
+  const started=performance.now(),root=publicRuntimeConfig().apiUrl??'http://localhost:4000';
+  const response=await authFetch(`${root}/api/workspaces/${encodeURIComponent(workspaceId)}/access/knowledge-bindings`,{cache:'no-store'});
+  const body=await response.json();if(!response.ok)throw new SurfaceCacheEvictionError(new Error(body.error??'access_unavailable'));
+  return protectProjection(body,started);
+}
+export async function prepareLegacyKnowledgeBinding(workspaceId:string,sourceId:string,targetDepartmentId:string):Promise<LegacyKnowledgeBindingReview> {
+  return knowledgeBindingRequest(workspaceId,'preview',{sourceId,targetDepartmentId,idempotencyKey:crypto.randomUUID()});
+}
+export async function applyLegacyKnowledgeBinding(workspaceId:string,reviewId:string,payloadHash:string):Promise<{reviewId:string}> {
+  return knowledgeBindingRequest(workspaceId,'apply',{reviewId,payloadHash});
+}
+async function knowledgeBindingRequest<T>(workspaceId:string,action:'preview'|'apply',body:unknown):Promise<T> {
+  const root=publicRuntimeConfig().apiUrl??'http://localhost:4000';
+  const response=await authFetch(`${root}/api/workspaces/${encodeURIComponent(workspaceId)}/access/knowledge-bindings/${action}`,{
+    cache:'no-store',method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const result=await response.json();if(!response.ok)throw new Error(result.error??'access_unavailable');return result;
 }
 async function cutoverRequest<T>(workspaceId:string,action:'preview'|'apply',body:unknown):Promise<T> {
   const root=publicRuntimeConfig().apiUrl??'http://localhost:4000';

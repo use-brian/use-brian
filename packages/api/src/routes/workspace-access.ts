@@ -1,4 +1,6 @@
 import {prepareOrganizationCutover,applyOrganizationCutover} from '../workspace-access/organization-cutover.js'
+import {listLegacyKnowledgeBindings,prepareLegacyKnowledgeBinding,applyLegacyKnowledgeBinding} from '../workspace-access/legacy-knowledge-binding.js'
+import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 import {inspectMigrationInventory,getMigrationInventory} from '../workspace-access/migration-inventory.js'
 import {explainWorkspaceAccess,getWorkspaceAccessEvents,getWorkspaceDepartmentRegistry} from '../workspace-access/access-inspection.js'
 import {prepareOrganizationCommand,applyOrganizationCommand} from '../workspace-access/organization-command-review.js'
@@ -43,6 +45,20 @@ export function workspaceAccessRoutes(): Router {
       const principal={userId:req.userId!,authSessionId:req.authSessionId}
       res.json(action==='preview'?await prepareOrganizationCutover(String(req.params.workspaceId),principal,req.body)
         :await applyOrganizationCutover(String(req.params.workspaceId),principal,req.body))
+    }catch(error){if(error instanceof WorkspaceAccessError)res.status(error.status).json({error:error.code});else next(error)}
+  })
+  router.get('/workspaces/:workspaceId/access/knowledge-bindings',async(req,res,next)=>{
+    if(!req.authSessionId)return void res.status(401).json({error:'authenticated_session_required'})
+    try{res.json(await listLegacyKnowledgeBindings(String(req.params.workspaceId),{userId:req.userId!,authSessionId:req.authSessionId}))}
+    catch(error){if(error instanceof WorkspaceAccessError)res.status(error.status).json({error:error.code});else next(error)}
+  })
+  for(const action of ['preview','apply'] as const)router.post(`/workspaces/:workspaceId/access/knowledge-bindings/${action}`,async(req,res,next)=>{
+    if(!req.authSessionId)return void res.status(401).json({error:'authenticated_session_required'})
+    try{
+      const workspaceId=String(req.params.workspaceId),principal={userId:req.userId!,authSessionId:req.authSessionId}
+      const result=action==='preview'?await prepareLegacyKnowledgeBinding(workspaceId,principal,req.body):await applyLegacyKnowledgeBinding(workspaceId,principal,req.body)
+      if(action==='apply')notifyWorkspaceChange(workspaceId,'workspace_config','update')
+      res.json(result)
     }catch(error){if(error instanceof WorkspaceAccessError)res.status(error.status).json({error:error.code});else next(error)}
   })
   for(const action of ['preview','apply','cancel'] as const)router.post(`/workspaces/:workspaceId/access/legacy-cleanup/${action}`,async(req,res,next)=>{

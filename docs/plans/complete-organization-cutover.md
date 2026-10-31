@@ -83,6 +83,39 @@ update rolls back acknowledgement, setup state, schedule conversions and receipt
 together. Classification mode and read/mutation grants stay unchanged. Tests
 must start with an absent acknowledgement instead of pre-seeding completion.
 
+### Legacy knowledge-source binding
+
+An unbound legacy knowledge source requires attended configuration before setup
+can finish. Organization migration progress exposes this independently of owner
+finalization, so a current workspace admin who can read the selected department
+can configure the source without granting the workspace owner data access.
+Prepare and apply require the same live human session and an explicit department
+choice. The review shows the source ID, future scope and retained entry count;
+it captures source/entry fingerprints, policy revision and expiry. Revalidation
+uses normal configuration admission and current v2 read authority. A source with
+a live sync lease, a held source/output, an existing binding or output outside
+the chosen department cannot be adopted. No creator is converted into consent.
+
+Apply converts only that legacy source's null binding to the authenticated
+reviewer's explicit binding, once, through a database guard backed by an
+immutable backend-only review. Preserve its ID, location, connector, checkpoints,
+entries, entry scope versions and provenance. Do not delete/recreate it or force
+a sync during the conversion. Existing sync snapshots are fenced by the changed
+binding version and the normal dispatcher captures fresh bound authority after
+commit. Unreviewed direct SQL and app-role attempts remain forbidden. A receipt
+and ordinary workspace invalidation make the recovery visible in the product.
+Cover sync through the real knowledge worker after finalization, with a separate
+workspace owner and configuring admin, and denial when that admin's department
+read edge is absent, expired or revoked.
+
+Migration `8151_reviewed_legacy_knowledge_binding.sql` adds
+`workspace_knowledge_binding_reviews`: workspace/source, attending actor/session,
+selected department, policy revision, idempotency key, immutable evidence/hash,
+expiry and prepared/applying/applied/cancelled lifecycle with an atomic receipt.
+It has no app-role write path and no cascading dependency that prevents later
+normal source removal. Its guard extends only the reviewed null-to-bound source
+transition; the existing immutable-binding guard handles every other operation.
+
 Review returns concrete remaining blockers with IDs and content-free evidence.
 It covers all inventory families, principal defaults, configured connectors and
 intake, enabled workflow triggers, live/queued jobs and old-worker barriers. The
