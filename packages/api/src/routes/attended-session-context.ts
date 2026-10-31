@@ -8,15 +8,36 @@ import type {Session,SessionMessage} from '../db/sessions.js'
 import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
 import {resolveReplyText,type ResolveReplyParams} from '../routes/_reply-context.js'
 
+type ClassificationInput={authority:SessionContextAuthority;session:Session;message:SessionMessage;capture?:object}
+const classificationCaptures=new WeakMap<object,{authority:SessionContextAuthority;sessionId:string;messageId:string;sequence:number;query:Awaited<ReturnType<typeof readAdmittedSessionQuery>>}>()
+/** Data snapshot only; every classifier still checks current bound input authority. */
+export async function captureAttendedSessionClassification(input:ClassificationInput):Promise<object>{
+ const {authority,session,message}=input
+ if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
+ const query=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,topicThroughSequence:message.sequenceNum-1,authority})
+ const capture=Object.freeze({})
+ classificationCaptures.set(capture,{authority,sessionId:session.id,messageId:message.id,sequence:message.sequenceNum,query})
+ return capture
+}
+async function classificationQuery(input:ClassificationInput,topicThroughSequence:number){
+ if(!input.capture)return readAdmittedSessionQuery({sessionId:input.session.id,throughSequence:input.message.sequenceNum,topicThroughSequence,authority:input.authority})
+ const captured=classificationCaptures.get(input.capture)
+ if(!captured||captured.authority!==input.authority||captured.sessionId!==input.session.id||captured.messageId!==input.message.id||captured.sequence!==input.message.sequenceNum)
+  throw new DerivedScopeError('scope_evidence_missing')
+ await input.authority.execution.security.authority.assertCurrent()
+ return captured.query
+}
+
 /** The actual current authored row is selected and scoped before text is formatted. */
 export async function classifyAttendedSessionMessage(input:{
  authority:SessionContextAuthority;session:Session;message:SessionMessage;
  provider:TopicClassifierOptions['provider'];model:string;decisionRuntime?:TopicClassifierOptions['decisionRuntime'];
  reply?:Pick<ResolveReplyParams,'channelType'|'replyToMessageId'|'clientSnippet'>;
+ capture?:object;
 }):Promise<{classification:TopicClassification;reply:Awaited<ReturnType<typeof resolveReplyText>>;history:SessionMessage[]}>{
  const {authority,session,message}=input
  if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
- const query=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,topicThroughSequence:message.sequenceNum-1,authority})
+ const query=await classificationQuery(input,message.sequenceNum-1)
  const current=query.history.find(row=>row.id===message.id)
  if(!current||current.role!=='user')throw new DerivedScopeError('scope_source_changed')
  const text=(row:SessionMessage)=>typeof row.content==='string'?row.content:Array.isArray(row.content)?row.content.flatMap(block=>
@@ -87,10 +108,11 @@ export async function readAttendedSessionHistory(authority:SessionContextAuthori
 export async function classifyAttendedResearchMessage(input:{
  authority:SessionContextAuthority;session:Session;message:SessionMessage;
  provider:ResearchClassifyOptions['provider'];model:string;decisionRuntime?:ResearchClassifyOptions['decisionRuntime'];
+ capture?:object;
 }):Promise<ResearchClassifyResult>{
  const {authority,session,message}=input
  if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
- const query=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,topicThroughSequence:0,authority})
+ const query=await classificationQuery(input,0)
  const current=query.history.find(row=>row.id===message.id)
  if(!current)throw new DerivedScopeError('scope_source_changed')
  const text=(row:SessionMessage)=>typeof row.content==='string'?row.content:Array.isArray(row.content)?row.content.flatMap(block=>

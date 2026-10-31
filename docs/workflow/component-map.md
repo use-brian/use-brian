@@ -2,6 +2,7 @@
 
 | COMP tag | doc path | source path | test path |
 |---|---|---|---|
+| `api/chat-finalization` | `docs/chat-reply-delivery.md` | `packages/api/src/turn/finalize.ts`; `packages/api/src/turn/session-state.ts`; `packages/api/src/routes/chat.ts` | `packages/api/src/turn/__tests__/finalize.test.ts`; `packages/api/src/application-platform/__tests__/persistent-consumers.integration.test.ts` |
 | classification/trivial-chat | docs/chat-reply-delivery.md | packages/core/src/classification/trivial-chat.ts | packages/core/src/classification/__tests__/trivial-chat.test.ts |
 | api/native-chat-read-cost | docs/chat-reply-delivery.md | packages/api/migrations/8152_native_chat_publication_frame.sql; packages/api/migrations/8153_native_chat_reference_frame.sql | packages/api/src/application-platform/__tests__/native-chat-read-cost.integration.test.ts |
 | api/turn-timings | docs/chat-reply-delivery.md | packages/api/src/routes/turn-timings.ts; packages/api/src/routes/chat.ts | packages/api/src/routes/__tests__/turn-timings.test.ts |

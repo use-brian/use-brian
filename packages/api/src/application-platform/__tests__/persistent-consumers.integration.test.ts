@@ -19,6 +19,9 @@ import { createDbMemoryStore } from '../../db/memory-store.js'
 import { createDbCapabilityStore } from '../../db/capability-store.js'
 import { buildDeliveryConversationStateBlock, ContextScopeAccumulator } from '@use-brian/core'
 import { runTurnSessionStateDiff } from '../../turn/session-state.js'
+import { publishWithConcurrentStateDiff } from '../../turn/finalize.js'
+import { publishNativeSessionMessageBatch } from '../../db/session-message-publication.js'
+import { readAdmittedSessionQuery } from '../../db/session-query-reader.js'
 import type { ContentBlock, LLMProvider, Message } from '@use-brian/core'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -599,6 +602,55 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
       AND d.resource_id=$2 ORDER BY s.source_id`, [f.workspaceId, boundScopeSources(rows[0])[0].resourceId])).rows.map(row => row.source_id)
     expect(inputs).toContain(prior.id)
     expect(inputs).toContain(history.at(-1)!.id)
+  })
+
+  it('overlaps actual publication with state inference using separate evidence and applies state after the saved reply',async()=>{
+    fixture=await persistentContextFixture()
+    const f=fixture,authority=await f.modelContext(),store=createDbSessionStateStore()
+    const history=await f.history()
+    await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:history.at(-1)!.sequenceNum,authority})
+    const original=structuredClone(authority.accumulator.evidence)
+    const stateAuthority={execution:authority.execution,accumulator:new ContextScopeAccumulator(original)}
+    let ready!:()=>void
+    const inference=new Promise<void>(resolve=>{ready=resolve})
+    const provider:LLMProvider={name:'fictional-concurrent-diff',models:['fixture'],createSession(){throw new Error('Unused fixture session')},
+      async *stream(){ready();yield{type:'text_delta',text:'{"upserts":[{"key":"fixture:concurrent","summary":"Fictional follow-up"}],"resolves":[]}'}}}
+    let saved=false
+    const upsert=store.upsert.bind(store)
+    store.upsert=async input=>{expect(saved).toBe(true);return upsert(input)}
+    const state=await publishWithConcurrentStateDiff({
+      publish:async()=>{
+        await inference
+        expect(authority.accumulator.evidence).toEqual(original)
+        const rows=await publishNativeSessionMessageBatch({sessionId:f.session.id,authority,derivationTarget:f.envelope,
+          messages:[{role:'assistant',content:[{type:'text',text:'Fictional final response'}]}],
+          derivation:{producer:'fixture:concurrent-publication',sources:original.sources??[]}})
+        expect(rows).toHaveLength(1);saved=true
+      },
+      diff:(beforeApply,onInferenceReady)=>runTurnSessionStateDiff({authority:stateAuthority,provider,model:'fixture',store,beforeApply,onInferenceReady,
+        userMessage:bindScopeSources<Message>({role:'user',content:'Follow up on the fictional task.'},boundScopeSources(history[0])),
+        assistantTurns:[{content:[{type:'text',text:'Fictional final response'}]}]}),
+    })
+    expect(state).toMatchObject({status:'fulfilled',value:{upserts:1}})
+    expect(authority.accumulator.evidence).toEqual(original)
+    expect(await store.listOpenBySession(f.session.id,stateAuthority)).toMatchObject([{key:'fixture:concurrent'}])
+  })
+
+  it('refuses state application when membership contracts while publication is pending',async()=>{
+    fixture=await persistentContextFixture()
+    const f=fixture,authority=await f.modelContext(f.firstId),history=await f.history(),store=createDbSessionStateStore()
+    let ready!:()=>void
+    const inference=new Promise<void>(resolve=>{ready=resolve})
+    const provider:LLMProvider={name:'fictional-concurrent-refusal',models:['fixture'],createSession(){throw new Error('Unused fixture session')},
+      async *stream(){yield{type:'text_delta',text:'{"upserts":[{"key":"fixture:withdrawn","summary":"Fictional held follow-up"}],"resolves":[]}'};ready()}}
+    const state=await publishWithConcurrentStateDiff({
+      publish:async()=>{await inference;await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.firstId])},
+      diff:(beforeApply,onInferenceReady)=>runTurnSessionStateDiff({authority,provider,model:'fixture',store,beforeApply,onInferenceReady,
+        userMessage:bindScopeSources<Message>({role:'user',content:'Follow up on the fictional task.'},boundScopeSources(history[0])),
+        assistantTurns:[{content:[{type:'text',text:'Fictional final response'}]}]}),
+    })
+    expect(state).toMatchObject({status:'rejected',reason:{reason:'authority_changed'}})
+    expect((await f.pool.query('SELECT count(*)::int AS n FROM session_state WHERE session_id=$1',[f.session.id])).rows[0].n).toBe(0)
   })
 
   it('refuses the actual API differ before reading response content after member contraction', async () => {

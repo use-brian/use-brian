@@ -29,9 +29,11 @@ export async function readAdmittedSessionQuery(input:{sessionId:string;throughSe
  await execution.security.authority.assertCurrent()
  // Discover immutable identities only. Neither owner discovery nor metadata is
  // an authorization decision; the non-owner projection admits every candidate.
- const roots=(await getPool().query<{source:ScopeSource|null}>(`SELECT read_scope_source(m.workspace_id,'session_message',m.id) AS source
+ const roots=(await getPool().query<{source:ScopeSource|null}>(`SELECT jsonb_build_object(
+  'workspaceId',m.workspace_id,'userId',m.user_id,'assistantId',m.assistant_id,'sensitivity',m.sensitivity,
+  'compartments',m.compartments,'projectIds',m.project_ids,'resourceKind','session_message','resourceId',m.id,'version',m.scope_version::text) AS source
   FROM session_messages m WHERE m.workspace_id=$1 AND m.session_id=$2 AND m.sequence_num<=$3
-  UNION ALL SELECT read_scope_source(h.workspace_id,'session_context_revision',h.scope_revision_id) AS source
+  UNION ALL SELECT read_scope_source(h.workspace_id,'session_context_revision',h.scope_revision_id)
   FROM session_message_annotation_heads h JOIN session_messages m ON m.workspace_id=h.workspace_id AND m.id=h.message_id AND m.session_id=h.session_id
   WHERE h.workspace_id=$1 AND h.session_id=$2 AND m.sequence_num<=$4`,[workspaceId,sessionId,throughSequence,topicThrough])).rows
   .flatMap(row=>row.source?[row.source]:[])

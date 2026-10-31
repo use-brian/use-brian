@@ -35,11 +35,52 @@ For the state differ only, exact assistant acknowledgments `Here.` and
 `Received.` also qualify when the user input is trivial and the admitted open
 commitment set is empty. This does not broaden research/topic routing.
 
-A persistent host can supply a `beforeApply` publication barrier. The differ
-awaits it after inference and parsing, then retains the existing current input
-checks before each state write. `onInferenceReady` signals that input dispatch
-admission has completed so the host can schedule independent work. Omitted
-callbacks preserve the existing sequential consumer contract.
+## Independent work and finalization
+
+Message-root discovery selects physical identity/version/scope metadata only;
+the non-owner query frame performs the actual canonical capture and final
+evidence validation. Annotation roots retain their canonical reader: a held
+annotation must retain the existing whole-window refusal behavior.
+External ancestry discovery batches roots. A cohort with no external ancestry
+needs no per-root discovery queries; mixed cohorts keep per-root source-denial
+handling. Metadata never grants access or filters a held candidate.
+
+Research and topic classification in one attended request may share a canonical
+query capture through the current message, with topics through the prior
+message. The host keeps that data snapshot behind an opaque request-local
+handle bound to the exact authority, session and message. Each classifier still
+retains the complete bound sources and performs its current input checks; no
+admission result is reused. The later model-history read stays fresh, including
+any newly published annotation. `classification_capture_ms` measures the common
+read separately from the research/topic counters.
+
+The publication host may discover external and application-field ancestry
+concurrently on separate metadata connections. It awaits both outcomes before
+opening the publication transaction and retains every original proof, lock,
+source check and post-write validation.
+
+After generation, prepare the state differ's inputs under the original live
+authority with a separate accumulator seeded from the completed turn. The
+state model may run concurrently with transcript publication. Complete its
+input reads and dispatch admission before starting publication's locking work,
+so those reads cannot serialize behind the publication locks. Its writes wait
+until publication and the saved-reply delivery check succeed, then revalidate
+current input authority before applying each result. A publication failure
+prevents every diff write. Both operations settle before finalization returns;
+there is no detached job or early release of the turn lease. State-read evidence
+must never mutate the reply's accumulator during publication. Normal state
+failures keep their existing handling; publication failures remain fatal.
+`state_diff_started_at_ms`/`state_diff_finished_at_ms` expose the overlap;
+`session_state_publication_wait_ms` measures the state result's publication
+barrier. The total state counter includes that wait and overlaps publication.
+`state_diff_model_ready_at_ms` records the inference dispatch boundary.
+
+The publication counter is subdivided into external/field ancestry discovery,
+query-context discovery, pool checkout, the publication-lock RPC, caller evidence
+validation, the native write callback and COMMIT (`publication_*_ms`). These
+are numeric, content-free host timings; the lock RPC includes its own checks
+and cannot by itself distinguish lock waiting from execution. Concurrent
+ancestry counters overlap and must not be added to the enclosing total.
 
 ## Streaming under backpressure
 

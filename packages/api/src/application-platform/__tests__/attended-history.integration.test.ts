@@ -2,7 +2,7 @@ import {runAssistantTurn} from '../../turn/kernel.js'
 import {validateAttendedAudienceEvidence} from '../../context-scope/attended-audience.js'
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,type QueryEvent,type LLMProvider} from '@use-brian/core'
-import {classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory} from '../../routes/attended-session-context.js'
+import {captureAttendedSessionClassification,classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory} from '../../routes/attended-session-context.js'
 import {readSessionMessageAnnotation} from '../../db/session-message-annotations.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {addSessionMessage} from '../../db/sessions.js'
@@ -130,6 +130,39 @@ describe.sequential('[COMP:api/application-persistence] actual admitted reply hi
   }
   expect(calls).toBe(0)
   expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toEqual([])
+ })
+ it('shares one canonical capture across research and topic while retaining their bound sources',async()=>{
+  const {f}=await setup(),authority=await f.modelContext()
+  const message=await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'test'}],scope:f.envelope})
+  const capture=await captureAttendedSessionClassification({authority,session:f.session,message})
+  let calls=0
+  const provider=classifierProvider(async()=>{calls++})
+  expect(await classifyAttendedResearchMessage({authority,session:f.session,message,capture,provider,model:'fixture'})).toMatchObject({research:false})
+  const topic=await classifyAttendedSessionMessage({authority,session:f.session,message,capture,provider,model:'fixture'})
+  expect(topic.classification.confidence).toBe(0)
+  expect(boundScopeSources(topic.classification)).toEqual(expect.arrayContaining(boundScopeSources(topic.history)))
+  expect(calls).toBe(0)
+ })
+ it.each(['hold','edit','membership'] as const)('refuses a shared classification capture after %s changes',async change=>{
+  const {f}=await setup(),authority=await f.modelContext(f.firstId)
+  const message=await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'test'}],scope:f.envelope})
+  const capture=await captureAttendedSessionClassification({authority,session:f.session,message})
+  const provider=classifierProvider()
+  await classifyAttendedResearchMessage({authority,session:f.session,message,capture,provider,model:'fixture'})
+  if(change==='hold')await f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[message.id])
+  else if(change==='edit')await f.pool.query(`UPDATE session_messages SET content='[{"type":"text","text":"Fictional edited request"}]'::jsonb WHERE id=$1`,[message.id])
+  else await f.pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.firstId])
+  await expect(classifyAttendedSessionMessage({authority,session:f.session,message,capture,provider,model:'fixture'})).rejects.toMatchObject({reason:'authority_changed'})
+  expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toEqual([])
+ })
+ it('refuses forged classification handles and handles belonging to another authority',async()=>{
+  const {f}=await setup(),authority=await f.modelContext()
+  const message=await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'test'}],scope:f.envelope})
+  const capture=await captureAttendedSessionClassification({authority,session:f.session,message})
+  for(const input of [{authority,capture:{}},{authority:await f.modelContext(),capture}]){
+   await expect(classifyAttendedSessionMessage({...input,session:f.session,message,provider:classifierProvider(),model:'fixture'}))
+    .rejects.toMatchObject({code:'scope_evidence_missing'})
+  }
  })
  it('still publishes a trivial message annotation when an explicit admitted reply target needs interpretation',async()=>{
   const {f,rows}=await setup(),message=await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'test'}],scope:f.envelope})

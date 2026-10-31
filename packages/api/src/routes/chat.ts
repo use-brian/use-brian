@@ -4,12 +4,13 @@ import {readSessionTitle} from '../db/session-title-store.js'
 import {authSessionStore} from '../db/auth-session-store.js'
 import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
+import { captureAttendedSessionClassification, classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
 import { bindScopeSources } from '@use-brian/core'
 import { runTurnSessionStateDiff } from '../turn/session-state.js'
+import { publishWithConcurrentStateDiff } from '../turn/finalize.js'
 import { RESEARCH_EFFORT_BUDGETS, researchEffortInstruction, type ResearchEffort } from '@use-brian/core'
 import { withTurnInference } from '../turn/runtime.js'
 import { PER_TURN_FILES_INDEX_CAP, PER_TURN_INDEX_CAP } from '../turn/index-caps.js'
@@ -3964,6 +3965,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         : undefined
       // Assess after the original canonical invocation and authored input exist.
       // Quota races retain this real request and its denial in the same thread.
+      const classificationCapture=adaptiveResearchEligible&&message&&nativeTranscriptAuthority&&earlyStoredUserMsg
+        ?await turnTiming.time('classification_capture',()=>captureAttendedSessionClassification({
+          authority:nativeTranscriptAuthority,session,message:earlyStoredUserMsg,
+        })):undefined
       if (
         adaptiveResearchEligible &&
         message
@@ -3974,6 +3979,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         const adaptive = await turnTiming.time('research_classify', () => classifyAttendedResearchMessage({
           authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
           provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+          capture:classificationCapture,
         }))
         adaptiveResearchOverhead = {
           model: adaptive.model,
@@ -3997,6 +4003,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         ? await turnTiming.time('topic_classify', () => classifyAttendedSessionMessage({
             authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
             provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+            capture:classificationCapture,
             reply: { channelType: 'web', replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
           }))
         : undefined
@@ -7075,7 +7082,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         await turnTiming.time('reply_publication', () => authority.execute(async () => {
           if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
             return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish,
-              turnLeaseToken ? abortController.signal.aborted ? { stoppedTurnToken: turnLeaseToken } : { turnToken: turnLeaseToken } : undefined)
+              {measure:turnTiming.time,...(turnLeaseToken ? abortController.signal.aborted ? { stoppedTurnToken: turnLeaseToken } : { turnToken: turnLeaseToken } : {})})
           }
           const tx = await getPool().connect()
           try {
@@ -7568,16 +7575,27 @@ export function chatRoutes(options: WebChatOptions): Router {
           sink: { kind: 'sse', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async (result) => {
             turnTiming.observe('generation_finished')
             postReply.beginFinalization(result, !!queryLoopError, abortController.signal)
-            await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
             const sessionStateStore = options.sessionStateStore
+            const stateAuthority={execution:executionContext,
+              accumulator:new ContextScopeAccumulator(structuredClone(scopeAccumulator.evidence))}
+            const state=await publishWithConcurrentStateDiff({
+              publish:()=>flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]'),
+              diff:async (beforeApply,inferenceReady)=>{
+                if(!sessionStateStore)return undefined
+                turnTiming.observe('state_diff_started')
+                try{return await turnTiming.time('session_state_diff',()=>runTurnSessionStateDiff({
+                  authority:stateAuthority,provider:backgroundProvider,model:backgroundModel,store:sessionStateStore,
+                  userMessage:bindScopeSources<Message>({role:'user',content:userMessageText},storedUserSource?[storedUserSource]:[]),
+                  assistantTurns:pendingAssistantTurns,
+                  beforeApply:()=>turnTiming.time('session_state_publication_wait',beforeApply),
+                  onInferenceReady:()=>{turnTiming.observe('state_diff_model_ready');inferenceReady()},
+                }))}finally{turnTiming.observe('state_diff_finished')}
+              },
+            })
             if (!sessionStateStore) return
             try {
-              const result = await turnTiming.time('session_state_diff', () => runTurnSessionStateDiff({
-                authority: { execution: executionContext, accumulator: scopeAccumulator },
-                provider: backgroundProvider, model: backgroundModel, store: sessionStateStore,
-                userMessage: bindScopeSources<Message>({ role: 'user', content: userMessageText }, storedUserSource ? [storedUserSource] : []),
-                assistantTurns: pendingAssistantTurns,
-              }))
+              if(state.status==='rejected')throw state.reason
+              const result=state.value!
               options.analytics?.logEvent({
                 userId: user.id, assistantId: assistant.id, sessionId: session.id,
                 eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',

@@ -15,6 +15,8 @@ export async function runTurnSessionStateDiff(params: {
   store: SessionStateStore
   userMessage: Message
   assistantTurns: readonly { content: ContentBlock[] }[]
+  beforeApply?: () => Promise<void>
+  onInferenceReady?: () => void
 }): Promise<SessionStateDiffResult> {
   const { execution, accumulator } = params.authority
   const sources = boundScopeSources(params.userMessage)
@@ -44,5 +46,7 @@ export async function runTurnSessionStateDiff(params: {
     assistantId: execution.assistant.id, store: params.store,
     recentTurns: [params.userMessage, assistant], openCommitments: open,
     authority: params.authority, assertInputAuthority,
+    beforeApply:params.beforeApply,
+    onInferenceReady:params.onInferenceReady,
   })
 }

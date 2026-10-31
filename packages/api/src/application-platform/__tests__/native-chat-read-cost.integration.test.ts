@@ -11,7 +11,7 @@ import {createDbMemoryStore} from '../../db/memory-store.js'
 import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
 import {writeSessionMessageAnnotation} from '../../db/session-message-annotations.js'
 import {addSessionMessage,createPersonalWebSession,readSessionById} from '../../db/sessions.js'
-import {classifyAttendedSessionMessage} from '../../routes/attended-session-context.js'
+import {captureAttendedSessionClassification,classifyAttendedResearchMessage,classifyAttendedSessionMessage} from '../../routes/attended-session-context.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {readRetainedContextFrame} from '../../db/session-context-revisions.js'
 import {publishSessionTitle} from '../../db/session-title-store.js'
@@ -32,7 +32,7 @@ if(profiling){
 }
 
 type FunctionStat={funcid:string;name:string;calls:number;totalMs:number;selfMs:number}
-type Profile={operation:'browser-history'|'browser-title'|'browser-list'|'native-snapshots'|'native-publication'|'native-topic'|'native-growth-publication';warmed:boolean;elapsedMs:number;functions:FunctionStat[]}
+type Profile={operation:'browser-history'|'browser-title'|'browser-list'|'native-snapshots'|'native-publication'|'native-topic'|'native-classification'|'native-growth-publication';warmed:boolean;elapsedMs:number;functions:FunctionStat[]}
 type Fixture=Awaited<ReturnType<typeof persistentContextFixture>>
 type Scenario={
  f:{pool:Fixture['pool'];workspaceId:string;ownerId:string;assistantId:string;memory:Fixture['memory']};
@@ -81,7 +81,7 @@ async function profile<T>(operation:Profile['operation'],run:()=>Promise<T>):Pro
    await writeFile(process.env.BRIAN_CHAT_PROFILE_OUTPUT??'/tmp/native-chat-read-cost-profile.json',JSON.stringify(profiles,null,2))
    const annotations=process.env.BRIAN_CHAT_PROFILE_ANNOTATIONS==='1'
    const budgets:Record<Profile['operation'],number>={'browser-history':32000,'browser-title':15000,'browser-list':30000,'native-snapshots':6000,'native-publication':60000,
-    'native-topic':annotations?1000000:150000,'native-growth-publication':annotations?450000:400000}
+    'native-topic':annotations?1000000:150000,'native-classification':300000,'native-growth-publication':annotations?450000:400000}
    expect(functions.reduce((sum,fn)=>sum+fn.calls,0),operation+' total SQL function calls').toBeLessThanOrEqual(budgets[operation])
   }
  }
@@ -205,8 +205,14 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
    const authority=await c.authority()
    authority.accumulator.note({sources:c.sources})
    const message=await addSessionMessage({sessionId:session.id,role:'user',content:[{type:'text',text:'test'}],scope})
-   const classified=await profile('native-topic',()=>classifyAttendedSessionMessage({authority,session,message,provider,model:'fixture',
-    ...(annotations?{reply:{channelType:'web' as const,replyToMessageId:c.original.id}}:{})}))
+   const classification=process.env.BRIAN_CHAT_PROFILE_CLASSIFICATION==='1'
+   const classified=await profile(classification?'native-classification':'native-topic',async()=>{
+    const capture=classification&&process.env.BRIAN_CHAT_PROFILE_SHARED==='1'
+     ?await captureAttendedSessionClassification({authority,session,message}):undefined
+    if(classification)await classifyAttendedResearchMessage({authority,session,message,provider,model:'fixture',capture})
+    return classifyAttendedSessionMessage({authority,session,message,provider,model:'fixture',capture,
+     ...(annotations?{reply:{channelType:'web' as const,replyToMessageId:c.original.id}}:{})})
+   })
    expect(classified.classification.confidence).toBe(annotations?0.9:0)
    const input=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,authority})
    authority.accumulator.note({sources:boundScopeSources(input)})
