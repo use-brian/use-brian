@@ -9199,6 +9199,7 @@ export const en = {
 
     deleteRecordingBody: "Delete this saved transcript? Separate archives, files and learned facts will remain. This does not stop future recording; manage that in Studio Channels.",
     otherProjects: "Other projects",
+    channelChats: "Channels",
     personalProjectsFailed: "Could not load project names. Your chats are still available.",
     generalChats: "General",
     newChatInProject: "New chat in {name}",

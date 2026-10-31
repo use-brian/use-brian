@@ -16,8 +16,8 @@
  * shared-session create.
  *
  * "Chats" groups personal web sessions by Project and non-web sessions by
- * source channel. The dock's rolling ambient web threads — which every dock
- * exchange bumps to the top of an unsplit list — sit in the collapsed
+ * source channel under a collapsed-by-default Channels section. The dock's
+ * rolling ambient web threads — which every dock exchange bumps to the top of an unsplit list — sit in the collapsed
  * "Other conversations" section: demoted, never hidden, so the unified-history
  * promise (any thread readable and continuable here) survives.
  *
@@ -304,6 +304,13 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       return b.rows[0].lastActive.localeCompare(a.rows[0].lastActive);
     });
   }, [chatRows, projects.data, t]);
+  const normalGroups = personalGroups.filter(group => group.kind !== "channel");
+  const channelGroups = personalGroups.filter(group => group.kind === "channel");
+  const [channelsOpen, toggleChannelsOpen] = useChatGroupDisclosure(
+    `doc:personal-chat-channels:${chatSessionsCacheKey(workspaceId)}`,
+    activeSessionId, channelGroups.some(group => group.rows.some(row => row.id === activeSessionId)), false,
+  );
+  const ChannelsIcon = channelsOpen ? FolderOpen : Folder;
   const visibleAmbient = ambientRows;
   const showAmbient = othersOpen;
   const hasWorkingRoom =
@@ -641,10 +648,25 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
             {Boolean(projects.error) && personalGroups.some(group => group.kind === "project") && (
               <p role="alert" className="px-2 text-xs text-destructive">{t.personalProjectsFailed}</p>
             )}
-            {personalGroups.map(group => (
+            {normalGroups.map(group => (
               <PersonalChatGroup key={group.id} workspaceId={workspaceId} group={group}
                 activeSessionId={activeSessionId} renderRow={renderRow} />
             ))}
+            {channelGroups.length > 0 && (
+              <section className={cn(styles.chatGroup, "flex flex-col gap-0.5")} data-open={channelsOpen} data-chat-channels>
+                <button type="button" aria-expanded={channelsOpen} onClick={toggleChannelsOpen}
+                  className={cn(styles.titleHost, "flex min-h-11 w-full min-w-0 items-center gap-2 rounded-[10px] px-2.5 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}>
+                  <ChannelsIcon aria-hidden className="size-4 shrink-0" />
+                  <SidebarTitle>{t.channelChats}</SidebarTitle>
+                </button>
+                {channelsOpen && <div className="flex flex-col gap-0.5 pl-3">
+                  {channelGroups.map(group => (
+                    <PersonalChatGroup key={group.id} workspaceId={workspaceId} group={group}
+                      activeSessionId={activeSessionId} renderRow={renderRow} />
+                  ))}
+                </div>}
+              </section>
+            )}
           </div>
         </div>
       )}
