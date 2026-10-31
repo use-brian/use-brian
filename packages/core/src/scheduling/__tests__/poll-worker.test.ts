@@ -560,3 +560,24 @@ describe('[COMP:scheduling/poll-worker] stop and restart admission', () => {
     } finally { release.resolve(); worker.stop() }
   })
 })
+
+
+describe('[COMP:scheduling/poll-worker] transition dispatch leases',()=>{
+ beforeEach(()=>vi.useFakeTimers())
+ afterEach(()=>vi.useRealTimers())
+ it.each(['success','failure','stale','revoked'] as const)('fences %s without job-ID-only outcome writes',async outcome=>{
+  const job=makeJob({dispatchLeaseId:'original-lease'}),store=makeFakeJobStore([job])
+  store.validateDispatchLease=vi.fn(async()=>outcome!=='revoked')
+  store.finishDispatchLease=vi.fn(async()=>({applied:outcome!=='stale',disabled:outcome==='failure',failures:1}))
+  const notify=vi.fn(),executor=vi.fn(async()=>{if(outcome==='failure')throw new Error('Fictional failure');if(outcome==='stale')throw Object.assign(new Error('Lease replaced'),{code:'scheduled_job_stale_dispatch'});return 'ok'})
+  const worker=createPollWorker({store,executor,onJobAutoDisabled:notify})
+  try {
+   worker.start();await vi.advanceTimersByTimeAsync(0)
+   expect(executor).toHaveBeenCalledTimes(outcome==='revoked'?0:1)
+   if(outcome==='success'||outcome==='failure')expect(store.finishDispatchLease).toHaveBeenCalledWith(job.id,'original-lease',expect.objectContaining({success:outcome==='success'}))
+   else expect(store.finishDispatchLease).not.toHaveBeenCalled()
+   expect(store.updates).toEqual([]);expect(store.completedCalls).toEqual([]);expect(store.failedCalls).toEqual([])
+   expect(notify).toHaveBeenCalledTimes(outcome==='failure'?1:0)
+  }finally {worker.stop()}
+ })
+})

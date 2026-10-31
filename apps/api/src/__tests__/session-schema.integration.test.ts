@@ -256,7 +256,8 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
     /sessions_channel_room_key/)
   })
 
-  it('requires a creation receipt for a workspace session in a ready workspace', async () => {
+  it('requires a creation receipt for a workspace session on the classic ready model', async () => {
+    await db.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1',[W])
     await db.query(
       `INSERT INTO workspace_access_policies (workspace_id, setup_state, access_mode) VALUES ($1, 'ready', 'departments')
        ON CONFLICT (workspace_id) DO UPDATE SET setup_state = 'ready', access_mode = 'departments'`, [W])
@@ -297,6 +298,7 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
          VALUES ($1, $2, $3, 'telegram', '999')`, [ASSISTANT, W, MEMBER])
     } finally {
       await db.query("UPDATE workspace_access_policies SET setup_state = 'legacy' WHERE workspace_id = $1", [W])
+      await db.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[W])
     }
   })
 })

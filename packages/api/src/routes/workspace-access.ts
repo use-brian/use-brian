@@ -1,3 +1,4 @@
+import {prepareOrganizationCutover,applyOrganizationCutover} from '../workspace-access/organization-cutover.js'
 import {inspectMigrationInventory,getMigrationInventory} from '../workspace-access/migration-inventory.js'
 import {explainWorkspaceAccess,getWorkspaceAccessEvents,getWorkspaceDepartmentRegistry} from '../workspace-access/access-inspection.js'
 import {prepareOrganizationCommand,applyOrganizationCommand} from '../workspace-access/organization-command-review.js'
@@ -35,6 +36,14 @@ export function workspaceAccessRoutes(): Router {
   router.get('/workspaces/:workspaceId/access/mode',async(req,res,next)=>{
     try{res.json(await getWorkspaceAccessMode(String(req.params.workspaceId),req.userId!))}
     catch(error){if(error instanceof WorkspaceAccessError)res.status(error.status).json({error:error.code});else next(error)}
+  })
+  for(const action of ['preview','apply'] as const)router.post(`/workspaces/:workspaceId/access/cutover/${action}`,async(req,res,next)=>{
+    if(!req.authSessionId||req.authVersion===undefined)return void res.status(401).json({error:'authenticated_session_required'})
+    try {
+      const principal={userId:req.userId!,authSessionId:req.authSessionId}
+      res.json(action==='preview'?await prepareOrganizationCutover(String(req.params.workspaceId),principal,req.body)
+        :await applyOrganizationCutover(String(req.params.workspaceId),principal,req.body))
+    }catch(error){if(error instanceof WorkspaceAccessError)res.status(error.status).json({error:error.code});else next(error)}
   })
   for(const action of ['preview','apply','cancel'] as const)router.post(`/workspaces/:workspaceId/access/legacy-cleanup/${action}`,async(req,res,next)=>{
     try{res.json(action==='preview'

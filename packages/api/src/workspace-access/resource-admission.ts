@@ -17,6 +17,8 @@ export type AdmissionPolicy = {
   workspaceId: string
   mode: WorkspaceAccessMode
   setupState: 'legacy' | 'ready'
+  /** Permission model v2 is authoritative independently of mode setup. */
+  departmentReadV2?: boolean
   revision: string
   defaultDepartmentId: string | null
   defaultCompartment: string | null

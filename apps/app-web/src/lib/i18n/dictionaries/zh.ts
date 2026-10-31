@@ -583,6 +583,19 @@ export const zh: Dictionary = {
     "migration": "管理員可以檢視已儲存的遷移計畫，並請 Brian 準備明確的提案。套用批次不會啟用模式。"
 },
   accessMigration: {
+    organization_cutover_target_changed: "此計劃的目標模式與工作區不同。請檢查或取消計劃；已完成的設定不會改變。",
+    cutoverActiveWork: "請待執行中的工作完成後重試。",
+    cutoverAssistants: "請檢查助理的所屬部門。",
+    cutoverSources: "請檢查資料來源的儲存位置。",
+    cutoverRecords: "請檢查記錄的儲存位置及權限。",
+
+    finishSetup: "完成設定",
+    cutoverReview: "確認切換至部門架構的最後步驟。保留的記錄和權限不會改變。",
+    cutoverBlocked: "完成前仍有項目需要處理。請檢查所列記錄後重試。",
+    cutoverPreserved: "不會刪除記錄或新增權限。",
+    cutoverSchedules: "需要轉換的排程",
+    cutoverFamilies: "已檢查的資料類別",
+
     "title": "存取模式與遷移",
     "simple": "簡易",
     "departments": "部門",
@@ -602,7 +615,7 @@ export const zh: Dictionary = {
     "scope_review_impact_missing": "缺少凍結的影響證據。套用前請建立新審核。",
     "scope_review_impact_too_large": "資源影響超出了支援的審核規模。請使用較小的受支援提案。",
     "scope_review_conflict": "資源審核不再符合目前權限或計畫狀態。請重新整理並建立新審核。",
-    "limitation": "有限範圍計畫可以變更人員、助理和受支援資源，但不變更工作區模式。目前無法啟用模式或完成遷移。請與 Brian 建立明確提案；此處不會猜測分配。",
+    "limitation": "計劃管理已審核的人員、助理及資源變更。完成工作區設定需要擁有者另行審核。",
     "plans": "遷移計畫",
     "empty": "沒有已儲存的計畫",
     "inspect": "檢視",
@@ -619,6 +632,8 @@ export const zh: Dictionary = {
     "full_inventory_required": "需要完整的清單審核。",
     "intake_certification_required": "需要認證資料接入路徑。",
     "mode_finalizer_unavailable": "模式最終啟用尚不可用。",
+    "organization_cutover_review_required": "請工作區擁有者審核並完成設定。",
+    "completed": "已完成",
     "migration_busy": "另一個遷移操作正在執行。請重新整理後重試。",
     "migration_not_active": "此計畫未處於活動狀態。請重新整理狀態。",
     "migration_item_applied": "此項目已套用。請重新整理進度。",

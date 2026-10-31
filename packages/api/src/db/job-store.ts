@@ -52,6 +52,7 @@ type JobRow = {
   contextProjectId: string | null
   contextCompartments: string[]
   contextProjectIds: string[]
+  dispatchLeaseId?: string | null
   scheduleClaimId?: string | null
   requiresScheduleClaim?: boolean
 }
@@ -73,6 +74,7 @@ const JOB_SELECT = `
   context_project_id as "contextProjectId",
   context_compartments as "contextCompartments",
   context_project_ids as "contextProjectIds",
+  dispatch_lease_id as "dispatchLeaseId",
   schedule_claim_id as "scheduleClaimId",
   (workflow_authoring_snapshot IS NOT NULL) as "requiresScheduleClaim"
 `
@@ -449,6 +451,7 @@ export function createDbJobStore(): JobStore {
       const result = await query<JobRow>(
         `UPDATE scheduled_jobs
          SET next_run_at = now() + interval '10 minutes',
+             dispatch_lease_id=gen_random_uuid(),dispatch_lease_expires_at=clock_timestamp()+interval '10 minutes',
              updated_at = now()
          WHERE id IN (
            SELECT id FROM scheduled_jobs
@@ -459,6 +462,51 @@ export function createDbJobStore(): JobStore {
         [],
       )
       return [...pinned, ...result.rows.map(rowToJob)]
+    },
+
+    async validateDispatchLease(job) {
+      if (job.scheduleClaimId || job.requiresScheduleClaim) return true
+      if (!job.dispatchLeaseId) return false
+      return (await query(`SELECT 1 FROM scheduled_jobs WHERE id=$1 AND dispatch_lease_id=$2
+        AND dispatch_lease_expires_at>clock_timestamp() AND workflow_authoring_snapshot IS NULL
+        AND enabled AND user_id=$3 AND assistant_id=$4 AND workflow_id IS NOT DISTINCT FROM $5::uuid`,
+      [job.id,job.dispatchLeaseId,job.userId,job.assistantId,job.workflowId])).rowCount===1
+    },
+    async advanceDispatchLeaseNag(id,leaseId,activeNag,nextRunAt) {
+      return (await query(`UPDATE scheduled_jobs SET state_json=coalesce(state_json,'{}'::jsonb)||jsonb_build_object('activeNag',$3::jsonb),
+        next_run_at=$4,updated_at=now() WHERE id=$1 AND dispatch_lease_id=$2 AND workflow_authoring_snapshot IS NULL
+        AND enabled AND dispatch_lease_expires_at>clock_timestamp()`,[id,leaseId,JSON.stringify(activeNag),safeNextRunAt(id,nextRunAt)])).rowCount===1
+    },
+    async finishDispatchLease(id,leaseId,outcome) {
+      const unchanged={applied:false,disabled:false,failures:0}
+      const pointer=(await query<{workspaceId:string}>(`SELECT a.workspace_id AS "workspaceId" FROM scheduled_jobs j
+        JOIN assistants a ON a.id=j.assistant_id WHERE j.id=$1`,[id])).rows[0]
+      if (!pointer) return unchanged
+      const client=await getPool().connect()
+      try {
+        await client.query('BEGIN')
+        if(pointer.workspaceId)await lockOperationalPolicy(client,pointer.workspaceId)
+        const job=(await client.query<JobRow>(`SELECT ${JOB_SELECT} FROM scheduled_jobs WHERE id=$1
+          AND dispatch_lease_id=$2 AND workflow_authoring_snapshot IS NULL FOR UPDATE`,[id,leaseId])).rows[0]
+        if(!job){await client.query('COMMIT');return unchanged}
+        const failures=outcome.success?0:(job.state?.consecutiveFailures??0)+1
+        const disabled=job.schedule.type==='once'||failures>=outcome.maxConsecutiveFailures
+        const state={...job.state,consecutiveFailures:failures}
+        const nextRunAt=!disabled&&job.nagIntervalMins!=null&&job.state?.activeNag?job.nextRunAt:outcome.nextRunAt
+        if(outcome.success&&job.schedule.type==='once'&&job.nagIntervalMins==null) {
+          await client.query('DELETE FROM scheduled_jobs WHERE id=$1 AND dispatch_lease_id=$2',[id,leaseId])
+          if(job.workflowId&&job.channelType!=='workflow')await client.query('DELETE FROM workflows WHERE id=$1 AND NOT schedule_authoring_pinned',[job.workflowId])
+        } else await client.query(`UPDATE scheduled_jobs SET enabled=enabled AND NOT $3,next_run_at=$4,
+          last_run_at=clock_timestamp(),last_status=$5,state_json=$6::jsonb,dispatch_lease_id=NULL,dispatch_lease_expires_at=NULL,updated_at=now()
+          WHERE id=$1 AND dispatch_lease_id=$2 AND workflow_authoring_snapshot IS NULL`,
+        [id,leaseId,disabled,safeNextRunAt(id,nextRunAt),outcome.success?'completed':'failed',JSON.stringify(state)])
+        if(disabled&&job.workflowId&&job.schedule.type==='once'&&(job.channelType==='workflow'||!outcome.success))
+          await client.query(`UPDATE workflows SET lifecycle_state='archived',lifecycle_reason='One-off schedule completed',
+            lifecycle_transitioned_at=now(),enabled=false WHERE id=$1 AND NOT schedule_authoring_pinned AND lifecycle_state<>'archived'`,[job.workflowId])
+        await client.query('COMMIT')
+        notifyJobChange(id,job.assistantId,outcome.success&&job.schedule.type==='once'&&job.nagIntervalMins==null?'delete':'update')
+        return {applied:true,disabled,failures}
+      }catch(error){await client.query('ROLLBACK');throw error}finally{client.release()}
     },
 
     async claimDueJob(id) {

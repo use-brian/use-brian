@@ -197,3 +197,19 @@ export async function fetchWorkspaceCreationContext(workspaceId:string){
   // A directory listing or read-only grant is not a creation destination.
   return protectProjection({teams:teams.groups.filter(team=>authority.mutationTeamIds===null||authority.mutationTeamIds.includes(team.id)),projects:projects.projects.filter(project=>authority.projectIds===null||authority.projectIds.includes(project.id)),assistants:assistants.filter(assistant=>assistant.workspaceId===workspaceId),policyRevision:mode.policyRevision,validForMs:Math.min(mode.validForMs,authority.validForMs)},started);
 }
+
+export type OrganizationCutoverPreview={status:string;reviewId?:string;payloadHash?:string;expiresAt?:string;policyRevision?:string;
+  changes?:{scheduleConversions:string[];recordsDeleted:number;grantsChanged:boolean};inventory?:{families:Array<{family:string;count:number}>};
+  blockers?:Array<{code:string;kind?:string;id?:string}>};
+export async function prepareOrganizationCutover(workspaceId:string,targetDepartmentId:string):Promise<OrganizationCutoverPreview> {
+  return cutoverRequest(workspaceId,'preview',{targetDepartmentId,idempotencyKey:crypto.randomUUID(),requireNoGeneral:true});
+}
+export async function applyOrganizationCutover(workspaceId:string,reviewId:string,payloadHash:string):Promise<{setupState:string;reviewId:string}> {
+  return cutoverRequest(workspaceId,'apply',{reviewId,payloadHash});
+}
+async function cutoverRequest<T>(workspaceId:string,action:'preview'|'apply',body:unknown):Promise<T> {
+  const root=publicRuntimeConfig().apiUrl??'http://localhost:4000';
+  const response=await authFetch(`${root}/api/workspaces/${encodeURIComponent(workspaceId)}/access/cutover/${action}`,{
+    cache:'no-store',method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const result=await response.json();if(!response.ok)throw new Error(result.error??'access_unavailable');return result;
+}

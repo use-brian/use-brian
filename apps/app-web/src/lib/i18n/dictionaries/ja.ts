@@ -583,6 +583,19 @@ export const ja: Dictionary = {
     "migration": "管理者は保存済みの移行計画を確認し、Brian に明示的な提案を依頼できます。バッチの適用でモードは有効化されません。"
 },
   accessMigration: {
+    organization_cutover_target_changed: "このプランは別のワークスペースモードを対象としています。確認またはキャンセルしてください。完了済みの設定は変わりません。",
+    cutoverActiveWork: "実行中の処理が完了したら再試行してください。",
+    cutoverAssistants: "アシスタントのホーム部門を確認してください。",
+    cutoverSources: "データソースの保存先を確認してください。",
+    cutoverRecords: "レコードの保存先と権限を確認してください。",
+
+    finishSetup: "セットアップを完了",
+    cutoverReview: "部門への最終移行を確認します。保持されたレコードと権限は変更されません。",
+    cutoverBlocked: "完了する前に対応が必要です。表示されたレコードを確認して再試行してください。",
+    cutoverPreserved: "レコードの削除や権限の追加はありません。",
+    cutoverSchedules: "変換するスケジュール",
+    cutoverFamilies: "確認済みのデータ種別",
+
     "title": "アクセスモードと移行",
     "simple": "シンプル",
     "departments": "部門",
@@ -602,7 +615,7 @@ export const ja: Dictionary = {
     "scope_review_impact_missing": "保存済みの影響証拠がありません。適用前に新しいレビューを作成してください。",
     "scope_review_impact_too_large": "リソースの影響が対応するレビューの上限を超えています。より小さな対応する提案を使用してください。",
     "scope_review_conflict": "リソースレビューが現在の権限や計画の状態と一致しません。更新して新しいレビューを作成してください。",
-    "limitation": "範囲を限定した計画では、人、アシスタント、対応リソースを変更できますが、ワークスペースモードは変更できません。モード有効化や移行完了は未対応です。Brian と明示的な提案を作成してください。割り当ては推測しません。",
+    "limitation": "プランでは、メンバー、アシスタント、リソースへの確認済みの変更を管理します。ワークスペースの設定完了には、所有者による別の確認が必要です。",
     "plans": "移行計画",
     "empty": "保存済み計画はありません",
     "inspect": "詳細",
@@ -619,6 +632,8 @@ export const ja: Dictionary = {
     "full_inventory_required": "全体のインベントリ確認が必要です。",
     "intake_certification_required": "取り込み経路の認証が必要です。",
     "mode_finalizer_unavailable": "モードの最終確定は利用できません。",
+    "organization_cutover_review_required": "ワークスペースの所有者による設定の最終確認が必要です。",
+    "completed": "完了",
     "migration_busy": "別の移行操作が実行中です。更新して再試行してください。",
     "migration_not_active": "この計画は有効ではありません。状態を更新してください。",
     "migration_item_applied": "この項目は適用済みです。進捗を更新してください。",

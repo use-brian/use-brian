@@ -64,6 +64,9 @@ export function createJobExecutor(options: JobExecutorOptions): JobExecutor {
 
   return async function executeJob(job: ScheduledJob): Promise<string> {
     const startedAt = Date.now()
+    if (job.dispatchLeaseId && jobStore.validateDispatchLease && !await jobStore.validateDispatchLease(job)) {
+      throw Object.assign(new Error('Scheduled dispatch lease changed.'),{code:'scheduled_job_stale_dispatch'})
+    }
 
     // ── Nag-loop state: open or roll the activeNag cycle ────────────
     //
@@ -103,6 +106,9 @@ export function createJobExecutor(options: JobExecutorOptions): JobExecutor {
           !await jobStore.advanceScheduleClaimNag(job.id, job.scheduleClaimId, activeNag, nagNextRunAt)) {
           throw Object.assign(new Error('workflow_schedule_claim_unavailable'), { code: 'workflow_schedule_claim_unavailable' })
         }
+      } else if (job.dispatchLeaseId && jobStore.advanceDispatchLeaseNag) {
+        if (!await jobStore.advanceDispatchLeaseNag(job.id,job.dispatchLeaseId,activeNag,nagNextRunAt))
+          throw Object.assign(new Error('Scheduled dispatch lease changed.'),{code:'scheduled_job_stale_dispatch'})
       } else {
         await jobStore.setState(job.id, { activeNag })
         await jobStore.update(job.id, { nextRunAt: nagNextRunAt })

@@ -1,8 +1,9 @@
 /** Office-owned staging + atomic app-role publication. Never root-file admission. */
+import { isDeepStrictEqual } from 'node:util'
 import { createHash, randomUUID } from 'node:crypto'
 import {dispatchOfficeJobLocal} from './job-event-bus.js'
 import type { PoolClient } from 'pg'
-import { assertOfficeArtifactSnapshot, officeStateVector, snapshotToYDoc, type DocumentSnapshot } from '@use-brian/office-model'
+import { assertOfficeArtifactSnapshot, officeStateVector, snapshotToYDoc, type DocumentSnapshot, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { applyRLSGucs, getAppPool, rollbackAndRelease } from '../db/client.js'
 import { createOfficeLiveStore } from '../db/office-live.js'
 import { createOfficeArtifactStore, type OfficeDbQuery } from '../db/office-artifacts.js'
@@ -10,12 +11,14 @@ import { createOfficeGenerationStore, type OfficeGenerationJobRow } from '../db/
 import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
+import { validateDepartmentOfficeGeneration } from './generation-evidence.js'
 import { promptOnlyBrief, constructPromptOnlyDocument } from './prompt-only.js'
+import { OfficeGenerationBriefSchema } from '@use-brian/core'
 import type { LLMProvider } from '@use-brian/core'
 import { validateOfficeInternalCandidateRendering, type OfficeRenderValidationPort } from './render-validation.js'
 
 const denied=()=>new Error('office_generation_publication_denied')
-const equal=(a:unknown,b:unknown)=>JSON.stringify(a)===JSON.stringify(b)
+const equal=isDeepStrictEqual
 function queryFor(client:PoolClient,actor:string):OfficeDbQuery {
   return async <T>(userId:string,sql:string,values:unknown[])=>{
     if(userId!==actor) throw denied()
@@ -30,20 +33,22 @@ async function authorize(client:PoolClient, expected:OfficeGenerationJobRow, lea
   if(!job || job.status!=='running' || job.leaseToken!==leaseToken || job.cancelRequestedAt || job.jobKind!=='create'
     || job.artifactId!==expected.artifactId || job.workspaceId!==expected.workspaceId || job.initiatedByUserId!==actor
     || !equal(job.brief,expected.brief) || !equal(job.authorityProjection,expected.authorityProjection)) throw denied()
-  promptOnlyBrief(job)
+  const department=(job.authorityProjection as {creationBinding?:{protocol?:string}})?.creationBinding?.protocol==='office_department_v2'
+  if(department) await validateDepartmentOfficeGeneration(client,job)
+  else promptOnlyBrief(job)
   const p=job.authorityProjection as {sensitivity:string;compartments:string[];projectIds:string[];visibilityUserIds:string[];compartmentGrant:string[];projectGrant:string[];sourceHandles:string[];
     creationBinding:{protocol:string;actorUserId:string;workspaceId:string;authSessionId:string;sources:unknown[];implicitContext:string}}
   const b=p.creationBinding
-  if(b?.protocol!=='office_prompt_only_v1' || b.actorUserId!==actor || b.workspaceId!==job.workspaceId || b.implicitContext!=='disabled'
+  if(!department && (b?.protocol!=='office_prompt_only_v1' || b.actorUserId!==actor || b.workspaceId!==job.workspaceId || b.implicitContext!=='disabled'
     || !equal(b.sources,[]) || !equal(p.sourceHandles,[]) || !Array.isArray(p.compartments) || !Array.isArray(p.projectIds)
-    || !equal(p.compartmentGrant,p.compartments) || !equal(p.projectGrant,p.projectIds) || job.templateVersionId || job.baseArtifactVersion!==0) throw denied()
+    || !equal(p.compartmentGrant,p.compartments) || !equal(p.projectGrant,p.projectIds) || job.templateVersionId || job.baseArtifactVersion!==0)) throw denied()
   const session=await client.query(`SELECT s.id FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.user_id=$2
     AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND s.auth_version=u.auth_version FOR SHARE OF s,u`,[b.authSessionId,actor])
   if(!session.rows.length) throw denied()
-  const a=(await client.query(`SELECT * FROM office_artifacts WHERE id=$1 AND workspace_id=$2 AND family='document' AND mode='artifact'
-    AND lifecycle_state='active' AND head_version=0 AND head_version_id IS NULL AND template_version_id IS NULL
-    AND NOT scope_review_state_held('office_artifact',id) AND office_generation_artifact_allows(id,workspace_id,true) FOR UPDATE`,[job.artifactId,job.workspaceId])).rows[0]
-  if(!a || a.sensitivity!==p.sensitivity || !equal(a.compartments,p.compartments) || !equal(a.project_ids,p.projectIds)
+  const a=(await client.query(`SELECT * FROM office_artifacts WHERE id=$1 AND workspace_id=$2 AND family=$3 AND mode='artifact'
+    AND lifecycle_state='active' AND head_version=0 AND head_version_id IS NULL
+    AND NOT scope_review_state_held('office_artifact',id) AND office_generation_artifact_allows(id,workspace_id,true) FOR UPDATE`,[job.artifactId,job.workspaceId,department?OfficeGenerationBriefSchema.parse(job.brief).family:'document'])).rows[0]
+  if(!a || a.template_version_id!==(job.templateVersionId??null) || a.sensitivity!==p.sensitivity || !equal(a.compartments,p.compartments) || !equal(a.project_ids,p.projectIds)
     || !equal(a.visibility_user_ids,p.visibilityUserIds)) throw denied()
   if((await client.query('SELECT 1 FROM office_artifact_sources WHERE artifact_id=$1 LIMIT 1',[job.artifactId])).rows.length) throw denied()
   for(const key of p.compartments) if(key.startsWith('team:') && !(await client.query("SELECT 1 FROM workspace_groups WHERE workspace_id=$1 AND compartment_key=$2 AND status='active'",[job.workspaceId,key])).rows.length) throw denied()
@@ -57,10 +62,12 @@ export async function checkPromptOnlyAuthority(job:OfficeGenerationJobRow,leaseT
   try {await client.query('BEGIN');await applyRLSGucs(client,job.initiatedByUserId);await authorize(client,job,leaseToken);await client.query('COMMIT')}
   finally {await rollbackAndRelease(client)}
 }
-export async function publishPromptOnlyDocument(params:{job:OfficeGenerationJobRow;leaseToken:string;snapshot:DocumentSnapshot;resolver:FilesClientResolver;storageLimitBytes:number}) {
+async function publishGenerationSnapshot(params:{job:OfficeGenerationJobRow;leaseToken:string;snapshot:OfficeArtifactSnapshot;resolver:FilesClientResolver;storageLimitBytes:number}) {
   const {job,leaseToken,snapshot,resolver}=params, actor=job.initiatedByUserId
   assertOfficeArtifactSnapshot(snapshot)
-  if(snapshot.artifactId!==job.artifactId || snapshot.workspaceId!==job.workspaceId || snapshot.templateVersionId || snapshot.resources.length) throw denied()
+  const department=(job.authorityProjection as {creationBinding?:{protocol?:string}})?.creationBinding?.protocol==='office_department_v2'
+  if(snapshot.artifactId!==job.artifactId || snapshot.workspaceId!==job.workspaceId || snapshot.family!==OfficeGenerationBriefSchema.parse(job.brief).family
+    || snapshot.templateVersionId!==(job.templateVersionId??null) || (!department && snapshot.resources.length)) throw denied()
   await checkPromptOnlyAuthority(job,leaseToken)
   const bytes=Buffer.from(JSON.stringify(snapshot)), hash=createHash('sha256').update(bytes).digest('hex'), fileId=randomUUID()
   const storage=await resolver.forWorkspace(job.workspaceId), key=buildStorageKey(job.workspaceId,fileId)
@@ -75,6 +82,12 @@ export async function publishPromptOnlyDocument(params:{job:OfficeGenerationJobR
     client=await getAppPool().connect()
     await client.query('BEGIN');await applyRLSGucs(client,actor)
     const a=await authorize(client,job,leaseToken)
+    if(department) {
+      // Only immutable resources admitted with the selected template can enter
+      // the published snapshot. The evidence validator rechecks their live files.
+      const sources=(job.authorityProjection as {creationBinding:{sources:Array<{kind:string;id:string;version:string}>}}).creationBinding.sources
+      for(const resource of snapshot.resources) if(!sources.some(source=>source.kind==='resource'&&source.id===resource.id&&source.version===resource.hash)) throw denied()
+    }
     if(!storage.byo) {
       const usage=(await client.query('SELECT coalesce(sum(size_bytes),0)::text AS bytes FROM workspace_files WHERE workspace_id=$1',[job.workspaceId])).rows[0]
       if(Number(usage.bytes)+bytes.length>params.storageLimitBytes) throw new Error('office_storage_quota_exceeded')
@@ -90,11 +103,20 @@ export async function publishPromptOnlyDocument(params:{job:OfficeGenerationJobR
       VALUES($1,$2,$3,$4,$5,'application/json',$6,$7,$8,$9,$10,$11,$12::jsonb)`,[fileId,job.workspaceId,`${parent}/${name}`,parent,name,bytes.length,buildStorageUri(storage.bucket,job.workspaceId,fileId,storage.uriScheme),a.sensitivity,a.compartments,a.project_ids,actor,JSON.stringify({noIndex:true,contentSha256:hash,officeGenerationJobId:job.id})])
     await client.query('INSERT INTO office_generation_file_bindings(file_id,artifact_id,workspace_id,job_id,snapshot_hash) VALUES($1,$2,$3,$4,$5)',[fileId,job.artifactId,job.workspaceId,job.id,hash])
     const version=await createOfficeArtifactStore(queryFor(client,actor)).commitVersion({userId:actor,artifactId:job.artifactId,snapshotTitle:snapshot.title,expectedVersion:0,snapshotFileId:fileId,snapshotHash:hash,
-      operationClock:officeStateVector(snapshotToYDoc(snapshot)),schemaVersion:snapshot.schemaVersion,capabilityVersion:snapshot.capabilityVersion,origin:'generation',authorType:'system',summary:'Prompt-only generation',checkpointKind:'generation'})
+      operationClock:officeStateVector(snapshotToYDoc(snapshot)),schemaVersion:snapshot.schemaVersion,capabilityVersion:snapshot.capabilityVersion,origin:'generation',authorType:'system',summary:department?'Office artifact generated':'Prompt-only generation',checkpointKind:'generation'})
     if(!version) throw denied()
     // Publish an immediately usable editing document, not just a historical
     // snapshot. Never overwrite a concurrent draft; roll back the whole output.
     if(!await createOfficeLiveStore(queryFor(client,actor)).initializeIfMissing({userId:actor,artifactId:job.artifactId,snapshot})) throw denied()
+    if(department) {
+      const sources=(job.authorityProjection as {creationBinding:{sources:Array<{kind:string;id:string;version:string;sensitivity:string;compartments:string[];private:boolean;artifactId?:string}>}}).creationBinding.sources
+      for(const source of sources) await client.query(`INSERT INTO office_artifact_sources
+        (artifact_id,artifact_version_id,workspace_id,source_kind,source_id,source_version,sensitivity,required_compartments,visibility_user_ids)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[job.artifactId,version.id,job.workspaceId,
+        source.kind==='knowledge'?'brain':source.kind==='template'?'artifact':'upload',
+        source.kind==='knowledge'?`knowledge:${source.id}`:source.artifactId??source.id,source.version,
+        source.sensitivity,source.compartments,source.private?[actor]:[]])
+    }
     const done=await client.query(`UPDATE office_generation_jobs SET status='completed',stage='completed',completed_at=now(),updated_at=now(),lease_token=NULL,lease_expires_at=NULL,error_code=NULL,error_detail=NULL
       WHERE id=$1 AND status='running' AND lease_token=$2 AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NULL
       AND EXISTS(SELECT 1 FROM auth_sessions s JOIN users u ON u.id=s.user_id
@@ -112,6 +134,15 @@ export async function publishPromptOnlyDocument(params:{job:OfficeGenerationJobR
     // Unknown COMMIT acknowledgement must retain bytes: they may be canonical.
     if(!committing && !committed) await storage.gcs.deleteBlob(key).catch(()=>{})
   }
+}
+
+export async function publishPromptOnlyDocument(params:{job:OfficeGenerationJobRow;leaseToken:string;snapshot:DocumentSnapshot;resolver:FilesClientResolver;storageLimitBytes:number}) {
+  if((params.job.authorityProjection as {creationBinding?:{protocol?:string}})?.creationBinding?.protocol!=='office_prompt_only_v1') throw denied()
+  return publishGenerationSnapshot(params)
+}
+export async function publishDepartmentOfficeSnapshot(params:{job:OfficeGenerationJobRow;leaseToken:string;snapshot:OfficeArtifactSnapshot;resolver:FilesClientResolver;storageLimitBytes:number}) {
+  if((params.job.authorityProjection as {creationBinding?:{protocol?:string}})?.creationBinding?.protocol!=='office_department_v2') throw denied()
+  return publishGenerationSnapshot(params)
 }
 
 /** Production orchestration. Tests replace only external model/render/storage ports. */

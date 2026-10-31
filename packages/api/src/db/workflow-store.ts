@@ -256,7 +256,18 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
             throw new WorkspaceAccessError('access_policy_conflict', 409)
           }
           let humanAuthor: OperationalHumanAuthor | undefined
-          if (policy && policy.setupState !== 'legacy') {
+          if (policy?.departmentReadV2) {
+            if (provenance?.kind==='authenticated-workflow-rest') {
+              if (!provenance.authSessionId || provenance.userId!==userId || managedBy) throw new WorkspaceAccessError('operational_authoring_proof_required',409)
+              const session=await client.query(`SELECT s.id FROM auth_sessions s JOIN users u ON u.id=s.user_id
+                WHERE s.id=$1 AND s.user_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
+                  AND s.auth_version=u.auth_version FOR SHARE OF s,u`,[provenance.authSessionId,userId])
+              if (!session.rows.length) throw new WorkspaceAccessError('operational_authoring_proof_required',409)
+              const assistantId=await hooks?.resolveAuthoringPrimary?.(workspaceId,client)
+              if (!assistantId) throw new WorkspaceAccessError('workflow_authoring_primary_unavailable',409)
+              humanAuthor={userId,assistantId,expectedPolicyRevision:provenance.expectedPolicyRevision}
+            } else if (provenance?.kind==='internal-human') humanAuthor=provenance
+          } else if (policy && policy.setupState !== 'legacy') {
             if (policy.setupState !== 'ready') throw new WorkspaceAccessError('access_mode_setup_required', 409)
             if (provenance?.kind === 'authenticated-workflow-rest') {
               if (!provenance.authSessionId || provenance.userId !== userId || managedBy) {
@@ -328,7 +339,7 @@ export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore
             ],
           )
           if (policy?.setupState === 'ready' && trigger?.kind === 'schedule') {
-            if (provenance?.kind !== 'authenticated-workflow-rest') throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
+            if (provenance?.kind !== 'authenticated-workflow-rest' && !policy.departmentReadV2) throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
             await insertWorkflowScheduleJob(client, workspaceId, inserted.rows[0].id)
             schedulePublished = true
           }

@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg'
 import { DerivedScopeError, deriveResourceScope, resourceScopeKey, type ScopeSource, type AccessContext, type DerivedWriteEvidence, type WorkspaceFileCreateInput } from '@use-brian/core'
 import { validateDerivedEntityInputs } from '../db/derived-scope-store.js'
 import { assertExecutionResourceScope } from '../db/access-predicate.js'
-import { readAdmissionPolicy } from './admission-policy-read.js'
+import { readAdmissionPolicy, usesClassicModeAdmission } from './admission-policy-read.js'
 import { admitWorkspaceResource } from './resource-admission.js'
 import { WorkspaceAccessError } from './policy.js'
 
@@ -59,7 +59,7 @@ export async function admitDerivedFile(client: PoolClient, actor: string, input:
     sensitivity: input.sensitivity ?? 'internal', compartments: input.compartments ?? [], projectIds: input.projectIds ?? [] })
   assertExecutionResourceScope(scope, 'read', access)
   assertExecutionResourceScope({ ...scope, compartments: scope.compartments.filter(k => !floor.compartments.includes(k)) }, 'mutation', access)
-  if (policy && policy.setupState !== 'legacy') await admitWorkspaceResource(client, input.workspaceId, actor, {
+  if (usesClassicModeAdmission(policy)) await admitWorkspaceResource(client, input.workspaceId, actor, {
     writerKind: 'workspace_file', rowVisibility: { userId: scope.userId, assistantId: scope.assistantId },
     visibility: scope.userId ? 'private' : 'workspace', sensitivity: scope.sensitivity,
     inherited: { ...floor, visibility: floor.userId ? 'private' : 'workspace' }, inheritedAuthority: 'read',
