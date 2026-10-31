@@ -21,7 +21,7 @@ export async function tryNativeInvocationEvidence(execution:ExecutionContext,evi
  if(execution.ownership.kind!=='workspace'||execution.ownership.workspaceId!==workspaceId||!nativeAttended&&!nativeDelegated||getApplicationExecutionBinding(execution)
   ||recipient.workspaceId!==workspaceId||recipient.userId!==''&&recipient.userId!==actor
   ||!roots.length||roots.length>100||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')
-  ||roots.some(root=>!['application_field','session_message','session_context_revision','memory'].includes(root.resourceKind)))return null
+  ||roots.some(root=>!['application_field','session_message','session_context_revision','memory','workspace_file'].includes(root.resourceKind)))return null
  const anonymous=recipient.userId===''
  const ceiling=intersectAccessCeilings(execution.security.ceiling,{...recipient,userId:actor,mutationCompartments:[],visibilityAssistantIds:execution.security.ceiling.visibilityAssistantIds})
  const client=await getAppPool().connect()

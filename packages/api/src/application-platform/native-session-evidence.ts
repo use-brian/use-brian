@@ -4,7 +4,7 @@ import type {PoolClient} from 'pg'
 import {ContextScopeAccumulator,resourceScopeKey,type ResourceScope,type ScopeEvidence,type ScopeSource} from '@use-brian/core'
 const scope=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),
- resourceKind:z.enum(['application_field','session_context_revision','session_message','memory']),resourceId:z.string().uuid(),version:z.string().min(1)}).strict()
+ resourceKind:z.enum(['application_field','session_context_revision','session_message','memory','workspace_file']),resourceId:z.string().uuid(),version:z.string().min(1)}).strict()
 const labelScope=scope.pick({workspaceId:true,userId:true,assistantId:true,sensitivity:true,compartments:true,projectIds:true}).strict()
 const historyResult=z.discriminatedUnion('available',[
  z.object({purpose:z.literal('memory_history'),available:z.literal(false)}).strict(),
@@ -18,11 +18,13 @@ const result=z.discriminatedUnion('admitted',[
 ])
 /** Null means an unchanged original-family fallback; no authorization result is cached. */
 export async function readNativeSessionEvidence(client:Pick<PoolClient,'query'>,workspaceId:string,roots:readonly ScopeSource[]):Promise<NativeEvidence|null>{
- if(!roots.length||roots.length>100||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')||roots.some(root=>!['application_field','session_context_revision','session_message','memory'].includes(root.resourceKind)))return null
+ if(!roots.length||roots.length>100||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')||roots.some(root=>!['application_field','session_context_revision','session_message','memory','workspace_file'].includes(root.resourceKind)))return null
  // Field observations can hide Memory ancestors too. The closed validator
  // discovers the complete native closure and preserves its original fallback.
  const sql='SELECT read_native_attended_memory_evidence($1,$2,$3,$4) AS value'
- const raw=(await client.query<{value:unknown}>(sql,
+ let raw=(await client.query<{value:unknown}>(sql,
+  [workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)])).rows[0]?.value
+ if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_file_session_evidence($1,$2,$3,$4,true) AS value',
   [workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)])).rows[0]?.value
  if(raw===null)return null
  if(typeof raw==='object'&&raw!==null&&'purpose'in raw&&raw.purpose==='memory_history'){
