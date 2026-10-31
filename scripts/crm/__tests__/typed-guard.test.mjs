@@ -64,6 +64,29 @@ test('[COMP:crm/assurance-fixture] Typed guard retains only the existing reviewe
  }finally{await owner.end()}
 })
 
+test('[COMP:crm/assurance-fixture] Source edge typed guard accepts only its exact private member',async()=>{
+ await assertLocalFixture()
+ const owner=new pg.Client({connectionString:process.env.DATABASE_URL});await owner.connect()
+ const helperSignature='public.application_native_source_edges_dispatch(uuid,text,uuid,text)'
+ try{
+  assert.match((await owner.query('SELECT prosrc FROM pg_proc WHERE oid=$1::regprocedure',[signature])).rows[0].prosrc,/count\(\*\)=128/)
+  for(const phase of phases)for(const change of ['body','cost','ACL','untracked phase']){
+   await owner.query('BEGIN')
+   try{
+    if(change==='body'){
+     const helper=(await owner.query('SELECT pg_get_functiondef(oid) definition,prosrc FROM pg_proc WHERE oid=$1::regprocedure',[helperSignature])).rows[0]
+     await owner.query(helper.definition.replace(helper.prosrc,()=>"BEGIN RAISE EXCEPTION 'unsafe_edge_dispatch_invoked'; END"))
+    }
+    if(change==='cost')await owner.query(`ALTER FUNCTION ${helperSignature} COST 101`)
+    if(change==='ACL')await owner.query(`GRANT EXECUTE ON FUNCTION ${helperSignature} TO app_user`)
+    if(change==='untracked phase')await owner.query("DELETE FROM _migrations WHERE name='8168_native_source_edge_dispatch.sql'")
+    await assert.rejects(owner.query(await roleSql(phase)),/Unknown fixture Memory guard/,`${change}:${phase}`)
+   }finally{await owner.query('ROLLBACK')}
+   assert.equal((await owner.query('SELECT application_memory_statement_helpers_current() current')).rows[0].current,true)
+  }
+ }finally{await owner.end()}
+})
+
 test('[COMP:crm/assurance-fixture] Original SQL guard phase remains recognized before typed migration',{timeout:180_000},async()=>{
  await assertLocalFixture()
  const env=cleanRuntimeEnvironment(process.env),pgBin=(await runCommand('pg_config',['--bindir'],{env})).trim()
