@@ -190,13 +190,15 @@ export function reconnectRelayFrames(
 
 /**
  * What the reconnect stream's 5s DB-status backstop sends when it, not the
- * bus, notices the turn ended: the same terminal pair, with an empty
- * `turn_completed` because there is no bus payload to relay.
+ * bus, notices the turn ended: the same terminal pair, retaining abnormal
+ * status without inventing an author or exposing exception details.
  */
-export const RECONNECT_BACKSTOP_FRAMES: readonly ReconnectRelayFrame[] = [
-  { event: 'turn_completed', data: {} },
-  { event: 'done', data: {} },
-]
+export function reconnectBackstopFrames(status?: string): readonly ReconnectRelayFrame[] {
+  return [
+    { event: 'turn_completed', data: status === 'timeout' || status === 'failed' ? { reason: status } : {} },
+    { event: 'done', data: {} },
+  ]
+}
 
 export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   const subscribeSessionEvents = opts.subscribeSessionEvents ?? noopSubscribeSessionEvents
@@ -2244,11 +2246,12 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     // instance, a dropped NOTIFY). Poll the authoritative DB status so the
     // client never hangs on "working" past the turn. The stuck-session-sweeper
     // flips an abandoned turn to 'timeout', which is also caught here. There
-    // is no bus payload to relay, so the backstop sends the bare pair.
+    // is no bus payload to relay; preserve the terminal status so an abandoned
+    // turn cannot look like a successful reply with an empty transcript.
     poll = setInterval(() => {
       void findSessionById(req.params.id)
         .then((s) => {
-          if (!s || s.status !== 'running') authority.run(() => finalize(RECONNECT_BACKSTOP_FRAMES))
+          if (!s || s.status !== 'running') authority.run(() => finalize(reconnectBackstopFrames(s?.status)))
         })
         .catch(() => {})
     }, 5_000)

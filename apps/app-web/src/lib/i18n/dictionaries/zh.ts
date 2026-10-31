@@ -9098,6 +9098,7 @@ export const zh: Dictionary = {
     liveWorkNoProgress: "已有 {minutes} 分鐘沒有進展",
     turnStoppedBy: "{name} 停止了這個回合。",
     turnStoppedByYou: "你已停止這個回合。",
+    turnFailed: "未能完成這次回覆。再次嘗試前，請先檢查對話內容。",
     turnReconnecting:
       "連線已中斷。助理仍在繼續處理，完成後回覆會顯示在這裡。",
     turnReclaimed:

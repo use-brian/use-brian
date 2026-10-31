@@ -9380,6 +9380,7 @@ export const en = {
     liveWorkNoProgress: "No progress for {minutes}m",
     turnStoppedBy: "{name} stopped this turn.",
     turnStoppedByYou: "You stopped this turn.",
+    turnFailed: "This reply could not be completed. Check the conversation before trying again.",
     turnReconnecting:
       "Connection dropped. Your assistant is still working; the reply will appear here when it finishes.",
     turnReclaimed:

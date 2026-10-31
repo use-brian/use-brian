@@ -9146,6 +9146,7 @@ export const ja: Dictionary = {
     liveWorkNoProgress: "{minutes} 分間、進捗がありません",
     turnStoppedBy: "{name} がこのターンを停止しました。",
     turnStoppedByYou: "このターンを停止しました。",
+    turnFailed: "返信を完了できませんでした。もう一度試す前に、会話の内容をご確認ください。",
     turnReconnecting:
       "接続が切れました。アシスタントは処理を続けています。完了すると返信がここに表示されます。",
     turnReclaimed:

@@ -1734,6 +1734,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       switch (event) {
         case "status": {
           const working = payload.status === "running";
+          if (!ownsDirectStream && payload.status === "timeout") setTurnEndNotice(t.turnReclaimed);
+          if (!ownsDirectStream && payload.status === "failed") setTurnEndNotice(t.turnFailed);
           if (working) sawRunning = true;
           if (reconnectWanted && working) chatController.connected(controllerRun);
           // A GET opened just before this page's POST may carry a stale `idle`
@@ -1977,8 +1979,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // sender of the stalled turn is exactly who most needs to be told.
           const endReason =
             typeof payload.reason === "string" ? payload.reason : null;
-          if (endReason === "stalled_reclaimed") {
+          if (endReason === "stalled_reclaimed" || endReason === "timeout") {
             setTurnEndNotice(t.turnReclaimed);
+          } else if (endReason === "failed" && !ownsDirectStream) {
+            setTurnEndNotice(t.turnFailed);
           } else if (endReason === "stopped_by_user") {
             const by =
               typeof payload.stoppedByName === "string"
@@ -1988,7 +1992,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               by ? format(t.turnStoppedBy, { name: by }) : t.turnStoppedByYou,
             );
           }
-          if (endReason) {
+          if (endReason && (endReason !== "failed" || !ownsDirectStream)) {
             // The stalled turn's own sender still owns a dead POST stream.
             // Tear it down or the composer stays dimmed behind a turn that
             // the server has already given up on.
@@ -5111,7 +5115,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               dict={tChat.queue}
               onSteer={midTurn.steer}
             />
-            {/* A teammate's turn, relayed off the per-session event bus
+            {/* A followed turn, including our own after returning to Chat,
+                relayed off the per-session event bus
                 through the SAME feed pipeline the sender uses (T13): the
                 shimmer feed (reasoning + tool steps) above the live snapshot
                 text. When the turn settles the PERSISTED transcript is
@@ -5120,24 +5125,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               <div className="flex gap-2.5">
                 {avatarFor(remoteAssistantId)}
                 <div className="min-w-0 flex-1 space-y-2 pt-0.5">
-                  {remoteEvents.length > 0 ||
-                  remoteTools.length > 0 ||
-                  remoteResearchPhase ? (
-                    <ChatActivityFeed
-                      events={remoteEvents}
-                      tools={remoteTools}
-                      replyStreaming={remoteText.length > 0}
-                      researchPhase={remoteResearchPhase}
-                      startedAt={remoteStartedAt}
-                    />
-                  ) : remoteText ? null : (
-                    <span
-                      role="status"
-                      className="chat-shimmer-text text-xs font-medium"
-                    >
-                      {t.teammateWorking}
-                    </span>
-                  )}
+                  <ChatActivityFeed
+                    events={remoteEvents}
+                    tools={remoteTools}
+                    replyStreaming={remoteText.length > 0}
+                    researchPhase={remoteResearchPhase}
+                    startedAt={remoteStartedAt}
+                  />
                   {remoteText ? (
                     <div data-brian-chat-answer className={MARKDOWN_CLS}>
                       <ChatMarkdown

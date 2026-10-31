@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import ts from 'typescript'
 import { ChatTurnRefusal, chatTurnErrorEvent, customModelMediaRefusal, resolveWorkspaceTurnLlm } from '../chat.js'
 import { CUSTOM_MODEL_IMAGE_REJECTION } from '../_channel-error-text.js'
 import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
@@ -123,4 +125,40 @@ describe('[COMP:api/chat-route] post-SSE turn refusals', () => {
       expect(message).not.toContain('—')
     }
   })
+})
+
+
+describe('[COMP:api/chat-route] detached failure outcome', () => {
+  // Exercise the actual catch publisher payload without starting unrelated
+  // provider work or duplicating its outcome logic in the fixture.
+  const source = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
+  const tree = ts.createSourceFile('chat.ts', source, ts.ScriptTarget.Latest, true)
+  let payload: ts.Expression | undefined
+  function visit(node: ts.Node) {
+    if (ts.isCallExpression(node) && node.expression.getText(tree) === 'publishSessionEvent') {
+      const event = node.arguments[0]
+      if (event && ts.isObjectLiteralExpression(event) && event.properties.some(property =>
+        ts.isPropertyAssignment(property) && property.name.getText(tree) === 'sessionId'
+        && property.initializer.getText(tree) === 'sessionIdForError')) {
+        const property = event.properties.find(property => ts.isPropertyAssignment(property)
+          && property.name.getText(tree) === 'payload') as ts.PropertyAssignment
+        payload = property.initializer
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  if (!payload) throw new Error('Missing chat catch completion publisher')
+  const evaluate = new Function('userIdForError', 'postReplyNotice', 'recoveryDelivered',
+    ts.transpileModule(`return (${payload.getText(tree)});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)
+
+  it('publishes only a failed outcome, never exception details or a success', () => {
+    expect(evaluate('actor', null, false)).toEqual({ senderUserId: 'actor', reason: 'failed' })
+  })
+
+  it.each([[null, true], [{ code: 'post_reply_authority_changed' }, false], [{ code: 'post_reply_authority_changed' }, true]])(
+    'keeps delivered recovery and completed-reply notices as ordinary completion', (notice, recovered) => {
+      expect(evaluate('actor', notice, recovered)).toEqual({ senderUserId: 'actor' })
+    },
+  )
 })

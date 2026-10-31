@@ -1,5 +1,13 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
+import React from "react";
+import { renderToString } from "react-dom/server";
+import { I18nProvider } from "@/lib/i18n/client";
+import { en } from "@/lib/i18n/dictionaries/en";
+import { ja } from "@/lib/i18n/dictionaries/ja";
+import { zh } from "@/lib/i18n/dictionaries/zh";
+import { zhCN } from "@/lib/i18n/dictionaries/zh-cn";
+import { ChatActivityFeed } from "@/components/chrome/chat-activity";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isAuthoritativeRosterDenial } from "@/lib/chat-surface-data";
 
@@ -33,7 +41,7 @@ function handler(name: string) {
 }
 function evaluate<T = (...args: any[]) => any>(expression: string, scope: Record<string, unknown>): T {
   const code = ts.transpileModule(`return (${expression});`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None, jsx: ts.JsxEmit.React },
   }).outputText;
   return new Function(...Object.keys(scope), code)(...Object.values(scope)) as T;
 }
@@ -464,4 +472,88 @@ describe("[COMP:app-web/chat-sessions-cache] selection before paint", () => {
     expect(scope.writeTranscriptCache).toHaveBeenCalledWith("B", selectedMessages);
     cleanup();
   });
+});
+
+
+function followedTurn(direct = false) {
+  const scope = {
+    ...base(), sessionId: "A", cancelled: false, epoch: 1,
+    shouldAcceptRoomMirror: () => !direct, meId: "viewer",
+    directTurnSessionRef: { current: direct ? "A" : null }, stream: { inFlight: () => direct },
+    workspaceId: "workspace", dispatchChatSessionActivity: vi.fn(),
+    setTurnEndNotice: vi.fn(), t: { turnFailed: "Failed safely", turnReclaimed: "Reset stalled turn" },
+    setRemoteActive: vi.fn(), setRemoteStartedAt: vi.fn(), setReconnectNotice: vi.fn(),
+    chat: { dispatch: vi.fn() }, resetTurnActivity: vi.fn(), resetRemoteTurn: vi.fn(),
+    setRemoteConfirmation: vi.fn(), setQueuedNotice: vi.fn(), loadTranscript: vi.fn(),
+    reloadShared: vi.fn(), dispatchChatSessionsRefresh: vi.fn(), panePolicy: { post: false },
+    refreshPendingInput: vi.fn(),
+  };
+  const onEvent = evaluate(`(() => {
+    const ownsFollow = ${declaration("ownsFollow").initializer!.getText(tree)};
+    const reconnectWanted = true;
+    const controllerRun = chatController.capture();
+    let sawRunning = false;
+    let sawTurnCompleted = false;
+    return ${declaration("handleRoomEvent").initializer!.getText(tree)};
+  })()`, scope);
+  return { scope, onEvent };
+}
+
+describe("[COMP:app-web/turn-reconnect] returning sender outcomes", () => {
+  it("reattaches to a running turn and explains its failed outcome", () => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("status", { status: "running" });
+    expect(scope.setRemoteActive).toHaveBeenCalledWith(true);
+    onEvent("turn_completed", { reason: "failed", senderUserId: "viewer" });
+    expect(scope.setTurnEndNotice).toHaveBeenCalledWith("Failed safely");
+    expect(scope.resetRemoteTurn).toHaveBeenCalledOnce();
+    expect(scope.loadTranscript).toHaveBeenCalledWith("A", { force: true });
+  });
+
+  it.each(["timeout", "failed"])("explains initial %s status when the terminal event was missed", status => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("status", { status });
+    expect(scope.setTurnEndNotice).toHaveBeenCalledWith(status === "timeout" ? "Reset stalled turn" : "Failed safely");
+    expect(scope.setRemoteActive).not.toHaveBeenCalled();
+  });
+
+  it("explains a DB backstop timeout as recovery rather than success", () => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("turn_completed", { reason: "timeout" });
+    expect(scope.setTurnEndNotice).toHaveBeenCalledWith("Reset stalled turn");
+    expect(scope.resetRemoteTurn).toHaveBeenCalledOnce();
+  });
+
+  it("leaves the direct stream's existing error handling in control", () => {
+    const { scope, onEvent } = followedTurn(true);
+    onEvent("turn_completed", { reason: "failed", senderUserId: "viewer" });
+    expect(scope.setTurnEndNotice).not.toHaveBeenCalled();
+    expect(scope.chat.dispatch).not.toHaveBeenCalled();
+    expect(scope.resetRemoteTurn).not.toHaveBeenCalled();
+  });
+
+  it("does not invent a failure on ordinary completion or accept a stale terminal event", () => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("turn_completed", {});
+    expect(scope.setTurnEndNotice).not.toHaveBeenCalled();
+    scope.switchTo("B");
+    scope.switchTo("A");
+    onEvent("turn_completed", { reason: "failed" });
+    expect(scope.setTurnEndNotice).not.toHaveBeenCalled();
+  });
+
+  it.each([["en", en], ["ja", ja], ["zh", zh], ["zh-CN", zhCN]] as const)(
+    "uses the ordinary localized activity feed after returning (%s)", (locale, dict) => {
+      const expression = find(node => ts.isBinaryExpression(node) &&
+        node.left.getText(tree) === "remoteActive && !chat.state.isStreaming").getText(tree);
+      const node = evaluate<React.ReactNode>(expression, {
+        React, remoteActive: true, chat: { state: { isStreaming: false } },
+        avatarFor: () => null, remoteAssistantId: null, ChatActivityFeed,
+        remoteEvents: [], remoteTools: [], remoteText: "", remoteResearchPhase: null, remoteStartedAt: null,
+      });
+      const html = renderToString(React.createElement(I18nProvider, { locale, dict, children: node }));
+      expect(html).toContain(dict.chat.thinking);
+      expect(html).not.toContain(dict.chatApp.teammateWorking.replaceAll("'", "&#x27;"));
+    },
+  );
 });

@@ -8945,7 +8945,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           publishSessionEvent({
             kind: 'turn_completed',
             sessionId: sessionIdForError,
-            payload: { senderUserId: userIdForError },
+            // Mirror the outcome, never the private exception or diagnostic.
+            // A returning viewer no longer owns the POST error stream.
+            payload: { senderUserId: userIdForError,
+              ...(!postReplyNotice && !recoveryDelivered ? { reason: 'failed' as const } : {}),
+            },
           })
         } catch { /* ignore */ }
         // Also flip status back to idle so subsequent turns aren't blocked

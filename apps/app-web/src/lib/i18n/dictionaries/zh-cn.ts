@@ -8970,6 +8970,7 @@ export const zhCN: Dictionary = {
     liveWorkNoProgress: "已有 {minutes} 分钟没有进展",
     turnStoppedBy: "{name} 停止了这个回合。",
     turnStoppedByYou: "你已停止这个回合。",
+    turnFailed: "未能完成这次回复。再次尝试前，请先检查对话内容。",
     turnReconnecting: "连接已中断。助理仍在继续处理，完成后回复会显示在这里。",
     turnReclaimed: "上一个回合停止回应，系统已将它重设并解除聊天阻止。消息都还在，重新发送即可继续。",
     pinnedContext: "钉选",
