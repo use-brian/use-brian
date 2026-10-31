@@ -177,9 +177,9 @@ describe.sequential('[COMP:api/application-persistence] private file query captu
       const result = await capture(client)
       expect(result).not.toBeNull()
       const after = await operation(client, 'stats')
-      expect(after!.frames).toBeGreaterThan(before!.frames)
-      expect(after!.checks).toBeGreaterThan(before!.checks)
-      expect(after!.snapshots).toBeGreaterThan(before!.snapshots)
+      expect(after!.frames - before!.frames).toBe(2)
+      expect(after!.checks).toBe(before!.checks)
+      expect(after!.snapshots).toBe(before!.snapshots)
       expect(result).toEqual(await baseline(client, () => capture(client)))
     })
     const query = await readAdmittedSessionQuery({ sessionId: modes.f.session.id, throughSequence: through,

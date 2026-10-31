@@ -149,8 +149,8 @@ describe.sequential('[COMP:api/application-persistence] deferred native field wo
         IF selected.derivation_id IS NULL THEN RAISE EXCEPTION 'Missing fictional source edge';END IF;
         IF action='fill_limit' THEN
           SELECT pending_events INTO event_count FROM native_field_dependency_batches WHERE workspace_id=w AND derivation_id=d;
-          IF event_count IS NULL OR event_count>=100 THEN RAISE EXCEPTION 'Unexpected fictional initial event count';END IF;
-          FOR event_count IN event_count..99 LOOP
+          IF event_count IS NULL OR event_count>=4096 THEN RAISE EXCEPTION 'Unexpected fictional initial event count';END IF;
+          FOR event_count IN event_count..4095 LOOP
             UPDATE scope_derivation_sources SET source_version=source_version WHERE derivation_id=d AND source_kind=selected.source_kind AND source_id=selected.source_id;
           END LOOP;
         ELSIF action='repeat' THEN
@@ -275,12 +275,15 @@ describe.sequential('[COMP:api/application-persistence] deferred native field wo
     expect(await state(client)).toMatchObject({ headers: 0, work: 0, pending: 0 })
   }), 90_000)
 
-  it('bounds duplicate event batches and keeps original checks after the 101st event', async () => rolledBack(async (client, id) => {
+  it('bounds duplicate event batches and keeps original checks after the 4097th event', async () => rolledBack(async (client, id) => {
+    // This rollback-only stress case deliberately exceeds the bounded native
+    // path. Give its 4,097 original event checks an explicit local test budget.
+    await client.query("SET LOCAL statement_timeout='120s'")
     expect(await operation(client, 'guard')).toBe(true)
     await operation(client, 'fill_limit', { message: id, kind: 'workspace_file' })
-    expect(await state(client)).toMatchObject({ headers: 1, work: 100, pending: 100, queued: 100, fallback: false })
+    expect(await state(client)).toMatchObject({ headers: 1, work: 4096, pending: 4096, queued: 4096, fallback: false })
     await operation(client, 'upsert', { message: id, kind: 'workspace_file' })
-    expect(await state(client)).toMatchObject({ headers: 1, work: 101, pending: 101, queued: 101, fallback: true })
+    expect(await state(client)).toMatchObject({ headers: 1, work: 4097, pending: 4097, queued: 4097, fallback: true })
     await operation(client, 'trace')
     const before = await state(client)
     await client.query(`SET CONSTRAINTS ${constraint} IMMEDIATE`)

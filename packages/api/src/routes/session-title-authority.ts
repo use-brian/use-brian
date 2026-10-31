@@ -214,28 +214,48 @@ export async function sessionTitleProjections(input:{claims:NativeClaims|null;se
   }
   prepared.push({id,projection})
  }
- // Only consecutive equal-context rows share a boundary. An intervening
- // fallback can await arbitrary source work, so a later row must not consume
- // an earlier group's finished proof after that work.
+ // Schedule individual rows first, then collect equal-context saved heads
+ // together. Each group still completes and consumes its proof contiguously;
+ // original display positions do not require another proof of the same graph.
  type Group={entries:PreparedTitle[];context:string;attempted:boolean;value:Map<string,TitleProjection>|null;budget:{failed:number}}
  const groupForId=new Map<string,Group>(),seenIds=new Set<string>(),repeatedIds=new Set<string>()
  for(const entry of prepared){if(seenIds.has(entry.id))repeatedIds.add(entry.id);seenIds.add(entry.id)}
- for(let offset=0;offset<prepared.length;){
-  const binding=projectionAuthorities.get(prepared[offset].projection)
-  const context=binding?.headOnly&&!repeatedIds.has(prepared[offset].id)?titleGroupContext(binding.authority):null
-  if(context===null){offset++;continue}
-  const part:PreparedTitle[]=[]
-  while(offset<prepared.length&&part.length<50){
-   const next=prepared[offset],nextBinding=projectionAuthorities.get(next.projection)
-   if(repeatedIds.has(next.id)||!nextBinding?.headOnly||titleGroupContext(nextBinding.authority)!==context)break
-   part.push(next);offset++
+ const individual:PreparedTitle[]=[],contexts=new Map<string,PreparedTitle[]>()
+ for(const entry of prepared){
+  const binding=projectionAuthorities.get(entry.projection)
+  const context=binding?.headOnly&&!repeatedIds.has(entry.id)?titleGroupContext(binding.authority):null
+  if(context===null){individual.push(entry);continue}
+  const entries=contexts.get(context)??[]
+  entries.push(entry);contexts.set(context,entries)
+ }
+ // This is eligibility metadata only. A held/missing head keeps its original
+ // individual reader; it cannot poison an otherwise supported optional group.
+ // The group reader reacquires these exact identities and all source authority.
+ for(const [context,entries]of contexts){
+  if(entries.length<2)continue
+  const workspaceId=projectionAuthorities.get(entries[0].projection)!.authority.execution.security.access.workspaceId
+  const metadata=(await getPool().query<{sessionId:string;revisionId:string;source:{held?:boolean;resourceKind?:string;resourceId?:string;version?:string}|null}>(`SELECT h.session_id AS "sessionId",h.scope_revision_id AS "revisionId",
+   read_scope_source(h.workspace_id,'session_context_revision',h.scope_revision_id) AS source
+   FROM session_title_heads h JOIN unnest($2::uuid[],$3::uuid[]) group_candidates(session_id,revision_id)
+    ON group_candidates.session_id=h.session_id AND group_candidates.revision_id=h.scope_revision_id WHERE h.workspace_id=$1`,
+  [workspaceId,entries.map(entry=>entry.id),entries.map(entry=>entry.projection.titleRevisionId)])).rows
+  const eligible=new Set(metadata.filter(row=>row.source?.held===false&&row.source.resourceKind==='session_context_revision'
+   &&row.source.resourceId===row.revisionId&&row.source.version==='1').map(row=>row.sessionId))
+  contexts.set(context,entries.filter(entry=>eligible.has(entry.id)))
+  individual.push(...entries.filter(entry=>!eligible.has(entry.id)))
+ }
+ const collectionOrder=[...individual]
+ for(const [context,entries]of contexts){
+  for(let offset=0;offset<entries.length;offset+=50){
+   const part=entries.slice(offset,offset+50)
+   collectionOrder.push(...part)
+   if(part.length<2)continue
+   const group:Group={entries:part,context,attempted:false,value:null,budget:{failed:0}}
+   for(const entry of part)groupForId.set(entry.id,group)
   }
-  if(part.length<2)continue
-  const group:Group={entries:part,context,attempted:false,value:null,budget:{failed:0}}
-  for(const entry of part)groupForId.set(entry.id,group)
  }
  const result=new Map<string,TitleProjection>()
- for(const{id,projection}of prepared){
+ for(const{id,projection}of collectionOrder){
   let group=groupForId.get(id),groupedValue:TitleProjection|undefined
   while(group){
    if(!group.attempted){
@@ -288,5 +308,7 @@ export async function sessionTitleProjections(input:{claims:NativeClaims|null;se
    throw error
   }
  }
- return result
+ // All admitted values have completed their actual collection boundary.
+ // Restore caller order without awaiting or reusing a proof for another row.
+ return new Map(prepared.map(({id})=>[id,result.get(id)!]))
 }

@@ -77,20 +77,26 @@ async function assertModelInputAuthority(context: ToolContext): Promise<void> {
 export async function assertModelOutputAuthority(context: ToolContext): Promise<void> {
   return assertModelAuthority(context, 'output')
 }
-async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'output'): Promise<void> {
+async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'output',tryBoundary?:()=>Promise<boolean>): Promise<void> {
   const check = boundary === 'input' ? context.assertModelInputAuthority : context.assertModelOutputAuthority
-  if (!check && !context.authority) return
+  if (!check && !context.authority && !tryBoundary) return
   const identity = context.executionContext ?? context
   if (invalidModelContexts.has(identity)) {
     throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed' as const,retrySafe: false })
   }
   try {
     await context.authority?.assertCurrent()
-    await check?.(context)
+    const combined=tryBoundary?await tryBoundary():false
+    if(!combined)await check?.(context)
+    if(combined)await context.authority?.assertCurrent()
+    // A concurrent/nested denial during the awaited operation is sticky too.
+    if(invalidModelContexts.has(identity))throw Object.assign(new Error('The model context is unavailable.'),{
+      reason:'authority_changed' as const,retrySafe:false,
+    })
   }
   catch (error) {
     invalidModelContexts.add(identity)
-    if (isAuthorityBoundaryError(error)) throw error
+    if (isAuthorityBoundaryError(error)||tryBoundary&&(error as {reason?:unknown})?.reason==='delivery_audience_unverified') throw error
     throw Object.assign(new Error('The model context is unavailable.', { cause: error }), {
       reason: 'authority_changed' as const, retrySafe: false,
     })
@@ -254,6 +260,10 @@ export type QueryEvent =
 // ── Query loop options ─────────────────────────────────────────
 
 export type QueryLoopOptions = {
+  /** Host-owned outer invocation boundary. Never copied onto ToolContext, so
+   * nested loops retain their own source checks. True requires a complete
+   * current caller+recipient operation; false runs the unchanged output hook. */
+  tryAssertOutputBoundary?: (context:ToolContext,event:QueryEvent)=>Promise<boolean>
   provider: LLMProvider
   model: string
   /** Provider output cap. Custom endpoint profiles supply this explicitly. */
@@ -642,7 +652,8 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
       queryLoopCore({ ...options, tools: filteredTools, context: toolContext, stallWatchdog: watchdog ?? undefined }),
     )
     for await (const event of events) {
-      await assertModelOutputAuthority(toolContext)
+      await assertModelAuthority(toolContext,'output',options.tryAssertOutputBoundary
+        ?()=>options.tryAssertOutputBoundary!(toolContext,event):undefined)
       yield event
     }
   } finally {

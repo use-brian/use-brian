@@ -18,16 +18,18 @@ const result=z.discriminatedUnion('admitted',[
 ])
 /** Null means an unchanged original-family fallback; no authorization result is cached. */
 export async function readNativeSessionEvidence(client:Pick<PoolClient,'query'>,workspaceId:string,roots:readonly ScopeSource[]):Promise<NativeEvidence|null>{
- if(!roots.length||roots.length>100||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')||roots.some(root=>!['application_field','session_context_revision','session_message','memory','workspace_file'].includes(root.resourceKind)))return null
+ if(!roots.length||roots.length>4096||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')||roots.some(root=>!['application_field','session_context_revision','session_message','memory','workspace_file'].includes(root.resourceKind)))return null
  // Field observations can hide Memory ancestors too. The closed validator
  // discovers the complete native closure and preserves its original fallback.
- const sql='SELECT read_native_attended_memory_evidence($1,$2,$3,$4) AS value'
- let raw=(await client.query<{value:unknown}>(sql,
-  [workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)])).rows[0]?.value
- if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_file_session_evidence($1,$2,$3,$4,true) AS value',
-  [workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)])).rows[0]?.value
- if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_empty_query_evidence($1,$2,$3,$4) AS value',
-  [workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)])).rows[0]?.value
+ const args=[workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)]
+ let raw:unknown
+ if(roots.length>100){
+  raw=(await client.query<{value:unknown}>('SELECT read_native_covered_session_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value
+ }else{
+  raw=(await client.query<{value:unknown}>('SELECT read_native_attended_memory_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value
+  if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_file_session_evidence($1,$2,$3,$4,true) AS value',args)).rows[0]?.value
+  if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_empty_query_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value
+ }
  if(raw===null)return null
  if(typeof raw==='object'&&raw!==null&&'purpose'in raw&&raw.purpose==='memory_history'){
   const history=historyResult.parse(raw)

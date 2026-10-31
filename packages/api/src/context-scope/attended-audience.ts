@@ -1,4 +1,4 @@
-import {tryNativeInvocationEvidence} from './native-invocation-evidence.js'
+import {tryNativeInvocationEvidence,tryNativeCombinedOutputEvidence} from './native-invocation-evidence.js'
 import { nativeSessionQueryContextSources } from '../application-platform/session-query-context.js'
 /** Native attended recipient admission. [COMP:api/application-persistence] [COMP:api/delivery-authority] */
 import {ContextScopeAccumulator,intersectAccessCeilings,type AccessCeiling,type ExecutionContext,type ScopeEvidence,type ScopeSource} from '@use-brian/core'
@@ -11,7 +11,7 @@ import {readExternalSourceAncestors} from '../application-platform/external-sour
 import {readPersistentSessionContextAncestors} from '../db/session-context-ancestry.js'
 import {pinPreparedExternalSourceAuthority,assertPreparedExternalSourceAuthorityCurrent,type PreparedExternalSourceAuthority} from '../application-platform/retained-source-authority.js'
 import {validateAudienceScopeEvidence,validateCallerScopeEvidence,scopeEvidenceFailureOf} from './caller-evidence.js'
-import {createDeliveryAudienceAuthorizer,createDeliveryAudienceEnvelopeResolver,DeliveryAudienceUnverifiedError,type AuthorizeDeliveryAudience} from './delivery-authority.js'
+import {createDeliveryAudienceAuthorizer,createDeliveryAudienceEnvelopeResolver,DeliveryAudienceUnverifiedError,type AuthorizeDeliveryAudience,type DeliveryAudienceInput} from './delivery-authority.js'
 import {classifySession,isWebTransport,policyFor} from '../session-kind.js'
 import {readSessionById} from '../db/sessions.js'
 import {findAssistantById} from '../db/users.js'
@@ -142,4 +142,34 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
    return{allowed:false,reason:'delivery_audience_unverified',diagnostic:scopeEvidenceFailureOf(error)??'verification_error'}
   }
  }
+}
+
+/** Optional personal-web operation: both current caller and recipient obligations
+ * are validated by one closed native proof. Unsupported destinations decline. */
+export async function tryValidateNativePersonalOutput(execution:ExecutionContext,input:DeliveryAudienceInput):Promise<ScopeEvidence|null>{
+ const pinned=structuredClone(input),actor=execution.security.access.userId
+ if(!isWebTransport(pinned.channelType)||pinned.sessionId!==execution.lifecycle.sessionId
+  ||execution.lifecycle.sessionPersisted===false||execution.security.access.sharedAudience
+  ||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
+  ||execution.identity.principal.authenticationKind!=='native_session'
+  ||execution.identity.principal.userId!==actor||pinned.userId!==actor
+  ||execution.ownership.kind!=='workspace'||pinned.workspaceId!==execution.security.access.workspaceId
+  ||pinned.assistantId!==execution.assistant.id||getApplicationExecutionBinding(execution)
+  ||pinned.recipientType==='group'||pinned.recipientMode&&pinned.recipientMode!=='member')return null
+ await execution.security.authority.assertCurrent()
+ const session=await readSessionById(pinned.sessionId!)
+ if(!session)throw new DeliveryAudienceUnverifiedError(undefined,'session_missing')
+ if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||classifySession(session).surface!=='chat'
+  ||session.channelType!==pinned.channelType||session.channelId!==pinned.channelId)return null
+ const owner=await findAssistantById(session.assistantId)
+ if(!owner||owner.workspaceId!==pinned.workspaceId)throw new DeliveryAudienceUnverifiedError(undefined,'session_assistant_missing')
+ const resolve=createDeliveryAudienceEnvelopeResolver()
+ const sink=await resolve({...pinned,userId:session.userId}),recipient=await resolve(pinned)
+ if(!sink.allowed)throw new DeliveryAudienceUnverifiedError(sink.detail,sink.diagnostic)
+ if(!recipient.allowed)throw new DeliveryAudienceUnverifiedError(recipient.detail,recipient.diagnostic)
+ if(sink.ceiling.userId!==actor||recipient.ceiling.userId!==actor)throw new DeliveryAudienceUnverifiedError(undefined,'binding_recipient_conflict')
+ const ceiling=intersectAccessCeilings(sink.ceiling,recipient.ceiling)
+ const result=await tryNativeCombinedOutputEvidence(execution,pinned.scopeEvidence??{},ceiling)
+ await execution.security.authority.assertCurrent()
+ return result
 }

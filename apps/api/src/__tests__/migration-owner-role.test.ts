@@ -18,7 +18,7 @@ import { vector } from '@electric-sql/pglite-pgvector'
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
 import { migratePglite, preparePgliteRuntimeRole } from '../migrate-pglite.js'
 
@@ -147,7 +147,97 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       [{ private: false, facade: true, later_private: false }])
       assert.deepEqual((await db.query(`SELECT to_jsonb(d) AS metadata FROM pg_default_acl d WHERE defaclobjtype<>'f' ORDER BY oid`)).rows, retainedDefaults)
       assert.equal(await migratePglite(db, migrationsDir, { through: migration }), 0)
+      const captureRepair = '81560_legacy_native_function_privileges.sql'
+      const capture = 'public.capture_native_session_projection_batch(uuid,uuid,integer,text)'
+      const captureSql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${captureRepair}`, 'utf8'), captureRepair)
+      const ordered = (await readdir(migrationsDir)).filter(name => name.endsWith('.sql')).sort()
+      assert.equal(ordered[ordered.indexOf(captureRepair) - 1], '8155_native_validation_query_plans.sql')
+      assert.equal(ordered[ordered.indexOf(captureRepair) + 1], '8156_native_file_capture_frame.sql')
+      await migratePglite(db, migrationsDir, { through: '8155_native_validation_query_plans.sql' })
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS legacy`, [capture])).rows, [{ legacy: true }])
+      const captureDefinition = (await db.query<{ definition: string }>('SELECT pg_get_functiondef($1::regprocedure) AS definition', [capture])).rows[0].definition
+      const captureCases = [
+        { name: 'body', change: captureDefinition.replace('$function$', '$function$\n-- Fictional capture drift\n'), restore: captureDefinition },
+        { name: 'execution property', change: `ALTER FUNCTION ${capture} COST 101`, restore: `ALTER FUNCTION ${capture} COST 100` },
+        { name: 'unknown principal', change: `GRANT EXECUTE ON FUNCTION ${capture} TO legacy_privilege_probe`, restore: `REVOKE ALL ON FUNCTION ${capture} FROM legacy_privilege_probe` },
+        { name: 'PUBLIC access', change: `GRANT EXECUTE ON FUNCTION ${capture} TO PUBLIC`, restore: `REVOKE ALL ON FUNCTION ${capture} FROM PUBLIC` },
+        { name: 'grant option', change: `GRANT EXECUTE ON FUNCTION ${capture} TO app_user WITH GRANT OPTION`, restore: `REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION ${capture} FROM app_user` },
+        { name: 'later helper execution property', change: 'ALTER FUNCTION public.application_current_field_snapshot(uuid,uuid) COST 101', restore: 'ALTER FUNCTION public.application_current_field_snapshot(uuid,uuid) COST 100' },
+        { name: 'missing owner grant', change: `REVOKE ALL ON FUNCTION ${capture} FROM migration_owner`, restore: `GRANT EXECUTE ON FUNCTION ${capture} TO migration_owner` },
+      ]
+      for (const scenario of captureCases) {
+        await t.test(`refuses capture ${scenario.name} atomically`, async () => {
+          try {
+            await db.exec(scenario.change)
+            const before = await snapshots()
+            await assert.rejects(migratePglite(db, migrationsDir, { through: captureRepair }), /Legacy native function prerequisite changed/)
+            assert.deepEqual(await snapshots(), before)
+          } finally { await db.exec(scenario.restore) }
+        })
+      }
+      const beforeCaptureRepair = (await db.query(`SELECT oid,to_jsonb(p)-'proacl' AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows
+      assert.equal(await migratePglite(db, migrationsDir, { through: captureRepair }), 1)
+      assert.deepEqual((await db.query(`SELECT oid,to_jsonb(p)-'proacl' AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows, beforeCaptureRepair)
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS exposed`, [capture])).rows, [{ exposed: false }])
+      const repaired = await snapshots()
+      await db.transaction(async tx => { await tx.exec(captureSql) })
+      assert.deepEqual(await snapshots(), repaired)
+      await migratePglite(db, migrationsDir, { through: '8156_native_file_capture_frame.sql' })
+      const partial = await snapshots()
+      await db.transaction(async tx => { await tx.exec(captureSql) })
+      assert.deepEqual(await snapshots(), partial)
+      const queryRepair = '81660_legacy_native_query_privileges.sql'
+      const queryHelper = 'public.application_session_field_keys(text)'
+      const materializer = 'public.application_materialize_field_envelope(uuid,jsonb,integer)'
+      const querySql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${queryRepair}`, 'utf8'), queryRepair)
+      assert.equal(ordered[ordered.indexOf(queryRepair) - 1], '8165_native_personal_title_acquisition.sql')
+      assert.equal(ordered[ordered.indexOf(queryRepair) + 1], '8166_native_session_query_acquisition.sql')
+      await migratePglite(db, migrationsDir, { through: '8165_native_personal_title_acquisition.sql' })
+      const queryHelpers = [queryHelper, 'public.application_session_query_bounds(uuid,jsonb)', materializer,
+        'public.application_session_query_scan(uuid,uuid,text,integer,text[],jsonb,jsonb)',
+        'public.read_native_application_session_projection(uuid,uuid,integer,text)']
+      for (const helper of queryHelpers) assert.equal((await db.query<{ exposed: boolean }>(
+        "SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS exposed", [helper])).rows[0].exposed, true)
+      const queryDefinition = (await db.query<{ definition: string }>('SELECT pg_get_functiondef($1::regprocedure) AS definition', [queryHelper])).rows[0].definition
+      const materializerDefinition = (await db.query<{ definition: string }>('SELECT pg_get_functiondef($1::regprocedure) AS definition', [materializer])).rows[0].definition
+      const changedDefault = materializerDefinition.replace('DEFAULT 0', 'DEFAULT 1')
+      assert.notEqual(changedDefault, materializerDefinition)
+      const queryCases = [
+        { name: 'body', change: queryDefinition.replace('$function$', '$function$\n-- Fictional query drift\n'), restore: queryDefinition },
+        { name: 'unknown principal', change: `GRANT EXECUTE ON FUNCTION ${queryHelper} TO legacy_privilege_probe`, restore: `REVOKE ALL ON FUNCTION ${queryHelper} FROM legacy_privilege_probe` },
+        { name: 'PUBLIC access', change: `GRANT EXECUTE ON FUNCTION ${queryHelper} TO PUBLIC`, restore: `REVOKE ALL ON FUNCTION ${queryHelper} FROM PUBLIC` },
+        { name: 'grant option', change: `GRANT EXECUTE ON FUNCTION ${queryHelper} TO app_user WITH GRANT OPTION`, restore: `REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION ${queryHelper} FROM app_user` },
+        { name: 'later helper cost', change: `ALTER FUNCTION ${materializer} COST 101`, restore: `ALTER FUNCTION ${materializer} COST 100` },
+        { name: 'different integer default', change: changedDefault, restore: materializerDefinition },
+      ]
+      for (const scenario of queryCases) await t.test(`refuses query ${scenario.name} atomically`, async () => {
+        try {
+          await db.exec(scenario.change)
+          const before = await snapshots()
+          await assert.rejects(migratePglite(db, migrationsDir, { through: queryRepair }), /Legacy native query prerequisite changed/)
+          assert.deepEqual(await snapshots(), before)
+        } finally { await db.exec(scenario.restore) }
+      })
+      const beforeQueryRepair = (await db.query(`SELECT oid,to_jsonb(p)-'proacl' AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows
+      assert.equal(await migratePglite(db, migrationsDir, { through: queryRepair }), 1)
+      assert.deepEqual((await db.query(`SELECT oid,to_jsonb(p)-'proacl' AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows, beforeQueryRepair)
+      for (const helper of queryHelpers) assert.equal((await db.query<{ exposed: boolean }>(
+        "SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS exposed", [helper])).rows[0].exposed, false)
+      const queryRepaired = await snapshots()
+      await db.transaction(async tx => { await tx.exec(querySql) })
+      assert.deepEqual(await snapshots(), queryRepaired)
       await migratePglite(db, migrationsDir)
+      const queryInstalled = await snapshots()
+      await db.transaction(async tx => { await tx.exec(querySql) })
+      assert.deepEqual(await snapshots(), queryInstalled)
+      assert.deepEqual((await db.query('SELECT application_native_session_query_acquisition_current() AS current')).rows, [{ current: true }])
+      const upgraded = await snapshots()
+      await db.transaction(async tx => { await tx.exec(captureSql) })
+      assert.deepEqual(await snapshots(), upgraded)
       assert.deepEqual((await db.query('SELECT application_memory_statement_helpers_current() AS current')).rows, [{ current: true }])
       assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',
         'public.application_memory_statement_state(uuid,uuid,text[],jsonb)','EXECUTE') AS exposed`)).rows, [{ exposed: false }])

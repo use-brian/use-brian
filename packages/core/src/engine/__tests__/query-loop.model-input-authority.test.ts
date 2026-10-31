@@ -163,4 +163,53 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     await expect(run(p.value,ctx)).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
     expect(p.createSession).toHaveBeenCalledTimes(1);expect(p.send).toHaveBeenCalledTimes(1)
   })
+  it('uses an invocation-local combined boundary for every event without skipping input checks',async()=>{
+    const p=provider(),input=vi.fn(async()=>{}),output=vi.fn(async()=>{}),combined=vi.fn(async()=>true)
+    const events=await run(p.value,{...context(input),assertModelOutputAuthority:output},{tryAssertOutputBoundary:combined})
+    expect(events.length).toBeGreaterThan(0);expect(combined).toHaveBeenCalledTimes(events.length)
+    expect(output).not.toHaveBeenCalled();expect(input).toHaveBeenCalledTimes(2)
+    expect(combined.mock.calls.length).toBe(events.length)
+  })
+  it('retains the original output hook when the optional outer boundary declines',async()=>{
+    const p=provider(),output=vi.fn(async()=>{}),combined=vi.fn(async()=>false)
+    const events=await run(p.value,{...context(async()=>{}),assertModelOutputAuthority:output},{tryAssertOutputBoundary:combined})
+    expect(output).toHaveBeenCalledTimes(events.length)
+  })
+  it('does not inherit the combined outer boundary into a nested loop',async()=>{
+    const p=provider({tool:true}),child=provider(),combined=vi.fn(async()=>true),childScope=new ContextScopeAccumulator()
+    const output=vi.fn(async(current:ToolContext)=>{if(current.scopeAccumulator===childScope)throw new Error('Fictional child denial')})
+    const observe=buildTool({name:'observe',description:'Run a fictional child',inputSchema:z.object({}).strict(),isReadOnly:true,isConcurrencySafe:true,
+      execute:async(_input,current)=>{
+        expect('tryAssertOutputBoundary' in current).toBe(false)
+        await run(child.value,{...current,scopeAccumulator:childScope})
+        return{data:{value:'Unreachable child output'}}
+      }})
+    await expect(run(p.value,{...context(async()=>{}),assertModelOutputAuthority:output},{tools:new Map([['observe',observe]]),tryAssertOutputBoundary:combined}))
+      .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+    expect(output.mock.calls.some(([current])=>current.scopeAccumulator===childScope)).toBe(true)
+  })
+  it('refuses an optional combined operation after a prior sticky denial',async()=>{
+    const p=provider(),combined=vi.fn(async()=>true),ctx={...context(async()=>{}),executionContext:{} as NonNullable<ToolContext['executionContext']>,
+      assertModelOutputAuthority:async()=>{throw new Error('Fictional prior refusal')}}
+    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({reason:'authority_changed'})
+    await expect(run(p.value,ctx,{tryAssertOutputBoundary:combined})).rejects.toMatchObject({reason:'authority_changed'})
+    expect(combined).not.toHaveBeenCalled();expect(p.send).not.toHaveBeenCalled()
+  })
+  it('observes a sticky denial arising during the awaited combined operation',async()=>{
+    const p=provider(),ctx={...context(async()=>{}),executionContext:{} as NonNullable<ToolContext['executionContext']>}
+    const combined=vi.fn(async(current:ToolContext)=>{
+      await expect(assertModelOutputAuthority({...current,assertModelOutputAuthority:async()=>{throw new Error('Fictional concurrent refusal')}}))
+        .rejects.toMatchObject({reason:'authority_changed'})
+      return true
+    })
+    await expect(run(p.value,ctx,{tryAssertOutputBoundary:combined})).rejects.toMatchObject({reason:'authority_changed'})
+    expect(combined).toHaveBeenCalledTimes(1)
+  })
+
+  it('rechecks the live lease after a combined operation before releasing its event',async()=>{
+    const p=provider();let revoked=false
+    const ctx={...context(async()=>{}),authority:{assertCurrent:async()=>{if(revoked)throw new Error('Fictional lease revoked')},execute:async<T>(run:()=>Promise<T>)=>run()}}
+    await expect(run(p.value,ctx,{tryAssertOutputBoundary:async()=>{revoked=true;return true}})).rejects.toMatchObject({reason:'authority_changed'})
+  })
+
 })

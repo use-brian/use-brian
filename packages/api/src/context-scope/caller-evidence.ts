@@ -1,4 +1,6 @@
 import { readNativeSessionEvidence } from '../application-platform/native-session-evidence.js'
+import {readNativeTitleGroupEvidence,type NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
+import {readNativeSessionQueryEvidence,type NativeSessionQuerySelection,type NativeSessionQueryCaptures} from '../application-platform/native-session-query-evidence.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 import {
   ContextScopeAccumulator, intersectAccessCeilings, maxSensitivity, scopeGrantContains, resourceScopeKey, RANK, isSensitivity,
@@ -88,7 +90,7 @@ function labelFailure(
   return null
 }
 
-function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client:Pick<PoolClient,'query'>|undefined,workflowRunId:string|undefined,nativeOnly:true):Promise<ScopeEvidence|null>
+function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client:Pick<PoolClient,'query'>|undefined,workflowRunId:string|undefined,nativeOnly:true,readNative?:typeof readNativeSessionEvidence,additionalCeilings?:readonly AccessCeiling[]):Promise<ScopeEvidence|null>
 function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client?:Pick<PoolClient,'query'>,workflowRunId?:string,nativeOnly?:false):Promise<ScopeEvidence>
 async function validateScopeEvidence(
   evidence: ScopeEvidence,
@@ -97,11 +99,14 @@ async function validateScopeEvidence(
   client?: Pick<PoolClient, 'query'>,
   workflowRunId?: string,
   nativeOnly = false,
+  readNative:typeof readNativeSessionEvidence = readNativeSessionEvidence,
+  additionalCeilings:readonly AccessCeiling[] = [],
 ): Promise<ScopeEvidence|null> {
   let failure: ScopeEvidenceFailure | null = null
   let snapshot: ScopeEvidence
   try {
     ceiling=intersectAccessCeilings(ceiling,ceiling)
+    additionalCeilings=additionalCeilings.map(value=>intersectAccessCeilings(value,value))
     if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) throw unavailable(kind, 'shape')
     if (evidence.sensitivity !== undefined && !isSensitivity(evidence.sensitivity)) throw unavailable(kind, 'shape')
     for (const labels of [evidence.compartments,evidence.projectIds]) {
@@ -120,12 +125,12 @@ async function validateScopeEvidence(
   // (scoped-context.md -> "Reading is not deriving").
   let sources = snapshot.sources ?? []
   const originalSources=structuredClone(sources)
-  for (const source of sources) failure ??= visibilityFailure(source, ceiling) ?? labelFailure(source, ceiling)
-  failure ??= labelFailure({
-    sensitivity: snapshot.sensitivity ?? 'public',
-    compartments: snapshot.compartments ?? [],
-    projectIds: snapshot.projectIds ?? [],
-  }, ceiling)
+  const nativeCeilings=[ceiling,...additionalCeilings]
+  for (const checkedCeiling of nativeCeilings) {
+    for (const source of sources) failure ??= visibilityFailure(source, checkedCeiling) ?? labelFailure(source, checkedCeiling)
+    failure ??= labelFailure({ sensitivity:snapshot.sensitivity??'public',compartments:snapshot.compartments??[],projectIds:snapshot.projectIds??[] },checkedCeiling)
+    if(failure)throw unavailable(checkedCeiling===ceiling?kind:'audience',failure)
+  }
   if (failure) throw unavailable(kind, failure)
   if (!sources.length) return nativeOnly ? null : snapshot
   if (!client && sources.some(source=>source.resourceKind==='session_context_revision')) throw unavailable(kind,'source_unverifiable')
@@ -134,16 +139,25 @@ async function validateScopeEvidence(
   // validator below, including independent source and Page admission.
   if (client && !workflowRunId) {
     try {
-      const native = await readNativeSessionEvidence(client, ceiling.workspaceId, sources)
+      const native = await readNative(client, ceiling.workspaceId, sources)
       if (native?.kind==='complete') {
         const expanded = new ContextScopeAccumulator(snapshot)
         expanded.note(native.evidence)
         for (const source of [...native.evidence.sources ?? [], ...native.current]) {
-          failure ??= visibilityFailure(source, ceiling) ?? labelFailure(source, ceiling)
+          for(const checkedCeiling of nativeCeilings){
+            const refused=visibilityFailure(source,checkedCeiling)??labelFailure(source,checkedCeiling)
+            if(refused)throw unavailable(checkedCeiling===ceiling?kind:'audience',refused)
+          }
         }
         if (failure) throw unavailable(kind, failure)
         for (const current of native.current) expanded.note({ sensitivity: current.sensitivity,
           compartments: current.compartments, projectIds: current.projectIds })
+        // Sequential delivery sees the caller's expanded aggregate, not only
+        // each source separately. Preserve that independent recipient floor.
+        for(const checkedCeiling of additionalCeilings) failure ??= labelFailure({
+          sensitivity:expanded.evidence.sensitivity??'public',compartments:expanded.evidence.compartments??[],projectIds:expanded.evidence.projectIds??[],
+        },checkedCeiling)
+        if(failure)throw unavailable(additionalCeilings.length?'audience':kind,failure)
         return expanded.evidence
       }
     } catch (error) { throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error) }
@@ -348,4 +362,36 @@ export async function validateAudienceScopeEvidence(evidence: ScopeEvidence, cei
 /** Closed native proof only; an unsupported closure must take the original full path. */
 export async function tryValidateNativeScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,client:Pick<PoolClient,'query'>,kind:'caller'|'audience'):Promise<ScopeEvidence|null>{
  return validateScopeEvidence(evidence,ceiling,kind,client,undefined,true)
+}
+
+/** One fresh native read, with independent caller and recipient label/visibility obligations.
+ * This function accepts source identities only, never a precomputed allow result. */
+export async function tryValidateNativeCombinedOutputEvidence(evidence:ScopeEvidence,caller:AccessCeiling,recipient:AccessCeiling,client:Pick<PoolClient,'query'>):Promise<ScopeEvidence|null>{
+ return validateScopeEvidence(evidence,caller,'caller',client,undefined,true,readNativeSessionEvidence,[recipient])
+}
+
+/** This entrypoint owns the identity-only SQL read. The alternate reader never
+ * leaves this module and cannot accept caller-provided evidence as a proof. */
+export async function readValidatedNativeTitleGroup(heads:readonly NativeTitleHead[],evidence:ScopeEvidence,
+ ceiling:AccessCeiling,client:Pick<PoolClient,'query'>):Promise<{titles:unknown[];checked:ScopeEvidence}|null>{
+ const identities=structuredClone(heads)
+ let titles:unknown[]|undefined
+ const read:typeof readNativeSessionEvidence=async(connection,workspaceId,roots)=>{
+  const captured=await readNativeTitleGroupEvidence(connection,workspaceId,identities,roots)
+  if(!captured)return null
+  titles=captured.titles;return captured.native
+ }
+ const checked=await validateScopeEvidence(evidence,ceiling,'caller',client,undefined,true,read)
+ return checked&&titles?{titles,checked}:null
+}
+
+/** Identity-based acquisition owns its private alternate reader. The original
+ * caller validator consumes the fresh SQL proof inside this same frame. */
+export async function readValidatedNativeSessionQuery(selection:NativeSessionQuerySelection,ceiling:AccessCeiling,
+ client:Pick<PoolClient,'query'>):Promise<{captures:NativeSessionQueryCaptures;sources:ScopeSource[];checked:ScopeEvidence}|null>{
+ const captured=await readNativeSessionQueryEvidence(client,ceiling.workspaceId,structuredClone(selection))
+ if(!captured)return null
+ const read:typeof readNativeSessionEvidence=async()=>captured.native
+ const checked=await validateScopeEvidence({sources:captured.sources},ceiling,'caller',client,undefined,true,read)
+ return checked?{captures:captured.captures,sources:captured.sources,checked}:null
 }

@@ -1,4 +1,6 @@
 import {tryNativeInvocationEvidence} from '../context-scope/native-invocation-evidence.js'
+import {createAttendedDeliveryAudienceAuthorizer,tryValidateNativePersonalOutput} from '../context-scope/attended-audience.js'
+import {DeliveryAudienceUnverifiedError,isDeliveryAudienceUnverifiedError,type DeliveryAudienceInput} from '../context-scope/delivery-authority.js'
 import { nativeSessionQueryContextSources } from './session-query-context.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 /** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
@@ -131,4 +133,66 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
       reason: 'authority_changed' as const,retrySafe: false,
     })
   }
+}
+
+
+const nativeOutputBrand:unique symbol=Symbol('native-attended-output')
+/** Created only by the canonical host factory; runtime identity is also checked. */
+export type NativeAttendedOutputBoundary={readonly [nativeOutputBrand]:true;readonly assertOutputAuthority:(context:ToolContext)=>Promise<void>}
+type NativeOutputBinding={execution:ExecutionContext;accumulator:ContextScopeAccumulator;input:Omit<DeliveryAudienceInput,'scopeEvidence'>}
+const nativeOutputBindings=new WeakMap<NativeAttendedOutputBoundary,NativeOutputBinding>()
+function assertNativeOutputBinding(binding:NativeOutputBinding,context:ToolContext):void{
+ if(invalid.has(binding.execution)||context.executionContext!==binding.execution
+  ||context.authority!==binding.execution.security.authority||context.scopeAccumulator!==binding.accumulator)denied()
+}
+function nativeOutputFailure(execution:ExecutionContext,error:unknown):never{
+ invalid.add(execution)
+ if(isDeliveryAudienceUnverifiedError(error))throw error
+ throw Object.assign(error instanceof SourceProtocolError?error:new SourceProtocolError('source_unavailable'),{
+  reason:'authority_changed' as const,retrySafe:false,
+ })
+}
+/** The factory owns both the ordinary recipient callback and optional combined
+ * operation; a custom callback cannot claim that it checked the same recipient. */
+export function createNativeAttendedOutputBoundary(execution:ExecutionContext,accumulator:ContextScopeAccumulator,
+ input:Omit<DeliveryAudienceInput,'scopeEvidence'>):NativeAttendedOutputBoundary{
+ const binding:NativeOutputBinding={execution,accumulator,input:structuredClone(input)}
+ const authorize=createAttendedDeliveryAudienceAuthorizer(execution)
+ const boundary:NativeAttendedOutputBoundary=Object.freeze({[nativeOutputBrand]:true as const,
+  assertOutputAuthority:async(context:ToolContext)=>{
+   try{
+    assertNativeOutputBinding(binding,context)
+    const originalEvidence=JSON.stringify(accumulator.evidence)
+    const result=await authorize({...binding.input,scopeEvidence:accumulator.evidence})
+    assertNativeOutputBinding(binding,context)
+    if(!result.allowed)throw new DeliveryAudienceUnverifiedError(result.detail,result.diagnostic)
+    if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
+    accumulator.note({sensitivity:result.evidence.sensitivity,compartments:result.evidence.compartments,projectIds:result.evidence.projectIds})
+   }catch(error){nativeOutputFailure(execution,error)}
+  },
+ })
+ nativeOutputBindings.set(boundary,binding)
+ return boundary
+}
+/** False means the original caller and recipient boundaries must both run.
+ * This operation never accepts a proof/allow argument and never returns one. */
+export async function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutputBoundary,context:ToolContext,
+ recipientCallback:((context:ToolContext)=>Promise<void>)|undefined):Promise<boolean>{
+ const binding=nativeOutputBindings.get(boundary)
+ if(!binding||recipientCallback!==boundary.assertOutputAuthority)return false
+ const {execution,accumulator}=binding
+ try{
+  assertNativeOutputBinding(binding,context)
+  const originalEvidence=JSON.stringify(accumulator.evidence)
+  const detached=new ContextScopeAccumulator(execution.security.provenance)
+  detached.note(accumulator.evidence)
+  await execution.security.authority.assertCurrent()
+  const evidence=await tryValidateNativePersonalOutput(execution,{...binding.input,scopeEvidence:detached.evidence})
+  await execution.security.authority.assertCurrent()
+  assertNativeOutputBinding(binding,context)
+  if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
+  if(!evidence)return false
+  accumulator.note(evidence)
+  return true
+ }catch(error){nativeOutputFailure(execution,error)}
 }

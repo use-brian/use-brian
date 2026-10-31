@@ -44,7 +44,7 @@ import { sanitizeDeliveryText } from '@use-brian/shared'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 import type { ResolvedWorkspaceCustomLlm } from '../custom-llm-runtime.js'
 import { ensureServableModel } from '../model-resolution.js'
-import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority } from '../application-platform/model-source-authority.js'
+import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority,tryAssertNativeCombinedOutput,type NativeAttendedOutputBoundary } from '../application-platform/model-source-authority.js'
 import type { SessionPolicy } from '../session-kind.js'
 import { hasTurnAbort, registerTurnAbort, releaseTurn, startLeaseHeartbeat, takeTurnLease, unregisterTurnAbort } from './lease.js'
 import type { TurnBilling } from './billing.js'
@@ -61,6 +61,10 @@ export type TurnSink = {
    * Omission keeps the kernel's source-delivery validator.
    */
   assertOutputAuthority?: (context: ToolContext) => Promise<void>
+  /** Canonical native host capability; custom sink callbacks cannot opt in. */
+  nativeOutputBoundary?: NativeAttendedOutputBoundary
+  /** Observational timing only; mutation of authority/evidence refuses output. */
+  onOutputAuthorityTiming?: (milliseconds:number)=>void
   /** Every engine event, in order. The `sse` sink renders them; others may observe. */
   onEvent?: (event: QueryEvent) => void | Promise<void>
   /**
@@ -111,7 +115,7 @@ export type RunAssistantTurnParams = {
   abortController: AbortController
   model: TurnModel
   /** The assembled loop, minus what the kernel owns (model, liveness, abort). */
-  loop: Omit<QueryLoopOptions, 'provider' | 'model' | 'stallIdleMs'>
+  loop: Omit<QueryLoopOptions, 'provider' | 'model' | 'stallIdleMs' | 'tryAssertOutputBoundary'>
   /**
    * `kernel` (default): admit, lease, heartbeat and release the session.
    * `held`: the runner took the lease itself through `takeTurnLease`
@@ -156,7 +160,16 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     authority: params.loop.context.authority,
     accumulator: params.loop.context.scopeAccumulator,
   }
+  const recordOutputTiming=(context:ToolContext,started:number)=>{
+    const evidence=JSON.stringify(context.scopeAccumulator?.evidence)
+    params.sink.onOutputAuthorityTiming?.(Date.now()-started)
+    if(context.executionContext!==original.execution||context.authority!==original.authority
+      ||context.scopeAccumulator!==original.accumulator||JSON.stringify(context.scopeAccumulator?.evidence)!==evidence){
+      throw Object.assign(new Error('The output timing observer changed authority.'),{reason:'authority_changed' as const,retrySafe:false})
+    }
+  }
   const assertSinkOutputAuthority = async (context: ToolContext): Promise<void> => {
+    const started=Date.now()
     if (!params.sink.assertOutputAuthority) return assertSourceModelOutputAuthority(context)
     const assertIdentity = () => {
       if (!original.execution || !original.authority || !original.accumulator
@@ -167,7 +180,7 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       }
     }
     assertIdentity()
-    await params.sink.assertOutputAuthority(context)
+    try{await params.sink.assertOutputAuthority(context)}finally{recordOutputTiming(context,started)}
     assertIdentity()
   }
   const lease = params.lease ?? { mode: 'kernel' as const }
@@ -208,6 +221,23 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     : () => {}
 
   const collector = createTurnOutputCollector({ format: params.outputFormat ?? 'compact' })
+  let combinedReceipt:{event:QueryEvent;evidence:string}|undefined
+  const refuseCombinedReceipt=()=>{throw Object.assign(new Error('The output evidence changed.'),{reason:'authority_changed' as const,retrySafe:false})}
+  const tryCombinedOutput=params.sink.nativeOutputBoundary&&!params.loop.context.assertModelOutputAuthority
+    &&params.sink.kind==='sse'
+    ?async(current:ToolContext,event:QueryEvent):Promise<boolean>=>{
+      combinedReceipt=undefined
+      if(current.executionContext!==original.execution||current.authority!==original.authority||current.scopeAccumulator!==original.accumulator)refuseCombinedReceipt()
+      const started=Date.now()
+      let admitted:boolean
+      try{admitted=await tryAssertNativeCombinedOutput(params.sink.nativeOutputBoundary!,current,params.sink.assertOutputAuthority)}
+      catch(error){recordOutputTiming(current,started);throw error}
+      if(!admitted)return false
+      recordOutputTiming(current,started)
+      if(current.executionContext!==original.execution||current.authority!==original.authority||current.scopeAccumulator!==original.accumulator)refuseCombinedReceipt()
+      combinedReceipt={event,evidence:JSON.stringify(original.accumulator?.evidence)}
+      return true
+    }:undefined
   try {
     if (params.budget) await params.budget()
     // Loop and sink failures propagate unchanged: the runner's own error path
@@ -232,13 +262,19 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     for await (const event of queryLoop({
       ...params.loop,
       context,
+      tryAssertOutputBoundary:tryCombinedOutput,
       provider: params.model.provider,
       model: servedTurnModel(params.model),
       stallIdleMs: params.stallIdleMs ?? DEFAULT_STALL_IDLE_MS,
     })) {
       // An aborted turn stops consuming: nothing after a stop reaches a sink.
       if (params.abortController.signal.aborted) break
-      if (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json') {
+      const receipt=combinedReceipt
+      combinedReceipt=undefined
+      if(receipt){
+        if(receipt.event!==event||context.executionContext!==original.execution||context.authority!==original.authority
+          ||context.scopeAccumulator!==original.accumulator||JSON.stringify(original.accumulator?.evidence)!==receipt.evidence)refuseCombinedReceipt()
+      }else if (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json') {
         await assertSinkOutputAuthority(context)
       }
       collector.observe(event)
@@ -258,6 +294,7 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     await params.sink.afterLoop?.(result)
     return result
   } finally {
+    combinedReceipt=undefined
     stopHeartbeat()
     if (ownsAbortHandle) unregisterTurnAbort(params.sessionId, token!)
     if (token && lease.mode === 'kernel') await releaseTurn(params.sessionId, token, 'completed')

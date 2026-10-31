@@ -179,16 +179,20 @@ export function wrapLog(options?: { verbose?: boolean }): StreamWrapper {
   return (inner) => async function* (request) {
     const start = Date.now()
     let chunkCount = 0
+    let consumerMs = 0
 
     for await (const chunk of inner(request)) {
       chunkCount++
       if (options?.verbose) {
         console.debug(`[stream] chunk #${chunkCount}: ${chunk.type}`)
       }
+      const yieldedAt = Date.now()
       yield chunk
+      consumerMs += Date.now() - yieldedAt
     }
 
-    console.debug(`[stream] complete: ${chunkCount} chunks in ${Date.now() - start}ms`)
+    const elapsedMs = Date.now() - start
+    console.debug(`[stream] complete: ${chunkCount} chunks in ${elapsedMs}ms (upstream_wait_ms=${elapsedMs - consumerMs} consumer_ms=${consumerMs})`)
   }
 }
 

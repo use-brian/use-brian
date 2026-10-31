@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { wrapProvider, wrapIdleTimeout } from '../wrappers.js'
+import { wrapProvider, wrapIdleTimeout, wrapLog } from '../wrappers.js'
 import { collectStream } from '../accumulator.js'
 import type { LLMProvider, StreamChunk, ProviderRequest, ProviderSession, SessionOptions, SendOptions, Message } from '../types.js'
 
@@ -283,5 +283,29 @@ describe('[COMP:providers/wrappers] wrapIdleTimeout — first-deliverable vs int
     }
     expect(String(err)).toMatch(/Stream idle for 30ms/)
     expect(String(err)).not.toMatch(/no deliverable chunk/)
+  })
+})
+
+
+describe('[COMP:providers/wrappers] stream timing attribution', () => {
+  it('separates slow consumer work from upstream waits without changing chunks', async () => {
+    let now = 0
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const log = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const chunks: StreamChunk[] = [{ type: 'text_delta', text: 'Fictional reply' },
+      { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }]
+    try {
+      const wrapped = wrapLog()(async function* () {
+        for (const chunk of chunks) { now += 15; yield chunk }
+        now += 5
+      })
+      const received: StreamChunk[] = []
+      for await (const chunk of wrapped({ model: 'fake', systemPrompt: '', messages: [] })) {
+        received.push(chunk)
+        now += 40
+      }
+      expect(received).toEqual(chunks)
+      expect(log).toHaveBeenLastCalledWith('[stream] complete: 2 chunks in 115ms (upstream_wait_ms=35 consumer_ms=80)')
+    } finally { clock.mockRestore(); log.mockRestore() }
   })
 })

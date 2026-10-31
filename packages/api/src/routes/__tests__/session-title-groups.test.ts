@@ -20,7 +20,8 @@ function execution(input:any,override:any={}){
 }
 beforeEach(()=>{
  vi.resetAllMocks()
- mocks.query.mockImplementation(async(sql:string)=>({rows:sql.includes('title_candidates')?ids.map(id=>({id})):ids.map(id=>({sessionId:id,revisionId:id+'-revision'}))}))
+ mocks.query.mockImplementation(async(sql:string)=>({rows:sql.includes('title_candidates')?ids.map(id=>({id})):ids.map(id=>({sessionId:id,revisionId:id+'-revision',
+  source:{held:false,resourceKind:'session_context_revision',resourceId:id+'-revision',version:'1'}}))}))
  mocks.resolve.mockImplementation(async input=>execution(input))
  mocks.head.mockImplementation(async id=>id+'-revision');mocks.read.mockImplementation(async id=>title(id))
  mocks.group.mockImplementation(async heads=>new Map(heads.map((head:{sessionId:string})=>[head.sessionId,title(head.sessionId)])))
@@ -42,9 +43,30 @@ describe('[COMP:api/application-persistence] bounded title group context partiti
   await sessionTitleProjections({claims,sessionIds:['first','second','first','second']})
   expect(mocks.group).not.toHaveBeenCalled();expect(mocks.read).toHaveBeenCalledTimes(4)
  })
+ it('collects equal contexts across different-context entries and restores request order',async()=>{
+  const events:string[]=[]
+  mocks.resolve.mockImplementation(async input=>execution(input,input.session.id==='second'?{clearance:'confidential'}:{}))
+  mocks.read.mockImplementation(async id=>{events.push('read:'+id);return title(id)})
+  mocks.group.mockImplementation(async heads=>{events.push('group:'+heads.map((head:any)=>head.sessionId).join(','));return new Map(heads.map((head:any)=>[head.sessionId,title(head.sessionId)]))})
+  const result=await sessionTitleProjections({claims,sessionIds:ids})
+  expect(mocks.group).toHaveBeenCalledTimes(1)
+  expect(events).toEqual(['group:first,third,fourth','read:second'])
+  expect([...result.keys()]).toEqual(ids)
+  expect([...result.values()].map(value=>value.title)).toEqual(ids.map(id=>'Fictional '+id))
+ })
+ it('uses held metadata only to exclude optional grouping and still reads that row freshly',async()=>{
+  mocks.query.mockImplementation(async(sql:string)=>({rows:sql.includes('title_candidates')?ids.map(id=>({id})):ids.map(id=>({sessionId:id,revisionId:id+'-revision',
+   source:id==='second'?{held:true}:{held:false,resourceKind:'session_context_revision',resourceId:id+'-revision',version:'1'}}))}))
+  const result=await sessionTitleProjections({claims,sessionIds:ids})
+  expect(mocks.read).toHaveBeenCalledTimes(1);expect(mocks.read.mock.calls[0][0]).toBe('second')
+  expect(mocks.group.mock.calls[0][0].map((head:any)=>head.sessionId)).toEqual(['first','third','fourth'])
+  expect([...result.keys()]).toEqual(ids)
+  expect(result.get('second')?.title).toBe('Fictional second')
+ })
  it('caps failed optional probes before unchanged row fallback',async()=>{
   const many=Array.from({length:50},(_,index)=>'fictional-'+index)
-  mocks.query.mockResolvedValue({rows:many.map(id=>({id}))});mocks.group.mockResolvedValue(null)
+  mocks.query.mockImplementation(async(sql:string)=>({rows:sql.includes('title_candidates')?many.map(id=>({id})):many.map(id=>({sessionId:id,revisionId:id+'-revision',
+   source:{held:false,resourceKind:'session_context_revision',resourceId:id+'-revision',version:'1'}}))}));mocks.group.mockResolvedValue(null)
   const result=await sessionTitleProjections({claims,sessionIds:many})
   expect(mocks.group).toHaveBeenCalledTimes(3);expect(mocks.read).toHaveBeenCalledTimes(50)
   expect([...result.values()].map(value=>value.title)).toEqual(many.map(id=>'Fictional '+id))

@@ -5,19 +5,13 @@ import {bindScopeSources,boundScopeSources,ContextScopeAccumulator,DerivedScopeE
 import {applicationJsonSchema} from '@use-brian/shared'
 import {getPool} from './client.js'
 import type {SessionMessage} from './sessions.js'
-import {readSessionQueryFrame} from './session-context-revisions.js'
+import {readJointSessionQueryFrame} from './session-context-revisions.js'
+import {nativeSessionAnnotationSchema as annotation} from '../application-platform/native-session-query-evidence.js'
 
 const source=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
  resourceKind:z.enum(['application_field','external_source']),resourceId:z.string().uuid(),version:z.string().min(1),
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid())}).strict()
 const capture=z.object({row:z.record(applicationJsonSchema).nullable(),sources:z.array(source).min(1)}).strict()
-const attachment=z.object({fileId:z.string().uuid(),workspaceId:z.string().uuid(),path:z.string(),name:z.string(),mime:z.string(),
- sizeBytes:z.number().int().nonnegative(),caption:z.string().optional()}).strict()
-const body=z.object({id:z.string().uuid(),role:z.string(),content:applicationJsonSchema,sequenceNum:z.number().int().positive(),
- createdAt:z.string().datetime({offset:true}),senderUserId:z.string().uuid().nullable(),senderAssistantId:z.string().uuid().nullable(),
- channelMessageId:z.string().nullable(),attachments:z.array(attachment)}).strict()
-const annotation=z.object({id:z.string().uuid(),sequenceNum:z.number().int().positive(),topicLabel:z.string().min(1).max(200),
- topicConfidence:z.number().finite().min(0).max(1),replyToText:z.string().max(8000).nullable()}).strict()
 export type SessionQueryAnnotation=z.infer<typeof annotation>
 function changed():never{throw new DerivedScopeError('scope_source_changed')}
 async function readCapture(client:Pick<PoolClient,'query'>,workspaceId:string,sessionId:string,through:number,kind:'history'|'topics'){
@@ -52,16 +46,14 @@ export async function readAdmittedSessionQuery(input:{sessionId:string;throughSe
  // Discover immutable identities only. Neither owner discovery nor metadata is
  // an authorization decision; the non-owner projection admits every candidate.
  const roots=await sessionQueryRootMetadata(workspaceId,sessionId,throughSequence,topicThrough)
- const result=await readSessionQueryFrame(authority,roots,async client=>{
-  const historyCapture=await readCapture(client,workspaceId,sessionId,throughSequence,'history'),annotations=await captureSessionTopics(client,workspaceId,sessionId,topicThrough)
-  const history=historyCapture.slice(1).map(row=>{
-   const value=body.parse(row.row)
-   return bindScopeSources<SessionMessage>({...value,sessionId,createdAt:new Date(value.createdAt),replyToText:null,topicLabel:null,topicConfidence:null},row.sources)
-  })
-  bindScopeSources(history,historyCapture.flatMap(row=>row.sources))
-  const value=bindScopeSources({history,annotations},[...boundScopeSources(history),...boundScopeSources(annotations)])
-  return {value,sources:boundScopeSources(value)}
+ const captured=await readJointSessionQueryFrame(authority,roots,{sessionId,throughSequence,topicThroughSequence:topicThrough})
+ const history=captured.history.slice(1).map(row=>{
+  const value=row.row!
+  return bindScopeSources<SessionMessage>({...value,sessionId,createdAt:new Date(value.createdAt),replyToText:null,topicLabel:null,topicConfidence:null},row.sources)
  })
+ bindScopeSources(history,captured.history.flatMap(row=>row.sources))
+ const annotations=bindScopeSources(captured.annotations.slice(1).map(row=>bindScopeSources(row.row!,row.sources)),captured.annotations.flatMap(row=>row.sources))
+ const result=bindScopeSources({history,annotations},[...boundScopeSources(history),...boundScopeSources(annotations)])
  authority.accumulator.note({sources:boundScopeSources(result)})
  return result
 }

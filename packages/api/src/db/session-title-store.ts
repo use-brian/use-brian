@@ -5,7 +5,7 @@ import {bindScopeSources,boundScopeSources,DerivedScopeError,type DerivedWriteEv
 import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
 import type {ScopeSource} from '@use-brian/core'
 import {getPool} from './client.js'
-import {readSessionContextRevisions,writeSessionContextRevision,readRetainedContextFrame} from './session-context-revisions.js'
+import {readSessionContextRevisions,writeSessionContextRevision,readRetainedContextFrame,readNativeTitleGroupFrame} from './session-context-revisions.js'
 const payload=z.object({title:z.string().trim().min(1).max(200),manual:z.boolean()}).strict()
 export type SessionTitle=z.infer<typeof payload>&{revisionId:string}
 function changed():never{throw new DerivedScopeError('scope_source_changed')}
@@ -55,7 +55,8 @@ export async function readSessionTitlesGrouped(input:readonly {sessionId:string;
  const sources:ScopeSource[]=discovered.map(({source})=>({workspaceId:source.workspaceId,userId:source.userId,assistantId:source.assistantId,
   sensitivity:source.sensitivity,compartments:source.compartments,projectIds:source.projectIds,resourceKind:source.resourceKind,resourceId:source.resourceId,version:source.version}))
  if((await readExternalSourceAncestors(workspaceId,sources)).length)return null
- const raw=await readRetainedContextFrame(authority,sources,async client=>(await client.query<{value:unknown}>(
+ const optional=await readNativeTitleGroupFrame(authority,heads,sources)
+ const raw=optional??await readRetainedContextFrame(authority,sources,async client=>(await client.query<{value:unknown}>(
   'SELECT read_native_personal_title_group($1,$2,$3) AS value',[workspaceId,heads.map(head=>head.sessionId),heads.map(head=>head.revisionId)])).rows[0]?.value)
  if(raw===null)return null
  const values=z.array(z.object({sessionId:z.string().uuid(),revisionId:z.string().uuid(),content:payload,source:z.unknown()}).strict()).parse(raw)

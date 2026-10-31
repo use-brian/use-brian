@@ -7,12 +7,14 @@ import { createMemory } from './memories.js'
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import {
-  ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope, intersectAccessCeilings, RANK, scopeGrantContains,
+  ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope, intersectAccessCeilings, accessCeilingContains, pinAccessCeiling, RANK, scopeGrantContains,
   type DerivedWriteEvidence, type ScopeEvidence, type ExecutionContext, type ResourceScope, type ScopeSource, type SessionContextAuthority,
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from './client.js'
 import { recordDerivedResource, validateDerivedWriteInputs } from './derived-scope-store.js'
-import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
+import { validateCallerScopeEvidence,readValidatedNativeTitleGroup,readValidatedNativeSessionQuery } from '../context-scope/caller-evidence.js'
+import type {NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
+import {readOriginalNativeSessionQueryCaptures,nativeSessionQueryCaptureSources,type NativeSessionQuerySelection,type NativeSessionQueryCaptures} from '../application-platform/native-session-query-evidence.js'
 import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
 import { readApplicationFieldAncestors } from '../application-platform/field-evidence.js'
 import { getSharedRetainedSourceAuthority } from '../application-platform/source-runtime.js'
@@ -152,6 +154,24 @@ export function readRetainedContextFrame<T>(authority:SessionContextAuthority,so
  return transaction(authority,structuredClone(sources),'context',false,capture)
 }
 
+/** Optional identity-only native acquisition. Its SQL reader proves the whole
+ * closed source set before selecting payloads; the original caller validator
+ * checks that same proof inside this frame. Null leaves the full retained path
+ * responsible for independent-source preparation and ordinary fallback. */
+export function readNativeTitleGroupFrame(authority:SessionContextAuthority,heads:readonly NativeTitleHead[],
+ sources:readonly ScopeSource[]):Promise<unknown[]|null>{
+ const {execution}=requireAuthority(authority)
+ // SQL admits payload before the host inspects its proof packet. An access
+ // context broader than the original caller ceiling must therefore retain
+ // the original pre-payload caller-validation path, not this consolidation.
+ if(!accessCeilingContains(execution.security.ceiling,pinAccessCeiling(execution.security.access)))return Promise.resolve(null)
+ const identities=structuredClone(heads),evidence={sources:structuredClone([...sources])}
+ return transaction(authority,[],'context',false,async client=>{
+  const captured=await readValidatedNativeTitleGroup(identities,evidence,authority.execution.security.ceiling,client)
+  return captured?.titles??null
+ })
+}
+
 /** Native durable publication uses the original retained operation and non-owner connection. */
 export function writeRetainedContextFrame<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
  publish:(client:PoolClient)=>Promise<T>):Promise<T>{
@@ -229,6 +249,24 @@ async function pinNativeSessionQueryFloor(authority:SessionContextAuthority,clie
 /** Internal current-reader frame for original session queries, including empty collections. */
 export async function readSessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:readonly ScopeSource[],
  capture:(client:PoolClient)=>Promise<{value:T;sources:readonly ScopeSource[]}>):Promise<T> {
+ return sessionQueryFrame(authority,rawRoots,capture)
+}
+
+/** Only canonical selector identities enter the optional joint acquisition.
+ * The ordinary query frame and its complete fallback remain private here. */
+export function readJointSessionQueryFrame(authority:SessionContextAuthority,roots:readonly ScopeSource[],
+ selection:NativeSessionQuerySelection):Promise<NativeSessionQueryCaptures>{
+ const selector=structuredClone(selection),{execution}=requireAuthority(authority)
+ if(selector.sessionId!==execution.lifecycle.sessionId||execution.lifecycle.sessionPersisted===false
+  ||![selector.throughSequence,selector.topicThroughSequence].every(value=>Number.isSafeInteger(value)&&value>=0&&value<=2147483647))missing()
+ return sessionQueryFrame(authority,roots,async client=>{
+  const value=await readOriginalNativeSessionQueryCaptures(client,execution.security.access.workspaceId,selector)
+  return{value,sources:nativeSessionQueryCaptureSources(value,execution.security.access.workspaceId)}
+ },selector)
+}
+
+async function sessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:readonly ScopeSource[],
+ capture:(client:PoolClient)=>Promise<{value:T;sources:readonly ScopeSource[]}>,joint?:NativeSessionQuerySelection):Promise<T>{
  try{
  const {execution}=requireAuthority(authority),roots=structuredClone(rawRoots)
  await execution.security.authority.assertCurrent()
@@ -260,8 +298,12 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
   proof=admittedRoots.length?await prepare!(execution,admittedRoots,'context'):undefined
   assertWiring()
   if(proof)await pinPreparedExternalSourceAuthority(client,execution,proof)
-  const result=await capture(client)
-  await validateCallerScopeEvidence({sources:[...result.sources]},execution.security.ceiling,client)
+  // Optional SQL selects payload only when its access is no broader than the
+  // original caller ceiling. The private validator consumes its fresh proof.
+  const acquired=joint&&accessCeilingContains(execution.security.ceiling,pinAccessCeiling(execution.security.access))
+   ?await readValidatedNativeSessionQuery(joint,execution.security.ceiling,client):null
+  const result=acquired?{value:acquired.captures as T,sources:acquired.sources}:await capture(client)
+  if(!acquired)await validateCallerScopeEvidence({sources:[...result.sources]},execution.security.ceiling,client)
   assertWiring()
   return result
  })

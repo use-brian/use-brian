@@ -3,7 +3,7 @@ import {generateAttendedSessionTitle} from './attended-session-title.js'
 import {readSessionTitle} from '../db/session-title-store.js'
 import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
-import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
+import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
 import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
@@ -3020,6 +3020,11 @@ export function chatRoutes(options: WebChatOptions): Router {
         && executionContext.identity.kind === 'attended'
         && executionContext.identity.principal.kind === 'workspace_member'
         ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
+      const nativeOutputBoundary=nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
+        &&!executionContext.security.access.sharedAudience&&classifySession(session).surface==='chat'?createNativeAttendedOutputBoundary(executionContext,scopeAccumulator,{
+        workspaceId:assistant.workspaceId??'',assistantId:assistant.id,userId:user.id,channelType:'web',
+        channelId:session.channelId,sessionId:session.id,recipientType:turnPolicy.deliveryCeiling.recipientType,
+      }):undefined
       const currentTurnWrite = () => ({
         ...turnOutputWrite({
           producer: 'turn:web',
@@ -7596,7 +7601,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // section 6). See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
           },
-          sink: { kind: 'sse', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async (result) => {
+          sink: { kind: 'sse', ...(nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority ? { assertOutputAuthority:assertDeliveryAudience } : {}), afterLoop: async (result) => {
             if (postReply.beginFinalization(result, !!queryLoopError, abortController.signal)) {
               sendActivityEvent('reply_text_complete', {})
               turnStream.setReplyPhase('saving')
