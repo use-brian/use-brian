@@ -6,6 +6,28 @@ current reader may see its source-dependent content.
 
 ## Streaming under backpressure
 
+### Latency diagnostics
+
+The `turn_timings` event and `[chat] turn timings` line include request-relative
+milestones (`*_at_ms`) for loop start, first delivered reasoning, first delivered
+text, generation completion, reply publication, loop return and client completion. A missing milestone
+means it was not reached. Repeated deltas never overwrite the first timestamp.
+Counters separately time research and topic classification, history reads,
+compaction, reply publication, session-state diff and title generation. These
+counters overlap the enclosing phases and must not be added to the phase totals.
+In particular, the existing `loop_ms` can include awaited post-loop state work;
+use the publication and loop-return milestones to identify that tail.
+
+Each existing `[stream]` summary also reports first chunk/reasoning/text arrival,
+chunk counts, and time waiting for the inner iterator versus time suspended at
+`yield` for its consumer. Inner-iterator time includes provider setup, authority
+checks and network waits; it is not a measurement of remote inference alone.
+Consumer time includes delivery authorization and backpressure. First-arrival
+times are stream-relative and can include earlier consumer waits. Summaries are
+emitted on completion, errors and cancellation, use monotonic clocks, and contain
+only counts, durations and a registry model alias (`other` for custom models).
+They never log prompts, replies, reasoning, tool arguments or endpoint URLs.
+
 The Codex transport receives notifications independently of the query-loop
 consumer. When authorization or delivery is slower than incoming notifications,
 combine adjacent queued text deltas of the same kind, up to 4,096 JavaScript
