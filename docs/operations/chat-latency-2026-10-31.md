@@ -267,3 +267,44 @@ production trace after operator deployment is needed to measure the actual
 end-to-end improvement. The main provider's latency, substantive-turn title
 wait, pre-loop failure timing gap and frontend Sharp SIGSEGV remain separate
 limitations.
+
+## Follow-up deployment verification, 21:06–21:08
+
+The operator deployed the follow-up at 20:58:10. The migration journal confirms
+8152 applied successfully. Two sequential browser probes used the same personal
+workspace, assistant and Pro effort: one in the existing test chat, then one in
+a fresh General chat. Both returned saved replies; the fresh reply remained
+visible after a browser reload. These are single samples,
+not a controlled performance benchmark.
+
+| Request-relative milestone | Before, 20:10 | Existing chat, 21:06 | Fresh chat, 21:07 |
+|---|---:|---:|---:|
+| Loop start | 8.675 s | 7.203 s | 1.983 s |
+| First delivered text | 15.329 s | 12.981 s | 8.864 s |
+| Generation finished | 16.356 s | 14.853 s | 9.636 s |
+| Reply saved | 17.517 s | 19.324 s | 10.594 s |
+| Loop returned | 20.853 s | 19.792 s | 13.714 s |
+| Client completion | 28.099 s | 20.406 s | 14.521 s |
+
+The fresh sample completed 48.3% sooner than the earlier isolated request;
+the existing-chat sample completed 27.4% sooner. The existing chat now has more
+history and the two new replies differ, so neither percentage isolates one
+change's effect. In particular, existing-chat publication took 4.011 s, compared
+with 0.778 s in the fresh chat: retained history/source work remains material.
+
+Fresh-chat nested counters were research 0.293 s, topic 0.408 s, history
+0.342 s, compaction 0.092 s, state diff 3.107 s and title wait 0.781 s. No
+research, topic or title provider stream appeared. The main `gpt-6-sol` stream
+took 6.669 s (6.404 s inner-iterator wait, 0.265 s consumer wait), close to the
+earlier 6.715 s. The assistant replied `Received.`, which is outside the exact
+trivial-message allowlist, so the conservative state-diff path still invoked
+`gpt-6-luna` for 2.723 s. The existing-chat reply was `I’m here.` and its diff
+took 0.457 s without a provider stream. Skipping an auxiliary provider does not
+skip the surrounding authority/evidence work.
+
+The frontend crashed at 21:06:58 and restarted at 21:07:03. The main-thread
+stack starts in `libvips-cpp.so.8.18.6` during `dlopen`, matching the earlier
+native-library loading fault. API restart count remained zero. No PostgreSQL
+errors, statement timeouts or deadlocks appeared between deployment and the
+two tests. No production configuration or service changes were made by the
+investigating agent.
