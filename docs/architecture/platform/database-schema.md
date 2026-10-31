@@ -11,3 +11,4 @@ The preceding schema is defined by the immutable migrations in
 
 | `8150_department_office_publication.sql` | Extends immutable Office snapshot publication to session-bound v2 generation jobs. Retains the live job, parent ACL, file envelope, content hash and storage path checks. |
 | `8152_native_chat_publication_frame.sql` | Seeds native transcript publication's statement-local evaluator only from a fully admitted private Memory frame. Preserves function identity/ACLs, source tuple comparisons, mutation grants, publication locks and canonical fallback. No tables or persistent permission cache are added. |
+| `8153_native_chat_reference_frame.sql` | Uses a fresh fully admitted private Memory frame for eligible native message/annotation application-field reference checks. Keeps original tuple comparisons, output validation, triggers, ACLs and canonical fallback under pinned reader contracts. No shared proof or persistent cache is added. |

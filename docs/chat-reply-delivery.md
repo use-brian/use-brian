@@ -112,6 +112,19 @@ the canonical field reader for unsupported roots or a changed reader contract.
 The original retained-edge, privacy, output-label and external-source checks
 still execute for every row; no proof is shared between trigger invocations.
 
+For source-reference validation on a canonical native message or message
+annotation, a fresh fully admitted private Memory frame may supply an exact
+current application-field tuple. This replaces only the generic current-field
+lookup, under pinned reader contracts; the original version comparison and all
+other reference, retained-edge, output-envelope and publication checks remain.
+Every trigger obtains a new proof. Unknown output shapes, changed helpers and
+unqualified frames keep the original reader. Review-state references and other
+derivation kinds retain the original path.
+An indexed metadata hint limits this optimization to conversations with an
+existing history-derived topic annotation; ordinary short histories retain
+their cheaper original path. The hint grants no access and never substitutes
+for the complete source proof.
+
 The 2026-10-29 home-server incident included a deadlock between a workspace
 picker update and session-history admission. Increasing the API pools to 16
 removed checkout timeouts after the 23:33 HKT restart, but 49 SQL statement
