@@ -3971,10 +3971,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         if (!nativeTranscriptAuthority || !earlyStoredUserMsg) {
           throw Object.assign(new Error('The assessment context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
         }
-        const adaptive = await classifyAttendedResearchMessage({
+        const adaptive = await turnTiming.time('research_classify', () => classifyAttendedResearchMessage({
           authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
           provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
-        })
+        }))
         adaptiveResearchOverhead = {
           model: adaptive.model,
           usage: adaptive.usage,
@@ -3994,11 +3994,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
 
       const nativeClassification = nativeTranscriptAuthority && earlyStoredUserMsg
-        ? await classifyAttendedSessionMessage({
+        ? await turnTiming.time('topic_classify', () => classifyAttendedSessionMessage({
             authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
             provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
             reply: { channelType: 'web', replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
-          })
+          }))
         : undefined
 
       // ── Reply resolution + topic classification ────────────────
@@ -4308,12 +4308,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       // "Provider signatures".
       // `fromSequence` skips rows already compacted into the most recent
       // boundary; null (never compacted) loads full history.
-      const dbMessages = nativeTranscriptAuthority
-        ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, session.compactBoundarySequence)
-        : await getSessionMessages(session.id, {
+      const dbMessages = await turnTiming.time('history_read', () => nativeTranscriptAuthority
+        ? readAttendedSessionHistory(nativeTranscriptAuthority, session.id, session.compactBoundarySequence)
+        : getSessionMessages(session.id, {
             fromSequence: session.compactBoundarySequence,
             excludeHeld: true,
-          })
+          }))
       noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
       const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
@@ -4382,7 +4382,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // retryHint injection) to the returned message array before the query
       // loop.
       await assertDeliveryAudience()
-      const compactionResult = await runProactiveCompaction({
+      const compactionResult = await turnTiming.time('compaction', () => runProactiveCompaction({
         modelContext: { execution: executionContext, accumulator: scopeAccumulator },
         sessionMessages: dbMessages,
         timezone: user.timezone ?? 'UTC',
@@ -4414,7 +4414,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         compartments: turnScope.writeCompartments,
         projectIds: turnScope.writeProjectIds,
         authority,
-      })
+      }))
       // Gate on the serving provider: the signature strip is a Gemini-only
       // workaround and would erase a Qwen (openai-compat) turn's tool calls
       // from history. Resolve the requested model to its provider here (the
@@ -7072,7 +7072,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             }
           }
         }
-        await authority.execute(async () => {
+        await turnTiming.time('reply_publication', () => authority.execute(async () => {
           if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
             return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish,
               turnLeaseToken ? abortController.signal.aborted ? { stoppedTurnToken: turnLeaseToken } : { turnToken: turnLeaseToken } : undefined)
@@ -7088,7 +7088,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           } finally {
             tx.release()
           }
-        })
+        }))
         if (savedTurns.length > 0) await assertDeliveryAudience()
 
         for (const saved of savedTurns) {
@@ -7101,6 +7101,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // timeline entries, not message bubbles, so the UI doesn't need
           // their ids.
           if (saved.isLast) {
+            turnTiming.observe('reply_saved')
             sendEvent('assistant_message_saved', { id: saved.stored.id })
             // File cards (sendFile) — the streaming client renders these
             // at turn end; refetches read them from the persisted row.
@@ -7283,6 +7284,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         })
         turnTiming.mark('prompt')
+        turnTiming.observe('loop_started')
         // Tool executions arrive as `tool_start` per call and ONE `tool_result`
         // per batch; the batch's wall-clock is what the turn waited for.
         let toolBatchStartedAt: number | null = null
@@ -7564,16 +7566,18 @@ export function chatRoutes(options: WebChatOptions): Router {
           turnInbox: turnInbox.port,
           },
           sink: { kind: 'sse', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async (result) => {
+            turnTiming.observe('generation_finished')
             postReply.beginFinalization(result, !!queryLoopError, abortController.signal)
             await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
-            if (!options.sessionStateStore) return
+            const sessionStateStore = options.sessionStateStore
+            if (!sessionStateStore) return
             try {
-              const result = await runTurnSessionStateDiff({
+              const result = await turnTiming.time('session_state_diff', () => runTurnSessionStateDiff({
                 authority: { execution: executionContext, accumulator: scopeAccumulator },
-                provider: backgroundProvider, model: backgroundModel, store: options.sessionStateStore,
+                provider: backgroundProvider, model: backgroundModel, store: sessionStateStore,
                 userMessage: bindScopeSources<Message>({ role: 'user', content: userMessageText }, storedUserSource ? [storedUserSource] : []),
                 assistantTurns: pendingAssistantTurns,
-              })
+              }))
               options.analytics?.logEvent({
                 userId: user.id, assistantId: assistant.id, sessionId: session.id,
                 eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
@@ -7605,6 +7609,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           researchObserver?.observe(event)
 
           if (event.type === 'text_delta') {
+            turnTiming.observe('first_text')
             turnTiming.count('text_delta')
             if (event.text.trim()) hasDeliveredText = true
             sendEvent('text_delta', { text: event.text })
@@ -7617,6 +7622,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           // older clients) simply ignore the event. See
           // docs/architecture/engine/live-streaming.md.
           if (event.type === 'thinking_delta') {
+            turnTiming.observe('first_thinking')
+            turnTiming.count('thinking_delta')
             sendEvent('reasoning', { text: event.text })
             // Every authenticated reconnect receives the live reasoning tail.
             turnStream.onReasoningDelta(event.text)
@@ -8277,6 +8284,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           }
           } },
         })
+        turnTiming.observe('loop_returned')
         turnTiming.mark('loop')
 
         // Happy-path flush: the loop completed without throwing. Any
@@ -8753,7 +8761,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             })
           }
         })()
-        await autoTitle
+        await turnTiming.time('auto_title_wait', () => autoTitle)
       }
 
       // Doc reply-to-page safety net — the "New draft" build never answers
@@ -8906,6 +8914,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         await docTitle
       }
 
+      turnTiming.observe('client_done')
       sendEvent('done', {})
       res.end()
     } catch (err) {
