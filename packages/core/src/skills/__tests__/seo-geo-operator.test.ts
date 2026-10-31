@@ -83,10 +83,9 @@ function assistant(
 }
 
 function weeklyDefinition(): WorkflowDefinition {
-  const failureDelivery = { channelType: 'slack' as const, channelId: SLACK_CHANNEL_ID }
+  const outputDelivery = { channelType: 'slack' as const, channelId: SLACK_CHANNEL_ID }
   return {
     startStepId: 'gsc_sites',
-    failureDelivery,
     steps: [
       {
         id: 'gsc_sites', type: 'tool_call', toolName: 'searchConsoleListSites',
@@ -193,7 +192,7 @@ function weeklyDefinition(): WorkflowDefinition {
         'slack_summary',
         'Post status, period, coverage, per-site GSC/Google/AI movement, ownership findings, lane counts, blockers, and run/scorecard/task links.',
         null,
-        { deliver: failureDelivery },
+        { deliver: outputDelivery },
       ),
     ],
   }
@@ -202,7 +201,6 @@ function weeklyDefinition(): WorkflowDefinition {
 function executorDefinition(): WorkflowDefinition {
   return {
     startStepId: 'execute',
-    failureDelivery: { channelType: 'slack', channelId: SLACK_CHANNEL_ID },
     steps: [assistant(
       'execute',
       'Claim and execute {{input.event.taskId}}. Verify the result and end exactly done or blocked.',
@@ -218,7 +216,6 @@ function executorDefinition(): WorkflowDefinition {
 function notifierDefinition(): WorkflowDefinition {
   return {
     startStepId: 'notify',
-    failureDelivery: { channelType: 'slack', channelId: SLACK_CHANNEL_ID },
     steps: [assistant(
       'notify',
       'Read {{input.event.taskId}} and emit the exact COMPLETED or BLOCKED terminal task payload.',
@@ -231,7 +228,6 @@ function notifierDefinition(): WorkflowDefinition {
 function watchdogDefinition(): WorkflowDefinition {
   return {
     startStepId: 'watchdog',
-    failureDelivery: { channelType: 'slack', channelId: SLACK_CHANNEL_ID },
     steps: [assistant(
       'watchdog',
       'Block Brian-routed queued/running tasks only after more than two hours without progress. Do not execute them.',
@@ -422,10 +418,7 @@ describe('[COMP:skills/seo-geo-operator] canonical workflow blueprint', () => {
     expect(notifier.kind).toBe('event')
     if (notifier.kind !== 'event') throw new Error('expected event trigger')
     expect(notifier.event.sources[0].match?.currentTags).toEqual(['geo:route:brian'])
-    expect(notifierDefinition().failureDelivery).toEqual({
-      channelType: 'slack',
-      channelId: SLACK_CHANNEL_ID,
-    })
+    expect(notifierDefinition().failureDelivery).toBeUndefined()
     expect(context().activeProjectId).toBe(PROJECT_ID)
   })
 })

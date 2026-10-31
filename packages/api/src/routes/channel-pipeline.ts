@@ -14,7 +14,7 @@ import { policyFor } from '../session-kind.js'
 import { narrowConnectorTurnScope, resolveConnectorNativeTurnScopeSystem } from '../context-scope/connector-exposure.js'
 import { mayReadGroupContext, roomTurnShape } from '../channel-room/turn.js'
 import { appendChannelRoomMessage, claimChannelRoomTurn } from '../channel-room/messages.js'
-import { admitRoomInputScope, captureChannelRoomInput, claimRoomDisclosure, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomDisclosureText, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
+import { admitRoomInputScope, captureChannelRoomInput, claimRoomHydration, findOrCreateChannelRoom, resolveRoomBinding, roomInputScope, roomSpeakerLabel } from '../channel-room/room.js'
 import { releaseTurn, takeTurnLease, waitForTurnSlot } from '../turn/lease.js'
 import { runAssistantTurn } from '../turn/kernel.js'
 
@@ -340,11 +340,7 @@ export type ChannelHooks = {
    * (web streaming, scheduled-job executor) return `void`.
    */
   sendResponse(text: string, documents?: OutgoingDocument[], question?: ChannelQuestion, actions?: OutgoingAction[]): Promise<{ channelMessageId?: string } | void>
-  /**
-   * Post a standalone message into the conversation outside the turn's reply
-   * (a channel room's one-time disclosure, D4). Absent: the notice is put in
-   * front of the turn's reply instead.
-   */
+  /** @deprecated Legacy transport hook. Room setup never posts or prepends notices. */
   postNotice?(text: string): Promise<void>
 
   /**
@@ -1218,25 +1214,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     channelType,
     channelId: sessionChannelId,
   })
-  // D4: the room says once, in the group, that it is shared and captured.
-  let pendingRoomNotice: string | null = null
-  if (room && !params.recording && await claimRoomDisclosure(room.id)) {
-    const notice = roomDisclosureText({ assistantName: assistant.name, channelType })
-    if (hooks.postNotice) {
-      await hooks.postNotice(notice).catch((err: unknown) => {
-        console.error(`[${channelType}] room disclosure failed:`, err)
-      })
-    } else {
-      pendingRoomNotice = notice
-    }
-  }
-  const deliverResponse: ChannelHooks['sendResponse'] = pendingRoomNotice
-    ? (text, ...rest) => {
-        const notice = pendingRoomNotice
-        pendingRoomNotice = null
-        return hooks.sendResponse(notice ? `${notice}\n\n${text}` : text, ...rest)
-      }
-    : hooks.sendResponse
+  const deliverResponse = hooks.sendResponse
   // Resolve credential/billing ownership before constructing execution facts.
   // It remains attribution only and never substitutes for the channel actor.
   const billingUserId = await billingPartyForAssistant({

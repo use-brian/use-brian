@@ -499,7 +499,7 @@ const externalClientWorkflowPrincipalSchema = z
   })
   .strict()
 
-export const WorkflowDefinitionSchema = z
+const legacyWorkflowDefinitionSchema = z
   .object({
     taskIntake: RoutineTaskIntakeSchema.optional(),
     // Scalar = one entry step; ARRAY = trigger fan-out (every listed step
@@ -959,6 +959,13 @@ export const WorkflowDefinitionSchema = z
       }
     }
   })
+
+/** Retired automatic failure notices must not survive an ordinary definition save. */
+export const WorkflowDefinitionSchema = z.preprocess(value => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
+  const { failureDelivery: _retired, ...definition } = value as Record<string, unknown>
+  return definition
+}, legacyWorkflowDefinitionSchema)
 
 // ── Step-type tag list ──────────────────────────────────────────────────
 

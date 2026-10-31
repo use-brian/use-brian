@@ -10,8 +10,8 @@ export async function tryNativeInvocationEvidence(execution:ExecutionContext,evi
  const roots=evidence.sources??[],actor=execution.security.access.userId,workspaceId=execution.security.access.workspaceId
  const nativeAttended=execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'
   &&execution.identity.principal.userId===actor
- const nativeSessionAttended=nativeAttended&&execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'
-  &&execution.identity.principal.authenticationKind==='native_session'&&execution.security.access.assistantId===execution.assistant.id
+ const nativeVerifiedAttended=nativeAttended&&execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'
+  &&(execution.identity.principal.authenticationKind==='native_session'||execution.identity.principal.authenticationKind==='verified_channel')&&execution.security.access.assistantId===execution.assistant.id
   &&execution.ownership.kind==='workspace'&&execution.ownership.workspaceId===workspaceId
   &&!execution.surface.systemRead&&!execution.surface.clientSelfMemory&&!execution.security.access.systemRead
  const nativeDelegated=execution.identity.kind==='delegated'&&execution.identity.actorUserId===actor
@@ -32,7 +32,7 @@ export async function tryNativeInvocationEvidence(execution:ExecutionContext,evi
   if(role?.bypass!==false)throw new Error('Native proof requires an application role')
   await runWithAgentAccess({...execution.security.access,...ceiling,sharedAudience:anonymous||execution.security.access.sharedAudience},()=>applyRLSGucs(client,actor))
   // Preserve the original verified native assistant under legacy and v2 policies.
-  if(nativeDelegated||nativeSessionAttended)await client.query("SELECT set_config('app.v2_assistant_id',$1,true)",[execution.assistant.id])
+  if(nativeDelegated||nativeVerifiedAttended)await client.query("SELECT set_config('app.v2_assistant_id',$1,true)",[execution.assistant.id])
   // The SQL facade acquires its native lock only after proving eligibility.
   // Unknown/generic/independent-source closures therefore fall back unlocked.
   const admitted=await tryValidateNativeScopeEvidence(evidence,recipient,client,kind)

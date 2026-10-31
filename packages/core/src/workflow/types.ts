@@ -357,7 +357,7 @@ export type WorkflowDefinition = {
    */
   startStepId: string | string[]
   steps: WorkflowStep[]
-  /** Best-effort terminal failed/timeout notification. Never runs on success or cancellation. */
+  /** @deprecated Historical input only. Ignored at runtime and removed on save. */
   failureDelivery?: WorkflowDelivery
   /** Optional run-wide external-client authority. */
   principal?: ExternalClientWorkflowPrincipal

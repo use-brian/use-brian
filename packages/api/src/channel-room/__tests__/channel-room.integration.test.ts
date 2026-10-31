@@ -7,7 +7,7 @@
  * Per transport: two senders in one group share one session; an un-addressed
  * message persists as a post and runs no turn; a guest's post lands in the
  * room with no memory rows; a legacy per-user group row is archived when the
- * room is created; the room is hydrated and disclosed exactly once; a ready
+ * room is created; the room is hydrated exactly once without posting a notice; a ready
  * workspace admits the room through the `channel_room` receipt.
  */
 import { randomUUID } from 'node:crypto'
@@ -111,8 +111,8 @@ describeIf('[COMP:api/channel-room] converged rooms (database)', () => {
       expect(archived.visibility).toBe('personal')
       expect((await db.query('SELECT 1 FROM session_messages WHERE session_id = $1', [legacy])).rows).toHaveLength(0)
 
-      // D4: disclosed once; D16: hydrated once.
-      expect(notices).toHaveLength(1)
+      // Passive room setup stays quiet; D16: hydrated once.
+      expect(notices).toHaveLength(0)
       expect(await room.claimRoomHydration(roomId)).toBe(true)
       expect(await room.claimRoomHydration(roomId)).toBe(false)
 

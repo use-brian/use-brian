@@ -459,7 +459,8 @@ describe('[COMP:workflow/approval] deterministic tool notifications', () => {
     if (step.type !== 'tool_call') throw new Error('fixture tool step missing')
     step.deliver = { channelType: 'slack', channelId: 'C_CHANGED' }
     step.deliveryText = 'Changed notification'
-    await f.runStore.updateRun(f.run.id, { contextCompartments: ['legal'], vars: {
+    f.runs.get(f.run.id)!.contextCompartments = ['legal']
+    await f.runStore.updateRun(f.run.id, { vars: {
       ...f.runs.get(f.run.id)!.vars, label: 'Changed label',
       [WORKFLOW_SCOPE_EVIDENCE_VAR]: { sensitivity: 'confidential', compartments: ['finance'] },
     } })
