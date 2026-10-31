@@ -2,6 +2,7 @@ import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow, withDocumentFlowDebug } from './document-flow-debug.js'
 import { askQuestionSchema } from '../tools/base/ask-question.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
+import { createToolDiscovery } from './tool-discovery.js'
 import { getHeapStatistics } from 'node:v8'
 import { renderSystemContext } from '../providers/system-context.js'
 import { isInputAuthorityError } from '../providers/input-authority.js'
@@ -263,6 +264,8 @@ export type QueryLoopOptions = {
   runtimeSystemContext?: string
   messages: Message[]
   tools: Map<string, Tool>
+  /** Host opt-in only for adapters that re-read the session tool array on every send. */
+  deferToolSchemas?: boolean
   context: ToolContext
   /**
    * Turn-ledger recorder — REQUIRED, deliberately not optional (an optional
@@ -670,7 +673,7 @@ async function* queryLoopCore(
     model,
     systemPrompt,
     runtimeSystemContext,
-    tools,
+    tools: admittedTools,
     context,
     maxTurns = DEFAULT_MAX_TURNS,
     maxToolCalls = DEFAULT_HARD_LIMIT,
@@ -678,6 +681,7 @@ async function* queryLoopCore(
   } = options
   // Every event the loop hands its consumer is progress; so is every
   // provider chunk (below) and every tool start / end (tool-executor).
+  const tools = new Map(admittedTools)
   const progress = context.progress
 
   const loopDetector = createLoopDetector({ hardLimit: maxToolCalls })
@@ -715,13 +719,21 @@ async function* queryLoopCore(
   }
 
   // Build tool definitions for the LLM
-  const toolDefinitions: ToolDefinition[] = Array.from(tools.values()).map((t) => ({
+  let toolDefinitions: ToolDefinition[] = Array.from(tools.values()).filter(t => !t.hiddenFromModel).map((t) => ({
     name: t.name,
     description: t.description,
     parameters: t.inputSchema._def
       ? jsonSchemaFromZod(t.inputSchema)
       : { type: 'object' as const, properties: {} as Record<string, ToolParameter> },
   }))
+
+  if (options.deferToolSchemas && toolDefinitions.length > 0) {
+    const discovery = createToolDiscovery(toolDefinitions)
+    tools.set(discovery.tool.name, discovery.tool)
+    toolDefinitions = discovery.definitions
+    toolDefinitions.push({ name: discovery.tool.name, description: discovery.tool.description,
+      parameters: jsonSchemaFromZod(discovery.tool.inputSchema) })
+  }
 
   // In stateless mode, use provider.stream() each turn (no rawHistory accumulation).
   // In stateful mode, use a persistent session that preserves thought signatures.

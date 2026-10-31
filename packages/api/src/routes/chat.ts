@@ -17,7 +17,7 @@ import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
 import { debugDocumentFlow, executionToolContext, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
 import { closeProviderError } from './chat-provider-error.js'
-import { createChatPostReplyBoundary } from './chat-post-reply.js'
+import { createChatPostReplyBoundary, withReplyPublicationBarrier } from './chat-post-reply.js'
 import type { FeedGenerationService } from '../content-planning/generation.js'
 import { resolveFeedTurnContext, formatFeedTurnContext } from '../content-planning/collaboration-service.js'
 import { loadFeedReviewContext, recordFeedContextApplication } from '../content-planning/review-context.js'
@@ -7309,6 +7309,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           runtimeSystemContext: preparedRun.trustedContext,
           messages,
           tools: preparedRun.tools,
+          // These built-in adapters (including Gemini's Anthropic fallback)
+          // re-read the session declarations. Snapshot-based adapters do not.
+          deferToolSchemas: customLlmRuntime?.routeKind !== 'custom' &&
+            registryRow(customLlmRuntime?.selector ?? preparedRun.model.model)?.provider === 'gemini',
           context: {
             ...executionToolContext(executionContext, { appId: 'Use Brian' }),
             workerRuntime: customLlmRuntime
@@ -7567,15 +7571,24 @@ export function chatRoutes(options: WebChatOptions): Router {
           },
           sink: { kind: 'sse', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async (result) => {
             postReply.beginFinalization(result, !!queryLoopError, abortController.signal)
-            await flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
-            if (!options.sessionStateStore) return
+            const publishReply = () => flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
+            const stateStore = options.sessionStateStore
+            if (!stateStore) { await publishReply(); return }
+            // Inference observes the completed turn, independently of the
+            // publication accumulator. Its writes still await the saved reply.
+            const diffAuthority = { execution: executionContext,
+              accumulator: new ContextScopeAccumulator(structuredClone(scopeAccumulator.evidence)) }
+            let publicationFailed = false
             try {
-              const result = await runTurnSessionStateDiff({
-                authority: { execution: executionContext, accumulator: scopeAccumulator },
-                provider: backgroundProvider, model: backgroundModel, store: options.sessionStateStore,
+              const result = await withReplyPublicationBarrier(async () => {
+                try { await publishReply() } catch (error) { publicationFailed = true; throw error }
+              }, beforePersist => runTurnSessionStateDiff({
+                authority: diffAuthority, beforePersist,
+                provider: backgroundProvider, model: backgroundModel, store: stateStore,
                 userMessage: bindScopeSources<Message>({ role: 'user', content: userMessageText }, storedUserSource ? [storedUserSource] : []),
                 assistantTurns: pendingAssistantTurns,
-              })
+              }))
+              scopeAccumulator.note(diffAuthority.accumulator.evidence)
               options.analytics?.logEvent({
                 userId: user.id, assistantId: assistant.id, sessionId: session.id,
                 eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass',
@@ -7599,7 +7612,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 ...backgroundUsageAttribution,
               }))
             } catch (err) {
-              if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
+              if (publicationFailed || isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
               console.debug('[chat] session-state diff unavailable')
             }
           }, onEvent: async (event) => {

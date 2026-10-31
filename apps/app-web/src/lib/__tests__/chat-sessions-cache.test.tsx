@@ -332,7 +332,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data).toEqual([created]);
     finish(PERSONAL);
     await pending;
-    expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data).toEqual([created, ...PERSONAL]);
+    expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data).toEqual([created, ...PERSONAL.map(row => ({ ...row, statusReadStartedAt: expect.any(Number) }))]);
     const room = { ...SHARED[0], contextProjectId: "project-1" };
     cacheCreatedChatSession("w1", room, "workspace");
     expect(readSurfaceCache(chatSharedSessionsCacheKey("w1")).data).toEqual([room]);
@@ -436,7 +436,7 @@ describe("[COMP:app-web/chat-sessions-cache] list failures", () => {
     const latest = await healthyLists();
     api.listWorkspaceSessions.mockRejectedValue(new Error("chat_list_failed: 403"));
     await act(async () => { await latest().refreshShared(); await settle(); });
-    expect(latest().personal).toEqual(PERSONAL);
+    expect(latest().personal).toMatchObject(PERSONAL);
     expect(latest().personalError).toBeUndefined();
     expect(latest().shared).toBeNull();
     expect(readSurfaceCache(chatSharedSessionsCacheKey("w1")).data).toBeUndefined();

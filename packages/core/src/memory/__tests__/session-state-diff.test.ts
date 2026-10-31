@@ -89,6 +89,25 @@ function makeFlakyProvider(outputs: string[]): LLMProvider {
 }
 
 describe('[COMP:memory/session-state-diff] runSessionStateDiff', () => {
+  it('waits for reply publication and rechecks authority before writing inferred commitments', async () => {
+    const store = makeStore()
+    let allow = true, release!: () => void, reached!: () => void
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    const waiting = new Promise<void>(resolve => { reached = resolve })
+    const refusal = Object.assign(new Error('Fictional authority change'), { reason: 'authority_changed', retrySafe: false })
+    const pending = runSessionStateDiff({ provider: makeProvider('{"upserts":[{"key":"task:example","summary":"Follow up on the draft"}],"resolves":[]}'),
+      model: 'fixture', sessionId: 's1', userId: 'u1', assistantId: 'a1', store,
+      recentTurns: [{role:'user',content:'Follow up on the draft'}], openCommitments: [],
+      beforePersist: async () => { reached(); await barrier },
+      assertInputAuthority: async () => { if (!allow) throw refusal },
+    })
+    await waiting
+    expect(store.upsert).not.toHaveBeenCalled()
+    allow = false
+    release()
+    await expect(pending).rejects.toBe(refusal)
+    expect(store.upsert).not.toHaveBeenCalled()
+  })
   it('returns zero counts on empty input', async () => {
     const store = makeStore()
     const res = await runSessionStateDiff({

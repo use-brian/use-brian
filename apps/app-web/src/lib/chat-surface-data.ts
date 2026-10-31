@@ -244,7 +244,8 @@ export function useProjectChatSessionsData(workspaceId: string, projectId: strin
 /** Keep creations made during an older read; the next read is authoritative. */
 async function readChatList<T extends DocSession>(key: string, fetch: () => Promise<T[]>): Promise<T[]> {
   const before = new Set(readSurfaceCache<T[]>(key).data?.map(row => row.id));
-  const rows = await fetch();
+  const statusReadStartedAt = Date.now();
+  const rows = (await fetch()).map(row => ({ ...row, statusReadStartedAt }));
   const added = (readSurfaceCache<T[]>(key).data ?? []).filter(row =>
     !before.has(row.id) && !rows.some(fetched => fetched.id === row.id));
   return [...added, ...rows];

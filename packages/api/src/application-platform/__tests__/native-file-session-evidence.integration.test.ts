@@ -10,6 +10,7 @@ import {listWorkspaceFilesIndexRanked} from '../../db/workspace-files.js'
 import {tryNativeInvocationEvidence} from '../../context-scope/native-invocation-evidence.js'
 import {validateCallerScopeEvidence} from '../../context-scope/caller-evidence.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
+import {publishSessionTitle} from '../../db/session-title-store.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -45,6 +46,31 @@ function observed(client:PoolClient,baseline:boolean,queries:string[]){
 }
 
 describe.sequential('[COMP:api/application-persistence] file-backed native evidence',()=>{
+ it('matches the canonical title reader before and after a file hold, without exposing private helpers',async()=>{
+  const c=await setup()
+  const title=await publishSessionTitle({sessionId:c.f.session.id,title:'Fictional file discussion',manual:false,
+   expectedRevision:null,authority:c.authority,derivation:{producer:'fixture:title',sources:c.evidence.sources!}})
+  expect(title).not.toBeNull()
+  const compare=async(held:boolean)=>{
+   const authority={execution:await c.f.execution(c.f.firstId),accumulator:new ContextScopeAccumulator()}
+   await readRetainedContextFrame(authority,[],async client=>{
+    const args=[c.f.workspaceId,c.f.session.id,title!.revisionId]
+    const baseline=(await client.query('SELECT read_session_title_revision($1,$2,$3) AS value',args)).rows[0].value
+    const current=(await client.query('SELECT read_native_file_session_title_revision($1,$2,$3) AS value',args)).rows[0].value
+    expect(current).toEqual(baseline)
+    expect(current).toEqual(held?null:{title:'Fictional file discussion',manual:false})
+    expect((await client.query("SELECT has_function_privilege(current_user,'session_context_file_revision_allowed(uuid,uuid)','execute') AS allowed")).rows[0].allowed).toBe(false)
+    expect((await client.query('SELECT read_native_file_session_title_revision($1,$2,$3) AS value',
+     [c.f.workspaceId,c.f.session.id,crypto.randomUUID()])).rows[0].value).toBeNull()
+   })
+  }
+  await compare(false)
+  await c.f.pool.query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
+   SELECT workspace_id,'workspace_file',id,scope_version::text,'held',1,'Fictional review hold' FROM workspace_files WHERE workspace_id=$1`,[c.f.workspaceId])
+  await compare(true)
+  expect((await c.f.pool.query('SELECT read_native_file_session_title_revision($1,$2,$3) AS value',
+   [c.f.workspaceId,c.f.session.id,title!.revisionId])).rows[0].value).toBeNull()
+ })
  it('matches complete original validation for fifty file leaves and derived Memory without repeated field reads',async()=>{
   const c=await setup(),original:string[]=[],batched:string[]=[]
   let expected:ScopeEvidence|undefined

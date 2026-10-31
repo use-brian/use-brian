@@ -225,7 +225,7 @@ describe.sequential('[COMP:api/application-persistence] actual browser title DTO
   // The first projection is selected before the paused row, with no SQL
   // frame held across the actual source withdrawal.
   await c.f.pool.query("UPDATE sessions SET last_active_at=clock_timestamp()+interval '1 second' WHERE id=$1",[c.session.id])
-  const pause=pauseMetadataRead((sql,values)=>sql.includes('LEFT JOIN session_title_heads title')&&values[1]===other.id)
+  const pause=pauseMetadataRead((sql,values)=>sql.includes('SELECT scope_revision_id AS id FROM session_title_heads')&&values[1]===other.id)
   const pending=c.list().then(response=>response)
   let response:Awaited<typeof pending>|undefined
   try{
@@ -245,7 +245,7 @@ describe.sequential('[COMP:api/application-persistence] actual browser title DTO
   const second=await renameCurrentSessionTitle({claims:c.claims,sessionId:other.id,title:'Fictional independent current title'})
   expect(second).not.toBeNull()
   await c.f.pool.query("UPDATE sessions SET last_active_at=clock_timestamp()+interval '1 second' WHERE id=$1",[c.session.id])
-  const pause=pauseMetadataRead((sql,values)=>sql.includes('LEFT JOIN session_title_heads title')&&values[1]===other.id)
+  const pause=pauseMetadataRead((sql,values)=>sql.includes('SELECT scope_revision_id AS id FROM session_title_heads')&&values[1]===other.id)
   const pending=c.list().then(response=>response)
   let response:Awaited<typeof pending>|undefined
   try{

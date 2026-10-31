@@ -224,9 +224,10 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         const row = byId.get(sessionId);
         const persistedWorking = row?.status === "running";
         if (
-          !row ||
-          persistedWorking === override.working ||
-          now - override.changedAt >= ROOM_ACTIVITY_OVERRIDE_GRACE_MS
+          !row && override.working ||
+          row && (row.statusReadStartedAt ?? 0) > override.changedAt &&
+          (persistedWorking === override.working ||
+            !override.working || now - override.changedAt >= ROOM_ACTIVITY_OVERRIDE_GRACE_MS)
         ) {
           delete next[sessionId];
           changed = true;
@@ -314,7 +315,8 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const visibleAmbient = ambientRows;
   const showAmbient = othersOpen;
   const hasWorkingRoom =
-    (sharedRows ?? []).some((row) => row.status === "running") ||
+    (view === "workspace" ? sharedRows ?? [] : rows ?? []).some((row) =>
+      activityBySession[row.id]?.working ?? row.status === "running") ||
     Object.values(activityBySession).some((activity) => activity.working);
 
   // A room may finish after the user switches to another room, at which point
@@ -322,14 +324,14 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   // Poll only while work is known live; the authoritative list status then
   // settles the old row and stops this interval.
   useEffect(() => {
-    if (view !== "workspace" || !hasWorkingRoom) return;
+    if (!hasWorkingRoom) return;
     const poll = window.setInterval(() => {
       // A forced revalidation of the cached shared list: rows stay painted
       // while the status column catches up.
-      void refreshShared().catch(() => {});
+      void (view === "workspace" ? refreshShared() : refresh()).catch(() => {});
     }, ROOM_ACTIVITY_STATUS_POLL_MS);
     return () => window.clearInterval(poll);
-  }, [hasWorkingRoom, refreshShared, view]);
+  }, [hasWorkingRoom, refreshShared, refresh, view]);
 
   const onRename = useCallback(
     async (row: DocSession) => {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createGeminiProvider } from '../gemini.js'
-import type { Message, StreamChunk } from '../types.js'
+import type { Message, StreamChunk, ToolDefinition } from '../types.js'
 
 /**
  * Guards the stateful Gemini session path AFTER it was converted from a
@@ -71,6 +71,21 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it('loads discovered schemas on the next send without losing provider history', async () => {
+    fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
+      .mockResolvedValueOnce(sseResponse([{ candidates: [{ content: { role: 'model', parts: [{ text: 'Done.' }] }, finishReason: 'STOP' }] }]))
+    const tools: ToolDefinition[] = [{ name: 'patchPage', description: 'Patch a page', parameters: { type: 'object', properties: {} } }]
+    const session = createGeminiProvider('test-key').createSession({ model: 'gemini-pro', systemPrompt: 'sys', tools })
+    await collect(session.send([{ role: 'user', content: 'Build a page' }]))
+    tools.push({ name: 'findRecord', description: 'Find a record', parameters: { type: 'object', properties: {} } })
+    await collect(session.send([{ role: 'user', content: [{ type: 'tool_result', toolUseId: 'fc-provider-1', name: 'patchPage', content: 'saved' }] }]))
+    const first = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    const second = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string)
+    expect(first.tools[0].functionDeclarations.map((tool: { name: string }) => tool.name)).toEqual(['patchPage'])
+    expect(second.tools[0].functionDeclarations.map((tool: { name: string }) => tool.name)).toEqual(['patchPage', 'findRecord'])
+    expect(JSON.stringify(second.contents)).toContain('sig-abc')
   })
 
   it.each(['gemini-3.6-flash-standard', 'gemini-3.6-flash-pro', 'gemini-4-argon-research'])('records %s while sending its wire model', async model => {

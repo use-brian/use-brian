@@ -61,7 +61,7 @@ export async function renameCurrentSessionTitle(input:{claims:NativeClaims|null;
 }
 
 type TitleProjection=Readonly<{title:string|null;titleRevisionId:string|null}>
-type ProjectionAuthority={authority:SessionContextAuthority;previewThrough?:number}
+type ProjectionAuthority={authority:SessionContextAuthority;previewThrough?:number;headOnly?:boolean}
 const projectionAuthorities=new WeakMap<TitleProjection,ProjectionAuthority|null>()
 
 /** Presence metadata only: an unreadable saved title must never become a preview. */
@@ -139,25 +139,41 @@ export async function sessionTitleProjections(input:{claims:NativeClaims|null;se
      ) preview_candidates WHERE role='user'))`,[command.sessionIds])).rows.map(row=>row.id))
  // Finish each row's frame before opening another. An unrelated blocked row
  // must not consume every connection needed for current source admission.
- for(const id of command.sessionIds)prepared.push({id,projection:titleCandidates.has(id)
-  ?await sessionTitleProjection({claims:command.claims,sessionId:id}):heldTitleProjection()})
+ for(const id of command.sessionIds){
+  let projection:TitleProjection=heldTitleProjection()
+  if(titleCandidates.has(id))try{
+   const authority=await resolveSessionTitleAuthority({claims:command.claims,sessionId:id,readOnly:true})
+   const head=await sessionTitleHead(id,authority)
+   if(head){
+    // Pin identity only. Payload and source admission happen at the final
+    // boundary below, after every row's execution has been prepared.
+    projection=Object.freeze({title:null,titleRevisionId:head})
+    projectionAuthorities.set(projection,{authority,headOnly:true})
+   }else projection=titleCandidates.has(id)?await sessionTitleProjection({claims:command.claims,sessionId:id}):heldTitleProjection()
+  }catch(error){
+   if(!(error instanceof DerivedScopeError||isAuthorityChangedError(error)))throw error
+  }
+  prepared.push({id,projection})
+ }
  const result=new Map<string,TitleProjection>()
  for(const{id,projection}of prepared){
   if(!projectionAuthorities.has(projection))denied()
   const binding=projectionAuthorities.get(projection)
   if(!binding){result.set(id,projection);continue}
-  const{authority,previewThrough}=binding
+  const{authority,previewThrough,headOnly}=binding
   try{
+   let finalProjection=projection
    if(previewThrough!==undefined){
     const current=await prepareTitlePreview(id,authority,previewThrough)
     if(!current||current.projection.title!==projection.title){result.set(id,heldTitleProjection());continue}
    }else{
     const current=await readSessionTitle(id,authority)
     if(!current||current.revisionId!==projection.titleRevisionId){result.set(id,heldTitleProjection());continue}
+    if(headOnly)finalProjection=bindScopeSources(Object.freeze({title:current.title,titleRevisionId:current.revisionId}),boundScopeSources(current))
    }
    if(previewThrough!==undefined)await assertPreviewOutput(id,authority)
    else await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-list-output'}),scopeAccumulator:authority.accumulator})
-   result.set(id,projection)
+   result.set(id,finalProjection)
   }catch(error){
    if(error instanceof DerivedScopeError||isAuthorityChangedError(error)){result.set(id,heldTitleProjection());continue}
    throw error

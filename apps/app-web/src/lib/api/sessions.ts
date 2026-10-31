@@ -47,6 +47,8 @@ const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Sidebar list row — mirrors what /api/sessions returns. */
 export type DocSession = {
+  /** Browser request start, only for reconciling transient activity; never content authority. */
+  statusReadStartedAt?: number;
   /** Metadata link only; opening it still requires current history admission. */
   recoveredFromSessionId?: string;
   transport?: string;

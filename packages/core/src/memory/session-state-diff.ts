@@ -71,6 +71,8 @@ export type RunSessionStateDiffOptions = {
   activeJobIds?: string[]
   authority?: SessionContextAuthority
   assertInputAuthority?: () => Promise<void>
+  /** Host-owned publication barrier. No state writes may precede it. */
+  beforePersist?: () => Promise<void>
 }
 
 /**
@@ -239,6 +241,9 @@ export async function runSessionStateDiff(
   }
   const parsed = result.parsed
   const errorMessage = result.errorMessage
+
+  await opts.beforePersist?.()
+  await assertInputAuthority(opts.assertInputAuthority)
 
   if (!parsed) {
     return {

@@ -30,3 +30,22 @@ export function createChatPostReplyBoundary() {
     },
   }
 }
+/** Overlap read-only inference with publication; drain both before releasing the turn. */
+export async function withReplyPublicationBarrier<T>(
+  publish: () => Promise<void>,
+  infer: (beforePersist: () => Promise<void>) => Promise<T>,
+): Promise<T> {
+  type Publication = { ok: true } | { ok: false; error: unknown }
+  let release!: (result: Publication) => void
+  const publication = new Promise<Publication>(resolve => { release = resolve })
+  const work = infer(async () => {
+    const result = await publication
+    if (!result.ok) throw result.error
+  }).then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }))
+  try { await publish() }
+  catch (error) { release({ ok: false, error }); await work; throw error }
+  release({ ok: true })
+  const result = await work
+  if (!result.ok) throw result.error
+  return result.value
+}

@@ -254,6 +254,44 @@ describe("[COMP:app-web/sidebar-panel-chat] open-chat deletion", () => {
 });
 
 describe("[COMP:app-web/sidebar-panel-chat] live room activity", () => {
+  it("stops personal activity polling when an active row leaves the loaded list", async () => {
+    navigation.search = "s=personal-1";
+    sessionApi.listWorkspaceSessions.mockResolvedValue([]);
+    sessionApi.listPersonalSessions.mockResolvedValue([{ id: "personal-1", title: "Fictional chat", channelId: "web-1", lastActive: "2026-10-01", appOrigin: "chat", status: "running" }]);
+    const intervals = vi.spyOn(window, "setInterval"), clear = vi.spyOn(window, "clearInterval");
+    await renderPanel();
+    await act(async () => window.dispatchEvent(new CustomEvent("chat:session-activity", {
+      detail: { workspaceId: "workspace-1", sessionId: "personal-1", working: true },
+    })));
+    const pollIndex = intervals.mock.calls.findIndex(([, ms]) => ms === 3_000);
+    expect(pollIndex).toBeGreaterThanOrEqual(0);
+    sessionApi.listPersonalSessions.mockResolvedValue([]);
+    await act(async () => mutateSurfaceCache(chatSessionsCacheKey("workspace-1"), () => []));
+    await flushEffects();
+    expect(clear).toHaveBeenCalledWith(intervals.mock.results[pollIndex].value);
+    expect(container!.querySelector('[data-chat-working="true"]')).toBeNull();
+    intervals.mockRestore(); clear.mockRestore();
+  });
+  it("does not resurrect completed activity from a slow older list response", async () => {
+    navigation.search = "s=room-1";
+    sessionApi.listWorkspaceSessions.mockResolvedValue([]);
+    sessionApi.listPersonalSessions.mockResolvedValue([{ id: "room-1", title: "Fictional chat", channelId: "web-1", lastActive: "2026-10-01", appOrigin: "chat", status: "idle" }]);
+    await renderPanel();
+    sessionApi.listPersonalSessions.mockImplementation(() => new Promise(() => {}));
+    const started = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(started + 1_000);
+    await act(async () => window.dispatchEvent(new CustomEvent("chat:session-activity", {
+      detail: { workspaceId: "workspace-1", sessionId: "room-1", working: false },
+    })));
+    clock.mockReturnValue(started + 12_000);
+    await act(async () => mutateSurfaceCache(chatSessionsCacheKey("workspace-1"), (rows: import("@/lib/api/sessions").WorkspaceSession[]) =>
+      rows.map(row => ({ ...row, status: "running", statusReadStartedAt: started }))));
+    expect(container!.querySelector('[data-chat-working="true"]')).toBeNull();
+    await act(async () => mutateSurfaceCache(chatSessionsCacheKey("workspace-1"), (rows: import("@/lib/api/sessions").WorkspaceSession[]) =>
+      rows.map(row => ({ ...row, status: "running", statusReadStartedAt: started + 2_000 }))));
+    expect(container!.querySelector('[data-chat-working="true"]')).not.toBeNull();
+    clock.mockRestore();
+  });
   it("shows a running-room spinner and settles from the same-tab activity signal", async () => {
     sessionApi.listWorkspaceSessions.mockResolvedValueOnce([
       {
