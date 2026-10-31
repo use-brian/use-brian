@@ -1,21 +1,26 @@
 import {runAssistantTurn} from '../../turn/kernel.js'
 import {validateAttendedAudienceEvidence} from '../../context-scope/attended-audience.js'
-import {afterAll,afterEach,describe,expect,it} from 'vitest'
+import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
 import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,type QueryEvent,type LLMProvider} from '@use-brian/core'
-import {classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory} from '../../routes/attended-session-context.js'
+import {classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory,readClassifiedSessionHistory,attendedSessionTurnCount} from '../../routes/attended-session-context.js'
+import * as sessionQueries from '../../db/session-query-reader.js'
+import {addSessionMessage} from '../../db/sessions.js'
 import {readSessionMessageAnnotation} from '../../db/session-message-annotations.js'
+import {bindSessionContextRetainedAuthority,writeSessionContextRevision} from '../../db/session-context-revisions.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {resolveReplyText} from '../../routes/_reply-context.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
+import {persistentSourceFixture} from './fixtures/persistent-source.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 describe.sequential('[COMP:api/application-persistence] actual admitted reply history',()=>{
  let fixture:Awaited<ReturnType<typeof persistentContextFixture>>|undefined
- afterEach(async()=>{await fixture?.cleanup();fixture=undefined})
+ let independent:Awaited<ReturnType<typeof persistentSourceFixture>>|undefined
+ afterEach(async()=>{vi.restoreAllMocks();await independent?.cleanup();independent=undefined;await fixture?.cleanup();fixture=undefined})
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
- async function setup(){
-  fixture=await persistentContextFixture();const f=fixture,rows=await f.history()
+ async function setup(clearance:'internal'|'confidential'='internal'){
+  fixture=await persistentContextFixture(clearance);const f=fixture,rows=await f.history()
   await f.pool.query('UPDATE session_messages SET channel_message_id=$2 WHERE id=$1',[rows[1].id,'fictional-channel-reply'])
   const authority=await f.modelContext(),query=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:rows.at(-1)!.sequenceNum,authority})
   return{f,rows,query}
@@ -132,5 +137,114 @@ describe.sequential('[COMP:api/application-persistence] actual admitted reply hi
   await expect(classifyAttendedSessionMessage({authority,session:f.session,message:rows.at(-1)!,model:'fixture',
    provider:classifierProvider(async()=>{await f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.ownerId])})})).rejects.toMatchObject({reason:'authority_changed'})
   expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
+ })
+ async function classified(clearance:'internal'|'confidential'='internal'){
+  const {f,rows}=await setup(clearance),authority=await f.modelContext()
+  const result=await classifyAttendedSessionMessage({authority,session:f.session,message:rows.at(-1)!,provider:classifierProvider(),model:'fixture'})
+  return{f,rows,authority,result}
+ }
+ it('reuses private body bytes with fresh topics and complete query evidence after classification',async()=>{
+  const {f,rows,authority,result}=await classified()
+  // Public returned arrays cannot alter the private retained body receipt.
+  result.history[0].content=[{type:'text',text:'Untrusted later replacement'}]
+  const full=vi.spyOn(sessionQueries,'readAdmittedSessionQuery'),topics=vi.spyOn(sessionQueries,'captureSessionTopics')
+  const reused=await readClassifiedSessionHistory(authority,f.session.id,result.history,rows[1].sequenceNum)
+  expect(full).not.toHaveBeenCalled();expect(topics).toHaveBeenCalledTimes(1)
+  expect(reused.at(-1)?.topicLabel).toBe('fictional admitted topic')
+  expect(await attendedSessionTurnCount(authority,reused)).toBe(2)
+  const original=await readAttendedSessionHistory(await f.modelContext(),f.session.id,rows[1].sequenceNum)
+  expect(reused).toEqual(original)
+  const sourceKeys=(value:object)=>boundScopeSources(value).map(source=>JSON.stringify(source)).sort()
+  expect(sourceKeys(reused)).toEqual(sourceKeys(original))
+  expect(boundScopeSources(reused).filter(source=>source.resourceKind==='application_field').length).toBeGreaterThan(2)
+ })
+ it('recaptures when a new input advances the classified history ceiling',async()=>{
+  const {f,authority,result}=await classified()
+  const added=await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'Fictional follow-up input'}],scope:f.envelope})
+  const full=vi.spyOn(sessionQueries,'readAdmittedSessionQuery')
+  const history=await readClassifiedSessionHistory(authority,f.session.id,result.history)
+  expect(full).toHaveBeenCalledTimes(1);expect(history.at(-1)?.id).toBe(added.id)
+ })
+ it('recaptures after the current annotation head is replaced',async()=>{
+  const {f,rows,authority,result}=await classified()
+  await classifyAttendedSessionMessage({authority,session:f.session,message:rows.at(-1)!,provider:classifierProvider(),model:'fixture'})
+  const full=vi.spyOn(sessionQueries,'readAdmittedSessionQuery')
+  await readClassifiedSessionHistory(authority,f.session.id,result.history)
+  expect(full).toHaveBeenCalledTimes(1)
+ })
+ it('recaptures changed bodies and preserves the original accumulator conflict',async()=>{
+  const {f,rows,authority,result}=await classified()
+  await f.pool.query('UPDATE session_messages SET content=$2 WHERE id=$1',[rows[0].id,JSON.stringify([{type:'text',text:'Fictional amended request'}])])
+  const full=vi.spyOn(sessionQueries,'readAdmittedSessionQuery')
+  await expect(readClassifiedSessionHistory(authority,f.session.id,result.history)).rejects.toMatchObject({code:'scope_source_changed'})
+  expect(full).toHaveBeenCalledTimes(1)
+  await expect(readAttendedSessionHistory(authority,f.session.id)).rejects.toMatchObject({code:'scope_source_changed'})
+  const history=await readAttendedSessionHistory(await f.modelContext(),f.session.id)
+  expect(history[0].content).toEqual([{type:'text',text:'Fictional amended request'}])
+ })
+ it('revalidates retained bodies at the shared floor even when the actor can read confidential rows',async()=>{
+  const {f,rows,authority,result}=await classified()
+  await f.pool.query("UPDATE session_messages SET sensitivity='confidential' WHERE id=$1",[rows[0].id])
+  const reused=await readClassifiedSessionHistory(authority,f.session.id,result.history)
+  expect(reused).toEqual(await readAttendedSessionHistory(authority,f.session.id))
+  expect(reused.map(row=>row.id)).not.toContain(rows[0].id)
+  const fresh=await readAttendedSessionHistory(await f.modelContext(),f.session.id)
+  expect(fresh.map(row=>row.id)).not.toContain(rows[0].id)
+  expect(JSON.stringify(fresh)).not.toContain('Fictional earlier request')
+ })
+ it('honors a current native body-field policy extension through the original fallback',async()=>{
+  const {f,authority,result}=await classified()
+  const original=(await f.pool.query<{definition:string;body:string}>(`SELECT pg_get_functiondef(oid) AS definition,prosrc AS body
+   FROM pg_proc WHERE oid='public.application_session_eval_point_state(uuid,text,uuid,text[],jsonb)'::regprocedure`)).rows[0]
+  const outcome=async(read:()=>Promise<unknown>)=>{
+   try{return{value:await read()}}
+   catch(error){const e=error as {message:string;code?:string;reason?:string};return{error:{message:e.message,code:e.code,reason:e.reason}}}
+  }
+  try{
+   await f.pool.query(original.definition.replace(original.body,original.body.replace('BEGIN',
+    `BEGIN\n IF w='${f.workspaceId}'::uuid AND t='session_message' AND 'content'=ANY(fields) THEN RETURN NULL;END IF;`)))
+   const expected=await outcome(()=>readAttendedSessionHistory(authority,f.session.id))
+   const actual=await outcome(()=>readClassifiedSessionHistory(authority,f.session.id,result.history))
+   expect(actual).toEqual(expected)
+   expect(JSON.stringify(actual)).not.toContain('Fictional earlier request')
+   expect(JSON.stringify(actual)).not.toContain('Fictional current request')
+  }finally{await f.pool.query(original.definition)}
+ })
+ it('prepares fresh independent authority for an earlier annotation added after classification',async()=>{
+  const {f,rows,authority,result}=await classified('confidential')
+  independent=await persistentSourceFixture(f)
+  const bind=(current:typeof authority)=>bindSessionContextRetainedAuthority(current.execution,
+   (execution,sources,action)=>independent!.coordinator.prepare(execution,sources,action))
+  bind(authority)
+  const writer=await f.modelContext();bind(writer)
+  const annotation=await writeSessionContextRevision({sessionId:f.session.id,parentId:rows[0].id,kind:'message_annotation',
+   content:{topicLabel:'fictional independent topic',topicConfidence:0.9,replyToText:null},authority:writer,
+   derivation:{producer:'fixture:independent-topic',sources:[independent.root]}})
+  expect(annotation).not.toBeNull()
+  const full=vi.spyOn(sessionQueries,'readAdmittedSessionQuery')
+  const reused=await readClassifiedSessionHistory(authority,f.session.id,result.history)
+  expect(full).not.toHaveBeenCalled()
+  expect(reused[0].topicLabel).toBe('fictional independent topic')
+  expect(boundScopeSources(reused).some(source=>source.resourceKind==='external_source')).toBe(true)
+  const current=await f.modelContext();bind(current)
+  expect(reused).toEqual(await readAttendedSessionHistory(current,f.session.id))
+  await independent.pool.query("DELETE FROM grants WHERE kind='human' AND account_id=$1",[f.ownerId])
+  const after={execution:authority.execution,accumulator:new ContextScopeAccumulator()}
+  const withdrawn=await readClassifiedSessionHistory(after,f.session.id,result.history)
+  expect(withdrawn[0].topicLabel).toBeNull()
+  const fresh=await f.modelContext();bind(fresh)
+  expect(withdrawn).toEqual(await readAttendedSessionHistory(fresh,f.session.id))
+ },60_000)
+ it('does not accept a copied receipt or reuse one for a different canonical execution',async()=>{
+  const {f,authority,result}=await classified(),full=vi.spyOn(sessionQueries,'readAdmittedSessionQuery')
+  await readClassifiedSessionHistory(authority,f.session.id,[...result.history])
+  await readClassifiedSessionHistory(await f.modelContext(),f.session.id,result.history)
+  expect(full).toHaveBeenCalledTimes(2)
+ })
+ it('refuses withdrawn authority before a retained body can be returned',async()=>{
+  const {f,authority,result}=await classified(),full=vi.spyOn(sessionQueries,'readAdmittedSessionQuery')
+  await f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.ownerId])
+  await expect(readClassifiedSessionHistory(authority,f.session.id,result.history)).rejects.toMatchObject({reason:'authority_changed'})
+  expect(full).not.toHaveBeenCalled()
  })
 })

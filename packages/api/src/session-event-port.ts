@@ -58,6 +58,7 @@ export type SessionEvent =
       sessionId: string
       payload: {
         text: string
+        replyPhase?: 'generating' | 'saving' | 'finishing'
         activity: string | null
         reasoning?: string | null
         senderUserId?: string

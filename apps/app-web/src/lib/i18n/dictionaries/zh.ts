@@ -3240,6 +3240,8 @@ export const zh: Dictionary = {
     },
     activity: {
       writing: "正在撰寫回覆…",
+      savingReply: "正在儲存回覆…",
+      finishingReply: "正在完成…",
       receipt: "{summary} · {duration}",
       summarySearch: "搜尋 {count} 次",
       summarySearchOne: "搜尋 1 次",

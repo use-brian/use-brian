@@ -19,7 +19,7 @@ import {
   buildAccessPredicate,
   type AccessContext,
 } from '../../../../packages/api/src/db/access-predicate.js'
-import { migratePglite } from '../migrate-pglite.js'
+import { migratePglite, preparePgliteRuntimeRole } from '../migrate-pglite.js'
 
 const WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 const USER_ID = '00000000-0000-4000-8000-000000000002'
@@ -188,6 +188,7 @@ async function rollupIds(scope: MatrixScope): Promise<string[]> {
 before(async () => {
   db = new PGlite({ extensions: { vector, pg_trgm } })
   await db.waitReady
+  await preparePgliteRuntimeRole(db)
   const migrationsDir = fileURLToPath(
     new URL('../../../../packages/api/migrations', import.meta.url),
   )
@@ -261,6 +262,7 @@ describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', 
       const previous=new PGlite({extensions:{vector,pg_trgm}})
       try{
         await previous.waitReady
+        await preparePgliteRuntimeRole(previous)
         await migratePglite(previous,directory,{through})
         const workspace='71000000-0000-4000-8000-00000000000'+last
         const owner='72000000-0000-4000-8000-00000000000'+last

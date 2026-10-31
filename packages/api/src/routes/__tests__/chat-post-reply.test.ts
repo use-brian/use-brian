@@ -13,6 +13,17 @@ const content: ContentBlock[] = [{ type: 'text', text: 'Hello.' }]
 const completed: TurnLoopResult = { selection: { kind: 'text', text: 'Hello.' }, finalText: null, aborted: false }
 
 describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
+  it('announces text completion only for successful live text and does not imply publication', () => {
+    const boundary = createChatPostReplyBoundary(), abort = new AbortController()
+    expect(boundary.beginFinalization(completed, false, abort.signal)).toBe(true)
+    expect(boundary.isPublishedReply()).toBe(false)
+    expect(boundary.beginFinalization(completed, true, abort.signal)).toBe(false)
+    expect(boundary.beginFinalization({ ...completed, aborted: true }, false, abort.signal)).toBe(false)
+    expect(boundary.beginFinalization({ ...completed, selection: { kind: 'empty', reason: 'tools_only' } }, false, abort.signal)).toBe(false)
+    abort.abort()
+    expect(boundary.beginFinalization(completed, false, abort.signal)).toBe(false)
+  })
+
   it('does not start locking source reads or inference before publication commits', async () => {
     let publish!: () => void
     const pending = new Promise<void>(resolve => { publish = resolve })
@@ -120,6 +131,59 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
 // Exercise the actual route boundary with a delayed/failed release and a late
 // follow-up error. No provider or database boundary is needed for these states.
 const route = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
+const metadataStart = route.indexOf('      // Metadata has its own durable, freshly authorized worker.')
+const metadataScheduling = route.slice(metadataStart, route.indexOf('      if (shouldTitle) {', metadataStart))
+function titleScheduling(accepted: boolean, failure?: Error) {
+  const enqueue = vi.fn(async () => { if (failure) throw failure; return accepted })
+  const readTitle = vi.fn(async () => null)
+  const scope = {
+    options: { enqueueSessionTitleJob: enqueue }, nativeTranscriptAuthority: {}, turnReleased: true,
+    postReply: { isPublishedReply: () => true },
+    classifySession: () => ({ anchor: { kind: 'none' }, transport: 'web', lane: 'conversation' }),
+    session: { id: 'session', assistantId: 'assistant' }, assistant: { id: 'assistant' }, roomResponseGroupContext: null, docToolsTurn: true, docWrittenPageIds: new Set(),
+    pinSessionTitleClaims: () => ({ userId: 'actor' }), req: {}, storedUserMsg: { id: 'message' },
+    isAuthorityChangedError: (error: unknown) => error instanceof AuthorityChangedError,
+    isDeliveryAudienceUnverifiedError: () => false, readSessionTitle: readTitle, isPlaceholderTitle: () => false,
+    attendedSessionTurnCount: vi.fn(async () => 1), dbMessages: [],
+    authority: { execute: (fn: () => unknown) => fn() }, countSessionTurns: vi.fn(async () => 2),
+  }
+  const code = ts.transpileModule(`return (async () => { ${metadataScheduling}; return { titleQueued, shouldTitle }; })();`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+  return { enqueue, readTitle, scope, run: () => new Function(...Object.keys(scope), code)(...Object.values(scope)) }
+}
+
+describe('[COMP:api/chat-post-reply] durable title scheduling', () => {
+  it('queues ordinary Chat even when page tools are available, without reading title history inline', async () => {
+    const test = titleScheduling(true)
+    await expect(test.run()).resolves.toEqual({ titleQueued: true, shouldTitle: false })
+    expect(test.enqueue).toHaveBeenCalledOnce()
+    expect(test.readTitle).not.toHaveBeenCalled()
+  })
+  it('retains the original inline path when no durable job was accepted', async () => {
+    const test = titleScheduling(false)
+    await expect(test.run()).resolves.toEqual({ titleQueued: false, shouldTitle: true })
+    expect(test.readTitle).toHaveBeenCalledOnce()
+  })
+  it('does not queue a turn that still owes document effects', async () => {
+    const test = titleScheduling(true)
+    test.scope.docWrittenPageIds.add('page')
+    await expect(test.run()).resolves.toEqual({ titleQueued: false, shouldTitle: true })
+    expect(test.enqueue).not.toHaveBeenCalled()
+  })
+  it('retains inline titles for a different answering assistant', async () => {
+    const test = titleScheduling(true)
+    test.scope.assistant.id = 'other-assistant'
+    await expect(test.run()).resolves.toEqual({ titleQueued: false, shouldTitle: true })
+    expect(test.enqueue).not.toHaveBeenCalled()
+    expect(test.readTitle).toHaveBeenCalledOnce()
+  })
+  it('propagates authority loss instead of starting an inline fallback', async () => {
+    const failure = new AuthorityChangedError(), test = titleScheduling(false, failure)
+    await expect(test.run()).rejects.toBe(failure)
+    expect(test.readTitle).not.toHaveBeenCalled()
+  })
+})
+
 const releaseBlock = route.slice(route.indexOf('      // Release the lease we took at claim time'),
   route.indexOf('      // Memory nudge: judge utility'))
 const catchBlock = route.slice(route.indexOf('      if (sessionIdForError && userIdForError) {'),

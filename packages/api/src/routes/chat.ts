@@ -1,10 +1,11 @@
 import {boundScopeSources} from '@use-brian/core'
 import {generateAttendedSessionTitle} from './attended-session-title.js'
 import {readSessionTitle} from '../db/session-title-store.js'
+import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
 import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
+import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
@@ -383,6 +384,8 @@ function resolveRunChannel(session: {
 }
 
 type WebChatOptions = {
+  /** Durable native metadata queue; absent preserves inline title generation. */
+  enqueueSessionTitleJob?: typeof import('../db/session-title-jobs.js').enqueueNativeSessionTitleJob
   feedReviewContext?: import('../content-planning/review-context.js').FeedReviewContextLoader
   feedGeneration?: FeedGenerationService
   provider: LLMProvider
@@ -4311,7 +4314,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       // `fromSequence` skips rows already compacted into the most recent
       // boundary; null (never compacted) loads full history.
       const dbMessages = nativeTranscriptAuthority
-        ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, session.compactBoundarySequence)
+        ? nativeClassification
+          ? await readClassifiedSessionHistory(nativeTranscriptAuthority, session.id, nativeClassification.history, session.compactBoundarySequence)
+          : await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, session.compactBoundarySequence)
         : await getSessionMessages(session.id, {
             fromSequence: session.compactBoundarySequence,
             excludeHeld: true,
@@ -7103,7 +7108,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           // timeline entries, not message bubbles, so the UI doesn't need
           // their ids.
           if (saved.isLast) {
-            sendEvent('assistant_message_saved', { id: saved.stored.id })
+            sendActivityEvent('assistant_message_saved', { id: saved.stored.id })
+            turnStream.setReplyPhase('finishing')
             // File cards (sendFile) — the streaming client renders these
             // at turn end; refetches read them from the persisted row.
             if (saved.attachments.length > 0) {
@@ -7591,7 +7597,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           turnInbox: turnInbox.port,
           },
           sink: { kind: 'sse', ...(nativeTranscriptAuthority ? { assertOutputAuthority: assertDeliveryAudience } : {}), afterLoop: async (result) => {
-            postReply.beginFinalization(result, !!queryLoopError, abortController.signal)
+            if (postReply.beginFinalization(result, !!queryLoopError, abortController.signal)) {
+              sendActivityEvent('reply_text_complete', {})
+              turnStream.setReplyPhase('saving')
+            }
             const publishReply = () => flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
             const stateStore = options.sessionStateStore
             if (!stateStore) { await publishReply(); return }
@@ -8700,6 +8709,23 @@ export function chatRoutes(options: WebChatOptions): Router {
         console.debug('[chat] memory nudge failed:', err)
       }
 
+      // Metadata has its own durable, freshly authorized worker. Never capture
+      // this request's live execution or transcript in a detached promise.
+      let titleQueued = false
+      const metadataKind = classifySession(session)
+      if (options.enqueueSessionTitleJob && nativeTranscriptAuthority && turnReleased && postReply.isPublishedReply()
+        && metadataKind.anchor.kind === 'none' && metadataKind.transport === 'web' && metadataKind.lane === 'conversation'
+        && session.assistantId === assistant.id
+        && !roomResponseGroupContext && !(docToolsTurn && docWrittenPageIds.size > 0)) {
+        try {
+          titleQueued = await options.enqueueSessionTitleJob({ authority: nativeTranscriptAuthority,
+            claims: pinSessionTitleClaims(req), userMessageId: storedUserMsg.id })
+        } catch (error) {
+          if (isAuthorityChangedError(error) || isDeliveryAudienceUnverifiedError(error)) throw error
+          console.warn('[chat] title queue unavailable; retaining inline metadata processing')
+        }
+      }
+
       // Auto-title: fire after the first full exchange (session has no title
       // yet) so the user sees a meaningful title immediately, then refresh
       // every 10 turns as the conversation evolves. Uses a fresh DB read so
@@ -8709,11 +8735,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       // title as an auto-generated placeholder to replace (isPlaceholderTitle —
       // open default false), or every ~10 human turns. The NULL check is robust
       // against tool-use inflating the message count.
-      const currentTitle = nativeTranscriptAuthority ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
+      const currentTitle = !titleQueued && nativeTranscriptAuthority ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
       const needsFirstTitle = !currentTitle || isPlaceholderTitle(currentTitle.title)
       const isNotification = classifySession(session).anchor.kind === 'inbox'
-      let shouldTitle = needsFirstTitle && !isNotification && !currentTitle?.manual
-      if (!shouldTitle && !isNotification && !currentTitle?.manual) {
+      let shouldTitle = !titleQueued && needsFirstTitle && !isNotification && !currentTitle?.manual
+      if (!titleQueued && !shouldTitle && !isNotification && !currentTitle?.manual) {
         const turnCount = nativeTranscriptAuthority
           ? await attendedSessionTurnCount(nativeTranscriptAuthority,dbMessages)
           : Math.floor(await authority.execute(() => countSessionTurns(session.id)) / 2)

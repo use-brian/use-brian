@@ -5,6 +5,16 @@ import type { DocSessionMessage } from "../api/sessions";
 const dict = en.chat.toolNarration;
 const fold = (events: [string, Record<string, unknown>][]) => events.reduce((turn, [event, data], index) => foldFeedChatEvent(turn, event, data, dict, 1000 + index * 100), newFeedChatTurn(1000));
 describe("[COMP:app-web/feed-chat-stream] protocol display", () => {
+  it("retains the reply through saving and finishing and restores a reconnect phase", () => {
+    const saving = fold([["text_delta", { text: "Hello" }], ["reply_text_complete", {}]]);
+    expect(saving).toMatchObject({ text: "Hello", visibleText: "Hello", replyPhase: "saving" });
+    const finishing = foldFeedChatEvent(saving, "assistant_message_saved", { id: "saved" }, dict);
+    expect(finishing).toMatchObject({ replyPhase: "finishing", messageId: "saved" });
+    expect(foldFeedChatEvent(finishing, "reply_text_complete", {}, dict).replyPhase).toBe("finishing");
+    expect(fold([["snapshot", { text: "Hello", replyPhase: "finishing" }]])).toMatchObject({ visibleText: "Hello", replyPhase: "finishing" });
+    expect(foldFeedChatEvent(finishing, "text_delta", { text: " again" }, dict).replyPhase).toBe("generating");
+    expect(foldFeedChatEvent(finishing, "tool_start", { id: "next", name: "listTasks" }, dict).replyPhase).toBe("generating");
+  });
   it("streams interleaved reasoning and delegated tool activity, retracts dropped calls and receipts the final segment", () => {
     const turn = fold([
       ["reasoning", { text: "Checking the opening" }], ["worker_start", { workerId: "worker", description: "Review the source" }],

@@ -344,7 +344,7 @@ export async function readSessionContextRevisions(sessionId: string, kind: Sessi
     try {
       const content = await transaction(authority,[source],'context',false,async client =>
         (await client.query<{ content: Record<string,unknown> | null }>(kind === 'session_title'
-          ? 'SELECT read_native_file_session_title_revision($1,$2,$3) AS content' : 'SELECT read_session_context_revision($1,$2) AS content',
+          ? 'SELECT read_native_empty_query_session_title_revision($1,$2,$3) AS content' : 'SELECT read_session_context_revision($1,$2) AS content',
           kind === 'session_title' ? [workspaceId,sessionId,candidate.id] : [workspaceId,candidate.id])).rows[0]?.content)
       if (content) rows.push(bindScopeSource({ ...candidate, source, content }, source))
     } catch (error) {

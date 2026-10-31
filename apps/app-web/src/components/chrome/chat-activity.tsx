@@ -352,6 +352,7 @@ export function ChatActivityFeed({
   events,
   tools,
   replyStreaming,
+  replyPhase = "generating",
   researchPhase,
   startedAt,
   defaultExpanded = false,
@@ -362,6 +363,8 @@ export function ChatActivityFeed({
   tools: ToolUsed[];
   /** Reply text has started streaming — auto-collapse to the header. */
   replyStreaming: boolean;
+  /** Text completion does not release foreground turn ownership. */
+  replyPhase?: "generating" | "saving" | "finishing";
   researchPhase?: ResearchPhase | null;
   /** Epoch ms when the turn started; drives the elapsed readout. */
   startedAt: number | null;
@@ -408,7 +411,7 @@ export function ChatActivityFeed({
   }, [events.length, expanded]);
 
   // Pure-text turn with the reply already streaming: nothing to show.
-  if (replyStreaming && !hasActivity) return null;
+  if (replyStreaming && !hasActivity && replyPhase === "generating") return null;
 
   // The most specific "what is happening right now" line.
   const runningLabel = runningTool
@@ -416,7 +419,9 @@ export function ChatActivityFeed({
         runningTool.detail ? ` · ${runningTool.detail}` : ""
       }`
     : null;
-  const headerLabel = replyStreaming
+  const headerLabel = replyPhase === "saving" ? t.chat.activity.savingReply
+    : replyPhase === "finishing" ? t.chat.activity.finishingReply
+    : replyStreaming
     ? t.chat.activity.writing
     : (runningLabel ??
       (researchPhase ? t.chat.researchStatus[researchPhase] : null) ??
@@ -433,7 +438,7 @@ export function ChatActivityFeed({
         aria-label={expanded ? t.chat.activity.hide : t.chat.activity.show}
         className="group flex w-full min-w-0 items-center gap-2 py-0.5 text-left"
       >
-        <span className="chat-shimmer-text min-w-0 truncate text-xs font-medium">
+        <span className={cn("min-w-0 truncate text-xs font-medium", replyPhase === "generating" ? "chat-shimmer-text" : "text-muted-foreground")}>
           {headerLabel}
         </span>
         {elapsed ? (

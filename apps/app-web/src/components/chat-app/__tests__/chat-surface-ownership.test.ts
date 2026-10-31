@@ -547,6 +547,7 @@ function followedTurn(direct = false) {
     workspaceId: "workspace", dispatchChatSessionActivity: vi.fn(),
     setTurnEndNotice: vi.fn(), t: { turnFailed: "Failed safely", turnReclaimed: "Reset stalled turn" },
     setRemoteActive: vi.fn(), setRemoteStartedAt: vi.fn(), setReconnectNotice: vi.fn(),
+    setRemoteReplyPhase: vi.fn(), setRemoteText: vi.fn(), setRemoteAssistantId: vi.fn(),
     chat: { dispatch: vi.fn() }, resetTurnActivity: vi.fn(), resetRemoteTurn: vi.fn(),
     setRemoteConfirmation: vi.fn(), setQueuedNotice: vi.fn(), loadTranscript: vi.fn(),
     reloadShared: vi.fn(), dispatchChatSessionsRefresh: vi.fn(), panePolicy: { post: false },
@@ -564,6 +565,19 @@ function followedTurn(direct = false) {
 }
 
 describe("[COMP:app-web/turn-reconnect] returning sender outcomes", () => {
+  it("restores text completion on reconnect without treating it as turn completion", () => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("snapshot", { text: "Hello", replyPhase: "saving" });
+    expect(scope.setRemoteReplyPhase).toHaveBeenCalledWith("saving");
+    expect(scope.setRemoteActive).toHaveBeenCalledWith(true);
+    onEvent("activity", { event: "assistant_message_saved", id: "saved" });
+    expect(scope.setRemoteReplyPhase).toHaveBeenLastCalledWith("finishing");
+    expect(scope.resetRemoteTurn).not.toHaveBeenCalled();
+    scope.switchTo("B");
+    onEvent("snapshot", { text: "Old", replyPhase: "generating" });
+    expect(scope.setRemoteReplyPhase).toHaveBeenCalledTimes(2);
+  });
+
   it("reattaches to a running turn and explains its failed outcome", () => {
     const { scope, onEvent } = followedTurn();
     onEvent("status", { status: "running" });
@@ -613,11 +627,34 @@ describe("[COMP:app-web/turn-reconnect] returning sender outcomes", () => {
       const node = evaluate<React.ReactNode>(expression, {
         React, remoteActive: true, chat: { state: { isStreaming: false } },
         avatarFor: () => null, remoteAssistantId: null, ChatActivityFeed,
-        remoteEvents: [], remoteTools: [], remoteText: "", remoteResearchPhase: null, remoteStartedAt: null,
+        remoteEvents: [], remoteTools: [], remoteText: "", remoteResearchPhase: null, remoteReplyPhase: "generating", remoteStartedAt: null,
       });
       const html = renderToString(React.createElement(I18nProvider, { locale, dict, children: node }));
       expect(html).toContain(dict.chat.thinking);
       expect(html).not.toContain(dict.chatApp.teammateWorking.replaceAll("'", "&#x27;"));
     },
   );
+});
+
+
+describe("[COMP:app-web/chat-activity] reply finalization display", () => {
+  it.each(["generating", "saving", "finishing"] as const)("renders the actual active reply in phase %s without ending its foreground state", (replyPhase) => {
+    const expression = find(node => ts.isBinaryExpression(node) && node.left.getText(tree) === "chat.state.isStreaming"
+      && node.right.getText(tree).includes("data-brian-chat-answer")).getText(tree);
+    const state = { isStreaming: true, streamingText: "Hello.", replyPhase };
+    const node = evaluate<React.ReactNode>(expression, {
+      React, chat: { state }, avatarFor: () => null, turnAssistantRef: { current: "assistant" },
+      ChatActivityFeed, streamingEvents: [], toolTimeline: [], researchPhase: null, turnStartedAt: null,
+      MARKDOWN_CLS: "answer", ChatMarkdown: ({ text }: { text: string }) => React.createElement("p", null, text),
+      CHAT_MARKDOWN_COMPONENTS: {}, REMARK_PLUGINS: [], citations: [],
+    });
+    const html = renderToString(React.createElement(I18nProvider, { locale: "en", dict: en, children: node }));
+    expect(html).toContain("Hello.");
+    expect(html.includes("animate-pulse")).toBe(replyPhase === "generating");
+    if (replyPhase !== "generating") {
+      expect(html).not.toContain("chat-shimmer-text");
+      expect(html).toContain(replyPhase === "saving" ? en.chat.activity.savingReply : en.chat.activity.finishingReply);
+    }
+    expect(state.isStreaming).toBe(true);
+  });
 });

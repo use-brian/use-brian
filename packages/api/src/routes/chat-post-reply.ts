@@ -11,6 +11,7 @@ export function createChatPostReplyBoundary() {
     beginFinalization(result: TurnLoopResult, providerFailed: boolean, abortSignal: AbortSignal) {
       signal = abortSignal
       finalizing = result.selection.kind === 'text' && !result.aborted && !providerFailed
+      return finalizing && !abortSignal.aborted
     },
     /** Call only for the last row, after publication, authority checks and notification. */
     recordPublishedReply(content: ContentBlock[]) {

@@ -6,10 +6,11 @@ import {authSessionStore,type AuthTokenClaims} from '../db/auth-session-store.js
 import {readSessionById} from '../db/sessions.js'
 import {getUserAssistant} from '../db/users.js'
 import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
-import {publishSessionTitle,readSessionTitle,sessionTitleHead} from '../db/session-title-store.js'
+import {publishSessionTitle,readSessionTitle,readSessionTitlesGrouped,sessionTitleHead} from '../db/session-title-store.js'
 import {resolveExecutionContextSystem} from '../context-scope/execution-context.js'
 import {gateSessionRead} from '../session-read-authority.js'
 import {policyFor,classifySession} from '../session-kind.js'
+import {getApplicationExecutionBinding} from '../application-platform/execution-context.js'
 import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
 
 type NativeClaims=Readonly<AuthTokenClaims>
@@ -61,7 +62,7 @@ export async function renameCurrentSessionTitle(input:{claims:NativeClaims|null;
 }
 
 type TitleProjection=Readonly<{title:string|null;titleRevisionId:string|null}>
-type ProjectionAuthority={authority:SessionContextAuthority;previewThrough?:number;headOnly?:boolean}
+type ProjectionAuthority={authority:SessionContextAuthority;previewThrough?:number;previewPending?:boolean;headOnly?:boolean}
 const projectionAuthorities=new WeakMap<TitleProjection,ProjectionAuthority|null>()
 
 /** Presence metadata only: an unreadable saved title must never become a preview. */
@@ -120,6 +121,59 @@ export async function sessionTitleProjection(input:{claims:NativeClaims|null;ses
   throw error
  }
 }
+type PreparedTitle={id:string;projection:TitleProjection}
+/** Equal data here means equal SQL/GUC context, never interchangeable leases. */
+function titleGroupContext(authority:SessionContextAuthority):string|null{
+ const execution=authority.execution,{identity,ownership,security,surface,lifecycle}=execution
+ if(identity.kind!=='attended'||identity.principal.kind!=='workspace_member'||identity.principal.authenticationKind!=='native_session'
+  ||identity.principal.userId!==security.access.userId||ownership.kind!=='workspace'||ownership.workspaceId!==security.access.workspaceId
+  ||security.access.assistantId!==execution.assistant.id||security.access.sharedAudience||security.access.systemRead||security.access.applicationBound
+  ||surface.readOnly!==true||surface.systemRead||surface.clientSelfMemory||getApplicationExecutionBinding(execution)
+  ||lifecycle.sessionPersisted===false||lifecycle.channelType!=='web'||lifecycle.abortSignal.aborted)return null
+ return JSON.stringify({identity,ownership,access:security.access,ceiling:security.ceiling,provenance:security.provenance,surface,
+  assistantId:execution.assistant.id,channelType:lifecycle.channelType,transport:lifecycle.transport})
+}
+async function tryTitleGroup(claims:NativeClaims,entries:PreparedTitle[],context:string):Promise<Map<string,TitleProjection>|null>{
+ const bindings=entries.map(entry=>projectionAuthorities.get(entry.projection))
+ if(bindings.some(binding=>!binding?.headOnly)||entries.some(entry=>!entry.projection.titleRevisionId))return null
+ try{
+  for(const binding of bindings){
+   await binding!.authority.execution.security.authority.assertCurrent()
+   if(titleGroupContext(binding!.authority)!==context)return null
+  }
+  // A rejected group must not invalidate an unaffected row's original lease.
+  // Resolve a genuine separate operation instead of cloning an execution.
+  const authority=await resolveSessionTitleAuthority({claims,sessionId:entries[0].id,readOnly:true})
+  if(titleGroupContext(authority)!==context)return null
+  const heads=entries.map(entry=>({sessionId:entry.id,revisionId:entry.projection.titleRevisionId!}))
+  const titles=await readSessionTitlesGrouped(heads,authority)
+  if(!titles)return null
+  const result=new Map<string,TitleProjection>()
+  for(const [index,entry] of entries.entries()){
+   const binding=bindings[index]!,title=titles.get(entry.id)
+   await binding.authority.execution.security.authority.assertCurrent()
+   if(titleGroupContext(binding.authority)!==context||!title||title.revisionId!==entry.projection.titleRevisionId)return null
+   const projection=bindScopeSources(Object.freeze({title:title.title,titleRevisionId:title.revisionId}),boundScopeSources(title))
+   projectionAuthorities.set(projection,{authority:binding.authority});result.set(entry.id,projection)
+  }
+  // This is the final awaited boundary: all original leases and provisional
+  // projections are checked before the fresh union source/head proof.
+  await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-list-output'}),scopeAccumulator:authority.accumulator},async()=>{
+   const current=(await getPool().query<{sessionId:string;revisionId:string}>(`SELECT session_id AS "sessionId",scope_revision_id AS "revisionId"
+    FROM session_title_heads WHERE workspace_id=$1 AND session_id=ANY($2::uuid[]) AND session_recording_read_allowed(session_id)`,
+   [authority.execution.security.access.workspaceId,heads.map(head=>head.sessionId)])).rows
+   if(current.length!==heads.length||heads.some(head=>!current.some(row=>row.sessionId===head.sessionId&&row.revisionId===head.revisionId)))denied()
+  })
+  return result
+ }catch(error){
+  if(error instanceof DerivedScopeError||isAuthorityChangedError(error))return null
+  // A union may exceed a canonical walk bound although each original row
+  // remains supported. Only that known optional-cohort failure delegates.
+  if(typeof error==='object'&&error!==null&&'code'in error&&error.code==='22023'
+   &&'message'in error&&error.message==='scope_ancestry_unavailable')return null
+  throw error
+ }
+}
 /** Original per-row authority and sources are checked again at the actual collection boundary. */
 export async function sessionTitleProjections(input:{claims:NativeClaims|null;sessionIds:readonly string[]}):Promise<Map<string,TitleProjection>>{
  const command=structuredClone(input),prepared:Array<{id:string;projection:TitleProjection}>=[]
@@ -149,20 +203,75 @@ export async function sessionTitleProjections(input:{claims:NativeClaims|null;se
     // boundary below, after every row's execution has been prepared.
     projection=Object.freeze({title:null,titleRevisionId:head})
     projectionAuthorities.set(projection,{authority,headOnly:true})
-   }else projection=titleCandidates.has(id)?await sessionTitleProjection({claims:command.claims,sessionId:id}):heldTitleProjection()
+   }else{
+    // Preparation retains identity only. The actual preview is selected and
+    // source-validated once at this row's final collection boundary.
+    projection=Object.freeze({title:null,titleRevisionId:null})
+    projectionAuthorities.set(projection,{authority,previewPending:true})
+   }
   }catch(error){
    if(!(error instanceof DerivedScopeError||isAuthorityChangedError(error)))throw error
   }
   prepared.push({id,projection})
  }
+ // Only consecutive equal-context rows share a boundary. An intervening
+ // fallback can await arbitrary source work, so a later row must not consume
+ // an earlier group's finished proof after that work.
+ type Group={entries:PreparedTitle[];context:string;attempted:boolean;value:Map<string,TitleProjection>|null;budget:{failed:number}}
+ const groupForId=new Map<string,Group>(),seenIds=new Set<string>(),repeatedIds=new Set<string>()
+ for(const entry of prepared){if(seenIds.has(entry.id))repeatedIds.add(entry.id);seenIds.add(entry.id)}
+ for(let offset=0;offset<prepared.length;){
+  const binding=projectionAuthorities.get(prepared[offset].projection)
+  const context=binding?.headOnly&&!repeatedIds.has(prepared[offset].id)?titleGroupContext(binding.authority):null
+  if(context===null){offset++;continue}
+  const part:PreparedTitle[]=[]
+  while(offset<prepared.length&&part.length<50){
+   const next=prepared[offset],nextBinding=projectionAuthorities.get(next.projection)
+   if(repeatedIds.has(next.id)||!nextBinding?.headOnly||titleGroupContext(nextBinding.authority)!==context)break
+   part.push(next);offset++
+  }
+  if(part.length<2)continue
+  const group:Group={entries:part,context,attempted:false,value:null,budget:{failed:0}}
+  for(const entry of part)groupForId.set(entry.id,group)
+ }
  const result=new Map<string,TitleProjection>()
  for(const{id,projection}of prepared){
+  let group=groupForId.get(id),groupedValue:TitleProjection|undefined
+  while(group){
+   if(!group.attempted){
+    group.attempted=true
+    if(group.budget.failed<3){
+     group.value=await tryTitleGroup(command.claims,group.entries,group.context)
+     if(!group.value)group.budget.failed++
+    }
+   }
+   groupedValue=group.value?.get(id)
+   if(groupedValue)break
+   for(const entry of group.entries)groupForId.delete(entry.id)
+   // A held/unsupported member cannot poison other original row readers.
+   // At most three failed optional probes precede their canonical fallback.
+   if(group.budget.failed<3&&group.entries.length>2){
+    const middle=Math.ceil(group.entries.length/2)
+    for(const part of [group.entries.slice(0,middle),group.entries.slice(middle)])if(part.length>1){
+     const half:Group={entries:part,context:group.context,attempted:false,value:null,budget:group.budget}
+     for(const entry of part)groupForId.set(entry.id,half)
+    }
+   }
+   group=groupForId.get(id)
+  }
+  if(groupedValue){result.set(id,groupedValue);continue}
   if(!projectionAuthorities.has(projection))denied()
   const binding=projectionAuthorities.get(projection)
   if(!binding){result.set(id,projection);continue}
-  const{authority,previewThrough,headOnly}=binding
+  const{authority,previewThrough,previewPending,headOnly}=binding
   try{
    let finalProjection=projection
+   if(previewPending){
+    const current=await prepareTitlePreview(id,authority)
+    if(!current){result.set(id,heldTitleProjection());continue}
+    projectionAuthorities.set(current.projection,{authority,previewThrough:current.through})
+    result.set(id,current.projection);continue
+   }
    if(previewThrough!==undefined){
     const current=await prepareTitlePreview(id,authority,previewThrough)
     if(!current||current.projection.title!==projection.title){result.set(id,heldTitleProjection());continue}

@@ -3245,6 +3245,8 @@ export const zhCN: Dictionary = {
     },
     activity: {
       writing: "正在撰写回复…",
+      savingReply: "正在保存回复…",
+      finishingReply: "正在完成…",
       receipt: "{summary} · {duration}",
       summarySearch: "搜索 {count} 次",
       summarySearchOne: "搜索 1 次",

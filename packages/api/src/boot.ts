@@ -1,3 +1,6 @@
+import { enqueueNativeSessionTitleJob } from './db/session-title-jobs.js'
+import { recordOverheadUsage } from './routes/_overhead-usage.js'
+import { createSessionTitleWorker } from './workers/session-title-worker.js'
 import { resolveRetainedTaskGoalAuthority } from './workspace-access/goal-source-admission.js'
 import { assertSourceModelOutputAuthority } from './application-platform/model-source-authority.js'
 import { executionToolContext } from '@use-brian/core'
@@ -5646,6 +5649,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const feedGeneration = createFeedGenerationService(createFeedGenerationPort(createFeedEditorialModelResolver({ provider, configuredProviders, resolveWorkspaceCustomLlm, usageStore, checkCreditBudget: ports.checkCreditBudget, triggerKey: 'feed_generation' }), { transport: geminiTransport, resolveWorkspaceKey: resolveWorkspaceByoGeminiKey, files: filesApi ?? undefined, usageStore, codex: codexProviderManager?.images ?? ports.feedImage?.codex,
       config: ports.feedImage?.config, billing: ports.feedImage?.billing }), feedReviewContext)
   app.use('/api/chat', optionalAuth(env.JWT_SECRET), chatRoutes({
+    enqueueSessionTitleJob: enqueueNativeSessionTitleJob,
     feedGeneration,
     feedReviewContext,
     provider,
@@ -8531,6 +8535,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (runWorkers) pollWorker.start()
   if (runWorkers) runQueueWorker.start()
 
+  const sessionTitleWorker = createSessionTitleWorker({
+    isPlaceholderTitle, getTitleChannelPrefix,
+    async resolveRuntime(workspaceId) {
+      const runtime = await resolveWorkspaceCustomLlm({ workspaceId, requestedTier: 'standard', allowDefault: true, allowAnyDefault: true })
+      return { provider: runtime?.provider ?? provider, model: runtime?.selector ?? backgroundModelFor(configuredProviders),
+        providerKeySource: runtime?.providerKeySource ?? 'platform' }
+    },
+    async recordUsage(job, result, runtime) {
+      await recordOverheadUsage({ usageStore, userId: job.actorUserId, assistantId: job.assistantId,
+        sessionId: job.sessionId, userMessageId: job.userMessageId ?? undefined,
+        model: result.model, usage: result.usage, source: 'overhead:title', triggerKey: 'session_title',
+        modelTier: 'standard', providerKeySource: runtime.providerKeySource })
+    },
+  })
+  if (runWorkers) sessionTitleWorker.start()
+
   const cleanupWorker = createCleanupWorker({ jobStore })
   if (runWorkers) cleanupWorker.start()
 
@@ -10124,6 +10144,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     await officeSearchProjector.stop()
     await stopWatchCleanup?.() // Watch boot lifecycle: stop and drain retention work.
     console.log('Shutting down — flushing analytics...')
+    await sessionTitleWorker.stop()
     consolidationWorker.stop()
     skillReviewWorker.stop()
     playbookReflectionWorker.stop()

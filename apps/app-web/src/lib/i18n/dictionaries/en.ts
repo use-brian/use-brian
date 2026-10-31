@@ -3308,6 +3308,8 @@ export const en = {
     // See docs/architecture/engine/live-streaming.md → "Chat: the activity feed".
     activity: {
       writing: "Writing reply…",
+      savingReply: "Saving reply…",
+      finishingReply: "Finishing…",
       // Receipt header, summarized by kind (activity-receipt.ts →
       // summarizeActivity): "Searched once and ran 9 Shopify calls · 48s".
       receipt: "{summary} · {duration}",

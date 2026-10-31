@@ -20,7 +20,7 @@ import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
-import { migratePglite } from '../migrate-pglite.js'
+import { migratePglite, preparePgliteRuntimeRole } from '../migrate-pglite.js'
 
 const migrationsDir = fileURLToPath(
   new URL('../../../../packages/api/migrations', import.meta.url),
@@ -31,7 +31,7 @@ const SKILL_ID = '00000000-0000-4000-8000-0000000000b1'
 const DEPARTMENT = 'team:00000000-0000-4000-8000-0000000000d1'
 
 /** A database provisioned the way the self-host recipe leaves it. */
-async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean; legacyDefaults?: boolean } = {}): Promise<PGlite> {
+async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean; legacyDefaults?: boolean; prepareRuntime?: boolean } = {}): Promise<PGlite> {
   const db = new PGlite({ extensions: { vector, pg_trgm } })
   await db.waitReady
   if (options.varyOids) {
@@ -44,7 +44,9 @@ async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean; leg
     assert.notDeepEqual((await db.query(`SELECT 'public'::regnamespace::oid AS namespace,
       (SELECT oid FROM pg_language WHERE lanname='plpgsql') AS language`)).rows, before)
   }
-  if (options.appUser) {
+  if (options.prepareRuntime) {
+    await preparePgliteRuntimeRole(db)
+  } else if (options.appUser) {
     await db.exec('CREATE ROLE app_user NOLOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT')
   }
   await db.exec(`
@@ -57,6 +59,7 @@ async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean; leg
     GRANT CREATE ON DATABASE postgres TO migration_owner;
     SET ROLE migration_owner;
   `)
+  if (options.prepareRuntime) await preparePgliteRuntimeRole(db)
   if (options.legacyDefaults) {
     await db.exec(`
       ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user;
@@ -301,7 +304,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
   })
 
   it('replays the whole chain from empty without a superuser', async () => {
-    const db = await openAsOwner()
+    const db = await openAsOwner({ prepareRuntime: true })
     try {
       // One connection for every file, so the baseline's row_security = off
       // is still in force when the later data-rewriting migrations run.
@@ -315,7 +318,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
   })
 
   it('relabels free-form compartments on upgrade, bypassing triggers and restoring them', async () => {
-    const db = await openAsOwner()
+    const db = await openAsOwner({ prepareRuntime: true })
     try {
       await migratePglite(db, migrationsDir, { through: '649_department_read_policy.sql' })
 

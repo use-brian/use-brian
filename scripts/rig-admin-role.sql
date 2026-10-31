@@ -29,13 +29,14 @@ DO $$ BEGIN
   RAISE EXCEPTION 'Fixture runtime role has unsafe privileges, membership or object ownership';END IF;
 END $$;
 
--- Recognize only the existing post8113 generator before any guard invocation.
--- Its stored fingerprints remain opaque and unchanged; currentness is checked
--- by the original callable after alias narrowing, never during this safety phase.
+-- Recognize only maintained generators before any guard invocation. Stored
+-- fingerprints/constants remain unchanged; currentness is checked by the
+-- original callable after alias narrowing, never during this safety phase.
 DO $fixture_guard_shape$
 DECLARE guard pg_proc;canonical_owner oid;previous_oid oid;source_oid oid;dispatcher_oid oid;
  pinned boolean:=false;feedback boolean:=false;amended boolean:=false;history boolean:=false;privacy boolean:=false;
- chat_read_frame boolean:=false;helper pg_proc;frame_helper pg_proc;
+ chat_read_frame boolean:=false;typed_manifest boolean:=false;helper pg_proc;frame_helper pg_proc;
+ columns_sql text;row_sql text;comparisons text;rows_sql text;catalog_shape jsonb;projection text;alias_oids oid[];
  matched integer;pins text;actual_oids oid[];expected_oids oid[];expected_body text;
  frame_fields_before constant text:=$chat_fields_before$ -- Read every original field under the current actor and original selector.$chat_fields_before$;
  frame_fields_after constant text:=$chat_fields_after$ -- This private port only exports a qualified locked Memory frame. Without
@@ -51,9 +52,10 @@ BEGIN
   history:=EXISTS(SELECT FROM public._migrations WHERE name='8128_native_memory_history_admission.sql');
   privacy:=EXISTS(SELECT FROM public._migrations WHERE name='8135_channel_recording_privacy_hold.sql');
   chat_read_frame:=EXISTS(SELECT FROM public._migrations WHERE name='8148_native_chat_read_frame.sql');
+  typed_manifest:=EXISTS(SELECT FROM public._migrations WHERE name='8155_native_validation_query_plans.sql');
  END IF;
  IF guard.oid IS NULL THEN
-  IF pinned OR feedback OR amended OR history OR privacy OR chat_read_frame
+  IF pinned OR feedback OR amended OR history OR privacy OR chat_read_frame OR typed_manifest
    OR to_regprocedure('public.read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)') IS NOT NULL THEN
    RAISE EXCEPTION 'Unknown fixture Memory guard: missing installed guard' USING ERRCODE='55000';END IF;
   RETURN; -- Fresh/pre8111 prefix, including the explicit new-disposable callback.
@@ -61,6 +63,8 @@ BEGIN
  IF NOT pinned OR amended AND NOT feedback OR chat_read_frame AND(NOT history OR NOT privacy
   OR NOT EXISTS(SELECT FROM public._migrations WHERE name='8129_native_history_title_dependencies.sql')) THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: migration phase' USING ERRCODE='55000';END IF;
+ IF typed_manifest AND (NOT chat_read_frame OR NOT EXISTS(SELECT FROM public._migrations WHERE name='8152_native_empty_query_worklists.sql')) THEN
+  RAISE EXCEPTION 'Unknown fixture Memory guard: typed migration phase' USING ERRCODE='55000';END IF;
  IF NOT chat_read_frame AND to_regprocedure('public.read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)') IS NOT NULL THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: untracked chat read frame' USING ERRCODE='55000';END IF;
  IF NOT amended THEN
@@ -72,7 +76,7 @@ BEGIN
   OR guard.proowner IS DISTINCT FROM (SELECT proowner FROM pg_proc WHERE oid=to_regprocedure('public.application_memory_field_state_before_successor(uuid,uuid,text[])'))
   OR guard.pronamespace<>'public'::regnamespace OR guard.proname<>'application_memory_statement_helpers_current'
   OR guard.prokind<>'f' OR guard.prorettype<>'boolean'::regtype OR guard.proretset
-  OR guard.prolang IS DISTINCT FROM (SELECT oid FROM pg_language WHERE lanname='sql')
+  OR guard.prolang IS DISTINCT FROM (SELECT oid FROM pg_language WHERE lanname=CASE WHEN typed_manifest THEN 'plpgsql' ELSE 'sql' END)
   OR NOT guard.prosecdef OR guard.provolatile<>'v' OR guard.proisstrict OR guard.proparallel<>'u'
   OR guard.proleakproof OR guard.prosupport<>0 OR guard.procost<>100 OR guard.prorows<>0
   OR guard.pronargs<>0 OR guard.pronargdefaults<>0 OR guard.provariadic<>0
@@ -83,11 +87,13 @@ BEGIN
   OR EXISTS(SELECT FROM aclexplode(coalesce(guard.proacl,acldefault('f',guard.proowner))) a
    WHERE a.grantee<>guard.proowner OR a.grantor<>guard.proowner OR a.privilege_type<>'EXECUTE' OR a.is_grantable) THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: properties or private ACL' USING ERRCODE='55000';END IF;
- -- 121 bounded tuples plus the fixed generator and its two reviewed source literals.
- IF octet_length(guard.prosrc)>24000 THEN RAISE EXCEPTION 'Unknown fixture Memory guard: body bounds' USING ERRCODE='55000';END IF;
+ -- Bound both maintained representations before inspecting their contents.
+ IF octet_length(guard.prosrc)>(CASE WHEN typed_manifest THEN 1048576 ELSE 24000 END) THEN RAISE EXCEPTION 'Unknown fixture Memory guard: body bounds' USING ERRCODE='55000';END IF;
+ IF NOT typed_manifest THEN
  SELECT string_agg(format('(%s::oid,%L::text)',m[1]::oid,m[2]),',' ORDER BY ordinal),array_agg(m[1]::oid ORDER BY ordinal),count(*)
  INTO pins,actual_oids,matched
  FROM regexp_matches(guard.prosrc,'\(([0-9]+)::oid,''([0-9a-f]{64})''::text\)','g') WITH ORDINALITY captures(m,ordinal);
+ END IF;
  SELECT array_agg(function_oid ORDER BY function_oid) INTO expected_oids
  FROM (SELECT to_regprocedure(signature)::oid AS function_oid FROM unnest(ARRAY[
   'public.agent_read_scope_allows(text,text[],uuid[])',
@@ -214,6 +220,17 @@ BEGIN
  previous_oid:=to_regprocedure('public.application_field_projection_state_before_feedback_outcome(uuid,jsonb,text,uuid,text,text,text[])')::oid;
  source_oid:=to_regprocedure('public.read_entity_derivation_source(uuid,text,uuid)')::oid;
  dispatcher_oid:=to_regprocedure('public.application_field_projection_state(uuid,jsonb,text,uuid,text,text,text[])')::oid;
+ IF typed_manifest THEN
+  -- These identities come only from the maintained closed list, never guard text.
+  actual_oids:=expected_oids||ARRAY[dispatcher_oid,
+   to_regprocedure('public.application_memory_history_status(uuid,uuid,text)')::oid,
+   to_regprocedure('public.session_recording_read_allowed(uuid)')::oid,
+   to_regprocedure('public.recording_source_read_allowed(uuid,text,uuid)')::oid,
+   to_regprocedure('public.guard_session_recording_privacy()')::oid,
+   to_regprocedure('public.refuse_quarantined_recording_message()')::oid,
+   to_regprocedure('public.read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)')::oid];
+  matched:=cardinality(actual_oids);
+ END IF;
  IF (matched<>(CASE WHEN chat_read_frame THEN 127 WHEN privacy THEN 126 WHEN history THEN 122 ELSE 121 END)) OR cardinality(expected_oids)<>120 OR array_position(expected_oids,NULL) IS NOT NULL
   OR previous_oid IS NULL OR source_oid IS NULL OR dispatcher_oid IS NULL OR previous_oid=dispatcher_oid
   OR actual_oids[1:120] IS DISTINCT FROM expected_oids OR actual_oids[121] IS DISTINCT FROM dispatcher_oid
@@ -390,6 +407,36 @@ END $fixture_original_source$,pins);
    E'BEGIN\n -- Recording privacy admission precedes body selection.\n IF NOT recording_source_read_allowed(w,k,i) THEN RETURN NULL;END IF;\n IF k=''''feedback_event'''' THEN');
  END IF;
  IF chat_read_frame THEN expected_body:=replace(expected_body,'SELECT count(*)=126','SELECT count(*)=127');END IF;
+ IF typed_manifest THEN
+  -- Reconstruct trusted SQL from current catalog data. Never execute any text
+  -- extracted from the installed guard, even if its apparent prefix matches.
+  SELECT array_agg(to_regprocedure(signature)::oid) INTO alias_oids FROM unnest(ARRAY[
+   'public.read_admitted_native_scope_snapshot(uuid,text,uuid)',
+   'public.read_entity_derivation_source(uuid,text,uuid)',
+   'public.read_admitted_native_scope_snapshot_before_knowledge_versions(uuid,text,uuid)',
+   'public.read_entity_derivation_source_before_memory_successor(uuid,text,uuid)',
+   'public.read_admitted_native_scope_snapshot_before_persistent_context(uuid,text,uuid)',
+   'public.read_entity_derivation_source_before_knowledge_versions(uuid,text,uuid)',
+   'public.read_admitted_native_scope_snapshot_before_public_share(uuid,text,uuid)',
+   'public.read_entity_derivation_source_before_knowledge_source_parent(uuid,text,uuid)',
+   'public.read_entity_derivation_source_before_persistent_context(uuid,text,uuid)',
+   'public.read_entity_derivation_source_before_engineering_archive(uuid,text,uuid)'
+  ]) signatures(signature);
+ SELECT string_agg(quote_ident(attname),',' ORDER BY attnum),
+  string_agg(format('format(%L,%s)', '%L::'||CASE WHEN attname='proacl' THEN 'jsonb' WHEN atttypid IN('pg_node_tree'::regtype,'oidvector'::regtype,'regproc'::regtype) THEN 'text' ELSE format_type(atttypid,atttypmod) END,
+   CASE WHEN attname='proacl' THEN 'to_jsonb(p.proacl)' WHEN atttypid IN('pg_node_tree'::regtype,'oidvector'::regtype,'regproc'::regtype) THEN format('p.%I::text',attname) ELSE format('p.%I',attname) END),'||'',''||' ORDER BY attnum),
+  string_agg(format('%s%s IS NOT DISTINCT FROM m.%I%s',CASE WHEN attname='proacl' THEN 'to_jsonb(p.proacl)' WHEN atttypid IN('pg_node_tree'::regtype,'oidvector'::regtype,'regproc'::regtype) THEN format('p.%I::text',attname) ELSE format('p.%I',attname) END,CASE WHEN attcollation<>0 OR atttypid IN('pg_node_tree'::regtype,'oidvector'::regtype,'regproc'::regtype) THEN ' COLLATE "C"' ELSE '' END,attname,CASE WHEN attcollation<>0 OR atttypid IN('pg_node_tree'::regtype,'oidvector'::regtype,'regproc'::regtype) THEN ' COLLATE "C"' ELSE '' END),' AND ' ORDER BY attnum),
+  jsonb_agg(jsonb_build_array(attnum,attname,atttypid,atttypmod,attcollation) ORDER BY attnum)
+ INTO columns_sql,row_sql,comparisons,catalog_shape
+ FROM pg_attribute WHERE attrelid='pg_proc'::regclass AND attnum>0 AND NOT attisdropped;
+  SELECT string_agg(CASE WHEN attname='proacl' THEN
+   'CASE WHEN p.oid=ANY($2) THEN (SELECT array_agg(entry.acl ORDER BY entry.ordinal) FROM unnest(p.proacl) WITH ORDINALITY entry(acl,ordinal) WHERE NOT EXISTS(SELECT FROM aclexplode(ARRAY[entry.acl]) grant_entry JOIN pg_roles role_entry ON role_entry.oid=grant_entry.grantee WHERE role_entry.rolname IN(''assurance_app'',''admin_fixture_app''))) ELSE p.proacl END AS proacl'
+   ELSE format('p.%I',attname) END,',' ORDER BY attnum) INTO projection
+   FROM pg_attribute WHERE attrelid='pg_proc'::regclass AND attnum>0 AND NOT attisdropped;
+  EXECUTE 'WITH catalog AS MATERIALIZED(SELECT '||projection||' FROM pg_catalog.pg_proc p WHERE p.oid=ANY($1)) SELECT string_agg(''(''||'||row_sql||'||'')'','','' ORDER BY p.oid) FROM catalog p'
+   INTO rows_sql USING actual_oids,alias_oids;
+ expected_body:='BEGIN IF (SELECT jsonb_agg(jsonb_build_array(attnum,attname,atttypid,atttypmod,attcollation) ORDER BY attnum) FROM pg_catalog.pg_attribute WHERE attrelid=''pg_catalog.pg_proc''::regclass AND attnum>0 AND NOT attisdropped) IS DISTINCT FROM '||quote_literal(catalog_shape::text)||'::jsonb THEN RETURN false;END IF; RETURN (SELECT count(*)=127 AND coalesce(bool_and('||comparisons||'),false) FROM (VALUES '||rows_sql||') m('||columns_sql||') JOIN pg_catalog.pg_proc p ON p.oid=m.oid);END';
+ END IF;
  IF guard.prosrc IS DISTINCT FROM expected_body THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: complete generated body' USING ERRCODE='55000';END IF;
 EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN

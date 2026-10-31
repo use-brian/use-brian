@@ -2,11 +2,21 @@
 import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,DerivedScopeError,executionToolContext,
  type ResearchClassifyOptions,type ResearchClassifyResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
 import {getPool} from '../db/client.js'
-import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
+import {readAdmittedSessionQuery,captureSessionTopics,sessionQueryRootMetadata} from '../db/session-query-reader.js'
+import {readSessionQueryFrame} from '../db/session-context-revisions.js'
 import {writeSessionMessageAnnotation} from '../db/session-message-annotations.js'
 import type {Session,SessionMessage} from '../db/sessions.js'
 import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
 import {resolveReplyText,type ResolveReplyParams} from '../routes/_reply-context.js'
+
+type ClassifiedTranscript = {
+ execution:SessionContextAuthority['execution'];sessionId:string;through:number;messageId:string;annotationId:string;
+ history:SessionMessage[];sources:ScopeSource[];
+}
+const classifiedTranscripts=new WeakMap<readonly SessionMessage[],ClassifiedTranscript>()
+function copyBoundHistory(history:readonly SessionMessage[]):SessionMessage[]{
+ return history.map(row=>bindScopeSources(structuredClone(row),structuredClone(boundScopeSources(row))))
+}
 
 /** The actual current authored row is selected and scoped before text is formatted. */
 export async function classifyAttendedSessionMessage(input:{
@@ -44,10 +54,70 @@ export async function classifyAttendedSessionMessage(input:{
  const annotation=await writeSessionMessageAnnotation({sessionId:session.id,messageId:message.id,classification,replyToText:reply?.text??null,authority,expectedRevision:expected})
  if(!annotation)throw new DerivedScopeError('scope_source_changed')
  await authority.execution.security.authority.assertCurrent()
+ classifiedTranscripts.set(history,{execution:authority.execution,sessionId:session.id,through:message.sequenceNum,
+  messageId:message.id,annotationId:annotation.revisionId,history:copyBoundHistory(query.history),
+  sources:structuredClone(boundScopeSources(query.history))})
  return{classification,reply,history}
 }
 
 const historyTurnCounts=new WeakMap<readonly SessionMessage[],{workspaceId:string;sessionId:string;count:number;sources:readonly ScopeSource[]}>()
+function attendedHistoryResult(authority:SessionContextAuthority,sessionId:string,rows:SessionMessage[],sources:readonly ScopeSource[],fromSequence?:number|null){
+ const count=rows.filter(row=>row.role==='user'&&!(Array.isArray(row.content)&&row.content.some(block=>
+  typeof block==='object'&&block!==null&&'type' in block&&block.type==='tool_result'))).length
+ const history=rows.filter(row=>fromSequence==null||row.sequenceNum>=fromSequence)
+ historyTurnCounts.set(history,{workspaceId:authority.execution.security.access.workspaceId,sessionId,count,sources:structuredClone(sources)})
+ return bindScopeSources(history,sources)
+}
+
+/** Reuse bytes only after a fresh canonical query frame admits their complete original evidence. */
+export async function readClassifiedSessionHistory(authority:SessionContextAuthority,sessionId:string,classifiedHistory:readonly SessionMessage[],fromSequence?:number|null):Promise<SessionMessage[]>{
+ const receipt=classifiedTranscripts.get(classifiedHistory),{execution}=authority
+ const fresh=()=>readAttendedSessionHistory(authority,sessionId,fromSequence)
+ if(!receipt||receipt.execution!==execution||receipt.sessionId!==sessionId||execution.lifecycle.sessionId!==sessionId)return fresh()
+ async function current(){
+  // Metadata narrows this optimization only. It never admits stored plaintext.
+  return (await getPool().query<{current:boolean}>(`SELECT
+   (SELECT coalesce(max(sequence_num),0) FROM session_messages WHERE workspace_id=$1 AND session_id=$2)=$3
+   AND EXISTS(SELECT 1 FROM session_message_annotation_heads h JOIN session_messages m
+    ON m.workspace_id=h.workspace_id AND m.session_id=h.session_id AND m.id=h.message_id
+    WHERE h.workspace_id=$1 AND h.session_id=$2 AND h.message_id=$4 AND h.scope_revision_id=$5 AND m.sequence_num=$3) AS current`,
+   [execution.security.access.workspaceId,sessionId,receipt!.through,receipt!.messageId,receipt!.annotationId])).rows[0]?.current===true
+ }
+ await execution.security.authority.assertCurrent()
+ if(!await current())return fresh()
+ try{
+  const topicRoots=await sessionQueryRootMetadata(execution.security.access.workspaceId,sessionId,0,receipt.through)
+  const rows=await readSessionQueryFrame(authority,[...receipt.sources,...topicRoots],async client=>{
+   if(!await current())return{value:null,sources:[]}
+   // The newly written annotation has not had a query-field observation yet.
+   // Capture current topics through the unchanged canonical query, including
+   // its field policy and row bounds; only the immutable body query is reused.
+   const annotations=await captureSessionTopics(client,execution.security.access.workspaceId,sessionId,receipt.through)
+   const topics=new Map(annotations.map(row=>[row.id,row]))
+   const history=copyBoundHistory(receipt.history).map(row=>{
+    const topic=topics.get(row.id)
+    return bindScopeSources({...row,topicLabel:topic?.topicLabel??null,topicConfidence:topic?.topicConfidence??null,replyToText:topic?.replyToText??null},
+     [...boundScopeSources(row),...(topic?boundScopeSources(topic):[])])
+   })
+   const sources=[...receipt.sources,...boundScopeSources(annotations)]
+   return{value:bindScopeSources(history,sources),sources}
+  })
+  if(!rows||!await current())return fresh()
+  await execution.security.authority.assertCurrent()
+  const sources=boundScopeSources(rows)
+  authority.accumulator.note({sources})
+  return attendedHistoryResult(authority,sessionId,rows,sources,fromSequence)
+ }catch(error){
+  const failure=error as {reason?:string;diagnostic?:string;cause?:{message?:string}}
+  // A changed observation needs a new capture. Transport/SQL failures and
+  // authority revocation must keep their authentic failure, never a retry.
+  if(error instanceof DerivedScopeError&&error.code==='scope_source_changed'
+   ||failure.reason==='caller_evidence_unavailable'&&(
+    ['source_held','source_reclassified','source_changed'].includes(failure.diagnostic??'')
+    ||failure.diagnostic==='source_unverifiable'&&failure.cause?.message==='Native session evidence unavailable'))return fresh()
+  throw error
+ }
+}
 /** Data snapshot only. Every use still requires the original current field/query/source admission. */
 export async function attendedSessionTurnCount(authority:SessionContextAuthority,history:readonly SessionMessage[]):Promise<number>{
  const snapshot=historyTurnCounts.get(history),{execution}=authority
@@ -64,16 +134,13 @@ export async function readAttendedSessionHistory(authority:SessionContextAuthori
   'SELECT coalesce(max(sequence_num),0)::int AS sequence FROM session_messages WHERE workspace_id=$1 AND session_id=$2',
   [authority.execution.security.access.workspaceId,sessionId])).rows[0].sequence
  const query=await readAdmittedSessionQuery({sessionId,throughSequence:high,authority})
- const count=query.history.filter(row=>row.role==='user'&&!(Array.isArray(row.content)&&row.content.some(block=>
-  typeof block==='object'&&block!==null&&'type' in block&&block.type==='tool_result'))).length
  const annotations=new Map(query.annotations.map(row=>[row.id,row]))
- const history=query.history.filter(row=>fromSequence==null||row.sequenceNum>=fromSequence).map(row=>{
+ const history=query.history.map(row=>{
   const annotation=annotations.get(row.id)
   return bindScopeSources({...row,topicLabel:annotation?.topicLabel??null,topicConfidence:annotation?.topicConfidence??null,replyToText:annotation?.replyToText??null},
    [...boundScopeSources(row),...(annotation?boundScopeSources(annotation):[])])
  })
- historyTurnCounts.set(history,{workspaceId:authority.execution.security.access.workspaceId,sessionId,count,sources:structuredClone(boundScopeSources(query))})
- return bindScopeSources(history,boundScopeSources(query))
+ return attendedHistoryResult(authority,sessionId,history,boundScopeSources(query),fromSequence)
 }
 
 /** Assess only an authored current row and the complete admitted original body cohort. */

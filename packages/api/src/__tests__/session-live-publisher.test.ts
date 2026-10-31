@@ -38,6 +38,22 @@ function harness(opts?: {
 }
 
 describe('[COMP:api/session-live-publisher] turn_stream snapshots', () => {
+  it('publishes saving and finishing immediately without terminalizing the turn, then resets a new segment', () => {
+    const { events, publisher, tick } = harness()
+    publisher.onTextDelta('A complete reply.')
+    publisher.setReplyPhase('saving')
+    expect(events.at(-1)).toMatchObject({ kind: 'turn_stream', payload: { text: 'A complete reply.', replyPhase: 'saving' } })
+    publisher.setReplyPhase('finishing')
+    expect(events.at(-1)).toMatchObject({ kind: 'turn_stream', payload: { replyPhase: 'finishing' } })
+    expect(events.every(event => event.kind !== 'turn_completed')).toBe(true)
+    publisher.resetAnswer()
+    expect(events.at(-1)).toMatchObject({ payload: { text: '' } })
+    expect(events.at(-1)!.payload).toHaveProperty('replyPhase', 'generating')
+    tick(STREAM_PUBLISH_THROTTLE_MS + 1)
+    publisher.onTextDelta('A new segment.')
+    expect(events.at(-1)!.payload).toHaveProperty('replyPhase', 'generating')
+  })
+
   it('publishes the FULL reply-so-far, never deltas', () => {
     const { events, publisher, tick } = harness()
     publisher.onTextDelta('Hello ')
@@ -108,7 +124,7 @@ describe('[COMP:api/session-live-publisher] turn_stream snapshots', () => {
     const { events, publisher } = harness()
     publisher.onTextDelta('hi')
     const payload = (events[0] as { payload: Record<string, unknown> }).payload
-    expect(Object.keys(payload).sort()).toEqual(['activity', 'text'])
+    expect(Object.keys(payload).sort()).toEqual(['activity', 'replyPhase', 'text'])
   })
 
   it('attributed snapshot carries reasoning tail + sender + assistant, reasoning capped', () => {

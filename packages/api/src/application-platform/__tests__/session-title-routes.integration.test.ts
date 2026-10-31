@@ -14,6 +14,7 @@ import {createDbMemoryStore} from '../../db/memory-store.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import * as sessionQueries from '../../db/session-query-reader.js'
 import * as executionContexts from '../../context-scope/execution-context.js'
+import * as modelSources from '../model-source-authority.js'
 import {publishSessionTitle} from '../../db/session-title-store.js'
 import {pinSessionTitleClaims,readCurrentSessionTitle,renameCurrentSessionTitle,resolveSessionTitleAuthority,sessionTitleProjection,sessionTitleProjections} from '../../routes/session-title-authority.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
@@ -101,17 +102,19 @@ describe.sequential('[COMP:api/application-persistence] actual browser title DTO
   expect((await c.patch('Fictional explicit saved choice')).status).toBe(200)
   expect((await c.get('/'+c.session.id)).body).toMatchObject({title:'Fictional explicit saved choice',titleRevisionId:expect.any(String)})
  })
- it('admits only the first useful user prefix for list titles and revalidates that exact prefix',async()=>{
+ it('admits the first useful user prefix once at the final list boundary',async()=>{
   const c=await setup()
   await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'Fictional bounded preview'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
   for(let n=0;n<9;n++)await addSessionMessage({sessionId:c.session.id,role:'assistant',content:[{type:'text',text:'Fictional later response'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
   // Observe the real admitted SQL path without replacing any authority check.
-  const reads=vi.spyOn(sessionQueries,'readAdmittedSessionQuery')
+  const reads=vi.spyOn(sessionQueries,'readAdmittedSessionQuery'),outputs=vi.spyOn(modelSources,'assertSourceModelOutputAuthority'),resolve=vi.spyOn(executionContexts,'resolveExecutionContextSystem')
   const response=await c.list()
   expect(response.status,JSON.stringify(response.body)).toBe(200)
   expect(response.body.find((row:{id:string})=>row.id===c.session.id)).toMatchObject({title:'Fictional bounded preview',titleRevisionId:null})
   const prefixes=reads.mock.calls.filter(([input])=>input.sessionId===c.session.id).map(([input])=>input.throughSequence)
-  expect(prefixes.length).toBeGreaterThanOrEqual(2)
+  expect(prefixes).toEqual([1])
+  expect(outputs.mock.calls.filter(([context])=>context.appId==='native-session-title-preview')).toHaveLength(1)
+  expect(resolve.mock.calls.filter(([input])=>input.lifecycle.sessionId===c.session.id)).toHaveLength(1)
   expect(prefixes.every(through=>through===1)).toBe(true)
  })
  it('keeps tool-only and assistant-only histories as placeholders',async()=>{
@@ -238,7 +241,7 @@ describe.sequential('[COMP:api/application-persistence] actual browser title DTO
   expect(JSON.stringify(response.body)).not.toContain(first!.title)
   expect(rows.find(row=>row.id===other.id)).toMatchObject({title:second!.title,titleRevisionId:second!.revisionId})
  })
- it.each(['message edit','saved title'] as const)('withholds an earlier preview after a concurrent %s before list output',async(change)=>{
+ it.each(['message edit','saved title'] as const)('uses the final preview boundary after a concurrent %s',async(change)=>{
   const c=await setup(),message=await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'Fictional original preview label'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
   const other=await createPersonalWebSession({assistantId:c.f.assistantId,userId:c.f.ownerId,workspaceId:c.f.workspaceId,channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
    {actorUserId:c.f.ownerId,authSessionId:c.auth.id,authVersion:c.auth.authVersion})
@@ -254,10 +257,27 @@ describe.sequential('[COMP:api/application-persistence] actual browser title DTO
    else expect(await renameCurrentSessionTitle({claims:c.claims,sessionId:c.session.id,title:'Fictional concurrent saved title'})).not.toBeNull()
   }finally{pause.release();response=await pending;pause.restore()}
   expect(response.status,JSON.stringify(response.body)).toBe(200)
-  expect(response.body.find((row:{id:string})=>row.id===c.session.id)).toMatchObject({title:'New Chat',titleRevisionId:null})
+  expect(response.body.find((row:{id:string})=>row.id===c.session.id)).toMatchObject({title:change==='message edit'?'Fictional updated preview label':'New Chat',titleRevisionId:null})
   expect(response.body.find((row:{id:string})=>row.id===other.id)).toMatchObject({title:second!.title,titleRevisionId:second!.revisionId})
   expect(JSON.stringify(response.body)).not.toContain('Fictional original preview label')
   expect((await c.get('/'+c.session.id)).body).toMatchObject({title:change==='message edit'?'Fictional updated preview label':'Fictional concurrent saved title'})
+ })
+ it('keeps the original preview ceiling when permissions expand before final capture',async()=>{
+  const c=await setup()
+  await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'Fictional newly granted preview'}],scope:{...c.f.envelope,userId:c.f.ownerId,sensitivity:'confidential'}})
+  const other=await createPersonalWebSession({assistantId:c.f.assistantId,userId:c.f.ownerId,workspaceId:c.f.workspaceId,channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
+   {actorUserId:c.f.ownerId,authSessionId:c.auth.id,authVersion:c.auth.authVersion})
+  expect(await renameCurrentSessionTitle({claims:c.claims,sessionId:other.id,title:'Fictional independent ceiling title'})).not.toBeNull()
+  await c.f.pool.query("UPDATE assistants SET clearance='internal' WHERE id=$1",[c.f.assistantId])
+  await c.f.pool.query("UPDATE sessions SET last_active_at=clock_timestamp()+interval '1 second' WHERE id=$1",[c.session.id])
+  const pause=pauseMetadataRead((sql,values)=>sql.includes('SELECT scope_revision_id AS id FROM session_title_heads')&&values[1]===other.id)
+  const pending=c.list().then(response=>response)
+  let response:Awaited<typeof pending>|undefined
+  try{await pause.entered;await c.f.pool.query("UPDATE assistants SET clearance='confidential' WHERE id=$1",[c.f.assistantId])}
+  finally{pause.release();response=await pending;pause.restore()}
+  expect(response.status,JSON.stringify(response.body)).toBe(200)
+  expect(response.body.find((row:{id:string})=>row.id===c.session.id)).toMatchObject({title:'New Chat',titleRevisionId:null})
+  expect((await c.get('/'+c.session.id)).body).toMatchObject({title:'Fictional newly granted preview',titleRevisionId:null})
  })
  it('checks saved-head absence inside the final source frame after a completed absence query races a rename',async()=>{
   const c=await setup()

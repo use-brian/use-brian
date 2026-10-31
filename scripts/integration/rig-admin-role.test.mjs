@@ -46,8 +46,8 @@ test('recognizes the exact chat read frame phase and keeps its complete proof pr
  const shape=JSON.parse(psql('brian',`SELECT json_build_object(
   'installed',EXISTS(SELECT FROM _migrations WHERE name='8148_native_chat_read_frame.sql'),
   'current',application_memory_statement_helpers_current(),
-  'pins',(SELECT count(*) FROM pg_proc p CROSS JOIN LATERAL regexp_matches(p.prosrc,'\\(([0-9]+)::oid,''([0-9a-f]{64})''::text\\)','g') pin WHERE p.oid='application_memory_statement_helpers_current()'::regprocedure));`))
- assert.deepEqual(shape,{installed:true,current:true,pins:127})
+  'privateGuard',NOT has_function_privilege('app_user','application_memory_statement_helpers_current()','EXECUTE'));`))
+ assert.deepEqual(shape,{installed:true,current:true,privateGuard:true})
  assert.doesNotThrow(()=>psql('brian',verifySql))
  const output=psql('app_user',`DO $$ BEGIN
   BEGIN PERFORM read_native_session_cohort_frame('00000000-0000-0000-0000-000000000000',ARRAY['session_message'],ARRAY['00000000-0000-0000-0000-000000000000']::uuid[],ARRAY['1'],true);

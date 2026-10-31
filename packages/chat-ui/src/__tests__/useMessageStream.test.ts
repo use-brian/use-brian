@@ -60,6 +60,22 @@ function drive(
 }
 
 describe('[COMP:chat-ui/use-message-stream] runStream close semantics', () => {
+  it('does not finish or release a stream when only reply text or persistence has completed', async () => {
+    let output!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({ start(controller) { output = controller } })
+    const disconnects: Array<{ lastEvent: string | null }> = []
+    const { calls, run } = drive(new Response(body), { onDisconnect: value => disconnects.push(value) })
+    for (const event of ['text_delta', 'reply_text_complete', 'assistant_message_saved']) {
+      output.enqueue(new TextEncoder().encode(frame(event, {})))
+    }
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls.done).toBe(0)
+    output.close()
+    await run
+    expect(calls.done).toBe(0)
+    expect(disconnects).toEqual([{ lastEvent: 'assistant_message_saved' }])
+  })
+
   it('settles a durable reply before delayed metadata without finalizing twice', async () => {
     let output!: ReadableStreamDefaultController<Uint8Array>
     const body = new ReadableStream<Uint8Array>({ start(controller) { output = controller } })

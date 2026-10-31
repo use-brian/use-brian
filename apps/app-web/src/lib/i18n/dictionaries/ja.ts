@@ -3246,6 +3246,8 @@ export const ja: Dictionary = {
     },
     activity: {
       writing: "返信を作成中…",
+      savingReply: "返信を保存中…",
+      finishingReply: "仕上げ中…",
       receipt: "{summary} · {duration}",
       summarySearch: "{count} 回検索",
       summarySearchOne: "1 回検索",

@@ -2031,6 +2031,10 @@ export function FloatingChat({
               if (notice) setAcceptedGoal(notice);
               break;
             }
+            case "reply_text_complete": {
+              session.dispatch({ type: "stream/text-complete" });
+              break;
+            }
             case "text_delta": {
               const delta = typeof payload.text === "string" ? payload.text : "";
               if (delta) {
@@ -2617,7 +2621,10 @@ export function FloatingChat({
             }
             case "assistant_message_saved": {
               const id = typeof payload.id === "string" ? payload.id : null;
-              if (id) assistantIdRef.current = id;
+              if (id) {
+                assistantIdRef.current = id;
+                session.dispatch({ type: "stream/saved" });
+              }
               break;
             }
             case "attachments": {
@@ -3628,6 +3635,7 @@ export function FloatingChat({
                   events={streamingEvents}
                   tools={toolTimeline}
                   replyStreaming={streamingText.length > 0}
+                  replyPhase={session.state.replyPhase}
                   researchPhase={researchPhase}
                   startedAt={turnStartedAt}
                 />
@@ -3638,10 +3646,12 @@ export function FloatingChat({
                       workspaceId={workspaceId}
                       onOpenPage={handleOpenInDoc}
                     />
-                    <span
-                      aria-hidden
-                      className="ml-0.5 inline-block h-[16px] w-[2px] align-text-bottom rounded-full bg-primary animate-pulse shadow-[0_0_8px_var(--primary)]"
-                    />
+                    {session.state.replyPhase === "generating" && (
+                      <span
+                        aria-hidden
+                        className="ml-0.5 inline-block h-[16px] w-[2px] align-text-bottom rounded-full bg-foreground animate-pulse"
+                      />
+                    )}
                   </div>
                 ) : null}
                 {citations.length > 0 ? (

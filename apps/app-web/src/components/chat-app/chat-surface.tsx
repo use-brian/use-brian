@@ -1495,6 +1495,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  snapshot mirror) — viewers render the right avatar live. */
   const [remoteAssistantId, setRemoteAssistantId] = useState<string | null>(null);
   const [remoteText, setRemoteText] = useState("");
+  const [remoteReplyPhase, setRemoteReplyPhase] = useState<"generating" | "saving" | "finishing">("generating");
   const [remoteEvents, setRemoteEvents] = useState<BuildEvent[]>([]);
   const [remoteTools, setRemoteTools] = useState<ToolUsed[]>([]);
   const [remoteResearchPhase, setRemoteResearchPhase] =
@@ -1604,6 +1605,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     remoteWorkerDescriptionsRef.current.clear();
     setRemoteActive(false);
     setRemoteText("");
+    setRemoteReplyPhase("generating");
     setRemoteEvents([]);
     setRemoteTools([]);
     setRemoteResearchPhase(null);
@@ -1778,6 +1780,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             setRemoteAssistantId(payload.assistantId);
           }
           setRemoteText(typeof payload.text === "string" ? payload.text : "");
+          if (payload.replyPhase === "generating" || payload.replyPhase === "saving" || payload.replyPhase === "finishing") setRemoteReplyPhase(payload.replyPhase);
           const reasoning =
             typeof payload.reasoning === "string" ? payload.reasoning : "";
           if (reasoning) {
@@ -1797,7 +1800,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           const kind = typeof payload.event === "string" ? payload.event : "";
           const id = typeof payload.id === "string" ? payload.id : "";
           const name = typeof payload.name === "string" ? payload.name : "";
-          if (kind === "status") {
+          if (kind === "reply_text_complete") {
+            setRemoteReplyPhase(current => current === "generating" ? "saving" : current);
+          } else if (kind === "assistant_message_saved") {
+            setRemoteReplyPhase("finishing");
+          } else if (kind === "status") {
             const phase = typeof payload.phase === "string" ? payload.phase : "";
             if (phase === "research_detected") setRemoteResearchPhase("detected");
             else if (phase === "research_starting") setRemoteResearchPhase("starting");
@@ -1817,6 +1824,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               setRemoteTools(remoteToolsRef.current);
             }
           } else if (kind === "tool_start" && id && name) {
+            setRemoteReplyPhase("generating");
             if (remoteToolsRef.current.some((tool) => tool.id === id)) break;
             const seeded = describeToolFromInput(name, {}, tChat.toolNarration);
             const workerId =
@@ -2875,6 +2883,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 ? payload.messageId
                 : `queued-${inputId}`;
             if (owningSessionId) applyQueuedInput(inputId, messageId, owningSessionId);
+            break;
+          }
+          case "assistant_message_saved": {
+            if (typeof payload.id === "string") chat.dispatch({ type: "stream/saved" });
+            break;
+          }
+          case "reply_text_complete": {
+            chat.dispatch({ type: "stream/text-complete" });
             break;
           }
           case "text_delta": {
@@ -5095,6 +5111,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                     events={streamingEvents}
                     tools={toolTimeline}
                     replyStreaming={chat.state.streamingText.length > 0}
+                    replyPhase={chat.state.replyPhase}
                     researchPhase={researchPhase}
                     startedAt={turnStartedAt}
                   />
@@ -5105,10 +5122,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         components={CHAT_MARKDOWN_COMPONENTS}
                         remarkPlugins={REMARK_PLUGINS}
                       />
-                      <span
-                        aria-hidden
-                        className="ml-0.5 inline-block h-[16px] w-[2px] rounded-full bg-primary align-text-bottom shadow-[0_0_8px_var(--primary)] animate-pulse"
-                      />
+                      {chat.state.replyPhase === "generating" && (
+                        <span
+                          aria-hidden
+                          className="ml-0.5 inline-block h-[16px] w-[2px] rounded-full bg-foreground align-text-bottom animate-pulse"
+                        />
+                      )}
                     </div>
                   ) : null}
                   {citations.length > 0 ? (
@@ -5141,6 +5160,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                     events={remoteEvents}
                     tools={remoteTools}
                     replyStreaming={remoteText.length > 0}
+                    replyPhase={remoteReplyPhase}
                     researchPhase={remoteResearchPhase}
                     startedAt={remoteStartedAt}
                   />

@@ -182,6 +182,13 @@ describe("[COMP:app-web/chat-activity] Live feed", () => {
     expect(html).toBe("");
   });
 
+  it.each(["saving", "finishing"] as const)("shows a static %s status after text generation, even for a plain reply", (replyPhase) => {
+    const html = wrap(<ChatActivityFeed events={[]} tools={[]} replyStreaming replyPhase={replyPhase} startedAt={null} />);
+    expect(html).toContain(replyPhase === "saving" ? dict.chat.activity.savingReply : dict.chat.activity.finishingReply);
+    expect(html).not.toContain("chat-shimmer-text");
+    expect(html).not.toContain(dict.chat.activity.writing);
+  });
+
   it("exposes a polite live region", () => {
     const html = wrap(
       <ChatActivityFeed events={[]} tools={[]} replyStreaming={false} startedAt={null} />,

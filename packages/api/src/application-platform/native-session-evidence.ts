@@ -26,6 +26,8 @@ export async function readNativeSessionEvidence(client:Pick<PoolClient,'query'>,
   [workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)])).rows[0]?.value
  if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_file_session_evidence($1,$2,$3,$4,true) AS value',
   [workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)])).rows[0]?.value
+ if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_empty_query_evidence($1,$2,$3,$4) AS value',
+  [workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)])).rows[0]?.value
  if(raw===null)return null
  if(typeof raw==='object'&&raw!==null&&'purpose'in raw&&raw.purpose==='memory_history'){
   const history=historyResult.parse(raw)

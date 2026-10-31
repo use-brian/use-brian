@@ -18,7 +18,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { migratePglite } from './migrate-pglite.js'
+import { migratePglite, preparePgliteRuntimeRole } from './migrate-pglite.js'
 
 /**
  * Canonical dotdir is `~/.usebrian/`. A pre-rebrand install that still has a
@@ -44,6 +44,7 @@ const migrationsDir = resolve(here, '../../../packages/api/migrations')
 
 const db = new PGlite(dataDir, { extensions: { vector, pg_trgm } })
 await db.waitReady
+await preparePgliteRuntimeRole(db)
 const applied = await migratePglite(db, migrationsDir)
 console.log(`[pglite] migrated ${applied} new migration(s); brain at ${dataDir}`)
 

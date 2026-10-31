@@ -40,7 +40,7 @@ async function setup(){
 function observed(client:PoolClient,baseline:boolean,queries:string[]){
  return {query:async(sql:string,args?:unknown[])=>{
   queries.push(sql)
-  if(baseline&&sql.includes('read_native_file_session_evidence'))return {rows:[{value:null}]}
+  if(baseline&&(sql.includes('read_native_file_session_evidence')||sql.includes('read_native_empty_query_evidence')))return {rows:[{value:null}]}
   return client.query(sql,args)
  }} as Pick<PoolClient,'query'>
 }
@@ -82,6 +82,7 @@ describe.sequential('[COMP:api/application-persistence] file-backed native evide
   expect(original.some(sql=>sql.includes('read_native_session_field_dependencies'))).toBe(true)
   expect(batched.some(sql=>sql.includes('read_native_session_field_dependencies'))).toBe(false)
   expect(batched.some(sql=>sql.includes('read_native_file_session_evidence'))).toBe(true)
+  expect(batched.some(sql=>sql.includes('read_native_empty_query_evidence'))).toBe(false)
   const invocation=await tryNativeInvocationEvidence(c.authority.execution,c.evidence,c.authority.execution.security.ceiling,'caller')
   expect(invocation).not.toBeNull();expect(canonical(invocation!)).toEqual(canonical(expected!))
  })
