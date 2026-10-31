@@ -56,7 +56,6 @@ async function fixture() {
   jobIds.push(job.id);workflowIds.push(workflow.id)
  }
  const retained=await officeArtifactStore.createShell({userId:u,workspaceId:w,family:'document',title:'Private synthetic retained draft',templateVersionId:null,capabilityVersion:1,sensitivity:'internal'})
- await pool.query('UPDATE workspace_access_policies SET reviewed_inventory_revision=$2 WHERE workspace_id=$1',[w,SCOPE_REVIEW_REGISTRY_REVISION])
  const preview=(body:Record<string,unknown>={},bearer=token)=>request(app).post(`/workspaces/${w}/access/cutover/preview`)
   .set('Authorization',`Bearer ${bearer}`).send({targetDepartmentId:team.id,idempotencyKey:randomUUID(),...body})
  const apply=(review:{reviewId:string;payloadHash:string},bearer=token)=>request(app).post(`/workspaces/${w}/access/cutover/apply`)
@@ -64,6 +63,50 @@ async function fixture() {
  return {w,u,a,team,session:session!,token,jobs,jobIds,workflowIds,retained,preview,apply}
 }
 describe('[COMP:api/organization-cutover] owner-reviewed atomic activation (PG18)',()=>{
+ it('starts unacknowledged, reviews complete coverage, and atomically certifies readiness without changing classification',async()=>{
+  const f=await fixture()
+  const policy=async()=>(await pool.query('SELECT reviewed_inventory_revision::text AS reviewed,classification_mode AS classification,setup_state AS setup FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0]
+  const before=await policy()
+  expect(before).toMatchObject({reviewed:null,setup:'legacy'})
+  const reviewed=await f.preview()
+  expect(reviewed.body.status,JSON.stringify(reviewed.body)).toBe('prepared')
+  expect(reviewed.body.readiness).toMatchObject({readyForActivation:false,scopeInventory:{reviewedRevision:null,canAcknowledge:true,coverage:{unresolved:'0'}}})
+  expect(reviewed.body.changes.reviewedInventoryRevision).toBe(String(SCOPE_REVIEW_REGISTRY_REVISION))
+  expect(await policy()).toEqual(before)
+  expect((await f.apply(reviewed.body)).body).toMatchObject({setupState:'ready',readyForActivation:true,reviewedInventoryRevision:String(SCOPE_REVIEW_REGISTRY_REVISION)})
+  expect(await policy()).toEqual({reviewed:String(SCOPE_REVIEW_REGISTRY_REVISION),classification:before.classification,setup:'ready'})
+ })
+
+ it('reports all independent blockers while inventory acknowledgement is absent',async()=>{
+  const f=await fixture()
+  const source=await createDbKnowledgeStore().createSource({workspaceId:f.w,sourceType:'local',repo:'/fictional/cutover-fixture'})
+  await pool.query("UPDATE assistants SET context_binding_origin='legacy' WHERE id=$1",[f.a])
+  await pool.query('UPDATE scheduled_jobs SET dispatch_lease_id=$2 WHERE id=$1',[f.jobIds[0],randomUUID()])
+  const result=await f.preview()
+  expect(result.body.status,JSON.stringify(result.body)).toBe('blocked')
+  expect(result.body.blockers).toEqual(expect.arrayContaining([
+   {code:'readiness_scope_review'},
+   {code:'cutover_assistant_binding_required',kind:'assistant',id:f.a},
+   {code:'cutover_knowledge_source_binding_required',kind:'knowledge_source',id:source.id},
+   {code:'cutover_schedule_not_quiet',kind:'scheduled_job',id:f.jobIds[0]},
+  ]))
+  expect(result.body.readiness.scopeInventory).toMatchObject({canAcknowledge:false})
+  expect((await pool.query('SELECT reviewed_inventory_revision FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0].reviewed_inventory_revision).toBeNull()
+ })
+
+ it('rolls back acknowledgement and all schedule conversions when post-update readiness fails',async()=>{
+  const f=await fixture(),reviewed=await f.preview()
+  expect(reviewed.body.status).toBe('prepared')
+  await pool.query(`CREATE FUNCTION cutover_fixture_reject_ack() RETURNS trigger LANGUAGE plpgsql AS $$
+   BEGIN IF NEW.workspace_id='${f.w}'::uuid AND NEW.setup_state='ready' THEN NEW.reviewed_inventory_revision:=NULL; END IF; RETURN NEW; END $$;
+   CREATE TRIGGER zzzz_cutover_fixture_reject_ack BEFORE UPDATE ON workspace_access_policies FOR EACH ROW EXECUTE FUNCTION cutover_fixture_reject_ack()`)
+  try {
+   expect((await f.apply(reviewed.body)).body).toEqual({error:'cutover_post_readiness_failed'})
+   expect((await pool.query('SELECT setup_state,reviewed_inventory_revision,completed_cutover_id FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0]).toEqual({setup_state:'legacy',reviewed_inventory_revision:null,completed_cutover_id:null})
+   expect((await pool.query('SELECT id FROM scheduled_jobs WHERE id=ANY($1::uuid[]) AND workflow_authoring_snapshot IS NOT NULL',[f.jobIds])).rows).toEqual([])
+  }finally {await pool.query('DROP TRIGGER zzzz_cutover_fixture_reject_ack ON workspace_access_policies; DROP FUNCTION cutover_fixture_reject_ack()')}
+ })
+
  it('reviews all 12,000 provenance links, rejects a late link beyond 5,000, and preserves them on activation',async()=>{
   const f=await fixture(),sources:string[]=[],outputs:string[]=[]
   for(let i=0;i<221;i++) {

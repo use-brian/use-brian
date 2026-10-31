@@ -43,7 +43,7 @@ const functions = [
   'read_scope_review_source','scope_review_registry_revision',
 ]
 
-function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string; withoutFunction?: string; reviewed?: string | null; seen?: string[] } = {}): ReadinessQuery {
+function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string; withoutFunction?: string; reviewed?: string | null; unresolved?: string; seen?: string[] } = {}): ReadinessQuery {
   return async <T extends Record<string, unknown>>(sql: string) => {
     opts.seen?.push(sql)
     if (sql.includes('information_schema.columns')) {
@@ -64,7 +64,7 @@ function readinessQuery(opts: { withoutColumn?: string; withoutTrigger?: string;
       return {rows:functions.filter(name=>name!==opts.withoutFunction).map(name=>({name})) as unknown as T[]}
     }
     if(sql.includes('reviewed_inventory_revision'))return {rows:[{revision:opts.reviewed===undefined?'2':opts.reviewed}] as unknown as T[]}
-    if(sql.includes(' AS total')||sql.includes(' total,'))return {rows:[{total:'0',unresolved:'0',held:'0'}] as unknown as T[]}
+    if(sql.includes(' AS total')||sql.includes(' total,'))return {rows:[{total:'0',unresolved:opts.unresolved??'0',held:'0'}] as unknown as T[]}
     return { rows: [{ count: '3' }] as unknown as T[] }
   }
 }
@@ -130,6 +130,22 @@ describe('[COMP:api/context-scope-routes] activation readiness', () => {
     await getContextReadinessSystem('workspace', readinessQuery({ seen }))
     expect(seen.some((sql) => sql.includes('read_scope_review_source'))).toBe(true)
   })
+
+  it('reviews actual unacknowledged coverage without manufacturing activation readiness', async () => {
+    const seen:string[]=[]
+    const result=await getContextReadinessSystem('workspace',readinessQuery({reviewed:null,seen}),{reviewScopeInventory:true})
+    expect(seen.some(sql=>sql.includes('read_scope_review_source'))).toBe(true)
+    expect(result.scopeInventory).toMatchObject({reviewedRevision:null,canAcknowledge:true,coverage:{registryRevision:'2',unresolved:'0'}})
+    expect(result.readyForActivation).toBe(false)
+    expect(result.checks.find(check=>check.id==='scope_review')).toMatchObject({ready:false,missing:['reviewed_inventory_revision']})
+  })
+
+  it.each([{unresolved:'1'},{withoutFunction:'read_scope_review_source'},{withoutColumn:'connector_grant.project_ids'}])(
+    'cannot acknowledge unresolved coverage or missing enforcement: %j',async missing=>{
+      const result=await getContextReadinessSystem('workspace',readinessQuery({reviewed:null,...missing}),{reviewScopeInventory:true})
+      expect(result.scopeInventory?.canAcknowledge??false).toBe(false)
+      expect(result.readyForActivation).toBe(false)
+    })
 
   it('omits the informational Workspace General counts when asked', async () => {
     const seen: string[] = []

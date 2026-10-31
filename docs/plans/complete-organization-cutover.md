@@ -66,6 +66,23 @@ merely absence of an obsolete error.
 
 ## Readiness and activation
 
+Completion itself is an attended review of the complete frozen inventory. A
+legacy workspace need not already have `reviewed_inventory_revision` populated:
+prepare walks the canonical coverage registry even when that acknowledgement is
+absent. It reports the actual coverage and every enforcement check, and may
+propose acknowledging the current registry only when coverage is zero and the
+compiled scope-review capability and database guards are present. It never
+treats an unevaluated inventory as complete. Unresolved families and missing
+guards remain blockers, alongside binding and scheduling blockers.
+
+The existing acknowledgement, complete coverage and proposed registry revision
+are immutable review evidence. Apply repeats the same review under the writer
+barrier, updates the acknowledgement with the ordinary audited policy update,
+and verifies full activation readiness before committing. Failure after that
+update rolls back acknowledgement, setup state, schedule conversions and receipt
+together. Classification mode and read/mutation grants stay unchanged. Tests
+must start with an absent acknowledgement instead of pre-seeding completion.
+
 Review returns concrete remaining blockers with IDs and content-free evidence.
 It covers all inventory families, principal defaults, configured connectors and
 intake, enabled workflow triggers, live/queued jobs and old-worker barriers. The
