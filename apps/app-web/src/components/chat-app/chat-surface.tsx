@@ -2509,7 +2509,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const sendEpoch = sessionEpochRef.current;
     let owningSessionId = sessionIdRef.current;
     const ownsSend = () =>
-      sessionEpochRef.current === sendEpoch && sessionIdRef.current === owningSessionId;
+      sessionEpochRef.current === sendEpoch && sessionIdRef.current === owningSessionId &&
+      chatController.isCurrent(controllerRun);
     const trimmed = (override?.text ?? input).trim();
     const usesComposerTray = override?.fileIds === undefined;
     const turnFileIds = override?.fileIds ?? att.fileIds();
@@ -2536,7 +2537,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     ) {
       return false;
     }
-    const controllerRun = chatController.begin(owningSessionId);
+    let controllerRun = chatController.begin(owningSessionId);
 
     // The address decision (multiplayer chat D1/T3, chat-parity D2): in a
     // conversation that posts and has more than one human, send = POST unless
@@ -2624,6 +2625,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         });
         if (!ownsSend()||!creationContext.isCurrent()) return false;
         owningSessionId = created.id;
+        if (chatController.adoptSession(controllerRun, created.id)) {
+          controllerRun = { ...controllerRun, sessionId: created.id };
+        }
         sessionIdRef.current = created.id;
         hydratedRef.current = created.id;
         cacheCreatedChatSession(workspaceId, created, "workspace");
@@ -2792,11 +2796,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           return;
         }
         switch (event.event) {
+          case "title_update": {
+            // Titles may arrive after the durable reply has settled. Read the
+            // authorized rail projection instead of trusting title bytes here.
+            if (payload.sessionId === owningSessionId) dispatchChatSessionsRefresh(workspaceId);
+            break;
+          }
           case "session": {
             const id = typeof payload.sessionId === "string" ? payload.sessionId : null;
             if (id && !owningSessionId) {
               owningSessionId = id;
-              chatController.adoptSession(controllerRun, id);
+              if (chatController.adoptSession(controllerRun, id)) {
+                controllerRun = { ...controllerRun, sessionId: id };
+              }
               // Adopt BEFORE the URL write: `hydratedRef` is what stops the
               // hydrate effect from re-fetching this thread and wiping the
               // reply that is streaming into it right now.

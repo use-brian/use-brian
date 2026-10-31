@@ -9,6 +9,7 @@ import { zh } from "@/lib/i18n/dictionaries/zh";
 import { zhCN } from "@/lib/i18n/dictionaries/zh-cn";
 import { ChatActivityFeed } from "@/components/chrome/chat-activity";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createChatControllerCoordinator } from "@/lib/chat/use-chat-controller";
 import { isAuthoritativeRosterDenial } from "@/lib/chat-surface-data";
 
 /**
@@ -59,6 +60,7 @@ function base() {
     isCurrent: vi.fn(() => true),
     adoptSession: vi.fn(() => true),
     presentInteraction: vi.fn(() => true),
+    begin: vi.fn(),
     beginResponse: vi.fn(() => true),
     responseFailed: vi.fn(() => true),
     resolveInteraction: vi.fn(() => true),
@@ -239,9 +241,10 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
   });
 });
 
-function directStream(initialSession: string | null = "A") {
+function directStream(initialSession: string | null = "A", realController = false) {
   const owner = base();
   owner.sessionIdRef.current = initialSession;
+  if (realController) Object.assign(owner.chatController, createChatControllerCoordinator(() => owner.sessionIdRef.current));
   const scope = {
     ...owner, coercePayload: (data: unknown) => data,
     hydratedRef: { current: initialSession }, directTurnSessionRef: { current: initialSession },
@@ -263,12 +266,12 @@ function directStream(initialSession: string | null = "A") {
   const handlers = evaluate<Record<string, (...args: any[]) => any>>(`(() => {
     const sendEpoch = sessionEpochRef.current;
     let owningSessionId = sessionIdRef.current;
-    const controllerRun = chatController.capture();
+    let controllerRun = chatController.capture();
     const ownsSend = ${declaration("ownsSend").initializer!.getText(tree)};
     let turnFailed = false;
     let turnDisconnected = false;
     return {
-      onEvent: ${handler("onEvent")}, onDone: ${handler("onDone")},
+      ownsSend, onEvent: ${handler("onEvent")}, onDone: ${handler("onDone")},
       onError: ${handler("onError")}, onDisconnect: ${handler("onDisconnect")}
     };
   })()`, scope);
@@ -276,6 +279,67 @@ function directStream(initialSession: string | null = "A") {
 }
 
 describe("[COMP:app-web/chat-sessions-cache] stream completion ownership", () => {
+  it("retains send ownership and clears creation busy state for a fresh workspace chat", async () => {
+    const owner = base();
+    owner.sessionIdRef.current = null;
+    const scope = {
+      ...owner, view: "workspace", startingShared: false, setStartingShared: vi.fn(),
+      chatController: createChatControllerCoordinator(() => owner.sessionIdRef.current),
+      creationContext: { snapshot: () => ({}), isCurrent: () => true, fail: vi.fn() },
+      createWorkspaceSession: vi.fn().mockResolvedValue({ id: "minted" }),
+      workspaceId: "workspace", interlocutor: { id: "assistant" },
+      hydratedRef: { current: null }, cacheCreatedChatSession: vi.fn(),
+      sessionAssistantRef: { current: new Map() }, chat: { setSession: vi.fn() },
+      selectSession: vi.fn(), dispatchChatSessionsRefresh: vi.fn(),
+      setError: vi.fn(), t: { newWorkspaceChatFailed: "Failed" },
+    };
+    const creation = find(node => ts.isIfStatement(node) &&
+      node.expression.getText(tree) === 'view === "workspace" && !sessionIdRef.current').getText(tree);
+    const continues = await evaluate(`async () => {
+      const sendEpoch = sessionEpochRef.current;
+      let owningSessionId = sessionIdRef.current;
+      let controllerRun = chatController.begin(owningSessionId);
+      const ownsSend = ${declaration("ownsSend").initializer!.getText(tree)};
+      ${creation}
+      return ownsSend();
+    }`, scope)();
+    expect(continues).toBe(true);
+    expect(scope.setStartingShared.mock.calls).toEqual([[true], [false]]);
+    expect(scope.selectSession).toHaveBeenCalledWith("minted", "workspace");
+  });
+
+  it("keeps the real controller generation when a fresh session is adopted", () => {
+    const { scope, handlers } = directStream(null, true);
+    handlers.onEvent({ event: "session", data: { sessionId: "minted" } });
+    expect(handlers.ownsSend()).toBe(true);
+    handlers.onDone();
+    expect(scope.chat.dispatch).toHaveBeenCalled();
+    scope.chatController.begin("minted");
+    expect(handlers.ownsSend()).toBe(false);
+  });
+
+  it("rejects a settled stream's callbacks and continuation after a same-session successor starts", async () => {
+    const { scope, handlers } = directStream();
+    handlers.onDone(); // reply_complete arrives while metadata is still pending
+    const metadata = deferred<void>();
+    const continueOldSend = vi.fn();
+    const pending = metadata.promise.then(() => {
+      if (handlers.ownsSend()) continueOldSend();
+    });
+    vi.clearAllMocks();
+    scope.chatController.isCurrent.mockReturnValue(false); // a new controller generation, same visit/session
+    metadata.resolve();
+    await pending;
+    handlers.onEvent({ event: "title_update", data: { sessionId: "A" } });
+    handlers.onDone();
+    handlers.onError(new Error("metadata closed"));
+    expect(continueOldSend).not.toHaveBeenCalled();
+    expect(scope.chat.dispatch).not.toHaveBeenCalled();
+    expect(scope.resetTurnActivity).not.toHaveBeenCalled();
+    expect(scope.dispatchChatSessionsRefresh).not.toHaveBeenCalled();
+    expect(scope.flushQueuedInputs).not.toHaveBeenCalled();
+  });
+
   it.each(["onDone", "onError", "onDisconnect"])("%s cannot mutate a different session or a new visit to the same session", (name) => {
     const { scope, handlers } = directStream();
     scope.switchTo("B");

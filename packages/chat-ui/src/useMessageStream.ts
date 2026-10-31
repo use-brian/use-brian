@@ -21,7 +21,7 @@ export type StreamOptions = {
   /** Per-event callback. Caller dispatches reducer actions from here. */
   onEvent: (event: SSEEvent) => void
   /**
-   * Called once when the stream ends AFTER the server said it was over — a
+   * Called once at `reply_complete`, or when the stream ends AFTER the server said it was over — a
    * terminal event (`done` or `error`) was seen before the body closed.
    *
    * Compatibility: when `onDisconnect` is not supplied, a body that closes
@@ -106,10 +106,24 @@ export async function runStream(opts: StreamOptions, signal: AbortSignal): Promi
   const buffer = createSSEBuffer()
   let lastEvent: string | null = null
   let sawTerminal = false
+  let replyComplete = false
+  let completed = false
+  const complete = () => {
+    if (completed) return
+    completed = true
+    opts.onDone?.()
+  }
   const deliver = (event: SSEEvent) => {
     lastEvent = event.event
     if (TERMINAL_STREAM_EVENTS.has(event.event)) sawTerminal = true
     opts.onEvent(event)
+    if (event.event === 'reply_complete') {
+      // The server has persisted the reply and released its turn. Continue
+      // reading authorized metadata, but do not keep the composer spinning
+      // or let a later socket close finalize a successor turn a second time.
+      replyComplete = true
+      complete()
+    }
   }
 
   try {
@@ -138,10 +152,11 @@ export async function runStream(opts: StreamOptions, signal: AbortSignal): Promi
     // network). Hand that to `onDisconnect` when the caller can re-attach;
     // otherwise keep the historical `onDone` so existing hosts behave as
     // before.
-    if (sawTerminal || !opts.onDisconnect) opts.onDone?.()
+    if (replyComplete || sawTerminal || !opts.onDisconnect) complete()
     else opts.onDisconnect({ lastEvent })
   } catch (err) {
     if (signal.aborted) return
+    if (replyComplete) return
     opts.onError?.(err)
   }
 }
@@ -156,10 +171,12 @@ export async function runStream(opts: StreamOptions, signal: AbortSignal): Promi
  */
 export function useMessageStream(): UseMessageStreamResult {
   const abortRef = useRef<AbortController | null>(null)
+  const replyInFlightRef = useRef(false)
 
   const abort = useCallback(() => {
     abortRef.current?.abort()
     abortRef.current = null
+    replyInFlightRef.current = false
   }, [])
 
   const start = useCallback<StartStream>(async (opts) => {
@@ -167,11 +184,18 @@ export function useMessageStream(): UseMessageStreamResult {
 
     const controller = new AbortController()
     abortRef.current = controller
+    replyInFlightRef.current = true
 
     try {
-      await runStream(opts, controller.signal)
+      await runStream({ ...opts, onDone: () => {
+        if (abortRef.current === controller) replyInFlightRef.current = false
+        opts.onDone?.()
+      } }, controller.signal)
     } finally {
-      if (abortRef.current === controller) abortRef.current = null
+      if (abortRef.current === controller) {
+        abortRef.current = null
+        replyInFlightRef.current = false
+      }
     }
   }, [abort])
 
@@ -182,7 +206,7 @@ export function useMessageStream(): UseMessageStreamResult {
     await runStream(opts, new AbortController().signal)
   }, [])
 
-  const inFlight = useCallback(() => abortRef.current !== null, [])
+  const inFlight = useCallback(() => replyInFlightRef.current, [])
 
   return { start, sideStream, abort, inFlight }
 }

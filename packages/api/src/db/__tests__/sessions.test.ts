@@ -174,13 +174,16 @@ describe('[COMP:api/sessions-route] findSessionById', () => {
     expect(mockQuery).toHaveBeenCalledOnce()
   })
 
-  it('touches last_active_at on a successful lookup', async () => {
+  it('keeps conversation recency unchanged across repeated passive lookups', async () => {
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ id: 's_1' }], rowCount: 1 } as never)
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+      .mockResolvedValue({ rows: [{ id: 's_1' }], rowCount: 1 } as never)
+    await findSessionById('s_1')
     await findSessionById('s_1')
     expect(mockQuery).toHaveBeenCalledTimes(2)
-    expect(mockQuery.mock.calls[1][0]).toContain('UPDATE sessions SET last_active_at')
+    for (const [sql] of mockQuery.mock.calls) {
+      expect(sql).not.toMatch(/UPDATE\s+sessions/i)
+      expect(sql).toContain('session_recording_read_allowed')
+    }
   })
 })
 

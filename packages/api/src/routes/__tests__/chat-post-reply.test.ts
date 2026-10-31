@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling, ContentBlock } from '@use-brian/core'
 import { AuthorityChangedError, createAuthorityLease } from '../../context-scope/authority-lease.js'
@@ -20,6 +22,7 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
     await authority.execute(async () => { saved.push(content) })
     await authority.assertCurrent()
     boundary.recordPublishedReply(content)
+    expect(boundary.isPublishedReply()).toBe(true)
     policyCurrent = false
     const followUp = vi.fn()
     let failure: unknown
@@ -44,6 +47,7 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
     } catch (error) { failure = error }
     expect(failure).toMatchObject({ operationMayHaveExecuted: true })
     expect(boundary.notice(failure)).toBeNull()
+    expect(boundary.isPublishedReply()).toBe(false)
     expect(boundary.notice(new AuthorityChangedError())).toBeNull()
   })
 
@@ -54,6 +58,7 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
     const boundary = createChatPostReplyBoundary()
     boundary.beginFinalization(completed, false, new AbortController().signal)
     boundary.recordPublishedReply(row)
+    expect(boundary.isPublishedReply()).toBe(false)
     expect(boundary.notice(new AuthorityChangedError())).toBeNull()
   })
 
@@ -69,6 +74,7 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
     ] as [TurnLoopResult, boolean][]) {
       boundary.beginFinalization(result, providerFailed, new AbortController().signal)
       boundary.recordPublishedReply(content)
+      expect(boundary.isPublishedReply()).toBe(false)
       expect(boundary.notice(new AuthorityChangedError())).toBeNull()
     }
   })
@@ -83,6 +89,63 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
     }
     expect(boundary.notice(new AuthorityChangedError())).not.toBeNull()
     abort.abort()
+    expect(boundary.isPublishedReply()).toBe(false)
     expect(boundary.notice(new AuthorityChangedError())).toBeNull()
+  })
+})
+
+// Exercise the actual route boundary with a delayed/failed release and a late
+// follow-up error. No provider or database boundary is needed for these states.
+const route = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
+const releaseBlock = route.slice(route.indexOf('      // Release the lease we took at claim time'),
+  route.indexOf('      // Memory nudge: judge utility'))
+const catchBlock = route.slice(route.indexOf('      if (sessionIdForError && userIdForError) {'),
+  route.indexOf('      // Only log if we have at least user context'))
+function routeBoundary(released: boolean, grouped = false, writtenPages: string[] = []) {
+  const events: string[] = []
+  const bus: unknown[] = []
+  const releaseTurn = vi.fn(async () => released)
+  const scope = {
+    session: { id: 'session' }, user: { id: 'actor' }, releaseTurn,
+    activeResolvers: new Map(), abortRegistryToken: null,
+    unregisterTurnAbort: vi.fn(), roomTurnAddressers: new Map(), approvalResolverIndex: new Map(),
+    turnPolicy: { liveFollow: true }, isBackgroundTurn: true, clientGone: true,
+    publishSessionEvent: (event: unknown) => bus.push(event),
+    docCtx: false, docToolsTurn: true, docWrittenPageIds: new Set(writtenPages), roomResponseGroupContext: grouped ? {} : null,
+    postReply: { isPublishedReply: () => true }, turnInboxHandle: { close: vi.fn() },
+    sendEvent: (name: string) => events.push(name), turnTiming: { add: vi.fn(), snapshot: () => ({ total_ms: 10 }) },
+    sessionIdForError: 'session', userIdForError: 'actor', postReplyNotice: {}, recoveryDelivered: false,
+  }
+  const code = ts.transpileModule(`return (async () => {
+    let turnLeaseToken = 'lease', turnReleased = false, turnCompletionPublished = false;
+    ${releaseBlock}
+    const tokenAfterRelease = turnLeaseToken;
+    ${catchBlock}
+    return { tokenAfterRelease };
+  })();`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+  return { events, bus, releaseTurn, run: () => new Function(...Object.keys(scope), code)(...Object.values(scope)) }
+}
+describe('[COMP:api/chat-post-reply] foreground route boundary', () => {
+  it('announces one completion after release and never repeats it on a late metadata failure', async () => {
+    const test = routeBoundary(true)
+    expect(await test.run()).toEqual({ tokenAfterRelease: null })
+    expect(test.events).toEqual(['reply_complete'])
+    expect(test.bus).toHaveLength(1)
+  })
+  it('retains cleanup ownership and withholds readiness when release fails', async () => {
+    const test = routeBoundary(false)
+    expect(await test.run()).toEqual({ tokenAfterRelease: 'lease' })
+    expect(test.events).toEqual([])
+    expect(test.releaseTurn).toHaveBeenCalledTimes(2)
+  })
+  it('keeps actual page authoring pending while allowing ordinary chats with page capabilities', async () => {
+    const test = routeBoundary(true, false, ['page'])
+    await test.run()
+    expect(test.events).toEqual([])
+  })
+  it('keeps a multi-assistant response group on its existing full completion boundary', async () => {
+    const test = routeBoundary(true, true)
+    await test.run()
+    expect(test.events).toEqual([])
   })
 })

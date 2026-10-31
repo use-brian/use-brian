@@ -17,6 +17,9 @@ export function createChatPostReplyBoundary() {
       published = finalizing && !content.some(block => block.type === 'tool_use')
         && content.some(block => block.type === 'text' && block.text.trim().length > 0)
     },
+    isPublishedReply() {
+      return published && !signal?.aborted
+    },
     notice(error: unknown): { code: string; message: string } | null {
       if (!published || signal?.aborted || !isAuthorityChangedError(error)
         || error.operationMayHaveExecuted !== false) return null

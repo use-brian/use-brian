@@ -60,6 +60,40 @@ function drive(
 }
 
 describe('[COMP:chat-ui/use-message-stream] runStream close semantics', () => {
+  it('settles a durable reply before delayed metadata without finalizing twice', async () => {
+    let output!: ReadableStreamDefaultController<Uint8Array>
+    const body = new ReadableStream<Uint8Array>({ start(controller) { output = controller } })
+    const disconnects: Array<{ lastEvent: string | null }> = []
+    const { calls, run } = drive(new Response(body), { onDisconnect: value => disconnects.push(value) })
+    const write = (event: string) => output.enqueue(new TextEncoder().encode(frame(event, {})))
+    write('text_delta')
+    write('reply_complete')
+    // The request remains open and the title provider has not finished.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(calls.done).toBe(1)
+    write('title_update')
+    write('reply_complete')
+    write('done')
+    output.close()
+    await run
+    expect(calls.done).toBe(1)
+    expect(calls.events).toContain('title_update')
+    expect(disconnects).toEqual([])
+  })
+
+  it('does not reopen or fail a saved reply when its metadata connection drops', async () => {
+    const disconnects: Array<{ lastEvent: string | null }> = []
+    for (const fail of [false, true]) {
+      const { calls, run } = drive(sseResponse([frame('reply_complete', {})], { fail }), {
+        onDisconnect: value => disconnects.push(value),
+      })
+      await run
+      expect(calls.done).toBe(1)
+      expect(calls.errors).toEqual([])
+    }
+    expect(disconnects).toEqual([])
+  })
+
   it('names done and error as the terminal events', () => {
     expect([...TERMINAL_STREAM_EVENTS].sort()).toEqual(['done', 'error'])
   })

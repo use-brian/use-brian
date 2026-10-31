@@ -695,24 +695,10 @@ export async function readSessionById(id: string): Promise<Session | null> {
 }
 
 export async function findSessionById(id: string): Promise<Session | null> {
-  const session = await readSessionById(id)
-  if (!session) return null
-  // Touch last_active_at.
-  //
-  // NOTE: this is a *read* that writes the recency column, and that is
-  // deliberate — `last_active_at` orders the session rail, where "someone
-  // looked at it" counts as activity. It is also exactly why turn liveness
-  // must NOT live here: a client polling an open room refreshes this column
-  // forever, which is how the 2026-08-08 stuck room defeated the 6-minute
-  // sweeper for ~31 minutes. Liveness has its own column that only the
-  // running turn writes (`turn_heartbeat_at`, migration 424). Never move the
-  // sweep predicate back onto `last_active_at`.
-  // A source/history reader can pin this row on another connection. Recency
-  // must not queue behind it (or make an authorization read wait for itself).
-  // Turn liveness and scope mutations keep their own mandatory write protocol.
-  await query(`UPDATE sessions SET last_active_at = now()
-    WHERE id IN (SELECT id FROM sessions WHERE id = $1 FOR NO KEY UPDATE SKIP LOCKED)`, [id])
-  return session
+  // Polls and authority checks are readers, not conversation activity. Writes
+  // at admission/publication/turn completion own recency; the turn heartbeat
+  // separately owns liveness. An open old chat must not reorder the rail.
+  return readSessionById(id)
 }
 
 /** Read-only session identity/binding snapshot for per-boundary authority renewal. */

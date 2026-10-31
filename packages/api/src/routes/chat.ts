@@ -2340,6 +2340,8 @@ export function chatRoutes(options: WebChatOptions): Router {
     // no turn in flight. The token makes the release ownership-guarded: a turn
     // whose lease was already reclaimed must not unlock its successor.
     let turnLeaseToken: string | null = null
+    let turnReleased = false
+    let turnCompletionPublished = false
     let leaseSessionId: string | null = null
     let sseKeepalive: ReturnType<typeof setInterval> | null = null
     // Per-phase wall-clock of this turn, reported once from `finally` as the
@@ -8380,52 +8382,6 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
 
 
-        // Memory nudge: judge utility of any getMemory calls.
-        // Records usage as `overhead:nudge` once the judge call returns.
-        // Standard tier per docs/architecture/platform/cost-and-pricing.md
-        // → Model routing (extraction / classification / structured-output bucket).
-        const nudgeModel = backgroundModel
-        try {
-          const nudgeResult = await authority.execute(() => runMemoryNudge({
-          turns: pendingAssistantTurns,
-          callModel: async (prompt, llm) => {
-            const nudgeProvider = llm?.provider ?? backgroundProvider
-            const resolvedNudgeModel = llm?.modelId ?? nudgeModel
-            const resp = await collectStream(nudgeProvider.stream({
-              model: resolvedNudgeModel,
-              messages: [{ role: 'user', content: prompt }],
-              systemPrompt: 'You are a memory utility judge. Follow instructions exactly.',
-              maxTokens: 256,
-            }))
-            return {
-              text: resp.content.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map((b) => b.text).join(''),
-              usage: resp.usage,
-              model: resolvedNudgeModel,
-            }
-          },
-          store: options.memoryStore,
-          decisionRuntime: options.decisionRuntime,
-          llm: { provider: backgroundProvider, modelId: nudgeModel },
-          workspaceId: assistant.workspaceId ?? undefined,
-          runId: `memory-usefulness-${storedUserMsg.id}`,
-          }))
-          await authority.execute(() => recordOverheadUsage({
-            usageStore: options.usageStore,
-            userId: user.id,
-            assistantId: assistant.id,
-            sessionId: session.id,
-            userMessageId: storedUserMsg.id,
-            model: nudgeResult.model,
-            usage: nudgeResult.usage,
-            source: 'overhead:nudge',
-            triggerKey: 'memory_nudge',
-            ...backgroundUsageAttribution,
-          }))
-        } catch (err) {
-          if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
-          console.debug('[chat] memory nudge failed:', err)
-        }
-
         // If the final buffered turn had no text and no tool_use, the
         // model produced nothing useful on the follow-up — surface a
         // descriptive error to the client so it can show something better
@@ -8628,8 +8584,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // was reclaimed mid-turn this is a no-op rather than an unlock of
       // whoever owns the session now. The `finally` is idempotent behind this.
       if (turnLeaseToken) {
-        await releaseTurn(session.id, turnLeaseToken, 'completed')
-        turnLeaseToken = null
+        turnReleased = await releaseTurn(session.id, turnLeaseToken, 'completed')
+        if (turnReleased) turnLeaseToken = null
       }
       activeResolvers.delete(session.id)
       if (abortRegistryToken) unregisterTurnAbort(session.id, abortRegistryToken)
@@ -8646,25 +8602,68 @@ export function chatRoutes(options: WebChatOptions): Router {
       // re-enable their input boxes — draft sessions and workspace-shared
       // chats both take one turn at a time, so this event is what clears the
       // other viewers' busy state. No-op for personal sessions.
-      if (turnPolicy.liveFollow) {
+      if (turnReleased && (turnPolicy.liveFollow || (isBackgroundTurn && clientGone))) {
         publishSessionEvent({
           kind: 'turn_completed',
           sessionId: session.id,
           payload: { senderUserId: user.id },
         })
+        turnCompletionPublished = true
       }
-      // Tell any reconnected watcher (GET /api/sessions/:id/stream; since
-      // 2026-08-24 every session, not just comment threads) the turn is done
-      // so it refetches the persisted reply and clears its "working…" bubble.
-      // Only meaningful once the original client disconnected (a reconnect may
-      // exist); the endpoint's 5s status poll is the backstop for any missed
-      // signal.
-      if (isBackgroundTurn && clientGone) {
-        publishSessionEvent({
-          kind: 'turn_completed',
+
+      // The reply is durable and the turn is released. Keep metadata work
+      // awaited under the original authority, but let ordinary chat clients
+      // settle their reply before that work. Doc turns still owe page effects.
+      if (turnReleased && !docCtx && !(docToolsTurn && docWrittenPageIds.size > 0) && !roomResponseGroupContext && postReply.isPublishedReply()) {
+        turnInboxHandle?.close()
+        sendEvent('reply_complete', {})
+        turnTiming.add('reply_ready', turnTiming.snapshot().total_ms)
+      }
+
+      // Memory nudge: judge utility of any getMemory calls.
+      // Records usage as `overhead:nudge` once the judge call returns.
+      // Standard tier per docs/architecture/platform/cost-and-pricing.md
+      // → Model routing (extraction / classification / structured-output bucket).
+      const nudgeModel = backgroundModel
+      try {
+        const nudgeResult = await authority.execute(() => runMemoryNudge({
+          turns: pendingAssistantTurns,
+          callModel: async (prompt, llm) => {
+            const nudgeProvider = llm?.provider ?? backgroundProvider
+            const resolvedNudgeModel = llm?.modelId ?? nudgeModel
+            const resp = await collectStream(nudgeProvider.stream({
+              model: resolvedNudgeModel,
+              messages: [{ role: 'user', content: prompt }],
+              systemPrompt: 'You are a memory utility judge. Follow instructions exactly.',
+              maxTokens: 256,
+          }))
+          return {
+            text: resp.content.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map((b) => b.text).join(''),
+            usage: resp.usage,
+            model: resolvedNudgeModel,
+          }
+        },
+        store: options.memoryStore,
+        decisionRuntime: options.decisionRuntime,
+        llm: { provider: backgroundProvider, modelId: nudgeModel },
+        workspaceId: assistant.workspaceId ?? undefined,
+        runId: `memory-usefulness-${storedUserMsg.id}`,
+        }))
+        await authority.execute(() => recordOverheadUsage({
+          usageStore: options.usageStore,
+          userId: user.id,
+          assistantId: assistant.id,
           sessionId: session.id,
-          payload: { senderUserId: user.id },
-        })
+          userMessageId: storedUserMsg.id,
+          model: nudgeResult.model,
+          usage: nudgeResult.usage,
+          source: 'overhead:nudge',
+          triggerKey: 'memory_nudge',
+          ...backgroundUsageAttribution,
+        }))
+      } catch (err) {
+        if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) throw err
+        console.debug('[chat] memory nudge failed:', err)
       }
 
       // Auto-title: fire after the first full exchange (session has no title
@@ -8941,16 +8940,21 @@ export function chatRoutes(options: WebChatOptions): Router {
       // as "the lock is released" rather than per-user.
       if (sessionIdForError && userIdForError) {
         try {
-          // Best-effort — failure here must not mask the original error.
-          publishSessionEvent({
-            kind: 'turn_completed',
-            sessionId: sessionIdForError,
-            // Mirror the outcome, never the private exception or diagnostic.
-            // A returning viewer no longer owns the POST error stream.
-            payload: { senderUserId: userIdForError,
-              ...(!postReplyNotice && !recoveryDelivered ? { reason: 'failed' as const } : {}),
-            },
-          })
+          // A metadata failure after release belongs to this old turn. It must
+          // not clear a successor's activity on the session-only event bus.
+          if (!turnReleased && !turnCompletionPublished) {
+            // Best-effort — failure here must not mask the original error.
+            publishSessionEvent({
+              kind: 'turn_completed',
+              sessionId: sessionIdForError,
+              // Mirror the outcome, never the private exception or diagnostic.
+              // A returning viewer no longer owns the POST error stream.
+              payload: { senderUserId: userIdForError,
+                ...(!postReplyNotice && !recoveryDelivered ? { reason: 'failed' as const } : {}),
+              },
+            })
+            turnCompletionPublished = true
+          }
         } catch { /* ignore */ }
         // Also flip status back to idle so subsequent turns aren't blocked
         // by the concurrent-turn guard. Token-guarded when we hold a lease.
