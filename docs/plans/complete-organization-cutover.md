@@ -133,6 +133,10 @@ remain enabled.
 
 Use the guarded disposable PostgreSQL fixture with the current department read
 model, real application role, actual authenticated route and worker/store paths.
+Large-graph and knowledge-sync fixtures remove their own synthetic workspaces
+before closing their pools. Acceptance files share a disposable cluster, so a
+12,000-link stress graph must not become unrelated later fixtures' seed workload.
+Keep production statement deadlines and all descendant-limit assertions intact.
 Cover successful generation and publication for every Office family with sources
 and a selected template, copy/import/release paths, existing event workflows,
 schedule claims and dispatch after migration, all preserved data/bindings and

@@ -23,7 +23,11 @@ import {WorkspaceAccessError} from '../policy.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool(),secret=randomUUID()
-afterAll(async()=>{await getAppPool().end();await pool.end()})
+const fixtureWorkspaces:string[]=[]
+afterAll(async()=>{
+ try {await pool.query('DELETE FROM workspaces WHERE id=ANY($1::uuid[])',[fixtureWorkspaces])}
+ finally {await getAppPool().end();await pool.end()}
+})
 const app=express()
 app.use(express.json(),requireAuth(secret),workspaceAccessRoutes())
 app.use(((error,_req,res,_next)=>{
@@ -32,6 +36,7 @@ app.use(((error,_req,res,_next)=>{
 }) as ErrorRequestHandler)
 async function fixture() {
  const w=randomUUID(),u=randomUUID(),a=randomUUID()
+ fixtureWorkspaces.push(w)
  await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[u])
  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Synthetic cutover',$2,true)",[w,u])
  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')",[w,u])
@@ -150,6 +155,7 @@ describe('[COMP:api/organization-cutover] owner-reviewed atomic activation (PG18
  },60_000)
  it.each(['legacy','ready'] as const)('permits v2 General workflow authoring without a home department (%s)',async(setupState)=>{
   const w=randomUUID(),u=randomUUID(),a=randomUUID()
+  fixtureWorkspaces.push(w)
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[u])
   await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'General workflow fixture',$2,true)",[w,u])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','internal')",[w,u])

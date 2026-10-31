@@ -19,11 +19,16 @@ import {WorkspaceAccessError} from '../policy.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool(),store=createDbKnowledgeStore(),secret=randomUUID(),app=express()
+const fixtureWorkspaces:string[]=[]
 app.use(express.json(),requireAuth(secret),workspaceAccessRoutes())
 app.use(((error,_req,res,_next)=>{res.status(error instanceof WorkspaceAccessError?error.status:500).json({error:error instanceof WorkspaceAccessError?error.code:error.message})}) as ErrorRequestHandler)
-afterAll(async()=>{await getAppPool().end();await pool.end()})
+afterAll(async()=>{
+ try {await pool.query('DELETE FROM workspaces WHERE id=ANY($1::uuid[])',[fixtureWorkspaces])}
+ finally {await getAppPool().end();await pool.end()}
+})
 async function fixture(entries=1) {
  const owner=randomUUID(),admin=randomUUID(),w=randomUUID(),assistant=randomUUID()
+ fixtureWorkspaces.push(w)
  for(const u of [owner,admin])await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[u])
  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Fictional legacy source',$2,true)",[w,owner])
  for(const [u,role] of [[owner,'owner'],[admin,'admin']])await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,$3,'confidential')",[w,u,role])
