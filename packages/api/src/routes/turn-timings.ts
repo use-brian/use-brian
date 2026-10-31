@@ -13,6 +13,8 @@
 export interface TurnTiming {
   /** Close the running phase under `phase` (`<phase>_ms`). */
   mark(phase: string): void
+  /** Record the first occurrence, relative to request start (`<event>_at_ms`). */
+  observe(event: string): void
   /** Add `ms` to `<counter>_ms` and 1 to `<counter>_count`. */
   add(counter: string, ms: number): void
   /** Add 1 to `<counter>_count` without a duration. */
@@ -23,17 +25,21 @@ export interface TurnTiming {
   snapshot(): Record<string, number>
 }
 
-export function createTurnTiming(now: () => number = Date.now): TurnTiming {
+export function createTurnTiming(now: () => number = () => performance.now()): TurnTiming {
   const startedAt = now()
   let phaseStartedAt = startedAt
   const phases: Record<string, number> = {}
   const sums: Record<string, number> = {}
   const counts: Record<string, number> = {}
+  const milestones: Record<string, number> = {}
   const timing: TurnTiming = {
     mark(phase) {
       const at = now()
       phases[phase] = (phases[phase] ?? 0) + (at - phaseStartedAt)
       phaseStartedAt = at
+    },
+    observe(event) {
+      milestones[event] ??= now() - startedAt
     },
     add(counter, ms) {
       sums[counter] = (sums[counter] ?? 0) + ms
@@ -55,6 +61,7 @@ export function createTurnTiming(now: () => number = Date.now): TurnTiming {
       for (const [phase, ms] of Object.entries(phases)) out[`${phase}_ms`] = Math.round(ms)
       for (const [counter, ms] of Object.entries(sums)) out[`${counter}_ms`] = Math.round(ms)
       for (const [counter, n] of Object.entries(counts)) out[`${counter}_count`] = n
+      for (const [event, ms] of Object.entries(milestones)) out[`${event}_at_ms`] = Math.round(ms)
       return out
     },
   }
