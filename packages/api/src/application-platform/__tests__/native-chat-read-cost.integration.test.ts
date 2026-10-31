@@ -8,7 +8,7 @@ import {createTokens} from '../../auth/jwt.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {publishNativeSessionMessage} from '../../db/session-message-publication.js'
+import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
 import {writeSessionMessageAnnotation} from '../../db/session-message-annotations.js'
 import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
@@ -31,7 +31,7 @@ if(profiling){
 }
 
 type FunctionStat={funcid:string;name:string;calls:number;totalMs:number;selfMs:number}
-type Profile={operation:'browser-history'|'browser-title'|'browser-list'|'native-snapshots';warmed:boolean;elapsedMs:number;functions:FunctionStat[]}
+type Profile={operation:'browser-history'|'browser-title'|'browser-list'|'native-snapshots'|'native-publication';warmed:boolean;elapsedMs:number;functions:FunctionStat[]}
 type Fixture=Awaited<ReturnType<typeof persistentContextFixture>>
 type Scenario={
  f:{pool:Fixture['pool'];workspaceId:string;ownerId:string;assistantId:string;memory:Fixture['memory']};
@@ -78,7 +78,7 @@ async function profile<T>(operation:Profile['operation'],run:()=>Promise<T>):Pro
    // This counts the complete fixed-fixture read, not an authorization result
    // or a particular implementation. Save evidence before asserting the bound.
    await writeFile(process.env.BRIAN_CHAT_PROFILE_OUTPUT??'/tmp/native-chat-read-cost-profile.json',JSON.stringify(profiles,null,2))
-   const budgets:Record<Profile['operation'],number>={'browser-history':32000,'browser-title':15000,'browser-list':30000,'native-snapshots':6000}
+   const budgets:Record<Profile['operation'],number>={'browser-history':32000,'browser-title':15000,'browser-list':30000,'native-snapshots':6000,'native-publication':60000}
    expect(functions.reduce((sum,fn)=>sum+fn.calls,0),operation+' total SQL function calls').toBeLessThanOrEqual(budgets[operation])
   }
  }
@@ -187,6 +187,19 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
   finally{await getAppPool().end();await getPool().end()}
  })
 
+ it('publishes a query-backed reply with bounded SQL work',async()=>{
+  const c=await setup(),authority=await c.authority()
+  authority.accumulator.note({sources:c.sources})
+  const input=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:2,authority})
+  authority.accumulator.note({sources:boundScopeSources(input)})
+  const reply=await profile('native-publication',()=>publishNativeSessionMessageBatch({sessionId:c.session.id,
+   messages:[{role:'assistant',content:[{type:'text',text:'Fictional second query-backed reply'}]}],authority,
+   derivationTarget:{workspaceId:c.f.workspaceId,userId:c.f.ownerId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]},
+   derivation:{producer:'fixture:native-chat-publication',sources:authority.accumulator.evidence.sources??[]}}))
+  expect(reply[0].role).toBe('assistant')
+  expect((await c.get('/'+c.session.id+'/messages')).body.map((row:{id:string})=>row.id)).toContain(reply[0].id)
+ })
+
  it('loads both canonical messages through the attended browser route',async()=>{
   const c=current,response=await profile('browser-history',async()=>await c.get('/'+c.session.id+'/messages'))
   expect(response.status,JSON.stringify(response.body)).toBe(200)
@@ -195,6 +208,32 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
    {role:'user',content:[{type:'text',text:'Fictional ordinary opening request'}]},
    {role:'assistant',content:[{type:'text',text:'Fictional query-backed reply'}]},
   ])
+ })
+
+ it('revalidates publication after an insert-time source hold and rolls the whole batch back',async()=>{
+  const c=await setup(),authority=await c.authority()
+  authority.accumulator.note({sources:c.sources})
+  const input=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:2,authority})
+  authority.accumulator.note({sources:boundScopeSources(input)})
+  await c.f.pool.query(`CREATE FUNCTION fixture_publication_source_hold() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+   SET search_path=pg_catalog,public,pg_temp AS $fixture$ BEGIN
+   IF NEW.session_id='${c.session.id}'::uuid AND NEW.role='assistant' THEN
+    UPDATE session_messages SET scope_held=true WHERE id='${c.original.id}'::uuid;
+   END IF;RETURN NEW;END $fixture$`)
+  await c.f.pool.query('REVOKE ALL ON FUNCTION fixture_publication_source_hold() FROM PUBLIC')
+  await c.f.pool.query('CREATE TRIGGER fixture_publication_source_hold AFTER INSERT ON session_messages FOR EACH ROW EXECUTE FUNCTION fixture_publication_source_hold()')
+  try{
+   await expect(publishNativeSessionMessageBatch({sessionId:c.session.id,
+    messages:[{role:'assistant',content:[{type:'text',text:'Fictional withheld reply'}]}],authority,
+    derivationTarget:{workspaceId:c.f.workspaceId,userId:c.f.ownerId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]},
+    derivation:{producer:'fixture:publication-source-hold',sources:authority.accumulator.evidence.sources??[]}})).rejects.toMatchObject({name:'DerivedScopeError',code:'scope_source_changed'})
+   expect((await c.f.pool.query('SELECT id FROM session_messages WHERE session_id=$1 ORDER BY sequence_num',[c.session.id])).rows)
+    .toEqual([{id:c.original.id},{id:c.reply.id}])
+   expect((await c.f.pool.query('SELECT scope_held AS held FROM session_messages WHERE id=$1',[c.original.id])).rows[0].held).toBe(false)
+  }finally{
+   await c.f.pool.query('DROP TRIGGER fixture_publication_source_hold ON session_messages')
+   await c.f.pool.query('DROP FUNCTION fixture_publication_source_hold()')
+  }
  })
  it('loads the immutable current title through the browser header',async()=>{
   const c=current,response=await profile('browser-title',async()=>await c.get('/'+c.session.id))
