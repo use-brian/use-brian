@@ -72,6 +72,10 @@ export type RunSessionStateDiffOptions = {
   activeJobIds?: string[]
   authority?: SessionContextAuthority
   assertInputAuthority?: () => Promise<void>
+  /** Await the host's successful transcript publication before any state write. */
+  beforeApply?: () => Promise<void>
+  /** Host-only signal after dispatch admission, before waiting on the model. */
+  onInferenceReady?: () => void
 }
 
 /**
@@ -157,9 +161,9 @@ export async function runSessionStateDiff(
   await assertInputAuthority(opts.assertInputAuthority)
   if (opts.openCommitments.length === 0 && opts.recentTurns.every(turn => {
     if (turn.role !== 'user' && turn.role !== 'assistant') return false
-    if (typeof turn.content === 'string') return isTrivialChatMessage(turn.content)
-    return turn.content.every(block => block.type === 'text')
-      && isTrivialChatMessage(turn.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
+    if (typeof turn.content !== 'string' && !turn.content.every(block => block.type === 'text')) return false
+    const text=typeof turn.content==='string'?turn.content:turn.content.map(block=>block.type==='text'?block.text:'').join('\n')
+    return isTrivialChatMessage(text)||turn.role==='assistant'&&/^(?:here|received)[\s!?.,。！？，]*$/iu.test(text.trim())
   })) return { upserts: 0, resolves: 0, usage: null, model: null }
   const derivation = opts.authority ? structuredClone({ producer: 'session_state:diff-pass',
     sources: opts.authority.accumulator.evidence.sources ?? [] }) : undefined
@@ -188,6 +192,7 @@ export async function runSessionStateDiff(
     let attemptModel: string | null = null
     try {
       await assertInputAuthority(opts.assertInputAuthority)
+      opts.onInferenceReady?.()
       const response = await collectStream(
         opts.provider.stream({
           model: opts.model,
@@ -256,6 +261,8 @@ export async function runSessionStateDiff(
       errorMessage,
     }
   }
+
+  await opts.beforeApply?.()
 
   const openByKey = new Map(opts.openCommitments.map((r) => [r.key, r]))
   const activeJobIds = opts.activeJobIds ?? []

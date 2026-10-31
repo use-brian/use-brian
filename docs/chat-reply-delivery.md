@@ -31,6 +31,16 @@ commitments and every supplied user/assistant turn is plain trivial text. An ope
 commitment, tool block, substantive answer or non-text content keeps the diff
 pass, so an acknowledgment can still resolve an existing commitment.
 
+For the state differ only, exact assistant acknowledgments `Here.` and
+`Received.` also qualify when the user input is trivial and the admitted open
+commitment set is empty. This does not broaden research/topic routing.
+
+A persistent host can supply a `beforeApply` publication barrier. The differ
+awaits it after inference and parsing, then retains the existing current input
+checks before each state write. `onInferenceReady` signals that input dispatch
+admission has completed so the host can schedule independent work. Omitted
+callbacks preserve the existing sequential consumer contract.
+
 ## Streaming under backpressure
 
 ### Latency diagnostics
