@@ -63,6 +63,24 @@ async function fixture() {
  return {w,u,a,team,session:session!,token,jobs,jobIds,workflowIds,retained,preview,apply}
 }
 describe('[COMP:api/organization-cutover] owner-reviewed atomic activation (PG18)',()=>{
+ it.each(['legacy','ready'] as const)('permits v2 General workflow authoring without a home department (%s)',async(setupState)=>{
+  const w=randomUUID(),u=randomUUID(),a=randomUUID()
+  await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[u])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'General workflow fixture',$2,true)",[w,u])
+  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','internal')",[w,u])
+  await pool.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance) VALUES($1,'Primary',$2,$3,'primary','internal')",[a,u,w])
+  await pool.query("UPDATE workspace_access_policies SET access_mode='departments',setup_state=$2 WHERE workspace_id=$1",[w,setupState])
+  const store=createDbWorkflowStore(),params={userId:u,workspaceId:w,name:'General workflow',
+   definition:{startStepId:'call',steps:[{id:'call',type:'assistant_call' as const,target:{assistantId:a},prompt:'Fictional prompt'}]}}
+  const created=await store.create(params,{authoring:{kind:'internal-human',userId:u,assistantId:a}})
+  expect(created.contextGroupId).toBeNull()
+  expect(created.authoringAuthority?.ceiling).toMatchObject({workspaceId:w,userId:u,clearance:'internal',
+   departmentRead:{departments:{},contextDepartment:null}})
+  const saved=created.authoringAuthority!
+  expect((await store.create({...params,authoringAuthority:saved})).authoringAuthority).toEqual(saved)
+  await expect(store.create({...params,authoringAuthority:{...saved,ceiling:{...saved.ceiling,userId:randomUUID()}}})).rejects.toThrow()
+  expect((await pool.query('SELECT count(*)::int AS n FROM workflows WHERE workspace_id=$1',[w])).rows[0].n).toBe(2)
+ })
  it('preserves every non-binding schedule field and retained record, then claims and dispatches both jobs',async()=>{
   const f=await fixture()
   const before=(await pool.query("SELECT id,to_jsonb(j)-ARRAY['workflow_authoring_snapshot','updated_at'] AS body FROM scheduled_jobs j WHERE id=ANY($1::uuid[]) ORDER BY id",[f.jobIds])).rows

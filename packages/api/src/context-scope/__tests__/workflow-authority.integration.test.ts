@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { applyRLSGucs, getPool, getAppPool, queryWithRLS, runWithAgentAccess } from '../../db/client.js'
 import { createDbWorkflowStore, createDbWorkflowRunStore } from '../../db/workflow-store.js'
-import { createGoal } from '../../db/goals.js'
+import { createGoal, getGoalByIdSystem } from '../../db/goals.js'
 import { currentAgentAccess } from '../../db/agent-access-context.js'
 import { captureAuthoringAuthoritySystem, resolveGoalAuthoritySystem, resolveWorkflowRunScope, resolveRetainedWorkflowSource } from '../workflow-authority.js'
 import { createCrmIntegrationStore, readCrmIntegrationCredential } from '../../db/crm-integration-store.js'
@@ -547,8 +547,14 @@ describe('[COMP:api/workflow-authority] persisted member-run authority',()=>{
   })
   it('keeps legacy and contracted goals inert before any tick claim',async()=>{
     const legacyFixture=await fixture()
-    const legacy=await createGoal({workspaceId:legacyFixture.workspaceId,outcome:'Legacy draft',doneWhen:{kind:'subtasks'},
-      createdByUserId:legacyFixture.userId,confirmed:false})
+    // Seed a historical authority-less draft directly. New v2 writes correctly
+    // require authoring proof; this test checks execution of pre-existing data.
+    await expect(createGoal({workspaceId:legacyFixture.workspaceId,outcome:'Unproven new draft',doneWhen:{kind:'subtasks'},
+      createdByUserId:legacyFixture.userId,confirmed:false})).rejects.toMatchObject({code:'operational_authoring_proof_required'})
+    const legacyId=randomUUID()
+    await pool.query(`INSERT INTO goals(id,workspace_id,outcome,done_when,created_by_user_id)
+      VALUES($1,$2,'Legacy draft','{"kind":"subtasks"}',$3)`,[legacyId,legacyFixture.workspaceId,legacyFixture.userId])
+    const legacy=(await getGoalByIdSystem(legacyId))!
     await expect(resolveGoalAuthoritySystem(legacy)).rejects.toMatchObject({reason:'goal_authority_unavailable'})
 
     const f=await fixture()

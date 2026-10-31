@@ -44,6 +44,12 @@ holding, immutable snapshots and authenticated principal checks. Only the
 superseded mode-specific restrictions are model-gated; no source, credential,
 retention, Office ACL, scope-version or pinned execution guard is removed.
 
+V2 workflow authoring may resolve to General when the assistant has no home or
+default department. An omitted department alone is not a readiness failure in
+v2. Revalidate the saved authoring ceiling and current source permissions for
+that binding just as for a named department; preserve the classic mode's
+explicit-selection requirement.
+
 Canonical v2 Office shell creation admits the actual empty draft destination,
 including templates. Human generation saves the admitted shell envelope in the
 job rather than the raw request's omitted labels. Ambient retrieval is recorded as exact source evidence before construction; publication rechecks it and records Office source provenance in the same transaction. The established generation,

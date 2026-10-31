@@ -42,7 +42,9 @@ export async function admitOperationalAuthoring(client: PoolClient, input: {
   const contextGroupId = input.contextGroupId !== undefined ? input.contextGroupId
     : policy.departmentReadV2 ? assistant.homeId ?? assistant.groupId : policy.mode === 'simple' ? policy.defaultDepartmentId : assistant.groupId
   const contextProjectId = input.contextProjectId !== undefined ? input.contextProjectId : assistant.projectId
-  if (input.contextGroupId === undefined && !contextGroupId) {
+  // V2 permits General when no home/default exists. Only the classic mode
+  // protocol requires an explicit selection in that case.
+  if (!policy.departmentReadV2 && input.contextGroupId === undefined && !contextGroupId) {
     throw new WorkspaceAccessError(policy.mode === 'simple' ? 'access_mode_default_invalid' : 'context_selection_required', 409)
   }
   const params = { userId: human.userId, workspaceId: input.workspaceId, assistantId: human.assistantId,
