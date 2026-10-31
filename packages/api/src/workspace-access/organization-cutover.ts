@@ -3,7 +3,7 @@ import {randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
 import {z} from 'zod'
 import {getPool} from '../db/client.js'
-import {getContextReadinessSystem} from '../context-scope/context-readiness.js'
+import {getContextReadinessSystem,type ContextReadiness} from '../context-scope/context-readiness.js'
 import {hashCommandReviewIntent} from './command-review.js'
 import {lockOrganizationCutoverInventory,organizationCutoverInventory} from './migration-inventory.js'
 import {readWorkflowScheduleAuthority} from './operational-admission.js'
@@ -20,7 +20,7 @@ type Blocker={code:string;kind?:string;id?:string}
 type Review={id:string;workspace_id:string;actor_user_id:string;auth_session_id:string;target_department_id:string;
   policy_revision:string;payload_hash:string;evidence:Evidence;status:string;expires_at:Date;result:unknown}
 type Evidence={request:z.infer<typeof cutoverPrepareSchema>;policyRevision:string;inventory:Awaited<ReturnType<typeof organizationCutoverInventory>>;
-  schedules:Schedule[];blockers:Blocker[];readinessVersion:number;retained:Record<string,string>}
+  schedules:Schedule[];blockers:Blocker[];readinessVersion:number;readiness:ContextReadiness;retained:Record<string,string>}
 const fail=(code:string,status=409):never=>{throw new WorkspaceAccessError(code,status)}
 
 const deadlines=new WeakMap<PoolClient,number>()
@@ -62,8 +62,14 @@ async function inspect(c:PoolClient,w:string,request:z.infer<typeof cutoverPrepa
    AND compartment_key='team:'||id::text`,[w,request.targetDepartmentId])).rows[0]
  if(!target)fail('cutover_department_unavailable',404)
  const inventory=await organizationCutoverInventory(c,w)
- const readiness=await getContextReadinessSystem(w,(sql,values)=>c.query(sql,values),{legacyInventory:false})
- const blockers:Blocker[]=readiness.checks.filter(check=>check.blocking&&!check.ready).map(check=>({code:`readiness_${check.id}`}))
+ const readiness=await getContextReadinessSystem(w,(sql,values)=>c.query(sql,values),{legacyInventory:false,reviewScopeInventory:true})
+ // The owner is reviewing this actual complete coverage now. Only the absent
+ // acknowledgement can be resolved by applying that review; no other failed
+ // enforcement check or unresolved family is waived.
+ const blockers:Blocker[]=readiness.checks.filter(check=>check.blocking&&!check.ready
+   &&!(check.id==='scope_review'&&readiness.scopeInventory?.canAcknowledge
+     &&check.missing?.length===1&&check.missing[0]==='reviewed_inventory_revision'))
+   .map(check=>({code:`readiness_${check.id}`}))
  const retained:Record<string,string>={}
  for(const [kind,table] of Object.entries({memory:'memories',task:'tasks',entity:'entities',entity_link:'entity_links',
   workspace_file:'workspace_files',episode:'episodes',knowledge_entry:'knowledge_entries',kb_chunk:'kb_chunks',office_artifact:'office_artifacts'})) {
@@ -141,7 +147,7 @@ async function inspect(c:PoolClient,w:string,request:z.infer<typeof cutoverPrepa
    schedules.push({id:job.id,workflowId:job.workflowId,oldFingerprint:job.oldFingerprint,sourceFingerprint:job.sourceFingerprint,retainedFingerprint:job.retainedFingerprint,alreadyPinned:job.alreadyPinned,enabled:job.enabled})
   }catch(error) {if(typeof(error as {code?:unknown}).code==='string'&&/^[0-9A-Z]{5}$/.test((error as {code:string}).code))throw error;blockers.push({code:'cutover_schedule_authority_unavailable',kind:'scheduled_job',id:job.id})}
  }
- return {request,policyRevision:policy.revision,inventory,schedules,blockers,readinessVersion:readiness.enforcementVersion,retained}
+ return {request,policyRevision:policy.revision,inventory,schedules,blockers,readinessVersion:readiness.enforcementVersion,readiness,retained}
 }
 
 export async function prepareOrganizationCutover(w:string,principal:CutoverPrincipal,input:unknown) {
@@ -158,7 +164,7 @@ export async function prepareOrganizationCutover(w:string,principal:CutoverPrinc
   }
   if(policy.setupState==='ready'&&policy.receiptId)return {status:'already_ready',receiptId:policy.receiptId}
   const evidence=await inspect(c,w,data)
-  if(evidence.blockers.length)return {status:'blocked',blockers:evidence.blockers,inventory:evidence.inventory,policyRevision:evidence.policyRevision}
+  if(evidence.blockers.length)return {status:'blocked',blockers:evidence.blockers,inventory:evidence.inventory,readiness:evidence.readiness,policyRevision:evidence.policyRevision}
   const id=randomUUID(),expiresAt=new Date(Date.now()+10*60_000).toISOString()
   const payloadHash=hashCommandReviewIntent({id,w,actor:principal.userId,session:principal.authSessionId,expiresAt,evidence})
   const review=(await c.query<Review>(`INSERT INTO workspace_organization_cutover_reviews(id,workspace_id,actor_user_id,auth_session_id,
@@ -171,8 +177,9 @@ export async function prepareOrganizationCutover(w:string,principal:CutoverPrinc
 function publicReview(review:Review) {
  return {status:review.status,reviewId:review.id,payloadHash:review.payload_hash,expiresAt:review.expires_at.toISOString(),
   policyRevision:review.policy_revision,targetDepartmentId:review.target_department_id,inventory:review.evidence.inventory,
-  schedules:review.evidence.schedules,retained:review.evidence.retained,blockers:review.evidence.blockers,
+  schedules:review.evidence.schedules,retained:review.evidence.retained,blockers:review.evidence.blockers,readiness:review.evidence.readiness,
   changes:{setupState:'ready',mode:'departments',defaultDepartmentId:review.target_department_id,
+   reviewedInventoryRevision:review.evidence.readiness?.scopeInventory?.coverage.registryRevision,
    scheduleConversions:review.evidence.schedules.filter(row=>!row.alreadyPinned).map(row=>row.id),recordsDeleted:0,grantsChanged:false},
   ...(review.status==='applied'?{receipt:review.result}:{})}
 }
@@ -192,6 +199,8 @@ export async function applyOrganizationCutover(w:string,principal:CutoverPrincip
   if(review.policy_revision!==policy.revision)fail('access_policy_conflict')
   const current=await inspect(c,w,review.evidence.request)
   if(current.blockers.length||hashCommandReviewIntent(current)!==hashCommandReviewIntent(review.evidence))fail('cutover_review_changed')
+  const scopeInventory=current.readiness.scopeInventory
+  if(!scopeInventory?.canAcknowledge)return fail('cutover_inventory_review_required')
   await c.query("UPDATE workspace_organization_cutover_reviews SET status='applying' WHERE id=$1",[review.id])
   await c.query("SELECT set_config('app.organization_cutover_review',$1,true)",[review.id])
   for(const job of current.schedules.filter(row=>!row.alreadyPinned)) {
@@ -213,15 +222,20 @@ export async function applyOrganizationCutover(w:string,principal:CutoverPrincip
   // The policy trigger advances the real revision, records its before/after
   // audit, and emits invalidation. Never manufacture completion by removing it.
   const updated=(await c.query<{revision:string}>(`UPDATE workspace_access_policies SET setup_state='ready',access_mode='departments',
-    default_department_id=$2,completed_cutover_id=$3 WHERE workspace_id=$1 RETURNING revision::text`,[w,review.target_department_id,review.id])).rows[0]
+    default_department_id=$2,completed_cutover_id=$3,reviewed_inventory_revision=$4
+    WHERE workspace_id=$1 RETURNING revision::text`,[w,review.target_department_id,review.id,scopeInventory.coverage.registryRevision])).rows[0]
   await owner(c,w,principal)
+  const postReadiness=await getContextReadinessSystem(w,(sql,values)=>c.query(sql,values),{legacyInventory:false})
+  if(!postReadiness.readyForActivation)fail('cutover_post_readiness_failed')
   const retained=await organizationCutoverInventory(c,w)
   for(const [kind,fingerprint]of Object.entries(current.retained)) {
    if(retained.families.find(row=>row.family===kind)?.fingerprint!==fingerprint)fail('cutover_retained_content_changed')
   }
   const receipt={reviewId:review.id,workspaceId:w,setupState:'ready',mode:'departments',defaultDepartmentId:review.target_department_id,
    policyRevision:updated.revision,scheduleConversions:current.schedules.filter(row=>!row.alreadyPinned).map(row=>row.id),
-   retained:current.retained,inventoryManifest:retained.manifestVersion,recordsDeleted:0,grantsChanged:false}
+   retained:current.retained,inventoryManifest:retained.manifestVersion,
+   reviewedInventoryRevision:scopeInventory.coverage.registryRevision,
+   readyForActivation:postReadiness.readyForActivation,recordsDeleted:0,grantsChanged:false}
   await c.query("UPDATE workspace_organization_cutover_reviews SET status='applied',result=$2,applied_at=clock_timestamp() WHERE id=$1",[review.id,JSON.stringify(receipt)])
   await c.query(`UPDATE workspace_access_migration_plans p SET status='completed',
     summary_counts=jsonb_build_object('applied',(SELECT count(*) FROM workspace_access_migration_items i WHERE i.plan_id=p.id),

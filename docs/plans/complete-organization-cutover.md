@@ -66,6 +66,56 @@ merely absence of an obsolete error.
 
 ## Readiness and activation
 
+Completion itself is an attended review of the complete frozen inventory. A
+legacy workspace need not already have `reviewed_inventory_revision` populated:
+prepare walks the canonical coverage registry even when that acknowledgement is
+absent. It reports the actual coverage and every enforcement check, and may
+propose acknowledging the current registry only when coverage is zero and the
+compiled scope-review capability and database guards are present. It never
+treats an unevaluated inventory as complete. Unresolved families and missing
+guards remain blockers, alongside binding and scheduling blockers.
+
+The existing acknowledgement, complete coverage and proposed registry revision
+are immutable review evidence. Apply repeats the same review under the writer
+barrier, updates the acknowledgement with the ordinary audited policy update,
+and verifies full activation readiness before committing. Failure after that
+update rolls back acknowledgement, setup state, schedule conversions and receipt
+together. Classification mode and read/mutation grants stay unchanged. Tests
+must start with an absent acknowledgement instead of pre-seeding completion.
+
+### Legacy knowledge-source binding
+
+An unbound legacy knowledge source requires attended configuration before setup
+can finish. Organization migration progress exposes this independently of owner
+finalization, so a current workspace admin who can read the selected department
+can configure the source without granting the workspace owner data access.
+Prepare and apply require the same live human session and an explicit department
+choice. The review shows the source ID, future scope and retained entry count;
+it captures source/entry fingerprints, policy revision and expiry. Revalidation
+uses normal configuration admission and current v2 read authority. A source with
+a live sync lease, a held source/output, an existing binding or output outside
+the chosen department cannot be adopted. No creator is converted into consent.
+
+Apply converts only that legacy source's null binding to the authenticated
+reviewer's explicit binding, once, through a database guard backed by an
+immutable backend-only review. Preserve its ID, location, connector, checkpoints,
+entries, entry scope versions and provenance. Do not delete/recreate it or force
+a sync during the conversion. Existing sync snapshots are fenced by the changed
+binding version and the normal dispatcher captures fresh bound authority after
+commit. Unreviewed direct SQL and app-role attempts remain forbidden. A receipt
+and ordinary workspace invalidation make the recovery visible in the product.
+Cover sync through the real knowledge worker after finalization, with a separate
+workspace owner and configuring admin, and denial when that admin's department
+read edge is absent, expired or revoked.
+
+Migration `8151_reviewed_legacy_knowledge_binding.sql` adds
+`workspace_knowledge_binding_reviews`: workspace/source, attending actor/session,
+selected department, policy revision, idempotency key, immutable evidence/hash,
+expiry and prepared/applying/applied/cancelled lifecycle with an atomic receipt.
+It has no app-role write path and no cascading dependency that prevents later
+normal source removal. Its guard extends only the reviewed null-to-bound source
+transition; the existing immutable-binding guard handles every other operation.
+
 Review returns concrete remaining blockers with IDs and content-free evidence.
 It covers all inventory families, principal defaults, configured connectors and
 intake, enabled workflow triggers, live/queued jobs and old-worker barriers. The
@@ -83,6 +133,10 @@ remain enabled.
 
 Use the guarded disposable PostgreSQL fixture with the current department read
 model, real application role, actual authenticated route and worker/store paths.
+Large-graph and knowledge-sync fixtures remove their own synthetic workspaces
+before closing their pools. Acceptance files share a disposable cluster, so a
+12,000-link stress graph must not become unrelated later fixtures' seed workload.
+Keep production statement deadlines and all descendant-limit assertions intact.
 Cover successful generation and publication for every Office family with sources
 and a selected template, copy/import/release paths, existing event workflows,
 schedule claims and dispatch after migration, all preserved data/bindings and
@@ -108,7 +162,16 @@ fields are preserved, and the normal dispatcher claims the converted row.
 The final barrier first validates the owner without row locks, acquires the short
 workspace/table writer barrier, then locks/rechecks workspace, policy, session,
 review and selected resources. It refuses contention rather than retaining locks
-across confirmation. Inventory is bounded to 5,000 records per family. Monotonic wall-clock checks bound review/apply work; PostgreSQL 17+ additionally enforces a 20-second transaction timeout, so a slow inventory cannot retain the global writer barrier indefinitely. All API
+across confirmation. Inventory includes every record in every family, including
+large provenance graphs. Read each ordered metadata projection through a
+transaction-local cursor in batches of 500 and incrementally hash the same
+newline-separated ID, row-version and metadata representation. Keep existing
+fingerprints stable, never truncate a family, and retain only one batch in the
+API process. Check the shared 10-second inventory deadline before and after
+every fetch, including the final family; exceeding it refuses the transition
+and rolls back. Monotonic wall-clock checks bound review/apply work; PostgreSQL
+17+ additionally enforces a 20-second transaction timeout, so a slow inventory
+cannot retain the global writer barrier indefinitely. All API
 and worker processes must run the cutover-capable release before activation;
 deployment itself is not performed by the migration client.
 

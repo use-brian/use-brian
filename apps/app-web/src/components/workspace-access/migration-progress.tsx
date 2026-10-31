@@ -18,6 +18,7 @@ import {ScopeReviewEvidence} from './scope-review';
 import {CommandReviewEffects} from './command-review-effects';
 import {useReviewedCommand} from './use-reviewed-command';
 import {DepartmentChangeFeedback} from './use-department-change';
+import {LegacyKnowledgeBindings} from './legacy-knowledge-bindings';
 
 type Copy=ReturnType<typeof useT>['accessMigration'];
 export function migrationMessage(code:string,t:Copy):string|undefined {
@@ -115,6 +116,7 @@ function ModeSummary(){
     renderReview:saved=><div className="max-h-[40dvh] space-y-2 overflow-y-auto text-sm"><p>{t.cutoverPreserved}</p>
       <p>{t.defaultDepartment}: {mode?.defaultDepartmentName??t.missing}</p>
       <p>{t.cutoverSchedules}: {saved.result.changes?.scheduleConversions.length??0}</p><p>{t.cutoverFamilies}: {saved.result.inventory?.families.length??0}</p>
+      <p>{t.cutoverInventoryAck}: {saved.result.changes?.reviewedInventoryRevision??t.missing}</p>
       <p>{t.revision}: {saved.result.policyRevision}</p><p className="break-all">{t.hash}: {saved.payloadHash}</p><p>{saved.result.expiresAt}</p></div>,
     errorMessage:code=>code==='cutover_busy'?useBusyCopy:code.startsWith('cutover_review_')?useStaleCopy:undefined,
     onApplied:()=>{window.dispatchEvent(new CustomEvent(ORGANIZATION_CHANGED_EVENT,{detail:{workspaceId}}));},
@@ -122,6 +124,7 @@ function ModeSummary(){
   const mode=useProtectedProjection(key,resource.data,()=>{change.cancelReview();setBlockers([]);},resource.refresh);
   return mode?<><dl className="grid gap-2 text-sm sm:grid-cols-3">{([[t.current,t[mode.mode]],[t.setup,t[mode.setupState]],[t.defaultDepartment,mode.defaultDepartmentName??t.missing]] as const).map(([label,value])=>
     <div key={label} className="min-w-0 rounded-lg bg-muted/50 px-3 py-2"><dt className="text-xs text-muted-foreground">{label}</dt><dd className="break-words font-medium">{value}</dd></div>)}</dl>
+    {mode.canAdminister&&mode.defaultDepartmentId?<LegacyKnowledgeBindings departmentId={mode.defaultDepartmentId} departmentName={mode.defaultDepartmentName??t.missing}/>:null}
     {mode.canFinalize&&!mode.cutoverReceiptId&&mode.defaultDepartmentId?<div className="space-y-2"><Button className="max-sm:min-h-11" disabled={change.busy||change.retryAvailable} onClick={()=>void change.save(mode.defaultDepartmentId!,{title:t.finishSetup,description:t.cutoverReview})}>{t.finishSetup}</Button><DepartmentChangeFeedback change={change}/>{blockers.length?<div role="alert"><p>{t.cutoverBlocked}</p><ul>{blockers.map((blocker,index)=><li className="break-all text-sm" key={index}>{blocker.code==='cutover_schedule_not_quiet'?t.cutoverActiveWork:blocker.code==='cutover_assistant_binding_required'?t.cutoverAssistants:blocker.code==='cutover_knowledge_source_binding_required'||blocker.code==='cutover_intake_configuration_required'?t.cutoverSources:t.cutoverRecords}{blocker.id?` (${blocker.id})`:''}</li>)}</ul></div>:null}</div>:null}</>:<LoadState error={resource.error} refresh={resource.refresh}/>;
 }
 function PlanList({after,setAfter,inspect}:{after:string;setAfter:(value:string)=>void;inspect:(id:string)=>void}){

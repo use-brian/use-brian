@@ -1,5 +1,6 @@
 import {createMigrationPlan,getMigrationPlan,listMigrationPlans} from '../migration-service.js'
 import {createTask} from '../../db/tasks.js'
+import {createMemory} from '../../db/memories.js'
 import {createDbKnowledgeStore} from '../../db/knowledge-store.js'
 import {createPersonalWebSession} from '../../db/sessions.js'
 import {createFilesApi} from '../../files/files-api.js'
@@ -22,7 +23,11 @@ import {WorkspaceAccessError} from '../policy.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool(),secret=randomUUID()
-afterAll(async()=>{await getAppPool().end();await pool.end()})
+const fixtureWorkspaces:string[]=[]
+afterAll(async()=>{
+ try {await pool.query('DELETE FROM workspaces WHERE id=ANY($1::uuid[])',[fixtureWorkspaces])}
+ finally {await getAppPool().end();await pool.end()}
+})
 const app=express()
 app.use(express.json(),requireAuth(secret),workspaceAccessRoutes())
 app.use(((error,_req,res,_next)=>{
@@ -31,6 +36,7 @@ app.use(((error,_req,res,_next)=>{
 }) as ErrorRequestHandler)
 async function fixture() {
  const w=randomUUID(),u=randomUUID(),a=randomUUID()
+ fixtureWorkspaces.push(w)
  await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[u])
  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Synthetic cutover',$2,true)",[w,u])
  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')",[w,u])
@@ -55,7 +61,6 @@ async function fixture() {
   jobIds.push(job.id);workflowIds.push(workflow.id)
  }
  const retained=await officeArtifactStore.createShell({userId:u,workspaceId:w,family:'document',title:'Private synthetic retained draft',templateVersionId:null,capabilityVersion:1,sensitivity:'internal'})
- await pool.query('UPDATE workspace_access_policies SET reviewed_inventory_revision=$2 WHERE workspace_id=$1',[w,SCOPE_REVIEW_REGISTRY_REVISION])
  const preview=(body:Record<string,unknown>={},bearer=token)=>request(app).post(`/workspaces/${w}/access/cutover/preview`)
   .set('Authorization',`Bearer ${bearer}`).send({targetDepartmentId:team.id,idempotencyKey:randomUUID(),...body})
  const apply=(review:{reviewId:string;payloadHash:string},bearer=token)=>request(app).post(`/workspaces/${w}/access/cutover/apply`)
@@ -63,8 +68,94 @@ async function fixture() {
  return {w,u,a,team,session:session!,token,jobs,jobIds,workflowIds,retained,preview,apply}
 }
 describe('[COMP:api/organization-cutover] owner-reviewed atomic activation (PG18)',()=>{
+ it('starts unacknowledged, reviews complete coverage, and atomically certifies readiness without changing classification',async()=>{
+  const f=await fixture()
+  const policy=async()=>(await pool.query('SELECT reviewed_inventory_revision::text AS reviewed,classification_mode AS classification,setup_state AS setup FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0]
+  const before=await policy()
+  expect(before).toMatchObject({reviewed:null,setup:'legacy'})
+  const reviewed=await f.preview()
+  expect(reviewed.body.status,JSON.stringify(reviewed.body)).toBe('prepared')
+  expect(reviewed.body.readiness).toMatchObject({readyForActivation:false,scopeInventory:{reviewedRevision:null,canAcknowledge:true,coverage:{unresolved:'0'}}})
+  expect(reviewed.body.changes.reviewedInventoryRevision).toBe(String(SCOPE_REVIEW_REGISTRY_REVISION))
+  expect(await policy()).toEqual(before)
+  expect((await f.apply(reviewed.body)).body).toMatchObject({setupState:'ready',readyForActivation:true,reviewedInventoryRevision:String(SCOPE_REVIEW_REGISTRY_REVISION)})
+  expect(await policy()).toEqual({reviewed:String(SCOPE_REVIEW_REGISTRY_REVISION),classification:before.classification,setup:'ready'})
+ })
+
+ it('reports all independent blockers while inventory acknowledgement is absent',async()=>{
+  const f=await fixture()
+  const source=await createDbKnowledgeStore().createSource({workspaceId:f.w,sourceType:'local',repo:'/fictional/cutover-fixture'})
+  await pool.query("UPDATE assistants SET context_binding_origin='legacy' WHERE id=$1",[f.a])
+  await pool.query('UPDATE scheduled_jobs SET dispatch_lease_id=$2 WHERE id=$1',[f.jobIds[0],randomUUID()])
+  const result=await f.preview()
+  expect(result.body.status,JSON.stringify(result.body)).toBe('blocked')
+  expect(result.body.blockers).toEqual(expect.arrayContaining([
+   {code:'readiness_scope_review'},
+   {code:'cutover_assistant_binding_required',kind:'assistant',id:f.a},
+   {code:'cutover_knowledge_source_binding_required',kind:'knowledge_source',id:source.id},
+   {code:'cutover_schedule_not_quiet',kind:'scheduled_job',id:f.jobIds[0]},
+  ]))
+  expect(result.body.readiness.scopeInventory).toMatchObject({canAcknowledge:false})
+  expect((await pool.query('SELECT reviewed_inventory_revision FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0].reviewed_inventory_revision).toBeNull()
+ })
+
+ it('rolls back acknowledgement and all schedule conversions when post-update readiness fails',async()=>{
+  const f=await fixture(),reviewed=await f.preview()
+  expect(reviewed.body.status).toBe('prepared')
+  await pool.query(`CREATE FUNCTION cutover_fixture_reject_ack() RETURNS trigger LANGUAGE plpgsql AS $$
+   BEGIN IF NEW.workspace_id='${f.w}'::uuid AND NEW.setup_state='ready' THEN NEW.reviewed_inventory_revision:=NULL; END IF; RETURN NEW; END $$;
+   CREATE TRIGGER zzzz_cutover_fixture_reject_ack BEFORE UPDATE ON workspace_access_policies FOR EACH ROW EXECUTE FUNCTION cutover_fixture_reject_ack()`)
+  try {
+   expect((await f.apply(reviewed.body)).body).toEqual({error:'cutover_post_readiness_failed'})
+   expect((await pool.query('SELECT setup_state,reviewed_inventory_revision,completed_cutover_id FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0]).toEqual({setup_state:'legacy',reviewed_inventory_revision:null,completed_cutover_id:null})
+   expect((await pool.query('SELECT id FROM scheduled_jobs WHERE id=ANY($1::uuid[]) AND workflow_authoring_snapshot IS NOT NULL',[f.jobIds])).rows).toEqual([])
+  }finally {await pool.query('DROP TRIGGER zzzz_cutover_fixture_reject_ack ON workspace_access_policies; DROP FUNCTION cutover_fixture_reject_ack()')}
+ })
+
+ it('reviews all 12,000 provenance links, rejects a late link beyond 5,000, and preserves them on activation',async()=>{
+  const f=await fixture(),sources:string[]=[],outputs:string[]=[]
+  for(let i=0;i<221;i++) {
+   const memory=await createMemory({workspaceId:f.w,userId:null,assistantId:f.a,createdByUserId:f.u,
+    summary:'Fictional provenance fixture',sensitivity:'internal',compartments:[f.team.compartmentKey!]})
+   ;(i<121?sources:outputs).push(memory.id)
+  }
+  sources.sort()
+  const spare=sources.pop()!
+  const derivations=(await pool.query<{id:string}>(`INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,
+   resource_version,producer,user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
+   SELECT workspace_id,'memory',id,read_scope_source(workspace_id,'memory',id)->>'version','large-inventory-fixture',
+    user_id,assistant_id,sensitivity,compartments,project_ids,1 FROM memories WHERE id=ANY($1::uuid[]) RETURNING id`,[outputs])).rows.map(row=>row.id).sort()
+  await pool.query(`WITH sources AS MATERIALIZED (SELECT id,workspace_id,read_scope_source(workspace_id,'memory',id)->>'version' AS version
+   FROM memories WHERE id=ANY($2::uuid[])) INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+   SELECT d.workspace_id,d.id,'memory',s.id,s.version FROM scope_derivations d CROSS JOIN sources s WHERE d.id=ANY($1::uuid[])`,[derivations,sources])
+  // Independent SQL aggregate verifies compatibility with existing review hashes.
+  const fingerprint=async()=>(await pool.query(`SELECT count(*)::text AS count,encode(sha256(convert_to(string_agg(
+   r.derivation_id::text||':'||r.source_kind||':'||r.source_id::text||':'||r.xmin::text||':'||
+   jsonb_build_object('workspace_id',r.workspace_id,'derivation_id',r.derivation_id,'source_kind',r.source_kind,
+    'source_id',r.source_id,'source_version',r.source_version)::text,E'\n'
+   ORDER BY r.derivation_id::text||':'||r.source_kind||':'||r.source_id::text),'UTF8')),'hex') AS fingerprint
+   FROM scope_derivation_sources r WHERE workspace_id=$1`,[f.w])).rows[0]
+  const before=await fingerprint(),reviewed=await f.preview()
+  expect(before.count).toBe('12000')
+  expect(reviewed.status,JSON.stringify(reviewed.body)).toBe(200)
+  expect(reviewed.body.status,JSON.stringify(reviewed.body)).toBe('prepared')
+  expect(reviewed.body.inventory.families.find((row:{family:string})=>row.family==='scope_derivation_sources')).toEqual({family:'scope_derivation_sources',...before})
+  expect(JSON.stringify(reviewed.body)).not.toContain('Fictional provenance fixture')
+  // The new link sorts after every reviewed row, past the former cap.
+  await pool.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+   SELECT $1,$2,'memory',id,read_scope_source(workspace_id,'memory',id)->>'version' FROM memories WHERE id=$3`,[f.w,derivations.at(-1),spare])
+  expect((await f.apply(reviewed.body)).body).toEqual({error:'cutover_review_changed'})
+  expect((await pool.query('SELECT setup_state FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0].setup_state).toBe('legacy')
+  expect((await pool.query('SELECT id FROM scheduled_jobs WHERE id=ANY($1::uuid[]) AND workflow_authoring_snapshot IS NOT NULL',[f.jobIds])).rows).toEqual([])
+  const current=await fingerprint(),fresh=await f.preview()
+  expect(current.count).toBe('12001')
+  expect(fresh.body.inventory.families.find((row:{family:string})=>row.family==='scope_derivation_sources')).toEqual({family:'scope_derivation_sources',...current})
+  expect((await f.apply(fresh.body)).body).toMatchObject({setupState:'ready',recordsDeleted:0,grantsChanged:false})
+  expect(await fingerprint()).toEqual(current)
+ },60_000)
  it.each(['legacy','ready'] as const)('permits v2 General workflow authoring without a home department (%s)',async(setupState)=>{
   const w=randomUUID(),u=randomUUID(),a=randomUUID()
+  fixtureWorkspaces.push(w)
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[u])
   await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'General workflow fixture',$2,true)",[w,u])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','internal')",[w,u])
