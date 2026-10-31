@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { wrapProvider, wrapIdleTimeout } from '../wrappers.js'
+import { wrapProvider, wrapIdleTimeout, wrapLog } from '../wrappers.js'
 import { collectStream } from '../accumulator.js'
 import type { LLMProvider, StreamChunk, ProviderRequest, ProviderSession, SessionOptions, SendOptions, Message } from '../types.js'
 
@@ -10,6 +10,63 @@ function makeChunks(text: string): StreamChunk[] {
     { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } },
   ]
 }
+
+describe('[COMP:providers/wrappers] stream latency accounting', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('separates provider waits from a slow consumer without changing chunks', async () => {
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const log = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const thinking: StreamChunk = { type: 'thinking_delta', text: 'private reasoning' }
+    const text: StreamChunk = { type: 'text_delta', text: 'private reply' }
+    const stream = wrapLog()(async function* () {
+      now += 100; yield thinking
+      now += 300; yield text
+    })({ model: 'private-endpoint', systemPrompt: 'private prompt', messages: [] })[Symbol.asyncIterator]()
+    expect((await stream.next()).value).toBe(thinking)
+    now += 250
+    expect((await stream.next()).value).toBe(text)
+    now += 50
+    expect((await stream.next()).done).toBe(true)
+    expect(log).toHaveBeenCalledWith('[stream] complete: 2 chunks in 700ms', {
+      model: 'other', upstream_wait_ms: 400, consumer_wait_ms: 300,
+      first_chunk_ms: 100, first_thinking_ms: 100, first_text_ms: 650,
+    })
+    expect(JSON.stringify(log.mock.calls)).not.toContain('private')
+  })
+
+  it('reports a provider failure before output and preserves the error', async () => {
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const log = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const error = new Error('private provider error')
+    const stream = wrapLog()(async function* () {
+      now += 25; throw error
+    })({ model: 'fake', systemPrompt: '', messages: [] })
+    await expect(collectStream(stream)).rejects.toBe(error)
+    expect(log).toHaveBeenCalledWith('[stream] error: 0 chunks in 25ms', {
+      model: 'other', upstream_wait_ms: 25, consumer_wait_ms: 0,
+    })
+  })
+
+  it('accounts for consumer cancellation while paused on a chunk', async () => {
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const log = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    let closed = false
+    const stream = wrapLog()(async function* () {
+      try { now += 10; yield makeChunks('reply')[0] } finally { closed = true }
+    })({ model: 'fake', systemPrompt: '', messages: [] })[Symbol.asyncIterator]()
+    await stream.next()
+    now += 90
+    await stream.return?.()
+    expect(closed).toBe(true)
+    expect(log).toHaveBeenCalledWith('[stream] cancelled: 1 chunks in 100ms', {
+      model: 'other', upstream_wait_ms: 10, consumer_wait_ms: 90, first_chunk_ms: 10,
+    })
+  })
+})
 
 /**
  * A configurable in-memory provider for testing. Each `stream` and each
