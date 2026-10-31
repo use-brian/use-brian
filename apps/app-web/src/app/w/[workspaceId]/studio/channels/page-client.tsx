@@ -851,6 +851,8 @@ export function ChannelDetail({
   const [attachError, setAttachError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(false);
+  const [webhookCopyState, setWebhookCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const slackWebhookUrl = `${DISPLAY_API_URL}/webhook/slack/${channel.id}`;
   const slashCommandSyncInFlight = useRef(false);
   const [slashCommandSyncState, setSlashCommandSyncState] = useState<
     | { status: "idle" | "pending" | "error" }
@@ -1165,6 +1167,33 @@ export function ChannelDetail({
           </span>
         ) : null}
       </div>
+
+      {channel.channelType === "slack" && (
+        <section className="min-w-0 rounded-lg border border-border p-4 space-y-2">
+          <h3 className="text-sm font-medium">{t.studioPage.channels.add.slackWebhookTitle}</h3>
+          <p className="text-xs text-muted-foreground">{t.studioPage.channels.add.slackWebhookHint}</p>
+          <code className="block rounded-md bg-muted px-2 py-1.5 text-xs font-mono break-all select-all">
+            {slackWebhookUrl}
+          </code>
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(slackWebhookUrl);
+                setWebhookCopyState("copied");
+              } catch {
+                setWebhookCopyState("error");
+              }
+            }}
+            className="min-h-11 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted md:min-h-0"
+          >
+            {webhookCopyState === "copied" ? t.studioPage.channels.add.copied : t.studioPage.channels.add.copyWebhook}
+          </button>
+          {webhookCopyState === "error" && (
+            <p className="text-xs text-destructive" role="alert">{t.studioPage.channels.add.slackWebhookCopyError}</p>
+          )}
+        </section>
+      )}
 
       {(channel.channelType === "telegram" || channel.channelType === "discord") &&
         channel.integrationId && (

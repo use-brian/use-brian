@@ -27,6 +27,7 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import {
   createChannelLinkCode,
+  ChannelLinkCodeError,
   getChannelIdentities,
   type LinkedAccount,
   type WechatBinding,
@@ -39,6 +40,8 @@ import {
   ConnectedAccountsList,
   WechatChannelIdentityRow,
 } from "../channel-identity";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const copy = en.settings.account.channelIdentity;
 const empty = {
@@ -220,8 +223,48 @@ describe("[COMP:app-web/channel-identity] API wire contracts", () => {
   });
 
   it("returns null when this installation cannot mint a code", async () => {
-    authFetch.mockResolvedValueOnce({ ok: false, json: async () => ({}) });
+    authFetch.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) });
     expect(await createChannelLinkCode(CHANNEL_IDENTITY.whatsapp.codeEndpoint!)).toBeNull();
+  });
+
+  it("preserves a missing-assistant prerequisite instead of claiming linking is unavailable", async () => {
+    authFetch.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ error: "no_assistant" }) });
+    await expect(createChannelLinkCode(CHANNEL_IDENTITY.slack.codeEndpoint!))
+      .rejects.toMatchObject({ code: "no_assistant" });
+  });
+
+  it.each([401, 500])("preserves ordinary HTTP %s failures", async (status) => {
+    authFetch.mockResolvedValueOnce({ ok: false, status, json: async () => ({}) });
+    await expect(createChannelLinkCode(CHANNEL_IDENTITY.slack.codeEndpoint!))
+      .rejects.toBeInstanceOf(ChannelLinkCodeError);
+  });
+
+  it.each([
+    { status: 409, body: { error: "no_assistant" }, text: copy.noAssistant },
+    { status: 503, body: {}, text: copy.notOnInstallation },
+    { status: 500, body: {}, text: copy.error },
+    { status: 401, body: {}, text: copy.error },
+    { status: 0, body: {}, text: copy.error },
+  ])("shows the correct connect recovery for HTTP $status", async ({ status, body, text }) => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    if (status === 0) authFetch.mockRejectedValueOnce(new TypeError("network unavailable"));
+    else authFetch.mockResolvedValueOnce({ ok: false, status, json: async () => body });
+    try {
+      await act(async () => root.render(
+        <I18nProvider locale="en" dict={en}>
+          <ChannelIdentityRow descriptor={CHANNEL_IDENTITY.slack} linked={null} emailMatch={null} />
+        </I18nProvider>,
+      ));
+      await act(async () => (host.querySelector("button") as HTMLButtonElement).click());
+      expect(host.textContent).toContain(text);
+      if (status !== 503) expect(host.textContent).not.toContain(copy.notOnInstallation);
+      expect((host.querySelector("button") as HTMLButtonElement).disabled).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 
   it("reads channel identities scoped to the workspace and defaults safely", async () => {

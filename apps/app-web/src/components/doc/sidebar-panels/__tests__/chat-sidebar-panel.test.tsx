@@ -717,6 +717,7 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
     await act(async () => buttonNamed("Sample Project").click());
     expect(group("Sample Project").textContent).toContain("Discussion project-a");
     expect(group("Sample Project").textContent).not.toContain("Discussion channel-a");
+    await act(async () => buttonNamed(en.chatApp.channelChats).click());
     await act(async () => buttonNamed("Slack: C_SAMPLE").click());
     for (const id of ["channel-a", "channel-b", "ambient-channel"]) {
       const link = group("Slack: C_SAMPLE").querySelector(`a[href="/w/workspace-1/chat?s=${id}"]`);
@@ -738,6 +739,7 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
       chat("discord-a", { transport: "discord", channelId: "123456789012345678" }),
     ]);
     await renderPanel();
+    await act(async () => buttonNamed(en.chatApp.channelChats).click());
     const slack = buttonNamed("#engineering");
     expect(slack.title).toBe("#engineering (Slack: C_ONE)");
     expect(slack.querySelector('[data-channel-icon="slack"] svg')).not.toBeNull();
@@ -759,6 +761,7 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
       chat("topic-b", { transport: "telegram", channelId: "-1000000000000:topic:2" }),
     ]);
     await renderPanel();
+    await act(async () => buttonNamed(en.chatApp.channelChats).click());
     for (const label of ["Slack: C_ONE", "Slack: C_TWO", "Feishu: C_ONE", "Telegram: -1000000000000:topic:1", "Telegram: -1000000000000:topic:2"]) {
       expect(buttonNamed(label).getAttribute("aria-expanded")).toBe("false");
     }
@@ -790,7 +793,7 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
     expect(group(en.chatApp.otherProjects).textContent).toContain("Discussion project-a");
   });
 
-  it("places General first and orders other groups and rows by newest activity", async () => {
+  it("places Channels after normal chats even when channel activity is newest", async () => {
     sessionApi.listPersonalSessions.mockResolvedValue([
       chat("channel-new", { transport: "slack", channelId: "C_SAMPLE", lastActive: "2026-10-27T03:00:00.000Z" }),
       chat("project-a", { contextProjectId: project.id, lastActive: "2026-10-27T02:00:00.000Z" }),
@@ -799,12 +802,52 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
     ]);
     await renderPanel();
     expect([...container!.querySelectorAll("[data-personal-chat-group] > button")].map(b => b.textContent)).toEqual([
-      en.chatApp.generalChats, "Slack: C_SAMPLE", "Sample Project",
+      en.chatApp.generalChats, "Sample Project",
     ]);
+    const channels = container!.querySelector("[data-chat-channels]")!;
+    expect(container!.querySelector('[data-personal-chat-group="project"]')!.compareDocumentPosition(channels) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(buttonNamed(en.chatApp.channelChats).getAttribute("aria-expanded")).toBe("false");
+    expect(container!.querySelector('[data-personal-chat-group="channel"]')).toBeNull();
+    await act(async () => buttonNamed(en.chatApp.channelChats).click());
     await act(async () => buttonNamed("Slack: C_SAMPLE").click());
     expect([...group("Slack: C_SAMPLE").querySelectorAll("a")].map(a => a.getAttribute("href"))).toEqual([
       "/w/workspace-1/chat?s=channel-new", "/w/workspace-1/chat?s=channel-old",
     ]);
+  });
+
+  it("remembers Channels disclosure through refresh and reload and isolates viewers", async () => {
+    const rows = [chat("channel-a", { transport: "slack", channelId: "C_SAMPLE" })];
+    sessionApi.listPersonalSessions.mockResolvedValue(rows);
+    await renderPanel();
+    const channels = () => buttonNamed(en.chatApp.channelChats);
+    expect(channels().getAttribute("aria-expanded")).toBe("false");
+    await act(async () => channels().click());
+    await act(async () => mutateSurfaceCache(chatSessionsCacheKey("workspace-1"), () => [...rows]));
+    expect(channels().getAttribute("aria-expanded")).toBe("true");
+    act(() => root!.unmount()); container!.remove();
+    await renderPanel();
+    expect(channels().getAttribute("aria-expanded")).toBe("true");
+    navigation.search = "s=channel-a";
+    await act(async () => root!.render(<I18nProvider locale="en" dict={en}><ChatSidebarPanel workspaceId="workspace-1" /></I18nProvider>));
+    expect(buttonNamed("Slack: C_SAMPLE").getAttribute("aria-expanded")).toBe("true");
+    await act(async () => channels().click());
+    await act(async () => mutateSurfaceCache(chatSessionsCacheKey("workspace-1"), () => [...rows]));
+    expect(channels().getAttribute("aria-expanded")).toBe("false");
+    act(() => root!.unmount()); container!.remove();
+    await renderPanel();
+    expect(channels().getAttribute("aria-expanded")).toBe("false");
+    navigation.search = "";
+    viewer.id = "viewer-2";
+    act(() => root!.unmount()); container!.remove();
+    await renderPanel();
+    expect(channels().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("omits Channels when there are only normal chats", async () => {
+    sessionApi.listPersonalSessions.mockResolvedValue([chat("general-a")]);
+    await renderPanel();
+    expect(container!.querySelector("[data-chat-channels]")).toBeNull();
+    expect(group(en.chatApp.generalChats).textContent).toContain("Discussion general-a");
   });
 
   it("retains private group choices through refresh/reload and reveals a different selected chat", async () => {
@@ -822,6 +865,8 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
     navigation.search = "s=project-a";
     await act(async () => root!.render(<I18nProvider locale="en" dict={en}><ChatSidebarPanel workspaceId="workspace-1" /></I18nProvider>));
     expect(buttonNamed("Sample Project").getAttribute("aria-expanded")).toBe("true");
+    expect(buttonNamed(en.chatApp.channelChats).getAttribute("aria-expanded")).toBe("false");
+    await act(async () => buttonNamed(en.chatApp.channelChats).click());
     expect(buttonNamed("Slack: C_SAMPLE").getAttribute("aria-expanded")).toBe("false");
     viewer.id = "viewer-2";
     navigation.search = "";

@@ -13,7 +13,7 @@ import { getHeldMemorySummary, requestHeldMemoryReview } from '../workspace-acce
 import { getWorkspaceAccessMode } from '../workspace-access/mode-policy.js'
 import { migrationItemApplySchema, createMigrationPlan, getMigrationPlan, listMigrationPlans, prepareMigrationItem, applyMigrationItem, setMigrationPlanState } from '../workspace-access/migration-service.js'
 import { departmentCommandApplySchema } from '../workspace-access/commands.js'
-import {previewLegacyCleanup,applyLegacyCleanup} from '../workspace-access/legacy-cleanup.js'
+import {previewLegacyCleanup,applyLegacyCleanup,LegacyCleanupDatabaseError} from '../workspace-access/legacy-cleanup.js'
 
 /** Both HTTP and native assistant commands enter the same transactional service. */
 export function workspaceAccessRoutes(): Router {
@@ -40,7 +40,7 @@ export function workspaceAccessRoutes(): Router {
     try{res.json(action==='preview'
       ?await previewLegacyCleanup(String(req.params.workspaceId),req.userId!,req.body)
       :await applyLegacyCleanup(String(req.params.workspaceId),req.userId!,req.body,action==='cancel'))}
-    catch(error){if(error instanceof WorkspaceAccessError)res.status(error.status).json({error:error.code});else next(error)}
+    catch(error){if(error instanceof WorkspaceAccessError)res.status(error.status).json({error:error.code,...(error instanceof LegacyCleanupDatabaseError?{blocker:error.blocker}:{})});else next(error)}
   })
   router.get('/workspaces/:workspaceId/access/migrations',async(req,res,next)=>{
     try{

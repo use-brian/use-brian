@@ -34,8 +34,14 @@ END $$;
 -- by the original callable after alias narrowing, never during this safety phase.
 DO $fixture_guard_shape$
 DECLARE guard pg_proc;canonical_owner oid;previous_oid oid;source_oid oid;dispatcher_oid oid;
- pinned boolean:=false;feedback boolean:=false;amended boolean:=false;history boolean:=false;privacy boolean:=false;helper pg_proc;
+ pinned boolean:=false;feedback boolean:=false;amended boolean:=false;history boolean:=false;privacy boolean:=false;
+ chat_read_frame boolean:=false;helper pg_proc;frame_helper pg_proc;
  matched integer;pins text;actual_oids oid[];expected_oids oid[];expected_body text;
+ frame_fields_before constant text:=$chat_fields_before$ -- Read every original field under the current actor and original selector.$chat_fields_before$;
+ frame_fields_after constant text:=$chat_fields_after$ -- This private port only exports a qualified locked Memory frame. Without
+ -- it the caller must use its original reader, not repeat a discarded full proof.
+ IF memo#>>'{memoryStatement,workspaceId}' IS DISTINCT FROM w::text THEN RETURN NULL;END IF;
+ -- Read every original field under the current actor and original selector.$chat_fields_after$;
 BEGIN
  SELECT * INTO guard FROM pg_proc WHERE oid=to_regprocedure('public.application_memory_statement_helpers_current()');
  IF to_regclass('public._migrations') IS NOT NULL THEN
@@ -44,12 +50,19 @@ BEGIN
   amended:=EXISTS(SELECT FROM public._migrations WHERE name='8113_native_memory_statement_helper_projection_guard.sql');
   history:=EXISTS(SELECT FROM public._migrations WHERE name='8128_native_memory_history_admission.sql');
   privacy:=EXISTS(SELECT FROM public._migrations WHERE name='8135_channel_recording_privacy_hold.sql');
+  chat_read_frame:=EXISTS(SELECT FROM public._migrations WHERE name='8148_native_chat_read_frame.sql');
  END IF;
  IF guard.oid IS NULL THEN
-  IF pinned OR feedback OR amended OR history OR privacy THEN RAISE EXCEPTION 'Unknown fixture Memory guard: missing installed guard' USING ERRCODE='55000';END IF;
+  IF pinned OR feedback OR amended OR history OR privacy OR chat_read_frame
+   OR to_regprocedure('public.read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)') IS NOT NULL THEN
+   RAISE EXCEPTION 'Unknown fixture Memory guard: missing installed guard' USING ERRCODE='55000';END IF;
   RETURN; -- Fresh/pre8111 prefix, including the explicit new-disposable callback.
  END IF;
- IF NOT pinned OR amended AND NOT feedback THEN RAISE EXCEPTION 'Unknown fixture Memory guard: migration phase' USING ERRCODE='55000';END IF;
+ IF NOT pinned OR amended AND NOT feedback OR chat_read_frame AND(NOT history OR NOT privacy
+  OR NOT EXISTS(SELECT FROM public._migrations WHERE name='8129_native_history_title_dependencies.sql')) THEN
+  RAISE EXCEPTION 'Unknown fixture Memory guard: migration phase' USING ERRCODE='55000';END IF;
+ IF NOT chat_read_frame AND to_regprocedure('public.read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)') IS NOT NULL THEN
+  RAISE EXCEPTION 'Unknown fixture Memory guard: untracked chat read frame' USING ERRCODE='55000';END IF;
  IF NOT amended THEN
   IF feedback THEN RAISE EXCEPTION 'Unsupported 8112-only fixture phase; preserve stopped fixture' USING ERRCODE='55000';END IF;
   RAISE EXCEPTION 'Unsupported 120-only fixture phase; preserve stopped fixture' USING ERRCODE='55000';
@@ -201,10 +214,10 @@ BEGIN
  previous_oid:=to_regprocedure('public.application_field_projection_state_before_feedback_outcome(uuid,jsonb,text,uuid,text,text,text[])')::oid;
  source_oid:=to_regprocedure('public.read_entity_derivation_source(uuid,text,uuid)')::oid;
  dispatcher_oid:=to_regprocedure('public.application_field_projection_state(uuid,jsonb,text,uuid,text,text,text[])')::oid;
- IF (matched<>(CASE WHEN privacy THEN 126 WHEN history THEN 122 ELSE 121 END)) OR cardinality(expected_oids)<>120 OR array_position(expected_oids,NULL) IS NOT NULL
+ IF (matched<>(CASE WHEN chat_read_frame THEN 127 WHEN privacy THEN 126 WHEN history THEN 122 ELSE 121 END)) OR cardinality(expected_oids)<>120 OR array_position(expected_oids,NULL) IS NOT NULL
   OR previous_oid IS NULL OR source_oid IS NULL OR dispatcher_oid IS NULL OR previous_oid=dispatcher_oid
   OR actual_oids[1:120] IS DISTINCT FROM expected_oids OR actual_oids[121] IS DISTINCT FROM dispatcher_oid
-  OR (SELECT count(DISTINCT function_oid) FROM unnest(actual_oids) identities(function_oid))<>(CASE WHEN privacy THEN 126 WHEN history THEN 122 ELSE 121 END) THEN
+  OR (SELECT count(DISTINCT function_oid) FROM unnest(actual_oids) identities(function_oid))<>(CASE WHEN chat_read_frame THEN 127 WHEN privacy THEN 126 WHEN history THEN 122 ELSE 121 END) THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: closed pin identities' USING ERRCODE='55000';END IF;
  IF privacy AND (NOT history OR actual_oids[123:126] IS DISTINCT FROM ARRAY[
   to_regprocedure('public.session_recording_read_allowed(uuid)')::oid,
@@ -213,6 +226,26 @@ BEGIN
   to_regprocedure('public.refuse_quarantined_recording_message()')::oid]
   OR array_position(actual_oids[123:126],NULL) IS NOT NULL) THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: recording privacy identities' USING ERRCODE='55000';END IF;
+ IF chat_read_frame THEN
+  -- One exact private clone joins the reviewed 126-pin predecessor. Neither a
+  -- live ACL nor a matching helper count can supply a new runtime capability.
+  SELECT * INTO helper FROM pg_proc WHERE oid=to_regprocedure('public.read_native_session_cohort_evidence(uuid,text[],uuid[],text[],boolean)');
+  SELECT * INTO frame_helper FROM pg_proc WHERE oid=to_regprocedure('public.read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)');
+  IF helper.oid IS NULL OR frame_helper.oid IS NULL OR actual_oids[127] IS DISTINCT FROM frame_helper.oid
+   OR helper.proowner IS DISTINCT FROM canonical_owner OR frame_helper.proowner IS DISTINCT FROM canonical_owner
+   OR encode(sha256(convert_to(helper.prosrc,'UTF8')),'hex') IS DISTINCT FROM '2afff03ed88d3de82386880a3b582bbfa2c4379b06ecbc06fd98ff467f60c376'
+   OR array_length(string_to_array(helper.prosrc,$chat_result$ RETURN jsonb_build_object('admitted',true,'immutable',immutable,'current',currents);$chat_result$),1)<>2
+   OR array_length(string_to_array(helper.prosrc,frame_fields_before),1)<>2
+   OR frame_helper.prosrc IS DISTINCT FROM replace(replace(helper.prosrc,
+    $chat_result$ RETURN jsonb_build_object('admitted',true,'immutable',immutable,'current',currents);$chat_result$,
+    $chat_frame_result$ -- This frame is private to the definer capture in this same SQL invocation.
+ RETURN jsonb_build_object('admitted',true,'immutable',immutable,'current',currents,'memo',memo);$chat_frame_result$),frame_fields_before,frame_fields_after)
+   OR (to_jsonb(frame_helper)-ARRAY['oid','proname','prosrc']) IS DISTINCT FROM (to_jsonb(helper)-ARRAY['oid','proname','prosrc'])
+   OR (SELECT count(*) FROM aclexplode(coalesce(frame_helper.proacl,acldefault('f',frame_helper.proowner))))<>1
+   OR EXISTS(SELECT FROM aclexplode(coalesce(frame_helper.proacl,acldefault('f',frame_helper.proowner))) a
+    WHERE a.grantee<>frame_helper.proowner OR a.grantor<>frame_helper.proowner OR a.privilege_type<>'EXECUTE' OR a.is_grantable) THEN
+   RAISE EXCEPTION 'Unknown fixture Memory guard: chat read frame identity, body or private ACL' USING ERRCODE='55000';END IF;
+ END IF;
  IF history THEN
   SELECT * INTO helper FROM pg_proc WHERE oid=to_regprocedure('public.application_memory_history_status(uuid,uuid,text)');
   IF helper.oid IS NULL OR actual_oids[122] IS DISTINCT FROM helper.oid
@@ -356,6 +389,7 @@ END $fixture_original_source$,pins);
   expected_body:=replace(expected_body,E'BEGIN\n IF k=''''feedback_event'''' THEN',
    E'BEGIN\n -- Recording privacy admission precedes body selection.\n IF NOT recording_source_read_allowed(w,k,i) THEN RETURN NULL;END IF;\n IF k=''''feedback_event'''' THEN');
  END IF;
+ IF chat_read_frame THEN expected_body:=replace(expected_body,'SELECT count(*)=126','SELECT count(*)=127');END IF;
  IF guard.prosrc IS DISTINCT FROM expected_body THEN
   RAISE EXCEPTION 'Unknown fixture Memory guard: complete generated body' USING ERRCODE='55000';END IF;
 EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
@@ -364,7 +398,7 @@ END $fixture_guard_shape$;
 -- phase: transition
 DO $transition$
 DECLARE expected record;p pg_proc;before_properties jsonb;alias_name text;entry record;expected_app boolean;
- pinned boolean;amended boolean;feedback boolean;retired_legacy boolean;retired_source boolean;
+ pinned boolean;amended boolean;feedback boolean;retired_legacy boolean;retired_source boolean;chat_read_frame boolean;
 BEGIN
  IF to_regclass('public._migrations') IS NULL THEN RETURN;END IF;
  IF NOT EXISTS(SELECT FROM public._migrations) THEN RETURN;END IF;
@@ -373,10 +407,14 @@ BEGIN
  feedback:=EXISTS(SELECT FROM public._migrations WHERE name='8112_native_feedback_outcome_projection.sql');
  retired_legacy:=EXISTS(SELECT FROM public._migrations WHERE name='8121_application_legacy_authoring_retirement.sql');
  retired_source:=EXISTS(SELECT FROM public._migrations WHERE name='8124_application_source_host_retirement.sql');
+ chat_read_frame:=EXISTS(SELECT FROM public._migrations WHERE name='8148_native_chat_read_frame.sql');
  IF feedback AND NOT amended THEN RAISE EXCEPTION 'Unsupported 8112-only fixture phase; preserve stopped fixture';END IF;
  IF pinned IS DISTINCT FROM (to_regprocedure('public.application_memory_statement_helpers_current()') IS NOT NULL)
   OR amended AND NOT pinned OR amended AND NOT feedback OR feedback AND NOT pinned
-  OR retired_legacy AND NOT amended OR retired_source AND NOT retired_legacy THEN
+  OR retired_legacy AND NOT amended OR retired_source AND NOT retired_legacy
+  OR chat_read_frame AND(NOT EXISTS(SELECT FROM public._migrations WHERE name='8128_native_memory_history_admission.sql')
+   OR NOT EXISTS(SELECT FROM public._migrations WHERE name='8129_native_history_title_dependencies.sql')
+   OR NOT EXISTS(SELECT FROM public._migrations WHERE name='8135_channel_recording_privacy_hold.sql')) THEN
   RAISE EXCEPTION 'Unknown fixture migration/guard phase';END IF;
  -- Only the immediate reviewed pre8111 boundary is supported, not arbitrary older chains.
  IF NOT pinned AND NOT EXISTS(SELECT FROM public._migrations WHERE name='8110_canonical_task_author_delete.sql') THEN
@@ -388,8 +426,9 @@ BEGIN
  ('application_legacy_inventory_registry()'),('application_legacy_review_snapshot(uuid,text,uuid)'),
  ('application_legacy_review_impact(uuid,text,uuid)'),('application_legacy_repair_plan(uuid,uuid)'),
  ('application_force_native_task_written_field()'),('application_record_native_task_write_intent(tasks,text[],text)'),
- ('application_recheck_native_task_write_intent()'),('application_scoped_grant_allowed_before_records(uuid,jsonb)')
- ) private(signature) LOOP
+ ('application_recheck_native_task_write_intent()'),('application_scoped_grant_allowed_before_records(uuid,jsonb)'),
+ ('read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)')
+ ) private(signature) WHERE signature<>'read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)' OR chat_read_frame LOOP
   SELECT * INTO p FROM pg_proc WHERE oid=to_regprocedure('public.'||entry.signature);
   IF NOT FOUND OR EXISTS(SELECT FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
    WHERE a.grantee<>p.proowner OR a.grantor<>p.proowner OR a.privilege_type<>'EXECUTE' OR a.is_grantable) THEN
@@ -463,6 +502,13 @@ DO $$ BEGIN
  IF to_regprocedure('public.application_memory_statement_helpers_current()') IS NOT NULL THEN
   IF public.application_memory_statement_helpers_current() IS DISTINCT FROM true THEN RAISE EXCEPTION 'Canonical Memory helper guard unavailable';END IF;
  END IF;
+ IF EXISTS(SELECT FROM public._migrations WHERE name='8148_native_chat_read_frame.sql') THEN
+  IF to_regprocedure('public.read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)') IS NULL
+   OR EXISTS(SELECT FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+    WHERE p.oid=to_regprocedure('public.read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)')
+     AND(a.grantee<>p.proowner OR a.grantor<>p.proowner OR a.privilege_type<>'EXECUTE' OR a.is_grantable)) THEN
+   RAISE EXCEPTION 'Private chat read frame must remain owner-only';END IF;
+ END IF;
 END $$;
 ALTER ROLE app_user LOGIN PASSWORD '__RUNTIME_PASSWORD__';
 ALTER ROLE app_user SET app.current_user_id='00000000-0000-0000-0000-000000000000';
@@ -481,6 +527,13 @@ DO $$ BEGIN
   RAISE EXCEPTION 'Runtime migration ledger must remain private';END IF;
  IF to_regprocedure('public.application_memory_statement_helpers_current()') IS NOT NULL THEN
   IF public.application_memory_statement_helpers_current() IS DISTINCT FROM true THEN RAISE EXCEPTION 'Canonical Memory helper guard unavailable';END IF;
+ END IF;
+ IF EXISTS(SELECT FROM public._migrations WHERE name='8148_native_chat_read_frame.sql') THEN
+  IF to_regprocedure('public.read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)') IS NULL
+   OR EXISTS(SELECT FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+    WHERE p.oid=to_regprocedure('public.read_native_session_cohort_frame(uuid,text[],uuid[],text[],boolean)')
+     AND(a.grantee<>p.proowner OR a.grantor<>p.proowner OR a.privilege_type<>'EXECUTE' OR a.is_grantable)) THEN
+   RAISE EXCEPTION 'Private chat read frame must remain owner-only';END IF;
  END IF;
  IF EXISTS(SELECT FROM pg_roles WHERE rolname IN('assurance_app','admin_fixture_app') AND rolcanlogin) THEN RAISE EXCEPTION 'Retired alias LOGIN remains active';END IF;
 END $$;

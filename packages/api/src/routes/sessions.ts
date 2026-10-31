@@ -1,4 +1,5 @@
 import {pinSessionTitleClaims,sessionTitleProjection,sessionTitleProjections,renameCurrentSessionTitle,resolveSessionTitleAuthority} from './session-title-authority.js'
+import {sessionRecoveryRoutes} from './session-recovery.js'
 import {DerivedScopeError,executionToolContext} from '@use-brian/core'
 import {readAttendedSessionHistory} from './attended-session-context.js'
 import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
@@ -203,6 +204,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   const setSessionTyping = opts.setSessionTyping ?? noopSetSessionTyping
   const getSessionPresence = opts.getSessionPresence ?? emptySessionPresence
   const router = Router()
+  router.use('/:id/recovery',sessionRecoveryRoutes())
 
   // Register before /:id routes. Explicit JWT required; no local default user.
   router.get('/incoming-event-sources', webChatSourcesHandler({
@@ -322,6 +324,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const cursorIndex = listParams.length + 1
       listParams.push(cursor.data.before ?? null, cursor.data.beforeId ?? null)
       type PersonalRailRow = {
+        recoveredFromSessionId: string | null
         id: string; title: string | null; channelId: string;
         lastActiveAt: Date; status: string; appOrigin: string | null
         assistantId: string; channelType: string
@@ -343,6 +346,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       while (readable.length < pageSize) {
       const result = await query<PersonalRailRow>(
         `SELECT s.id, NULL::text AS title, s.channel_id as "channelId",
+                recovery.source_session_id AS "recoveredFromSessionId",
                 s.last_active_at as "lastActiveAt", s.status,
                 s.app_origin as "appOrigin",
                 s.anchor_kind as "anchorKind",
@@ -354,6 +358,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
                 s.effective_clearance as "effectiveClearance",
                 s.context_compartments as "contextCompartments"
          FROM (SELECT * FROM sessions WHERE session_recording_read_allowed(id) AND feed_draft_audience_allowed(id)) s
+         LEFT JOIN session_recoveries recovery ON recovery.target_session_id=s.id AND recovery.user_id=$2 AND recovery.workspace_id=s.workspace_id
          WHERE ${workspaceScope
            ? `s.assistant_id IN (SELECT a.id FROM assistants a WHERE a.workspace_id = $1)`
            : `s.assistant_id = $1`} AND s.user_id = $2
@@ -406,6 +411,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         : new Map<string, string>()
       res.json(readable.map((s) => ({
         id: s.id,
+        ...(s.recoveredFromSessionId ? {recoveredFromSessionId:s.recoveredFromSessionId} : {}),
         title: titles.get(s.id)?.title ?? 'New Chat',
         titleRevisionId: titles.get(s.id)?.titleRevisionId ?? null,
         channelId: s.channelId,
@@ -949,8 +955,12 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         ? (await getUserProfilesByIds([session.userId])).get(session.userId) ?? null
         : null
       const title=await sessionTitleProjection({claims:titleClaims,sessionId:session.id})
+      const recoveredFrom=(await query<{sourceId:string}>(`SELECT r.source_session_id AS "sourceId" FROM session_recoveries r
+        JOIN sessions target ON target.id=r.target_session_id JOIN assistants a ON a.id=target.assistant_id
+        WHERE r.target_session_id=$1 AND r.user_id=$2 AND r.workspace_id=target.workspace_id AND a.workspace_id=r.workspace_id`,[session.id,user.id])).rows[0]?.sourceId
       res.json({
         id: session.id,
+        ...(recoveredFrom ? {recoveredFromSessionId:recoveredFrom} : {}),
         title: title.title ?? 'New Chat',
         titleRevisionId: title.titleRevisionId,
         channelId: session.channelId,

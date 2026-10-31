@@ -100,6 +100,28 @@ beforeEach(() => {
   runStore.listStepRuns.mockResolvedValue([])
 })
 
+describe('[COMP:api/workflows-route] workspace-scoped editing',()=>{
+  it('uses the normal RLS read and context-authoring path in the named workspace',async()=>{
+    workflowStore.getById.mockResolvedValue(wf())
+    const detail=await request(app('u-1')).get(`/api/workspaces/${WS}/workflows/wf-1`)
+    expect(detail.status).toBe(200);expect(detail.body.workspaceId).toBe(WS)
+    workflowStore.update.mockResolvedValueOnce(wf({contextGroupId:'22222222-2222-4222-8222-222222222222'}))
+    const resolveAuthoringAuthority=vi.fn().mockResolvedValue({version:1})
+    const changed=await request(app('u-1',{resolveAuthoringAuthority,getContextReadiness:async()=>contextReadinessFixture()}))
+      .patch(`/api/workspaces/${WS}/workflows/wf-1`).send({contextGroupId:'22222222-2222-4222-8222-222222222222'})
+    expect(changed.status).toBe(200)
+    expect(resolveAuthoringAuthority).toHaveBeenCalledWith(expect.objectContaining({workspaceId:WS,contextGroupId:'22222222-2222-4222-8222-222222222222'}))
+  })
+  it.each(['get','patch','post'] as const)('refuses a mismatched URL workspace before %s side effects',async method=>{
+    workflowStore.getById.mockResolvedValue(wf())
+    const resolveAuthoringAuthority=vi.fn(),listTriggerJobs=vi.fn(),instance=app('u-1',{resolveAuthoringAuthority,listTriggerJobs})
+    const url='/api/workspaces/22222222-2222-4222-8222-222222222222/workflows/wf-1'+(method==='post'?'/schedule-review':'')
+    const response=await request(instance)[method](url).send(method==='get'?undefined:{name:'Fictional rename'})
+    expect(response.status).toBe(404)
+    expect(workflowStore.update).not.toHaveBeenCalled();expect(resolveAuthoringAuthority).not.toHaveBeenCalled();expect(listTriggerJobs).not.toHaveBeenCalled()
+  })
+})
+
 describe('[COMP:api/workflows-route] GET /workflows', () => {
   it('rejects an unauthenticated request with 401', async () => {
     expect((await request(app()).get('/api/workflows?workspaceId=' + WS)).status).toBe(401)
@@ -457,5 +479,19 @@ describe('[COMP:api/workflows-route] GET /pages/:pageId/workflow-runs', () => {
     runStore.listRunsForPage.mockResolvedValueOnce([])
     await request(app('u-1')).get(`/api/pages/${PAGE}/workflow-runs?limit=999`)
     expect(runStore.listRunsForPage).toHaveBeenCalledWith('u-1', PAGE, { limit: 100 })
+  })
+})
+
+describe('[COMP:api/workflows-route] deterministic delivery target validation', () => {
+  it('validates a tool notification against the primary assistant and refuses unreachable targets', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    const definition = { startStepId: 'notify', steps: [{ id: 'notify', type: 'tool_call', toolName: 'getCrmSubmission', arguments: {},
+      deliver: { channelType: 'slack', channelId: 'C_APPROVED' }, deliveryText: '{{prev.reference}}' }] }
+    mockDefParse.mockReturnValueOnce({ success: true, data: definition })
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: false, reason: 'channel_not_found' }))
+    const response = await request(app('u-1', { resolvePrimary, validateDeliveryTarget })).post('/api/workflows')
+      .send({ workspaceId: WS, name: 'Fixture deterministic delivery', definition })
+    expect(response.status).toBe(400)
+    expect(validateDeliveryTarget).toHaveBeenCalledWith(expect.objectContaining({ assistantId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', channelId: 'C_APPROVED' }))
   })
 })

@@ -158,7 +158,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
     mockVerifySignature.mockReturnValue(true)
     mockGetChannelForWebhook.mockResolvedValue({ workspaceId: 'workspace', status: 'active', enabledCapabilities: [] } as never)
     for (const type of [first, second]) {
-      await request(app).post('/webhook/slack/channel').send({
+      await request(app).post('/webhook/slack/00000000-0000-4000-a000-000000000001').send({
         type: 'event_callback', event_id: `${type}-envelope`,
         event: { type, user: 'sender', channel: 'room', text: '<@SELF> alert', ts: '123.456', thread_ts: '100.000',
           files: [{ name: 'report.pdf', mimetype: 'application/pdf', size: 42, url_private: 'https://secret-slack' }],
@@ -174,7 +174,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
     }))
     expect(JSON.stringify(dispatch.mock.calls)).not.toContain('secret-slack')
     // The same timestamp in a different room is not a duplicate.
-    await request(app).post('/webhook/slack/channel').send({
+    await request(app).post('/webhook/slack/00000000-0000-4000-a000-000000000001').send({
       type: 'event_callback', event: { type: first, user: 'sender', channel: 'other-room', text: 'alert', ts: '123.456' },
     }).expect(200)
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2))
@@ -216,7 +216,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
     { status: 'active', config: { userAccessMode: 'blocklist', blockedUserIds: ['U123'] } },
   ])('does not trigger or claim unauthorized posts: %j', async ({ status, config }) => {
     const { app, dispatch } = workflowApp(config, status)
-    await request(app).post('/webhook/slack/channel').send(slackPost()).expect(200)
+    await request(app).post('/webhook/slack/00000000-0000-4000-a000-000000000001').send(slackPost()).expect(200)
     await vi.waitFor(() => expect(mockGetChannelForWebhook).toHaveBeenCalled())
     await new Promise(resolve => setImmediate(resolve))
     expect(dispatch).not.toHaveBeenCalled()
@@ -230,14 +230,14 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
     { userAccessMode: 'blocklist', blockedUserIds: ['OTHER'] },
   ])('dispatches authorized unmentioned posts without chat capability: %j', async config => {
     const { app, dispatch } = workflowApp(config)
-    await request(app).post('/webhook/slack/channel').send(slackPost()).expect(200)
+    await request(app).post('/webhook/slack/00000000-0000-4000-a000-000000000001').send(slackPost()).expect(200)
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce())
     expect(claimChannelEvent).toHaveBeenCalledOnce()
   })
 
   it.each(['', 'Attached is the report'])('dispatches native file_share messages with text %j', async text => {
     const { app, dispatch } = workflowApp({ userAccessMode: 'allowlist', allowedUserIds: ['U123'] })
-    await request(app).post('/webhook/slack/channel').send(slackPost({
+    await request(app).post('/webhook/slack/00000000-0000-4000-a000-000000000001').send(slackPost({
       subtype: 'file_share', text, files: [{
         id: 'F123', name: 'report.pdf', mimetype: 'application/pdf', size: 1234,
         url_private: 'https://files.slack.com/secret', url_private_download: 'https://files.slack.com/secret-download',
@@ -257,7 +257,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
   it.each(['message_changed', 'message_deleted', 'message_replied', 'channel_join', 'channel_leave', 'channel_topic'])
     ('does not trigger on Slack %s lifecycle events', async subtype => {
       const { app, dispatch } = workflowApp()
-      await request(app).post('/webhook/slack/channel').send(slackPost({
+      await request(app).post('/webhook/slack/00000000-0000-4000-a000-000000000001').send(slackPost({
         subtype,
         message: { type: 'message', user: 'U123', text: 'edited post', ts: '1710000000.000001' },
         previous_message: { type: 'message', user: 'U123', text: 'old post', ts: '1710000000.000001' },
@@ -268,15 +268,27 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
       expect(claimChannelEvent).not.toHaveBeenCalled()
     })
 
-  it('responds to url_verification challenge', async () => {
+  it.each(['00000000-0000-4000-a000-000000000001', 'REPLACE-AFTER-CONNECT'])('responds to url_verification challenge at %s before credentials exist', async (channelId) => {
     const app = createTestApp('/webhook/slack', slackRoutes(options))
 
     const res = await request(app)
-      .post('/webhook/slack/a_1')
+      .post(`/webhook/slack/${channelId}`)
       .send({ type: 'url_verification', challenge: 'test_challenge' })
 
     expect(res.status).toBe(200)
     expect(res.body.challenge).toBe('test_challenge')
+    expect(integrationStore.getByChannelForWebhook).not.toHaveBeenCalled()
+  })
+
+  it('rejects the manifest placeholder before integration lookup', async () => {
+    const app = createTestApp('/webhook/slack', slackRoutes(options))
+    await request(app)
+      .post('/webhook/slack/REPLACE-AFTER-CONNECT')
+      .send({ type: 'event_callback', event: { type: 'message', text: 'hi' } })
+      .expect(404)
+    expect(integrationStore.getByChannelForWebhook).not.toHaveBeenCalled()
+    expect(mockVerifySignature).not.toHaveBeenCalled()
+    expect(integrationStore.touchLastEventAt).not.toHaveBeenCalled()
   })
 
   it('returns 404 when no integration found', async () => {
@@ -284,7 +296,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
     integrationStore.getByChannelForWebhook.mockResolvedValueOnce(null)
 
     const res = await request(app)
-      .post('/webhook/slack/a_1')
+      .post('/webhook/slack/00000000-0000-4000-a000-000000000001')
       .send({ event: { type: 'message', text: 'hi' } })
 
     expect(res.status).toBe(404)
@@ -300,7 +312,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
     mockVerifySignature.mockReturnValueOnce(false)
 
     const res = await request(app)
-      .post('/webhook/slack/a_1')
+      .post('/webhook/slack/00000000-0000-4000-a000-000000000001')
       .set('x-slack-signature', 'bad')
       .set('x-slack-request-timestamp', '12345')
       .send({ event: { type: 'message', text: 'hi' } })
@@ -334,7 +346,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
     })
 
     const res = await request(app)
-      .post('/webhook/slack/a_1')
+      .post('/webhook/slack/00000000-0000-4000-a000-000000000001')
       .set('x-slack-signature', 'v0=valid')
       .set('x-slack-request-timestamp', String(Math.floor(Date.now() / 1000)))
       .send({
@@ -435,7 +447,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
 
       const app = createTestApp('/webhook/slack', slackRoutes(ingestOpts))
       const res = await request(app)
-        .post('/webhook/slack/a_1')
+        .post('/webhook/slack/00000000-0000-4000-a000-000000000001')
         .set('x-slack-signature', 'v0=valid')
         .set('x-slack-request-timestamp', String(Math.floor(Date.now() / 1000)))
         .send(validEvent())
@@ -468,7 +480,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
 
       const app = createTestApp('/webhook/slack', slackRoutes(ingestOpts))
       const res = await request(app)
-        .post('/webhook/slack/a_1')
+        .post('/webhook/slack/00000000-0000-4000-a000-000000000001')
         .set('x-slack-signature', 'v0=valid')
         .set('x-slack-request-timestamp', String(Math.floor(Date.now() / 1000)))
         .send(validEvent())
@@ -489,7 +501,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
 
       const app = createTestApp('/webhook/slack', slackRoutes(ingestOpts))
       const res = await request(app)
-        .post('/webhook/slack/a_1')
+        .post('/webhook/slack/00000000-0000-4000-a000-000000000001')
         .set('x-slack-signature', 'v0=valid')
         .set('x-slack-request-timestamp', String(Math.floor(Date.now() / 1000)))
         .send(
@@ -532,7 +544,7 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
 
       const app = createTestApp('/webhook/slack', slackRoutes(ingestOpts))
       const res = await request(app)
-        .post('/webhook/slack/a_1')
+        .post('/webhook/slack/00000000-0000-4000-a000-000000000001')
         .set('x-slack-signature', 'v0=valid')
         .set('x-slack-request-timestamp', String(Math.floor(Date.now() / 1000)))
         .send(validEvent({ type: 'app_mention', text: '<@B123> hello team' }))

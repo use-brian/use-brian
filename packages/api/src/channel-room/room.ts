@@ -300,18 +300,6 @@ export async function setRoomCapture(roomId: string, enabled: boolean): Promise<
   )
 }
 
-/**
- * Claim the room's one-time disclosure (D4). True exactly once per room, so
- * concurrent first messages post it once.
- */
-export async function claimRoomDisclosure(roomId: string): Promise<boolean> {
-  const claimed = await query(
-    'UPDATE sessions SET room_disclosed_at = now() WHERE id = $1 AND room_disclosed_at IS NULL RETURNING id',
-    [roomId],
-  )
-  return claimed.rows.length > 0
-}
-
 /** Claim the room's one-time hydration from provider-visible history (D16). */
 export async function claimRoomHydration(roomId: string): Promise<boolean> {
   const claimed = await query(
@@ -319,21 +307,6 @@ export async function claimRoomHydration(roomId: string): Promise<boolean> {
     [roomId],
   )
   return claimed.rows.length > 0
-}
-
-/**
- * The disclosure the assistant posts once in a converged group (D4). On a
- * transport whose bots only see mentions (Telegram privacy mode, §8) it says
- * capture is mentions-only rather than implying it hears everything.
- */
-export function roomDisclosureText(params: { assistantName: string; channelType: string }): string {
-  const limited = transportPolicy(params.channelType as Transport).rooms.privacyLimited
-  const hears = limited
-    ? 'I only see messages that mention me or reply to me here, unless an admin turns off my privacy mode.'
-    : 'I read every message here, not only the ones that mention me.'
-  return `${params.assistantName} is now a shared workspace conversation in this group. ${hears} `
-    + 'Messages here can be saved to the team brain, and a workspace admin can switch that off for this group. '
-    + 'Mention me when you want a reply.'
 }
 
 /**
@@ -351,7 +324,7 @@ export function roomSpeakerLabel(name: string | null | undefined, handle: string
 /**
  * The un-addressed half of a room's inbound flow (§4.4, D4), for a route's
  * mention gate: when the group converges, persist the message as a room post
- * (and post the one-time disclosure) and report it handled; otherwise report
+ * and report it handled; otherwise report
  * false and the route drops the message as before. Never runs a turn.
  */
 export async function postPassiveChannelMessage(params: {
@@ -382,10 +355,6 @@ export async function postPassiveChannelMessage(params: {
     channelId: params.sessionChannelId,
     starterUserId: params.senderUserId,
   })
-  if (params.postNotice && await claimRoomDisclosure(room.id)) {
-    await params.postNotice(roomDisclosureText({ assistantName: params.assistant.name, channelType: params.channelType }))
-      .catch((err: unknown) => console.error(`[${params.channelType}] room disclosure failed:`, err))
-  }
   const audience = await resolveGroupAudienceSystem({ workspaceId: binding.workspaceId,
     assistantId: params.assistant.id, userId: params.senderUserId, channelType: params.channelType,
     channelId: params.sessionChannelId })

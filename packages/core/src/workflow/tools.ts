@@ -666,13 +666,6 @@ function summarize(def: WorkflowDefinition): string {
       ? `Start IN PARALLEL at ${starts.map((s) => `"${s}"`).join(', ')}`
       : `Start at "${starts[0]}"`
   lines.push(`${startLine}. ${def.steps.length} step${def.steps.length === 1 ? '' : 's'}.`)
-  if (def.failureDelivery) {
-    lines.push(
-      'replyToTrigger' in def.failureDelivery
-        ? 'Failure notification: originating WhatsApp conversation.'
-        : `Failure notification: ${def.failureDelivery.channelType} ${def.failureDelivery.channelId}.`,
-    )
-  }
   for (const step of def.steps) {
     let detail = ''
     switch (step.type) {
@@ -685,6 +678,7 @@ function summarize(def: WorkflowDefinition): string {
       case 'tool_call':
         detail = `tool_call → ${step.toolName}`
         if (step.approval?.required) detail += ' (approval required every run)'
+        if (step.deliver) detail += ` (sends authored notification to ${step.deliver.channelType} ${step.deliver.channelId})`
         break
       case 'wait':
         detail = step.until
@@ -1109,7 +1103,7 @@ async function dependencyIssues(
     }> = []
     for (const step of def.steps) {
       if (
-        step.type === 'assistant_call' &&
+        (step.type === 'assistant_call' || step.type === 'tool_call') &&
         step.deliver &&
         'channelId' in step.deliver &&
         step.deliver.channelType !== 'web' &&
@@ -1123,7 +1117,7 @@ async function dependencyIssues(
       ) {
         targets.push({
           location: `Step "${step.id}"`,
-          assistantTarget: step.target.assistantId,
+          assistantTarget: step.type === 'assistant_call' ? step.target.assistantId : 'primary',
           channelType: step.deliver.channelType,
           channelId: step.deliver.channelId,
           channelIntegrationId: step.deliver.channelIntegrationId,
@@ -1701,7 +1695,7 @@ async function resolveCurrentChatDeliveries(
   if (Array.isArray(definition.steps)) {
     const steps: unknown[] = []
     for (const step of definition.steps) {
-      if (!isRecord(step) || step.type !== 'assistant_call' || !isRecord(step.deliver)) {
+      if (!isRecord(step) || !['assistant_call', 'tool_call'].includes(String(step.type)) || !isRecord(step.deliver)) {
         steps.push(step)
         continue
       }
@@ -1720,11 +1714,8 @@ async function resolveCurrentChatDeliveries(
     }
     out = { ...out, steps }
   }
-  if (isRecord(definition.failureDelivery)) {
-    const failureDelivery = resolveOne(definition.failureDelivery, 'Workflow failureDelivery')
-    if (failureDelivery) out = { ...out, failureDelivery }
-  }
-  return { definition: out, errors }
+  const { failureDelivery: _retired, ...active } = out
+  return { definition: active, errors }
 }
 
 /**
@@ -1781,7 +1772,7 @@ const MESSAGING_OUTPUT_PHRASE = /\b(?:the|a|your|this)\s+(?:slack|telegram|whats
  * lints: channel ids in prompt prose do not deliver.
  */
 function deliveryIntentWarnings(def: WorkflowDefinition, trigger?: WorkflowTrigger): string[] {
-  const anyDeliver = def.steps.some((s) => s.type === 'assistant_call' && s.deliver !== undefined)
+  const anyDeliver = def.steps.some((s) => (s.type === 'assistant_call' || s.type === 'tool_call') && s.deliver !== undefined)
   if (anyDeliver) return []
   if (trigger?.kind === 'schedule' && trigger.delivery) return [] // sugar stamps the terminal step at persist
   const composers = def.steps.filter((s): s is AssistantCallStep =>
@@ -2059,8 +2050,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `The callee then runs with the doc tools (getCurrentPage / patchPage / renderPage) against that page.` +
       `\n\nSkills: when a step should follow a saved brain skill, ATTACH it on the step — NEVER just name the skill in the prompt (a workflow callee has no skill surface unless the step attaches one, so a prose-only reference silently does nothing on every run). \`enforcedSkills: ["<slug>"]\` force-loads the skill's instructions every run (the usual choice for workflows); \`skills: ["<slug>"]\` offers it via useSkill and the callee chooses. Use exact skill slugs; an attached slug that matches no workspace skill or built-in id is rejected. ` +
       `For structured output, an assistant_call research step may also set \`blueprintId: "<workspace skill slug | page-template id>"\` together with a \`page\` anchor to fill that blueprint instead of free-form authoring — blueprints themselves are created in the web app (Brain → Blueprints) or minted from a skill's extraction spec; they cannot be created from chat, so never claim otherwise.` +
-      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a static messaging destination. To deliver to THIS chat (the one you are authoring from), on any trigger kind, set \`channelId: "${CURRENT_CHAT_CHANNEL_ID}"\` with this chat's channelType; the server substitutes the real chat id (and topic) and shows it in the proposal. The same works for \`failureDelivery\`. Never put an id from listChannels in \`deliver\`: those are internal Use Brian ids, not platform chat ids. For a WhatsApp channel-event workflow that must answer the customer who triggered this run, use exactly \`deliver: { channelType: "whatsapp", replyToTrigger: true }\`; never add a channelId or phone number. This variant is valid only when every event source is a WhatsApp channel integration. To post a THREAD - one parent message with replies under it - use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack, telegram, and feishu). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
-      `Set definition-level \`failureDelivery\` to the same destination shape when one best-effort notification must be attempted if the run terminates failed or timed out; the executor owns that boundary, so do not model it as a final graph step. ` +
+      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a static messaging destination. To deliver to THIS chat (the one you are authoring from), on any trigger kind, set \`channelId: "${CURRENT_CHAT_CHANNEL_ID}"\` with this chat's channelType; the server substitutes the real chat id (and topic) and shows it in the proposal. Never put an id from listChannels in \`deliver\`: those are internal Use Brian ids, not platform chat ids. For a WhatsApp channel-event workflow that must answer the customer who triggered this run, use exactly \`deliver: { channelType: "whatsapp", replyToTrigger: true }\`; never add a channelId or phone number. This variant is valid only when every event source is a WhatsApp channel integration. To post a THREAD - one parent message with replies under it - use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack, telegram, and feishu). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
       `To MENTION people in a Slack delivery, first call \`listSlackMembers\` and embed the literal \`<@MEMBER_ID>\` ids in the step prompt — plain @name renders as text and notifies nobody.`,
     inputSchema: z.object({
       name: z
@@ -2722,9 +2712,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         // explicitly rather than slip through as a side effect of an edit.
         const deliverBindings = (d: WorkflowDefinition) => [
           ...d.steps
-            .filter((s): s is AssistantCallStep => s.type === 'assistant_call' && s.deliver !== undefined)
-            .map((s) => s.deliver!),
-          ...(d.failureDelivery ? [d.failureDelivery] : []),
+            .flatMap((s) => (s.type === 'assistant_call' || s.type === 'tool_call') && s.deliver ? [s.deliver] : []),
         ]
         const oldDelivers = deliverBindings(existing.definition)
         const newDelivers = deliverBindings(parsed.data)

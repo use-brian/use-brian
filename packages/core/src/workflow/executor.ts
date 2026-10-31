@@ -46,6 +46,7 @@ import { evaluateBoolean, JsonLogicEvalError } from './condition.js'
 import { buildReachability, startStepIds, stepSuccessors } from './graph.js'
 import { interpolateString, interpolateValue, interpolateBoundValue, type InterpolationScope } from './interpolation.js'
 import { reviewedClientReplyViolation } from './schemas.js'
+import { deliverToolCallNotification } from './tool-delivery.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 
@@ -226,7 +227,7 @@ export type DeliverToChannel = (params: {
   text: string
   /** Trusted run/turn high-water evidence checked against the current audience. */
   scopeEvidence?: import('../security/context-scope.js').ScopeEvidence
-  /** Only the engine's generated-output step sets this; never tool or question delivery. */
+  /** Engine-owned workflow step identity; never supplied by tool result data. */
   publication?: { runId: string; stepId: string }
   question?: import('../tools/base/ask-question.js').AssistantQuestion
   questionResponse?: { toolName: string; arguments: Record<string, unknown>; answerField: string }
@@ -354,6 +355,14 @@ export type SendPageResult =
       message: string
     }
 
+export type ToolCallNotification = {
+  stepId: string
+  deliver: NonNullable<ToolCallStep['deliver']>
+  deliveryText: string
+  scope: InterpolationScope
+  scopeEvidence: ScopeEvidence
+}
+
 export type ExecutorDeps = {
   /** Cooperative cancellation for this advance pass; persisted as failed/workflow_cancelled. */
   abortSignal?: AbortSignal
@@ -477,6 +486,8 @@ export type ExecutorDeps = {
     expiresAt: Date | null
     /** Exact out-of-band application id from the immediately upstream model step. */
     decisionApplicationId?: string
+    /** Exact authored notification and its source context, frozen before approval. */
+    toolNotification?: ToolCallNotification
   }) => Promise<void>
   /**
    * Called once a run has been fully persisted as paused on an approval
@@ -876,6 +887,8 @@ export async function advanceWorkflowRun(
         projectIds: runtimeScope.turnScope.writeProjectIds,
       }
     : undefined)
+  scopeAccumulator.note({ compartments: run.contextCompartments ?? [],
+    projectIds: run.contextProjectIds ?? (run.contextProjectId ? [run.contextProjectId] : []) })
   const persistedScopeEvidence = run.vars[WORKFLOW_SCOPE_EVIDENCE_VAR]
   scopeAccumulator.note(runtimeScope?.inputScopeEvidence)
   if (persistedScopeEvidence && typeof persistedScopeEvidence === 'object') {
@@ -1289,6 +1302,7 @@ export async function advanceWorkflowRun(
       deliveryChannel: result.deliveryChannel,
       expiresAt: result.expiresAt,
       decisionApplicationId: result.decisionApplicationId,
+      toolNotification: result.toolNotification,
     })
     try {
       await (executeWithAuthority ? executeWithAuthority(requestApproval) : requestApproval())
@@ -1465,6 +1479,7 @@ type StepDispatchResult =
       deliveryChannel: 'recent' | 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
       expiresAt: Date | null
       decisionApplicationId?: string
+      toolNotification?: ToolCallNotification
     }
 
 type DispatchContext = {
@@ -2210,8 +2225,15 @@ async function dispatchToolCall(
     }
   }
   ctx.scopeAccumulator.note(result.scopeEvidence)
-
-  return { kind: 'success', output: result.data }
+  const delivery = await deliverToolCallNotification({
+    step, output: result.data, scope: ctx.scope, run: ctx.run, workflow: ctx.workflow,
+    assistantId: ctx.toolAssistantId, scopeEvidence: ctx.scopeAccumulator.evidence, deps: ctx.deps,
+  })
+  if (delivery) {
+    fireAndForgetAudit(ctx.deps, { type: 'workflow.step_delivered', workspaceId: ctx.run.workspaceId,
+      actorUserId: ctx.run.triggeredBy, runId: ctx.run.id, workflowId: ctx.workflow.id, stepId: step.id, delivery })
+  }
+  return { kind: 'success', output: result.data, ...(delivery ? { delivery } : {}) }
 }
 
 /**
@@ -2250,6 +2272,10 @@ function askPolicyOutcome(
       deliveryChannel,
       expiresAt,
       decisionApplicationId,
+      ...(step.deliver && step.deliveryText !== undefined ? { toolNotification: {
+        stepId: step.id, deliver: structuredClone(step.deliver), deliveryText: step.deliveryText,
+        scope: structuredClone(ctx.scope), scopeEvidence: ctx.scopeAccumulator.evidence,
+      } } : {}),
     }
   }
   // Phase A guard.
@@ -2781,10 +2807,8 @@ async function markRunFailed(
   // the accumulated vars + step log in scope; omitted by pre-loop infra
   // failures (no workflow logic ran, so there is nothing to hand forward).
   outcome?: WorkflowRunOutcome | null,
-  // Definitions loaded before the failure boundary can declare one durable
-  // failure destination. A missing workflow (the workflow_not_found case)
-  // cannot be notified because there is no trusted destination to resolve.
-  workflow?: WorkflowRecord,
+  // Kept as an internal call-site compatibility argument; failures stay in the run view.
+  _workflow?: WorkflowRecord,
 ): Promise<void> {
   const now = new Date()
   await deps.runStore.updateRun(run.id, {
@@ -2804,152 +2828,6 @@ async function markRunFailed(
     stepId,
     error,
   })
-  if (workflow) {
-    await attemptFailureDelivery(deps, run, workflow, stepId, status)
-  }
-}
-
-function failureReplyTarget(
-  run: WorkflowRunRecord,
-  workflow: WorkflowRecord,
-): {
-  channelId: string
-  channelIntegrationId: string
-  actorId: string
-  recipientType: 'individual' | 'group'
-  providerAccountId: string
-  occurredAt: string
-} | null {
-  const trigger = run.input.trigger as {
-    sourceType?: unknown
-    provider?: unknown
-    channelIntegrationId?: unknown
-    channelId?: unknown
-    actorId?: unknown
-    isGroupChat?: unknown
-    providerAccountId?: unknown
-    occurredAt?: unknown
-  } | undefined
-  const event = run.input.event as { from?: unknown; group_id?: unknown } | undefined
-  const integrationId = typeof trigger?.channelIntegrationId === 'string'
-    ? trigger.channelIntegrationId
-    : null
-  const sourceStillConfigured = workflow.trigger.kind === 'event'
-    && integrationId !== null
-    && workflow.trigger.event.sources.some((subscription) =>
-      subscription.source.type === 'channel'
-      && subscription.source.channel === 'whatsapp'
-      && subscription.source.channelIntegrationId === integrationId,
-    )
-  if (
-    run.triggerKind !== 'event'
-    || trigger?.sourceType !== 'channel'
-    || trigger.provider !== 'whatsapp'
-    || integrationId === null
-    || !sourceStillConfigured
-    || typeof trigger.channelId !== 'string'
-    || typeof trigger.actorId !== 'string'
-    || (trigger.isGroupChat === true
-      ? trigger.channelId === trigger.actorId
-        || event?.group_id !== trigger.channelId
-        || event.from !== trigger.actorId
-      : trigger.channelId !== trigger.actorId
-        || (event?.group_id !== undefined && event.group_id !== null)
-        || (event?.from !== undefined && event.from !== trigger.actorId))
-    || typeof trigger.providerAccountId !== 'string'
-    || typeof trigger.occurredAt !== 'string'
-  ) return null
-  return {
-    channelId: trigger.channelId,
-    channelIntegrationId: integrationId,
-    actorId: trigger.actorId,
-    recipientType: trigger.isGroupChat === true ? 'group' : 'individual',
-    providerAccountId: trigger.providerAccountId,
-    occurredAt: trigger.occurredAt,
-  }
-}
-
-/**
- * One deterministic, sanitized, best-effort notification owned by the
- * terminal failure boundary. The run is already terminal before this starts,
- * so delivery can never turn the original failure into a different status.
- */
-async function attemptFailureDelivery(
-  deps: ExecutorDeps,
-  run: WorkflowRunRecord,
-  workflow: WorkflowRecord,
-  stepId: string,
-  status: 'failed' | 'timeout',
-): Promise<void> {
-  const target: WorkflowDelivery | undefined = workflow.definition.failureDelivery
-  if (!target || !deps.deliverToChannel) return
-
-  try {
-    const assistantId = await deps.resolvePrimary(run.workspaceId)
-    if (!assistantId) return
-
-    // A notification target is not authority to publish workflow metadata.
-    // Full names, reasons and outcome details remain on the admitted run view.
-    const text = sanitizeDeliveryText(
-      `A workflow run ${status}. Review the run in the web app before retrying.\nRun: ${run.id}`,
-    )
-
-    let delivery: DeliveryOutcome
-    if ('replyToTrigger' in target) {
-      const reply = failureReplyTarget(run, workflow)
-      if (!reply) return
-      delivery = await deps.deliverToChannel({
-        workspaceId: run.workspaceId,
-        assistantId,
-        userId: run.triggeredBy ?? workflow.createdBy,
-        channelType: 'whatsapp',
-        channelId: reply.channelId,
-        channelIntegrationId: reply.channelIntegrationId,
-        text,
-        scopeEvidence: deliveryScopeEvidenceForRun(run),
-        replyToTrigger: reply,
-      })
-    } else {
-      const parent = target.thread
-        ? run.vars[`__deliveryMsg_${target.thread.fromStep}`]
-        : undefined
-      delivery = await deps.deliverToChannel({
-        workspaceId: run.workspaceId,
-        assistantId,
-        userId: run.triggeredBy ?? workflow.createdBy,
-        channelType: target.channelType,
-        channelId: target.channelId,
-        channelIntegrationId: target.channelIntegrationId,
-        text,
-        scopeEvidence: deliveryScopeEvidenceForRun(run),
-        threadRef: typeof parent === 'string' ? parent : undefined,
-      })
-    }
-    fireAndForgetAudit(deps, {
-      type: 'workflow.failure_delivered',
-      workspaceId: run.workspaceId,
-      actorUserId: run.triggeredBy,
-      runId: run.id,
-      workflowId: workflow.id,
-      stepId,
-      delivery,
-    })
-  } catch (deliveryError) {
-    fireAndForgetAudit(deps, {
-      type: 'workflow.failure_delivered',
-      workspaceId: run.workspaceId,
-      actorUserId: run.triggeredBy,
-      runId: run.id,
-      workflowId: workflow.id,
-      stepId,
-      delivery: {
-        status: 'failed',
-        channelType: target.channelType,
-        error: 'failure_notification_delivery_failed',
-      },
-    })
-    console.warn('[workflow] failure notification failed:', deliveryError)
-  }
 }
 
 function failOutcome(

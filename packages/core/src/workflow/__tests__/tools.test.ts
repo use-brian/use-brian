@@ -2110,6 +2110,20 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(r.isError).toBe(true)
   })
 
+  it('edits a legacy failure-only workflow without confirming removal of retired notices', async () => {
+    const { tools, stores } = makeAllTools({ allowLegacyDirectWrites: false })
+    const created = await tools.proposeWorkflow.execute({ name: 'Fictional process', definition: SIMPLE_DEF }, makeContext())
+    const receipt = (created.data as { proposalReceipt: string }).proposalReceipt
+    const saved = await tools.createWorkflow.execute({ proposalReceipt: receipt }, makeContext())
+    const id = (saved.data as { id: string }).id
+    stores.workflows.get(id)!.definition.failureDelivery = { channelType: 'slack', channelId: 'C_FICTIONAL' }
+    const proposal = await tools.proposeWorkflow.execute({ workflowId: id, name: 'Fictional revised process', definition: SIMPLE_DEF }, makeContext())
+    expect(proposal.isError).toBeFalsy()
+    const updated = await tools.updateWorkflow.execute({ proposalReceipt: (proposal.data as { proposalReceipt: string }).proposalReceipt }, makeContext())
+    expect(updated.isError).toBeFalsy()
+    expect(stores.workflows.get(id)!.definition.failureDelivery).toBeUndefined()
+  })
+
   it('updateWorkflow blocks a replacement that strips every deliver binding unless confirmed', async () => {
     const { tools, stores } = makeAllTools()
     // Delivering workflow (the pre-2026-08-11 Dev Standup shape).
@@ -2565,7 +2579,7 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
     expect((r.data as { ok: boolean }).ok).toBe(true)
   })
 
-  it('[COMP:workflow/failure-delivery] summarizes and preflights the primary assistant failure destination', async () => {
+  it('[COMP:workflow/failure-delivery] retires the failure destination without a summary or provider probe', async () => {
     const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
     const { tools } = makeAllTools({ validateDeliveryTarget })
     const definition: WorkflowDefinition = {
@@ -2583,15 +2597,9 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
       makeContext({ assistantId: AUTHORING_ASSISTANT_ID }),
     )
     expect(r.isError).toBeFalsy()
-    expect((r.data as { summary: string }).summary).toContain(
-      'Failure notification: slack C_FAILURES',
-    )
-    expect(validateDeliveryTarget).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE_ID,
-      assistantId: PRIMARY_ASSISTANT_ID,
-      channelType: 'slack',
-      channelId: 'C_FAILURES',
-    })
+    expect((r.data as { summary: string }).summary).not.toContain('Failure notification')
+    expect((r.data as { definition: WorkflowDefinition }).definition.failureDelivery).toBeUndefined()
+    expect(validateDeliveryTarget).not.toHaveBeenCalled()
   })
 
   it('blocks a tool_call against a connector whose preflight fails (the Bad credentials incident)', async () => {
@@ -3315,7 +3323,7 @@ describe('[COMP:workflow/tools] channelId "current" resolves to the authoring ch
   const proposedDef = (r: { data: unknown }) =>
     (r.data as { definition: WorkflowDefinition }).definition
 
-  it('substitutes the session chat on a webhook workflow, step and failureDelivery, and probes that chat', async () => {
+  it('resolves and probes the explicit step output while discarding retired failure delivery', async () => {
     const validateDeliveryTarget = vi.fn(async (_args: { channelId: string }) => ({ ok: true }))
     const { tools } = makeAllTools({ validateDeliveryTarget })
     const r = await tools.proposeWorkflow.execute(
@@ -3333,13 +3341,13 @@ describe('[COMP:workflow/tools] channelId "current" resolves to the authoring ch
     const def = proposedDef(r)
     const step = def.steps[0] as { target: { assistantId: string }; deliver: unknown }
     expect(step.deliver).toEqual({ channelType: 'telegram', channelId: GROUP_CHAT })
-    expect(def.failureDelivery).toEqual({ channelType: 'telegram', channelId: GROUP_CHAT })
+    expect(def.failureDelivery).toBeUndefined()
     // The session assistant IS the primary: the durable sentinel is kept.
     expect(step.target.assistantId).toBe('primary')
     for (const call of validateDeliveryTarget.mock.calls) {
       expect(call[0].channelId).toBe(GROUP_CHAT)
     }
-    expect(validateDeliveryTarget).toHaveBeenCalledTimes(2)
+    expect(validateDeliveryTarget).toHaveBeenCalledTimes(1)
   })
 
   it('retargets a step left on primary to the session assistant, and persists the resolved id', async () => {
@@ -3401,7 +3409,7 @@ describe('[COMP:workflow/tools] channelId "current" resolves to the authoring ch
     )
     expect(r.isError).toBe(true)
     const errors = (r.data as { errors: string[] }).errors
-    expect(errors).toHaveLength(2)
+    expect(errors).toHaveLength(1)
     expect(errors.join('\n')).toContain('set channelId to "current"')
     expect(errors.join('\n')).not.toContain('Invalid input')
   })
@@ -3420,29 +3428,17 @@ describe('[COMP:workflow/tools] channelId "current" resolves to the authoring ch
     expect(validateDeliveryTarget).not.toHaveBeenCalled()
   })
 
-  it('names the primary assistant, not a step target, when a failure notification cannot reach this chat', async () => {
+  it('does not probe an obsolete failure target when the explicit output reaches this chat', async () => {
     const validateDeliveryTarget = vi.fn(async (args: { assistantId: string }) =>
-      args.assistantId === PRIMARY_ASSISTANT_ID
-        ? { ok: false, reason: `Telegram: chat not found (${GROUP_CHAT})` }
-        : { ok: true },
-    )
+      args.assistantId === PRIMARY_ASSISTANT_ID ? { ok: false, reason: 'Target unavailable' } : { ok: true })
     const { tools } = makeAllTools({ validateDeliveryTarget })
-    const r = await tools.proposeWorkflow.execute(
-      {
-        name: 'X',
-        definition: webhookDef(
-          { channelType: 'telegram', channelId: 'current' },
-          { channelType: 'telegram', channelId: 'current' },
-        ),
-      },
-      telegramGroup({ assistantId: AUTHORING_ASSISTANT_ID }),
-    )
-    expect(r.isError).toBe(true)
-    const errors = (r.data as { errors: string[] }).errors
-    // The step was retargeted and reaches the chat; only the failure line fails.
-    expect(errors).toHaveLength(1)
-    expect(errors[0]).toContain('failure notifications are always sent by the workspace\'s primary assistant')
-    expect(errors[0]).not.toContain('target.assistantId')
+    const r = await tools.proposeWorkflow.execute({ name: 'X', definition: webhookDef(
+      { channelType: 'telegram', channelId: 'current' },
+      { channelType: 'telegram', channelId: 'current' },
+    ) }, telegramGroup({ assistantId: AUTHORING_ASSISTANT_ID }))
+    expect(r.isError).toBeFalsy()
+    expect(validateDeliveryTarget).toHaveBeenCalledTimes(1)
+    expect(validateDeliveryTarget).toHaveBeenCalledWith(expect.objectContaining({ assistantId: AUTHORING_ASSISTANT_ID }))
   })
 
   it('stops telling a user inside a Telegram chat to author from inside the Telegram chat', async () => {
@@ -3466,6 +3462,36 @@ describe('[COMP:workflow/tools] channelId "current" resolves to the authoring ch
     ))
     expect(parsed.success).toBe(false)
     const messages = parsed.success ? [] : parsed.error.issues.map((i) => i.message)
-    expect(messages.filter((m) => m.includes('no authoring chat'))).toHaveLength(2)
+    expect(messages.filter((m) => m.includes('no authoring chat'))).toHaveLength(1)
+  })
+})
+
+describe('[COMP:workflow/tool-delivery] deterministic notification authoring parity', () => {
+  const definition: WorkflowDefinition = { startStepId: 'notify', steps: [{ id: 'notify', type: 'tool_call', toolName: 'listTasks', arguments: {},
+    deliver: { channelType: 'slack', channelId: 'C_APPROVED' }, deliveryText: 'Result {{prev.name}}' }] }
+  it('preflights the primary integration even when authored from another assistant and names the destination in review', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const result = await tools.proposeWorkflow.execute({ name: 'Fixture', definition }, makeContext({ assistantId: AUTHORING_ASSISTANT_ID }))
+    expect(result.isError).toBeFalsy()
+    expect(validateDeliveryTarget).toHaveBeenCalledWith(expect.objectContaining({ assistantId: PRIMARY_ASSISTANT_ID, channelId: 'C_APPROVED' }))
+    expect(JSON.stringify(result.data)).toContain('sends authored notification to slack C_APPROVED')
+  })
+  it('preserves removal confirmation for deterministic posting bindings', async () => {
+    const { tools } = makeAllTools()
+    const created = await tools.createWorkflow.execute({ name: 'Fixture', definition }, makeContext())
+    const workflowId = (created.data as { id: string }).id
+    const replacement = { startStepId: 'notify', steps: [{ id: 'notify', type: 'tool_call', toolName: 'listTasks', arguments: {} }] }
+    const blocked = await tools.updateWorkflow.execute({ workflowId, definition: replacement }, makeContext())
+    expect(blocked.isError).toBe(true)
+    expect(JSON.stringify(blocked.data)).toContain('confirmDeliveryRemoval')
+  })
+  it('resolves current chat before validating a deterministic notification', async () => {
+    const { tools } = makeAllTools()
+    const result = await tools.proposeWorkflow.execute({ name: 'Fixture', definition: { ...definition,
+      steps: definition.steps.map(step => ({ ...step, deliver: { channelType: 'slack', channelId: 'current' } })) } },
+    makeContext({ channelType: 'slack', channelId: 'C_CURRENT' }))
+    expect(result.isError).toBeFalsy()
+    expect(JSON.stringify(result.data)).toContain('C_CURRENT')
   })
 })

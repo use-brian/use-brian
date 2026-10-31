@@ -562,41 +562,17 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
   })
 })
 
-describe('[COMP:workflow/failure-delivery] WorkflowDefinitionSchema', () => {
-  const step = {
-    id: 'collect',
-    type: 'assistant_call' as const,
-    target: { assistantId: 'primary' as const },
-    prompt: 'collect',
-  }
-
-  it('accepts a static Slack failure destination', () => {
-    expect(WorkflowDefinitionSchema.safeParse({
-      startStepId: 'collect',
-      steps: [step],
-      failureDelivery: { channelType: 'slack', channelId: 'C123' },
-    }).success).toBe(true)
-  })
-
-  it('rejects an inert integration id and a dangling thread parent', () => {
-    expect(WorkflowDefinitionSchema.safeParse({
-      startStepId: 'collect',
-      steps: [step],
-      failureDelivery: {
-        channelType: 'slack',
-        channelId: 'C123',
-        channelIntegrationId: '00000000-0000-4000-8000-000000000010',
-      },
-    }).success).toBe(false)
-    expect(WorkflowDefinitionSchema.safeParse({
-      startStepId: 'collect',
-      steps: [step],
-      failureDelivery: {
-        channelType: 'slack',
-        channelId: 'C123',
-        thread: { fromStep: 'missing' },
-      },
-    }).success).toBe(false)
+describe('[COMP:workflow/failure-delivery] retired configuration', () => {
+  it.each([
+    { channelType: 'slack', channelId: 'C00000001' },
+    { channelType: 'slack', channelId: 'C00000001', thread: { fromStep: 'missing' } },
+    { channelType: 'telegram', channelId: 'current' },
+  ])('removes legacy failure delivery while preserving explicit output delivery', failureDelivery => {
+    const step = { id: 'collect', type: 'assistant_call', target: { assistantId: 'primary' },
+      prompt: 'Collect evidence', deliver: { channelType: 'slack', channelId: 'C00000001' } }
+    const parsed = WorkflowDefinitionSchema.parse({ startStepId: 'collect', steps: [step], failureDelivery })
+    expect(parsed.failureDelivery).toBeUndefined()
+    expect(parsed.steps[0]).toMatchObject({ deliver: step.deliver })
   })
 })
 

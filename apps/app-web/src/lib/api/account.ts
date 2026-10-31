@@ -186,21 +186,27 @@ export type ChannelLinkCode = {
   officialNumber?: string | null;
 };
 
-/**
- * Mint a link code at a registry `codeEndpoint`. Resolves `null` on any
- * non-OK response (503 no store or no bot on this installation, 409 no
- * assistant), which the row shows as "not available here".
- */
+/** A recoverable account prerequisite or request failure, distinct from 503. */
+export class ChannelLinkCodeError extends Error {
+  constructor(readonly code: "no_assistant" | "request_failed") {
+    super(code);
+    this.name = "ChannelLinkCodeError";
+  }
+}
+
+/** Mint a link code. Only 503 means linking is unavailable on this installation. */
 export async function createChannelLinkCode(
   codeEndpoint: string,
 ): Promise<ChannelLinkCode | null> {
-  try {
-    const res = await authFetch(`${API_URL}${codeEndpoint}`, { method: "POST" });
-    if (!res.ok) return null;
-    return (await res.json()) as ChannelLinkCode;
-  } catch {
-    return null;
+  const res = await authFetch(`${API_URL}${codeEndpoint}`, { method: "POST" });
+  if (res.status === 503) return null;
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { error?: string } | null;
+    throw new ChannelLinkCodeError(
+      res.status === 409 && body?.error === "no_assistant" ? "no_assistant" : "request_failed",
+    );
   }
+  return (await res.json()) as ChannelLinkCode;
 }
 
 export type ChannelEmailMatch = {

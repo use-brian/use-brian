@@ -1,5 +1,5 @@
 import { authFetch } from "../auth-fetch";
-import { fetchLatestSession, fetchSessionMessages, listWorkspaceSessions, listAuditSessions, getChatSessionSummary, listPersonalSessions, setSessionArchived } from "../api/sessions";
+import { fetchLatestSession, fetchSessionMessages, listWorkspaceSessions, listAuditSessions, getChatSessionSummary, listPersonalSessions, setSessionArchived, inspectChatRecovery, recoverChat, isSessionHistoryUnavailable, chatRecoveryFailure } from "../api/sessions";
 import { PERSONAL_CHAT_POLICY } from "../chat-session-policy";
 vi.mock("../auth-fetch", () => ({ authFetch: vi.fn() }));
 /**
@@ -375,5 +375,33 @@ describe("[COMP:app-web/sessions-sdk] provider channel names", () => {
     const rows = await listPersonalSessions({ workspaceId: "workspace" });
     expect(rows[0]).toMatchObject({ title: "Conversation title", channelName: "#engineering", transport: "slack" });
     expect(rows[1].channelName).toBeUndefined();
+  });
+});
+
+describe("[COMP:app-web/chat-recovery] typed recovery transport", () => {
+  const source = "11111111-1111-4111-8111-111111111111", workspace = "22222222-2222-4222-8222-222222222222";
+  const target = "33333333-3333-4333-8333-333333333333", assistant = "44444444-4444-4444-8444-444444444444", revision = "a".repeat(64);
+  it("offers recovery only for the server's exact typed history denial", async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({code:"session_history_unavailable"}), {status:403}));
+    const denied = await fetchSessionMessages(source, {strict:true}).catch(error => error);
+    expect(isSessionHistoryUnavailable(denied)).toBe(true);
+    expect(isSessionHistoryUnavailable(new Error("chat_history_failed: 403"))).toBe(false);
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response("{}", {status:403}));
+    expect(isSessionHistoryUnavailable(await fetchSessionMessages(source, {strict:true}).catch(error => error))).toBe(false);
+  });
+  it("scopes metadata and apply to the exact workspace and original chat", async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({sessionId:source,workspaceId:workspace,revision,status:"available",continuationSessionId:null,contextGroupId:null,contextProjectId:null})));
+    expect((await inspectChatRecovery(source,workspace)).revision).toBe(revision);
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({sessionId:target,assistantId:assistant,workspaceId:workspace,replayed:true,channelId:target,lastActive:"2026-10-31T00:00:00.000Z",status:"idle",contextGroupId:null,contextProjectId:null,policy:PERSONAL_CHAT_POLICY})));
+    expect((await recoverChat(source,workspace,revision)).sessionId).toBe(target);
+    expect(authFetch).toHaveBeenLastCalledWith(expect.stringContaining(`/sessions/${source}/recovery`),expect.objectContaining({method:"POST",body:JSON.stringify({workspaceId:workspace,expectedRevision:revision})}));
+  });
+  it("rejects mismatched or malformed success and preserves typed recovery refusals", async () => {
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({sessionId:source,assistantId:assistant,workspaceId:workspace,replayed:false,channelId:target,lastActive:"2026-10-31T00:00:00.000Z",status:"idle",contextGroupId:null,contextProjectId:null,policy:PERSONAL_CHAT_POLICY})));
+    await expect(recoverChat(source,workspace,revision)).rejects.toThrow("chat_recovery_unavailable");
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response("{}"));
+    await expect(inspectChatRecovery(source,workspace)).rejects.toThrow();
+    vi.mocked(authFetch).mockResolvedValueOnce(new Response(JSON.stringify({error:"session_recovery_changed"}),{status:409}));
+    expect(chatRecoveryFailure(await recoverChat(source,workspace,revision).catch(error=>error))).toBe("changed");
   });
 });

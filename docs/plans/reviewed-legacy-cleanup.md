@@ -16,10 +16,29 @@ workspace migration by changing a flag.
 
 An erase selection may name a General source or impact from the existing closed
 scope registry, an unbound conversation, or a legacy workflow/goal with missing
-authoring authority. Named department resources are retained. Running sessions
+authoring authority. Named department resources are retained unless the owner
+explicitly names a memory, episode or workspace file both in `selections` and
+`eraseDepartmentRecords`. This narrow consent is required to erase migrated
+records that still depend on obsolete General sources. Preview returns each
+consented record's exact compartments and version; it never expands consent to
+other department descendants. Apply freezes the consent, content, scope and
+complete dependency graph. Unknown and unrelated department data remain protected.
+Running sessions
 and pending, running or waiting workflow runs refuse cleanup. Assistant identities, members, provider
 credentials and department/project access memberships are never erased here.
 Immutable evidence guards and foreign-key restrictions still apply.
+
+Deleting a legacy workflow also reviews its General run history. A
+`workflow_history` selection reviews General history of a named workflow while
+retaining its definition and future schedule. Department-bound or labelled runs,
+active executions and foreign-workspace dependencies block erasure. Personal run
+history outside the selected General set stays protected. Preview lists every
+run ID to erase and freezes complete run bodies, canonical descendants and FK
+reach. A surviving consumer of a selected run blocks deletion; its General
+history must be explicitly selected too. Apply removes copy receipts only for
+runs in the frozen erasure set, then removes those runs in one statement before
+deleting a selected legacy workflow. Ordinary foreign keys and deletion triggers
+remain enabled; no receipt is severed from a surviving consumer.
 
 Preview simulates the exact deletes in a savepoint and rolls them back. It
 compares complete database-side fingerprints of retained department records,
@@ -61,8 +80,39 @@ row, including one in another workspace, never qualifies as a removed reference.
 Failures identify a bounded metadata blocker. An unsupported erasure is never
 replaced with an unchecked SQL cleanup, a fake General confirmation or a force
 release. Complete cleanup requires a fresh inventory after all reviewed batches.
+Database blockers return only SQLSTATE and validated table, constraint and
+PL/pgSQL function names. Error messages, detail, SQL text and stack context are
+never returned. Immutable-state refusals are conflicts; unexpected database
+failures remain server errors with JSON metadata so owners can report the
+blocker without accessing production logs or content.
 
 ## Schema and verification
+
+Owners may explicitly request `eraseUnclassifiedLegacy: true` for selected
+unclassified resources or the messages of selected unbound conversations. The
+preview identifies these exact records and freezes their versions and bodies.
+This is erasure consent, never a classification or read grant. Unknown records
+outside those explicit selections remain protected, as do all known department
+records and dependencies. The immutable ledger independently validates consent
+and membership of each unclassified erasure; apply checks physical absence.
+Migration 8146 extends that independent validation without changing runtime
+readers, resource labels, deletion triggers or historical applied receipts.
+
+Migration 8147 independently validates the exact selected department erasures,
+including kind, ID, version and nonempty compartment labels. Consent is limited
+to memory, episode and workspace-file roots, and cannot be substituted for
+unclassified erasure consent. Retention excludes only these exact records and
+General payloads whose only department parents are consented records. Other
+department-labelled children, immutable revisions and required files still
+block cleanup. A selected recording already removed by its selected episode's
+ordinary cascade is recorded once as erased. Existing deletion/invalidation
+triggers and foreign keys remain active throughout.
+
+Impact-only records use their exact registered derivation root when checking
+descendants. They have no canonical supersession ancestry; asking the canonical
+ancestor walker to resolve a cache or Office artifact incorrectly blocks cleanup.
+Direct and transitive derivations and real foreign-key retention checks still
+apply. Tests cover General impacts and department-labelled dependents.
 
 Migration 8145 adds owner-host cleanup review storage with immutable proposals and
 owner-only erased-resource reference reading. No content table, runtime grants or
@@ -71,6 +121,28 @@ real canonical source writes, deletion invalidation and application-role denial.
 They cover authorization, tenant boundaries, scoped-record retention, stale
 content/evidence, cancellation/replay, unknown dependencies, and assistant
 binding conversion without changes to grants or clearance.
+
+### Existing legacy schedule bindings
+
+Changing a workflow's department does not move its existing firing rows. An
+owner may select `workflow_schedule_binding` with a workflow ID to review that
+workflow's General firing rows against its already saved department and authoring
+authority. This is binding migration, with no deletion or permission widening.
+The parent must be an enabled scheduled workflow with a valid current department
+and saved authoring authority. The workspace must still be in legacy setup.
+The normal ready-mode schedule review remains the only path for pinned schedules.
+
+Preview freezes every firing row's complete database-side fingerprint and the
+parent's current authority, scope and body. Unknown/scoped, pinned, claimed,
+foreign-workspace, or different-principal firing rows refuse this operation;
+workflow wait/resume rows are excluded. Apply copies only the exact validated
+department/Project binding into the frozen General firing rows. IDs, schedules,
+timezone, instructions, delivery targets, enablement, history and nag settings
+stay unchanged. Existing triggers stay enabled. Revalidation, simulation and
+database-side hashes of every non-binding field reject unexpected trigger
+rewrites; foreign-workspace rows refuse without changing their parent. The
+immutable receipts use the same cleanup protocol, without activating ready mode
+or modifying historical runs. This adds no migration or runtime grants.
 Conversation tests include real immutable context revisions: General snapshot
 bytes follow the normal purge trigger, while a Personal snapshot prevents the
 conversation deletion and remains byte-for-byte unchanged. Content-free held

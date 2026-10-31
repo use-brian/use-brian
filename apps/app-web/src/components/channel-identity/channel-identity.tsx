@@ -34,6 +34,7 @@ import {
 } from "@use-brian/shared";
 import {
   createChannelLinkCode,
+  ChannelLinkCodeError,
   createWechatLinkCode,
   getChannelIdentities,
   listLinkedAccounts,
@@ -134,6 +135,13 @@ export function ChannelIdentityRow({
         return;
       }
       setCode(minted);
+    } catch (err) {
+      setNotice({
+        kind: "error",
+        text: err instanceof ChannelLinkCodeError && err.code === "no_assistant"
+          ? copy.noAssistant
+          : copy.error,
+      });
     } finally {
       setBusy(false);
     }

@@ -38,16 +38,16 @@ describe('Slack shared confirmation admission', () => {
     const app = express()
     app.use(express.json())
     app.use('/slack', slackRoutes({ integrationStore: {
-      getByChannelForWebhook: async () => ({ id: 'integration-uuid', channelId: 'channel-row',
+      getByChannelForWebhook: async () => ({ id: 'integration-uuid', channelId: '00000000-0000-4000-a000-000000000001',
         credentials: { bot_token: 'token', signing_secret: 'secret' }, config: { replyInThread: true } }),
       touchLastEventAt: async () => {},
     }, tools: new Map(), channelUserStore: {} } as never))
     const resolve = vi.fn()
     const dispose = channelConfirmations.register({
-      channelType: 'slack', integrationId: 'channel-row', conversationId: 'C1', senderId: 'actor', sessionId: 'C1:thread:1',
+      channelType: 'slack', integrationId: '00000000-0000-4000-a000-000000000001', conversationId: 'C1', senderId: 'actor', sessionId: 'C1:thread:1',
     }, { toolCallId: 'call', toolName: 'tool', serverName: 'server', input: {}, classification: null, description: '' }, { resolve } as never)
     const post = async () => {
-      await request(app).post('/slack/channel-row').set('x-slack-signature', 'signature')
+      await request(app).post('/slack/00000000-0000-4000-a000-000000000001').set('x-slack-signature', 'signature')
         .set('x-slack-request-timestamp', '1').send({ type: 'event_callback', event: { type: 'message', text: 'yes' } }).expect(200)
       await new Promise(r => setImmediate(r))
     }
@@ -73,11 +73,11 @@ describe('Slack shared confirmation admission', () => {
     const app = express()
     app.use(express.json())
     app.use('/slack', slackRoutes({ integrationStore: {
-      getByChannelForWebhook: async () => ({ id: 'integration-uuid', channelId: 'channel-row', botUserId: 'BOT',
+      getByChannelForWebhook: async () => ({ id: 'integration-uuid', channelId: '00000000-0000-4000-a000-000000000001', botUserId: 'BOT',
         credentials: { bot_token: 'token', signing_secret: 'secret' }, config: { replyInThread: true } }),
       touchLastEventAt: async () => {},
     }, tools: new Map(), channelUserStore: available ? {} : undefined, ...extra } as never))
-    return (event: Record<string, unknown> = { type: 'message', text: 'yes' }) => request(app).post('/slack/channel-row')
+    return (event: Record<string, unknown> = { type: 'message', text: 'yes' }) => request(app).post('/slack/00000000-0000-4000-a000-000000000001')
       .set('x-slack-signature', 'signature').set('x-slack-request-timestamp', '1')
       .send({ type: 'event_callback', event })
   }
@@ -127,7 +127,7 @@ describe('Slack shared confirmation admission', () => {
     mocks.incoming.isMentioned = true
     const findValidCode = vi.fn(async () => null)
     const post = setupIdentityRoute(mode !== 'missing', { linkCodeStore: { findValidCode }, linkedAccountStore: { findByProvider: vi.fn(async () => null) } })
-    const scope = roomInteractionScope({ channelType: 'slack', integrationId: 'channel-row', conversationId: 'C1', senderId: 'original', sessionId: 'C1:thread:1' })
+    const scope = roomInteractionScope({ channelType: 'slack', integrationId: '00000000-0000-4000-a000-000000000001', conversationId: 'C1', senderId: 'original', sessionId: 'C1:thread:1' })
     const controller = new AbortController()
     const resolve = vi.fn()
     const onAbort = vi.fn()
@@ -152,7 +152,7 @@ describe('Slack shared confirmation admission', () => {
     mocks.incoming.isEdit = true
     mocks.incoming.text = 'changed message'
     const post = setupIdentityRoute(true)
-    const scope = { channelType: 'slack', integrationId: 'channel-row', conversationId: 'C1', senderId: 'actor', sessionId: 'C1:thread:1' }
+    const scope = { channelType: 'slack', integrationId: '00000000-0000-4000-a000-000000000001', conversationId: 'C1', senderId: 'actor', sessionId: 'C1:thread:1' }
     const controller = new AbortController()
     const onAbort = vi.fn()
     const dispose = channelConfirmations.registerTurn(scope, controller, { messageId: '2', onAbort })

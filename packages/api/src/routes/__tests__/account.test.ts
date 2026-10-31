@@ -24,17 +24,21 @@ vi.mock('../../db/account-teardown.js', async (orig) => ({
 }))
 vi.mock('../../db/users.js', () => ({
   findUserById: vi.fn(),
+  getDefaultAssistant: vi.fn(),
+  listAccessibleAssistants: vi.fn(),
   updateUserTimezone: vi.fn(),
 }))
 
 import { accountRoutes } from '../account.js'
 import { query, queryWithRLS, getPool } from '../../db/client.js'
-import { findUserById, updateUserTimezone } from '../../db/users.js'
+import { findUserById, getDefaultAssistant, listAccessibleAssistants, updateUserTimezone } from '../../db/users.js'
 import { AccountTeardownBlockedError, deleteAccountFootprint } from '../../db/account-teardown.js'
 
 const mockQuery = vi.mocked(query)
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
 const mockFindUserById = vi.mocked(findUserById)
+const mockGetDefaultAssistant = vi.mocked(getDefaultAssistant)
+const mockListAccessibleAssistants = vi.mocked(listAccessibleAssistants)
 const mockTeardown = vi.mocked(deleteAccountFootprint)
 const mockUpdateUserTimezone = vi.mocked(updateUserTimezone)
 
@@ -60,6 +64,8 @@ describe('[COMP:api/account-route] Account routes', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     mockQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+    mockGetDefaultAssistant.mockResolvedValue(null)
+    mockListAccessibleAssistants.mockResolvedValue([])
     mockTeardown.mockResolvedValue({ mode: 'deleted', workspacesDeleted: 1, assistantsDeleted: 0 })
   })
 
@@ -269,46 +275,97 @@ describe('[COMP:api/account-route] Account routes', () => {
   })
 
   // ── POST /slack/link-code ────────────────────────────────────
-  // Same first-owned-assistant rule as Telegram; no deep-link payload —
-  // the code is pasted to the Brian app in Slack. Redemption + link-first
-  // routing live in slack.ts (`resolveSlackSender`).
+  // Canonical assistant access selects the link anchor. Redemption and
+  // link-first routing live in slack.ts (`resolveSlackSender`).
 
-  it('mints a Slack link code for the first-owned assistant', async () => {
+  describe('Slack link assistant eligibility', () => {
     const linkCodeStore = {
-      create: vi.fn().mockResolvedValue({
-        code: 'SLK123',
-        expiresAt: new Date('2026-06-10T00:05:00Z'),
-      }),
+      create: vi.fn(),
       findValidCode: vi.fn(),
       claim: vi.fn(),
       getByUserAndAssistant: vi.fn(),
     }
-    const app = createTestApp(
-      '/api/account',
-      accountRoutes({ linkCodeStore: linkCodeStore as never }),
-      { userId: 'u_1' },
-    )
-    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'a_first' }], rowCount: 1 } as never)
 
-    const res = await request(app).post('/api/account/slack/link-code')
-    expect(res.status).toBe(200)
-    expect(res.body.code).toBe('SLK123')
-    expect(linkCodeStore.create).toHaveBeenCalledWith({ userId: 'u_1', assistantId: 'a_first' })
-  })
+    beforeEach(() => {
+      linkCodeStore.create.mockResolvedValue({
+        code: 'SLK123',
+        expiresAt: new Date('2026-06-10T00:05:00Z'),
+      })
+    })
 
-  it('returns 409 no_assistant for Slack when the user owns no assistant', async () => {
-    const linkCodeStore = { create: vi.fn(), findValidCode: vi.fn(), claim: vi.fn(), getByUserAndAssistant: vi.fn() }
-    const app = createTestApp('/api/account', accountRoutes({ linkCodeStore: linkCodeStore as never }), { userId: 'u_1' })
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    const res = await request(app).post('/api/account/slack/link-code')
-    expect(res.status).toBe(409)
-    expect(linkCodeStore.create).not.toHaveBeenCalled()
+    function requestSlackCode() {
+      const app = createTestApp(
+        '/api/account',
+        accountRoutes({ linkCodeStore: linkCodeStore as never }),
+        { userId: 'u_1' },
+      )
+      return request(app).post('/api/account/slack/link-code')
+    }
+
+    it('prefers the canonical default assistant without listing other assistants', async () => {
+      mockGetDefaultAssistant.mockResolvedValueOnce({ id: 'a_default' } as never)
+
+      const res = await requestSlackCode()
+
+      expect(res.status).toBe(200)
+      expect(res.body.code).toBe('SLK123')
+      expect(mockGetDefaultAssistant).toHaveBeenCalledWith('u_1')
+      expect(mockListAccessibleAssistants).not.toHaveBeenCalled()
+      expect(linkCodeStore.create).toHaveBeenCalledWith({
+        userId: 'u_1', assistantId: 'a_default',
+      })
+    })
+
+    it('uses the first canonically accessible assistant when there is no default', async () => {
+      mockListAccessibleAssistants.mockResolvedValueOnce([
+        { id: 'a_workspace' }, { id: 'a_later' },
+      ] as never)
+
+      const res = await requestSlackCode()
+
+      expect(res.status).toBe(200)
+      expect(res.body.code).toBe('SLK123')
+      expect(mockGetDefaultAssistant).toHaveBeenCalledWith('u_1')
+      expect(mockListAccessibleAssistants).toHaveBeenCalledWith('u_1')
+      expect(linkCodeStore.create).toHaveBeenCalledWith({
+        userId: 'u_1', assistantId: 'a_workspace',
+      })
+      expect(mockQuery).not.toHaveBeenCalled()
+    })
+
+    it('returns 409 no_assistant when canonical access finds no eligible assistant', async () => {
+      const res = await requestSlackCode()
+
+      expect(res.status).toBe(409)
+      expect(res.body.error).toBe('no_assistant')
+      expect(mockGetDefaultAssistant).toHaveBeenCalledWith('u_1')
+      expect(mockListAccessibleAssistants).toHaveBeenCalledWith('u_1')
+      expect(linkCodeStore.create).not.toHaveBeenCalled()
+    })
+
+    it('does not fall back or mint a code when the default access lookup fails', async () => {
+      mockGetDefaultAssistant.mockRejectedValueOnce(new Error('access lookup unavailable'))
+
+      expect((await requestSlackCode()).status).toBe(500)
+      expect(mockListAccessibleAssistants).not.toHaveBeenCalled()
+      expect(linkCodeStore.create).not.toHaveBeenCalled()
+    })
+
+    it('does not mint a code when the accessible assistant lookup fails', async () => {
+      mockListAccessibleAssistants.mockRejectedValueOnce(new Error('access lookup unavailable'))
+
+      expect((await requestSlackCode()).status).toBe(500)
+      expect(mockListAccessibleAssistants).toHaveBeenCalledWith('u_1')
+      expect(linkCodeStore.create).not.toHaveBeenCalled()
+    })
   })
 
   it('returns 503 for Slack when no link code store configured', async () => {
     const app = createTestApp('/api/account', accountRoutes(), { userId: 'u_1' })
     const res = await request(app).post('/api/account/slack/link-code')
     expect(res.status).toBe(503)
+    expect(mockGetDefaultAssistant).not.toHaveBeenCalled()
+    expect(mockListAccessibleAssistants).not.toHaveBeenCalled()
   })
 
   // ── POST /feishu/link-code ──────────────────────────────────

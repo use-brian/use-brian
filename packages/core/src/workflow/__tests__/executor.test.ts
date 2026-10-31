@@ -2046,19 +2046,16 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
   })
 })
 
-describe('[COMP:workflow/failure-delivery] terminal workflow notification', () => {
-  it.each(['failed', 'timeout'] as const)('keeps private metadata out of a %s notification while retaining the authorized run detail', async status => {
+describe('[COMP:workflow/failure-delivery] quiet terminal failures', () => {
+  it.each(['failed', 'timeout'] as const)('retains the %s run and audit without contacting any channel', async status => {
     const stores = makeFakeStores()
-    const hiddenName = 'SYNTHETIC_PRIVATE_WORKFLOW_LABEL'
-    const hiddenStep = 'synthetic_private_step'
-    const hiddenReason = 'synthetic_private_failure_reason'
-    const hiddenMessage = 'SYNTHETIC_PRIVATE_FAILURE_DETAIL'
     const delivered: string[] = []
+    const audits: WorkflowAuditEvent[] = []
     const deps: ExecutorDeps = {
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       consultTransport: { async send() {
-        throw Object.assign(new Error(hiddenMessage), { reason: status === 'timeout' ? 'timeout' : hiddenReason })
+        throw Object.assign(new Error('Synthetic run failure'), { reason: status === 'timeout' ? 'timeout' : 'synthetic_failure' })
       } },
       resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
       buildToolRegistry: async () => new Map(),
@@ -2066,145 +2063,22 @@ describe('[COMP:workflow/failure-delivery] terminal workflow notification', () =
         delivered.push(params.text)
         return { status: 'delivered', channelType: params.channelType, channelId: params.channelId }
       },
+      emitAudit: event => { audits.push(event) },
     }
-    const { workflow, run } = await seedWorkflowAndRun(deps, {
-      startStepId: hiddenStep,
-      steps: [{ id: hiddenStep, type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Return synthetic output' }],
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 'collect',
+      steps: [{ id: 'collect', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Collect evidence' }],
+      // A legacy saved configuration must stay quiet without a migration.
       failureDelivery: { channelType: 'slack', channelId: 'C00000001' },
     })
-    workflow.name = hiddenName
     await advanceWorkflowRun(deps, run.id)
     await advanceWorkflowRun(deps, run.id)
-    expect(delivered).toHaveLength(1)
-    for (const hidden of [hiddenName, hiddenStep, hiddenReason, hiddenMessage]) {
-      expect(delivered[0].includes(hidden)).toBe(false)
-    }
-    expect(delivered[0]).toBe(`A workflow run ${status}. Review the run in the web app before retrying.\nRun: ${run.id}`)
+    expect(delivered).toEqual([])
     expect(stores.runs.get(run.id)?.status).toBe(status)
-    expect(String(stores.runs.get(run.id)?.error?.message).includes(hiddenMessage)).toBe(true)
-    expect(stores.stepRuns.some(row => row.stepId === hiddenStep && row.status === 'failed')).toBe(true)
-  })
-
-  it('preserves the terminal result when notification assistant resolution fails', async () => {
-    const stores = makeFakeStores()
-    let resolutions = 0
-    const deps: ExecutorDeps = {
-      workflowStore: stores.workflowStore,
-      runStore: stores.runStore,
-      consultTransport: makeConsultTransport({ fail: 'failed safely' }),
-      resolvePrimary: async () => {
-        resolutions += 1
-        if (resolutions > 1) throw new Error('resolver unavailable')
-        return PRIMARY_ASSISTANT_ID
-      },
-      buildToolRegistry: async () => new Map(),
-      deliverToChannel: async () => {
-        throw new Error('delivery must not be attempted')
-      },
-    }
-    const { run } = await seedWorkflowAndRun(deps, {
-      startStepId: 'collect',
-      steps: [{
-        id: 'collect',
-        type: 'assistant_call',
-        target: { assistantId: 'primary' },
-        prompt: 'collect',
-      }],
-      failureDelivery: { channelType: 'slack', channelId: 'C123' },
-    })
-
-    const outcome = await advanceWorkflowRun(deps, run.id)
-
-    expect(outcome.kind).toBe('failed')
-    expect(stores.runs.get(run.id)?.status).toBe('failed')
-  })
-
-  it('attempts one sanitized notification after a timeout and stays terminal when delivery fails', async () => {
-    const stores = makeFakeStores()
-    const delivered: string[] = []
-    const audits: WorkflowAuditEvent[] = []
-    const deps: ExecutorDeps = {
-      workflowStore: stores.workflowStore,
-      runStore: stores.runStore,
-      consultTransport: {
-        async send() {
-          throw Object.assign(new Error('token=do-not-send'), {
-            reason: 'timeout',
-            partialOutput: 'partial result',
-          })
-        },
-      },
-      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
-      buildToolRegistry: async () => new Map(),
-      deliverToChannel: async (params) => {
-        expect(stores.runs.get(run.id)?.status).toBe('timeout')
-        delivered.push(params.text)
-        throw new Error('Slack unavailable')
-      },
-      emitAudit: (event) => {
-        audits.push(event)
-      },
-    }
-    const { run } = await seedWorkflowAndRun(deps, {
-      startStepId: 'collect',
-      steps: [{
-        id: 'collect',
-        type: 'assistant_call',
-        target: { assistantId: 'primary' },
-        prompt: 'collect',
-      }],
-      failureDelivery: { channelType: 'slack', channelId: 'C123' },
-    })
-
-    await advanceWorkflowRun(deps, run.id)
-    await advanceWorkflowRun(deps, run.id)
-
-    expect(delivered).toHaveLength(1)
-    expect(delivered[0]).toBe(`A workflow run timeout. Review the run in the web app before retrying.\nRun: ${run.id}`)
-    expect(delivered[0].includes('collect')).toBe(false)
-    expect(delivered[0]).not.toContain('do-not-send')
-    expect(stores.runs.get(run.id)?.status).toBe('timeout')
-    expect(audits.filter((event) => event.type === 'workflow.failure_delivered')).toHaveLength(1)
-  })
-
-  it('audits one successful notification and never notifies a successful run', async () => {
-    const stores = makeFakeStores()
-    const delivered: string[] = []
-    const audits: WorkflowAuditEvent[] = []
-    const deps: ExecutorDeps = {
-      workflowStore: stores.workflowStore,
-      runStore: stores.runStore,
-      consultTransport: makeConsultTransport({ fail: 'failed safely' }),
-      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
-      buildToolRegistry: async () => new Map(),
-      deliverToChannel: async (params) => {
-        delivered.push(params.text)
-        return { status: 'delivered', channelType: params.channelType, channelId: params.channelId }
-      },
-      emitAudit: (event) => {
-        audits.push(event)
-      },
-    }
-    const definition: WorkflowDefinition = {
-      startStepId: 'collect',
-      steps: [{
-        id: 'collect',
-        type: 'assistant_call',
-        target: { assistantId: 'primary' },
-        prompt: 'collect',
-      }],
-      failureDelivery: { channelType: 'slack', channelId: 'C123' },
-    }
-    const failed = await seedWorkflowAndRun(deps, definition)
-    await advanceWorkflowRun(deps, failed.run.id)
-    await advanceWorkflowRun(deps, failed.run.id)
-    expect(delivered).toHaveLength(1)
-    expect(audits.filter((event) => event.type === 'workflow.failure_delivered')).toHaveLength(1)
-
-    deps.consultTransport = makeConsultTransport({ responseText: 'ok' })
-    const successful = await seedWorkflowAndRun(deps, definition)
-    await advanceWorkflowRun(deps, successful.run.id)
-    expect(delivered).toHaveLength(1)
+    expect(stores.runs.get(run.id)?.error?.message).toBe('Synthetic run failure')
+    expect(stores.stepRuns.some(row => row.stepId === 'collect' && row.status === 'failed')).toBe(true)
+    expect(audits.filter(event => event.type === 'workflow.run_failed')).toHaveLength(1)
+    expect(audits.filter(event => event.type === 'workflow.failure_delivered')).toEqual([])
   })
 })
 
@@ -3220,4 +3094,35 @@ describe('executor cancellation', () => {
       if (stage === 'tool') expect(stores.stepRuns[0]).toMatchObject({ status: 'completed', output: { committed: true } })
     },
   )
+})
+
+describe('[COMP:workflow/tool-delivery] tool execution and notification settlement', () => {
+  it.each(['success', 'error', 'ask'] as const)('notifies only after an allowed successful tool (%s)', async state => {
+    const source = { workspaceId: WORKSPACE_ID, userId: null, assistantId: null, sensitivity: 'internal' as const,
+      compartments: [], projectIds: [], resourceKind: 'entity', resourceId: USER_ID, version: '1' }
+    const execute = vi.fn(async () => ({ data: { reference: 'ENQ-42', channelId: 'C_EVIL', __delivery: 'untrusted' }, scopeEvidence: { sources: [source] }, isError: state === 'error' }))
+    const tool = buildTool({ name: 'readEnquiry', description: 'Read fixture enquiry', inputSchema: z.object({}), requiresConfirmation: state === 'ask', execute })
+    const deliverToChannel = vi.fn(async (params) => ({ status: 'skipped' as const, channelType: params.channelType, reason: 'delivery_audience_unverified' as const }))
+    const requestApproval = vi.fn(async () => undefined)
+    const deps = makeDeps({ buildToolRegistry: async () => new Map([[tool.name, tool]]), deliverToChannel, requestApproval })
+    const { run } = await seedWorkflowAndRun(deps, { startStepId: 'notify', steps: [{ id: 'notify', type: 'tool_call', toolName: tool.name,
+      arguments: {}, deliver: { channelType: 'slack', channelId: 'C_APPROVED' }, deliveryText: 'Saved {{prev.reference}}' }] })
+    await deps.runStore.updateRun(run.id, { vars: { __contextScopeEvidence: { sensitivity: 'internal', compartments: [], projectIds: [], sources: [{ ...source, resourceKind: 'crm_event', resourceId: WORKSPACE_ID }] } } })
+    const result = await advanceWorkflowRun(deps, run.id)
+    if (state === 'success') {
+      expect(result.kind).toBe('completed')
+      expect(execute).toHaveBeenCalledTimes(1)
+      expect(deliverToChannel).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ assistantId: PRIMARY_ASSISTANT_ID, channelId: 'C_APPROVED', text: 'Saved ENQ-42',
+        scopeEvidence: expect.objectContaining({ sources: expect.arrayContaining([source, expect.objectContaining({ resourceKind: 'crm_event' })]) }) }))
+      expect((await deps.runStore.listStepRuns(USER_ID, run.id))[0].output).toMatchObject({ reference: 'ENQ-42', __delivery: { status: 'skipped', reason: 'delivery_audience_unverified' } })
+      await advanceWorkflowRun(deps, run.id)
+      expect(execute).toHaveBeenCalledTimes(1); expect(deliverToChannel).toHaveBeenCalledTimes(1)
+    } else {
+      expect(deliverToChannel).not.toHaveBeenCalled()
+      if (state === 'ask') {
+        expect(execute).not.toHaveBeenCalled()
+        expect(requestApproval).toHaveBeenCalledWith(expect.objectContaining({ toolNotification: expect.objectContaining({ stepId: 'notify', deliver: { channelType: 'slack', channelId: 'C_APPROVED' }, deliveryText: 'Saved {{prev.reference}}', scope: expect.objectContaining({ vars: expect.any(Object) }) }) }))
+      }
+    }
+  })
 })

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mayReadGroupContext, roomTurnShape, type RoomTurnFacts } from '../turn.js'
-import { roomDisclosureText, roomSpeakerLabel, formatProviderHistory } from '../room.js'
+import { roomSpeakerLabel, formatProviderHistory } from '../room.js'
 import { classifySession, policyFor, ROOM_TRANSPORTS, sessionPolicy, transportPolicy } from '../../session-kind.js'
 
 /**
@@ -64,14 +64,6 @@ describe('[COMP:api/channel-room] room turns per transport', () => {
       })
     })
   }
-
-  it('discloses mentions-only capture where the bot only sees mentions (Telegram privacy mode)', () => {
-    expect(roomDisclosureText({ assistantName: 'Brian', channelType: 'telegram' })).toMatch(/only see messages that mention me/)
-    expect(roomDisclosureText({ assistantName: 'Brian', channelType: 'slack' })).toMatch(/read every message here/)
-    for (const transport of ROOM_TRANSPORTS) {
-      expect(roomDisclosureText({ assistantName: 'Brian', channelType: transport })).not.toContain('—')
-    }
-  })
 
   it('labels guests by their platform handle', () => {
     expect(roomSpeakerLabel(null, '@casey')).toBe('@casey')

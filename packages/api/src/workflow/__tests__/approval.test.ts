@@ -13,7 +13,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { advanceWorkflowRun, createExecutionContext, type ExecutorDeps } from '@use-brian/core'
+import { advanceWorkflowRun, createExecutionContext, WORKFLOW_SCOPE_EVIDENCE_VAR, type ExecutorDeps, type ScopeEvidence } from '@use-brian/core'
 import { buildTool, type Tool } from '@use-brian/core'
 import type {
   WorkflowDefinition,
@@ -416,6 +416,114 @@ function cancellationRunScope(signal = new AbortController().signal) {
     }),
   }
 }
+
+async function toolNotificationFixture() {
+  const stores = makeStores(), approvals = fakeApprovalsStore(), audit = fakeAuditStore()
+  const source = (suffix: string) => ({
+    workspaceId: WORKSPACE_ID, userId: null, assistantId: null, sensitivity: 'internal' as const,
+    compartments: [], projectIds: [], resourceKind: 'entity' as const,
+    resourceId: `00000000-0000-0000-0000-${suffix.padStart(12, '0')}`, version: '1',
+  })
+  const inputEvidence: ScopeEvidence = { sources: [source('701')] }
+  const savedEvidence: ScopeEvidence = { sources: [source('702')] }
+  const resultEvidence: ScopeEvidence = { sources: [source('703')] }
+  const execute = vi.fn(async () => ({ data: { reference: 'saved-enquiry' }, scopeEvidence: resultEvidence }))
+  const tool = buildTool({ name: 'readEnquiry', description: 'Read an enquiry', inputSchema: z.object({}),
+    requiresConfirmation: true, execute })
+  tool.resolveConfirmation = async () => true
+  const executorDeps: ExecutorDeps = {
+    workflowStore: stores.workflowStore, runStore: stores.runStore, consultTransport: FAKE_TRANSPORT,
+    resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+    buildToolRegistry: async () => new Map([[tool.name, tool]]),
+    resolveRunScope: async () => ({ ...cancellationRunScope(), inputScopeEvidence: inputEvidence }),
+  }
+  const deps: ApprovalBridgeDeps = { ...executorDeps, approvalsStore: approvals, auditStore: audit,
+    deliveries: async () => {}, executorDeps }
+  executorDeps.requestApproval = makeRequestApproval(deps)
+  const workflow = await stores.workflowStore.create({ userId: USER_ID, workspaceId: WORKSPACE_ID,
+    name: 'Notify staff', definition: { startStepId: 'read', steps: [{ id: 'read', type: 'tool_call',
+      toolName: tool.name, arguments: {}, deliver: { channelType: 'slack', channelId: 'C_REVIEWED' },
+      deliveryText: '{{input.site}}: {{vars.label}} / {{prev.reference}}', nextStepId: null }] } })
+  const run = await stores.runStore.createRun({ workflowId: workflow.id, workspaceId: WORKSPACE_ID,
+    triggeredBy: USER_ID, triggerKind: 'manual', input: { site: 'Website' } })
+  await stores.runStore.updateRun(run.id, { vars: { label: 'Enquiry', [WORKFLOW_SCOPE_EVIDENCE_VAR]: savedEvidence } })
+  expect((await advanceWorkflowRun(executorDeps, run.id)).kind).toBe('paused')
+  expect(execute).not.toHaveBeenCalled()
+  return { ...stores, deps, approvals, audit, workflow, run, execute, inputEvidence, savedEvidence, resultEvidence }
+}
+
+describe('[COMP:workflow/approval] deterministic tool notifications', () => {
+  it('freezes the reviewed destination and template, persists the effect and all source evidence before one delivery', async () => {
+    const f = await toolNotificationFixture()
+    const step = f.workflow.definition.steps[0]
+    if (step.type !== 'tool_call') throw new Error('fixture tool step missing')
+    step.deliver = { channelType: 'slack', channelId: 'C_CHANGED' }
+    step.deliveryText = 'Changed notification'
+    f.runs.get(f.run.id)!.contextCompartments = ['legal']
+    await f.runStore.updateRun(f.run.id, { vars: {
+      ...f.runs.get(f.run.id)!.vars, label: 'Changed label',
+      [WORKFLOW_SCOPE_EVIDENCE_VAR]: { sensitivity: 'confidential', compartments: ['finance'] },
+    } })
+    const delivery = vi.fn(async (params: Parameters<NonNullable<ExecutorDeps['deliverToChannel']>>[0]) => {
+      expect(f.stepRuns[0]).toMatchObject({ status: 'completed', output: { reference: 'saved-enquiry' } })
+      expect(f.runs.get(f.run.id)!.vars[WORKFLOW_SCOPE_EVIDENCE_VAR]).toEqual(params.scopeEvidence)
+      return { status: 'delivered' as const, channelType: 'slack', channelId: params.channelId,
+        messageId: '123.456', receipt: { channelId: params.channelId, attemptedMessages: 1,
+          messageIds: ['123.456'], effect: 'complete' as const, retrySafe: false } }
+    })
+    f.deps.executorDeps.deliverToChannel = delivery
+    expect(await resumeFromApproval(f.deps, f.approvals.rows[0].id, 'approved', USER_ID)).toMatchObject({ status: 'completed' })
+    expect(f.execute).toHaveBeenCalledOnce()
+    expect(delivery).toHaveBeenCalledOnce()
+    expect(delivery.mock.calls[0][0]).toMatchObject({ channelId: 'C_REVIEWED', text: 'Website: Enquiry / saved-enquiry',
+      publication: { runId: f.run.id, stepId: 'read' }, scopeEvidence: { sensitivity: 'confidential', compartments: ['finance', 'legal', 'product'], sources: expect.arrayContaining([
+        ...f.inputEvidence.sources!, ...f.savedEvidence.sources!, ...f.resultEvidence.sources!,
+      ]) } })
+    expect(f.stepRuns[0].output).toMatchObject({ reference: 'saved-enquiry', __delivery: { status: 'delivered',
+      receipt: { messageIds: ['123.456'], retrySafe: false } } })
+    await resumeFromApproval(f.deps, f.approvals.rows[0].id, 'approved', USER_ID)
+    expect(f.execute).toHaveBeenCalledOnce()
+    expect(delivery).toHaveBeenCalledOnce()
+  })
+
+  it.each(['failed', 'denied', 'revoked'] as const)('keeps the successful tool complete after %s notification and never retries it', async outcome => {
+    const f = await toolNotificationFixture()
+    const delivery = vi.fn(async () => {
+      if (outcome === 'failed') throw new Error('provider outcome unknown')
+      return { status: 'skipped' as const, channelType: 'slack', reason: 'delivery_audience_unverified' as const }
+    })
+    f.deps.executorDeps.deliverToChannel = delivery
+    if (outcome === 'revoked') {
+      let calls = 0
+      f.deps.executorDeps.resolveRunScope = async () => ({ ...cancellationRunScope(),
+        inputScopeEvidence: f.inputEvidence,
+        executeWithAuthority: async operation => {
+          if (++calls === 2) throw new Error('Current authority was revoked')
+          return operation()
+        },
+      })
+    }
+    expect(await resumeFromApproval(f.deps, f.approvals.rows[0].id, 'approved', USER_ID)).toMatchObject({ status: 'completed' })
+    expect(f.execute).toHaveBeenCalledOnce()
+    expect(delivery).toHaveBeenCalledTimes(outcome === 'revoked' ? 0 : 1)
+    expect(f.stepRuns[0]).toMatchObject({ status: 'completed', output: { reference: 'saved-enquiry',
+      __delivery: { status: outcome === 'denied' ? 'skipped' : 'failed' } } })
+    await resumeFromApproval(f.deps, f.approvals.rows[0].id, 'approved', USER_ID)
+    expect(f.execute).toHaveBeenCalledOnce()
+  })
+
+  it('sends nothing when the approved tool fails or the decision rejects it', async () => {
+    for (const decision of ['approved', 'rejected'] as const) {
+      const f = await toolNotificationFixture()
+      f.execute.mockRejectedValueOnce(new Error('Read failed'))
+      const delivery = vi.fn()
+      f.deps.executorDeps.deliverToChannel = delivery
+      expect(await resumeFromApproval(f.deps, f.approvals.rows[0].id, decision, USER_ID)).toMatchObject({ status: 'failed' })
+      expect(delivery).not.toHaveBeenCalled()
+      expect(f.execute).toHaveBeenCalledTimes(decision === 'approved' ? 1 : 0)
+    }
+  })
+})
 
 it.each(['none', 'stop', 'lifecycle'] as const)('projects live execution authority while preserving %s cancellation on approval resume', async source => {
   const f = await cancellationFixture()

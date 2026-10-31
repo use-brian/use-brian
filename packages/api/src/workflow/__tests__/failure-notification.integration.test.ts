@@ -15,7 +15,7 @@ describe('[COMP:api/application-lifecycle] workflow failure notification metadat
   afterEach(() => vi.unstubAllGlobals())
   afterAll(async () => { await getAppPool().end(); await pool.end() })
 
-  it.each(['failed', 'timeout'] as const)('sends one fixed %s notice to an unbound group and keeps private details behind real member RLS', async status => {
+  it.each(['failed', 'timeout'] as const)('keeps a %s run visible to its member without any automatic provider call', async status => {
     const role = (await getAppPool().query<{ rolsuper: boolean; rolbypassrls: boolean; active: boolean }>(
       "SELECT r.rolsuper,r.rolbypassrls,row_security_active('workflow_runs'::regclass) AS active FROM pg_roles r WHERE r.rolname=current_user",
     )).rows[0]
@@ -61,16 +61,9 @@ describe('[COMP:api/application-lifecycle] workflow failure notification metadat
     await advanceWorkflowRun(deps, run.id)
     await advanceWorkflowRun(deps, run.id)
     expect(consult).toHaveBeenCalledTimes(1)
-    expect(providerTexts).toHaveLength(1)
+    expect(providerTexts).toHaveLength(0)
     const messages = (await pool.query<{ content: unknown }>(`SELECT m.content FROM session_messages m JOIN sessions s ON s.id=m.session_id WHERE s.assistant_id=$1 AND s.channel_id=$2`, [assistantId, channelId])).rows
-    expect(messages).toHaveLength(1)
-    const persisted = JSON.stringify(messages)
-    for (const hidden of [hiddenName, hiddenStep, hiddenReason, hiddenDetail]) {
-      // Boolean assertions keep protected synthetic payloads out of red logs.
-      expect(providerTexts[0].includes(hidden)).toBe(false)
-      expect(persisted.includes(hidden)).toBe(false)
-    }
-    expect(providerTexts[0]).toBe(`A workflow run ${status}. Review the run in the web app before retrying.\nRun: ${run.id}`)
+    expect(messages).toHaveLength(0)
     const visible = await runs.getRunById(actorId, run.id)
     expect(visible?.status).toBe(status)
     expect(String(visible?.error?.message).includes(hiddenDetail)).toBe(true)

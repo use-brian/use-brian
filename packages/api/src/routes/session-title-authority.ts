@@ -123,9 +123,24 @@ export async function sessionTitleProjection(input:{claims:NativeClaims|null;ses
 /** Original per-row authority and sources are checked again at the actual collection boundary. */
 export async function sessionTitleProjections(input:{claims:NativeClaims|null;sessionIds:readonly string[]}):Promise<Map<string,TitleProjection>>{
  const command=structuredClone(input),prepared:Array<{id:string;projection:TitleProjection}>=[]
+ if(!command.sessionIds.length)return new Map()
+ if(!command.claims)return new Map(command.sessionIds.map(id=>[id,heldTitleProjection()]))
+ // Presence metadata can only withhold a label. Missing canonical parents,
+ // heads and bounded preview candidates need no execution/source frame. This
+ // is not an admission cache: every remaining row takes the complete path
+ // below, and a head/message created after this read waits for the next list.
+ const titleCandidates=new Set((await getPool().query<{id:string}>(`SELECT s.id FROM sessions s
+  WHERE s.id=ANY($1::uuid[]) AND s.workspace_id IS NOT NULL
+   AND (EXISTS(SELECT 1 FROM session_title_heads title_candidates
+     WHERE title_candidates.workspace_id=s.workspace_id AND title_candidates.session_id=s.id)
+    OR EXISTS(SELECT 1 FROM (
+      SELECT role FROM session_messages WHERE workspace_id=s.workspace_id AND session_id=s.id
+       ORDER BY sequence_num LIMIT 10
+     ) preview_candidates WHERE role='user'))`,[command.sessionIds])).rows.map(row=>row.id))
  // Finish each row's frame before opening another. An unrelated blocked row
  // must not consume every connection needed for current source admission.
- for(const id of command.sessionIds)prepared.push({id,projection:await sessionTitleProjection({claims:command.claims,sessionId:id})})
+ for(const id of command.sessionIds)prepared.push({id,projection:titleCandidates.has(id)
+  ?await sessionTitleProjection({claims:command.claims,sessionId:id}):heldTitleProjection()})
  const result=new Map<string,TitleProjection>()
  for(const{id,projection}of prepared){
   if(!projectionAuthorities.has(projection))denied()

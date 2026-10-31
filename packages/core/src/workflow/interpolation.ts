@@ -26,6 +26,8 @@
 const TOKEN = /\{\{\s*([a-zA-Z][a-zA-Z0-9_.]*)\s*\}\}/g
 
 export type InterpolationScope = {
+  /** Successful deterministic tool output, available only to its notification. */
+  prev?: unknown
   vars: Record<string, unknown>
   input: Record<string, unknown>
   /**
@@ -70,7 +72,7 @@ export function interpolateValue<T>(value: T, scope: InterpolationScope): T {
 function resolvePath(scope: InterpolationScope, path: string): unknown {
   const segments = path.split('.')
   const head = segments[0]
-  if (head !== 'vars' && head !== 'input' && head !== 'lastRun') return undefined
+  if (head !== 'vars' && head !== 'input' && head !== 'lastRun' && head !== 'prev') return undefined
   let cursor: unknown = scope[head]
   for (let i = 1; i < segments.length; i++) {
     if (cursor === null || cursor === undefined) return undefined

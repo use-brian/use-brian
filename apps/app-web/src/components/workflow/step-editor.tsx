@@ -417,6 +417,10 @@ export function StepEditor({
                     t={t}
                   />
                 )}
+                {step.type === "tool_call" && (
+                  <ToolNotificationFields step={step} destinations={destinations} channelOptions={channelOptions}
+                    slackChannels={slackChannels} onChange={onChange} disabled={disabled} t={t} />
+                )}
                 <div className="flex flex-col gap-1.5">
                   <FieldLabel
                     label={b.storeOutputAsLabel}
@@ -447,6 +451,34 @@ export function StepEditor({
 }
 
 // ── Document body — the instruction as borderless prose ──────────────────
+
+export function ToolNotificationFields({ step, onChange, destinations, channelOptions, slackChannels, disabled, t }: {
+  step: Extract<WorkflowStep, { type: "tool_call" }>;
+  onChange: (step: WorkflowStep) => void;
+  destinations: ChannelDestination[];
+  channelOptions: WorkspaceChannelOption[];
+  slackChannels: SlackChannelOption[];
+  disabled?: boolean;
+  t: Dictionary;
+}) {
+  const b = t.workflowPage.builder;
+  return <>
+    <WorkflowDeliveryField delivery={step.deliver} destinations={destinations} channelOptions={channelOptions}
+      slackChannels={slackChannels} disabled={disabled} t={t} hint={b.toolNotificationHint}
+      onChange={(delivery) => {
+        if (!delivery) { onChange({ ...step, deliver: undefined, deliveryText: undefined }); return; }
+        if (!("channelId" in delivery) || delivery.channelType === "web") return;
+        onChange({ ...step, deliver: { channelType: delivery.channelType, channelId: delivery.channelId,
+          channelIntegrationId: delivery.channelIntegrationId }, deliveryText: step.deliveryText ?? "" });
+      }} />
+    {step.deliver && <div className="flex flex-col gap-1.5">
+      <FieldLabel label={b.toolNotificationTextLabel} hint={b.toolNotificationTextHint} />
+      <textarea value={step.deliveryText ?? ""} aria-label={b.toolNotificationTextLabel} maxLength={8000}
+        onChange={(event) => onChange({ ...step, deliveryText: event.target.value })} disabled={disabled} rows={5}
+        className="w-full rounded-md border border-input bg-background px-2.5 py-2 text-[16px] md:text-sm outline-none focus:ring-2 focus:ring-ring" />
+    </div>}
+  </>;
+}
 
 function InstructionBody({
   step,
@@ -1911,7 +1943,9 @@ function isRawStepDraft(value: unknown, previous: WorkflowStep): value is Workfl
       !(Array.isArray(value.nextStepId) && value.nextStepId.every((v) => typeof v === "string"))) return false;
   switch (value.type) {
     case "tool_call":
-      return typeof value.toolName === "string" && record(value.arguments);
+      return typeof value.toolName === "string" && record(value.arguments) && optionalString(value.deliveryText)
+        && (value.deliver === undefined || record(value.deliver) && typeof value.deliver.channelType === "string"
+          && typeof value.deliver.channelId === "string" && optionalString(value.deliver.channelIntegrationId));
     case "branch":
       return "condition" in value && edge(value.nextStepIdIfTrue) && edge(value.nextStepIdIfFalse);
     case "wait":
@@ -1951,6 +1985,13 @@ export function RawJsonFields({
     // re-stringify on every keystroke and clobber user edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step.type, step.id]);
+
+  const notification = step.type === "tool_call" ? JSON.stringify([step.deliver, step.deliveryText]) : undefined;
+  useEffect(() => {
+    if (!error) setText(JSON.stringify(step, null, 2));
+    // The output rail edits these fields independently of the raw JSON draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notification]);
 
   const b = t.workflowPage.builder;
   const approvalChannel = step.type === "tool_call" ? step.approval?.deliveryChannel ?? "web" : "web";

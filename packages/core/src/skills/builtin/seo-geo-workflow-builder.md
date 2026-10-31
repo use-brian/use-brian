@@ -112,7 +112,7 @@ Build with the standard workflow authoring tools. For each workflow, call the pr
 
 ### 1. Weekly Portfolio SEO/GEO
 
-Trigger: weekly Monday at 09:00, `Asia/Hong_Kong`. Do not use trigger delivery sugar; the final step has an explicit Slack delivery. Set workflow-level `failureDelivery` to the resolved Slack channel ID.
+Trigger: weekly Monday at 09:00, `Asia/Hong_Kong`. Do not use trigger delivery sugar; the final step has an explicit Slack delivery.
 
 Definition graph:
 
@@ -139,7 +139,7 @@ The only fan-out is the five collector steps. Every branch rejoins at `portfolio
 
 Trigger: task event, `fromBots: true`, lifecycle actions `created`, `tagged`, `updated`, and `reopened`; `match.tags` contains `geo:queued` and `match.currentTags` contains `geo:route:brian`. This requires the queue tag to be part of the firing mutation while the persistent route tag is present.
 
-One `assistant_call` step targets the primary assistant, enforces `seo-geo-task-executor`, grants only durable task read/write tools plus the bounded tools needed by the task at runtime, and receives the live `{{input.event.taskId}}`. It claims, executes, verifies, and ends the task as `done` or `blocked`. Set workflow `failureDelivery` to the resolved Slack ID.
+One `assistant_call` step targets the primary assistant, enforces `seo-geo-task-executor`, grants only durable task read/write tools plus the bounded tools needed by the task at runtime, and receives the live `{{input.event.taskId}}`. It claims, executes, verifies, and ends the task as `done` or `blocked`.
 
 ### 3. GEO Brian Task Notifier
 
@@ -150,11 +150,11 @@ One read-only `assistant_call` reads the live task and posts exactly one termina
 - `COMPLETED`: site/category, result, verification, task link, and originating run.
 - `BLOCKED`: site/category, blocker, work already completed, input/action required, task link, and originating run.
 
-Set workflow `failureDelivery` to the resolved Slack ID so notifier failures are also visible.
+Review notifier failures in the authorized workflow run view.
 
 ### 4. GEO Brian Action Watchdog
 
-Trigger: hourly schedule in `Asia/Hong_Kong`. One `assistant_call` enforces `seo-geo-task-executor` and grants durable task reads/updates. It inspects Brian-routed tasks carrying `geo:queued` or `geo:running`, and changes one to `blocked` only when it has had no progress for more than two hours. It records the exact reason and required next input. The notifier handles Slack. Set workflow `failureDelivery` to the resolved Slack ID.
+Trigger: hourly schedule in `Asia/Hong_Kong`. One `assistant_call` enforces `seo-geo-task-executor` and grants durable task reads/updates. It inspects Brian-routed tasks carrying `geo:queued` or `geo:running`, and changes one to `blocked` only when it has had no progress for more than two hours. It records the exact reason and required next input. The notifier handles Slack.
 
 ## Installation completion
 
