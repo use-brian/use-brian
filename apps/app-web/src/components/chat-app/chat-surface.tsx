@@ -103,6 +103,7 @@ import remarkGfm from "remark-gfm";
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { navigateChatLocation } from "@/lib/chat-last-location";
+import { ChatRecoveryAction } from "./chat-recovery";
 import {
   ArrowUp,
   AtSign,
@@ -203,6 +204,7 @@ import {
   extractMessageText,
   extractPresentedDocuments,
   fetchSessionMessages,
+  isSessionHistoryUnavailable,
   parseMessageAttachments,
   parsePresentedDocumentPayload,
   postRoomMessage,
@@ -391,6 +393,7 @@ type RemoteConfirmation = {
 };
 
 export function ChatSurface({ workspaceId }: { workspaceId: string }) {
+  const [historyRecoverySessionId, setHistoryRecoverySessionId] = useState<string | null>(null);
   const t = useT().chatApp;
   const searchCopy = useT().workspaceSearch;
   const chatLabel = useT().operatorBar.chat;
@@ -1376,6 +1379,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ) return;
         writeTranscriptCache(sessionId, rows);
         chat.loadMessages(rows);
+        setHistoryRecoverySessionId(null);
         return rows;
       } catch (error) {
         if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId
@@ -1388,6 +1392,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             chat.loadMessages([]);
           }
           setError(denied ? t.historyUnavailable : t.errorGeneric);
+          setHistoryRecoverySessionId(isSessionHistoryUnavailable(error) ? sessionId : null);
         }
         return undefined;
       }
@@ -1419,6 +1424,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     sessionEpochRef.current += 1;
     setPendingQuestion(null);
     setStartingShared(false);
+    setHistoryRecoverySessionId(null);
     // Thread switches now arrive from the sidebar panel via the URL, so the
     // in-flight stream (if any) belongs to the OLD thread — kill it before
     // painting the new one, exactly what the old in-surface rail did on
@@ -5297,6 +5303,32 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             {error && (
               <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                 {error}
+                {activeSessionId && historyRecoverySessionId === activeSessionId && <ChatRecoveryAction
+                  key={`${workspaceId}:${activeSessionId}`} workspaceId={workspaceId} sessionId={activeSessionId}
+                  onRecovered={(result) => {
+                    if (sessionIdRef.current !== activeSessionId || result.workspaceId !== workspaceId) return;
+                    resetPane();
+                    cacheCreatedChatSession(workspaceId, {
+                      id: result.sessionId, assistantId: result.assistantId, channelId: result.channelId,
+                      title: t.newChat, lastActive: result.lastActive, status: result.status,
+                      contextGroupId: result.contextGroupId, contextProjectId: result.contextProjectId,
+                      appOrigin: "chat", transport: "web", policy: result.policy, humanCount: 1,
+                      recoveredFromSessionId: activeSessionId,
+                    }, "personal");
+                    sessionAssistantRef.current.set(result.sessionId, result.assistantId);
+                    selectSession(result.sessionId, "personal");
+                    dispatchChatSessionsRefresh(workspaceId);
+                  }}
+                />}
+              </div>
+            )}
+            {(activeRow?.recoveredFromSessionId ?? paneSummary?.recoveredFromSessionId) && (
+              <div className="rounded-md border border-border px-3 py-2 text-sm text-muted-foreground">
+                {t.recovery.notice}{" "}
+                <button type="button" className="min-h-8 max-sm:min-h-11 underline underline-offset-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                  onClick={() => selectSession((activeRow?.recoveredFromSessionId ?? paneSummary?.recoveredFromSessionId)!, "personal")}>
+                  {t.recovery.openOriginal}
+                </button>
               </div>
             )}
           </div>

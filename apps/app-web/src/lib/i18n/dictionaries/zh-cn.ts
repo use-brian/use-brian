@@ -8763,6 +8763,22 @@ export const zhCN: Dictionary = {
     "noProjects": "没有可用的项目"
 },
   chatApp: {
+    recovery: {
+      "action": "恢复聊天",
+      "working": "正在准备恢复",
+      "title": "打开新的私人聊天？",
+      "description": "新私人聊天会使用此对话的助手、部门和项目选择。之前的消息、文件和待处理操作会保留在原聊天，不会复制或重新执行。",
+      "existingDescription": "此聊天已有恢复后的对话。打开同一个私人聊天，不会复制或重新执行之前的工作。",
+      "confirm": "打开新聊天",
+      "openExisting": "打开已恢复聊天",
+      "cancel": "取消",
+      "busy": "此聊天仍在运行。请等待完成或先停止，再进行恢复。",
+      "changed": "聊天或访问设置已更改。请再次选择恢复聊天，查看当前目标。",
+      "unavailable": "当前的访问权限不允许恢复。你可以使用可用的上下文范围开始新聊天。",
+      "failed": "无法确认恢复结果。请再次选择恢复聊天，查找已有的后续对话或安全重试。",
+      "notice": "此私人聊天从新开始。之前的记录仍受保护并保留在原聊天。",
+      "openOriginal": "打开原聊天"
+    },
     historyUnavailable: "你当前的访问权限无法查看此聊天记录。你可以开始新聊天。",
     unarchiveChat: "取消归档对话",
     archiveManage: "管理",

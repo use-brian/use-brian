@@ -66,6 +66,7 @@ function base() {
   };
   return {
     sessionIdRef, sessionEpochRef, chatController, isAuthoritativeRosterDenial,
+    setHistoryRecoverySessionId: vi.fn(), isSessionHistoryUnavailable: () => false,
     switchTo(id: string | null) { sessionEpochRef.current++; sessionIdRef.current = id; },
   };
 }
@@ -85,6 +86,23 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     expect(scope.chat.loadMessages).toHaveBeenCalledWith([]);
     expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
     expect(scope.setError).toHaveBeenCalledWith("History unavailable. Start a new chat.");
+  });
+
+  it.each([false, true])("offers recovery only for the current denied transcript (switched: %s)", async switched => {
+    const response = deferred<unknown>();
+    const scope = {
+      ...base(), transcriptRequestRef: { current: 0 },
+      fetchSessionMessages: vi.fn().mockReturnValue(response.promise), mapTranscriptRows: (rows: unknown) => rows,
+      writeTranscriptCache: vi.fn(), evictTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
+      isSessionHistoryUnavailable: () => true, setError: vi.fn(),
+      t: { errorGeneric: "Try again", historyUnavailable: "History unavailable" },
+    };
+    const pending = evaluate(callback("loadTranscript"), scope)("A");
+    if (switched) scope.switchTo("B");
+    response.reject(new Error("chat_history_failed: 403"));
+    await pending;
+    expect(scope.setHistoryRecoverySessionId).toHaveBeenCalledTimes(switched ? 0 : 1);
+    if (!switched) expect(scope.setHistoryRecoverySessionId).toHaveBeenCalledWith("A");
   });
 
   it.each([false, true])("reports failed history without erasing cache or changing another session (switched: %s)", async (switched) => {

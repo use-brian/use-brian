@@ -47,6 +47,11 @@ describe('[COMP:api/application-persistence] batched title presence withholding'
   expect(mocks.query).toHaveBeenCalledTimes(2)
   expect(mocks.readSession).toHaveBeenCalledExactlyOnceWith(first)
  })
+ it('withholds unsigned projections before metadata discovery',async()=>{
+  expect(await sessionTitleProjections({claims:null,sessionIds:[first]})).toEqual(new Map([[first,{title:null,titleRevisionId:null}]]))
+  expect(mocks.query).not.toHaveBeenCalled()
+  expect(mocks.validateAccess).not.toHaveBeenCalled()
+ })
  it('does not issue a database request for an empty collection',async()=>{
   expect(await sessionTitleProjections({claims,sessionIds:[]})).toEqual(new Map())
   expect(mocks.query).not.toHaveBeenCalled()

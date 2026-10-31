@@ -34,6 +34,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  */
 
 import { authFetch } from "@/lib/auth-fetch";
+import { z } from "zod";
 import type { DocumentAttachment } from "@use-brian/chat-ui";
 import {
   legacyRoomPolicy,
@@ -46,6 +47,8 @@ const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Sidebar list row — mirrors what /api/sessions returns. */
 export type DocSession = {
+  /** Metadata link only; opening it still requires current history admission. */
+  recoveredFromSessionId?: string;
   transport?: string;
   id: string;
   title: string;
@@ -145,6 +148,7 @@ export type DocSessionMessage = {
  * passing the already-parsed object through doesn't need to re-coerce.
  */
 type RawListRow = {
+  recoveredFromSessionId?: string;
   id: string;
   title: string;
   /** Current admitted immutable revision identity; never an allow token. */
@@ -293,6 +297,7 @@ export async function listPersonalSessions(opts: {
     }
     return data.map((r) => ({
       id: r.id,
+      ...(r.recoveredFromSessionId ? { recoveredFromSessionId: r.recoveredFromSessionId } : {}),
       title: r.title,
       ...(r.titleRevisionId !== undefined ? {titleRevisionId: r.titleRevisionId} : {}),
       channelId: r.channelId,
@@ -403,6 +408,7 @@ export async function getChatSessionSummary(
     if (!r?.id || !policy) return null;
     return {
       id: r.id,
+      ...(r.recoveredFromSessionId ? { recoveredFromSessionId: r.recoveredFromSessionId } : {}),
       title: r.title,
       ...(r.titleRevisionId !== undefined ? {titleRevisionId: r.titleRevisionId} : {}),
       channelId: r.channelId,
@@ -830,7 +836,10 @@ export async function fetchSessionMessages(
       `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
       opts?.signal ? { signal: opts.signal } : {},
     );
-    if (!res.ok) throw new Error(`chat_history_failed: ${res.status}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { code?: unknown } | null;
+      throw new SessionHistoryError(res.status, body?.code === "session_history_unavailable" ? body.code : null);
+    }
     const data = (await res.json()) as RawMessageRow[];
     if (!Array.isArray(data)) throw new Error("chat_history_invalid_response");
     return data.map((m) => ({
@@ -850,6 +859,63 @@ export async function fetchSessionMessages(
     if (opts?.strict) throw error;
     return [];
   }
+}
+
+class SessionHistoryError extends Error {
+  constructor(readonly status: number, readonly code: "session_history_unavailable" | null) {
+    super(`chat_history_failed: ${status}`);
+  }
+}
+export function isSessionHistoryUnavailable(error: unknown): boolean {
+  return error instanceof SessionHistoryError && error.status === 403 && error.code === "session_history_unavailable";
+}
+
+const recoveryPreview = z.object({
+  sessionId: z.string().uuid(), workspaceId: z.string().uuid(), revision: z.string().regex(/^[a-f0-9]{64}$/),
+  status: z.enum(["available", "busy"]), continuationSessionId: z.string().uuid().nullable(),
+  contextGroupId: z.string().uuid().nullable(), contextProjectId: z.string().uuid().nullable(),
+}).strict();
+const recoveryResult = z.object({
+  sessionId: z.string().uuid(), assistantId: z.string().uuid(), workspaceId: z.string().uuid(), replayed: z.boolean(),
+  channelId: z.string(), lastActive: z.string().datetime({ offset: true }), status: z.string(),
+  contextGroupId: z.string().uuid().nullable(), contextProjectId: z.string().uuid().nullable(),
+  policy: z.unknown().transform((value, context) => {
+    const parsed = parseChatSessionPolicy(value);
+    if (!parsed) { context.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid recovered chat policy" }); return z.NEVER; }
+    return parsed;
+  }),
+}).strict();
+export type ChatRecoveryResult = z.infer<typeof recoveryResult>;
+class RecoveryError extends Error {
+  constructor(readonly reason: "busy" | "changed" | "unavailable" | "failed") { super(`chat_recovery_${reason}`); }
+}
+export function chatRecoveryFailure(error: unknown): "busy" | "changed" | "unavailable" | "failed" {
+  return error instanceof RecoveryError ? error.reason : "failed";
+}
+async function recoveryResponse(res: Response): Promise<unknown> {
+  const body: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    const code = body && typeof body === "object" && "error" in body ? body.error : null;
+    throw new RecoveryError(code === "session_recovery_busy" ? "busy" : code === "session_recovery_changed" ? "changed"
+      : res.status === 401 || res.status === 403 || res.status === 404 ? "unavailable" : "failed");
+  }
+  return body;
+}
+/** Metadata proposal only. Every apply independently rechecks current authority. */
+export async function inspectChatRecovery(sessionId: string, workspaceId: string, signal?: AbortSignal) {
+  const res = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/recovery?${new URLSearchParams({ workspaceId })}`, { signal });
+  const value = recoveryPreview.parse(await recoveryResponse(res));
+  if (value.sessionId !== sessionId || value.workspaceId !== workspaceId) throw new RecoveryError("unavailable");
+  return value;
+}
+/** Repeating the same source/owner operation returns its existing continuation. */
+export async function recoverChat(sessionId: string, workspaceId: string, expectedRevision: string, signal?: AbortSignal): Promise<ChatRecoveryResult> {
+  const res = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/recovery`, {
+    method: "POST", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspaceId, expectedRevision }),
+  });
+  const value = recoveryResult.parse(await recoveryResponse(res));
+  if (value.workspaceId !== workspaceId || value.sessionId === sessionId) throw new RecoveryError("unavailable");
+  return value;
 }
 
 /**

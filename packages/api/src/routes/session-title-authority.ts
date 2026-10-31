@@ -124,6 +124,7 @@ export async function sessionTitleProjection(input:{claims:NativeClaims|null;ses
 export async function sessionTitleProjections(input:{claims:NativeClaims|null;sessionIds:readonly string[]}):Promise<Map<string,TitleProjection>>{
  const command=structuredClone(input),prepared:Array<{id:string;projection:TitleProjection}>=[]
  if(!command.sessionIds.length)return new Map()
+ if(!command.claims)return new Map(command.sessionIds.map(id=>[id,heldTitleProjection()]))
  // Presence metadata can only withhold a label. Missing canonical parents,
  // heads and bounded preview candidates need no execution/source frame. This
  // is not an admission cache: every remaining row takes the complete path

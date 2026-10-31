@@ -383,17 +383,24 @@ export async function findOrCreateSession(params: CreateSessionParams): Promise<
 
 /** Per-call authenticated personal transport; no request-supplied visibility. */
 export async function createPersonalWebSession(params: Omit<CreateSessionParams, 'visibility' | 'effectiveClearance' | 'contextCompartments'>,
-  principal: PersonalWebSessionPrincipal): Promise<Session> {
-  const client = await getAppPool().connect()
+  principal: PersonalWebSessionPrincipal, transactionClient?: pg.PoolClient): Promise<Session> {
+  const client = transactionClient ?? await getAppPool().connect()
   try {
-    await client.query('BEGIN')
+    if (!transactionClient) await client.query('BEGIN')
+    if (transactionClient) {
+      const role = await client.query<{ allowed: boolean }>(`SELECT NOT EXISTS(
+        SELECT 1 FROM pg_roles r JOIN pg_class c ON c.oid='public.sessions'::regclass
+        WHERE r.rolname IN(session_user,current_user) AND (r.rolsuper OR r.rolbypassrls OR pg_has_role(r.oid,c.relowner,'USAGE'))
+      ) AS allowed`)
+      if (role.rows[0]?.allowed !== true) throw new DerivedScopeError('scope_evidence_missing')
+    }
     await applyRLSGucs(client, principal.actorUserId)
     const admitted = await admitPersonalWebSession(client, params, principal)
     const session = await insertSession({ ...admitted, visibility: 'personal' }, (sql, values) => client.query(sql, values), true)
-    await client.query('COMMIT')
+    if (!transactionClient) await client.query('COMMIT')
     return session
-  } catch (error) { await client.query('ROLLBACK'); throw error }
-  finally { client.release() }
+  } catch (error) { if (!transactionClient) await client.query('ROLLBACK'); throw error }
+  finally { if (!transactionClient) client.release() }
 }
 
 async function findOrCreateSessionInternal(params: CreateSessionParams, authenticatedHuman: boolean): Promise<Session> {

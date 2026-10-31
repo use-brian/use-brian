@@ -8891,6 +8891,22 @@ export const zh: Dictionary = {
     "noProjects": "沒有可用的專案"
 },
   chatApp: {
+    recovery: {
+      "action": "復原聊天",
+      "working": "正在準備復原",
+      "title": "開啟新的私人聊天？",
+      "description": "新私人聊天會使用此對話的助理、部門和專案選擇。之前的訊息、檔案和待處理操作會保留在原聊天，不會複製或重新執行。",
+      "existingDescription": "此聊天已有復原後的對話。開啟同一個私人聊天，不會複製或重新執行之前的工作。",
+      "confirm": "開啟新聊天",
+      "openExisting": "開啟已復原聊天",
+      "cancel": "取消",
+      "busy": "此聊天仍在執行。請等候完成或先停止，再進行復原。",
+      "changed": "聊天或存取設定已變更。請再次選擇復原聊天，檢視目前的目的地。",
+      "unavailable": "目前的存取權限不允許復原。你可以使用可用的內容範圍開始新聊天。",
+      "failed": "無法確認復原結果。請再次選擇復原聊天，尋找既有的後續對話或安全地重試。",
+      "notice": "此私人聊天從新開始。之前的記錄仍受保護並保留在原聊天。",
+      "openOriginal": "開啟原聊天"
+    },
     historyUnavailable: "你目前的存取權限無法查看此聊天記錄。你可以開始新聊天。",
     unarchiveChat: "取消封存對話",
     archiveManage: "管理",

@@ -9165,6 +9165,22 @@ export const en = {
     "noProjects": "No available Projects"
 },
   chatApp: {
+    recovery: {
+      "action": "Recover chat",
+      "working": "Preparing recovery",
+      "title": "Open a fresh private chat?",
+      "description": "A new private chat will use this conversation's assistant, department and project selection. Earlier messages, files and pending actions stay in the original chat and will not be copied or retried.",
+      "existingDescription": "This chat already has a recovery continuation. Open that same private chat without copying or retrying earlier work.",
+      "confirm": "Open fresh chat",
+      "openExisting": "Open recovered chat",
+      "cancel": "Cancel",
+      "busy": "This chat is still running. Wait for it to finish or stop it before recovery.",
+      "changed": "The chat or access settings changed. Choose Recover chat again to review the current destination.",
+      "unavailable": "Recovery is unavailable with your current access. You can start a new chat using an available context.",
+      "failed": "Recovery could not be confirmed. Choose Recover chat again to find the existing continuation or retry safely.",
+      "notice": "This private chat starts fresh. Earlier history remains protected in the original chat.",
+      "openOriginal": "Open original chat"
+    },
     historyUnavailable: "This chat's history is unavailable with your current access. You can start a new chat.",
     unarchiveChat: "Unarchive chat",
     archiveManage: "Manage",
