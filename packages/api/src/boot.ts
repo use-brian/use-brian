@@ -897,6 +897,7 @@ export interface OpenApiEnv {
   /** Both values are required to activate the audited deployment-wide decision override. */
   DECISION_DEFAULT_MODE?: string
   DECISION_DEFAULT_MODEL?: string
+  DECISION_DEFAULT_OPERATIONS?: string
   // Vertex AI backing for the `gemini` provider. When VERTEX_PROJECT_ID is set,
   // boot builds the gemini transport against Vertex (regional host + OAuth)
   // instead of AI Studio. Credentials come from the metadata server (ADC)
@@ -2248,6 +2249,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const operatorDecisionDefault = parseOperatorDecisionDefault(
     env.DECISION_DEFAULT_MODE,
     env.DECISION_DEFAULT_MODEL,
+    env.DECISION_DEFAULT_OPERATIONS,
   )
   let decisionRuntime!: DecisionRuntime
   const workspaceDecisionRouteResolver = createWorkspaceDecisionRouteResolver({
@@ -2291,6 +2293,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       mode: operatorDecisionDefault.mode,
       modelAlias: operatorDecisionDefault.modelAlias,
       scope: 'workspaces_without_explicit_setting',
+      operations: operatorDecisionDefault.operationIds ?? 'all',
       llmFailover: true,
     })
   }

@@ -20,15 +20,17 @@ export const WORKSPACE_DECISION_TOTAL_TIMEOUT_MS = 120_000
 export type OperatorDecisionDefault = {
   mode: 'operator_hybrid'
   modelAlias: string
+  operationIds?: readonly string[]
 }
 
 export function parseOperatorDecisionDefault(
   modeValue: string | undefined,
   modelValue: string | undefined,
+  operationsValue?: string,
 ): OperatorDecisionDefault | undefined {
   const mode = modeValue?.trim()
   const modelAlias = modelValue?.trim()
-  if (!mode && !modelAlias) return undefined
+  if (!mode && !modelAlias && !operationsValue) return undefined
   if (mode !== 'operator_hybrid' || !modelAlias) {
     throw new Error(
       'decision-routing: DECISION_DEFAULT_MODE=operator_hybrid and DECISION_DEFAULT_MODEL are required together',
@@ -38,7 +40,11 @@ export function parseOperatorDecisionDefault(
   if (!row || row.status !== 'active' || !isDecisionModelRow(row)) {
     throw new Error(`decision-routing: operator default '${modelAlias}' is not an active decision model`)
   }
-  return { mode, modelAlias: row.alias }
+  const operationIds = operationsValue?.split(',').map(value => value.trim())
+  if (operationIds?.some(value => !/^[a-z][a-z0-9.-]+$/.test(value))) {
+    throw new Error('decision-routing: operation scope must contain exact operation IDs')
+  }
+  return { mode, modelAlias: row.alias, ...(operationIds ? { operationIds: [...new Set(operationIds)] } : {}) }
 }
 
 export function createWorkspaceDecisionRouteResolver(options: {
@@ -54,7 +60,8 @@ export function createWorkspaceDecisionRouteResolver(options: {
 
     try {
       const setting = await options.store.getSystem(context.workspaceId)
-      if (!setting && options.operatorDefault) {
+      if (!setting && options.operatorDefault
+        && (!options.operatorDefault.operationIds || options.operatorDefault.operationIds.includes(context.operation.id))) {
         const row = registryRow(options.operatorDefault.modelAlias)
         if (
           !row ||

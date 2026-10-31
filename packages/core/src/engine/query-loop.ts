@@ -2,6 +2,7 @@ import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow, withDocumentFlowDebug } from './document-flow-debug.js'
 import { askQuestionSchema } from '../tools/base/ask-question.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
+import { selectInitialToolSchemas, type ToolSelectionOptions } from './tool-selection.js'
 import { createToolDiscovery } from './tool-discovery.js'
 import { getHeapStatistics } from 'node:v8'
 import { renderSystemContext } from '../providers/system-context.js'
@@ -266,6 +267,7 @@ export type QueryLoopOptions = {
   tools: Map<string, Tool>
   /** Host opt-in only for adapters that re-read the session tool array on every send. */
   deferToolSchemas?: boolean
+  toolSelection?: ToolSelectionOptions
   context: ToolContext
   /**
    * Turn-ledger recorder — REQUIRED, deliberately not optional (an optional
@@ -728,7 +730,13 @@ async function* queryLoopCore(
   }))
 
   if (options.deferToolSchemas && toolDefinitions.length > 0) {
-    const discovery = createToolDiscovery(toolDefinitions)
+    const selected = options.toolSelection ? await selectInitialToolSchemas({
+      ...options.toolSelection, definitions: toolDefinitions, messages: options.toolSelection.input?.messages ?? options.messages,
+      runId: `chat-tools-${context.sessionId}-${Date.now()}`, signal: context.abortSignal,
+      assertInputAuthority: options.toolSelection.input?.assertInputAuthority ?? (() => assertModelInputAuthority(context)),
+    }) : undefined
+    if (selected) await options.toolSelection?.onResult?.(selected)
+    const discovery = createToolDiscovery(toolDefinitions, selected?.names)
     tools.set(discovery.tool.name, discovery.tool)
     toolDefinitions = discovery.definitions
     toolDefinitions.push({ name: discovery.tool.name, description: discovery.tool.description,

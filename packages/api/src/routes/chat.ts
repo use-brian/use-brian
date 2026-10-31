@@ -17,7 +17,7 @@ import { dispatchPersistedWebInput } from './_incoming-chat-event.js'
 import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
 import { debugDocumentFlow, executionToolContext, pinAccessCeiling, summarizeProviderError } from '@use-brian/core'
 import { closeProviderError } from './chat-provider-error.js'
-import { createChatPostReplyBoundary, withReplyPublicationBarrier } from './chat-post-reply.js'
+import { createChatPostReplyBoundary, afterReplyPublication } from './chat-post-reply.js'
 import type { FeedGenerationService } from '../content-planning/generation.js'
 import { resolveFeedTurnContext, formatFeedTurnContext } from '../content-planning/collaboration-service.js'
 import { loadFeedReviewContext, recordFeedContextApplication } from '../content-planning/review-context.js'
@@ -7284,6 +7284,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
           userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         })
+        // The selector sees the current user request, not automatic file,
+        // memory or other ambient context. Validate precisely that source.
+        const selectionScope = new ContextScopeAccumulator(executionContext.security.provenance)
+        if (storedUserSource) selectionScope.noteSource(storedUserSource)
         turnTiming.mark('prompt')
         // Tool executions arrive as `tool_start` per call and ONE `tool_result`
         // per batch; the batch's wall-clock is what the turn waited for.
@@ -7313,6 +7317,23 @@ export function chatRoutes(options: WebChatOptions): Router {
           // re-read the session declarations. Snapshot-based adapters do not.
           deferToolSchemas: customLlmRuntime?.routeKind !== 'custom' &&
             registryRow(customLlmRuntime?.selector ?? preparedRun.model.model)?.provider === 'gemini',
+          toolSelection: options.decisionRuntime && storedUserSource && rawMessage?.trim() ? {
+            runtime: options.decisionRuntime, workspaceId: assistant.workspaceId ?? undefined,
+            input: {
+              messages: [bindScopeSources<Message>({ role: 'user', content: rawMessage }, [storedUserSource])],
+              assertInputAuthority: () => assertSourceModelInputAuthority({
+                ...executionToolContext(executionContext, { appId: 'native-tool-selection' }), scopeAccumulator: selectionScope,
+              }),
+            },
+            llm: { provider: backgroundProvider, modelId: backgroundModel },
+            onResult: async selection => {
+              turnTiming.add('tool_selection', selection.durationMs)
+              await recordOverheadUsage({ usageStore: options.usageStore, userId: user.id, assistantId: assistant.id,
+                sessionId: session.id, userMessageId: storedUserMsg.id, model: selection.model, usage: selection.usage,
+                source: 'overhead:classifier', triggerKey: 'chat_tool_selection', ...backgroundUsageAttribution })
+              console.info('[chat] tool selection', { path: selection.path, count: selection.names.length, durationMs: selection.durationMs, failureKind: selection.failureKind })
+            },
+          } : undefined,
           context: {
             ...executionToolContext(executionContext, { appId: 'Use Brian' }),
             workerRuntime: customLlmRuntime
@@ -7574,16 +7595,16 @@ export function chatRoutes(options: WebChatOptions): Router {
             const publishReply = () => flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
             const stateStore = options.sessionStateStore
             if (!stateStore) { await publishReply(); return }
-            // Inference observes the completed turn, independently of the
-            // publication accumulator. Its writes still await the saved reply.
+            // Source-authority reads lock rows too. Complete publication before
+            // inference so its proofs cannot time out behind our own writes.
             const diffAuthority = { execution: executionContext,
               accumulator: new ContextScopeAccumulator(structuredClone(scopeAccumulator.evidence)) }
             let publicationFailed = false
             try {
-              const result = await withReplyPublicationBarrier(async () => {
+              const result = await afterReplyPublication(async () => {
                 try { await publishReply() } catch (error) { publicationFailed = true; throw error }
-              }, beforePersist => runTurnSessionStateDiff({
-                authority: diffAuthority, beforePersist,
+              }, () => runTurnSessionStateDiff({
+                authority: diffAuthority,
                 provider: backgroundProvider, model: backgroundModel, store: stateStore,
                 userMessage: bindScopeSources<Message>({ role: 'user', content: userMessageText }, storedUserSource ? [storedUserSource] : []),
                 assistantTurns: pendingAssistantTurns,

@@ -5,7 +5,7 @@ import type { AccessCeiling, ContentBlock } from '@use-brian/core'
 import { AuthorityChangedError, createAuthorityLease } from '../../context-scope/authority-lease.js'
 import { DeliveryAudienceUnverifiedError } from '../../context-scope/delivery-authority.js'
 import type { TurnLoopResult } from '../../turn/kernel.js'
-import { createChatPostReplyBoundary, withReplyPublicationBarrier } from '../chat-post-reply.js'
+import { createChatPostReplyBoundary, afterReplyPublication } from '../chat-post-reply.js'
 
 const ceiling: AccessCeiling = { workspaceId: 'workspace', userId: 'actor', clearance: 'internal',
   compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: ['assistant'] }
@@ -13,27 +13,25 @@ const content: ContentBlock[] = [{ type: 'text', text: 'Hello.' }]
 const completed: TurnLoopResult = { selection: { kind: 'text', text: 'Hello.' }, finalText: null, aborted: false }
 
 describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
-  it('starts inference before publication finishes but blocks its effects until publication succeeds', async () => {
+  it('does not start locking source reads or inference before publication commits', async () => {
     let publish!: () => void
     const pending = new Promise<void>(resolve => { publish = resolve })
     const events: string[] = []
-    const result = withReplyPublicationBarrier(() => pending, async beforePersist => {
+    const result = afterReplyPublication(() => pending, async () => {
       events.push('inference')
-      await beforePersist()
       events.push('persist')
       return 7
     })
     await Promise.resolve()
-    expect(events).toEqual(['inference'])
+    expect(events).toEqual([])
     publish()
     await expect(result).resolves.toBe(7)
     expect(events).toEqual(['inference', 'persist'])
   })
 
-  it('drains failed publication without allowing inferred state to persist', async () => {
+  it('does not start follow-up work when publication fails', async () => {
     const failure = new Error('Fictional publication failure'), persist = vi.fn()
-    await expect(withReplyPublicationBarrier(async () => { throw failure }, async beforePersist => {
-      await beforePersist()
+    await expect(afterReplyPublication(async () => { throw failure }, async () => {
       persist()
     })).rejects.toBe(failure)
     expect(persist).not.toHaveBeenCalled()

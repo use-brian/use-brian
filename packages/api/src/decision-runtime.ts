@@ -83,6 +83,7 @@ type DecisionUsageTarget = {
 }
 
 const DECISION_USAGE_TARGETS: Readonly<Record<string, DecisionUsageTarget>> = {
+  'chat.tool-selection': { source: 'overhead:classifier', triggerKey: 'chat_tool_selection' },
   'research.intent': { source: 'overhead:classifier', triggerKey: 'adaptive_research_classifier' },
   'research.split': { source: 'overhead:splitter', triggerKey: 'parallel_split_classifier' },
   'memory.usefulness': { source: 'overhead:nudge', triggerKey: 'memory_nudge' },

@@ -30,6 +30,20 @@ describe('[COMP:decisions/workspace-routing] workspace decision route resolver',
     expect(() => parseOperatorDecisionDefault('operator_hybrid', 'not-a-model')).toThrow(/active decision model/)
   })
 
+  it('limits an operator default to explicitly named operations', async () => {
+    const operatorDefault = parseOperatorDecisionDefault('operator_hybrid', 'typesafe-jev-1.13', 'chat.tool-selection')
+    expect(operatorDefault?.operationIds).toEqual(['chat.tool-selection'])
+    expect(() => parseOperatorDecisionDefault(undefined, undefined, 'chat.tool-selection')).toThrow(/required together/)
+    expect(() => parseOperatorDecisionDefault('operator_hybrid', 'typesafe-jev-1.13', 'chat.tool-selection,')).toThrow(/exact operation/)
+    const resolver = createWorkspaceDecisionRouteResolver({
+      store: { getSystem: vi.fn(async () => null) }, configuredAdapterIds: () => ['typesafe'], operatorDefault,
+    })
+    await expect(resolver(context)).resolves.toEqual({ mode: 'llm_only' })
+    await expect(resolver({ ...context, operation: { ...context.operation, id: 'chat.tool-selection' } })).resolves.toMatchObject({
+      mode: 'hybrid', operatorOverride: true,
+    })
+  })
+
   it('makes the operator default authoritative for execution and full-sample shadow for observation', async () => {
     const getSystem = vi.fn(async () => null)
     const resolver = createWorkspaceDecisionRouteResolver({
