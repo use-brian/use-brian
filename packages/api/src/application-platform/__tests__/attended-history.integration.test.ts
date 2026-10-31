@@ -5,6 +5,7 @@ import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN
 import {classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory} from '../../routes/attended-session-context.js'
 import {readSessionMessageAnnotation} from '../../db/session-message-annotations.js'
 import {getAppPool,getPool} from '../../db/client.js'
+import {addSessionMessage} from '../../db/sessions.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {resolveReplyText} from '../../routes/_reply-context.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
@@ -117,6 +118,43 @@ describe.sequential('[COMP:api/application-persistence] actual admitted reply hi
   await before?.();yield{type:'message_start',model:'fixture'};yield{type:'text_delta',text:JSON.stringify({topic_label:'Fictional admitted topic',state:'continue',confidence:0.9})};
   yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:3,outputTokens:2}}
  }}}
+ it('keeps an admitted trivial topic ephemeral without adding history-derived annotation nodes',async()=>{
+  const {f}=await setup(),message=await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'test'}],scope:f.envelope})
+  let calls=0
+  for(let round=0;round<2;round++){
+   const authority=await f.modelContext()
+   const result=await classifyAttendedSessionMessage({authority,session:f.session,message,model:'fixture',provider:classifierProvider(async()=>{calls++})})
+   expect(result.classification).toMatchObject({confidence:0,usage:null})
+   expect(boundScopeSources(result.classification).some(source=>source.resourceKind==='application_field')).toBe(true)
+   expect(result.history.some(row=>row.id===message.id)).toBe(true)
+  }
+  expect(calls).toBe(0)
+  expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toEqual([])
+ })
+ it('still publishes a trivial message annotation when an explicit admitted reply target needs interpretation',async()=>{
+  const {f,rows}=await setup(),message=await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'test'}],scope:f.envelope})
+  let calls=0
+  const result=await classifyAttendedSessionMessage({authority:await f.modelContext(),session:f.session,message,model:'fixture',
+   provider:classifierProvider(async()=>{calls++}),reply:{channelType:'web',replyToMessageId:rows[0].id}})
+  expect(result.reply).not.toBeNull()
+  expect(calls).toBe(1)
+  expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toHaveLength(1)
+ })
+ it('refuses a held trivial input instead of returning an ephemeral topic',async()=>{
+  const {f}=await setup(),message=await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'test'}],scope:f.envelope})
+  const authority=await f.modelContext();let calls=0
+  await f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[message.id])
+  await expect(classifyAttendedSessionMessage({authority,session:f.session,message,model:'fixture',provider:classifierProvider(async()=>{calls++})}))
+   .rejects.toMatchObject({code:'scope_source_changed'})
+  expect(calls).toBe(0)
+  expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toEqual([])
+ })
+ it('keeps non-text messages on the original annotation path even when their text is trivial',async()=>{
+  const {f}=await setup(),message=await addSessionMessage({sessionId:f.session.id,role:'user',content:[
+   {type:'text',text:'test'},{type:'image',source:{type:'base64',mediaType:'image/png',data:'fictional-image'}}],scope:f.envelope})
+  await classifyAttendedSessionMessage({authority:await f.modelContext(),session:f.session,message,model:'fixture',provider:classifierProvider()})
+  expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toHaveLength(1)
+ })
  it('publishes a real immutable topic annotation from the complete admitted history',async()=>{
   const {f,rows}=await setup(),authority=await f.modelContext()
   const result=await classifyAttendedSessionMessage({authority,session:f.session,message:rows.at(-1)!,provider:classifierProvider(),model:'fixture'})

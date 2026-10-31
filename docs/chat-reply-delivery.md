@@ -14,6 +14,16 @@ can continue the last admitted topic with zero confidence when no explicit
 reply target needs interpretation. All original input and final authority checks
 still apply to deterministic results.
 
+For an admitted exact trivial plain-text message without attachments or a
+resolved reply target, the topic result is ephemeral: do not publish a new
+generated annotation revision.
+The complete admitted history is still captured and retained for the result,
+and all current source checks still run. Persisting a redundant annotation adds
+another history-derived node to later annotations and replies, increasing the
+cost of each following turn. Substantive input and resolved replies retain the
+original immutable annotation publication and compare-and-swap behavior, as do
+messages containing non-text content or attachments.
+
 Automatic title generation leaves the placeholder in place while every admitted
 user message is trivial; the first substantive turn can generate a meaningful
 title normally. The state-diff model is skipped only when there are no open
