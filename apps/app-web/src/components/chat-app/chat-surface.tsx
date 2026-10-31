@@ -1382,18 +1382,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           && transcriptRequestRef.current === request) {
           // Transient failures preserve the painted history. Actual access
           // denial must clear protected content instead of retaining it.
-          if (isAuthoritativeRosterDenial(error)) {
+          const denied = isAuthoritativeRosterDenial(error);
+          if (denied) {
             evictTranscriptCache(sessionId);
             chat.loadMessages([]);
           }
-          setError(t.errorGeneric);
+          setError(denied ? t.historyUnavailable : t.errorGeneric);
         }
         return undefined;
       }
     },
     // `chat.loadMessages` is a stable useCallback from the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mapTranscriptRows, t.errorGeneric],
+    [mapTranscriptRows, t.errorGeneric, t.historyUnavailable],
   );
 
   /** True from a switch onto a session with NO cached transcript until its

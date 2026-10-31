@@ -8938,6 +8938,7 @@ export const ja: Dictionary = {
     "noProjects": "利用可能なプロジェクトがありません"
 },
   chatApp: {
+    historyUnavailable: "現在のアクセス権では、このチャットの履歴を表示できません。新しいチャットを開始できます。",
     unarchiveChat: "チャットのアーカイブを解除",
     archiveManage: "管理",
     archiveSettingsDescription: "このワークスペースのアーカイブ済みチャットを表示して元に戻します。",

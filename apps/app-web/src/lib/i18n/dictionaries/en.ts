@@ -9165,6 +9165,7 @@ export const en = {
     "noProjects": "No available Projects"
 },
   chatApp: {
+    historyUnavailable: "This chat's history is unavailable with your current access. You can start a new chat.",
     unarchiveChat: "Unarchive chat",
     archiveManage: "Manage",
     archiveSettingsDescription: "View and unarchive chats in this workspace.",

@@ -8763,6 +8763,7 @@ export const zhCN: Dictionary = {
     "noProjects": "没有可用的项目"
 },
   chatApp: {
+    historyUnavailable: "你当前的访问权限无法查看此聊天记录。你可以开始新聊天。",
     unarchiveChat: "取消归档对话",
     archiveManage: "管理",
     archiveSettingsDescription: "查看并取消归档此工作区的对话。",

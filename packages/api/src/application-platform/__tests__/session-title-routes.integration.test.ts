@@ -13,8 +13,9 @@ import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import * as sessionQueries from '../../db/session-query-reader.js'
+import * as executionContexts from '../../context-scope/execution-context.js'
 import {publishSessionTitle} from '../../db/session-title-store.js'
-import {pinSessionTitleClaims,readCurrentSessionTitle,renameCurrentSessionTitle,resolveSessionTitleAuthority,sessionTitleProjection} from '../../routes/session-title-authority.js'
+import {pinSessionTitleClaims,readCurrentSessionTitle,renameCurrentSessionTitle,resolveSessionTitleAuthority,sessionTitleProjection,sessionTitleProjections} from '../../routes/session-title-authority.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const{assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -124,6 +125,30 @@ describe.sequential('[COMP:api/application-persistence] actual browser title DTO
   for(let n=0;n<10;n++)await addSessionMessage({sessionId:c.session.id,role:'assistant',content:[{type:'text',text:'Fictional earlier assistant text'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
   await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'Fictional eleventh message'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
   expect((await c.get('/'+c.session.id)).body).toMatchObject({title:'New Chat',titleRevisionId:null})
+ })
+ it('withholds empty and beyond-prefix histories without resolving per-row execution authority',async()=>{
+  const c=await setup()
+  const blank=await sessionTitleProjections({claims:c.claims,sessionIds:[c.session.id]})
+  expect(blank.get(c.session.id)).toEqual({title:null,titleRevisionId:null})
+  for(let n=0;n<10;n++)await addSessionMessage({sessionId:c.session.id,role:'assistant',content:[{type:'text',text:'Fictional prefix assistant message'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
+  await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'Fictional outside-prefix user message'}],scope:{...c.f.envelope,userId:c.f.ownerId}})
+  const resolve=vi.spyOn(executionContexts,'resolveExecutionContextSystem')
+  const result=await sessionTitleProjections({claims:c.claims,sessionIds:[c.session.id]})
+  expect(result.get(c.session.id)).toEqual({title:null,titleRevisionId:null})
+  expect(resolve).not.toHaveBeenCalled()
+ })
+ it('keeps a preflight-withheld row held when a saved title is created before collection output',async()=>{
+  const c=await setup()
+  const pause=pauseMetadataRead(sql=>sql.includes('session_title_heads title_candidates'))
+  const pending=sessionTitleProjections({claims:c.claims,sessionIds:[c.session.id]})
+  let result:Awaited<typeof pending>|undefined
+  try{
+   await pause.entered
+   expect(await renameCurrentSessionTitle({claims:c.claims,sessionId:c.session.id,title:'Fictional newly saved label'})).not.toBeNull()
+  }finally{pause.release();result=await pending;pause.restore()}
+  expect(result!.get(c.session.id)).toEqual({title:null,titleRevisionId:null})
+  const current=await sessionTitleProjections({claims:c.claims,sessionIds:[c.session.id]})
+  expect(current.get(c.session.id)).toMatchObject({title:'Fictional newly saved label',titleRevisionId:expect.any(String)})
  })
  it('publishes a manual immutable revision through the actual PATCH and all title DTO readers',async()=>{
   const c=await setup(),response=await c.patch('Fictional authored current title')

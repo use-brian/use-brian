@@ -8891,6 +8891,7 @@ export const zh: Dictionary = {
     "noProjects": "沒有可用的專案"
 },
   chatApp: {
+    historyUnavailable: "你目前的存取權限無法查看此聊天記錄。你可以開始新聊天。",
     unarchiveChat: "取消封存對話",
     archiveManage: "管理",
     archiveSettingsDescription: "查看及取消封存此工作區的對話。",

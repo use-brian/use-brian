@@ -78,13 +78,13 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
       fetchSessionMessages: vi.fn().mockRejectedValue(new Error(`chat_history_failed: ${status}`)),
       mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), evictTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
-      setError: vi.fn(), t: { errorGeneric: "History unavailable" },
+      setError: vi.fn(), t: { errorGeneric: "Try again", historyUnavailable: "History unavailable. Start a new chat." },
     };
     await evaluate(callback("loadTranscript"), scope)("A");
     expect(scope.evictTranscriptCache).toHaveBeenCalledWith("A");
     expect(scope.chat.loadMessages).toHaveBeenCalledWith([]);
     expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
-    expect(scope.setError).toHaveBeenCalledWith("History unavailable");
+    expect(scope.setError).toHaveBeenCalledWith("History unavailable. Start a new chat.");
   });
 
   it.each([false, true])("reports failed history without erasing cache or changing another session (switched: %s)", async (switched) => {
