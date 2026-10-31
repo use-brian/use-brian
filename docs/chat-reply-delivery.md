@@ -85,6 +85,23 @@ the contention contract below.
 
 ## Database contention
 
+Native transcript publication may reuse the complete private Memory evaluation
+frame within its own SQL statement, under the original publication locks. Only
+a fully admitted frame for the original source tuple can seed the evaluator's
+worklist. Original native points use the exact current scopes admitted by that
+complete private frame; a missing point still invokes its canonical reader.
+Field evaluations, retained-source comparisons, mutation grants and output
+scope checks still run. Unsupported or incomplete cohorts use
+the canonical evaluator. The private worklist is never accepted from an app or
+exposed to callers, and is rebuilt for every statement, including a later write
+in the same transaction. Regression coverage profiles a query-backed publication
+and verifies that a changed source is refused by the next statement.
+The transcript dependency trigger can also use the exact current field scopes
+from a new private frame obtained during that trigger invocation. It retains
+the canonical field reader for unsupported roots or a changed reader contract.
+The original retained-edge, privacy, output-label and external-source checks
+still execute for every row; no proof is shared between trigger invocations.
+
 The 2026-10-29 home-server incident included a deadlock between a workspace
 picker update and session-history admission. Increasing the API pools to 16
 removed checkout timeouts after the 23:33 HKT restart, but 49 SQL statement
