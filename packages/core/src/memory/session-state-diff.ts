@@ -1,4 +1,5 @@
 import { boundScopeSources } from '../security/source-evidence.js'
+import { isTrivialChatMessage } from '../classification/trivial-chat.js'
 import { DerivedScopeError } from '../security/derived-scope.js'
 import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
 /**
@@ -154,6 +155,12 @@ export async function runSessionStateDiff(
     opts.authority.accumulator.note({ sources: [...opts.openCommitments, ...opts.recentTurns].flatMap(row => boundScopeSources(row)) })
   }
   await assertInputAuthority(opts.assertInputAuthority)
+  if (opts.openCommitments.length === 0 && opts.recentTurns.every(turn => {
+    if (turn.role !== 'user' && turn.role !== 'assistant') return false
+    if (typeof turn.content === 'string') return isTrivialChatMessage(turn.content)
+    return turn.content.every(block => block.type === 'text')
+      && isTrivialChatMessage(turn.content.map(block => block.type === 'text' ? block.text : '').join('\n'))
+  })) return { upserts: 0, resolves: 0, usage: null, model: null }
   const derivation = opts.authority ? structuredClone({ producer: 'session_state:diff-pass',
     sources: opts.authority.accumulator.evidence.sources ?? [] }) : undefined
 

@@ -3,6 +3,7 @@ import {publishNativeSessionMessageBatch} from '../../db/session-message-publica
 import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import {boundScopeSources,type LLMProvider} from '@use-brian/core'
 import {getAppPool,getPool} from '../../db/client.js'
+import {addSessionMessage} from '../../db/sessions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {publishSessionTitle,readSessionTitle} from '../../db/session-title-store.js'
@@ -26,6 +27,20 @@ describe.sequential('[COMP:api/application-persistence] actual attended title mo
  afterEach(async()=>{await fixture?.cleanup();fixture=undefined})
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
  async function setup(){fixture=await persistentContextFixture();const f=fixture;await f.history();return f}
+ it('keeps trivial chat untitled until an admitted substantive user turn arrives',async()=>{
+  fixture=await persistentContextFixture();const f=fixture
+  await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'test'}],scope:f.envelope})
+  await addSessionMessage({sessionId:f.session.id,role:'assistant',content:[{type:'text',text:'I’m here.'}],scope:f.envelope})
+  const llm=provider()
+  expect(await generateAttendedSessionTitle({authority:await f.modelContext(),provider:llm.value,model:'fixture'}))
+   .toMatchObject({title:null,usage:null,model:null,written:false})
+  expect(llm.inputs).toEqual([])
+  expect((await f.pool.query('SELECT scope_revision_id FROM session_title_heads WHERE session_id=$1',[f.session.id])).rows).toEqual([])
+  await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'Fictional planning request'}],scope:f.envelope})
+  expect(await generateAttendedSessionTitle({authority:await f.modelContext(),provider:llm.value,model:'fixture'}))
+   .toMatchObject({title:'Fictional generated session title',written:true})
+  expect(llm.inputs).toHaveLength(1)
+ })
  it('retains complete actual query and consumed memory ancestry before title text compaction',async()=>{
   const f=await setup(),authority=await f.modelContext(),memory=await f.memory('Fictional consumed turn memory')
   const row=await createDbMemoryStore().getById(authority.execution.security.access,memory.id);expect(row).not.toBeNull()
