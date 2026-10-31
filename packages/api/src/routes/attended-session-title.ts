@@ -4,6 +4,7 @@ import {getPool} from '../db/client.js'
 import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
 import {publishSessionTitle,readSessionTitle,sessionTitleHead} from '../db/session-title-store.js'
 import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
+import {isTrivialChatMessage} from '@use-brian/core'
 
 function extractPlainText(content:unknown):string {
  if(typeof content==='string')return content
@@ -31,6 +32,10 @@ export async function generateTitle(provider: LLMProvider, messages: readonly {r
   // gave them a context-carrying placeholder (e.g. a bracketed channel
   // prefix) that "New Chat" would erase — see the auto-title call site.
   if (!excerpt) return { title: null, usage: null, model: null }
+  const userMessages = filteredMessages.filter(message => message.role === 'user')
+  if (userMessages.length > 0 && userMessages.every(message => isTrivialChatMessage(message.text))) {
+    return { title: null, usage: null, model: null }
+  }
 
   let rawTitle = ''
   let carriesToolUse = false

@@ -37,6 +37,13 @@ function makeProvider(rawText: string, responseModel = 'gemini-3.5-flash-lite'):
 }
 
 describe('[COMP:workers/research-classifier] detectOperateSiteIntent', () => {
+  it.each(['test','ping','pong'])('skips research work for the exact %s probe under current authority',async message=>{
+    const provider=makeProvider('{"research":true,"effort":"focused"}'),check=vi.fn(async()=>{})
+    expect(await classifyResearchIntent({provider,message,assertInputAuthority:check})).toMatchObject({research:false,usage:null,model:null})
+    expect(provider.stream).not.toHaveBeenCalled()
+    expect(check).toHaveBeenCalledTimes(2)
+  })
+
   it('hits on a strong verb with a named site (the 2026-07-13 incident message)', () => {
     expect(
       detectOperateSiteIntent('can you browse luma for me to check whats current events in hk?'),

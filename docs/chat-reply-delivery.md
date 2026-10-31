@@ -4,7 +4,46 @@ Brian must deliver a saved, currently authorized reply both on its live stream
 and after a browser reload. A database row alone does not establish that the
 current reader may see its source-dependent content.
 
+## Trivial conversation overhead
+
+Exact short greetings, acknowledgments and connectivity probes (`test`, `ping`,
+`pong`) use a conservative allowlist. Substantive requests such as `test my API`
+or `compare prices` still use the normal model paths, regardless of length.
+Research assessment skips its provider on these messages. Topic classification
+can continue the last admitted topic with zero confidence when no explicit
+reply target needs interpretation. All original input and final authority checks
+still apply to deterministic results.
+
+Automatic title generation leaves the placeholder in place while every admitted
+user message is trivial; the first substantive turn can generate a meaningful
+title normally. The state-diff model is skipped only when there are no open
+commitments and every supplied user/assistant turn is plain trivial text. An open
+commitment, tool block, substantive answer or non-text content keeps the diff
+pass, so an acknowledgment can still resolve an existing commitment.
+
 ## Streaming under backpressure
+
+### Latency diagnostics
+
+The `turn_timings` event and `[chat] turn timings` line include request-relative
+milestones (`*_at_ms`) for loop start, first delivered reasoning, first delivered
+text, generation completion, reply publication, loop return and client completion. A missing milestone
+means it was not reached. Repeated deltas never overwrite the first timestamp.
+Counters separately time research and topic classification, history reads,
+compaction, reply publication, session-state diff and title generation. These
+counters overlap the enclosing phases and must not be added to the phase totals.
+In particular, the existing `loop_ms` can include awaited post-loop state work;
+use the publication and loop-return milestones to identify that tail.
+
+Each existing `[stream]` summary also reports first chunk/reasoning/text arrival,
+chunk counts, and time waiting for the inner iterator versus time suspended at
+`yield` for its consumer. Inner-iterator time includes provider setup, authority
+checks and network waits; it is not a measurement of remote inference alone.
+Consumer time includes delivery authorization and backpressure. First-arrival
+times are stream-relative and can include earlier consumer waits. Summaries are
+emitted on completion, errors and cancellation, use monotonic clocks, and contain
+only counts, durations and a registry model alias (`other` for custom models).
+They never log prompts, replies, reasoning, tool arguments or endpoint URLs.
 
 The Codex transport receives notifications independently of the query-loop
 consumer. When authorization or delivery is slower than incoming notifications,
@@ -45,6 +84,23 @@ row; this never changes turn heartbeat or publication guarantees. See
 the contention contract below.
 
 ## Database contention
+
+Native transcript publication may reuse the complete private Memory evaluation
+frame within its own SQL statement, under the original publication locks. Only
+a fully admitted frame for the original source tuple can seed the evaluator's
+worklist. Original native points use the exact current scopes admitted by that
+complete private frame; a missing point still invokes its canonical reader.
+Field evaluations, retained-source comparisons, mutation grants and output
+scope checks still run. Unsupported or incomplete cohorts use
+the canonical evaluator. The private worklist is never accepted from an app or
+exposed to callers, and is rebuilt for every statement, including a later write
+in the same transaction. Regression coverage profiles a query-backed publication
+and verifies that a changed source is refused by the next statement.
+The transcript dependency trigger can also use the exact current field scopes
+from a new private frame obtained during that trigger invocation. It retains
+the canonical field reader for unsupported roots or a changed reader contract.
+The original retained-edge, privacy, output-label and external-source checks
+still execute for every row; no proof is shared between trigger invocations.
 
 The 2026-10-29 home-server incident included a deadlock between a workspace
 picker update and session-history admission. Increasing the API pools to 16

@@ -177,18 +177,42 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
  */
 export function wrapLog(options?: { verbose?: boolean }): StreamWrapper {
   return (inner) => async function* (request) {
-    const start = Date.now()
+    const start = performance.now()
     let chunkCount = 0
-
-    for await (const chunk of inner(request)) {
-      chunkCount++
-      if (options?.verbose) {
-        console.debug(`[stream] chunk #${chunkCount}: ${chunk.type}`)
+    let consumerMs = 0
+    let firstChunkMs: number | undefined
+    let firstThinkingMs: number | undefined
+    let firstTextMs: number | undefined
+    let outcome = 'cancelled'
+    try {
+      for await (const chunk of inner(request)) {
+        const received = performance.now()
+        firstChunkMs ??= received - start
+        if (chunk.type === 'thinking_delta') firstThinkingMs ??= received - start
+        if (chunk.type === 'text_delta') firstTextMs ??= received - start
+        chunkCount++
+        if (options?.verbose) {
+          console.debug(`[stream] chunk #${chunkCount}: ${chunk.type}`)
+        }
+        // Async generators pause here while the sink checks authority and
+        // delivers the chunk. Do not attribute that wait to the provider.
+        try { yield chunk } finally { consumerMs += performance.now() - received }
       }
-      yield chunk
+      outcome = 'completed'
+    } catch (error) {
+      outcome = 'error'
+      throw error
+    } finally {
+      const elapsed = performance.now() - start
+      console.debug(`[stream] ${outcome === 'completed' ? 'complete' : outcome}: ${chunkCount} chunks in ${Math.round(elapsed)}ms`, {
+        model: registryRow(request.model) ? request.model : 'other',
+        upstream_wait_ms: Math.round(Math.max(0, elapsed - consumerMs)),
+        consumer_wait_ms: Math.round(consumerMs),
+        ...(firstChunkMs === undefined ? {} : { first_chunk_ms: Math.round(firstChunkMs) }),
+        ...(firstThinkingMs === undefined ? {} : { first_thinking_ms: Math.round(firstThinkingMs) }),
+        ...(firstTextMs === undefined ? {} : { first_text_ms: Math.round(firstTextMs) }),
+      })
     }
-
-    console.debug(`[stream] complete: ${chunkCount} chunks in ${Date.now() - start}ms`)
   }
 }
 

@@ -89,6 +89,26 @@ function makeFlakyProvider(outputs: string[]): LLMProvider {
 }
 
 describe('[COMP:memory/session-state-diff] runSessionStateDiff', () => {
+  it('skips the diff model for a plain trivial exchange with no open commitments',async()=>{
+    const store=makeStore(),provider=makeProvider('throw'),stream=vi.spyOn(provider,'stream'),check=vi.fn(async()=>{})
+    expect(await runSessionStateDiff({provider,model:'flash',sessionId:'s1',userId:'u1',assistantId:'a1',store,
+      recentTurns:[{role:'user',content:'test'},{role:'assistant',content:[{type:'text',text:'I’m here.'}]}],
+      openCommitments:[],assertInputAuthority:check})).toEqual({upserts:0,resolves:0,usage:null,model:null})
+    expect(check).toHaveBeenCalledOnce()
+    expect(stream).not.toHaveBeenCalled()
+    expect(store.upsert).not.toHaveBeenCalled()
+    expect(store.resolve).not.toHaveBeenCalled()
+  })
+
+  it.each(['open','substantive','tool'] as const)('retains the diff pass for %s context',async kind=>{
+    const store=makeStore(),provider=makeProvider('{"upserts":[],"resolves":[]}'),stream=vi.spyOn(provider,'stream')
+    await runSessionStateDiff({provider,model:'flash',sessionId:'s1',userId:'u1',assistantId:'a1',store,
+      recentTurns:[{role:'user',content:'yes'},{role:'assistant',content:kind==='tool'
+        ?[{type:'tool_use',id:'fictional-call',name:'fictionalTool',input:{}}]
+        :kind==='substantive'?'I will follow up tomorrow.':'okay'}],openCommitments:kind==='open'?[record()]:[]})
+    expect(stream).toHaveBeenCalledOnce()
+  })
+
   it('returns zero counts on empty input', async () => {
     const store = makeStore()
     const res = await runSessionStateDiff({
