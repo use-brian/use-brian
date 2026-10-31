@@ -178,6 +178,7 @@ import {
   restoreAssistantActivity,
 } from "@/lib/activity-receipt";
 import { authFetch } from "@/lib/auth-fetch";
+import { createChatStreamObserver } from "@/lib/chat-stream-observation";
 import { useT, useLocale, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/skeleton";
@@ -1700,9 +1701,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const controllerRun = chatController.capture();
     if (reconnectWanted) chatController.reconnect(controllerRun);
     const epoch = sessionEpochRef.current;
+    const followObserver = createChatStreamObserver(workspaceId);
     const unregisterControllerCleanup = chatController.registerCleanup(
       controllerRun,
       () => {
+        followObserver.release();
         cancelled = true;
         controller.abort();
       },
@@ -2028,6 +2031,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // turn is over, or was never running) and never reopens it. A
           // room's follow stream has no `done`.
           if (panePolicy.presence) break;
+          followObserver.release();
           sawDone = true;
           if (reconnectWanted) chatController.complete(controllerRun);
           setReconnectSessionId(null);
@@ -2083,6 +2087,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           }
           return;
         }
+        followObserver.observe(sessionId);
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         const buf = createSSEBuffer();
@@ -2096,6 +2101,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       } catch {
         // Transport error / abort — reconnect below (or unmount).
       } finally {
+        followObserver.release();
         // Follow mode never closes server-side on idle, so a room close means
         // a deploy / restart / network blip: re-open after a beat. A
         // personal session's reconnect stream reopens only when the body
@@ -2112,6 +2118,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       }
     })();
     return () => {
+      followObserver.release();
       unregisterControllerCleanup();
       cancelled = true;
       controller.abort();
@@ -2736,6 +2743,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       /** The body closed with no terminal event: the turn is still running
        *  server-side and the session stream has taken over painting it. */
       let turnDisconnected = false;
+      const directObserver = createChatStreamObserver(workspaceId);
+      const unregisterDirectObserver = chatController.registerCleanup(controllerRun, directObserver.release);
+      try {
       await stream.start({
       url: `${API_URL}/api/chat`,
       authFetch: (url, init) => authFetch(String(url), init),
@@ -2796,6 +2806,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       onEvent: (event) => {
         const payload = coercePayload(event.data);
         if (!ownsSend()) {
+          directObserver.release();
           // A taken input is durable even if its stream no longer owns the
           // pane. Acknowledge it without splicing into a different visit.
           if (event.event === "input_applied" && owningSessionId && typeof payload.inputId === "string") {
@@ -2803,6 +2814,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           }
           return;
         }
+        if (owningSessionId) directObserver.observe(owningSessionId);
         switch (event.event) {
           case "title_update": {
             // Titles may arrive after the durable reply has settled. Read the
@@ -2814,6 +2826,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             const id = typeof payload.sessionId === "string" ? payload.sessionId : null;
             if (id && !owningSessionId) {
               owningSessionId = id;
+              directObserver.observe(id);
               if (chatController.adoptSession(controllerRun, id)) {
                 controllerRun = { ...controllerRun, sessionId: id };
               }
@@ -3343,6 +3356,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
       },
       onDone: () => {
+        directObserver.release();
         if (!ownsSend()) return;
         chatController.complete(controllerRun);
         const settledSessionId = owningSessionId;
@@ -3382,6 +3396,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         dispatchChatSessionsRefresh(workspaceId);
       },
       onDisconnect: () => {
+        directObserver.release();
         if (!ownsSend()) return;
         chatController.disconnect(controllerRun);
         // The transport closed with no `done` / `error`: a request-timeout
@@ -3424,6 +3439,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         setReconnectNotice(true);
       },
       onError: () => {
+        directObserver.release();
         if (!ownsSend()) return;
         chatController.fail(controllerRun, t.errorGeneric);
         turnFailed = true;
@@ -3441,6 +3457,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         dispatchChatSessionsRefresh(workspaceId);
       },
       });
+      } finally {
+        directObserver.release();
+        unregisterDirectObserver();
+      }
       if (!ownsSend()) return false;
       if (
         turnFailed ||

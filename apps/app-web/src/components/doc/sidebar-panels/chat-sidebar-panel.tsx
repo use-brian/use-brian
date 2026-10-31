@@ -81,6 +81,7 @@ import { chatArchivedSessionsCacheKey, chatSessionsCacheKey, chatSharedSessionsC
 import { isRoomUnread } from "@/lib/chat-seen";
 import { navigateChatLocation } from "@/lib/chat-last-location";
 import { requestSidebarClose } from "@/lib/sidebar-close";
+import { needsChatActivityPoll, useObservedChatSessions } from "@/lib/chat-stream-observation";
 
 /** Compact single-line rows, with a 44px phone target (M3) and room for the row menu. */
 const rowCls = (active: boolean) =>
@@ -314,14 +315,14 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const ChannelsIcon = channelsOpen ? FolderOpen : Folder;
   const visibleAmbient = ambientRows;
   const showAmbient = othersOpen;
-  const hasWorkingRoom =
-    (view === "workspace" ? sharedRows ?? [] : rows ?? []).some((row) =>
-      activityBySession[row.id]?.working ?? row.status === "running") ||
-    Object.values(activityBySession).some((activity) => activity.working);
+  const observedSessions = useObservedChatSessions(workspaceId);
+  const hasWorkingRoom = needsChatActivityPoll(
+    view === "workspace" ? sharedRows ?? [] : rows ?? [], activityBySession, observedSessions,
+  );
 
   // A room may finish after the user switches to another room, at which point
   // neither of the old room's page streams remains to deliver turn_completed.
-  // Poll only while work is known live; the authoritative list status then
+  // Poll only for work without a live observer; the authoritative list status then
   // settles the old row and stops this interval.
   useEffect(() => {
     if (!hasWorkingRoom) return;

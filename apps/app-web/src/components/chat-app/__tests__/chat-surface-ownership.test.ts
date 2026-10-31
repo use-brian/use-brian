@@ -76,6 +76,10 @@ function base() {
   };
   return {
     sessionIdRef, sessionEpochRef, chatController, isAuthoritativeRosterDenial,
+    workspaceId: "fictional-workspace",
+    createChatStreamObserver: () => ({ observe: vi.fn(), release: vi.fn() }),
+    directObserver: { observe: vi.fn(), release: vi.fn() },
+    followObserver: { observe: vi.fn(), release: vi.fn() },
     setHistoryRecoverySessionId: vi.fn(), isSessionHistoryUnavailable: () => false,
     switchTo(id: string | null) { sessionEpochRef.current++; sessionIdRef.current = id; },
   };
