@@ -308,3 +308,43 @@ native-library loading fault. API restart count remained zero. No PostgreSQL
 errors, statement timeouts or deadlocks appeared between deployment and the
 two tests. No production configuration or service changes were made by the
 investigating agent.
+
+## Frontend native-crash root cause and packaging fix
+
+Further inspection of the deployed libvips ELF established the loading defect:
+`DT_INIT` still points to `0x25c`, while `.init` has moved to `0x13c7348` in a
+new non-executable load segment. The crash instruction pointer is at the stale
+initializer. The Nix package uses autoPatchelf with patchelf 0.15.2. This matches
+[upstream patchelf issue 639](https://github.com/NixOS/patchelf/issues/639), fixed
+in [0.19.0](https://github.com/NixOS/patchelf/blob/0.19.1/ChangeLog.md).
+
+A disposable Linux dependency tree used the same fresh official Sharp 0.35.4
+and libvips 1.3.3 artifacts and the deployed GCC library paths. Patching them
+with 0.15.2 reproduced SIGSEGV (exit 139); patching fresh copies with 0.19.1
+passed PNG decode, resize and WebP encoding for both frontend apps. The same
+Next-resolved image checks passed on Darwin. A separate Nix regression using
+the package's actual pre-fixup selection and autoPatchelf hooks successfully
+loaded libvips and verified version 8.18.6 after fixup.
+
+The repair lives in [nix-config PR 3](https://github.com/awcjack/nix-config/pull/3),
+on `fix/chat-speed`, under `pkgs/brian-server/`:
+
+- Pin content-hashed patchelf 0.19.1 locally to the Brian package and select it
+  before both normal fixup and autoPatchelf. Shared nixpkgs inputs stay pinned.
+- Run an image conversion install check after fixup, resolving Sharp through
+  each app's Next package. Repeat this in the existing runtime flake check.
+- Add `checks.x86_64-linux.brian-native-images`, a fast regression on the exact
+  affected DSO and real package fixup selection.
+- Retain the deployed application revision `471078e33` so the package rebuild
+  includes the chat-speed changes.
+
+The previous runtime check loaded only core's separate Sharp 0.34.5 and fetched
+the frontend root, so it never exercised Next's lazy native image dependency.
+No application dependency downgrade or image-optimization bypass is needed.
+Rebuild from original dependencies; applying a new patcher to a library whose
+initializer was already corrupted does not restore the overwritten bytes.
+
+No production package, file or service was changed. The frontend retained one
+automatic restart throughout the isolated tests. The complete application
+package and live image endpoint still require operator rebuild/deployment and
+verification; isolated native regressions do not claim a completed rollout.
