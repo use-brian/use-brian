@@ -2,7 +2,8 @@
 
 | COMP tag | doc path | source path | test path |
 |---|---|---|---|
-| api/workspace-legacy-cleanup | docs/plans/reviewed-legacy-cleanup.md | packages/api/src/workspace-access/legacy-cleanup.ts; packages/api/migrations/8145_reviewed_legacy_cleanup.sql; packages/api/src/routes/workspace-access.ts | packages/api/src/workspace-access/__tests__/legacy-cleanup.integration.test.ts |
+| api/workspace-legacy-cleanup | docs/plans/reviewed-legacy-cleanup.md | packages/api/src/workspace-access/legacy-cleanup.ts (reviewed General workflow history, exact department erasure consent, legacy schedule bindings, unclassified erasure and bounded blockers); packages/api/migrations/8145_reviewed_legacy_cleanup.sql; packages/api/migrations/8146_explicit_unclassified_legacy_erasure.sql; packages/api/migrations/8147_selected_department_erasure.sql; packages/api/src/routes/workspace-access.ts | packages/api/src/workspace-access/__tests__/legacy-cleanup.integration.test.ts |
+| api/workflows-route | docs/plans/workflow-workspace-routes.md | packages/api/src/routes/workflows.ts | packages/api/src/routes/__tests__/workflows.test.ts |
 | api/workspace-scope-review | docs/plans/scope-review-derived-revisions.md | packages/api/src/workspace-access/scope-review.ts; packages/api/src/workspace-access/scope-review-registry.ts; packages/api/migrations/8143_scope_review_derived_revisions.sql; packages/api/migrations/8144_scope_review_removed_messages.sql | packages/api/src/workspace-access/__tests__/scope-review.integration.test.ts; packages/api/src/workspace-access/__tests__/scope-review-revisions.integration.test.ts; packages/api/src/workspace-access/__tests__/scope-review-removed-messages.integration.test.ts |
 
 Drawing-library coverage includes a direct JSON/search picker for local origins,

@@ -594,12 +594,13 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
   })
 
   // ── GET /workflows/:id ─────────────────────────────────────────────────
-  router.get('/workflows/:id', async (req, res) => {
+  router.get(['/workflows/:id','/workspaces/:workspaceId/workflows/:id'], async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return unauthorized(res)
+    if (typeof req.params.id !== 'string') return notFound(res, 'Workflow not found')
 
     const workflow = await opts.workflowStore.getById(userId, req.params.id)
-    if (!workflow) return notFound(res, 'Workflow not found')
+    if (!workflow || req.params.workspaceId && req.params.workspaceId !== workflow.workspaceId) return notFound(res, 'Workflow not found')
 
     // The ACTUAL scheduled-trigger rows, any creator — lets the builder
     // show what really fires this workflow (and flag drift against the
@@ -774,7 +775,7 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     }
 
     const existing = await opts.workflowStore.getById(userId, req.params.id)
-    if (!existing) return notFound(res, 'Workflow not found')
+    if (!existing || req.params.workspaceId && req.params.workspaceId !== existing.workspaceId) return notFound(res, 'Workflow not found')
     if (!await contextActivationReady(
       res,
       existing.workspaceId,
@@ -937,8 +938,8 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       ...(updateWarnings.length > 0 ? { warnings: updateWarnings } : {}),
     })
   }
-  router.post('/workflows/:id/schedule-review', updateWorkflow)
-  router.patch('/workflows/:id', updateWorkflow)
+  router.post(['/workflows/:id/schedule-review','/workspaces/:workspaceId/workflows/:id/schedule-review'], updateWorkflow)
+  router.patch(['/workflows/:id','/workspaces/:workspaceId/workflows/:id'], updateWorkflow)
 
   // ── DELETE /workflows?workspaceId= — bulk delete ───────────────────────
   //
