@@ -30,6 +30,7 @@ import type { SessionContextAuthority } from './session-state-types.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
 import type { DecisionAnswer, DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
+import { DecisionProviderError } from '../decisions/types.js'
 
 export type TopicState = 'continue' | 'shift' | 'resume' | 'cross-topic'
 
@@ -418,6 +419,9 @@ async function classifyTopicCurrent(
   } catch (error) {
     if (isInputAuthorityError(error)) throw error
     await assertInputAuthority(opts.assertInputAuthority)
+    if (error instanceof DecisionProviderError && error.kind === 'timeout') {
+      console.warn('[topic-classifier] decision deadline exceeded; using uncategorized fallback')
+    }
     return { ...FALLBACK }
   }
 }
