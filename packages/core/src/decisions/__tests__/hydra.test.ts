@@ -10,6 +10,7 @@ import {
 import type { DecisionProvider, DecisionResponse } from '../types.js'
 import { DecisionProviderError } from '../types.js'
 import { decisionRequest } from './fixtures.js'
+import { createTypeSafeDecisionProvider } from '../adapters/typesafe.js'
 
 type Result = { verdict: 'ordinary' | 'research' | 'safe'; generated?: string }
 
@@ -236,7 +237,7 @@ describe('[COMP:decisions/hydra] bounded cascade', () => {
         model: { catalogId: 'fixture-llm', wireId: 'fixture-llm-v1' },
       }), 25)
     }))
-    const result = await executeDecisionCascade({
+    await expect(executeDecisionCascade({
       request: decisionRequest(),
       operation: operation({ complete }),
       route: {
@@ -245,10 +246,8 @@ describe('[COMP:decisions/hydra] bounded cascade', () => {
         profile: short,
         allowSyntheticProfile: true,
       },
-    })
-    expect(result).toMatchObject({ path: 'safe_default', failureKind: 'timeout' })
-    expect([1, 2]).toContain(result.attempts)
-    expect(complete).toHaveBeenCalledTimes(result.attempts - 1)
+    })).rejects.toMatchObject({ kind: 'timeout' })
+    expect(complete.mock.calls.length).toBeLessThanOrEqual(1)
   })
 
   it('records every attempt exactly once with stage and attribution', async () => {
@@ -367,5 +366,75 @@ describe('[COMP:decisions/hydra] bounded cascade', () => {
     expect(() => validateDecisionRoute(request, {
       mode: 'shadow', primary, profile: profile('shadow'), operatorOverride: true,
     })).toThrow(/only for hybrid/)
+  })
+})
+
+
+describe('[COMP:decisions/hydra] audited decision transport budgets', () => {
+  const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+  const wireBody = () => ({ status: 200, headers: new Headers(),
+    json: async () => ({ answers: { intent: { type: 'choice', choice: 'ordinary', probabilities: { ordinary: 0.95, research: 0.05 } } } }),
+  }) as Response
+
+  it('lets slow fresh input and result proofs finish without spending the model transport budget', async () => {
+    vi.useFakeTimers()
+    const fetch = vi.fn(async (_url: unknown, _init?: RequestInit) => { await pause(10); return wireBody() })
+    vi.stubGlobal('fetch', fetch)
+    try {
+      const primary = createTypeSafeDecisionProvider({ apiKey: 'fictional-key' })
+      const complete = vi.fn(operation().completeWithLlm)
+      const run = executeDecisionCascade({ request: decisionRequest(),
+        operation: { ...operation({ complete }), assertInputAuthority: () => pause(100) },
+        route: { mode: 'hybrid', primary, profile: { ...profile(), totalTimeoutMs: 2000, primaryTimeoutMs: 50 }, allowSyntheticProfile: true },
+      })
+      const result = expect(run).resolves.toMatchObject({ path: 'primary_complete', result: { verdict: 'ordinary' } })
+      await Promise.all([result, vi.runAllTimersAsync()])
+      expect(fetch).toHaveBeenCalledOnce(); expect(complete).not.toHaveBeenCalled()
+      const sent = JSON.parse(fetch.mock.calls[0]![1]!.body as string)
+      expect(Object.keys(sent).sort()).toEqual(['model', 'questions', 'state'])
+    } finally { vi.unstubAllGlobals(); vi.useRealTimers() }
+  })
+
+  it('never dispatches after the immutable total deadline expires during source admission', async () => {
+    vi.useFakeTimers(); const fetch = vi.fn(async () => wireBody()); vi.stubGlobal('fetch', fetch)
+    try {
+      const complete = vi.fn(operation().completeWithLlm)
+      const run = executeDecisionCascade({ request: decisionRequest(),
+        operation: { ...operation({ complete }), assertInputAuthority: () => pause(100) },
+        route: { mode: 'hybrid', primary: createTypeSafeDecisionProvider({ apiKey: 'fictional-key' }),
+          profile: { ...profile(), totalTimeoutMs: 150, primaryTimeoutMs: 50 }, allowSyntheticProfile: true },
+      })
+      const result = expect(run).rejects.toMatchObject({ kind: 'timeout' })
+      await Promise.all([result, vi.runAllTimersAsync()])
+      expect(fetch).not.toHaveBeenCalled(); expect(complete).not.toHaveBeenCalled()
+    } finally { vi.unstubAllGlobals(); vi.useRealTimers() }
+  })
+
+  it('keeps an injected transport under its conservative absolute primary deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const transport = vi.fn(async () => ({ status: 200, body: { answers: { intent: { type: 'choice', choice: 'ordinary', probabilities: { ordinary: 0.95, research: 0.05 } } } } }))
+      const run = executeDecisionCascade({ request: decisionRequest(),
+        operation: { ...operation(), assertInputAuthority: () => pause(100) },
+        route: { mode: 'hybrid', primary: createTypeSafeDecisionProvider({ apiKey: 'fictional-key', transport }),
+          profile: { ...profile(), totalTimeoutMs: 2000, primaryTimeoutMs: 50 }, allowSyntheticProfile: true, allowOperationalFailover: false },
+      })
+      const result = expect(run).resolves.toMatchObject({ path: 'safe_default', failureKind: 'timeout' })
+      await Promise.all([result, vi.runAllTimersAsync()]); expect(transport).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('captures the registered method before asynchronous authority can replace it', async () => {
+    const replacement = vi.fn(async () => response())
+    const fetch = vi.fn(async () => wireBody()); vi.stubGlobal('fetch', fetch)
+    // This factory captures fetch at creation, so create the actual provider after stubbing.
+    const captured = createTypeSafeDecisionProvider({ apiKey: 'fictional-key' })
+    try {
+      await executeDecisionCascade({ request: decisionRequest(),
+        operation: { ...operation(), assertInputAuthority: async () => { captured.evaluate = replacement } },
+        route: { mode: 'hybrid', primary: captured, profile: { ...profile(), totalTimeoutMs: 2000 }, allowSyntheticProfile: true },
+      })
+      expect(fetch).toHaveBeenCalledOnce(); expect(replacement).not.toHaveBeenCalled()
+    } finally { vi.unstubAllGlobals() }
   })
 })

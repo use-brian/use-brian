@@ -16,6 +16,8 @@ import type {
   JsonValue,
 } from './types.js'
 import { DecisionProviderError } from './types.js'
+import { withDecisionInvocation } from './invocation.js'
+import { bindDecisionTransportBudget, captureDecisionTransport, ownsDecisionTransportBudget } from './transport-budget.js'
 import type { LLMProvider } from '../providers/types.js'
 import { isJsonValue } from './validate.js'
 
@@ -351,14 +353,47 @@ function currentInputCheck(check?: () => Promise<void>): () => Promise<void> {
   }
 }
 
-export async function executeDecisionCascade<T>(
+export function executeDecisionCascade<T>(options: ExecuteDecisionCascadeOptions<T>): Promise<DecisionCascadeResult<T>> {
+  const now = options.now ?? Date.now
+  const startedAt = now()
+  const primary = options.route.primary ? captureDecisionTransport(options.route.primary) : undefined
+  const route = { ...options.route, ...(primary ? { primary } : {}) }
+  const profileBudget = route.profile?.totalTimeoutMs
+  const deadlineAt = Math.min(options.request.deadlineAt ?? Infinity,
+    typeof profileBudget === 'number' && Number.isFinite(profileBudget) && profileBudget > 0 ? startedAt + profileBudget : Infinity)
+  const inputCheck = options.operation.assertInputAuthority
+  const onAttempt = options.onAttempt
+  return withDecisionInvocation({
+    signal: options.request.signal, ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}), now,
+    call: (invocation) => executeDecisionCascadeCurrent({
+      ...options, route, request: { ...options.request, signal: invocation.signal,
+        ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}) },
+      operation: { ...options.operation, assertInputAuthority: async () => {
+        invocation.assertActive()
+        await assertInputAuthority(inputCheck)
+        invocation.assertActive()
+      } },
+      onAttempt: async attempt => {
+        invocation.assertActive()
+        await onAttempt?.(attempt)
+        invocation.assertActive()
+      },
+    }),
+  })
+}
+
+async function executeDecisionCascadeCurrent<T>(
   options: ExecuteDecisionCascadeOptions<T>,
 ): Promise<DecisionCascadeResult<T>> {
   const now = options.now ?? Date.now
   const random = options.random ?? Math.random
   const { request, operation, route } = options
+  const admissionStartedAt = now()
+  const primary = route.primary ? captureDecisionTransport(route.primary) : undefined
+  const transportBudgetOwned = !!primary && ownsDecisionTransportBudget(primary)
   const check = currentInputCheck(operation.assertInputAuthority)
-  await check()
+  // Pure route validation exposes no input. The actual completion/primary
+  // branch checks current input before dispatch, including unknown providers.
   validateDecisionRoute(request, route)
 
   let attempts = 0
@@ -453,7 +488,7 @@ export async function executeDecisionCascade<T>(
   }
 
   const profile = route.profile!
-  const totalDeadline = earlierDeadline(request, profile.totalTimeoutMs, now())
+  const totalDeadline = earlierDeadline(request, profile.totalTimeoutMs, admissionStartedAt)
   const sampled = route.mode !== 'shadow' || random() < profile.shadowSampleRate!
   if (!sampled) {
     try {
@@ -478,9 +513,12 @@ export async function executeDecisionCascade<T>(
   try {
     primaryResponse = await withDeadline({
       parent: request.signal,
-      deadlineAt: primaryDeadline,
+      deadlineAt: transportBudgetOwned ? totalDeadline : primaryDeadline,
       now,
-      call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline, assertInputAuthority: check }),
+      call: (signal) => {
+        const attempt = { ...request, signal, deadlineAt: transportBudgetOwned ? totalDeadline : primaryDeadline, assertInputAuthority: check }
+        return primary!.evaluate(transportBudgetOwned ? bindDecisionTransportBudget(attempt, profile.primaryTimeoutMs) : attempt)
+      },
     })
     await check()
     disposition = operation.decide(primaryResponse, { profile })
@@ -506,7 +544,7 @@ export async function executeDecisionCascade<T>(
       operationId: request.operation.id,
       attempt: primaryAttempt,
       stage: 'primary_decision',
-      providerId: route.primary!.id,
+      providerId: primary!.id,
       modelCatalogId: request.model.catalogId,
       modelWireId: request.model.wireId,
       latencyMs: Math.max(0, now() - primaryStartedAt),
@@ -616,12 +654,44 @@ export async function executeDecisionCascade<T>(
  * This deliberately has no LLM completion lane. Domain callers continue their
  * mandatory legacy work regardless of the returned disposition.
  */
-export async function executeDecisionObservation<T>(
+export function executeDecisionObservation<T>(options: ExecuteDecisionObservationOptions<T>): Promise<DecisionObservationResult<T>> {
+  const now = options.now ?? Date.now
+  const startedAt = now()
+  const primary = options.route.primary ? captureDecisionTransport(options.route.primary) : undefined
+  const route = { ...options.route, ...(primary ? { primary } : {}) }
+  const profileBudget = route.profile?.totalTimeoutMs
+  const deadlineAt = Math.min(options.request.deadlineAt ?? Infinity,
+    typeof profileBudget === 'number' && Number.isFinite(profileBudget) && profileBudget > 0 ? startedAt + profileBudget : Infinity)
+  const inputCheck = options.operation.assertInputAuthority
+  const onAttempt = options.onAttempt
+  return withDecisionInvocation({
+    signal: options.request.signal, ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}), now,
+    call: (invocation) => executeDecisionObservationCurrent({
+      ...options, route, request: { ...options.request, signal: invocation.signal,
+        ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}) },
+      operation: { ...options.operation, assertInputAuthority: async () => {
+        invocation.assertActive()
+        await assertInputAuthority(inputCheck)
+        invocation.assertActive()
+      } },
+      onAttempt: async attempt => {
+        invocation.assertActive()
+        await onAttempt?.(attempt)
+        invocation.assertActive()
+      },
+    }),
+  })
+}
+
+async function executeDecisionObservationCurrent<T>(
   options: ExecuteDecisionObservationOptions<T>,
 ): Promise<DecisionObservationResult<T>> {
   const now = options.now ?? Date.now
   const random = options.random ?? Math.random
   const { request, operation, route } = options
+  const admissionStartedAt = now()
+  const primary = route.primary ? captureDecisionTransport(route.primary) : undefined
+  const transportBudgetOwned = !!primary && ownsDecisionTransportBudget(primary)
   const check = currentInputCheck(operation.assertInputAuthority)
   await check()
   validateDecisionRoute(request, route)
@@ -635,14 +705,17 @@ export async function executeDecisionObservation<T>(
   }
 
   const startedAt = now()
-  const totalDeadline = earlierDeadline(request, profile.totalTimeoutMs, startedAt)
+  const totalDeadline = earlierDeadline(request, profile.totalTimeoutMs, admissionStartedAt)
   const primaryDeadline = Math.min(totalDeadline, startedAt + profile.primaryTimeoutMs)
   try {
     const response = await withDeadline({
       parent: request.signal,
-      deadlineAt: primaryDeadline,
+      deadlineAt: transportBudgetOwned ? totalDeadline : primaryDeadline,
       now,
-      call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline, assertInputAuthority: check }),
+      call: (signal) => {
+        const attempt = { ...request, signal, deadlineAt: transportBudgetOwned ? totalDeadline : primaryDeadline, assertInputAuthority: check }
+        return primary!.evaluate(transportBudgetOwned ? bindDecisionTransportBudget(attempt, profile.primaryTimeoutMs) : attempt)
+      },
     })
     await check()
     let disposition = operation.decide(response, { profile })
@@ -678,7 +751,7 @@ export async function executeDecisionObservation<T>(
       operationId: request.operation.id,
       attempt: 1,
       stage: 'primary_decision',
-      providerId: route.primary!.id,
+      providerId: primary!.id,
       modelCatalogId: request.model.catalogId,
       modelWireId: request.model.wireId,
       latencyMs: Math.max(0, now() - startedAt),

@@ -441,3 +441,53 @@ describe('[COMP:decisions/runtime] decision composition', () => {
     }))).rejects.toThrow(/versions/)
   })
 })
+
+describe('[COMP:decisions/runtime] complete invocation deadlines', () => {
+  it('times out a pending route lookup and prevents its late result from dispatching', async () => {
+    vi.useFakeTimers()
+    let resolveRoute!: (route: { mode: 'llm_only' }) => void
+    const pending = new Promise<{ mode: 'llm_only' }>(resolve => { resolveRoute = resolve })
+    const complete = vi.fn(resultOperation().completeWithLlm)
+    const outcome = vi.fn()
+    try {
+      const runtime = createDecisionRuntime({ llmProvider: fixtureLlm(), defaultLlmModel: 'fixture-llm',
+        resolveRoute: () => pending, onOutcome: outcome })
+      const start = Date.now()
+      const run = runtime.run({ request: { ...request(), deadlineAt: start + 100 }, operation: resultOperation(complete) })
+      const refusal = expect(run).rejects.toMatchObject({ kind: 'timeout' })
+      await Promise.all([refusal, vi.advanceTimersByTimeAsync(100)])
+      expect(Date.now() - start).toBe(100)
+      resolveRoute({ mode: 'llm_only' }); await vi.runAllTimersAsync()
+      expect(complete).not.toHaveBeenCalled(); expect(outcome).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('does not start a second accounting callback after the first outlives the deadline', async () => {
+    vi.useFakeTimers()
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const first = vi.fn(() => pending), second = vi.fn()
+    try {
+      const runtime = createDecisionRuntime({ llmProvider: fixtureLlm(), defaultLlmModel: 'fixture-llm', onAttempt: first })
+      const run = runtime.run({ request: { ...request(), deadlineAt: Date.now() + 100 },
+        operation: resultOperation(), onAttempt: second })
+      const refusal = expect(run).rejects.toMatchObject({ kind: 'timeout' })
+      await Promise.all([refusal, vi.advanceTimersByTimeAsync(100)])
+      expect(first).toHaveBeenCalledOnce()
+      release(); await vi.runAllTimersAsync()
+      expect(second).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('does not release a verdict while an outcome callback hangs past the total deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      const outcome = vi.fn(() => new Promise<void>(() => {}))
+      const runtime = createDecisionRuntime({ llmProvider: fixtureLlm(), defaultLlmModel: 'fixture-llm', onOutcome: outcome })
+      const run = runtime.run({ request: { ...request(), deadlineAt: Date.now() + 100 }, operation: resultOperation() })
+      const refusal = expect(run).rejects.toMatchObject({ kind: 'timeout' })
+      await Promise.all([refusal, vi.advanceTimersByTimeAsync(100)])
+      expect(outcome).toHaveBeenCalledOnce()
+    } finally { vi.useRealTimers() }
+  })
+})

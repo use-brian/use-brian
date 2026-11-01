@@ -9,6 +9,7 @@
 
 import {
   assertInputAuthority,
+  withDecisionInvocation,
   calculateCost,
   DecisionAdapterRegistry,
   DecisionProviderError,
@@ -280,6 +281,14 @@ export function createDecisionRuntime(
     configuredAdapterIds: () => adapters.ids(),
     resolveRoute: async (context) => routeResolver(context),
     async observe<T>(runOptions: DecisionObservationRunOptions<T>): Promise<DecisionObservationResult<T>> {
+      const admissionStartedAt = Date.now()
+      const inputCheck = runOptions.operation.assertInputAuthority
+      const initialDeadline = Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + 120_000)
+      return withDecisionInvocation({ signal: runOptions.request.signal, deadlineAt: initialDeadline, call: async invocation => {
+      runOptions = { ...runOptions, request: { ...runOptions.request, signal: invocation.signal, deadlineAt: initialDeadline },
+        operation: { ...runOptions.operation, assertInputAuthority: async () => {
+          invocation.assertActive(); await assertInputAuthority(inputCheck); invocation.assertActive()
+        } } }
       await assertInputAuthority(runOptions.operation.assertInputAuthority)
       const routeContext: DecisionRouteContext = {
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
@@ -289,9 +298,12 @@ export function createDecisionRuntime(
         questionKinds: runOptions.request.questions.map((question) => question.kind),
       }
       const config = await routeResolver(routeContext)
+      invocation.assertActive()
+      if (config.profile) invocation.tightenDeadline(admissionStartedAt + config.profile.totalTimeoutMs)
       const primary = configuredPrimary(config, adapters)
       const request: DecisionRequest = {
         ...runOptions.request,
+        ...(config.profile ? { deadlineAt: Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + config.profile.totalTimeoutMs) } : {}),
         model: primary.model ?? modelRef(
           config.llm && config.llm !== null
             ? config.llm.modelId
@@ -321,9 +333,19 @@ export function createDecisionRuntime(
           })
         },
       })
+      } })
     },
     async run<T>(runOptions: DecisionRuntimeRunOptions<T>): Promise<DecisionCascadeResult<T>> {
-      await assertInputAuthority(runOptions.operation.assertInputAuthority)
+      const admissionStartedAt = Date.now()
+      const inputCheck = runOptions.operation.assertInputAuthority
+      const initialDeadline = Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + 120_000)
+      return withDecisionInvocation({ signal: runOptions.request.signal, deadlineAt: initialDeadline, call: async invocation => {
+      runOptions = { ...runOptions, request: { ...runOptions.request, signal: invocation.signal, deadlineAt: initialDeadline },
+        operation: { ...runOptions.operation, assertInputAuthority: async () => {
+          invocation.assertActive(); await assertInputAuthority(inputCheck); invocation.assertActive()
+        } } }
+      // Route resolution receives operation metadata only. Hydra performs fresh
+      // input admission before the selected completion or decision provider.
       const routeContext: DecisionRouteContext = {
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
         kind: 'execution',
@@ -332,6 +354,8 @@ export function createDecisionRuntime(
         questionKinds: runOptions.request.questions.map((question) => question.kind),
       }
       const config = await routeResolver(routeContext)
+      invocation.assertActive()
+      if (config.profile) invocation.tightenDeadline(admissionStartedAt + config.profile.totalTimeoutMs)
       const primary = configuredPrimary(config, adapters)
       const llm = config.llm === undefined
         ? (runOptions.llm ?? resolveDefaultLlm())
@@ -340,6 +364,7 @@ export function createDecisionRuntime(
 
       const request: DecisionRequest = {
         ...runOptions.request,
+        ...(config.profile ? { deadlineAt: Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + config.profile.totalTimeoutMs) } : {}),
         model: primary.model ?? modelRef(llm.modelId),
       }
       if (primary.provider) assertDecisionCapabilities(request, primary.provider.capabilities)
@@ -373,10 +398,14 @@ export function createDecisionRuntime(
             effectiveMode: primary.effectiveMode,
             operatorOverride: config.profile?.evidence === 'operator_override',
           }
+          invocation.assertActive()
           await options.onAttempt?.(attributed)
+          invocation.assertActive()
           await runOptions.onAttempt?.(attributed)
+          invocation.assertActive()
         },
       })
+      invocation.assertActive()
       await options.onOutcome?.({
         runId: result.runId,
         operationId: request.operation.id,
@@ -390,6 +419,7 @@ export function createDecisionRuntime(
       })
       await assertInputAuthority(runOptions.operation.assertInputAuthority)
       return result
+      } })
     },
   }
 }
