@@ -36,7 +36,9 @@ export type InteractionJob = {
  * bypasses the speech rule, and allows correction after stop. Both actions clear pending
  * pre-control detection, never accepted jobs. Typed text is not transcript evidence.
  * POST /:captureId/stop -> {ok:true}
- * GET /jobs?workspaceId=...&chatSessionId=... -> {jobs:InteractionJob[]}
+ * GET /jobs?workspaceId=...&chatSessionId=... -> {jobs:InteractionJob[],captureErrors:...}
+ * Optional captureIds (1-100 comma-separated UUIDs) adds processing:boolean for authorized
+ * captures still listening or detecting final utterances; clients stop checking once settled.
  * POST /jobs/:jobId/cancel -> {ok:true}; POST /jobs/:jobId/retry -> {ok:true}
  * Jobs retain stable IDs and deliver final text to canonical chat messages.
  */

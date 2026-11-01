@@ -448,6 +448,17 @@ export function createLiveInteractionStore(
            AND jsonb_typeof(data->'error')='string'`, [owner, workspace, chat],
       )).rows;
     },
+    async isProcessing(owner: string, workspace: string, chat: string, captureIds: string[]): Promise<boolean> {
+      return (await db().query(
+        `SELECT EXISTS (
+          SELECT 1 FROM live_interaction_captures c
+          WHERE c.owner_id=$1 AND c.workspace_id=$2 AND c.chat_session_id=$3 AND c.id=ANY($4::uuid[])
+            AND (c.data->>'state'='listening' OR EXISTS (
+              SELECT 1 FROM live_interaction_utterances u WHERE u.capture_id=c.id AND NOT u.processed
+            ))
+        ) AS processing`, [owner, workspace, chat, captureIds],
+      )).rows[0].processing;
+    },
     async listJobs(
       owner: string,
       workspace: string,

@@ -4821,6 +4821,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               </div>
             )}
             {voiceInteractionHere && <LiveInteractionJobs
+              recordingSessionId={dockRecorder?.interactionCaptureId ? dockRecorder.interactionChatSessionId : null}
+              recordingCaptureId={dockRecorder?.interactionCaptureId}
               workspaceId={workspaceId}
               sessionId={activeSessionId}
               messageIds={new Set(chat.state.messages.map((message) => message.id))}

@@ -3554,6 +3554,8 @@ export function FloatingChat({
             </div>
           )}
           <LiveInteractionJobs
+            recordingSessionId={recorder.interactionCaptureId ? recorder.interactionChatSessionId : null}
+            recordingCaptureId={recorder.interactionCaptureId}
             workspaceId={workspaceId}
             sessionId={session.state.sessionId}
             messageIds={new Set(messages.map((message) => message.id))}
