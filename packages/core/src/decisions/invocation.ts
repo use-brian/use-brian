@@ -1,5 +1,23 @@
 /** Terminal decision deadlines, including admission. [COMP:decisions/hydra] */
 import { DecisionProviderError } from './types.js'
+import { assertInputAuthority } from '../providers/input-authority.js'
+
+/** An injected runtime may narrow admission, never replace the caller's check. */
+export function decisionCompletionInput(
+  context: { signal: AbortSignal; request: { assertInputAuthority?: () => Promise<void> } },
+  original: { signal?: AbortSignal; assertInputAuthority?: () => Promise<void> },
+): { signal: AbortSignal; assertInputAuthority(): Promise<void> } {
+  const signal = original.signal ? AbortSignal.any([context.signal, original.signal]) : context.signal
+  const current = context.request.assertInputAuthority
+  const prior = original.assertInputAuthority
+  return { signal, assertInputAuthority: async () => {
+    signal.throwIfAborted()
+    await assertInputAuthority(current)
+    signal.throwIfAborted()
+    if (prior !== current) await assertInputAuthority(prior)
+    signal.throwIfAborted()
+  } }
+}
 
 export async function withDecisionInvocation<T>(options: {
   signal?: AbortSignal

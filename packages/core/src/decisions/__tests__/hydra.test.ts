@@ -11,6 +11,57 @@ import type { DecisionProvider, DecisionResponse } from '../types.js'
 import { DecisionProviderError } from '../types.js'
 import { decisionRequest } from './fixtures.js'
 import { createTypeSafeDecisionProvider } from '../adapters/typesafe.js'
+import { decisionCompletionInput } from '../invocation.js'
+
+describe('[COMP:decisions/hydra] completion admission composition', () => {
+  it.each([undefined, async () => {}])('retains original admission with an injected callback %s', async current => {
+    const refusal = Object.assign(new Error('Synthetic source revoked'), { reason: 'authority_changed', retrySafe: false })
+    const original = vi.fn(async () => { throw refusal })
+    const input = decisionCompletionInput({ signal: new AbortController().signal, request: { assertInputAuthority: current } },
+      { assertInputAuthority: original })
+    await expect(input.assertInputAuthority()).rejects.toBe(refusal)
+    expect(original).toHaveBeenCalledOnce()
+  })
+
+  it('retains invocation refusal even when original admission succeeds', async () => {
+    const refusal = Object.assign(new Error('Synthetic invocation revoked'), { reason: 'authority_changed', retrySafe: false })
+    const original = vi.fn(async () => {})
+    const input = decisionCompletionInput({ signal: new AbortController().signal,
+      request: { assertInputAuthority: async () => { throw refusal } } }, { assertInputAuthority: original })
+    await expect(input.assertInputAuthority()).rejects.toBe(refusal)
+    expect(original).not.toHaveBeenCalled()
+  })
+
+  it('rejects late admission before any subsequent dispatch', async () => {
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const controller = new AbortController()
+    const dispatch = vi.fn()
+    const original = vi.fn(async () => {})
+    const input = decisionCompletionInput({ signal: controller.signal,
+      request: { assertInputAuthority: () => pending } }, { assertInputAuthority: original })
+    const work = input.assertInputAuthority().then(dispatch)
+    const failure = new Error('Synthetic decision deadline')
+    const rejected = expect(work).rejects.toBe(failure)
+    controller.abort(failure)
+    release()
+    await rejected
+    expect(original).not.toHaveBeenCalled()
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+
+  it('calls an identical check once and preserves caller cancellation', async () => {
+    const check = vi.fn(async () => {})
+    const caller = new AbortController()
+    const input = decisionCompletionInput({ signal: new AbortController().signal, request: { assertInputAuthority: check } },
+      { signal: caller.signal, assertInputAuthority: check })
+    await input.assertInputAuthority()
+    expect(check).toHaveBeenCalledOnce()
+    caller.abort(new Error('Synthetic caller cancellation'))
+    await expect(input.assertInputAuthority()).rejects.toThrow('Synthetic caller cancellation')
+    expect(check).toHaveBeenCalledOnce()
+  })
+})
 
 type Result = { verdict: 'ordinary' | 'research' | 'safe'; generated?: string }
 
@@ -400,7 +451,7 @@ describe('[COMP:decisions/hydra] audited decision transport budgets', () => {
     try {
       const complete = vi.fn(operation().completeWithLlm)
       const run = executeDecisionCascade({ request: decisionRequest(),
-        operation: { ...operation({ complete }), assertInputAuthority: () => pause(100) },
+        operation: { ...operation({ complete }), assertInputAuthority: () => pause(200) },
         route: { mode: 'hybrid', primary: createTypeSafeDecisionProvider({ apiKey: 'fictional-key' }),
           profile: { ...profile(), totalTimeoutMs: 150, primaryTimeoutMs: 50 }, allowSyntheticProfile: true },
       })
@@ -436,5 +487,31 @@ describe('[COMP:decisions/hydra] audited decision transport budgets', () => {
       })
       expect(fetch).toHaveBeenCalledOnce(); expect(replacement).not.toHaveBeenCalled()
     } finally { vi.unstubAllGlobals() }
+  })
+
+  it('uses one fresh check before the audited physical dispatch', async () => {
+    const check = vi.fn(async () => {})
+    const fetch = vi.fn(async () => { expect(check).toHaveBeenCalledTimes(1); return wireBody() })
+    vi.stubGlobal('fetch', fetch)
+    try {
+      await executeDecisionCascade({ request: decisionRequest(),
+        operation: { ...operation(), assertInputAuthority: check },
+        route: { mode: 'hybrid', primary: createTypeSafeDecisionProvider({ apiKey: 'fictional-key' }),
+          profile: { ...profile(), totalTimeoutMs: 2000 }, allowSyntheticProfile: true },
+      })
+      expect(fetch).toHaveBeenCalledOnce()
+      expect(check.mock.calls.length).toBeGreaterThan(1) // Result/callback boundaries remain fresh.
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  it('retains preparation admission for a method replaced before capture', async () => {
+    const check = vi.fn(async () => {})
+    const primary = createTypeSafeDecisionProvider({ apiKey: 'fictional-key' })
+    primary.evaluate = vi.fn(async () => { expect(check).toHaveBeenCalledOnce(); return response() })
+    await executeDecisionCascade({ request: decisionRequest(),
+      operation: { ...operation(), assertInputAuthority: check },
+      route: { mode: 'hybrid', primary, profile: { ...profile(), totalTimeoutMs: 2000 }, allowSyntheticProfile: true },
+    })
+    expect(primary.evaluate).toHaveBeenCalledOnce()
   })
 })

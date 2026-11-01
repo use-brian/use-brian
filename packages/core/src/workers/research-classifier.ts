@@ -2,6 +2,7 @@ import {bindScopeSources,boundScopeSources} from '../security/source-evidence.js
 import {isTrivialChatMessage} from '../classification/trivial-chat.js'
 import {DerivedScopeError} from '../security/derived-scope.js'
 import {assertInputAuthority,assertProviderInputPreparation,captureInputAdmissionProvider,isInputAuthorityError} from '../providers/input-authority.js'
+import { decisionCompletionInput } from '../decisions/invocation.js'
 import type {SessionContextAuthority} from '../memory/session-state-types.js'
 /**
  * Pre-flight classifier for adaptive research-mode entry.
@@ -225,6 +226,7 @@ async function classifyResearchWithLlm(params: {
     recentConversation: params.recentConversation,
   }) }]
   await assertProviderInputPreparation(provider, { model: params.model, messages }, params.assertInputAuthority)
+  params.signal?.throwIfAborted()
   const stream = provider.stream({
     assertInputAuthority: params.assertInputAuthority,
     signal: params.signal,
@@ -236,6 +238,7 @@ async function classifyResearchWithLlm(params: {
   })
 
   const response = await collectStream(stream)
+  params.signal?.throwIfAborted()
   await assertInputAuthority(params.assertInputAuthority)
   const text = response.content
     .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
@@ -352,8 +355,7 @@ async function classifyResearchIntentCurrent(
         async completeWithLlm(context) {
           const result = await classifyResearchWithLlm({
             provider: context.llm.provider,
-            assertInputAuthority: options.assertInputAuthority,
-            signal: options.signal,
+            ...decisionCompletionInput(context, options),
             model: context.llm.modelId,
             message,
             recentConversation,

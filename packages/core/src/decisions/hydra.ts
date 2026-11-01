@@ -502,7 +502,9 @@ async function executeDecisionCascadeCurrent<T>(
     }
   }
 
-  await check()
+  // The exact audited default adapter performs this fresh check at physical
+  // dispatch. Unknown or replaced callables retain preparation admission.
+  if (!transportBudgetOwned) await check()
   attempts += 1
   const primaryAttempt = attempts
   const primaryStartedAt = now()

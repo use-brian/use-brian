@@ -13,7 +13,7 @@
  * [COMP:workers/research-classifier]
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { classifyResearchIntent, detectOperateSiteIntent } from '../research-classifier.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
@@ -94,6 +94,31 @@ describe('[COMP:workers/research-classifier] detectOperateSiteIntent', () => {
 })
 
 describe('[COMP:workers/research-classifier] classifyResearchIntent', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('aborts an in-flight LLM fallback at the shorter decision deadline', async () => {
+    vi.useFakeTimers()
+    const aborted = vi.fn()
+    const llm = makeProvider('{"research":false}')
+    llm.stream = vi.fn(async function* (request) {
+      await new Promise<void>((_resolve, reject) => {
+        request.signal!.addEventListener('abort', () => {
+          aborted()
+          reject(request.signal!.reason)
+        }, { once: true })
+      })
+    })
+    const primary = fixtureDecisionProvider(async () => { throw new Error('Synthetic transport failure') })
+    const classification = classifyResearchIntent({ provider: llm, message: 'Compare battery recycling methods',
+      decisionRuntime: executionFixture({ llm, primary }) })
+
+    await vi.advanceTimersByTimeAsync(100)
+    await expect(classification).resolves.toMatchObject({ research: false, operateSite: false })
+    expect(llm.stream).toHaveBeenCalledOnce()
+    expect(aborted).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('binds current authority to a configured non-LLM decision primary', async () => {
     const llm = makeProvider('{"research":false}')
     let revoked = false

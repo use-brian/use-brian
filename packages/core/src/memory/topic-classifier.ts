@@ -31,6 +31,7 @@ import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
 import type { DecisionAnswer, DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
 import { DecisionProviderError } from '../decisions/types.js'
+import { decisionCompletionInput } from '../decisions/invocation.js'
 
 export type TopicState = 'continue' | 'shift' | 'resume' | 'cross-topic'
 
@@ -394,7 +395,7 @@ async function classifyTopicCurrent(
             provider: context.llm.provider,
             model: context.llm.modelId,
             decisionRuntime: undefined,
-            signal: context.signal,
+            ...decisionCompletionInput(context, opts),
             deadlineAt: Math.min(opts.deadlineAt, context.deadlineAt ?? opts.deadlineAt),
           })
           return {
