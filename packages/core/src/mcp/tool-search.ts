@@ -375,12 +375,14 @@ export function createMcpSearchTools(params: {
    * lookups. Other surfaces keep the token-saving search/call pair only.
    */
   keepDynamicToolsDirect?: boolean
+  /** Canonical read schemas for interactive deferred selection; execution stays in mcp_call. */
+  exposeLocalReadTools?: boolean
   /** Newest authored request, used only for bounded read-only schema discovery. */
   discoveryQuery?: string
 }): Tool[] {
   const {
     index, settingsStore, assistantId, appLevelAssistantId, userId,
-    hooks, keepDynamicToolsDirect = false, discoveryQuery,
+    hooks, keepDynamicToolsDirect = false, exposeLocalReadTools = false, discoveryQuery,
   } = params
 
   // ── Lookup: server:toolName → IndexedTool ─────────────────────
@@ -565,7 +567,26 @@ export function createMcpSearchTools(params: {
     },
   })
 
-  if (!keepDynamicToolsDirect) return [searchTool, callTool]
+  if (!keepDynamicToolsDirect) {
+    if (!exposeLocalReadTools) return [searchTool, callTool]
+    const counts = new Map<string, number>()
+    for (const entry of index.entries) counts.set(entry.toolName, (counts.get(entry.toolName) ?? 0) + 1)
+    const reads: Tool[] = []
+    for (const entry of index.entries) {
+      if (entry.kind !== 'local' || entry.tool.isReadOnly !== true || entry.tool.hiddenFromModel
+        || counts.get(entry.toolName) !== 1 || ['mcp_search', 'mcp_call'].includes(entry.toolName)
+        || ambiguousEntryKeys.has(`${entry.server}:${entry.toolName}`)) continue
+      reads.push({
+        ...entry.tool,
+        deferredSchemaOnly: true,
+        // One dispatcher owns approval and denied-call state across both names.
+        requiresConfirmation: false,
+        resolveConfirmation: undefined,
+        execute: (input, context) => callTool.execute({ server: entry.server, tool: entry.toolName, args: input }, context),
+      })
+    }
+    return [searchTool, callTool, ...reads]
+  }
 
   // A workflow tool_call performs one exact registry lookup and cannot run a
   // model-driven mcp_search -> mcp_call sequence. Expose adapters under both

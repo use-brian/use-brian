@@ -1,3 +1,5 @@
+import {buildToolSelectionQuestions} from '../engine/tool-selection.js'
+import {createLlmDecisionProvider} from '../decisions/adapters/llm.js'
 import {bindScopeSources,boundScopeSources} from '../security/source-evidence.js'
 import {isTrivialChatMessage} from '../classification/trivial-chat.js'
 import {DerivedScopeError} from '../security/derived-scope.js'
@@ -111,9 +113,13 @@ export type ResearchClassifyOptions = {
   decisionRuntime?: DecisionExecutionPort
   workspaceId?: string
   runId?: string
+  /** Already scoped capability metadata; never an execution grant. */
+  toolCandidates?: Array<{name:string;description:string}>
 }
 
 export type ResearchClassifyResult = {
+  /** Present when preparation owns selection, including an empty choice. */
+  toolNames?: string[]
   /** Whether the classifier flagged the message as needing research mode. */
   research: boolean
   /** Smallest sufficient research effort; absent for ordinary/site requests. */
@@ -183,7 +189,7 @@ const RESEARCH_OPERATION = {
 } as const
 
 function primaryResearchResult(response: DecisionResponse): ResearchClassifyResult | null {
-  const answer = response.answers[0]
+  const answer = response.answers.find(answer => answer.questionId === 'intent')
   if (answer?.kind !== 'choice') return null
   const common = {
     usage: response.usage
@@ -307,19 +313,28 @@ async function classifyResearchIntentCurrent(
     .map((turn) => ({ role: turn.role, text: turn.text.trim().slice(0, 2000) }))
 
   if (options.decisionRuntime) {
-    const result = await options.decisionRuntime.run({
+    const combined = options.toolCandidates !== undefined
+    const selection = combined ? buildToolSelectionQuestions(options.toolCandidates!) : null
+    const decode = (response: DecisionResponse): ResearchClassifyResult | null => {
+      const intent = primaryResearchResult(response)
+      if (!intent) return null
+      if (!combined) return intent
+      const toolAnswers = response.answers.filter(answer => answer.questionId !== 'intent')
+      return { ...intent, toolNames: selection ? selection.namesFrom({ ...response, answers: toolAnswers }) : [] }
+    }
+    const result = await options.decisionRuntime.run<ResearchClassifyResult>({
       ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
       llm: { provider, modelId: model },
       request: {
         runId: options.runId ?? `research-intent-${Date.now()}`,
-        operation: RESEARCH_OPERATION,
-        state: { currentMessage: message, recentConversation },
+        operation: combined ? { ...RESEARCH_OPERATION, version: '3', stateVersion: '2', questionVersion: '3' } : RESEARCH_OPERATION,
+        state: { currentMessage: message, recentConversation, ...(combined ? { tools: selection?.catalog ?? [] } : {}) },
         assertInputAuthority: options.assertInputAuthority,
         signal: options.signal,
         questions: [{
           kind: 'choice',
           id: 'intent',
-          prompt: 'Assess fresh evidence needs using recent dialogue. Existing-context explanation is ordinary; new evidence can require research even in a short follow-up. Choose the smallest sufficient research effort. One named site is a site operation.',
+          prompt: (combined ? CLASSIFIER_SYSTEM_PROMPT.replace('Return JSON only. No explanation.', 'Answer the intent choice question; do not output a separate JSON object.') + '\n' : '') + 'Assess fresh evidence needs using recent dialogue. Existing-context explanation is ordinary; new evidence can require research even in a short follow-up. Choose the smallest sufficient research effort. One named site is a site operation.',
           options: [
             { value: 'ordinary', description: 'Normal request or contextual follow-up' },
             { value: 'research_focused', description: 'Narrow multi-source investigation: two angles, one wave' },
@@ -327,12 +342,12 @@ async function classifyResearchIntentCurrent(
             { value: 'research_deep', description: 'Broad, exhaustive or conflicting evidence: five workers, four waves' },
             { value: 'operate_site', description: 'Open, browse, log into, or act on one named site' },
           ],
-        }],
+        }, ...(selection?.questions ?? [])],
       },
       operation: {
         assertInputAuthority: options.assertInputAuthority,
         decide(response, { profile }) {
-          const answer = response.answers[0]
+          const answer = response.answers.find(answer => answer.questionId === 'intent')
           const probabilities = answer?.evidence.probabilities
           const policy = profile?.policy
           const reviewBelow = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
@@ -345,14 +360,29 @@ async function classifyResearchIntentCurrent(
           ) {
             return { kind: 'follow_up', reason: 'uncertain' }
           }
-          const result = primaryResearchResult(response)
+          const result = decode(response)
           return result
             ? { kind: 'complete', result }
             : { kind: 'unavailable', reason: 'invalid_response' }
         },
-        validateResult: validateResearchResult,
-        safeFailure: () => ({ research: false, operateSite: false, reason: null, usage: null, model: null }),
+        validateResult: result => {
+          validateResearchResult(result)
+          if (combined && (!Array.isArray(result.toolNames) || result.toolNames.some(name => !selection?.catalog.some(tool => tool.name === name)))) {
+            throw new Error('Invalid preparation selection')
+          }
+          return result
+        },
+        safeFailure: () => ({ research: false, operateSite: false, reason: null, usage: null, model: null, ...(combined ? { toolNames: [] } : {}) }),
         async completeWithLlm(context) {
+          if (combined) {
+            const response = await createLlmDecisionProvider({ provider: context.llm.provider }).evaluate({
+              ...context.request, model: { catalogId: context.llm.modelId, wireId: context.llm.modelId },
+              ...decisionCompletionInput(context, options),
+            })
+            const result = decode(response)
+            if (!result) throw new Error('Invalid preparation result')
+            return { result, providerId: response.providerId, model: response.model, usage: response.usage }
+          }
           const result = await classifyResearchWithLlm({
             provider: context.llm.provider,
             ...decisionCompletionInput(context, options),
@@ -409,7 +439,7 @@ export async function classifyResearchIntent(options: ResearchClassifyOptions): 
     try{await pending}finally{pending=undefined}
   }
   await check()
-  const input=structuredClone({message:options.message,recentConversation:options.recentConversation})
+  const input=structuredClone({message:options.message,recentConversation:options.recentConversation,toolCandidates:options.toolCandidates})
   const observed=authority?structuredClone(authority.accumulator.evidence.sources??[]):inputs
   const signal=AbortSignal.any([...(options.signal?[options.signal]:[]),...(authority?[authority.execution.lifecycle.abortSignal]:[])])
   let result:ResearchClassifyResult
@@ -420,5 +450,6 @@ export async function classifyResearchIntent(options: ResearchClassifyOptions): 
     result={research:false,operateSite:false,reason:null,usage:null,model:null}
   }
   await check()
+  if(options.toolCandidates!==undefined&&result.toolNames===undefined&&result.reason!=='operate_site_fast_path')result={...result,toolNames:[]}
   return bindScopeSources(result,observed)
 }

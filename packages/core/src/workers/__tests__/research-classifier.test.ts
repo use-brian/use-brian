@@ -383,3 +383,84 @@ describe('[COMP:workers/research-classifier] short semantic requests', () => {
     expect(provider.stream).toHaveBeenCalledOnce()
   })
 })
+
+
+describe('[COMP:workers/research-classifier] combined preparation decision', () => {
+  const candidates = [{ name: 'calendarListEvents', description: 'Read calendar events' }]
+  it.each(['ordinary', 'research_focused', 'research', 'research_deep'])(
+    'answers intent %s and concrete tool selection in one decision', async intent => {
+      const provider = makeProvider('unexpected')
+      const evaluate = vi.fn(async (request: import('../../decisions/types.js').DecisionRequest) => ({
+        providerId: 'fixture-decision', model: request.model,
+        answers: request.questions.map((question, index) => ({ kind: 'choice' as const, questionId: question.id,
+          value: question.id === 'intent' ? intent : index === 1 ? 't0' : 'none', evidence: { source: 'unavailable' as const } })),
+      }))
+      const result = await classifyResearchIntent({ provider, message: 'Check my calendar now', toolCandidates: candidates,
+        decisionRuntime: executionFixture({ llm: provider, primary: fixtureDecisionProvider(evaluate) }) })
+      expect(evaluate).toHaveBeenCalledOnce()
+      expect(evaluate.mock.calls[0][0].operation).toMatchObject({ id: 'research.intent', version: '3' })
+      expect(evaluate.mock.calls[0][0].questions).toHaveLength(4)
+      expect(result).toMatchObject({ research: intent !== 'ordinary', toolNames: ['calendarListEvents'] })
+      expect(provider.stream).not.toHaveBeenCalled()
+    })
+
+  it('preserves a successful research verdict across slow healthy authority checks', async () => {
+    vi.useFakeTimers()
+    try {
+      const provider = makeProvider('unexpected'), started = Date.now()
+      const check = vi.fn(() => new Promise<void>(resolve => setTimeout(resolve, 1100)))
+      const primary = fixtureDecisionProvider(async request => ({ providerId: 'fixture-decision', model: request.model,
+        answers: request.questions.map(question => ({ kind: 'choice' as const, questionId: question.id,
+          value: question.id === 'intent' ? 'research_focused' : 'none', evidence: { source: 'unavailable' as const } })) }))
+      const pending = classifyResearchIntent({ provider, message: 'Compare fresh evidence on energy storage', toolCandidates: candidates,
+        assertInputAuthority: check, decisionRuntime: executionFixture({ llm: provider, primary, totalTimeoutMs: 60_000, primaryTimeoutMs: 20_000 }) })
+      await vi.advanceTimersByTimeAsync(45_000)
+      expect(await pending).toMatchObject({ research: true, effort: 'focused', toolNames: [] })
+      expect(check.mock.calls.length * 1100).toBeGreaterThan(5000)
+      expect(Date.now() - started).toBeGreaterThan(5000)
+      expect(provider.stream).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('uses one combined LLM fallback with the full research criteria', async () => {
+    const provider = makeProvider(JSON.stringify({ answers: { intent: { value: 'research_focused' },
+      group0_rank1: { value: 't0' }, group0_rank2: { value: 'none' }, group0_rank3: { value: 'none' } } }))
+    const result = await classifyResearchIntent({ provider, message: 'Compare current energy storage methods', toolCandidates: candidates,
+      decisionRuntime: executionFixture({ llm: provider, primary: fixtureDecisionProvider(async () => { throw new Error('offline') }) }) })
+    expect(result).toMatchObject({ research: true, effort: 'focused', toolNames: ['calendarListEvents'] })
+    expect(provider.stream).toHaveBeenCalledOnce()
+    const request = vi.mocked(provider.stream).mock.calls[0][0]
+    expect(JSON.stringify(request.messages)).toContain('MULTI-SOURCE INVESTIGATION')
+    expect(request.allowProviderFallback).toBe(false)
+  })
+
+  it('still classifies research when the tool catalog exceeds the bounded vocabulary', async () => {
+    const provider = makeProvider('unexpected')
+    const evaluate = vi.fn(async (request: import('../../decisions/types.js').DecisionRequest) => {
+      expect(request.questions).toHaveLength(1)
+      return { providerId: 'fixture-decision', model: request.model,
+        answers: [{ kind: 'choice' as const, questionId: 'intent', value: 'research_deep', evidence: { source: 'unavailable' as const } }] }
+    })
+    const result = await classifyResearchIntent({ provider, message: 'Research all competing storage technologies',
+      toolCandidates: Array.from({ length: 509 }, (_, i) => ({ name: `read${i}`, description: 'Read' })),
+      decisionRuntime: executionFixture({ llm: provider, primary: fixtureDecisionProvider(evaluate) }) })
+    expect(result).toMatchObject({ research: true, effort: 'deep', toolNames: [] })
+  })
+
+  it('cannot admit a fabricated choice and keeps deterministic site intent', async () => {
+    const provider = makeProvider('malformed')
+    const evaluate = vi.fn(async (request: import('../../decisions/types.js').DecisionRequest) => ({
+      providerId: 'fixture-decision', model: request.model,
+      answers: request.questions.map(question => ({ kind: 'choice' as const, questionId: question.id,
+        value: question.id === 'intent' ? 'ordinary' : 'ungranted', evidence: { source: 'unavailable' as const } })),
+    }))
+    const runtime = executionFixture({ llm: provider, primary: fixtureDecisionProvider(evaluate) })
+    expect(await classifyResearchIntent({ provider, message: 'Check my calendar now', toolCandidates: candidates, decisionRuntime: runtime }))
+      .toMatchObject({ research: false, toolNames: [] })
+    evaluate.mockClear()
+    const site = await classifyResearchIntent({ provider, message: 'Browse example.com', toolCandidates: candidates, decisionRuntime: runtime })
+    expect(site).toMatchObject({ research: false, operateSite: true, reason: 'operate_site_fast_path' })
+    expect(site.toolNames).toBeUndefined()
+    expect(evaluate).not.toHaveBeenCalled()
+  })
+})

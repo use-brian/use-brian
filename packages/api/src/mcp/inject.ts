@@ -442,6 +442,7 @@ export async function injectMcpTools(params: {
    */
   knowledgeCaptureRuleStore?: KnowledgeCaptureRuleStore
   discoveryQuery?: string
+  exposeLocalReadTools?: boolean
   knowledgeCaptureText?: string
   /** Explicit workflow tool_call steps are governed by their authored step + approval pause. */
   knowledgeWriteAuthorization?: 'capture' | 'workflow'
@@ -582,7 +583,7 @@ export async function injectMcpTools(params: {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
     userTimezone, knowledgeStore, knowledgeRepoWriter, allowKnowledgeWrites = false,
-    knowledgeCaptureRuleStore, knowledgeCaptureText, discoveryQuery, knowledgeWriteAuthorization = 'capture',
+    knowledgeCaptureRuleStore, knowledgeCaptureText, discoveryQuery, exposeLocalReadTools = false, knowledgeWriteAuthorization = 'capture',
     gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
@@ -2198,6 +2199,7 @@ export async function injectMcpTools(params: {
       // The index owns each source's exact dispatcher and validated overrides.
       hooks: engineHooks,
       keepDynamicToolsDirect,
+      exposeLocalReadTools,
       discoveryQuery,
     })
     for (const tool of searchTools) {
@@ -2205,7 +2207,7 @@ export async function injectMcpTools(params: {
       // Never let that replace an existing first-party registry entry; its
       // server-prefixed compatibility alias remains available to tool_call.
       if (
-        keepDynamicToolsDirect
+        (keepDynamicToolsDirect || exposeLocalReadTools)
         && tool.name !== 'mcp_search'
         && tool.name !== 'mcp_call'
         && tools.has(tool.name)

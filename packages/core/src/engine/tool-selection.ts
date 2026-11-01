@@ -18,35 +18,16 @@ export type ToolSelectionOptions = {
   llm: DecisionCompletionRoute
   /** Trusted host input slice with its own current source authority. */
   input?: { messages: Message[]; assertInputAuthority: () => Promise<void> }
+  /** Host decision already completed against its admitted preparation inputs. */
+  preselected?: readonly string[]
   onResult?: (result: ToolSelectionResult) => void | Promise<void>
 }
 
-/** Advisory schema planning. Only the existing executor can authorize an action. */
-export async function selectInitialToolSchemas(input: ToolSelectionOptions & {
-  definitions: ToolDefinition[]
-  messages: Message[]
-  runId: string
-  signal: AbortSignal
-  assertInputAuthority: () => Promise<void>
-}): Promise<ToolSelectionResult> {
-  const started = Date.now()
-  const empty = (path: string): ToolSelectionResult => ({ names: [], model: null, usage: null, path, durationMs: Date.now() - started })
-  const catalog = input.definitions.map((tool, index) => ({
-    id: `t${index}`, name: tool.name, description: tool.description.slice(0, 160),
-  }))
-  // A larger catalog stays available through discovery; never truncate its vocabulary.
-  if (!catalog.length || catalog.length > 508) return empty('catalog_limit')
-  const conversation = input.messages.filter(message => message.role === 'user' || message.role === 'assistant')
-    .map(message => ({ role: message.role, text: typeof message.content === 'string' ? message.content
-      : message.content.filter(block => block.type === 'text').map(block => block.type === 'text' ? block.text : '').join('\n') }))
-    .filter(message => message.text.trim()).slice(-4)
-    .map(message => ({ ...message, text: message.text.slice(-2000) }))
-  // A bare greeting needs no eager schemas. The main model retains discovery
-  // and its full context, so this never suppresses a later action.
-  if (conversation.length === 1 && conversation[0].role === 'user'
-    && /^(?:hi|hello|hey|你好|您好|こんにちは)[!.！。\s]*$/iu.test(conversation[0].text.trim())) return empty('greeting')
-  const state = { conversation, tools: catalog }
-  if (JSON.stringify(state).length > 100_000) return empty('catalog_limit')
+/** Compact vocabulary shared by standalone selection and combined preparation. */
+export function buildToolSelectionQuestions(definitions: readonly Pick<ToolDefinition, 'name' | 'description'>[]) {
+  const catalog = definitions.map((tool, index) => ({ id: `t${index}`, name: tool.name, description: tool.description.slice(0, 160) }))
+  if (catalog.length > 508 || new Set(catalog.map(tool => tool.name)).size !== catalog.length
+    || JSON.stringify(catalog).length > 90_000) return null
   const questions: DecisionQuestion[] = []
   for (let start = 0; start < catalog.length; start += 254) {
     const group = catalog.slice(start, start + 254)
@@ -76,6 +57,34 @@ export async function selectInitialToolSchemas(input: ToolSelectionOptions & {
       return answer.value === 'none' ? [] : [byId.get(answer.value)!]
     }))
   }
+  return { catalog, questions, namesFrom }
+}
+
+/** Advisory schema planning. Only the existing executor can authorize an action. */
+export async function selectInitialToolSchemas(input: ToolSelectionOptions & {
+  definitions: ToolDefinition[]
+  messages: Message[]
+  runId: string
+  signal: AbortSignal
+  assertInputAuthority: () => Promise<void>
+}): Promise<ToolSelectionResult> {
+  const started = Date.now()
+  const empty = (path: string): ToolSelectionResult => ({ names: [], model: null, usage: null, path, durationMs: Date.now() - started })
+  const plan = buildToolSelectionQuestions(input.definitions)
+  if (!plan || !plan.catalog.length) return empty('catalog_limit')
+  const { catalog } = plan
+  const conversation = input.messages.filter(message => message.role === 'user' || message.role === 'assistant')
+    .map(message => ({ role: message.role, text: typeof message.content === 'string' ? message.content
+      : message.content.filter(block => block.type === 'text').map(block => block.type === 'text' ? block.text : '').join('\n') }))
+    .filter(message => message.text.trim()).slice(-4)
+    .map(message => ({ ...message, text: message.text.slice(-2000) }))
+  // A bare greeting needs no eager schemas. The main model retains discovery
+  // and its full context, so this never suppresses a later action.
+  if (conversation.length === 1 && conversation[0].role === 'user'
+    && /^(?:hi|hello|hey|你好|您好|こんにちは)[!.！。\s]*$/iu.test(conversation[0].text.trim())) return empty('greeting')
+  const state = { conversation, tools: catalog }
+  if (JSON.stringify(state).length > 100_000) return empty('catalog_limit')
+  const { questions, namesFrom } = plan
   let completionUsage: TokenUsage | null = null
   let completionModel: string | null = null
   try {
@@ -86,7 +95,10 @@ export async function selectInitialToolSchemas(input: ToolSelectionOptions & {
       operation: {
         assertInputAuthority: input.assertInputAuthority,
         decide: response => ({ kind: 'complete', result: namesFrom(response) }),
-        validateResult: validate,
+        validateResult: result => {
+          if (result.some(name => !catalog.some(tool => tool.name === name))) throw new Error('Invalid tool selection')
+          return result
+        },
         safeFailure: () => [],
         async completeWithLlm(context) {
           const response = await createLlmDecisionProvider({ provider: context.llm.provider }).evaluate({

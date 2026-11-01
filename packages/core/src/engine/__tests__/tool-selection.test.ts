@@ -97,7 +97,24 @@ describe('[COMP:engine/tool-selection] bounded initial schema decisions', () => 
     await expect(pending).rejects.toMatchObject({ kind: 'cancelled' })
   })
 
-  it('executes the selected canonical tool on the first main-model turn', async () => {
+  it.each([false, true])('keeps optional read adapters out of non-deferred provider schemas (%s)', async deferred => {
+    const provider: LLMProvider = { ...llm, createSession: vi.fn((options: Parameters<LLMProvider['createSession']>[0]) => ({ async *send() {
+      expect(options.tools?.some((tool: ToolDefinition) => tool.name === 'calendarRead') ?? false).toBe(deferred)
+      yield { type: 'text_delta' as const, text: 'Done' }
+      yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } }
+    } })) }
+    const tool = buildTool({ name: 'calendarRead', description: 'Read', deferredSchemaOnly: true,
+      inputSchema: z.object({}), execute: async () => ({ data: [] }) })
+    const runtime = executionFixture({ primary: fixtureDecisionProvider(async request => answers(request, true)), llm })
+    for await (const _ of queryLoop({ provider, model: 'fixture', systemPrompt: 'Test', messages: base.messages,
+      tools: new Map([[tool.name, tool]]), ledger: NOOP_TURN_LEDGER, deferToolSchemas: deferred,
+      toolSelection: { runtime, llm: base.llm, preselected: ['calendarRead'] }, context: {
+        userId: 'u', assistantId: 'a', sessionId: 's', appId: 'test', channelType: 'web', channelId: 'c',
+        abortSignal: new AbortController().signal,
+      } })) { /* drain */ }
+  })
+
+  it.each([false, true])('executes the selected tool without repeating preparation (%s)', async prepared => {
     const execute = vi.fn(async () => ({ data: [] }))
     const tool = buildTool({ name: 'listTasks', description: 'Read tasks', inputSchema: z.object({}),
       isReadOnly: true, isConcurrencySafe: true, execute })
@@ -122,12 +139,12 @@ describe('[COMP:engine/tool-selection] bounded initial schema decisions', () => 
     }) }
     for await (const _ of queryLoop({ provider, model: 'fixture', systemPrompt: 'Test', messages: [{ role: 'user', content: 'Ambient content excluded from selector' }],
       tools: new Map([[tool.name, tool]]), ledger: NOOP_TURN_LEDGER, deferToolSchemas: true,
-      toolSelection: { runtime, llm: base.llm, input: { messages: base.messages, assertInputAuthority: selectionGuard } }, context: {
+      toolSelection: { runtime, llm: base.llm, ...(prepared ? { preselected: ['listTasks', 'notGranted'] } : {}), input: { messages: base.messages, assertInputAuthority: selectionGuard } }, context: {
         userId: 'u', assistantId: 'a', sessionId: 's', appId: 'test', channelType: 'web', channelId: 'c', assertModelInputAuthority: mainGuard,
         abortSignal: new AbortController().signal,
       } })) { /* drain */ }
-    expect(JSON.stringify(evaluate.mock.calls[0][0].state)).not.toContain('Ambient content')
-    expect(selectionGuard).toHaveBeenCalled()
+    if (prepared) { expect(evaluate).not.toHaveBeenCalled(); expect(selectionGuard).not.toHaveBeenCalled() }
+    else { expect(JSON.stringify(evaluate.mock.calls[0][0].state)).not.toContain('Ambient content'); expect(selectionGuard).toHaveBeenCalled() }
     expect(mainGuard).toHaveBeenCalled()
     expect(seen).toHaveLength(2)
     expect(seen[0]).toEqual(['listTasks', 'discoverTools'])

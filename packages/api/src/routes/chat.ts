@@ -3973,6 +3973,75 @@ export function chatRoutes(options: WebChatOptions): Router {
             scope: inputMessageScope,
           })
         : undefined
+      const activeCapabilities = new Set(await options.capabilityStore.listActive(assistant.id))
+      const sensitivityAccumulator = new SensitivityAccumulator()
+      const compartmentAccumulator = new CompartmentAccumulator()
+      const connectorActionAudit =
+        assistant.workspaceId &&
+        options.connectorActionStore &&
+        options.episodesStore &&
+        options.buildConnectorActionAudit
+          ? options.buildConnectorActionAudit({
+              workspaceId: assistant.workspaceId,
+              assistantClearance: assistant.clearance,
+              // Same instance as the queryLoop's `sensitivity:` accumulator
+              // — the loop's tool reads populate it, the audit hooks read
+              // `.max` at action time.
+              sensitivityAccumulator,
+              connectorActionStore: options.connectorActionStore,
+              episodesStore: options.episodesStore,
+            })
+          : undefined
+      const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId)
+      const preparedConnectorTools = new Map(filterToolsByCapabilities(options.tools, activeCapabilities))
+      const preparedConnectors = await turnTiming.time('connector_prepare', () => applyMcpInjection({
+        scope: 'chat',
+        connectorUserId,
+        assistant,
+        userTimezone: user.timezone,
+        tools: preparedConnectorTools,
+        stores: {
+          ...options,
+          // Promote a just-attached photo on demand, so an image can reach a
+          // Shopify product without the model first calling saveFileToBrain.
+          readCachedFile: options.fileStore
+            ? (id, ctx) => options.fileStore!.get(id, ctx)
+            : undefined,
+        },
+        engineHooks: options.engineHooks,
+        // In-app actor identity: email is how the signed-in user is known on
+        // the web/app surface. Channel turns (WA/TG/Slack) set their native id
+        // in channel-pipeline. Resolved server-side from the session — never
+        // model output. Opted-in connectors receive X-Sidanclaw-Actor-*.
+        actorIdentity: { channel: session.channelType ?? 'web', id: user.email, email: user.email, userId: user.id },
+        // Forwarded to `injectGoogleTools` → Gmail `sendMessage` audit
+        // wrap. Shared with the host extra-tool inject above.
+        connectorActionAudit,
+        // Workspace domain is null today — workspaces don't carry an
+        // email_domain column. The GCal audit hook falls back to
+        // treating attendees-with-domain as external (audience=public).
+        // Future migration adds the column.
+        workspaceDomain: null,
+        // Interactive chat has a live Approve/Deny loop, so the KB write
+        // tools may exist here (D2 — chat-only). The public API shares
+        // `applyMcpInjection` and must NOT set this.
+        allowKnowledgeWrites: true,
+        knowledgeCaptureText: message ?? '',
+        discoveryQuery: rawMessage ?? undefined,
+        exposeLocalReadTools: true,
+        contextScope: turnScope,
+        executionContext,
+        scopeAccumulator,
+        // On-demand introspection lane (ability audit §6-c/d): workspace
+        // PRIMARY assistants only — these read workspace-operational state
+        // (approvals / scheduled jobs / research runs / session history).
+        // They enter the mcp_search index, never the direct tool surface.
+        introspectionTools:
+          assistant.kind === 'primary' && assistant.workspaceId
+            ? options.introspectionTools
+            : undefined,
+      }))
+
       // Assess after the original canonical invocation and authored input exist.
       // Quota races retain this real request and its denial in the same thread.
       const classificationCapture=adaptiveResearchEligible&&message&&nativeTranscriptAuthority&&earlyStoredUserMsg
@@ -3995,6 +4064,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           return await turnTiming.time('research_classify', () => classifyAttendedResearchMessage({
             authority: researchAssessment?.authority ?? nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
             provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+            toolCandidates: options.decisionRuntime ? [...filterToolsByCapabilities(preparedConnectorTools, activeCapabilities).values()]
+              .filter(tool => !tool.hiddenFromModel).map(tool => ({ name: tool.name, description: tool.description })) : undefined,
             capture: researchAssessment?.capture ?? classificationCapture,
             measure: turnTiming.time,
           }))
@@ -4643,7 +4714,6 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Capability set — used both for the L1 `# Workspace Files` block
       // gating below and for `filterToolsByCapabilities` further down.
       // One fetch, two consumers.
-      const activeCapabilities = new Set(await options.capabilityStore.listActive(assistant.id))
 
       // Workspace files L1 block (Q3 / company-brain §10). Built only when
       // the assistant has the `files` capability AND a workspace AND the
@@ -5644,8 +5714,6 @@ export function chatRoutes(options: WebChatOptions): Router {
       // the audit's `retrieval_sensitivity_max` is the true max sensitivity
       // of brain rows the model saw this turn — not a conservative
       // `'public'` under-stamp. See `connector-actions.md` → IFC.
-      const sensitivityAccumulator = new SensitivityAccumulator()
-      const compartmentAccumulator = new CompartmentAccumulator()
       noteAutomaticScopeEvidence(scopeAccumulator, [
         rankedIndex.rows,teamMemoryIndex,
         ...identityMemories,
@@ -5667,22 +5735,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // the MCP inject (Gmail `sendMessage`) so one workspace-scoped chat
       // turn audits both surfaces consistently. See
       // `docs/plans/company-brain/connector-actions.md`.
-      const connectorActionAudit =
-        assistant.workspaceId &&
-        options.connectorActionStore &&
-        options.episodesStore &&
-        options.buildConnectorActionAudit
-          ? options.buildConnectorActionAudit({
-              workspaceId: assistant.workspaceId,
-              assistantClearance: assistant.clearance,
-              // Same instance as the queryLoop's `sensitivity:` accumulator
-              // — the loop's tool reads populate it, the audit hooks read
-              // `.max` at action time.
-              sensitivityAccumulator,
-              connectorActionStore: options.connectorActionStore,
-              episodesStore: options.episodesStore,
-            })
-          : undefined
+
 
       // Host extra-tool injection — a host may merge additional tools into the
       // turn for certain assistants (e.g. a publishing app's outbound tools).
@@ -5955,59 +6008,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       for (const name of allTools.keys()) {
         if (!admittedTools.has(name)) allTools.delete(name)
       }
-      const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId)
       turnTiming.mark('context')
-      const {
-        enrichConfirmation,
-        unavailable: unavailableCapabilities,
-        searchableSources,
-        knowledgeCapturePrompt,
-      } = await applyMcpInjection({
-        scope: 'chat',
-        connectorUserId,
-        assistant,
-        userTimezone: user.timezone,
-        tools: allTools,
-        stores: {
-          ...options,
-          // Promote a just-attached photo on demand, so an image can reach a
-          // Shopify product without the model first calling saveFileToBrain.
-          readCachedFile: options.fileStore
-            ? (id, ctx) => options.fileStore!.get(id, ctx)
-            : undefined,
-        },
-        engineHooks: options.engineHooks,
-        // In-app actor identity: email is how the signed-in user is known on
-        // the web/app surface. Channel turns (WA/TG/Slack) set their native id
-        // in channel-pipeline. Resolved server-side from the session — never
-        // model output. Opted-in connectors receive X-Sidanclaw-Actor-*.
-        actorIdentity: { channel: session.channelType ?? 'web', id: user.email, email: user.email, userId: user.id },
-        // Forwarded to `injectGoogleTools` → Gmail `sendMessage` audit
-        // wrap. Shared with the host extra-tool inject above.
-        connectorActionAudit,
-        // Workspace domain is null today — workspaces don't carry an
-        // email_domain column. The GCal audit hook falls back to
-        // treating attendees-with-domain as external (audience=public).
-        // Future migration adds the column.
-        workspaceDomain: null,
-        // Interactive chat has a live Approve/Deny loop, so the KB write
-        // tools may exist here (D2 — chat-only). The public API shares
-        // `applyMcpInjection` and must NOT set this.
-        allowKnowledgeWrites: true,
-        knowledgeCaptureText: message ?? '',
-        discoveryQuery: rawMessage ?? undefined,
-        contextScope: turnScope,
-        executionContext,
-        scopeAccumulator,
-        // On-demand introspection lane (ability audit §6-c/d): workspace
-        // PRIMARY assistants only — these read workspace-operational state
-        // (approvals / scheduled jobs / research runs / session history).
-        // They enter the mcp_search index, never the direct tool surface.
-        introspectionTools:
-          assistant.kind === 'primary' && assistant.workspaceId
-            ? options.introspectionTools
-            : undefined,
-      })
+      const { enrichConfirmation, unavailable: unavailableCapabilities, searchableSources, knowledgeCapturePrompt } = preparedConnectors
+      for (const [name, tool] of preparedConnectorTools) {
+        if (tool === options.tools.get(name) || tool.deferredSchemaOnly && allTools.has(name)) continue
+        allTools.set(name, tool)
+      }
       turnTiming.mark('tools_inject')
       if (knowledgeCapturePrompt) privateRuntimeContextParts.push(knowledgeCapturePrompt)
 
@@ -7360,6 +7366,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             registryRow(customLlmRuntime?.selector ?? preparedRun.model.model)?.provider === 'gemini',
           toolSelection: options.decisionRuntime && storedUserSource && rawMessage?.trim() ? {
             runtime: options.decisionRuntime, workspaceId: assistant.workspaceId ?? undefined,
+            preselected: adaptive?.toolNames,
             input: {
               messages: [bindScopeSources<Message>({ role: 'user', content: rawMessage }, [storedUserSource])],
               assertInputAuthority: () => assertSourceModelInputAuthority({
@@ -7368,6 +7375,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             },
             llm: { provider: backgroundProvider, modelId: backgroundModel },
             onResult: async selection => {
+              if (selection.path === 'preparation') return
               turnTiming.add('tool_selection', selection.durationMs)
               await recordOverheadUsage({ usageStore: options.usageStore, userId: user.id, assistantId: assistant.id,
                 sessionId: session.id, userMessageId: storedUserMsg.id, model: selection.model, usage: selection.usage,

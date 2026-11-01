@@ -213,6 +213,7 @@ export async function readAttendedSessionHistory(authority:SessionContextAuthori
 export async function classifyAttendedResearchMessage(input:{
  authority:SessionContextAuthority;session:Session;message:SessionMessage;
  provider:ResearchClassifyOptions['provider'];model:string;decisionRuntime?:ResearchClassifyOptions['decisionRuntime'];
+ toolCandidates?:ResearchClassifyOptions['toolCandidates'];
  capture?:object;
  measure?:ClassificationMeasure;
 }):Promise<ResearchClassifyResult>{
@@ -229,7 +230,7 @@ export async function classifyAttendedResearchMessage(input:{
   .map(row=>({role:row.role as 'user'|'assistant',text:text(row)})).filter(row=>row.text.trim().length>0).slice(-6)
  const context={...executionToolContext(authority.execution,{appId:'native-session-research'}),scopeAccumulator:authority.accumulator}
  const options=bindScopeSources<ResearchClassifyOptions>({provider:input.provider,model:input.model,decisionRuntime:input.decisionRuntime,
-  message:text(current),recentConversation:recent,authority,signal:authority.execution.lifecycle.abortSignal,
+  message:text(current),recentConversation:recent,toolCandidates:input.toolCandidates,authority,signal:authority.execution.lifecycle.abortSignal,
   assertInputAuthority:()=>input.measure?input.measure('research_authority',()=>assertSourceModelInputAuthority(context)):assertSourceModelInputAuthority(context),workspaceId:authority.execution.security.access.workspaceId,
   runId:'research-intent-'+message.id},boundScopeSources(query))
  return classifyResearchIntent(options)

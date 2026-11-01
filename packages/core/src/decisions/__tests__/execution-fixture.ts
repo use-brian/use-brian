@@ -18,6 +18,8 @@ export function executionFixture(options: {
   llm: LLMProvider
   model?: { catalogId: string; wireId: string }
   shadowSampleRate?: number
+  totalTimeoutMs?: number
+  primaryTimeoutMs?: number
   profilePolicy?: JsonValue
 }): DecisionExecutionPort {
   const routeFor = (request: Parameters<typeof executeDecisionCascade>[0]['request']) => {
@@ -37,8 +39,8 @@ export function executionFixture(options: {
       evaluationSegment: request.evaluationSegment ?? 'global',
       status: mode === 'hybrid' ? 'approved' : 'evaluation',
       evidence: 'synthetic',
-      totalTimeoutMs: 100,
-      primaryTimeoutMs: 50,
+      totalTimeoutMs: options.totalTimeoutMs ?? 100,
+      primaryTimeoutMs: options.primaryTimeoutMs ?? 50,
       maxAttempts: 2,
       ...(options.profilePolicy !== undefined ? { policy: options.profilePolicy } : {}),
       ...(mode === 'shadow' ? { shadowSampleRate: options.shadowSampleRate ?? 1 } : {}),

@@ -739,7 +739,8 @@ async function* queryLoopCore(
   }
 
   // Build tool definitions for the LLM
-  let toolDefinitions: ToolDefinition[] = Array.from(tools.values()).filter(t => !t.hiddenFromModel).map((t) => ({
+  let toolDefinitions: ToolDefinition[] = Array.from(tools.values())
+    .filter(t => !t.hiddenFromModel && (!t.deferredSchemaOnly || options.deferToolSchemas)).map((t) => ({
     name: t.name,
     description: t.description,
     parameters: t.inputSchema._def
@@ -748,7 +749,10 @@ async function* queryLoopCore(
   }))
 
   if (options.deferToolSchemas && toolDefinitions.length > 0) {
-    const selected = options.toolSelection ? await selectInitialToolSchemas({
+    const selected = options.toolSelection?.preselected !== undefined
+      ? { names: [...options.toolSelection.preselected].filter(name => toolDefinitions.some(tool => tool.name === name)),
+          model: null, usage: null, path: 'preparation', durationMs: 0 }
+      : options.toolSelection ? await selectInitialToolSchemas({
       ...options.toolSelection, definitions: toolDefinitions, messages: options.toolSelection.input?.messages ?? options.messages,
       runId: `chat-tools-${context.sessionId}-${Date.now()}`, signal: context.abortSignal,
       assertInputAuthority: options.toolSelection.input?.assertInputAuthority ?? (() => assertModelInputAuthority(context)),

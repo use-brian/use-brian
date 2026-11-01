@@ -415,6 +415,7 @@ export type ApplyMcpInjectionParams = {
   allowKnowledgeWrites?: boolean
   /** Newest authored request for bounded read-only schema discovery. */
   discoveryQuery?: string
+  exposeLocalReadTools?: boolean
   /** Newest human turn used by the deterministic capture-rule matcher. */
   knowledgeCaptureText?: string
   /** Trusted execution scope used to hide connectors with broader exposure. */
@@ -462,6 +463,7 @@ export async function applyMcpInjection(
       knowledgeCaptureRuleStore: stores.knowledgeCaptureRuleStore,
       knowledgeCaptureText: params.knowledgeCaptureText,
       discoveryQuery: params.discoveryQuery,
+      exposeLocalReadTools: params.exposeLocalReadTools,
       knowledgeWriteAuthorization: 'capture',
       gdriveFilesStore: stores.gdriveFilesStore,
       connectorGrantStore: stores.connectorGrantStore,

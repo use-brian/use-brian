@@ -554,6 +554,8 @@ export type Tool<Input extends z.ZodType = z.ZodType> = {
    * Enforced in `tools/capability-gate.ts` (the single model-visibility gate).
    */
   hiddenFromModel?: boolean
+  /** Optional schema adapter; expose only when the loop selects deferred schemas. */
+  deferredSchemaOnly?: boolean
 
   /**
    * Dynamic confirmation check — called at execution time instead of
