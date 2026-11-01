@@ -28,6 +28,10 @@ async function definition(client: PoolClient, signature: string) {
 
 describe.sequential('[COMP:api/application-persistence] flattened native covered helper manifest', () => {
   afterAll(async () => { await getAppPool().end(); await getPool().end() })
+  it('retains covered queue eligibility after changing the guard representation', async () => transaction(async client => {
+    expect(await allowed(client, 'application_native_covered_queue_current()')).toBe(true)
+  }))
+
   it('retains a fresh true result without executing nested guards', async () => transaction(async client => {
     await client.query("SET LOCAL track_functions='all'")
     expect(await allowed(client)).toBe(true)
