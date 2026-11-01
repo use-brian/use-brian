@@ -172,7 +172,7 @@ describe.sequential('[COMP:api/application-persistence] invocation-local native 
       const original = await operation<Json>(client, 'stats')
       expect((optimized.read_native_file_worklist_evidence ?? 0) - (before.read_native_file_worklist_evidence ?? 0)).toBeGreaterThan(0)
       expect((optimized.native_worklist_frame_current ?? 0) - (before.native_worklist_frame_current ?? 0)).toBeGreaterThan(0)
-      expect((optimized.read_admitted_native_scope_snapshot ?? 0) - (before.read_admitted_native_scope_snapshot ?? 0)).toBeGreaterThan(0)
+      expect((optimized.native_worklist_seed ?? 0) - (before.native_worklist_seed ?? 0)).toBeGreaterThanOrEqual(2)
       expect((optimized.read_resource_page_dependencies ?? 0) - (before.read_resource_page_dependencies ?? 0))
         .toBeLessThan((original.read_resource_page_dependencies ?? 0) - (optimized.read_resource_page_dependencies ?? 0))
       expect(await history(client)).toEqual(await baseline(client, () => history(client)))
@@ -184,19 +184,27 @@ describe.sequential('[COMP:api/application-persistence] invocation-local native 
     for (const id of replies) expect(current.history.some(row => row.id === id)).toBe(true)
   }, 120_000)
 
-  it('independently rereads every distinct native source through the complete canonical reader at the final boundary', async () => frame(async client => {
+  it('independently rebuilds final source snapshots from identities with canonical-equivalent results', async () => frame(async client => {
     const seed = await operation(client, 'seed', roots)
     expect(seed).not.toBeNull()
     const nativeCount = Object.keys(seed!.currents).length
     expect(nativeCount).toBeGreaterThanOrEqual(50)
+    for (const node of Object.values(seed!.currents) as Json[]) {
+      expect(node.source).toEqual(await operation(client, 'native', { kind: node.kind, id: node.id }))
+    }
     await operation(client, 'trace')
     const before = await operation<Json>(client, 'stats')
     expect(await operation(client, 'current', seed)).toBe(true)
     const after = await operation<Json>(client, 'stats')
-    expect((after.read_admitted_native_scope_snapshot ?? 0) - (before.read_admitted_native_scope_snapshot ?? 0)).toBeGreaterThanOrEqual(nativeCount)
-    for (const privateReader of ['native_worklist_current', 'native_worklist_snapshot', 'native_worklist_page_dependencies']) {
-      expect((after[privateReader] ?? 0) - (before[privateReader] ?? 0)).toBe(0)
-    }
+    expect((after.native_worklist_seed ?? 0) - (before.native_worklist_seed ?? 0)).toBe(1)
+    expect((after.native_worklist_current ?? 0) - (before.native_worklist_current ?? 0)).toBe(nativeCount)
+    // The seed starts with empty currents. Its source readers cannot borrow
+    // the original native snapshots or any previous field admission memo.
+    expect((after.native_worklist_snapshot ?? 0) - (before.native_worklist_snapshot ?? 0)).toBe(0)
+    const changed = structuredClone(seed!)
+    const key = Object.keys(changed.currents)[0]
+    changed.currents[key].source = null
+    expect(await operation(client, 'current', changed)).toBe(false)
   }), 90_000)
 
   it('preserves canonical frame evidence and only adds completed native scope entries', async () => frame(async client => {

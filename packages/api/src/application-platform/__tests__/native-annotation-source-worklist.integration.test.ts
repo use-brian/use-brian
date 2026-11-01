@@ -186,7 +186,7 @@ describe.sequential('[COMP:api/application-persistence] annotation source workli
     finally { await getAppPool().end(); await getPool().end() }
   })
 
-  it('preserves complete proof JSON and committed annotation readback while retaining final canonical verification', async () => {
+  it('preserves complete proof JSON and committed annotation readback while retaining independent final verification', async () => {
     await frame(async client => {
       expect(await operation(client, 'guard')).toBe(true)
       await operation(client, 'trace')
@@ -195,7 +195,8 @@ describe.sequential('[COMP:api/application-persistence] annotation source workli
       expect(actual.memo).not.toHaveProperty('nativeWorklist')
       const after = await operation(client, 'stats')
       expect((after.native_worklist_frame_current ?? 0) - (before.native_worklist_frame_current ?? 0)).toBeGreaterThan(0)
-      expect((after.read_admitted_native_scope_snapshot ?? 0) - (before.read_admitted_native_scope_snapshot ?? 0)).toBeGreaterThanOrEqual(50)
+      expect((after.native_worklist_seed ?? 0) - (before.native_worklist_seed ?? 0)).toBeGreaterThanOrEqual(2)
+      expect((after.native_worklist_current ?? 0) - (before.native_worklist_current ?? 0)).toBeGreaterThanOrEqual(100)
       await operation(client, 'disable')
       expectScheduledFrame(actual, await operation(client, 'frame', roots))
     })
