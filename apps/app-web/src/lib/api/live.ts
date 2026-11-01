@@ -20,6 +20,8 @@ const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 export type LiveWorkState = "working" | "waiting" | "stalled" | "settled";
 
 export type LiveSessionItem = {
+  /** Local read start for transient completion reconciliation, never authority. */
+  statusReadStartedAt?: number;
   kind: "session";
   tier: "full" | "presence";
   id: string;
@@ -68,6 +70,7 @@ export async function fetchLiveRoster(
   workspaceId: string,
 ): Promise<LiveWorkItem[]> {
   const started = performance.now();
+  const statusReadStartedAt = Date.now();
   const res = await authFetch(
     `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/live`,
   );
@@ -77,7 +80,7 @@ export async function fetchLiveRoster(
     throw error;
   }
   const body = (await res.json()) as { items?: LiveWorkItem[] };
-  const items = body.items ?? [];
+  const items = (body.items ?? []).map(item => item.kind === "session" ? { ...item, statusReadStartedAt } : item);
   deadlines.set(items, started + MAX_AGE_MS);
   if (liveRosterRemaining(items) <= 0) throw new SurfaceCacheEvictionError(new Error('live_roster_expired'));
   return items;

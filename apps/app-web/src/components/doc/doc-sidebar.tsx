@@ -103,7 +103,7 @@ import { OfficeSidebarPanel } from "./sidebar-panels/office-sidebar-panel";
 import { ShopifySidebarPanel } from "./sidebar-panels/shopify-sidebar-panel";
 import { LiveSidebarPanel } from "./sidebar-panels/live-sidebar-panel";
 import { useLiveRoster } from "@/components/live/use-live-roster";
-import { summarizeRosterItems } from "@/lib/live-roster";
+import { useChatLiveCount } from "@/lib/chat-send-feedback";
 import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 
 /**
@@ -211,7 +211,7 @@ export function DocSidebar(props: Props) {
   // updates while the user works on any surface. The Live sidebar receives the
   // same snapshot below instead of starting a second copy of this loader.
   const liveRoster = useLiveRoster(workspaceId);
-  const liveActiveCount = summarizeRosterItems(liveRoster.items).active;
+  const liveActiveCount = useChatLiveCount(workspaceId, liveRoster.items);
   // ── Inbox unread badge (pending assistant replies + unread mentions) ──
   // Reads the SAME slot the Inbox flyout fills (`inboxCacheKey`, instant-
   // navigation contract N2), so one request serves the badge and the flyout:

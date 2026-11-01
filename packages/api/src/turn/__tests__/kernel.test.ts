@@ -14,6 +14,7 @@ vi.mock('../../db/sessions.js', () => ({
 
 let loopEvents: unknown[] = []
 let loopThrows: Error | null = null
+let loopCleanup: (() => Promise<void>) | null = null
 const loopOptions: Array<Record<string, unknown>> = []
 vi.mock('@use-brian/core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@use-brian/core')>()
@@ -22,6 +23,7 @@ vi.mock('@use-brian/core', async (importOriginal) => {
     queryLoop: vi.fn(async function* (options: Record<string, unknown>) {
       loopOptions.push(options)
       for (const event of loopEvents) yield event
+      await loopCleanup?.()
       if (loopThrows) throw loopThrows
     }),
   }
@@ -55,11 +57,56 @@ beforeEach(() => {
   leaseCalls.length = 0
   loopEvents = []
   loopThrows = null
+  loopCleanup = null
   loopOptions.length = 0
   vi.mocked(isTurnLeaseLive).mockResolvedValue(false)
 })
 
 describe('[COMP:api/turn-kernel] runAssistantTurn', () => {
+  it('settles reply presentation before delayed cleanup while keeping publication and lease held', async () => {
+    const response = textTurn('Hello.').response
+    loopEvents = [textTurn('Hello.'), { type: 'turn_complete', response, totalUsage: response.usage }]
+    let finishCleanup!: () => void
+    loopCleanup = () => new Promise<void>(resolve => { finishCleanup = resolve })
+    const textComplete = vi.fn(), publish = vi.fn()
+    const run = runAssistantTurn(params('sse', { sink: {
+      kind: 'sse', onReplyTextComplete: textComplete, afterLoop: publish,
+    } }))
+    await vi.waitFor(() => expect(textComplete).toHaveBeenCalledOnce())
+    expect(publish).not.toHaveBeenCalled()
+    expect(leaseCalls).not.toContain('release')
+    finishCleanup()
+    await run
+    expect(publish).toHaveBeenCalledOnce()
+    expect(leaseCalls.at(-1)).toBe('release')
+  })
+
+  it('does not announce intermediate text, narration or output refused at the sink', async () => {
+    const response = textTurn('Hello.').response
+    for (const terminal of [false, true]) {
+      loopEvents = [textTurn('Hello.')]
+      if (terminal) loopEvents.push({ type: 'turn_complete', response, totalUsage: response.usage })
+      const textComplete = vi.fn()
+      const options = params('sse', { sink: { kind: 'sse', onReplyTextComplete: textComplete,
+        ...(terminal ? { assertOutputAuthority: async () => { throw new AuthorityChangedError() } } : {}),
+      } })
+      if (terminal) {
+        const authority = {}, executionContext = { security: { authority } }
+        options.loop.context = { authority, executionContext, scopeAccumulator: { evidence: {} } } as never
+      }
+      if (terminal) await expect(runAssistantTurn(options)).rejects.toBeInstanceOf(AuthorityChangedError)
+      else await runAssistantTurn(options)
+      expect(textComplete).not.toHaveBeenCalled()
+    }
+    const narration = { ...response, content: [{ type: 'text', text: 'Checking.' },
+      { type: 'tool_use', id: 'call', name: 'search', input: {} }] }
+    loopEvents = [{ type: 'assistant_turn', response: narration },
+      { type: 'turn_complete', response: narration, totalUsage: response.usage }]
+    const textComplete = vi.fn()
+    await runAssistantTurn(params('sse', { sink: { kind: 'sse', onReplyTextComplete: textComplete } }))
+    expect(textComplete).not.toHaveBeenCalled()
+  })
+
   it('distinguishes a refused follow-up after a published reply from a failed publication', async () => {
     for (const publicationFails of [false, true]) {
       loopEvents = [textTurn('hello')]

@@ -379,7 +379,7 @@ export function ChatActivityFeed({
   );
   // Live rows open to their Input / Output like receipt rows do.
   const [openSteps, setOpenSteps] = useState<Set<string>>(() => new Set());
-  const elapsed = useElapsed(startedAt);
+  const elapsed = useElapsed(replyPhase === "generating" ? startedAt : null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
   const toolById = new Map(tools.map((tool) => [tool.id, tool]));
@@ -410,8 +410,15 @@ export function ChatActivityFeed({
     if (el) el.scrollTop = el.scrollHeight;
   }, [events.length, expanded]);
 
+  // Saving and session bookkeeping are not another user-visible work phase.
+  // Keep the finished answer's receipt while the transport still owns the run.
+  if (replyPhase !== "generating") {
+    return <ChatActivitySummary tools={tools}
+      reasoning={events.filter(event => event.kind === "reasoning").map(event => event.text).join("\n")}
+      defaultExpanded={defaultExpanded} />;
+  }
   // Pure-text turn with the reply already streaming: nothing to show.
-  if (replyStreaming && !hasActivity && replyPhase === "generating") return null;
+  if (replyStreaming && !hasActivity) return null;
 
   // The most specific "what is happening right now" line.
   const runningLabel = runningTool
@@ -419,9 +426,7 @@ export function ChatActivityFeed({
         runningTool.detail ? ` · ${runningTool.detail}` : ""
       }`
     : null;
-  const headerLabel = replyPhase === "saving" ? t.chat.activity.savingReply
-    : replyPhase === "finishing" ? t.chat.activity.finishingReply
-    : replyStreaming
+  const headerLabel = replyStreaming
     ? t.chat.activity.writing
     : (runningLabel ??
       (researchPhase ? t.chat.researchStatus[researchPhase] : null) ??

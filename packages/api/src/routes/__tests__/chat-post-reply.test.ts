@@ -13,6 +13,17 @@ const content: ContentBlock[] = [{ type: 'text', text: 'Hello.' }]
 const completed: TurnLoopResult = { selection: { kind: 'text', text: 'Hello.' }, finalText: null, aborted: false }
 
 describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
+  it('announces text completion once without claiming a saved reply or hiding a later failure', () => {
+    const boundary = createChatPostReplyBoundary(), announce = vi.fn()
+    boundary.announceTextCompletion(announce)
+    expect(boundary.isPublishedReply()).toBe(false)
+    expect(boundary.notice(new AuthorityChangedError())).toBeNull()
+    boundary.beginFinalization(completed, false, new AbortController().signal)
+    boundary.announceTextCompletion(announce)
+    expect(announce).toHaveBeenCalledOnce()
+    boundary.recordPublishedReply(content)
+    expect(boundary.isPublishedReply()).toBe(true)
+  })
   it('announces text completion only for successful live text and does not imply publication', () => {
     const boundary = createChatPostReplyBoundary(), abort = new AbortController()
     expect(boundary.beginFinalization(completed, false, abort.signal)).toBe(true)
@@ -234,5 +245,42 @@ describe('[COMP:api/chat-post-reply] foreground route boundary', () => {
     const test = routeBoundary(true, true)
     await test.run()
     expect(test.events).toEqual([])
+  })
+})
+
+
+describe('[COMP:api/chat-post-reply] nonblocking commitment analysis', () => {
+  const start = route.indexOf('            const stateJobKind = classifySession(session)')
+  const end = route.indexOf('            // Source-authority reads lock rows too.', start)
+  const body = ts.transpileModule(route.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor
+  function setup() {
+    const events: string[] = []
+    const scope = {
+      classifySession: () => ({ anchor: { kind: 'none' }, transport: 'web', lane: 'conversation' }),
+      session: { id: 'session', assistantId: 'assistant' }, assistant: { id: 'assistant' }, user: { id: 'actor' },
+      nativeTranscriptAuthority: {}, roomResponseGroupContext: null, docToolsTurn: false, docWrittenPageIds: new Set(),
+      executionContext: {identity: {kind: 'attended', principal: {kind: 'workspace_member', authenticationKind: 'native_session'}}},
+      options: { enqueueSessionStateJob: vi.fn(async () => { events.push('enqueue'); return true }), analytics: {logEvent: vi.fn()} },
+      publishReply: vi.fn(async () => { events.push('saved') }), postReply: { isPublishedReply: () => true },
+      lastAssistantMessageId: 'reply', storedUserMsg: { id: 'question' }, req: {}, pinSessionTitleClaims: () => ({ userId: 'actor' }),
+      isAuthorityChangedError: () => false, isDeliveryAudienceUnverifiedError: () => false,
+      console: { warn: vi.fn() },
+    }
+    const run = () => new AsyncFunction(...Object.keys(scope), body)(...Object.values(scope))
+    return { scope, events, run }
+  }
+  it('returns after saving and enqueueing without waiting for the worker model', async () => {
+    const f = setup(); await f.run()
+    expect(f.events).toEqual(['saved', 'enqueue'])
+    expect(f.scope.options.enqueueSessionStateJob).toHaveBeenCalledWith(expect.objectContaining({ userMessageId: 'question', assistantMessageId: 'reply' }))
+  })
+  it('never enqueues failed publication and never falls back to blocking inference on queue failure', async () => {
+    const f = setup(); f.scope.publishReply.mockRejectedValue(new Error('save failed'))
+    await expect(f.run()).rejects.toThrow('save failed')
+    expect(f.scope.options.enqueueSessionStateJob).not.toHaveBeenCalled()
+    f.scope.publishReply.mockResolvedValue();f.scope.options.enqueueSessionStateJob.mockRejectedValue(new Error('queue unavailable'))
+    await f.run()
+    expect(f.scope.options.analytics.logEvent).toHaveBeenLastCalledWith(expect.objectContaining({eventName:'session_state_diff_enqueue_failed'}))
   })
 })

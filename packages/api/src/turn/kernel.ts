@@ -67,6 +67,8 @@ export type TurnSink = {
   onOutputAuthorityTiming?: (milliseconds:number)=>void
   /** Every engine event, in order. The `sse` sink renders them; others may observe. */
   onEvent?: (event: QueryEvent) => void | Promise<void>
+  /** SSE display only: final text is selected, but cleanup/publication still follow. */
+  onReplyTextComplete?: () => void
   /**
    * Runs after a clean loop while the lease is still held: flush buffered
    * turns, persist the reply. A throw here still releases the lease.
@@ -279,6 +281,13 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       }
       collector.observe(event)
       await params.sink.onEvent?.(event)
+      // The generator may await resource cleanup after yielding its terminal
+      // event. Stop the writing UI now, without releasing the lease or claiming
+      // persistence. This event already passed the source/delivery boundary.
+      if (event.type === 'turn_complete' && params.sink.kind === 'sse'
+        && !params.abortController.signal.aborted && collector.select().kind === 'text') {
+        params.sink.onReplyTextComplete?.()
+      }
     }
     const selection = collector.select()
     const finalText = FINAL_ONLY_SINKS.has(params.sink.kind) && selection.kind === 'text'

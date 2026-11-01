@@ -13,10 +13,10 @@ import { assertInputAuthority, isInputAuthorityError } from '../providers/input-
  *   { "upserts": [{ "key", "summary", "detail"? }, ...],
  *     "resolves": [{ "key" }, ...] }
  *
- * Actual persistent hosts await this inside the current turn lease after the
- * primary loop, so commitments missed by `trackCommitment` are caught before
- * the next turn starts. Deduped against `openCommitments` so
- * unchanged rows don't get re-upserted.
+ * Native web conversations run this in a durable, freshly authorized background
+ * worker; other persistent hosts retain the in-turn path. Background writes
+ * carry a pre-inference generation fence. Deduped against `openCommitments`
+ * so unchanged rows do not get re-upserted.
  *
  * On any failure (provider error, non-JSON output, schema mismatch) the
  * function returns zero counts and the caller logs `session_state_diff_failed`.

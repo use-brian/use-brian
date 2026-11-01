@@ -1,3 +1,5 @@
+import { enqueueNativeSessionStateJob } from './db/session-state-jobs.js'
+import { createSessionStateWorker } from './workers/session-state-worker.js'
 import { enqueueNativeSessionTitleJob } from './db/session-title-jobs.js'
 import { recordOverheadUsage } from './routes/_overhead-usage.js'
 import { createSessionTitleWorker } from './workers/session-title-worker.js'
@@ -5651,6 +5653,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       config: ports.feedImage?.config, billing: ports.feedImage?.billing }), feedReviewContext)
   app.use('/api/chat', optionalAuth(env.JWT_SECRET), chatRoutes({
     enqueueSessionTitleJob: enqueueNativeSessionTitleJob,
+    enqueueSessionStateJob: enqueueNativeSessionStateJob,
     feedGeneration,
     feedReviewContext,
     provider,
@@ -8559,6 +8562,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) sessionTitleWorker.start()
 
+  const sessionStateWorker = createSessionStateWorker({
+    async resolveRuntime(workspaceId) {
+      const runtime = await resolveWorkspaceCustomLlm({ workspaceId, requestedTier: 'standard', allowDefault: true, allowAnyDefault: true })
+      return { provider: runtime?.provider ?? provider, model: runtime?.selector ?? backgroundModelFor(configuredProviders),
+        providerKeySource: runtime?.providerKeySource ?? 'platform' }
+    },
+    async recordResult(job, result, runtime) {
+      analytics?.logEvent({ userId: job.actorUserId, assistantId: job.assistantId, sessionId: job.sessionId,
+        eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass', channelType: 'web',
+        metadata: { upserts: result.upserts, resolves: result.resolves, failed: Boolean(result.errorMessage), background: true } })
+      await recordOverheadUsage({ usageStore, userId: job.actorUserId, assistantId: job.assistantId,
+        sessionId: job.sessionId, userMessageId: job.userMessageId,
+        model: result.model, usage: result.usage, source: 'overhead:session-state-diff', triggerKey: 'session_state_diff',
+        modelTier: 'standard', providerKeySource: runtime.providerKeySource })
+    },
+  })
+  if (runWorkers) sessionStateWorker.start()
+
   const cleanupWorker = createCleanupWorker({ jobStore })
   if (runWorkers) cleanupWorker.start()
 
@@ -10153,6 +10174,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     await stopWatchCleanup?.() // Watch boot lifecycle: stop and drain retention work.
     console.log('Shutting down — flushing analytics...')
     await sessionTitleWorker.stop()
+    await sessionStateWorker.stop()
     consolidationWorker.stop()
     skillReviewWorker.stop()
     playbookReflectionWorker.stop()

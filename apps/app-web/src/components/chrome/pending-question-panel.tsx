@@ -15,7 +15,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Cable, TriangleAlert } from "lucide-react";
+import { TriangleAlert } from "lucide-react";
+import { ConnectorAuthorizationCard } from "./connector-authorization-card";
 import { cn } from "@/lib/utils";
 import { isPhoneViewport } from "@/lib/viewport";
 import type { useT } from "@/lib/i18n/client";
@@ -65,6 +66,7 @@ export function PendingQuestionPanel({
       .then((pending) => {
         if (!cancelled && pending?.approvalId === approvalId) setAction(pending.action);
       })
+      .catch(() => { /* A later pending-input refresh can recover this action. */ })
       .finally(() => {
         if (!cancelled) setActionResolved(true);
       });
@@ -113,6 +115,12 @@ export function PendingQuestionPanel({
     onCancelled();
   }, [cancelling, submitting, sessionId, approvalId, onCancelled, dict]);
 
+  if (actionResolved && action) return <ConnectorAuthorizationCard
+    key={`${sessionId}:${approvalId}:${action.provider}`}
+    action={action} sessionId={sessionId} approvalId={approvalId} dict={dict}
+    cancelling={cancelling} error={error} onAnswered={onAnswered} onCancel={() => void onCancel()}
+  />;
+
   return (
     <div className="flex gap-2.5">
       <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-400 ring-1 ring-amber-500/25">
@@ -122,25 +130,7 @@ export function PendingQuestionPanel({
         <div className="text-[10px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-300">
           {dict.heading}
         </div>
-        {!actionResolved ? null : action ? (
-          <div className="space-y-2">
-            <p className="text-xs text-muted-foreground">
-              {dict.connectHelp.replace("{connector}", action.label)}
-            </p>
-            <button
-              type="button"
-              onClick={() => window.location.assign(action.connectPath)}
-              disabled={cancelling}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-md bg-action px-3 py-1.5 text-[12px] font-medium text-action-foreground",
-                "transition-colors hover:bg-action/90 disabled:cursor-not-allowed disabled:opacity-50",
-              )}
-            >
-              <Cable className="size-3.5" aria-hidden />
-              {dict.connect.replace("{connector}", action.label)}
-            </button>
-          </div>
-        ) : (
+        {!actionResolved ? null : (
           <textarea
             ref={answerRef}
             value={answer}

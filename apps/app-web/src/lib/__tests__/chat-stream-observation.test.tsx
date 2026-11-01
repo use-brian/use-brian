@@ -38,6 +38,7 @@ function find(predicate: (node: ts.Node) => boolean): ts.Node {
   return result;
 }
 function evaluate<T = (...args: any[]) => any>(expression: string, scope: Record<string, unknown>): T {
+  scope = { localSend: { release: vi.fn(), complete: vi.fn() }, inputSaved: true, ...scope };
   const code = ts.transpileModule(`return (${expression});`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
   return new Function(...Object.keys(scope), code)(...Object.values(scope)) as T;
 }
@@ -165,7 +166,9 @@ describe("[COMP:app-web/chat-stream-observation] activity polling ownership", ()
 
   for (const callback of ["onDone", "onDisconnect", "onError"]) it(`releases stale POST coverage in actual ${callback} before the ownership gate`, () => {
     const stale = observe(); stale.observe("chat-a");
-    evaluate(directHandler(callback), { directObserver: stale, ownsSend: () => false })();
+    const release = vi.fn();
+    evaluate(directHandler(callback), { directObserver: stale, localSend: { release, complete: release }, ownsSend: () => false })();
+    expect(release).toHaveBeenCalledOnce();
     expect(polling()).toBe(true);
     const successor = observe(); successor.observe("chat-a");
     evaluate(directHandler(callback), { directObserver: stale, ownsSend: () => false })();

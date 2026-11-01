@@ -76,9 +76,15 @@ function base() {
   };
   return {
     sessionIdRef, sessionEpochRef, chatController, isAuthoritativeRosterDenial,
+    stream: { inFlight: () => false },
+    transcriptRequestRef: { current: 0 }, transcriptAbortRef: { current: null as AbortController | null },
+    setTranscriptCold: vi.fn(),
     workspaceId: "fictional-workspace",
     createChatStreamObserver: () => ({ observe: vi.fn(), release: vi.fn() }),
     directObserver: { observe: vi.fn(), release: vi.fn() },
+    localSend: { adopt: vi.fn(), release: vi.fn(), complete: vi.fn() },
+    rollbackRecency: vi.fn(),
+    beginChatSendFeedback: () => ({ adopt: vi.fn(), release: vi.fn() }),
     followObserver: { observe: vi.fn(), release: vi.fn() },
     setHistoryRecoverySessionId: vi.fn(), isSessionHistoryUnavailable: () => false,
     switchTo(id: string | null) { sessionEpochRef.current++; sessionIdRef.current = id; },
@@ -87,10 +93,57 @@ function base() {
 afterEach(() => vi.useRealTimers());
 
 describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
+  it.each(["rows", "failure"])("a new send supersedes a slow same-chat history read (%s)", async outcome => {
+    const pending = deferred<unknown[]>();
+    const scope = {
+      ...base(),
+      fetchChatTranscript: vi.fn((_id: string, _options: { signal: AbortSignal }) => pending.promise),
+      mapTranscriptRows: (rows: unknown) => rows,
+      writeTranscriptCache: vi.fn(), evictTranscriptCache: vi.fn(),
+      chat: { loadMessages: vi.fn() }, setError: vi.fn(),
+      t: { errorGeneric: "Try again", historyUnavailable: "Unavailable" },
+    };
+    const coordinator = createChatControllerCoordinator(() => scope.sessionIdRef.current);
+    const load = evaluate(callback("loadTranscript"), { ...scope, chatController: coordinator });
+    const read = load("A");
+    coordinator.begin("A"); // The accepted-send ownership transition.
+    expect(scope.fetchChatTranscript.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(scope.setTranscriptCold).toHaveBeenCalledWith(false);
+    // A transport may still resolve after abort (e.g. headers already read).
+    if (outcome === "rows") pending.resolve(["old prompt", "old answer"]);
+    else pending.reject(new Error("chat_history_failed: 403"));
+    await read;
+    expect(scope.chat.loadMessages).not.toHaveBeenCalled();
+    expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
+    expect(scope.evictTranscriptCache).not.toHaveBeenCalled();
+    expect(scope.setError).not.toHaveBeenCalled();
+    scope.fetchChatTranscript.mockResolvedValue(["old prompt", "old answer", "new prompt", "new answer"]);
+    await load("A", { force: true });
+    expect(scope.chat.loadMessages).toHaveBeenCalledExactlyOnceWith(["old prompt", "old answer", "new prompt", "new answer"]);
+  });
+
+  it("defers history replacement while the direct reply owns the transcript", async () => {
+    const scope = { ...base(), stream: { inFlight: () => true }, fetchChatTranscript: vi.fn() };
+    await evaluate(callback("loadTranscript"), scope)("A", { force: true });
+    expect(scope.fetchChatTranscript).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("reconciles personal history after a saved send only while it still owns the pane (%s)", async current => {
+    const settle = find(node => ts.isIfStatement(node)
+      && node.thenStatement.getText(tree).includes("await loadTranscript(owningSessionId, { force: true })"));
+    const scope = {
+      ownsSend: () => current, sourceMessageId: "saved-input", owningSessionId: "A",
+      panePolicy: { post: false }, targets: [{ id: "assistant" }], loadTranscript: vi.fn(),
+    };
+    await evaluate(`async () => { ${settle.getText(tree)} }`, scope)();
+    expect(scope.loadTranscript).toHaveBeenCalledTimes(current ? 1 : 0);
+    if (current) expect(scope.loadTranscript).toHaveBeenCalledWith("A", { force: true });
+  });
+
   it.each([401, 403, 404])("evicts protected history on an authoritative denial (%s)", async (status) => {
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
-      fetchSessionMessages: vi.fn().mockRejectedValue(new Error(`chat_history_failed: ${status}`)),
+      fetchChatTranscript: vi.fn().mockRejectedValue(new Error(`chat_history_failed: ${status}`)),
       mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), evictTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
       setError: vi.fn(), t: { errorGeneric: "Try again", historyUnavailable: "History unavailable. Start a new chat." },
@@ -106,7 +159,7 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     const response = deferred<unknown>();
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
-      fetchSessionMessages: vi.fn().mockReturnValue(response.promise), mapTranscriptRows: (rows: unknown) => rows,
+      fetchChatTranscript: vi.fn().mockReturnValue(response.promise), mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), evictTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
       isSessionHistoryUnavailable: () => true, setError: vi.fn(),
       t: { errorGeneric: "Try again", historyUnavailable: "History unavailable" },
@@ -123,7 +176,7 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     const response = deferred<string[]>();
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
-      fetchSessionMessages: vi.fn().mockReturnValue(response.promise),
+      fetchChatTranscript: vi.fn().mockReturnValue(response.promise),
       mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
       setError: vi.fn(), t: { errorGeneric: "History unavailable" },
@@ -133,7 +186,7 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     if (switched) scope.switchTo("B");
     response.reject(new Error("forbidden"));
     await loading;
-    expect(scope.fetchSessionMessages).toHaveBeenCalledWith("A", { strict: true });
+    expect(scope.fetchChatTranscript).toHaveBeenCalledWith("A", { signal: expect.any(AbortSignal) });
     expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
     expect(scope.chat.loadMessages).not.toHaveBeenCalled();
     expect(scope.setError).toHaveBeenCalledTimes(switched ? 0 : 1);
@@ -142,11 +195,11 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
   it.each([false, true])("drops late transcript responses after a switch (round trip: %s), including cache writes", async (roundTrip) => {
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
-      fetchSessionMessages: vi.fn(), mapTranscriptRows: (rows: unknown) => rows,
+      fetchChatTranscript: vi.fn(), mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
     };
     const response = deferred<string[]>();
-    scope.fetchSessionMessages.mockReturnValue(response.promise);
+    scope.fetchChatTranscript.mockReturnValue(response.promise);
     const load = evaluate(callback("loadTranscript"), scope);
     const loading = load("A");
     scope.switchTo("B");
@@ -162,15 +215,18 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     const fresh = deferred<string[]>();
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
-      fetchSessionMessages: vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise),
+      fetchChatTranscript: vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise),
       mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
     };
     const load = evaluate(callback("loadTranscript"), scope);
     const first = load("A");
     const second = load("A", { force: true });
+    expect(scope.fetchChatTranscript.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(scope.setTranscriptCold).not.toHaveBeenCalled();
     fresh.resolve(["new turn"]);
     await second;
+    expect(scope.setTranscriptCold).toHaveBeenCalledExactlyOnceWith(false);
     old.resolve(["before turn"]);
     await first;
     expect(scope.chat.loadMessages.mock.calls).toEqual([[["new turn"]]]);
@@ -274,6 +330,7 @@ function directStream(initialSession: string | null = "A", realController = fals
     const ownsSend = ${declaration("ownsSend").initializer!.getText(tree)};
     let turnFailed = false;
     let turnDisconnected = false;
+    let inputSaved = false;
     return {
       ownsSend, onEvent: ${handler("onEvent")}, onDone: ${handler("onDone")},
       onError: ${handler("onError")}, onDisconnect: ${handler("onDisconnect")}
@@ -399,7 +456,7 @@ describe("[COMP:app-web/chat-sessions-cache] stream completion ownership", () =>
     const response = deferred<void>();
     const scope = {
       ...base(), responseGroupAbortRef: { current: false }, directTurnSessionRef: { current: "A" },
-      stream: { abort: vi.fn() }, chat: { dispatch: vi.fn() }, turnTextRef: { current: "" },
+      stream: { abort: vi.fn(), inFlight: () => false }, chat: { dispatch: vi.fn() }, turnTextRef: { current: "" },
       resetTurnActivity: vi.fn(), stopTurn: vi.fn().mockReturnValue(response.promise),
       flushQueuedInputs: vi.fn(), setError: vi.fn(), t: { stopTurnFailed: "stop failed" },
     };
@@ -509,13 +566,45 @@ function hydrationEffect() {
 }
 
 describe("[COMP:app-web/chat-sessions-cache] selection before paint", () => {
+  it.each([false, true])("finishes cold loading after effect replay (unmount cleanup: %s)", async replayUnmount => {
+    const pending = deferred<string[]>();
+    const scope = {
+      ...base(), activeSessionId: "B", hydratedRef: { current: "A" as string | null },
+      setPendingQuestion: vi.fn(), setStartingShared: vi.fn(), responseGroupAbortRef: { current: false },
+      directTurnSessionRef: { current: "A" }, stream: { abort: vi.fn(), inFlight: () => false },
+      chat: { setSession: vi.fn(), loadMessages: vi.fn(), dispatch: vi.fn() },
+      resetTurnActivity: vi.fn(), att: { clear: vi.fn() }, setError: vi.fn(), setReplyTo: vi.fn(), setSelectionQuote: vi.fn(),
+      freshChannelIdRef: { current: null }, panePolicy: { presence: false }, setReconnectSessionId: vi.fn(),
+      readCachedTranscript: () => undefined, writeTranscriptCache: vi.fn(),
+      fetchChatTranscript: vi.fn(() => pending.promise), mapTranscriptRows: (rows: unknown) => rows,
+      loadTranscript: null as unknown as (id: string) => Promise<unknown>,
+    };
+    scope.loadTranscript = evaluate(callback("loadTranscript"), scope);
+    const hydrate = evaluate(hydrationEffect(), scope);
+    hydrate();
+    if (replayUnmount) {
+      const lifecycle = (find(node => ts.isCallExpression(node) && node.expression.getText(tree) === "useLayoutEffect" &&
+        node.arguments[0]?.getText(tree).includes("hydratedRef.current = null")) as ts.CallExpression).arguments[0].getText(tree);
+      evaluate(lifecycle, scope)()();
+      expect(scope.transcriptAbortRef.current?.signal.aborted).toBe(true);
+    }
+    hydrate();
+    expect(scope.fetchChatTranscript).toHaveBeenCalledTimes(replayUnmount ? 2 : 1);
+    pending.resolve(["Selected chat"]);
+    await pending.promise;
+    await Promise.resolve();
+    expect(scope.chat.loadMessages).toHaveBeenLastCalledWith(["Selected chat"]);
+    expect(scope.setTranscriptCold).toHaveBeenLastCalledWith(false);
+    expect(scope.writeTranscriptCache).toHaveBeenCalledExactlyOnceWith("B", ["Selected chat"]);
+  });
+
   it.each([true, false])("installs only the selected transcript synchronously while its read is pending (cached: %s)", cached => {
     const oldMessages = [{ id: "old-message", text: "Previous chat" }];
     const selectedMessages = [{ id: "selected-message", text: "Selected chat" }];
     const scope = {
       ...base(), activeSessionId: "B", hydratedRef: { current: "A" },
       setPendingQuestion: vi.fn(), setStartingShared: vi.fn(), responseGroupAbortRef: { current: false },
-      directTurnSessionRef: { current: "A" }, stream: { abort: vi.fn() },
+      directTurnSessionRef: { current: "A" }, stream: { abort: vi.fn(), inFlight: () => false },
       chat: { state: {sessionId: "A", messages: oldMessages}, setSession: vi.fn(), loadMessages: vi.fn(), dispatch: vi.fn() },
       resetTurnActivity: vi.fn(), att: { clear: vi.fn() }, setError: vi.fn(), setReplyTo: vi.fn(), setSelectionQuote: vi.fn(),
       freshChannelIdRef: {current: null}, panePolicy: {presence: false}, setReconnectSessionId: vi.fn(),
@@ -538,7 +627,7 @@ describe("[COMP:app-web/chat-sessions-cache] selection before paint", () => {
     scope.chat.state = {sessionId: "B", messages: selectedMessages};
     evaluate(write, scope)();
     expect(scope.writeTranscriptCache).toHaveBeenCalledWith("B", selectedMessages);
-    cleanup();
+    expect(cleanup).toBeUndefined();
   });
 });
 
@@ -642,6 +731,26 @@ describe("[COMP:app-web/turn-reconnect] returning sender outcomes", () => {
 
 
 describe("[COMP:app-web/chat-activity] reply finalization display", () => {
+  it.each(["saving", "finishing"] as const)("restores Send and accepts a queued follow-up during %s", (replyPhase) => {
+    const composer = find(node => ts.isJsxSelfClosingElement(node) && node.tagName.getText(tree) === "ChatComposer"
+      && node.attributes.properties.some(prop => ts.isJsxAttribute(prop) && prop.name.getText(tree) === "sendButtonTone")) as ts.JsxSelfClosingElement;
+    const prop = (name: string) => {
+      const attribute = composer.attributes.properties.find(node => ts.isJsxAttribute(node) && node.name.getText(tree) === name) as ts.JsxAttribute;
+      return (attribute.initializer as ts.JsxExpression).expression!.getText(tree);
+    };
+    const state = { isStreaming: true, replyPhase };
+    const sendDuringTurn = vi.fn(() => true), send = vi.fn(), setInput = vi.fn();
+    const scope = { chat: { state }, canQueueMidTurn: true, mirrorStopAvailable: false,
+      sendDuringTurn, send, setInput };
+    expect(evaluate(prop("sendButtonTone"), scope)).toBe("primary");
+    expect(evaluate(prop("slotPostInput"), scope)).toBeNull();
+    evaluate<() => void>(prop("onSend"), scope)();
+    expect(sendDuringTurn).toHaveBeenCalledExactlyOnceWith(false);
+    expect(setInput).toHaveBeenCalledExactlyOnceWith("");
+    expect(send).not.toHaveBeenCalled();
+    expect(state.isStreaming).toBe(true);
+  });
+
   it.each(["generating", "saving", "finishing"] as const)("renders the actual active reply in phase %s without ending its foreground state", (replyPhase) => {
     const expression = find(node => ts.isBinaryExpression(node) && node.left.getText(tree) === "chat.state.isStreaming"
       && node.right.getText(tree).includes("data-brian-chat-answer")).getText(tree);
@@ -657,7 +766,8 @@ describe("[COMP:app-web/chat-activity] reply finalization display", () => {
     expect(html.includes("animate-pulse")).toBe(replyPhase === "generating");
     if (replyPhase !== "generating") {
       expect(html).not.toContain("chat-shimmer-text");
-      expect(html).toContain(replyPhase === "saving" ? en.chat.activity.savingReply : en.chat.activity.finishingReply);
+      expect(html).not.toContain(en.chat.activity.savingReply);
+      expect(html).not.toContain(en.chat.activity.finishingReply);
     }
     expect(state.isStreaming).toBe(true);
   });

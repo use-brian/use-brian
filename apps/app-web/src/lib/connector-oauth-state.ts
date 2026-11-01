@@ -67,6 +67,8 @@ export type ConnectorOauthState = {
   instanceId: string | undefined;
   /** The CSRF nonce; matched against the companion cookie in the callback. */
   nonce: string | undefined;
+  /** In-chat consent window; valid only with a durable continuation. */
+  popup?: boolean;
   /** Durable web-chat continuation; present only when both UUIDs validate. */
   continuation: {
     sessionId: string;
@@ -89,11 +91,12 @@ export function buildConnectorState(input: {
   instanceId?: string;
   nonce: string;
   continuation?: { sessionId: string; approvalId: string };
+  popup?: boolean;
 }): string {
   const continuation = input.continuation &&
     UUID_RE.test(input.continuation.sessionId) &&
     UUID_RE.test(input.continuation.approvalId)
-    ? `:c:${input.continuation.sessionId}:${input.continuation.approvalId}`
+    ? `:c:${input.continuation.sessionId}:${input.continuation.approvalId}${input.popup ? ":popup" : ""}`
     : "";
   // Reconnect wins over add-another — they are mutually exclusive intents.
   if (input.instanceId) {
@@ -137,7 +140,9 @@ export function parseConnectorState(raw: string): ConnectorOauthState {
     ? { sessionId: parts[idx + 3], approvalId: parts[idx + 4] }
     : undefined;
 
-  return { connector, workspaceId, createNew, instanceId, nonce, continuation };
+  return { connector, workspaceId, createNew, instanceId, nonce, continuation,
+    ...(continuation && parts[idx + 5] === "popup" ? { popup: true } : {}),
+  };
 }
 
 /**

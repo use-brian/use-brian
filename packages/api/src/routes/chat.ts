@@ -386,6 +386,7 @@ function resolveRunChannel(session: {
 type WebChatOptions = {
   /** Durable native metadata queue; absent preserves inline title generation. */
   enqueueSessionTitleJob?: typeof import('../db/session-title-jobs.js').enqueueNativeSessionTitleJob
+  enqueueSessionStateJob?: typeof import('../db/session-state-jobs.js').enqueueNativeSessionStateJob
   feedReviewContext?: import('../content-planning/review-context.js').FeedReviewContextLoader
   feedGeneration?: FeedGenerationService
   provider: LLMProvider
@@ -7609,14 +7610,46 @@ export function chatRoutes(options: WebChatOptions): Router {
           // section 6). See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
           },
-          sink: { kind: 'sse', ...(nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority ? { assertOutputAuthority:assertDeliveryAudience } : {}), afterLoop: async (result) => {
+          sink: { kind: 'sse', ...(nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority ? { assertOutputAuthority:assertDeliveryAudience } : {}),
+          onReplyTextComplete: () => postReply.announceTextCompletion(() => {
+            sendActivityEvent('reply_text_complete', {})
+            turnStream.setReplyPhase('saving')
+          }), afterLoop: async (result) => {
             if (postReply.beginFinalization(result, !!queryLoopError, abortController.signal)) {
-              sendActivityEvent('reply_text_complete', {})
-              turnStream.setReplyPhase('saving')
+              postReply.announceTextCompletion(() => {
+                sendActivityEvent('reply_text_complete', {})
+                turnStream.setReplyPhase('saving')
+              })
             }
             const publishReply = () => flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
             const stateStore = options.sessionStateStore
             if (!stateStore) { await publishReply(); return }
+            // Ordinary native chat persists a small job, then releases the turn.
+            // The safety-net model runs with fresh authority in the worker.
+            const stateJobKind = classifySession(session)
+            if (options.enqueueSessionStateJob && nativeTranscriptAuthority
+              && executionContext.identity.kind === 'attended' && executionContext.identity.principal.kind === 'workspace_member'
+              && executionContext.identity.principal.authenticationKind === 'native_session'
+              && stateJobKind.anchor.kind === 'none' && stateJobKind.transport === 'web' && stateJobKind.lane === 'conversation'
+              && session.assistantId === assistant.id && !roomResponseGroupContext
+              && !(docToolsTurn && docWrittenPageIds.size > 0)) {
+              await publishReply()
+              if (postReply.isPublishedReply() && lastAssistantMessageId) {
+                try {
+                  const queued = await options.enqueueSessionStateJob({ authority: nativeTranscriptAuthority,
+                    claims: pinSessionTitleClaims(req), userMessageId: storedUserMsg.id, assistantMessageId: lastAssistantMessageId })
+                  if (!queued) console.warn('[chat] session-state queue unavailable')
+                  options.analytics?.logEvent({ userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                    eventName: queued ? 'session_state_diff_queued' : 'session_state_diff_enqueue_failed', channelType: 'web', metadata: {} })
+                } catch (error) {
+                  if (isAuthorityChangedError(error) || isDeliveryAudienceUnverifiedError(error)) throw error
+                  console.warn('[chat] session-state queue unavailable')
+                  options.analytics?.logEvent({ userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                    eventName: 'session_state_diff_enqueue_failed', channelType: 'web', metadata: {} })
+                }
+              }
+              return
+            }
             // Source-authority reads lock rows too. Complete publication before
             // inference so its proofs cannot time out behind our own writes.
             const diffAuthority = { execution: executionContext,

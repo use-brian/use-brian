@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { settleChatSessionFeedback } from "@/lib/chat-send-feedback";
 
 /**
  * [COMP:app-web/sidebar-panel-chat] Chat session rail routing.
@@ -14,7 +15,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
-import { invalidateSurfaceCache, mutateSurfaceCache, resetSurfaceCache } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, markSurfaceCacheStale, mutateSurfaceCache, resetSurfaceCache } from "@/lib/surface-cache";
 import { chatSessionsCacheKey, chatSharedSessionsCacheKey } from "@/lib/surface-prefetch";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -58,6 +59,7 @@ vi.mock("next/link", () => ({
 
 const sessionApi = vi.hoisted(() => ({
   createWorkspaceSession: vi.fn(),
+  fetchSessionMessages: vi.fn(),
   deleteSession: vi.fn(),
   listPersonalSessions: vi.fn(),
   listWorkspaceSessions: vi.fn(),
@@ -94,6 +96,8 @@ vi.mock("@/lib/chat-session-events", () => ({
   dispatchChatSessionsRefresh: vi.fn(),
 }));
 
+import { takeChatHandoff } from "@/lib/chat-handoff";
+
 import { ChatSidebarPanel } from "../chat-sidebar-panel";
 
 let container: HTMLDivElement | null = null;
@@ -121,7 +125,7 @@ async function renderPanel(workspaceId = "workspace-1") {
 
 function buttonNamed(name: string): HTMLButtonElement {
   const button = [...document.querySelectorAll("button")].find(
-    (candidate) => candidate.textContent?.trim() === name,
+    (candidate) => candidate.textContent?.trim() === name || candidate.getAttribute("aria-label") === name,
   );
   if (!button) throw new Error(`Button not found: ${name}`);
   return button;
@@ -172,6 +176,44 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/sidebar-panel-chat] failed history loads", () => {
+  it("keeps cached chats mounted and recovery in the heading through failure, retry and success", async () => {
+    navigation.search = "";
+    const rows = [{ id: "cached-chat", title: "Existing plan", channelId: "channel-2", lastActive: "2026-10-01", appOrigin: "chat", assistantId: "assistant-1" }];
+    sessionApi.listPersonalSessions.mockResolvedValue(rows);
+    await renderPanel();
+    const chat = container!.querySelector('a[href*="s=cached-chat"]');
+    const heading = container!.querySelector('[data-chat-history-heading]');
+    expect(chat).not.toBeNull();
+    sessionApi.listPersonalSessions.mockRejectedValue(new Error("chat_list_failed: 503"));
+    await act(async () => { markSurfaceCacheStale(chatSessionsCacheKey("workspace-1")); });
+    await flushEffects();
+    const retry = buttonNamed(`${en.chatApp.railLoadFailed} ${en.chatApp.railRetry}`);
+    expect(heading?.contains(retry)).toBe(true);
+    expect(container!.querySelector('a[href*="s=cached-chat"]')).toBe(chat);
+    expect(container!.querySelector('[role="alert"]')).toBeNull();
+    let recover!: (value: typeof rows) => void;
+    sessionApi.listPersonalSessions.mockImplementation(() => new Promise(resolve => { recover = resolve; }));
+    await act(async () => retry.click());
+    expect(retry.disabled).toBe(true);
+    expect(container!.querySelector('a[href*="s=cached-chat"]')).toBe(chat);
+    await act(async () => recover(rows));
+    await flushEffects();
+    expect(heading?.querySelector('button')).toBeNull();
+    expect(heading?.querySelector('[role="status"]')?.textContent).toBe("");
+    expect(container!.querySelector('a[href*="s=cached-chat"]')).toBe(chat);
+  });
+
+  it("keeps a previously confirmed empty state in place when its refresh fails", async () => {
+    navigation.search = "";
+    await renderPanel();
+    expect(container?.textContent).toContain(en.chatApp.railEmpty);
+    sessionApi.listPersonalSessions.mockRejectedValue(new Error("chat_list_failed: 503"));
+    await act(async () => { markSurfaceCacheStale(chatSessionsCacheKey("workspace-1")); });
+    await flushEffects();
+    expect(container?.textContent).toContain(en.chatApp.railEmpty);
+    expect(container?.querySelector('[role="status"]')?.textContent).toContain(en.chatApp.railLoadFailed);
+  });
+
   it("does not restart skeletons when a loaded rail loses access and Retry is pending", async () => {
     navigation.search = "";
     sessionApi.listPersonalSessions.mockResolvedValue([
@@ -185,7 +227,7 @@ describe("[COMP:app-web/sidebar-panel-chat] failed history loads", () => {
     expect(container?.textContent).not.toContain("Existing plan");
     expect(container?.querySelector(".skeleton")).toBeNull();
     sessionApi.listPersonalSessions.mockImplementation(() => new Promise(() => {}));
-    act(() => buttonNamed("Retry").click());
+    act(() => buttonNamed(`${en.chatApp.railLoadFailed} ${en.chatApp.railRetry}`).click());
     await flushEffects();
     expect(container?.querySelector(".skeleton")).toBeNull();
     expect(container?.textContent).toContain(en.chatApp.railLoadFailed);
@@ -195,12 +237,12 @@ describe("[COMP:app-web/sidebar-panel-chat] failed history loads", () => {
     navigation.search = "";
     sessionApi.listPersonalSessions.mockRejectedValue(new Error("chat_list_failed"));
     await renderPanel();
-    expect(container?.querySelector('[role="alert"]')?.textContent).toContain("Could not load chats.");
+    expect(container?.querySelector('[role="status"]')?.textContent).toContain(en.chatApp.railLoadFailed);
     expect(container?.textContent).not.toContain(en.chatApp.railEmpty);
     sessionApi.listPersonalSessions.mockResolvedValue([
       { id: "recovered-chat", title: "Recovered plan", channelId: "channel-2", lastActive: "2026-10-01", appOrigin: "chat", assistantId: "assistant-1" },
     ]);
-    await act(async () => buttonNamed("Retry").click());
+    await act(async () => buttonNamed(`${en.chatApp.railLoadFailed} ${en.chatApp.railRetry}`).click());
     await flushEffects();
     expect(container?.textContent).toContain("Recovered plan");
     expect(container?.querySelector('[role="alert"]')).toBeNull();
@@ -272,6 +314,20 @@ describe("[COMP:app-web/sidebar-panel-chat] live room activity", () => {
     expect(container!.querySelector('[data-chat-working="true"]')).toBeNull();
     intervals.mockRestore(); clear.mockRestore();
   });
+  it("clears a completed spinner from stale cached status and keeps it clear after remount", async () => {
+    navigation.search = "s=terminal-chat";
+    sessionApi.listWorkspaceSessions.mockResolvedValue([]);
+    sessionApi.listPersonalSessions.mockResolvedValue([{ id: "terminal-chat", title: "Terminal chat", channelId: "web-terminal", lastActive: "2026-10-01", appOrigin: "chat", status: "running" }]);
+    await renderPanel();
+    expect(container!.querySelector('[data-chat-working="true"]')).not.toBeNull();
+    sessionApi.listPersonalSessions.mockImplementation(() => new Promise(() => {}));
+    await act(async () => settleChatSessionFeedback("workspace-1", "terminal-chat"));
+    expect(container!.querySelector('[data-chat-working="true"]')).toBeNull();
+    await act(async () => root!.render(<></>));
+    await act(async () => root!.render(<I18nProvider locale="en" dict={en}><ChatSidebarPanel workspaceId="workspace-1" /></I18nProvider>));
+    expect(container!.querySelector('[data-chat-working="true"]')).toBeNull();
+  });
+
   it("does not resurrect completed activity from a slow older list response", async () => {
     navigation.search = "s=room-1";
     sessionApi.listWorkspaceSessions.mockResolvedValue([]);
@@ -527,6 +583,22 @@ describe("[COMP:app-web/sidebar-panel-chat] group disclosure persistence", () =>
     await renderPanel(workspaceId);
   }
 
+  it("uses row unread and activity rules in a partially loaded Work folder preview", async () => {
+    const rows = Array.from({ length: 50 }, (_, index) => ({
+      ...room(index === 0 ? "room-1" : `room-${index + 1}`, null),
+      humanCount: index === 1 ? 1 : 2,
+    }));
+    sessionApi.listWorkspaceSessions.mockResolvedValue(rows);
+    seen.isRoomUnread.mockReturnValue(true);
+    await renderPanel();
+    await act(async () => window.dispatchEvent(new CustomEvent("chat:session-activity", {
+      detail: { workspaceId: "workspace-1", sessionId: "room-2", working: true },
+    })));
+    await act(async () => { buttonNamed(en.chatApp.generalChats).focus(); await new Promise(resolve => setTimeout(resolve, 550)); });
+    expect(document.querySelector('[data-chat-folder-preview]')?.textContent).toContain("50+ chats · 48 unread · 1 active");
+    seen.isRoomUnread.mockReturnValue(false);
+  });
+
   it("switches the Project folder icon with its disclosure and omits the chevron", async () => {
     await renderPanel();
     const heading = buttonNamed("Sample Project");
@@ -739,6 +811,43 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
     projectsApi.listContextProjects.mockResolvedValue([project]);
   });
 
+  it("starts empty private drafts in the selected folder without creating a shared chat", async () => {
+    sessionApi.listPersonalSessions.mockResolvedValue([chat("general-a"), chat("project-a", { contextProjectId: project.id })]);
+    await renderPanel();
+    const create = (name: string) => container!.querySelector<HTMLButtonElement>(`button[aria-label="New chat in ${name}"]`)!;
+    await act(async () => create(project.name).click());
+    expect(takeChatHandoff("workspace-1", Date.now())).toMatchObject({ contextProjectId: project.id, draftOnly: true, text: "" });
+    await act(async () => create(en.chatApp.generalChats).click());
+    const general = takeChatHandoff("workspace-1", Date.now());
+    expect(general).toMatchObject({ draftOnly: true, text: "" });
+    expect(general?.contextProjectId).toBeUndefined();
+    expect(sessionApi.createWorkspaceSession).not.toHaveBeenCalled();
+    expect(buttonNamed(en.chatApp.generalChats).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("omits private compose for archived and unknown Projects", async () => {
+    projectsApi.listContextProjects.mockResolvedValue([{ ...project, status: "archived" }]);
+    sessionApi.listPersonalSessions.mockResolvedValue([chat("archived", { contextProjectId: project.id }), chat("missing", { contextProjectId: "missing" })]);
+    await renderPanel();
+    expect(container!.querySelector('button[aria-label^="New chat in"]')).toBeNull();
+  });
+
+  it("previews the full folder and loaded counts without changing disclosure or fetching", async () => {
+    projectsApi.listContextProjects.mockResolvedValue([{ ...project, description: "Release planning" }]);
+    sessionApi.listPersonalSessions.mockResolvedValue([chat("project-a", { contextProjectId: project.id, status: "running" })]);
+    await renderPanel();
+    const requests = projectsApi.listContextProjects.mock.calls.length;
+    await act(async () => { buttonNamed(project.name).focus(); await new Promise(resolve => setTimeout(resolve, 550)); });
+    const preview = document.querySelector('[data-chat-folder-preview]');
+    expect(preview?.textContent).toContain("1 chat · 0 unread · 1 active");
+    expect(preview?.textContent).toContain("Release planning");
+    expect(preview?.textContent).toContain(en.chatApp.viewPersonal);
+    expect(buttonNamed(project.name).getAttribute("aria-expanded")).toBe("false");
+    expect(projectsApi.listContextProjects).toHaveBeenCalledTimes(requests);
+    await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(document.querySelector('[data-chat-folder-preview]')).toBeNull();
+  });
+
   it("groups private web chats by Project and gives source channels precedence without sharing", async () => {
     sessionApi.listPersonalSessions.mockResolvedValue([
       chat("channel-a", { transport: "slack", channelId: "C_SAMPLE:thread:100.001", contextProjectId: project.id }),
@@ -839,7 +948,7 @@ describe("[COMP:app-web/sidebar-panel-chat] private Project and source-channel g
       chat("general-a"),
     ]);
     await renderPanel();
-    expect([...container!.querySelectorAll("[data-personal-chat-group] > button")].map(b => b.textContent)).toEqual([
+    expect([...container!.querySelectorAll("[data-personal-chat-group] [data-chat-folder-heading]")].map(b => b.textContent)).toEqual([
       en.chatApp.generalChats, "Sample Project",
     ]);
     const channels = container!.querySelector("[data-chat-channels]")!;
@@ -937,5 +1046,24 @@ describe("[COMP:app-web/sidebar-panel-chat] immediate selection", () => {
       act(() => row.dispatchEvent(event));
       expect(event.defaultPrevented).toBe(false);
       expect(window.location.search).toBe("?v=workspace");
+  });
+});
+
+
+describe("[COMP:app-web/sidebar-panel-chat] transcript selection intent", () => {
+  it.each(["mouse", "touch", "keyboard"])("warms only non-touch selection intent: %s", async input => {
+    navigation.search = "v=workspace";
+    sessionApi.fetchSessionMessages.mockResolvedValue([]);
+    await renderPanel();
+    const link = container!.querySelector<HTMLAnchorElement>('a[href*="s=room-1"]')!;
+    await act(async () => {
+      if (input === "keyboard") link.focus();
+      else {
+        const event = new Event("pointerover", { bubbles: true });
+        Object.defineProperty(event, "pointerType", { value: input });
+        link.dispatchEvent(event);
+      }
+    });
+    expect(sessionApi.fetchSessionMessages).toHaveBeenCalledTimes(input === "touch" ? 0 : 1);
   });
 });

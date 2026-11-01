@@ -7,7 +7,8 @@
  * Used by Studio -> Assistants -> Tools (assistant-scoped connectors list) and
  * Studio -> Events (ingest sources, keyed on the source's `provider`).
  *
- * Official connector icons are inlined SVGs (brand colors, consistent size).
+ * Official connector icons use inline SVGs or locally bundled provider artwork
+ * (brand colors, consistent size).
  * Community / custom connectors fall back to their `icon_url` or a plug glyph.
  *
  * Adding an official connector: add a case in ConnectorIcon() only.
@@ -58,17 +59,11 @@ function GmailIcon() {
 }
 
 function GoogleCalendarIcon() {
+  // Official artwork, bundled locally so consent UI never depends on a remote image.
+  // Source: https://www.gstatic.com/images/branding/productlogos/calendar_2026/v2/web/192px.svg
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-      <path d="M18.316 5.684H5.684v12.632h12.632V5.684Z" fill="#fff" />
-      <path d="M18.316 24l5.684-5.684h-5.684V24Z" fill="#1A73E8" />
-      <path d="M24 5.684h-5.684v12.632H24V5.684Z" fill="#1A73E8" />
-      <path d="M18.316 18.316H5.684V24h12.632v-5.684Z" fill="#1A73E8" />
-      <path d="M0 18.316V21.6A2.4 2.4 0 0 0 2.4 24h2.284v-5.684H0Z" fill="#0D47A1" />
-      <path d="M24 5.684V2.4A2.4 2.4 0 0 0 21.6 0h-3.284v5.684H24Z" fill="#1A73E8" />
-      <path d="M18.316 0H2.4A2.4 2.4 0 0 0 0 2.4v15.916h5.684V5.684h12.632V0Z" fill="#4285F4" />
-      <path d="M8.342 16.2a3.6 3.6 0 0 1-1.51-1.17l.85-.7c.28.4.6.7.98.92.38.22.81.33 1.28.33.49 0 .91-.12 1.26-.37.35-.25.52-.58.52-.99 0-.42-.18-.75-.55-1-.37-.25-.84-.37-1.42-.37h-.88v-1.05h.79c.5 0 .9-.11 1.22-.33.32-.22.48-.53.48-.92 0-.35-.15-.64-.46-.85-.31-.21-.69-.32-1.14-.32-.44 0-.8.1-1.08.29-.28.19-.5.44-.65.74l-.93-.62c.24-.45.58-.81 1.03-1.08.45-.27 1-.4 1.64-.4.49 0 .93.08 1.32.24.39.16.69.39.92.69.23.3.34.65.34 1.04 0 .42-.12.78-.36 1.08-.24.3-.55.52-.93.66v.06c.46.13.83.37 1.1.72.27.35.41.76.41 1.23 0 .44-.12.84-.36 1.18-.24.34-.58.61-1.01.8-.43.19-.93.29-1.49.29-.7 0-1.3-.15-1.83-.46Zm7.28-.18V9.78l-1.6 1.06-.5-.88 2.3-1.5h1.02v7.56h-1.22Z" fill="#1A73E8" />
-    </svg>
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src="/connectors/google-calendar.svg" alt="" width={18} height={18} />
   );
 }
 

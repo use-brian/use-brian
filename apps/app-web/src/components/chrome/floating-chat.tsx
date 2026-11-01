@@ -1253,6 +1253,7 @@ export function FloatingChat({
   const isStreaming = session.state.isStreaming;
   const streamingText = session.state.streamingText;
   const activity = useMemo<ChatActivity>(() => {
+    const replyGenerating = isStreaming && session.state.replyPhase === "generating";
     const requiresAction =
       Boolean(pendingQuestion) ||
       session.state.pendingConfirmations.some(
@@ -1260,12 +1261,12 @@ export function FloatingChat({
           confirmation.status === "pending" || confirmation.status === "approving",
       );
     const phase = companionChatPhase({
-      isStreaming,
+      isStreaming: replyGenerating,
       hasStreamingText: Boolean(streamingText),
       requiresAction,
       isLoading: resumePolling,
     });
-    if (!isStreaming) {
+    if (!replyGenerating) {
       return { isStreaming: false, streamingText: "", phase, activeTool: null };
     }
     const running = toolTimeline.find((t) => t.status === "running");
@@ -1286,7 +1287,7 @@ export function FloatingChat({
           }
         : null,
     };
-  }, [isStreaming, pendingQuestion, resumePolling, session.state.pendingConfirmations, streamingText, toolTimeline]);
+  }, [isStreaming, session.state.replyPhase, pendingQuestion, resumePolling, session.state.pendingConfirmations, streamingText, toolTimeline]);
 
   const onActivityChangeRef = useRef(onActivityChange);
   useEffect(() => {
@@ -3859,7 +3860,7 @@ export function FloatingChat({
                 ? t.pendingQuestion.composerDisabled
                 : idlePlaceholder
             }
-            sendLabel={isStreaming ? t.queue.send : t.send}
+            sendLabel={isStreaming && session.state.replyPhase === "generating" ? t.queue.send : t.send}
             slotAttachments={
               <>
                 {acceptedGoal?.sessionId === session.state.sessionId ? (
@@ -3957,12 +3958,12 @@ export function FloatingChat({
             sendButtonClassName={cn(
               "shrink-0 rounded-md px-3 py-2 text-xs font-medium transition-colors",
               "disabled:opacity-50 disabled:pointer-events-none",
-              isStreaming
+              isStreaming && session.state.replyPhase === "generating"
                 ? "bg-muted text-foreground/80 hover:bg-muted/80"
                 : "bg-action text-action-foreground hover:bg-action/90",
             )}
             slotPostInput={
-              isStreaming ? (
+              isStreaming && session.state.replyPhase === "generating" ? (
                 <button
                   type="button"
                   onClick={handleAbort}

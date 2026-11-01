@@ -33,6 +33,14 @@ describe("[COMP:app-web/chat-handoff] Home to Personal chat handoff", () => {
       .toEqual(base);
   });
 
+  it("accepts empty drafts for folder compose but never empty automatic sends", () => {
+    const payload = { ...base, text: "", draftOnly: true, contextProjectId: "project-1" };
+    const requestId = stashChatHandoff(payload);
+    expect(takeChatHandoff(base.workspaceId, base.ts)).toEqual({ ...payload, requestId });
+    expect(parsePendingChatHandoff(JSON.stringify({ ...payload, draftOnly: false }))).toBeNull();
+    expect(parsePendingChatHandoff(JSON.stringify({ ...payload, draftOnly: "true" }))).toBeNull();
+  });
+
   it("parses a valid payload and trims its prompt", () => {
     expect(
       parsePendingChatHandoff(JSON.stringify({ ...base, text: "  Ask Brian  " })),
