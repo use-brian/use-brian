@@ -7,6 +7,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -142,13 +143,23 @@ export function WorkspaceContextProvider(props: {
   // Any real workspace open counts as recent, including a direct/deep link
   // that never passed through picker chrome. This is a non-critical navigation
   // preference write and never blocks the workspace shell.
+  const recordedOpen = useRef<string | null>(null);
   useEffect(() => {
+    const entry = JSON.stringify([
+      props.apiUrl ?? API_URL,
+      props.value.workspaceId,
+      props.value.me.id,
+    ]);
+    // Effect replay is the same entry; a real remount or identity transition
+    // gets a new attempt. Do not reset this in effect cleanup.
+    if (recordedOpen.current === entry) return;
+    recordedOpen.current = entry;
     void updateWorkspacePickerPreferences(
       props.value.workspaceId,
       { opened: true },
       props.apiUrl,
     ).catch(() => {});
-  }, [props.apiUrl, props.value.workspaceId]);
+  }, [props.apiUrl, props.value.workspaceId, props.value.me.id]);
 
   useEffect(() => {
     function onRenamed(e: Event) {
