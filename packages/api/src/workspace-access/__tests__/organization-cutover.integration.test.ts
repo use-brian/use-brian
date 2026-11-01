@@ -8,7 +8,7 @@ import {createDbWorkspaceFilesStore} from '../../db/workspace-files-store.js'
 import {randomUUID} from 'node:crypto'
 import express,{type ErrorRequestHandler} from 'express'
 import request from 'supertest'
-import {afterAll,describe,expect,it} from 'vitest'
+import {afterAll,beforeAll,describe,expect,it} from 'vitest'
 import {getPool,getAppPool,queryWithRLS} from '../../db/client.js'
 import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
 import {createDbWorkflowStore,createDbWorkflowRunStore} from '../../db/workflow-store.js'
@@ -112,47 +112,64 @@ describe('[COMP:api/organization-cutover] owner-reviewed atomic activation (PG18
   }finally {await pool.query('DROP TRIGGER zzzz_cutover_fixture_reject_ack ON workspace_access_policies; DROP FUNCTION cutover_fixture_reject_ack()')}
  })
 
- it('reviews all 12,000 provenance links, rejects a late link beyond 5,000, and preserves them on activation',async()=>{
-  const f=await fixture(),sources:string[]=[],outputs:string[]=[]
-  for(let i=0;i<221;i++) {
-   const memory=await createMemory({workspaceId:f.w,userId:null,assistantId:f.a,createdByUserId:f.u,
-    summary:'Fictional provenance fixture',sensitivity:'internal',compartments:[f.team.compartmentKey!]})
-   ;(i<121?sources:outputs).push(memory.id)
-  }
-  sources.sort()
-  const spare=sources.pop()!
-  const derivations=(await pool.query<{id:string}>(`INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,
-   resource_version,producer,user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
-   SELECT workspace_id,'memory',id,read_scope_source(workspace_id,'memory',id)->>'version','large-inventory-fixture',
-    user_id,assistant_id,sensitivity,compartments,project_ids,1 FROM memories WHERE id=ANY($1::uuid[]) RETURNING id`,[outputs])).rows.map(row=>row.id).sort()
-  await pool.query(`WITH sources AS MATERIALIZED (SELECT id,workspace_id,read_scope_source(workspace_id,'memory',id)->>'version' AS version
-   FROM memories WHERE id=ANY($2::uuid[])) INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
-   SELECT d.workspace_id,d.id,'memory',s.id,s.version FROM scope_derivations d CROSS JOIN sources s WHERE d.id=ANY($1::uuid[])`,[derivations,sources])
-  // Independent SQL aggregate verifies compatibility with existing review hashes.
-  const fingerprint=async()=>(await pool.query(`SELECT count(*)::text AS count,encode(sha256(convert_to(string_agg(
-   r.derivation_id::text||':'||r.source_kind||':'||r.source_id::text||':'||r.xmin::text||':'||
-   jsonb_build_object('workspace_id',r.workspace_id,'derivation_id',r.derivation_id,'source_kind',r.source_kind,
-    'source_id',r.source_id,'source_version',r.source_version)::text,E'\n'
-   ORDER BY r.derivation_id::text||':'||r.source_kind||':'||r.source_id::text),'UTF8')),'hex') AS fingerprint
-   FROM scope_derivation_sources r WHERE workspace_id=$1`,[f.w])).rows[0]
-  const before=await fingerprint(),reviewed=await f.preview()
-  expect(before.count).toBe('12000')
-  expect(reviewed.status,JSON.stringify(reviewed.body)).toBe(200)
-  expect(reviewed.body.status,JSON.stringify(reviewed.body)).toBe('prepared')
-  expect(reviewed.body.inventory.families.find((row:{family:string})=>row.family==='scope_derivation_sources')).toEqual({family:'scope_derivation_sources',...before})
-  expect(JSON.stringify(reviewed.body)).not.toContain('Fictional provenance fixture')
-  // The new link sorts after every reviewed row, past the former cap.
-  await pool.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
-   SELECT $1,$2,'memory',id,read_scope_source(workspace_id,'memory',id)->>'version' FROM memories WHERE id=$3`,[f.w,derivations.at(-1),spare])
-  expect((await f.apply(reviewed.body)).body).toEqual({error:'cutover_review_changed'})
-  expect((await pool.query('SELECT setup_state FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0].setup_state).toBe('legacy')
-  expect((await pool.query('SELECT id FROM scheduled_jobs WHERE id=ANY($1::uuid[]) AND workflow_authoring_snapshot IS NOT NULL',[f.jobIds])).rows).toEqual([])
-  const current=await fingerprint(),fresh=await f.preview()
-  expect(current.count).toBe('12001')
-  expect(fresh.body.inventory.families.find((row:{family:string})=>row.family==='scope_derivation_sources')).toEqual({family:'scope_derivation_sources',...current})
-  expect((await f.apply(fresh.body)).body).toMatchObject({setupState:'ready',recordsDeleted:0,grantsChanged:false})
-  expect(await fingerprint()).toEqual(current)
- },60_000)
+ describe('complete provenance inventory',()=>{
+  let f:Awaited<ReturnType<typeof fixture>>,spare:string,derivations:string[]=[]
+  beforeAll(async()=>{
+   f=await fixture()
+   const sources:string[]=[],outputs:string[]=[]
+   for(let i=0;i<221;i++) {
+    const memory=await createMemory({workspaceId:f.w,userId:null,assistantId:f.a,createdByUserId:f.u,
+     summary:'Fictional provenance fixture',sensitivity:'internal',compartments:[f.team.compartmentKey!]})
+    ;(i<121?sources:outputs).push(memory.id)
+   }
+   sources.sort()
+   spare=sources.pop()!
+   derivations=(await pool.query<{id:string}>(`INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,
+    resource_version,producer,user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
+    SELECT workspace_id,'memory',id,read_scope_source(workspace_id,'memory',id)->>'version','large-inventory-fixture',
+     user_id,assistant_id,sensitivity,compartments,project_ids,1 FROM memories WHERE id=ANY($1::uuid[]) RETURNING id`,[outputs])).rows.map(row=>row.id).sort()
+   // Seed the full graph without making one 12,000-row trigger-heavy statement
+   // consume the interactive 15s deadline before the cutover is exercised.
+   for(const derivation of derivations) {
+    await pool.query(`WITH sources AS MATERIALIZED (SELECT id,workspace_id,read_scope_source(workspace_id,'memory',id)->>'version' AS version
+     FROM memories WHERE id=ANY($2::uuid[])) INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+     SELECT d.workspace_id,d.id,'memory',s.id,s.version FROM scope_derivations d CROSS JOIN sources s WHERE d.id=$1`,[derivation,sources])
+   }
+  },600_000)
+  afterAll(async()=>{
+   // Remove only this synthetic graph before the outer workspace cascade;
+   // a single 12,001-row delete has the same trigger cost as the old seed.
+   for(const derivation of derivations) {
+    await pool.query('DELETE FROM scope_derivation_sources WHERE derivation_id=$1',[derivation])
+   }
+  },600_000)
+  it('reviews all 12,000 provenance links, rejects a late link beyond 5,000, and preserves them on activation',async()=>{
+   // Independent SQL aggregate verifies compatibility with existing review hashes.
+   const fingerprint=async()=>(await pool.query(`SELECT count(*)::text AS count,encode(sha256(convert_to(string_agg(
+    r.derivation_id::text||':'||r.source_kind||':'||r.source_id::text||':'||r.xmin::text||':'||
+    jsonb_build_object('workspace_id',r.workspace_id,'derivation_id',r.derivation_id,'source_kind',r.source_kind,
+     'source_id',r.source_id,'source_version',r.source_version)::text,E'\n'
+    ORDER BY r.derivation_id::text||':'||r.source_kind||':'||r.source_id::text),'UTF8')),'hex') AS fingerprint
+    FROM scope_derivation_sources r WHERE workspace_id=$1`,[f.w])).rows[0]
+   const before=await fingerprint(),reviewed=await f.preview()
+   expect(before.count).toBe('12000')
+   expect(reviewed.status,JSON.stringify(reviewed.body)).toBe(200)
+   expect(reviewed.body.status,JSON.stringify(reviewed.body)).toBe('prepared')
+   expect(reviewed.body.inventory.families.find((row:{family:string})=>row.family==='scope_derivation_sources')).toEqual({family:'scope_derivation_sources',...before})
+   expect(JSON.stringify(reviewed.body)).not.toContain('Fictional provenance fixture')
+   // The new link sorts after every reviewed row, past the former cap.
+   await pool.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+    SELECT $1,$2,'memory',id,read_scope_source(workspace_id,'memory',id)->>'version' FROM memories WHERE id=$3`,[f.w,derivations.at(-1),spare])
+   expect((await f.apply(reviewed.body)).body).toEqual({error:'cutover_review_changed'})
+   expect((await pool.query('SELECT setup_state FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0].setup_state).toBe('legacy')
+   expect((await pool.query('SELECT id FROM scheduled_jobs WHERE id=ANY($1::uuid[]) AND workflow_authoring_snapshot IS NOT NULL',[f.jobIds])).rows).toEqual([])
+   const current=await fingerprint(),fresh=await f.preview()
+   expect(current.count).toBe('12001')
+   expect(fresh.body.inventory.families.find((row:{family:string})=>row.family==='scope_derivation_sources')).toEqual({family:'scope_derivation_sources',...current})
+   expect((await f.apply(fresh.body)).body).toMatchObject({setupState:'ready',recordsDeleted:0,grantsChanged:false})
+   expect(await fingerprint()).toEqual(current)
+  },60_000)
+ })
  it.each(['legacy','ready'] as const)('permits v2 General workflow authoring without a home department (%s)',async(setupState)=>{
   const w=randomUUID(),u=randomUUID(),a=randomUUID()
   fixtureWorkspaces.push(w)
