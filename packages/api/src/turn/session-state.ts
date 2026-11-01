@@ -21,7 +21,7 @@ function greetingOnly(user: Message, turns: readonly { content: ContentBlock[] }
     || turns.some(turn => turn.content.some(block => block.type !== 'text'))) return false
   if (!/^(?:hi|hello|hey|你好|您好|こんにちは)$/u.test(normalize(incoming))) return false
   const help = "(?:how can i (?:help|assist) you(?: today)?|what can i help you with(?: today)?|what are we working on(?: today)?|what would you like to work on(?: today)?|what(?:['’]s| is) on your mind)"
-  return new RegExp(`^(?:(?:hi|hello|hey)(?: there)?(?: ${help})?|${help}|你好|您好|こんにちは)$`, 'u').test(normalize(answer))
+  return new RegExp(`^(?:(?:hi|hello|hey|morning|good morning)(?: there)?(?: ${help})?|${help}|你好|您好|こんにちは)$`, 'u').test(normalize(answer))
 }
 
 /** Internal host input: the incoming Message must retain its canonical binding. */
@@ -32,6 +32,8 @@ export async function runTurnSessionStateDiff(params: {
   store: SessionStateStore
   userMessage: Message
   assistantTurns: readonly { content: ContentBlock[] }[]
+  /** Explicit false excludes attachments; true admits the additional probe shortcut. */
+  allowTrivialShortcut?: boolean
   beforePersist?: () => Promise<void>
 }): Promise<SessionStateDiffResult> {
   const { execution, accumulator } = params.authority
@@ -52,7 +54,7 @@ export async function runTurnSessionStateDiff(params: {
     turn.content.some(block => block.type === 'text' && block.text.trim().length > 0))
   if (!final) { await assertInputAuthority(); return { upserts: 0, resolves: 0, usage: null, model: null } }
   let open: Awaited<ReturnType<SessionStateStore['listOpenBySession']>> | undefined
-  if (greetingOnly(params.userMessage, params.assistantTurns, final.content)) {
+  if (params.allowTrivialShortcut !== false && greetingOnly(params.userMessage, params.assistantTurns, final.content)) {
     if (execution.lifecycle.abortSignal.aborted) throw new AuthorityChangedError()
     await execution.security.authority.assertCurrent()
     open = await params.store.listOpenBySession(execution.lifecycle.sessionId, params.authority)
@@ -71,6 +73,7 @@ export async function runTurnSessionStateDiff(params: {
     assistantId: execution.assistant.id, store: params.store,
     recentTurns: [params.userMessage, assistant], openCommitments: open,
     authority: params.authority, assertInputAuthority,
+    allowTrivialShortcut: params.allowTrivialShortcut === true && params.assistantTurns.length === 1 && params.assistantTurns[0].content.every(block => block.type === 'text'),
     beforePersist: params.beforePersist,
   })
 }

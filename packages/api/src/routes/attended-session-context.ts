@@ -1,5 +1,5 @@
 /** Current native attended history and annotations. [COMP:api/application-persistence] */
-import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,DerivedScopeError,executionToolContext,
+import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,isTrivialChatMessage,DerivedScopeError,executionToolContext,
  type ResearchClassifyOptions,type ResearchClassifyResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
 import {getPool} from '../db/client.js'
 import {readAdmittedSessionQuery,captureSessionTopics,sessionQueryRootMetadata} from '../db/session-query-reader.js'
@@ -8,6 +8,26 @@ import {writeSessionMessageAnnotation} from '../db/session-message-annotations.j
 import type {Session,SessionMessage} from '../db/sessions.js'
 import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
 import {resolveReplyText,type ResolveReplyParams} from '../routes/_reply-context.js'
+
+type ClassificationInput={authority:SessionContextAuthority;session:Session;message:SessionMessage;capture?:object}
+const classificationCaptures=new WeakMap<object,{authority:SessionContextAuthority;sessionId:string;messageId:string;sequence:number;query:Awaited<ReturnType<typeof readAdmittedSessionQuery>>}>()
+/** Data snapshot only; every classifier still checks current bound input authority. */
+export async function captureAttendedSessionClassification(input:ClassificationInput):Promise<object>{
+ const {authority,session,message}=input
+ if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
+ const query=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,topicThroughSequence:message.sequenceNum-1,authority})
+ const capture=Object.freeze({})
+ classificationCaptures.set(capture,{authority,sessionId:session.id,messageId:message.id,sequence:message.sequenceNum,query})
+ return capture
+}
+async function classificationQuery(input:ClassificationInput,topicThroughSequence:number){
+ if(!input.capture)return readAdmittedSessionQuery({sessionId:input.session.id,throughSequence:input.message.sequenceNum,topicThroughSequence,authority:input.authority})
+ const captured=classificationCaptures.get(input.capture)
+ if(!captured||captured.authority!==input.authority||captured.sessionId!==input.session.id||captured.messageId!==input.message.id||captured.sequence!==input.message.sequenceNum)
+  throw new DerivedScopeError('scope_evidence_missing')
+ await input.authority.execution.security.authority.assertCurrent()
+ return captured.query
+}
 
 type ClassifiedTranscript = {
  execution:SessionContextAuthority['execution'];sessionId:string;through:number;messageId:string;annotationId:string;
@@ -23,12 +43,13 @@ export async function classifyAttendedSessionMessage(input:{
  authority:SessionContextAuthority;session:Session;message:SessionMessage;
  provider:TopicClassifierOptions['provider'];model:string;decisionRuntime?:TopicClassifierOptions['decisionRuntime'];
  reply?:Pick<ResolveReplyParams,'channelType'|'replyToMessageId'|'clientSnippet'>;
+ capture?:object;
 }):Promise<{classification:TopicClassification;reply:Awaited<ReturnType<typeof resolveReplyText>>;history:SessionMessage[]}>{
  const {authority,session,message}=input
  if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
- const query=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,topicThroughSequence:message.sequenceNum-1,authority})
+ const query=await classificationQuery(input,message.sequenceNum-1)
  const current=query.history.find(row=>row.id===message.id)
- if(!current)throw new DerivedScopeError('scope_source_changed')
+ if(!current||current.role!=='user')throw new DerivedScopeError('scope_source_changed')
  const text=(row:SessionMessage)=>typeof row.content==='string'?row.content:Array.isArray(row.content)?row.content.flatMap(block=>
   typeof block==='object'&&block!==null&&'type' in block&&block.type==='text'&&'text' in block&&typeof block.text==='string'?[block.text]:[]).join(' ').trim():''
  const annotations=new Map(query.annotations.map(row=>[row.id,row]))
@@ -39,22 +60,28 @@ export async function classifyAttendedSessionMessage(input:{
  })
  bindScopeSources(history,boundScopeSources(query))
  const reply=input.reply?await resolveReplyText({...input.reply,session,readableHistory:history}):null
+ // Exact acknowledgments need no durable generated annotation. The result
+ // still retains the complete admitted query and current authority checks.
+ const plain=typeof current.content==='string'||Array.isArray(current.content)&&current.content.every(block=>
+  typeof block==='object'&&block!==null&&'type' in block&&block.type==='text'&&'text' in block&&typeof block.text==='string')
+ const allowTrivialShortcut=!input.reply?.replyToMessageId&&!input.reply?.clientSnippet&&plain&&!current.attachments?.length
+ const ephemeral=!reply&&allowTrivialShortcut&&isTrivialChatMessage(text(current))
  // Only metadata is read for CAS. The old generated value is not an input to
  // this new classification; its immutable revision remains in native history.
- const expected=(await getPool().query<{id:string}>('SELECT scope_revision_id AS id FROM session_message_annotation_heads WHERE workspace_id=$1 AND session_id=$2 AND message_id=$3',
+ const expected=ephemeral?undefined:(await getPool().query<{id:string}>('SELECT scope_revision_id AS id FROM session_message_annotation_heads WHERE workspace_id=$1 AND session_id=$2 AND message_id=$3',
   [authority.execution.security.access.workspaceId,session.id,message.id])).rows[0]?.id
  const context={...executionToolContext(authority.execution,{appId:'native-session-topic'}),scopeAccumulator:authority.accumulator}
  const options=bindScopeSources<TopicClassifierOptions>({provider:input.provider,model:input.model,decisionRuntime:input.decisionRuntime,
-  currentMessage:text(current),recentUserTurns:history.filter(row=>row.sequenceNum<message.sequenceNum&&row.role==='user').slice(-8)
+  allowTrivialShortcut,currentMessage:text(current),recentUserTurns:history.filter(row=>row.sequenceNum<message.sequenceNum&&row.role==='user'&&(!ephemeral||row.topicLabel)).slice(-8)
    .map(row=>({text:text(row),topicLabel:row.topicLabel})).filter(turn=>turn.text.length>0),
   knownTopicsThisSession:[...new Set(query.annotations.map(row=>row.topicLabel))].slice(-20),replyToText:reply?.text??null,
   authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context),workspaceId:authority.execution.security.access.workspaceId,
   runId:'memory-topic-'+message.id},boundScopeSources(query))
  const classification=await classifyTopic(options)
- const annotation=await writeSessionMessageAnnotation({sessionId:session.id,messageId:message.id,classification,replyToText:reply?.text??null,authority,expectedRevision:expected})
- if(!annotation)throw new DerivedScopeError('scope_source_changed')
+ const annotation=ephemeral?null:await writeSessionMessageAnnotation({sessionId:session.id,messageId:message.id,classification,replyToText:reply?.text??null,authority,expectedRevision:expected})
+ if(!ephemeral&&!annotation)throw new DerivedScopeError('scope_source_changed')
  await authority.execution.security.authority.assertCurrent()
- classifiedTranscripts.set(history,{execution:authority.execution,sessionId:session.id,through:message.sequenceNum,
+ if(annotation)classifiedTranscripts.set(history,{execution:authority.execution,sessionId:session.id,through:message.sequenceNum,
   messageId:message.id,annotationId:annotation.revisionId,history:copyBoundHistory(query.history),
   sources:structuredClone(boundScopeSources(query.history))})
  return{classification,reply,history}
@@ -147,10 +174,11 @@ export async function readAttendedSessionHistory(authority:SessionContextAuthori
 export async function classifyAttendedResearchMessage(input:{
  authority:SessionContextAuthority;session:Session;message:SessionMessage;
  provider:ResearchClassifyOptions['provider'];model:string;decisionRuntime?:ResearchClassifyOptions['decisionRuntime'];
+ capture?:object;
 }):Promise<ResearchClassifyResult>{
  const {authority,session,message}=input
  if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
- const query=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,topicThroughSequence:0,authority})
+ const query=await classificationQuery(input,0)
  const current=query.history.find(row=>row.id===message.id)
  if(!current)throw new DerivedScopeError('scope_source_changed')
  const text=(row:SessionMessage)=>typeof row.content==='string'?row.content:Array.isArray(row.content)?row.content.flatMap(block=>

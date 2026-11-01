@@ -5,7 +5,7 @@ import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
 import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
+import { captureAttendedSessionClassification, classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
@@ -3974,6 +3974,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         : undefined
       // Assess after the original canonical invocation and authored input exist.
       // Quota races retain this real request and its denial in the same thread.
+      const classificationCapture=adaptiveResearchEligible&&message&&nativeTranscriptAuthority&&earlyStoredUserMsg
+        ?await turnTiming.time('classification_capture',()=>captureAttendedSessionClassification({
+          authority:nativeTranscriptAuthority,session,message:earlyStoredUserMsg,
+        })):undefined
       if (
         adaptiveResearchEligible &&
         message
@@ -3981,10 +3985,11 @@ export function chatRoutes(options: WebChatOptions): Router {
         if (!nativeTranscriptAuthority || !earlyStoredUserMsg) {
           throw Object.assign(new Error('The assessment context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
         }
-        const adaptive = await classifyAttendedResearchMessage({
+        const adaptive = await turnTiming.time('research_classify', () => classifyAttendedResearchMessage({
           authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
           provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
-        })
+          capture:classificationCapture,
+        }))
         adaptiveResearchOverhead = {
           model: adaptive.model,
           usage: adaptive.usage,
@@ -4004,11 +4009,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
 
       const nativeClassification = nativeTranscriptAuthority && earlyStoredUserMsg
-        ? await classifyAttendedSessionMessage({
+        ? await turnTiming.time('topic_classify', () => classifyAttendedSessionMessage({
             authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
             provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+            capture:classificationCapture,
             reply: { channelType: 'web', replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
-          })
+          }))
         : undefined
 
       // ── Reply resolution + topic classification ────────────────
@@ -4318,14 +4324,14 @@ export function chatRoutes(options: WebChatOptions): Router {
       // "Provider signatures".
       // `fromSequence` skips rows already compacted into the most recent
       // boundary; null (never compacted) loads full history.
-      const dbMessages = nativeTranscriptAuthority
+      const dbMessages = await turnTiming.time('history_read', async () => nativeTranscriptAuthority
         ? nativeClassification
           ? await readClassifiedSessionHistory(nativeTranscriptAuthority, session.id, nativeClassification.history, session.compactBoundarySequence)
           : await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, session.compactBoundarySequence)
         : await getSessionMessages(session.id, {
             fromSequence: session.compactBoundarySequence,
             excludeHeld: true,
-          })
+          }))
       noteAutomaticScopeEvidence(scopeAccumulator, dbMessages)
       const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
@@ -4394,7 +4400,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // retryHint injection) to the returned message array before the query
       // loop.
       await assertDeliveryAudience()
-      const compactionResult = await runProactiveCompaction({
+      const compactionResult = await turnTiming.time('compaction', () => runProactiveCompaction({
         modelContext: { execution: executionContext, accumulator: scopeAccumulator },
         sessionMessages: dbMessages,
         timezone: user.timezone ?? 'UTC',
@@ -4426,7 +4432,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         compartments: turnScope.writeCompartments,
         projectIds: turnScope.writeProjectIds,
         authority,
-      })
+      }))
       // Gate on the serving provider: the signature strip is a Gemini-only
       // workaround and would erase a Qwen (openai-compat) turn's tool calls
       // from history. Resolve the requested model to its provider here (the
@@ -7084,10 +7090,10 @@ export function chatRoutes(options: WebChatOptions): Router {
             }
           }
         }
-        await authority.execute(async () => {
+        await turnTiming.time('reply_publication', () => authority.execute(async () => {
           if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
             return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish,
-              turnLeaseToken ? abortController.signal.aborted ? { stoppedTurnToken: turnLeaseToken } : { turnToken: turnLeaseToken } : undefined)
+              {measure:turnTiming.time,...(turnLeaseToken ? abortController.signal.aborted ? { stoppedTurnToken: turnLeaseToken } : { turnToken: turnLeaseToken } : {})})
           }
           const tx = await getPool().connect()
           try {
@@ -7100,7 +7106,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           } finally {
             tx.release()
           }
-        })
+        }))
         if (savedTurns.length > 0) await assertDeliveryAudience()
 
         for (const saved of savedTurns) {
@@ -7113,6 +7119,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // timeline entries, not message bubbles, so the UI doesn't need
           // their ids.
           if (saved.isLast) {
+            turnTiming.observe('assistant_message_saved')
             sendActivityEvent('assistant_message_saved', { id: saved.stored.id })
             turnStream.setReplyPhase('finishing')
             // File cards (sendFile) — the streaming client renders these
@@ -7300,6 +7307,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         const selectionScope = new ContextScopeAccumulator(executionContext.security.provenance)
         if (storedUserSource) selectionScope.noteSource(storedUserSource)
         turnTiming.mark('prompt')
+        turnTiming.observe('loop_started')
         // Tool executions arrive as `tool_start` per call and ONE `tool_result`
         // per batch; the batch's wall-clock is what the turn waited for.
         let toolBatchStartedAt: number | null = null
@@ -7617,12 +7625,13 @@ export function chatRoutes(options: WebChatOptions): Router {
             try {
               const result = await afterReplyPublication(async () => {
                 try { await publishReply() } catch (error) { publicationFailed = true; throw error }
-              }, () => runTurnSessionStateDiff({
+              }, () => turnTiming.time('session_state_diff', () => runTurnSessionStateDiff({
                 authority: diffAuthority,
                 provider: backgroundProvider, model: backgroundModel, store: stateStore,
                 userMessage: bindScopeSources<Message>({ role: 'user', content: userMessageText }, storedUserSource ? [storedUserSource] : []),
                 assistantTurns: pendingAssistantTurns,
-              }))
+                allowTrivialShortcut: !hasFiles,
+              })))
               scopeAccumulator.note(diffAuthority.accumulator.evidence)
               options.analytics?.logEvent({
                 userId: user.id, assistantId: assistant.id, sessionId: session.id,
@@ -7655,6 +7664,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           researchObserver?.observe(event)
 
           if (event.type === 'text_delta') {
+            turnTiming.observe('first_text')
             turnTiming.count('text_delta')
             if (event.text.trim()) hasDeliveredText = true
             sendEvent('text_delta', { text: event.text })
@@ -7667,6 +7677,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           // older clients) simply ignore the event. See
           // docs/architecture/engine/live-streaming.md.
           if (event.type === 'thinking_delta') {
+            turnTiming.observe('first_thinking')
+            turnTiming.count('thinking_delta')
             sendEvent('reasoning', { text: event.text })
             // Every authenticated reconnect receives the live reasoning tail.
             turnStream.onReasoningDelta(event.text)
@@ -8327,6 +8339,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           }
           } },
         })
+        turnTiming.observe('loop_returned')
         turnTiming.mark('loop')
 
         // Happy-path flush: the loop completed without throwing. Any
@@ -8970,6 +8983,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         await docTitle
       }
 
+      turnTiming.observe('client_done')
       sendEvent('done', {})
       res.end()
     } catch (err) {

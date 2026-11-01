@@ -1,4 +1,5 @@
 import {bindScopeSources,boundScopeSources} from '../security/source-evidence.js'
+import {isTrivialChatMessage} from '../classification/trivial-chat.js'
 import {DerivedScopeError} from '../security/derived-scope.js'
 import {assertInputAuthority,isInputAuthorityError} from '../providers/input-authority.js'
 import type {SessionContextAuthority} from '../memory/session-state-types.js'
@@ -294,8 +295,7 @@ async function classifyResearchIntentCurrent(
 
   // Only clearly trivial short chat bypasses assessment. A short substantive
   // question can need several sources without containing a research keyword.
-  const trivialChat = /^(?:(?:hi|hello|hey)(?: there)?|thanks|thank you|ok(?:ay)?|sure|got it|yes|no|早晨|你好|多謝|谢谢|謝謝|こんにちは|ありがとう|而家得閒嗎)[\s!?.,。！？，]*$/iu
-  if (!message.trim() || (effectiveLength(message) <= minMessageLength && trivialChat.test(message.trim()))) {
+  if (!message.trim() || (effectiveLength(message) <= minMessageLength && isTrivialChatMessage(message))) {
     return { research: false, operateSite: false, reason: null, usage: null, model: null }
   }
 

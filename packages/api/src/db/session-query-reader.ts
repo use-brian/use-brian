@@ -28,7 +28,9 @@ export async function captureSessionTopics(client:Pick<PoolClient,'query'>,works
 }
 /** Immutable root metadata for fresh independent-source preparation, never payload admission. */
 export async function sessionQueryRootMetadata(workspaceId:string,sessionId:string,throughSequence:number,topicThrough:number):Promise<ScopeSource[]>{
- return (await getPool().query<{source:ScopeSource|null}>(`SELECT read_scope_source(m.workspace_id,'session_message',m.id) AS source
+ return (await getPool().query<{source:ScopeSource|null}>(`SELECT jsonb_build_object(
+  'workspaceId',m.workspace_id,'userId',m.user_id,'assistantId',m.assistant_id,'sensitivity',m.sensitivity,
+  'compartments',m.compartments,'projectIds',m.project_ids,'resourceKind','session_message','resourceId',m.id,'version',m.scope_version::text) AS source
   FROM session_messages m WHERE m.workspace_id=$1 AND m.session_id=$2 AND m.sequence_num<=$3
   UNION ALL SELECT read_scope_source(h.workspace_id,'session_context_revision',h.scope_revision_id) AS source
   FROM session_message_annotation_heads h JOIN session_messages m ON m.workspace_id=h.workspace_id AND m.id=h.message_id AND m.session_id=h.session_id

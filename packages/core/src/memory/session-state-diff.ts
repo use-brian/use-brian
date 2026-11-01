@@ -1,3 +1,4 @@
+import { isTrivialChatMessage } from '../classification/trivial-chat.js'
 import { boundScopeSources } from '../security/source-evidence.js'
 import { DerivedScopeError } from '../security/derived-scope.js'
 import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
@@ -70,6 +71,8 @@ export type RunSessionStateDiffOptions = {
    */
   activeJobIds?: string[]
   authority?: SessionContextAuthority
+  /** Host veto when omitted turns or attachments make the visible pair incomplete. */
+  allowTrivialShortcut?: boolean
   assertInputAuthority?: () => Promise<void>
   /** Host-owned publication barrier. No state writes may precede it. */
   beforePersist?: () => Promise<void>
@@ -156,6 +159,12 @@ export async function runSessionStateDiff(
     opts.authority.accumulator.note({ sources: [...opts.openCommitments, ...opts.recentTurns].flatMap(row => boundScopeSources(row)) })
   }
   await assertInputAuthority(opts.assertInputAuthority)
+  if (opts.allowTrivialShortcut !== false && opts.openCommitments.length === 0 && opts.recentTurns.every(turn => {
+    if (turn.role !== 'user' && turn.role !== 'assistant') return false
+    if (typeof turn.content !== 'string' && !turn.content.every(block => block.type === 'text')) return false
+    const text=typeof turn.content==='string'?turn.content:turn.content.map(block=>block.type==='text'?block.text:'').join('\n')
+    return isTrivialChatMessage(text)||turn.role==='assistant'&&/^(?:here|received)[\s!?.,。！？，]*$/iu.test(text.trim())
+  })) return { upserts: 0, resolves: 0, usage: null, model: null }
   const derivation = opts.authority ? structuredClone({ producer: 'session_state:diff-pass',
     sources: opts.authority.accumulator.evidence.sources ?? [] }) : undefined
 

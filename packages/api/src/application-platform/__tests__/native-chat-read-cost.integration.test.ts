@@ -2,15 +2,16 @@ import {readFile,writeFile} from 'node:fs/promises'
 import {afterAll,beforeAll,describe,expect,it} from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import {bindScopeSources,boundScopeSources,type ScopeSource,type SessionContextAuthority,type TopicClassification} from '@use-brian/core'
+import {bindScopeSources,boundScopeSources,type LLMProvider,type ScopeSource,type SessionContextAuthority,type TopicClassification} from '@use-brian/core'
 import {requireAuth} from '../../auth/middleware.js'
 import {createTokens} from '../../auth/jwt.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
-import {publishNativeSessionMessage} from '../../db/session-message-publication.js'
+import {publishNativeSessionMessage,publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
 import {writeSessionMessageAnnotation} from '../../db/session-message-annotations.js'
-import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
+import {addSessionMessage,createPersonalWebSession,readSessionById} from '../../db/sessions.js'
+import {captureAttendedSessionClassification,classifyAttendedResearchMessage,classifyAttendedSessionMessage} from '../../routes/attended-session-context.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {readRetainedContextFrame} from '../../db/session-context-revisions.js'
 import {publishSessionTitle} from '../../db/session-title-store.js'
@@ -31,7 +32,7 @@ if(profiling){
 }
 
 type FunctionStat={funcid:string;name:string;calls:number;totalMs:number;selfMs:number}
-type Profile={operation:'browser-history'|'browser-title'|'browser-list'|'native-snapshots';warmed:boolean;elapsedMs:number;functions:FunctionStat[]}
+type Profile={operation:'browser-history'|'browser-title'|'browser-list'|'native-snapshots'|'native-publication'|'native-topic'|'native-classification'|'native-growth-publication';warmed:boolean;elapsedMs:number;functions:FunctionStat[]}
 type Fixture=Awaited<ReturnType<typeof persistentContextFixture>>
 type Scenario={
  f:{pool:Fixture['pool'];workspaceId:string;ownerId:string;assistantId:string;memory:Fixture['memory']};
@@ -78,7 +79,9 @@ async function profile<T>(operation:Profile['operation'],run:()=>Promise<T>):Pro
    // This counts the complete fixed-fixture read, not an authorization result
    // or a particular implementation. Save evidence before asserting the bound.
    await writeFile(process.env.BRIAN_CHAT_PROFILE_OUTPUT??'/tmp/native-chat-read-cost-profile.json',JSON.stringify(profiles,null,2))
-   const budgets:Record<Profile['operation'],number>={'browser-history':32000,'browser-title':15000,'browser-list':30000,'native-snapshots':6000}
+   const annotations=process.env.BRIAN_CHAT_PROFILE_ANNOTATIONS==='1'
+   const budgets:Record<Profile['operation'],number>={'browser-history':32000,'browser-title':15000,'browser-list':30000,'native-snapshots':6000,'native-publication':60000,
+    'native-topic':annotations?1000000:150000,'native-classification':300000,'native-growth-publication':annotations?450000:400000}
    expect(functions.reduce((sum,fn)=>sum+fn.calls,0),operation+' total SQL function calls').toBeLessThanOrEqual(budgets[operation])
   }
  }
@@ -187,6 +190,54 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
   finally{await getAppPool().end();await getPool().end()}
  })
 
+ it.skipIf(process.env.BRIAN_CHAT_PROFILE_GROWTH!=='1')('profiles repeated trivial turns with real history-derived replies',async()=>{
+  const c=await setup(),session=(await readSessionById(c.session.id))!
+  const annotations=process.env.BRIAN_CHAT_PROFILE_ANNOTATIONS==='1'
+  const provider:LLMProvider={name:'fictional-unused-trivial-topic',models:['fixture'],createSession(){throw new Error('Unexpected query session')},
+   async *stream(){
+    if(!annotations)throw new Error('Trivial topic must not dispatch a provider')
+    yield{type:'message_start',model:'fixture'}
+    yield{type:'text_delta',text:JSON.stringify({topic_label:'Fictional admitted reply topic',state:'continue',confidence:0.9})}
+    yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:3,outputTokens:2}}
+   }}
+  const scope={workspaceId:c.f.workspaceId,userId:c.f.ownerId,assistantId:null,sensitivity:'internal' as const,compartments:[],projectIds:[]}
+  for(let round=0;round<(annotations?2:3);round++){
+   const authority=await c.authority()
+   authority.accumulator.note({sources:c.sources})
+   const message=await addSessionMessage({sessionId:session.id,role:'user',content:[{type:'text',text:'test'}],scope})
+   const classification=process.env.BRIAN_CHAT_PROFILE_CLASSIFICATION==='1'
+   const classified=await profile(classification?'native-classification':'native-topic',async()=>{
+    const capture=classification&&process.env.BRIAN_CHAT_PROFILE_SHARED==='1'
+     ?await captureAttendedSessionClassification({authority,session,message}):undefined
+    if(classification)await classifyAttendedResearchMessage({authority,session,message,provider,model:'fixture',capture})
+    return classifyAttendedSessionMessage({authority,session,message,provider,model:'fixture',capture,
+     ...(annotations?{reply:{channelType:'web' as const,replyToMessageId:c.original.id}}:{})})
+   })
+   expect(classified.classification.confidence).toBe(annotations?0.9:0)
+   const input=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,authority})
+   authority.accumulator.note({sources:boundScopeSources(input)})
+   const reply=await profile('native-growth-publication',()=>publishNativeSessionMessageBatch({sessionId:session.id,
+    messages:[{role:'assistant',content:[{type:'text',text:'I’m here.'}]}],authority,derivationTarget:scope,
+    derivation:{producer:'fixture:repeated-trivial-chat',sources:authority.accumulator.evidence.sources??[]}}))
+   expect(reply).toHaveLength(1)
+  }
+  expect((await c.f.pool.query('SELECT count(*)::int AS count FROM session_message_annotation_heads WHERE session_id=$1',[session.id])).rows[0].count)
+   .toBe(annotations?3:1)
+ },120000)
+
+ it('publishes a query-backed reply with bounded SQL work',async()=>{
+  const c=await setup(),authority=await c.authority()
+  authority.accumulator.note({sources:c.sources})
+  const input=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:2,authority})
+  authority.accumulator.note({sources:boundScopeSources(input)})
+  const reply=await profile('native-publication',()=>publishNativeSessionMessageBatch({sessionId:c.session.id,
+   messages:[{role:'assistant',content:[{type:'text',text:'Fictional second query-backed reply'}]}],authority,
+   derivationTarget:{workspaceId:c.f.workspaceId,userId:c.f.ownerId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]},
+   derivation:{producer:'fixture:native-chat-publication',sources:authority.accumulator.evidence.sources??[]}}))
+  expect(reply[0].role).toBe('assistant')
+  expect((await c.get('/'+c.session.id+'/messages')).body.map((row:{id:string})=>row.id)).toContain(reply[0].id)
+ })
+
  it('loads both canonical messages through the attended browser route',async()=>{
   const c=current,response=await profile('browser-history',async()=>await c.get('/'+c.session.id+'/messages'))
   expect(response.status,JSON.stringify(response.body)).toBe(200)
@@ -196,6 +247,52 @@ describe.sequential('[COMP:api/native-chat-read-cost] actual personal transcript
    {role:'assistant',content:[{type:'text',text:'Fictional query-backed reply'}]},
   ])
  })
+
+ it('revalidates publication after an insert-time source hold and rolls the whole batch back',async()=>{
+  const c=await setup(),authority=await c.authority()
+  authority.accumulator.note({sources:c.sources})
+  const input=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:2,authority})
+  authority.accumulator.note({sources:boundScopeSources(input)})
+  await c.f.pool.query(`CREATE FUNCTION fixture_publication_source_hold() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+   SET search_path=pg_catalog,public,pg_temp AS $fixture$ BEGIN
+   IF NEW.session_id='${c.session.id}'::uuid AND NEW.role='assistant' THEN
+    UPDATE session_messages SET scope_held=true WHERE id='${c.original.id}'::uuid;
+   END IF;RETURN NEW;END $fixture$`)
+  await c.f.pool.query('REVOKE ALL ON FUNCTION fixture_publication_source_hold() FROM PUBLIC')
+  await c.f.pool.query('CREATE TRIGGER fixture_publication_source_hold AFTER INSERT ON session_messages FOR EACH ROW EXECUTE FUNCTION fixture_publication_source_hold()')
+  try{
+   await expect(publishNativeSessionMessageBatch({sessionId:c.session.id,
+    messages:[{role:'assistant',content:[{type:'text',text:'Fictional withheld reply'}]}],authority,
+    derivationTarget:{workspaceId:c.f.workspaceId,userId:c.f.ownerId,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[]},
+    derivation:{producer:'fixture:publication-source-hold',sources:authority.accumulator.evidence.sources??[]}})).rejects.toMatchObject({name:'DerivedScopeError',code:'scope_source_changed'})
+   expect((await c.f.pool.query('SELECT id FROM session_messages WHERE session_id=$1 ORDER BY sequence_num',[c.session.id])).rows)
+    .toEqual([{id:c.original.id},{id:c.reply.id}])
+   expect((await c.f.pool.query('SELECT scope_held AS held FROM session_messages WHERE id=$1',[c.original.id])).rows[0].held).toBe(false)
+  }finally{
+   await c.f.pool.query('DROP TRIGGER fixture_publication_source_hold ON session_messages')
+   await c.f.pool.query('DROP FUNCTION fixture_publication_source_hold()')
+  }
+ })
+ it('retains canonical refusal when the current-field reader contract changes in a history-derived conversation',async()=>{
+  const c=await setup(),authority=await c.authority()
+  const scope={workspaceId:c.f.workspaceId,userId:c.f.ownerId,assistantId:null,sensitivity:'internal' as const,compartments:[],projectIds:[]}
+  const message=await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'Fictional annotation input'}],scope})
+  const input=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:message.sequenceNum,topicThroughSequence:message.sequenceNum-1,authority})
+  const classification=bindScopeSources<TopicClassification>({topic_label:'fictional derived topic',state:'continue',confidence:0.9},boundScopeSources(input))
+  expect(await writeSessionMessageAnnotation({sessionId:c.session.id,messageId:message.id,classification,replyToText:null,authority})).not.toBeNull()
+  const history=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:message.sequenceNum,authority})
+  authority.accumulator.note({sources:[...c.sources,...boundScopeSources(history)]})
+  const definition=(await c.f.pool.query<{definition:string}>("SELECT pg_get_functiondef('public.application_current_field_snapshot(uuid,uuid)'::regprocedure) AS definition")).rows[0].definition
+  const changed=definition.replace('BEGIN\n','BEGIN\n RETURN NULL;\n')
+  expect(changed).not.toBe(definition)
+  await c.f.pool.query(changed)
+  try{
+   await expect(publishNativeSessionMessageBatch({sessionId:c.session.id,messages:[{role:'assistant',content:[{type:'text',text:'Fictional refused reply'}]}],
+    authority,derivationTarget:scope,derivation:{producer:'fixture:changed-current-reader',sources:authority.accumulator.evidence.sources??[]}})).rejects.toThrow()
+   expect((await c.f.pool.query('SELECT id FROM session_messages WHERE session_id=$1',[c.session.id])).rows).toHaveLength(3)
+  }finally{await c.f.pool.query(definition)}
+ })
+
  it('loads the immutable current title through the browser header',async()=>{
   const c=current,response=await profile('browser-title',async()=>await c.get('/'+c.session.id))
   expect(response.status,JSON.stringify(response.body)).toBe(200)

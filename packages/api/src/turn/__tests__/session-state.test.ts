@@ -32,7 +32,7 @@ function fixture(user = 'hi', answer = 'Hey! What are we working on today?') {
 beforeEach(() => vi.clearAllMocks())
 
 describe('[COMP:api/turn-session-state] completed exchange inference admission', () => {
-  it.each(['Hey! What are we working on today?', 'Hey there! What can I help you with today?', 'Hello! How can I help you today?',
+  it.each(['Morning! What are we working on today?', 'Good morning! How can I help you today?', 'Hey! What are we working on today?', 'Hey there! What can I help you with today?', 'Hello! How can I help you today?',
     "Hey there. What's on your mind?", 'Hello! What’s on your mind?', 'Hi! What is on your mind?'])('skips inference only for a plain greeting with no open commitments: %s', async answer => {
     const f = fixture('hi', answer)
     await expect(runTurnSessionStateDiff(f.params)).resolves.toMatchObject({ upserts: 0, resolves: 0, usage: null })
@@ -71,6 +71,19 @@ describe('[COMP:api/turn-session-state] completed exchange inference admission',
     f.params.assistantTurns.unshift({ content: [{ type: 'tool_use', id: 'call', name: 'listTasks', input: {} }] })
     await runTurnSessionStateDiff(f.params)
     expect(runSessionStateDiff).toHaveBeenCalledOnce()
+  })
+
+  it('vetoes the core trivial shortcut after tools even when the final answer is a short acknowledgment', async () => {
+    const f = fixture('test', 'Here.')
+    f.params.assistantTurns.unshift({content:[{type:'tool_use',id:'fictional-call',name:'listTasks',input:{}}]})
+    await runTurnSessionStateDiff({...f.params,allowTrivialShortcut:true})
+    expect(runSessionStateDiff).toHaveBeenCalledWith(expect.objectContaining({allowTrivialShortcut:false}))
+  })
+
+  it('keeps attachment-bearing greetings on the inference path',async()=>{
+    const f=fixture()
+    await runTurnSessionStateDiff({...f.params,allowTrivialShortcut:false})
+    expect(runSessionStateDiff).toHaveBeenCalledWith(expect.objectContaining({allowTrivialShortcut:false}))
   })
 
   it('never treats a failed current read, lost authority or cancellation as an empty commitment set', async () => {

@@ -24,6 +24,7 @@ export {
 } from './types.js'
 
 export { decide, type DecideOptions } from './decide.js'
+export { isTrivialChatMessage } from './trivial-chat.js'
 
 export {
   createClassifierRegistry,
