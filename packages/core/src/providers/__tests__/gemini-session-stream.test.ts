@@ -73,6 +73,29 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     vi.restoreAllMocks()
   })
 
+  it.each(['headers', 'authority'] as const)('closes read-ahead during pending %s without a later fetch', async phase => {
+    let settle!: () => void
+    let entered!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const blocked = new Promise<void>(resolve => { settle = resolve })
+    const pause = async () => { entered(); await blocked }
+    const provider = createGeminiProvider({
+      kind: 'ai-studio', endpoint: () => 'https://model.example/stream',
+      headers: async () => { if (phase === 'headers') await pause(); return {} },
+    })
+    const session = provider.createSession!({ model: 'gemini-3.6-flash-standard', systemPrompt: 'Fictional context',
+      ...(phase === 'authority' ? { assertInputAuthority: pause } : {}),
+    })
+    const stream = session.send([{ role: 'user', content: 'Hello' }])[Symbol.asyncIterator]()
+    expect((await stream.next()).value.type).toBe('message_start')
+    await started
+    await stream.return?.()
+    expect(fetchMock).not.toHaveBeenCalled()
+    settle()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('loads discovered schemas on the next send without losing provider history', async () => {
     fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
       .mockResolvedValueOnce(sseResponse([{ candidates: [{ content: { role: 'model', parts: [{ text: 'Done.' }] }, finishReason: 'STOP' }] }]))

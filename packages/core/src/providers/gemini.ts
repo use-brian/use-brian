@@ -1,3 +1,4 @@
+import { bufferProviderStream } from './stream-backpressure.js'
 import type { HttpRetryWindow } from './types.js'
 /**
  * Gemini provider using REST API directly (not the SDK).
@@ -480,6 +481,27 @@ export function stripLeadingEnvelopeLeak(firstTurnText: string): string {
 
 // ── SSE streaming via REST API ─────────────────────────────────
 
+/** Credential and host-admission work may not accept a signal. Stop waiting on
+ * cancellation, handle its eventual settlement, and never dispatch afterward. */
+function awaitStreamPreparation<T>(start: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted()
+  const pending = start()
+  if (!signal) return pending
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => { signal.removeEventListener('abort', abort); reject(signal.reason) }
+    signal.addEventListener('abort', abort, { once: true })
+    pending.then(value => {
+      signal.removeEventListener('abort', abort)
+      if (signal.aborted) reject(signal.reason)
+      else resolve(value)
+    }, error => {
+      signal.removeEventListener('abort', abort)
+      reject(error)
+    })
+    if (signal.aborted) abort()
+  })
+}
+
 async function* streamGeminiSSE(
   transport: GoogleTransport,
   modelId: string,
@@ -494,7 +516,7 @@ async function* streamGeminiSSE(
   const url = transport.endpoint(modelId, 'streamGenerateContent', { alt: 'sse' })
   const retryHttp = createGeminiHttpRetry(signal, { transport: transport.kind, model: modelId, window: httpRetryWindow })
   signal?.throwIfAborted()
-  const headers = await transport.headers()
+  const headers = await awaitStreamPreparation(() => transport.headers(), signal)
   const responseWindowMs = registryRow(modelId)?.firstResponseTimeoutMs
   let dispatcher = responseWindowMs ? PREFILL_DISPATCHERS.get(responseWindowMs) : undefined
   if (responseWindowMs && !dispatcher) {
@@ -512,7 +534,7 @@ async function* streamGeminiSSE(
     const serialized = JSON.stringify(body)
     debugDocumentFlow('gemini_wire', { model: modelId, mode, gemini: body })
     return retryHttp(async attemptSignal => {
-      await assertInputAuthority(checkInput)
+      await awaitStreamPreparation(() => assertInputAuthority(checkInput), attemptSignal)
       attemptSignal.throwIfAborted()
       return fetch(url, {
         method: 'POST',
@@ -863,7 +885,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
       : aiStudioTransport(keyOrTransport)
   const toolCallCounter = { value: 0 }
 
-  return {
+  const provider: LLMProvider = {
     name: 'gemini',
     models: [...providerModelIds('gemini')],
 
@@ -1111,6 +1133,16 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
           }
         },
       }
+    },
+  }
+  return {
+    ...provider,
+    stream: request => bufferProviderStream(signal => provider.stream({ ...request, signal }), request.signal),
+    createSession: options => {
+      const session = provider.createSession!(options)
+      return { send: (messages, opts) => bufferProviderStream(
+        signal => session.send(messages, { ...opts, signal }), opts?.signal ?? options.signal,
+      ) }
     },
   }
 }
