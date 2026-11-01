@@ -20,6 +20,17 @@ export async function captureAttendedSessionClassification(input:ClassificationI
  classificationCaptures.set(capture,{authority,sessionId:session.id,messageId:message.id,sequence:message.sequenceNum,query})
  return capture
 }
+/** Fork data evidence for concurrent assessments, never an authority or allow receipt. */
+export function forkAttendedSessionClassification(input:ClassificationInput){
+ const captured=input.capture?classificationCaptures.get(input.capture):undefined
+ if(!captured||captured.authority!==input.authority||captured.sessionId!==input.session.id
+  ||captured.messageId!==input.message.id||captured.sequence!==input.message.sequenceNum)throw new DerivedScopeError('scope_evidence_missing')
+ const authority:SessionContextAuthority={execution:input.authority.execution,
+  accumulator:new ContextScopeAccumulator(structuredClone(input.authority.accumulator.evidence))}
+ const capture=Object.freeze({})
+ classificationCaptures.set(capture,{...captured,authority})
+ return{authority,capture,mergeEvidence:()=>input.authority.accumulator.note(structuredClone(authority.accumulator.evidence))}
+}
 async function classificationQuery(input:ClassificationInput,topicThroughSequence:number){
  if(!input.capture)return readAdmittedSessionQuery({sessionId:input.session.id,throughSequence:input.message.sequenceNum,topicThroughSequence,authority:input.authority})
  const captured=classificationCaptures.get(input.capture)
@@ -39,12 +50,12 @@ function copyBoundHistory(history:readonly SessionMessage[]):SessionMessage[]{
 }
 
 /** The actual current authored row is selected and scoped before text is formatted. */
-export async function classifyAttendedSessionMessage(input:{
+export async function assessAttendedSessionMessage(input:{
  authority:SessionContextAuthority;session:Session;message:SessionMessage;
  provider:TopicClassifierOptions['provider'];model:string;decisionRuntime?:TopicClassifierOptions['decisionRuntime'];
  reply?:Pick<ResolveReplyParams,'channelType'|'replyToMessageId'|'clientSnippet'>;
  capture?:object;
-}):Promise<{classification:TopicClassification;reply:Awaited<ReturnType<typeof resolveReplyText>>;history:SessionMessage[]}>{
+}):Promise<{publish:()=>Promise<{classification:TopicClassification;reply:Awaited<ReturnType<typeof resolveReplyText>>;history:SessionMessage[]}>}>{
  const {authority,session,message}=input
  if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
  const query=await classificationQuery(input,message.sequenceNum-1)
@@ -78,6 +89,8 @@ export async function classifyAttendedSessionMessage(input:{
   authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context),workspaceId:authority.execution.security.access.workspaceId,
   runId:'memory-topic-'+message.id},boundScopeSources(query))
  const classification=await classifyTopic(options)
+ return{publish:async()=>{
+ if(ephemeral)await assertSourceModelInputAuthority(context)
  const annotation=ephemeral?null:await writeSessionMessageAnnotation({sessionId:session.id,messageId:message.id,classification,replyToText:reply?.text??null,authority,expectedRevision:expected})
  if(!ephemeral&&!annotation)throw new DerivedScopeError('scope_source_changed')
  await authority.execution.security.authority.assertCurrent()
@@ -85,6 +98,13 @@ export async function classifyAttendedSessionMessage(input:{
   messageId:message.id,annotationId:annotation.revisionId,history:copyBoundHistory(query.history),
   sources:structuredClone(boundScopeSources(query.history))})
  return{classification,reply,history}
+ }}
+}
+
+/** Sequential callers retain the original classify-and-publish contract. */
+export async function classifyAttendedSessionMessage(input:Parameters<typeof assessAttendedSessionMessage>[0]){
+ const assessment=await assessAttendedSessionMessage(input)
+ return assessment.publish()
 }
 
 const historyTurnCounts=new WeakMap<readonly SessionMessage[],{workspaceId:string;sessionId:string;count:number;sources:readonly ScopeSource[]}>()

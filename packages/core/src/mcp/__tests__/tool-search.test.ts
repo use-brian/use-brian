@@ -92,6 +92,41 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     return { tools, callMcpTool, index }
   }
 
+  it('preloads matching read schemas without executing tools and retains guarded dispatch', async () => {
+    const execute = vi.fn(async () => ({ data: { items: [] } }))
+    const read = buildTool({ name: 'calendarListEvents', description: 'List calendar events',
+      inputSchema: z.object({ from: z.string() }), isReadOnly: true, requiresConfirmation: false, execute })
+    const write = buildTool({ ...read, name: 'calendarCreateEvent', isReadOnly: false })
+    const gated = buildTool({ ...read, name: 'calendarRestricted', requiresCapability: 'fictional' })
+    const hidden = buildTool({ ...read, name: 'calendarHidden', hiddenFromModel: true })
+    const index = buildToolIndex([{ kind: 'local', serverName: 'calendar', tools: [read, write, gated, hidden] }])
+    const [, call] = createMcpSearchTools({ index, settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1',
+      discoveryQuery: 'can you check my calendar now?' })
+    expect(call.description).toContain('[calendar] calendarListEvents')
+    expect(call.description).toContain('from: string')
+    expect(call.description).not.toContain('calendarCreateEvent')
+    expect(call.description).not.toContain('calendarRestricted')
+    expect(call.description).not.toContain('calendarHidden')
+    expect(execute).not.toHaveBeenCalled()
+    await call.execute({ server: 'calendar', tool: 'calendarListEvents', args: { from: '2030-01-01' } }, ctx)
+    expect(execute).toHaveBeenCalledOnce()
+  })
+
+  it('keeps empty, unrelated, oversized and ambiguous preloads bounded', () => {
+    const read = buildTool({ name: 'calendarRead', description: 'Read calendar events',
+      inputSchema: z.object({}), isReadOnly: true, requiresConfirmation: false,
+      execute: async () => ({ data: [] }) })
+    const describe = (query: string, entries = [read]) => createMcpSearchTools({
+      index: buildToolIndex([{ kind: 'local', serverName: 'calendar', tools: entries }]),
+      settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1', discoveryQuery: query,
+    })[1].description
+    for (const query of ['', 'can you please help now', 'unrelatedquux', ' '.repeat(500) + 'calendar']) {
+      expect(describe(query)).not.toContain('already discovered')
+    }
+    expect(describe('calendar', [read, read])).not.toContain('already discovered')
+    expect(describe('calendar', [buildTool({ ...read, description: 'calendar ' + 'x'.repeat(12_000) })])).not.toContain('already discovered')
+  })
+
   it('creates exactly 2 tools: mcp_search and mcp_call', () => {
     const { tools } = makeSearchTools()
     expect(tools).toHaveLength(2)

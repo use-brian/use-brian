@@ -2,7 +2,7 @@ import {runAssistantTurn} from '../../turn/kernel.js'
 import {validateAttendedAudienceEvidence} from '../../context-scope/attended-audience.js'
 import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
 import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,type QueryEvent,type LLMProvider} from '@use-brian/core'
-import {captureAttendedSessionClassification,classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory,readClassifiedSessionHistory,attendedSessionTurnCount} from '../../routes/attended-session-context.js'
+import {captureAttendedSessionClassification,forkAttendedSessionClassification,assessAttendedSessionMessage,classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory,readClassifiedSessionHistory,attendedSessionTurnCount} from '../../routes/attended-session-context.js'
 import * as sessionQueries from '../../db/session-query-reader.js'
 import {addSessionMessage} from '../../db/sessions.js'
 import {readSessionMessageAnnotation} from '../../db/session-message-annotations.js'
@@ -165,6 +165,68 @@ describe.sequential('[COMP:api/application-persistence] actual admitted reply hi
   expect(topic.classification.confidence).toBe(0)
   expect(boundScopeSources(topic.classification)).toEqual(expect.arrayContaining(boundScopeSources(topic.history)))
   expect(calls).toBe(0)
+ })
+ it('runs independent assessments concurrently over one current captured cohort',async()=>{
+  const {f,message}=await researchInput(),authority=await f.modelContext(f.firstId)
+  const capture=await captureAttendedSessionClassification({authority,session:f.session,message})
+  const researchBranch=forkAttendedSessionClassification({authority,session:f.session,message,capture})
+  const topicBranch=forkAttendedSessionClassification({authority,session:f.session,message,capture})
+  let entered=0,release!:()=>void
+  const bothEntered=new Promise<void>(resolve=>{release=resolve})
+  const rendezvous=async()=>{entered++;if(entered===2)release();await bothEntered}
+  const [research,assessment]=await Promise.all([
+   classifyAttendedResearchMessage({...researchBranch,session:f.session,message,provider:researchProvider(rendezvous),model:'fixture'}),
+   assessAttendedSessionMessage({...topicBranch,session:f.session,message,provider:classifierProvider(rendezvous),model:'fixture'}),
+  ])
+  expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toHaveLength(0)
+  researchBranch.mergeEvidence()
+  const topic=await assessment.publish()
+  topicBranch.mergeEvidence()
+  expect(entered).toBe(2)
+  expect(research.research).toBe(true)
+  expect(topic.classification.topic_label).toBe('fictional admitted topic')
+  expect(boundScopeSources(research)).toEqual(expect.arrayContaining(boundScopeSources(topic.history)))
+  expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toHaveLength(1)
+ })
+ it('isolates branch evidence expansion and merges only explicitly into the turn',async()=>{
+  const {f,message}=await researchInput(),authority=await f.modelContext(f.firstId)
+  const capture=await captureAttendedSessionClassification({authority,session:f.session,message})
+  const first=forkAttendedSessionClassification({authority,session:f.session,message,capture})
+  const second=forkAttendedSessionClassification({authority,session:f.session,message,capture})
+  const before=JSON.stringify(authority.accumulator.evidence)
+  first.authority.accumulator.note({sensitivity:'confidential'})
+  expect(JSON.stringify(authority.accumulator.evidence)).toBe(before)
+  expect(JSON.stringify(second.authority.accumulator.evidence)).toBe(before)
+  first.mergeEvidence()
+  expect(authority.accumulator.evidence.sensitivity).toBe('confidential')
+  expect(first.authority.execution).toBe(authority.execution)
+  expect(second.authority.execution).toBe(authority.execution)
+ })
+ it('does not append annotation evidence while a sibling research assessment is pending',async()=>{
+  const {f,message}=await researchInput(),authority=await f.modelContext(f.firstId)
+  const capture=await captureAttendedSessionClassification({authority,session:f.session,message})
+  let release!:()=>void,started!:()=>void
+  const pending=new Promise<void>(resolve=>{release=resolve}),entered=new Promise<void>(resolve=>{started=resolve})
+  const research=classifyAttendedResearchMessage({authority,session:f.session,message,capture,
+   provider:researchProvider(async()=>{started();await pending}),model:'fixture'})
+  await entered
+  const before=JSON.stringify(authority.accumulator.evidence)
+  const assessment=await assessAttendedSessionMessage({authority,session:f.session,message,capture,provider:classifierProvider(),model:'fixture'})
+  expect(JSON.stringify(authority.accumulator.evidence)).toBe(before)
+  expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toHaveLength(0)
+  release()
+  await expect(research).resolves.toMatchObject({research:true})
+  await assessment.publish()
+  expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toHaveLength(1)
+ })
+ it.each(['hold','edit'] as const)('revalidates a deferred ephemeral assessment after source %s',async change=>{
+  const {f}=await setup(),authority=await f.modelContext(f.firstId)
+  const message=await addSessionMessage({sessionId:f.session.id,role:'user',content:[{type:'text',text:'hi'}],scope:f.envelope})
+  const assessment=await assessAttendedSessionMessage({authority,session:f.session,message,provider:classifierProvider(),model:'fixture'})
+  if(change==='hold')await f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[message.id])
+  else await f.pool.query(`UPDATE session_messages SET content='[{"type":"text","text":"Fictional replacement"}]'::jsonb WHERE id=$1`,[message.id])
+  await expect(assessment.publish()).rejects.toMatchObject({reason:'authority_changed'})
+  expect((await f.pool.query('SELECT message_id FROM session_message_annotation_heads WHERE message_id=$1',[message.id])).rows).toHaveLength(0)
  })
  it.each(['hold','edit','membership'] as const)('refuses a shared classification capture after %s changes',async change=>{
   const {f}=await setup(),authority=await f.modelContext(f.firstId)

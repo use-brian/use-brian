@@ -441,6 +441,7 @@ export async function injectMcpTools(params: {
    * absent store/text means no rule match and therefore no write tools.
    */
   knowledgeCaptureRuleStore?: KnowledgeCaptureRuleStore
+  discoveryQuery?: string
   knowledgeCaptureText?: string
   /** Explicit workflow tool_call steps are governed by their authored step + approval pause. */
   knowledgeWriteAuthorization?: 'capture' | 'workflow'
@@ -581,7 +582,7 @@ export async function injectMcpTools(params: {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
     userTimezone, knowledgeStore, knowledgeRepoWriter, allowKnowledgeWrites = false,
-    knowledgeCaptureRuleStore, knowledgeCaptureText, knowledgeWriteAuthorization = 'capture',
+    knowledgeCaptureRuleStore, knowledgeCaptureText, discoveryQuery, knowledgeWriteAuthorization = 'capture',
     gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
@@ -2197,6 +2198,7 @@ export async function injectMcpTools(params: {
       // The index owns each source's exact dispatcher and validated overrides.
       hooks: engineHooks,
       keepDynamicToolsDirect,
+      discoveryQuery,
     })
     for (const tool of searchTools) {
       // A dynamic MCP can choose a generic canonical name such as `search`.

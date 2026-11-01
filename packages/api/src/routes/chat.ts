@@ -5,7 +5,7 @@ import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
 import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { captureAttendedSessionClassification, classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
+import { captureAttendedSessionClassification, forkAttendedSessionClassification, assessAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
@@ -3979,18 +3979,39 @@ export function chatRoutes(options: WebChatOptions): Router {
         ?await turnTiming.time('classification_capture',()=>captureAttendedSessionClassification({
           authority:nativeTranscriptAuthority,session,message:earlyStoredUserMsg,
         })):undefined
-      if (
-        adaptiveResearchEligible &&
-        message
-      ) {
-        if (!nativeTranscriptAuthority || !earlyStoredUserMsg) {
-          throw Object.assign(new Error('The assessment context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
-        }
-        const adaptive = await turnTiming.time('research_classify', () => classifyAttendedResearchMessage({
-          authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
-          provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
-          capture:classificationCapture,
-        }))
+      const researchAssessment = classificationCapture && nativeTranscriptAuthority && earlyStoredUserMsg
+        ? forkAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg, capture: classificationCapture }) : undefined
+      const topicAssessmentBranch = classificationCapture && nativeTranscriptAuthority && earlyStoredUserMsg
+        ? forkAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg, capture: classificationCapture }) : undefined
+      // The two independent assessments share bytes, never authority receipts.
+      // Settle both before leaving this phase so a rejected sibling cannot keep
+      // background classifier work running after the route has failed.
+      const assessments = await Promise.allSettled([
+        (async () => {
+          if (!adaptiveResearchEligible || !message) return undefined
+          if (!nativeTranscriptAuthority || !earlyStoredUserMsg) {
+            throw Object.assign(new Error('The assessment context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+          }
+          return await turnTiming.time('research_classify', () => classifyAttendedResearchMessage({
+            authority: researchAssessment?.authority ?? nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
+            provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+            capture: researchAssessment?.capture ?? classificationCapture,
+          }))
+        })(),
+        (async () => nativeTranscriptAuthority && earlyStoredUserMsg
+        ? await turnTiming.time('topic_classify', () => assessAttendedSessionMessage({
+            authority: topicAssessmentBranch?.authority ?? nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
+            provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
+            capture: topicAssessmentBranch?.capture ?? classificationCapture,
+            reply: { channelType: 'web', replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
+          }))
+        : undefined)(),
+      ])
+      for (const assessment of assessments) if (assessment.status === 'rejected') throw assessment.reason
+      const adaptive = assessments[0].status === 'fulfilled' ? assessments[0].value : undefined
+      const topicAssessment = assessments[1].status === 'fulfilled' ? assessments[1].value : undefined
+      researchAssessment?.mergeEvidence()
+      if (adaptive) {
         adaptiveResearchOverhead = {
           model: adaptive.model,
           usage: adaptive.usage,
@@ -4009,14 +4030,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
-      const nativeClassification = nativeTranscriptAuthority && earlyStoredUserMsg
-        ? await turnTiming.time('topic_classify', () => classifyAttendedSessionMessage({
-            authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
-            provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
-            capture:classificationCapture,
-            reply: { channelType: 'web', replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
-          }))
+      const nativeClassification = topicAssessment
+        ? await turnTiming.time('topic_annotation', () => topicAssessment.publish())
         : undefined
+      topicAssessmentBranch?.mergeEvidence()
 
       // ── Reply resolution + topic classification ────────────────
       // Resolve the replied-to message text (if any) and classify the
@@ -5976,6 +5993,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // `applyMcpInjection` and must NOT set this.
         allowKnowledgeWrites: true,
         knowledgeCaptureText: message ?? '',
+        discoveryQuery: rawMessage ?? undefined,
         contextScope: turnScope,
         executionContext,
         scopeAccumulator,
