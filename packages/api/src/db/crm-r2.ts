@@ -1311,11 +1311,28 @@ export async function getCrmSummary(
     )
     ELSE COALESCE(e.attributes->>'stage','lead') NOT IN ('won','lost')
   END)`
+  // Both projections consume the same fully admitted snapshots in one operation.
   const aggregate = await queryLegacyCanonicalCrmSql<{
     deals: string; contacts: string; companies: string
     overdue: string; stale: string; noAmount: string; orphaned: string
+    stages: Array<{ stageId: string; currency: string; stageCount: string; value: string | null }>
   }>(ctx,[{type:'person',fields:['archivedAt','companyId']},{type:'company',fields:['archivedAt']},{type:'deal',fields:['archivedAt','pipelineId','pipelineStageId','stage','amount','closeDate','updatedAt','currencyCode']}],
-    `SELECT
+    `SELECT summary_totals.*,
+            COALESCE((SELECT jsonb_agg(summary_stages) FROM (
+       SELECT e.attributes->>'pipeline_stage_id' AS "stageId",
+              COALESCE(NULLIF(upper(e.attributes->>'currency_code'),''),'USD') AS currency,
+              SUM(COUNT(*)) OVER (
+                PARTITION BY e.attributes->>'pipeline_stage_id'
+              )::text AS "stageCount",
+              SUM(NULLIF(e.attributes->>'amount','')::numeric)::text AS value
+         FROM entities e
+        WHERE ${ap.sql} AND e.kind = 'deal' AND e.valid_to IS NULL
+          AND e.retracted_at IS NULL AND NOT (e.attributes ? 'crm_archived_at')
+          AND NULLIF(e.attributes->>'pipeline_stage_id','') IS NOT NULL
+          ${pipelinePredicate}
+        GROUP BY e.attributes->>'pipeline_stage_id', currency
+            ) summary_stages), '[]'::jsonb) AS stages
+       FROM (SELECT
        COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate})::text AS deals,
        COUNT(*) FILTER (WHERE e.kind = 'person')::text AS contacts,
        COUNT(*) FILTER (WHERE e.kind = 'company')::text AS companies,
@@ -1333,35 +1350,11 @@ export async function getCrmSummary(
      FROM entities e
      WHERE ${ap.sql} AND e.kind = ANY($${ap.nextIdx}::text[])
        AND e.valid_to IS NULL AND e.retracted_at IS NULL
-       AND NOT (e.attributes ? 'crm_archived_at')`,
+       AND NOT (e.attributes ? 'crm_archived_at')) summary_totals`,
     aggregateValues,
   )
-  const stageAp = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
-  const stageValues: unknown[] = [...stageAp.params]
-  let pipelineSql = ''
-  if (pipelineId) {
-    stageValues.push(pipelineId)
-    pipelineSql = `AND e.attributes->>'pipeline_id' = $${stageValues.length}`
-  }
-  const stages = await queryLegacyCanonicalCrmSql<{
-    stageId: string; currency: string; stageCount: string; value: string | null
-  }>(ctx,[{type:'person',fields:['archivedAt','companyId']},{type:'company',fields:['archivedAt']},{type:'deal',fields:['archivedAt','pipelineId','pipelineStageId','stage','amount','closeDate','updatedAt','currencyCode']}],
-    `SELECT e.attributes->>'pipeline_stage_id' AS "stageId",
-            COALESCE(NULLIF(upper(e.attributes->>'currency_code'),''),'USD') AS currency,
-            SUM(COUNT(*)) OVER (
-              PARTITION BY e.attributes->>'pipeline_stage_id'
-            )::text AS "stageCount",
-            SUM(NULLIF(e.attributes->>'amount','')::numeric)::text AS value
-       FROM entities e
-      WHERE ${stageAp.sql} AND e.kind = 'deal' AND e.valid_to IS NULL
-        AND e.retracted_at IS NULL AND NOT (e.attributes ? 'crm_archived_at')
-        AND NULLIF(e.attributes->>'pipeline_stage_id','') IS NOT NULL
-        ${pipelineSql}
-      GROUP BY e.attributes->>'pipeline_stage_id', currency`,
-    stageValues,
-  )
   const stageMap = new Map<string, { stageId: string; count: number; values: Record<string, number|string> }>()
-  for (const row of stages.rows) {
+  for (const row of aggregate.rows[0]?.stages ?? []) {
     const summary = stageMap.get(row.stageId) ?? { stageId: row.stageId, count: 0, values: {} }
     summary.count = Number(row.stageCount)
     if (row.value !== null) summary.values[row.currency] = decimalResult(decimalParts(row.value).units,decimalParts(row.value).scale)
@@ -1372,7 +1365,7 @@ export async function getCrmSummary(
     totals: { deals: Number(row?.deals ?? 0), contacts: Number(row?.contacts ?? 0), companies: Number(row?.companies ?? 0) },
     attention: { overdue: Number(row?.overdue ?? 0), stale: Number(row?.stale ?? 0), noAmount: Number(row?.noAmount ?? 0), orphaned: Number(row?.orphaned ?? 0) },
     stages: [...stageMap.values()],
-  },[...boundScopeSources(aggregate),...boundScopeSources(stages)])
+  },boundScopeSources(aggregate))
   })
 }
 
