@@ -199,13 +199,36 @@ describe.sequential('[COMP:api/application-persistence] invocation-local native 
     }
   }), 90_000)
 
-  it('preserves the canonical capture frame memo after removing the private invocation worklist', async () => frame(async client => {
+  it('preserves canonical frame evidence and only adds completed native scope entries', async () => frame(async client => {
     const actual = await operation(client, 'frame', roots)
     expect(actual).toMatchObject({ admitted: true })
     await operation(client, 'disable_kernel')
     const original = await operation(client, 'frame', roots)
     expect(original).toMatchObject({ admitted: true })
-    expect(actual).toEqual(original)
+    const { memo: actualMemo, ...actualEvidence } = actual!
+    const { memo: originalMemo, ...originalEvidence } = original!
+    expect(actualEvidence).toEqual(originalEvidence)
+    for (const [key, value] of Object.entries(originalMemo)) expect(actualMemo[key]).toEqual(value)
+    for (const key of Object.keys(actualMemo).filter(key => !(key in originalMemo))) {
+      expect(key).toMatch(/^native:(session_message|session_context_revision|memory|workspace_file):/)
+      expect(actual!.lineage.some((node: Json) => key === `native:${node.kind}:${node.id}:${node.version}`)).toBe(true)
+      expect(actualMemo[key]).toEqual({ value: true, external: [] })
+    }
+  }), 90_000)
+
+  it('evaluates shared field obligations in dependency order without repeated recursive visits', async () => frame(async client => {
+    const nodes = await operation<Json[]>(client, 'nodes', roots)
+    const fieldCount = nodes.filter(node => node.kind === 'application_field').length
+    expect(fieldCount).toBeGreaterThan(0)
+    await operation(client, 'trace')
+    const before = await operation<Json>(client, 'stats')
+    const actual = await evidence(client)
+    expect(actual).toMatchObject({ admitted: true })
+    const after = await operation<Json>(client, 'stats')
+    const fieldVisits = (after.native_detached_eval_field ?? 0) - (before.native_detached_eval_field ?? 0)
+    expect(fieldVisits).toBeGreaterThan(0)
+    expect(fieldVisits).toBeLessThanOrEqual(fieldCount * 3)
+    expect(actual).toEqual(await baseline(client, () => evidence(client)))
   }), 90_000)
 
   for (const type of ['session_message', 'session_message_annotation']) it(`preserves the complete ${type} capture`, async () => frame(async client => {

@@ -43,6 +43,17 @@ async function outcome(client: PoolClient, read: () => Promise<unknown>) {
   catch (error) { const e = error as { code?: string; message: string }; return { error: e.code, message: e.message } }
   finally { await client.query('ROLLBACK TO SAVEPOINT evaluator_outcome') }
 }
+function expectScheduledFrame(actual: Json, original: Json) {
+  const { memo: actualMemo, ...actualEvidence } = actual
+  const { memo: originalMemo, ...originalEvidence } = original
+  expect(actualEvidence).toEqual(originalEvidence)
+  for (const [key, value] of Object.entries(originalMemo)) expect(actualMemo[key]).toEqual(value)
+  for (const key of Object.keys(actualMemo).filter(key => !(key in originalMemo))) {
+    expect(key).toMatch(/^native:(session_message|session_context_revision|memory|workspace_file):/)
+    expect(actual.lineage.some((node: Json) => key === `native:${node.kind}:${node.id}:${node.version}`)).toBe(true)
+    expect(actualMemo[key]).toEqual({ value: true, external: [] })
+  }
+}
 async function prepared(client: PoolClient) {
   const result = await operation(client, 'frame', roots)
   expect(result).toMatchObject({ admitted: true })
@@ -125,21 +136,26 @@ describe.sequential('[COMP:api/application-persistence] annotation source workli
           ALTER TABLE session_context_revision_contents ENABLE TRIGGER session_context_content_guard;
         ELSIF action='grant' THEN
           team:=gen_random_uuid();request_id:=gen_random_uuid();deadline:=clock_timestamp()+interval '10 seconds';
-          INSERT INTO workspace_groups(id,workspace_id,name,created_by,compartment_key) VALUES(team,w,'Fictional expiring team',(payload->>'owner')::uuid,'fictional-expiring');
+          INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES(team,w,'Fictional expiring team',(payload->>'owner')::uuid,'team','fictional-expiring-'||team,'team:'||team);
           UPDATE workspace_members SET team_scope_mode='assigned',compartments=NULL WHERE workspace_id=w AND user_id=current_setting('app.current_user_id')::uuid;
           INSERT INTO workspace_access_requests(id,workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,reason,starts_at,expires_at,payload_hash,policy_revision,status,decided_by,decided_at)
             VALUES(request_id,w,current_setting('app.current_user_id')::uuid,'member',current_setting('app.current_user_id')::uuid,team,'Fictional timed read',clock_timestamp()-interval '1 day',deadline,repeat('a',64),1,'approved',(payload->>'owner')::uuid,clock_timestamp());
           INSERT INTO workspace_access_grants(workspace_id,request_id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,approved_by)
             SELECT workspace_id,id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,decided_by FROM workspace_access_requests WHERE id=request_id;
           PERFORM set_config('app.agent_compartments','null',true);
-          RETURN jsonb_build_object('expiresAt',deadline,'compartments',effective_member_read_compartments(current_setting('app.current_user_id')::uuid,w));
+          RETURN jsonb_build_object('expiresAt',deadline,'label','team:'||team,'compartments',effective_member_read_compartments(current_setting('app.current_user_id')::uuid,w));
         ELSIF action='wait_grant' THEN
           PERFORM pg_sleep(greatest(0,extract(epoch FROM ((payload->>'expiresAt')::timestamptz-clock_timestamp())))+0.03);
           RETURN to_jsonb(effective_member_read_compartments(current_setting('app.current_user_id')::uuid,w));
         ELSIF action='revision_version' THEN UPDATE session_context_scope_revisions SET scope_version=2 WHERE workspace_id=w AND id=(payload->>'revision')::uuid;
         ELSIF action='revision_hold' THEN UPDATE session_context_scope_revisions SET scope_held=true WHERE workspace_id=w AND id=(payload->>'revision')::uuid;
-        ELSIF action='review_hold' THEN INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
-          VALUES(w,'session_context_revision',(payload->>'revision')::uuid,'1','held',1,'Fictional annotation hold');
+        ELSIF action='review_hold_fault' THEN
+          -- Revisions are not direct review targets. Inject a legacy/corrupt
+          -- review row to prove the read boundary still refuses it.
+          ALTER TABLE scope_resource_states DISABLE TRIGGER scope_resource_states_reference;
+          INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
+            VALUES(w,'session_context_revision',(payload->>'revision')::uuid,'1','held',1,'Fictional annotation hold');
+          ALTER TABLE scope_resource_states ENABLE TRIGGER scope_resource_states_reference;
         ELSIF action='message_hold' THEN UPDATE session_messages SET scope_held=true WHERE workspace_id=w AND id=(payload->>'message')::uuid;
         ELSIF action='recording' THEN UPDATE sessions SET recording_privacy_held=true WHERE workspace_id=w AND id=(payload->>'session')::uuid;
         ELSIF action='labels' THEN UPDATE workspace_files SET sensitivity='confidential' WHERE workspace_id=w AND id=(payload->>'file')::uuid;
@@ -181,7 +197,7 @@ describe.sequential('[COMP:api/application-persistence] annotation source workli
       expect((after.native_worklist_frame_current ?? 0) - (before.native_worklist_frame_current ?? 0)).toBeGreaterThan(0)
       expect((after.read_admitted_native_scope_snapshot ?? 0) - (before.read_admitted_native_scope_snapshot ?? 0)).toBeGreaterThanOrEqual(50)
       await operation(client, 'disable')
-      expect(await operation(client, 'frame', roots)).toEqual(actual)
+      expectScheduledFrame(actual, await operation(client, 'frame', roots))
     })
     const query = await readAdmittedSessionQuery({ sessionId: f.session.id, throughSequence: through, authority: authority() })
     expect(query.annotations.find(row => row.id === replies.at(-1))?.topicLabel).toBe('Fictional file topic')
@@ -221,12 +237,12 @@ describe.sequential('[COMP:api/application-persistence] annotation source workli
     expect(await operation(client, 'point', input)).toEqual(await operation(client, 'original', input))
   }), 90_000)
 
-  for (const change of ['revision_hold', 'review_hold', 'message_hold', 'recording', 'labels', 'body', 'actor', 'ceiling']) {
-    it(`invalidates the enclosing proof after a real ${change} change`, async () => frame(async client => {
+  for (const change of ['revision_hold', 'review_hold_fault', 'message_hold', 'recording', 'labels', 'body', 'actor', 'ceiling']) {
+    it(`invalidates the enclosing proof after ${change}`, async () => frame(async client => {
       const input = await prepared(client)
       await operation(client, change, { revision: revisionId, message: replies.at(-1), session: f.session.id, file: files[0].resourceId, actor: f.secondId })
       expect(await operation(client, 'current', input.seed)).toBe(false)
-      if (['revision_hold', 'review_hold', 'recording'].includes(change)) {
+      if (['revision_hold', 'review_hold_fault', 'recording'].includes(change)) {
         const actual = await operation(client, 'point', input)
         expect(actual?.value).toBeUndefined()
         expect(actual).toEqual(await operation(client, 'original', input))
@@ -255,11 +271,11 @@ describe.sequential('[COMP:api/application-persistence] annotation source workli
 
   it('rechecks an actual timed read grant after it expires without a metadata mutation', async () => frame(async client => {
     const grant = await operation(client, 'grant', { owner: f.ownerId })
-    expect(grant.compartments).toContain('fictional-expiring')
+    expect(grant.compartments).toContain(grant.label)
     const seed = await operation(client, 'seed', roots)
     expect(seed).not.toBeNull()
     expect(await operation(client, 'current', seed)).toBe(true)
-    expect(await operation(client, 'wait_grant', grant)).not.toContain('fictional-expiring')
+    expect(await operation(client, 'wait_grant', grant)).not.toContain(grant.label)
     expect(await operation(client, 'current', seed)).toBe(false)
   }), 90_000)
 
@@ -267,7 +283,7 @@ describe.sequential('[COMP:api/application-persistence] annotation source workli
     const baseline = await operation(client, 'frame', roots)
     await operation(client, drift)
     expect(await operation(client, 'guard')).toBe(false)
-    expect(await operation(client, 'frame', roots)).toEqual(baseline)
+    expectScheduledFrame(baseline, await operation(client, 'frame', roots))
   }), 90_000)
 
   it('reads a canonically replaced annotation head through the original reader when it is outside the seed', async () => {

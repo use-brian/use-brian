@@ -42,6 +42,17 @@ async function outcome(client: PoolClient, read: () => Promise<unknown>) {
   catch (error) { const e = error as { code?: string; message: string }; return { error: e.code, message: e.message } }
   finally { await client.query('ROLLBACK TO SAVEPOINT evaluator_outcome') }
 }
+function expectScheduledFrame(actual: Json, original: Json) {
+  const { memo: actualMemo, ...actualEvidence } = actual
+  const { memo: originalMemo, ...originalEvidence } = original
+  expect(actualEvidence).toEqual(originalEvidence)
+  for (const [key, value] of Object.entries(originalMemo)) expect(actualMemo[key]).toEqual(value)
+  for (const key of Object.keys(actualMemo).filter(key => !(key in originalMemo))) {
+    expect(key).toMatch(/^native:(session_message|session_context_revision|memory|workspace_file):/)
+    expect(actual.lineage.some((node: Json) => key === `native:${node.kind}:${node.id}:${node.version}`)).toBe(true)
+    expect(actualMemo[key]).toEqual({ value: true, external: [] })
+  }
+}
 async function prepared(client: PoolClient) {
   const result = await operation(client, 'frame', roots)
   expect(result).toMatchObject({ admitted: true })
@@ -160,7 +171,7 @@ describe.sequential('[COMP:api/application-persistence] detached native evaluato
       expect((after.native_worklist_frame_current ?? 0) - (before.native_worklist_frame_current ?? 0)).toBeGreaterThan(0)
       expect((after.read_admitted_native_scope_snapshot ?? 0) - (before.read_admitted_native_scope_snapshot ?? 0)).toBeGreaterThanOrEqual(50)
       await operation(client, 'disable')
-      expect(await operation(client, 'frame', roots)).toEqual(actual)
+      expectScheduledFrame(actual, await operation(client, 'frame', roots))
     })
     const actual = await readAdmittedSessionQuery({ sessionId: f.session.id, throughSequence: through, authority: authority() })
     for (const id of replies) expect(actual.history.some(row => row.id === id)).toBe(true)
