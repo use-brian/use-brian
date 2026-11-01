@@ -34,6 +34,11 @@ PG_FUNCTION_INFO_V1(crm_probe_direct);
 #define MAX_ENTRIES 8192
 static struct {Oid oid; uint64 calls;} entries[MAX_ENTRIES];
 static int used;
+#define MAX_EDGES 4096
+#define MAX_DEPTH 1024
+static struct {Oid root; Oid caller; Oid callee; uint64 calls;} edges[MAX_EDGES];
+static Oid call_stack[MAX_DEPTH];
+static int edge_count, call_depth;
 static uint64 hashes, privileges, predicates, application_predicates, direct_predicates;
 static bool enabled;
 static needs_fmgr_hook_type previous_needs;
@@ -51,11 +56,22 @@ static bool probe_needs(Oid oid) {
  return true;
 }
 static void probe_hook(FmgrHookEventType event,FmgrInfo *flinfo,Datum *arg) {
- if (enabled && event==FHET_START && get_func_namespace(flinfo->fn_oid)==PG_PUBLIC_NAMESPACE) {
+ if (enabled && get_func_namespace(flinfo->fn_oid)==PG_PUBLIC_NAMESPACE) {
+  if(event==FHET_START) {
   int i; for(i=0;i<used;i++) if(entries[i].oid==flinfo->fn_oid) break;
-  if(i==MAX_ENTRIES) ereport(ERROR,(errmsg("CRM permission probe capacity exceeded")));
+  if(i==MAX_ENTRIES) {enabled=false;ereport(ERROR,(errmsg("CRM permission probe capacity exceeded")));}
   if(i==used) {entries[used].oid=flinfo->fn_oid;entries[used++].calls=0;}
   entries[i].calls++;
+  Oid caller=call_depth?call_stack[call_depth-1]:InvalidOid;
+  Oid root=call_depth?call_stack[0]:flinfo->fn_oid;
+  int edge;for(edge=0;edge<edge_count;edge++) if(edges[edge].root==root && edges[edge].caller==caller && edges[edge].callee==flinfo->fn_oid) break;
+  if(edge==MAX_EDGES || call_depth==MAX_DEPTH) {enabled=false;ereport(ERROR,(errmsg("CRM permission probe call graph capacity exceeded")));}
+  if(edge==edge_count) {edges[edge].root=root;edges[edge].caller=caller;edges[edge].callee=flinfo->fn_oid;edges[edge_count++].calls=0;}
+  edges[edge].calls++;call_stack[call_depth++]=flinfo->fn_oid;
+  } else if(event==FHET_END || event==FHET_ABORT) {
+   if(call_depth==0 || call_stack[call_depth-1]!=flinfo->fn_oid) {enabled=false;ereport(ERROR,(errmsg("CRM permission probe call stack mismatch")));}
+   call_depth--;
+  }
  }
  if(previous_hook) previous_hook(event,flinfo,arg);
 }
@@ -155,7 +171,7 @@ Datum crm_probe_begin(PG_FUNCTION_ARGS) {
   }
   SPI_finish();
  }
- used=0;hashes=0;privileges=0;predicates=0;application_predicates=0;direct_predicates=0;enabled=true;PG_RETURN_VOID();
+ used=0;edge_count=0;call_depth=0;hashes=0;privileges=0;predicates=0;application_predicates=0;direct_predicates=0;enabled=true;PG_RETURN_VOID();
 }
 Datum crm_probe_end(PG_FUNCTION_ARGS) {
  StringInfoData out;enabled=false;initStringInfo(&out);
@@ -164,7 +180,12 @@ Datum crm_probe_end(PG_FUNCTION_ARGS) {
   if(i) appendStringInfoChar(&out,',');
   appendStringInfo(&out,"{\"oid\":%u,\"calls\":%llu}",entries[i].oid,(unsigned long long)entries[i].calls);
  }
- appendStringInfoString(&out,"]}");
+ appendStringInfoString(&out,"],\"callEdges\":[");
+ for(int i=0;i<edge_count;i++) {
+  if(i) appendStringInfoChar(&out,',');
+  appendStringInfo(&out,"{\"root\":%u,\"caller\":%u,\"callee\":%u,\"calls\":%llu}",edges[i].root,edges[i].caller,edges[i].callee,(unsigned long long)edges[i].calls);
+ }
+ appendStringInfo(&out,"],\"openFrames\":%d}",call_depth);
  PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in,CStringGetDatum(out.data)));
 }
 Datum crm_probe_hash(PG_FUNCTION_ARGS) {

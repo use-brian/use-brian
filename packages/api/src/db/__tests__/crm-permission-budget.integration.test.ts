@@ -12,7 +12,7 @@ if (process.env.CAMPAIGN_PERMISSION_PROBE) await assertLocalFixture()
 const owner = getPool(), cleanup: Array<() => Promise<void>> = []
 const library = process.env.CAMPAIGN_PERMISSION_PROBE
 if (library && !/^\/[^']+\.so$/.test(library)) throw new Error('Build the fixture-only permission-probe.c and set CAMPAIGN_PERMISSION_PROBE to its absolute .so path')
-type Counts = { hashes: number; privileges: number; applicationPredicates: number; directPredicates: number; rls: number; functions: Array<{ oid: number; calls: number }> }
+type Counts = { hashes: number; privileges: number; applicationPredicates: number; directPredicates: number; rls: number; functions: Array<{ oid: number; calls: number }>; callEdges: Array<{ root: number; caller: number; callee: number; calls: number }>; openFrames: number }
 
 async function fixture(size: number, mode: 'allowed' | 'masked' | 'denied' | 'no-match' = 'allowed') {
   const workspaceId = randomUUID(), userId = randomUUID(), memberId = randomUUID(), assistantId = randomUUID()
@@ -83,15 +83,29 @@ async function measured<T>(read: () => Promise<T>, access?: AccessContext) {
   let result: T | undefined, failure: unknown
   try { result = await read() } catch (error) { failure = error } finally { spy.mockRestore() }
   const elapsedMs = performance.now() - started
-  const totals: Counts = { hashes: 0, privileges: 0, applicationPredicates: 0, directPredicates: 0, rls: 0, functions: [] }
+  const totals: Counts = { hashes: 0, privileges: 0, applicationPredicates: 0, directPredicates: 0, rls: 0, functions: [], callEdges: [], openFrames: 0 }
   for (const client of clients.filter(client => [...active].some(item => Object.is(item, client)))) {
     const counts: Counts = (await client.query('SELECT crm_permission_probe.end() AS counts')).rows[0].counts
+    if (counts.openFrames !== 0) throw new Error('Unclosed function frame in CRM diagnostic')
+    totals.callEdges.push(...counts.callEdges)
     totals.directPredicates += counts.directPredicates; totals.hashes += counts.hashes; totals.privileges += counts.privileges; totals.applicationPredicates += counts.applicationPredicates; totals.rls += counts.rls; totals.functions.push(...counts.functions)
   }
   const merged = new Map<number, number>()
   for (const fn of totals.functions) merged.set(fn.oid, (merged.get(fn.oid) ?? 0) + fn.calls)
   const names = (await owner.query('SELECT oid,proname,oid::regprocedure::text AS signature FROM pg_proc WHERE oid=ANY($1::oid[])', [[...merged.keys()]])).rows
   const functions = names.map(row => ({ name: row.proname as string, signature: row.signature as string, calls: merged.get(Number(row.oid))! })).sort((a, b) => b.calls - a.calls)
+  const signatures = new Map(names.map(row => [Number(row.oid), row.signature as string]))
+  const edgeCounts = new Map<string, number>()
+  for (const edge of totals.callEdges) {
+    const key = `${edge.root}:${edge.caller}:${edge.callee}`
+    edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + edge.calls)
+  }
+  const callEdges = [...edgeCounts].map(([key, calls]) => {
+    const [root, caller, callee] = key.split(':').map(Number)
+    if (!signatures.has(root) || !signatures.has(callee) || caller !== 0 && !signatures.has(caller)) throw new Error('Unknown function in CRM diagnostic call graph')
+    return { root: signatures.get(root)!, caller: caller === 0 ? '<statement>' : signatures.get(caller)!, callee: signatures.get(callee)!, calls }
+  }).sort((a, b) => b.calls - a.calls)
+  if (callEdges.reduce((sum, edge) => sum + edge.calls, 0) !== functions.reduce((sum, fn) => sum + fn.calls, 0)) throw new Error('CRM call graph does not reconcile with invocation totals')
   // These codecs extract/format already selected business values; the vector
   // index access-method handler performs planning, not an authority decision.
   // Every other observed public helper is retained conservatively.
@@ -99,7 +113,7 @@ async function measured<T>(read: () => Promise<T>, access?: AccessContext) {
     'application_native_entity_values_before_completion', 'application_native_entity_values_before_self_profile',
     'application_native_date_value_valid'])
   const allPublicCalls = functions.filter(fn => !business.has(fn.name)).reduce((sum, fn) => sum + fn.calls, 0)
-  return { result, failure, elapsedMs, sql, annotatedStatements, hashes: totals.hashes, privileges: totals.privileges, rls: totals.rls, applicationPredicates: totals.applicationPredicates, directPredicates: totals.directPredicates, functions, observedPermissionWork: allPublicCalls + totals.hashes + totals.privileges + totals.rls + totals.applicationPredicates + totals.directPredicates }
+  return { result, failure, elapsedMs, sql, annotatedStatements, hashes: totals.hashes, privileges: totals.privileges, rls: totals.rls, applicationPredicates: totals.applicationPredicates, directPredicates: totals.directPredicates, functions, callEdges, observedPermissionWork: allPublicCalls + totals.hashes + totals.privileges + totals.rls + totals.applicationPredicates + totals.directPredicates }
 }
 
 describe.skipIf(!library).sequential('[COMP:crm/permission-budget] whole summary observed-work regression', () => {
@@ -138,7 +152,39 @@ describe.skipIf(!library).sequential('[COMP:crm/permission-budget] whole summary
       expect(capture.failure).toBeUndefined(); expect(capture.result).toEqual(baseline)
       expect(capture.hashes).toBe(2); expect(capture.rls).toBe(3)
       expect(capture.functions).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'crm_probe_inner', calls: 2 }), expect.objectContaining({ name: 'crm_probe_outer', calls: 2 }), expect.objectContaining({ name: 'crm_probe_plpgsql', calls: 2 })]))
+      expect(capture.callEdges).toEqual(expect.arrayContaining([
+        { root: 'crm_probe_plpgsql(text)', caller: '<statement>', callee: 'crm_probe_plpgsql(text)', calls: 2 },
+        { root: 'crm_probe_plpgsql(text)', caller: 'crm_probe_plpgsql(text)', callee: 'crm_probe_outer(text)', calls: 2 },
+        { root: 'crm_probe_plpgsql(text)', caller: 'crm_probe_outer(text)', callee: 'crm_probe_inner(text)', calls: 2 },
+      ]))
     } finally { await owner.query('DROP TABLE crm_permission_probe.rows; DROP FUNCTION public.crm_probe_plpgsql(text),public.crm_probe_outer(text),public.crm_probe_inner(text)') }
+  })
+
+  it('unwinds caught and uncaught function errors without carrying a caller into the next statement', async () => {
+    await freshBackends()
+    await owner.query(`CREATE FUNCTION public.crm_probe_boom() RETURNS integer LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''Fictional probe failure''; END';
+      CREATE FUNCTION public.crm_probe_catcher() RETURNS integer LANGUAGE plpgsql AS 'BEGIN RETURN public.crm_probe_boom(); EXCEPTION WHEN OTHERS THEN RETURN 1; END';
+      CREATE FUNCTION public.crm_probe_tail() RETURNS integer LANGUAGE plpgsql AS 'BEGIN RETURN 2; END'`)
+    try {
+      const capture = await measured(async () => {
+        // Hold the same connection, as the canonical transaction owner does;
+        // Pool.query destroys its client on any query error, losing counters.
+        const client = await getAppPool().connect()
+        try {
+          const caught = (await client.query('SELECT public.crm_probe_catcher() AS value')).rows
+          await expect(client.query('SELECT public.crm_probe_boom()')).rejects.toThrow('Fictional probe failure')
+          return { caught, tail: (await client.query('SELECT public.crm_probe_tail() AS value')).rows }
+        } finally { client.release() }
+      })
+      expect(capture.failure).toBeUndefined()
+      expect(capture.result).toEqual({ caught: [{ value: 1 }], tail: [{ value: 2 }] })
+      expect(capture.callEdges).toEqual(expect.arrayContaining([
+        { root: 'crm_probe_catcher()', caller: '<statement>', callee: 'crm_probe_catcher()', calls: 1 },
+        { root: 'crm_probe_catcher()', caller: 'crm_probe_catcher()', callee: 'crm_probe_boom()', calls: 1 },
+        { root: 'crm_probe_boom()', caller: '<statement>', callee: 'crm_probe_boom()', calls: 1 },
+        { root: 'crm_probe_tail()', caller: '<statement>', callee: 'crm_probe_tail()', calls: 1 },
+      ]))
+    } finally { await owner.query('DROP FUNCTION public.crm_probe_catcher(),public.crm_probe_boom(),public.crm_probe_tail()') }
   })
 
   it('counts folded hashes and builtin privileges and preserves strict null and predicate semantics', async () => {
@@ -161,6 +207,28 @@ describe.skipIf(!library).sequential('[COMP:crm/permission-budget] whole summary
       const plain = await read(), capture = await measured(read)
       expect(capture.failure).toBeUndefined(); expect(capture.result).toEqual(plain)
       expect(capture.directPredicates).toBe(6)
+    } finally { await owner.query('DROP TABLE crm_permission_probe.scope_rows') }
+  })
+
+  it('exposes index-plan distortion so diagnostic predicate counts cannot certify the ceiling', async () => {
+    await freshBackends()
+    await owner.query(`CREATE TABLE crm_permission_probe.scope_rows(id integer,scope_version integer);
+      INSERT INTO crm_permission_probe.scope_rows SELECT i,i FROM generate_series(1,10000) i;
+      CREATE INDEX scope_rows_version ON crm_permission_probe.scope_rows(scope_version);
+      GRANT SELECT ON crm_permission_probe.scope_rows TO app_user;
+      ANALYZE crm_permission_probe.scope_rows`)
+    const statement = 'SELECT id FROM crm_permission_probe.scope_rows WHERE scope_version=4242'
+    const read = async () => ({
+      plan: (await getAppPool().query(`EXPLAIN (FORMAT JSON) ${statement}`)).rows[0]['QUERY PLAN'],
+      rows: (await getAppPool().query(statement)).rows,
+    })
+    try {
+      const plain = await read(), capture = await measured(read)
+      expect(capture.failure).toBeUndefined()
+      expect(plain.rows).toEqual([{ id: 4242 }]); expect(capture.result?.rows).toEqual(plain.rows)
+      expect(JSON.stringify(plain.plan)).toContain('Index Scan')
+      expect(JSON.stringify(capture.result?.plan)).toContain('Seq Scan')
+      expect(capture.directPredicates).toBe(10000)
     } finally { await owner.query('DROP TABLE crm_permission_probe.scope_rows') }
   })
 
