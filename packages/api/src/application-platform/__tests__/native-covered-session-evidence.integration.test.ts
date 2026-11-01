@@ -74,7 +74,7 @@ function canonicalClient(client: PoolClient, queries: string[]) {
     queries.push(sql)
     // Decline only the optional large proof, so the actual original validator
     // still supplies the baseline rather than a fabricated admission result.
-    if (sql.includes('read_native_covered_session_evidence')) return { rows: [{ value: null }] }
+    if (sql.includes('read_native_turn_scope_evidence') || sql.includes('read_native_covered_session_evidence')) return { rows: [{ value: null }] }
     return client.query(sql, params)
   } } as Pick<PoolClient, 'query'>
 }
@@ -239,7 +239,7 @@ describe.sequential('[COMP:api/application-persistence] execution-only native ev
     const queries: string[] = []
     const baseline = await validateCallerScopeEvidence({ sources }, execution.security.ceiling, canonicalClient(client, queries))
     expect(normalized(actual)).toEqual(normalized(baseline))
-    expect(queries.some(sql => sql.includes('read_native_covered_session_evidence'))).toBe(true)
+    expect(queries.some(sql => sql.includes('read_native_turn_scope_evidence'))).toBe(true)
     for (const source of sources) expect(actual.sources).toContainEqual(source)
     const value = (await client.query('SELECT read_native_covered_session_evidence($1,$2,$3,$4) AS value', args())).rows[0].value
     expect(Object.keys(value).sort()).toEqual(['admitted', 'current', 'immutable'])
@@ -490,7 +490,7 @@ describe.sequential('[COMP:api/application-persistence] execution-only native ev
     expect(await operation(client, 'queue_guard')).toBe(false)
   })))
 
-  it('exposes only the identity facade and preserves the original small-root host path', async () => frame(async client => {
+  it('exposes only identity facades and uses native requirements for small roots', async () => frame(async client => {
     const privateNames = ['application_native_covered_evidence_helpers_current', 'application_native_root_cover',
       'read_native_covered_session_frame', 'read_native_covered_memory_frame', 'application_native_covered_queue_current',
       'validate_native_covered_field_dependency_work', 'prepare_native_session_message_covered', 'application_native_transcript_prepare_helpers_current']
@@ -501,7 +501,7 @@ describe.sequential('[COMP:api/application-persistence] execution-only native ev
     const calls: string[] = []
     await readNativeSessionEvidence({ query: async (sql: string, params?: unknown[]) => { calls.push(sql);return client.query(sql, params) } } as Pick<PoolClient, 'query'>,
       f.workspaceId, sources.filter(source => source.resourceKind === 'application_field').slice(0, 1))
-    expect(calls[0]).toContain('read_native_attended_memory_evidence')
+    expect(calls[0]).toContain('read_native_turn_scope_evidence')
     expect(calls.some(sql => sql.includes('read_native_covered_session_evidence'))).toBe(false)
   }))
 

@@ -37,7 +37,7 @@ async function trace<T>(run:()=>Promise<T>){
  }as typeof query)
  try{return{value:await run(),sql}}finally{spy.mockRestore()}
 }
-function fileProofs(sql:string[]){return sql.filter(value=>value.includes('SELECT read_native_file_session_evidence(')).length}
+function nativeProofs(sql:string[]){return sql.filter(value=>value.includes('SELECT read_native_turn_scope_evidence(')||value.includes('SELECT read_native_file_session_evidence(')).length}
 async function hold(){await f.pool.query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
  SELECT workspace_id,'workspace_file',id,scope_version::text,'held',1,'Fictional output hold' FROM workspace_files WHERE id=$1`,[fileId])}
 async function unhold(){await f.pool.query("DELETE FROM scope_resource_states WHERE workspace_id=$1 AND resource_kind='workspace_file' AND resource_id=$2",[f.workspaceId,fileId])}
@@ -75,7 +75,7 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
   const c=await setup()
   for(let n=0;n<2;n++){
    const result=await trace(()=>tryAssertNativeCombinedOutput(c.boundary,c.context,c.boundary.assertOutputAuthority))
-   expect(result.value).toBe(true);expect(fileProofs(result.sql)).toBe(1)
+   expect(result.value).toBe(true);expect(nativeProofs(result.sql)).toBe(1)
   }
  })
  it('removes exactly one duplicate proof per real outer event while preserving final checks',async()=>{
@@ -83,13 +83,13 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
   const current=await run(true),optimized=await trace(current.execute)
   expect(optimized.value).toEqual(baseline.value);expect(current.seen).toEqual(original.seen)
   expect(current.seen.length).toBeGreaterThan(0)
-  expect(fileProofs(baseline.sql)-fileProofs(optimized.sql)).toBe(current.seen.length)
+  expect(nativeProofs(baseline.sql)-nativeProofs(optimized.sql)).toBe(current.seen.length)
  })
  it('retains both boundaries for a custom loop output callback',async()=>{
   const original=await run(false,{custom:true}),baseline=await trace(original.execute)
   const current=await run(true,{custom:true}),optimized=await trace(current.execute)
   expect(current.custom).toHaveBeenCalled();expect(current.seen).toEqual(original.seen)
-  expect(fileProofs(optimized.sql)).toBe(fileProofs(baseline.sql))
+  expect(nativeProofs(optimized.sql)).toBe(nativeProofs(baseline.sql))
  })
  for(const denied of ['caller','recipient'] as const)it(`independently refuses the ${denied} ceiling`,async()=>{
   const c=await setup(),original=c.authority.execution
@@ -124,7 +124,7 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
   await expect(tryAssertNativeCombinedOutput(c.boundary,c.context,c.boundary.assertOutputAuthority)).rejects.toMatchObject({reason:'authority_changed'})
   await unhold()
   const result=await trace(async()=>{await expect(tryAssertNativeCombinedOutput(c.boundary,c.context,c.boundary.assertOutputAuthority)).rejects.toMatchObject({reason:'authority_changed'})})
-  expect(fileProofs(result.sql)).toBe(0)
+  expect(nativeProofs(result.sql)).toBe(0)
   const fresh=await setup();expect(await tryAssertNativeCombinedOutput(fresh.boundary,fresh.context,fresh.boundary.assertOutputAuthority)).toBe(true)
  })
  for(const held of [false,true])it(`preserves inherited provenance omitted from the initial accumulator (held=${held})`,async()=>{
@@ -137,7 +137,7 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
   if(held){await hold();await expect(tryAssertNativeCombinedOutput(boundary,context,boundary.assertOutputAuthority)).rejects.toMatchObject({reason:'authority_changed'})}
   else{
    const result=await trace(()=>tryAssertNativeCombinedOutput(boundary,context,boundary.assertOutputAuthority))
-   expect(result.value).toBe(true);expect(fileProofs(result.sql)).toBe(1)
+   expect(result.value).toBe(true);expect(nativeProofs(result.sql)).toBe(1)
    expect(accumulator.evidence.sources).toEqual(expect.arrayContaining(all))
   }
  })
@@ -152,7 +152,7 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
    expect(await tryAssertNativeCombinedOutput(forged,c.context,forged.assertOutputAuthority)).toBe(false)
    expect(await tryAssertNativeCombinedOutput(c.boundary,c.context,async()=>{})).toBe(false)
   })
-  expect(fileProofs(result.sql)).toBe(0)
+  expect(nativeProofs(result.sql)).toBe(0)
  })
  it('declines an unsupported family without treating it as admitted',async()=>{
   const c=await setup();c.authority.accumulator.note({sources:[{workspaceId:f.workspaceId,userId:null,assistantId:null,sensitivity:'internal',compartments:[],projectIds:[],resourceKind:'workflow_run',resourceId:randomUUID(),version:'1'}]})

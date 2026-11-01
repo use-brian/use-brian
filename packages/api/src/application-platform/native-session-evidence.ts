@@ -22,10 +22,11 @@ export async function readNativeSessionEvidence(client:Pick<PoolClient,'query'>,
  // Field observations can hide Memory ancestors too. The closed validator
  // discovers the complete native closure and preserves its original fallback.
  const args=[workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)]
- let raw:unknown
- if(roots.length>100){
+ let raw:unknown=(await client.query<{value:unknown}>('SELECT read_native_turn_scope_evidence($1,$2) AS value',
+  [workspaceId,JSON.stringify(roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version})))])).rows[0]?.value
+ if(raw===null&&roots.length>100){
   raw=(await client.query<{value:unknown}>('SELECT read_native_covered_session_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value
- }else{
+ }else if(raw===null){
   raw=(await client.query<{value:unknown}>('SELECT read_native_attended_memory_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value
   if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_file_session_evidence($1,$2,$3,$4,true) AS value',args)).rows[0]?.value
   if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_empty_query_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value

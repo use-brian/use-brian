@@ -40,7 +40,7 @@ async function setup(){
 function observed(client:PoolClient,baseline:boolean,queries:string[]){
  return {query:async(sql:string,args?:unknown[])=>{
   queries.push(sql)
-  if(baseline&&(sql.includes('read_native_file_session_evidence')||sql.includes('read_native_empty_query_evidence')))return {rows:[{value:null}]}
+  if(baseline&&(sql.includes('read_native_turn_scope_evidence')||sql.includes('read_native_file_session_evidence')||sql.includes('read_native_empty_query_evidence')))return {rows:[{value:null}]}
   return client.query(sql,args)
  }} as Pick<PoolClient,'query'>
 }
