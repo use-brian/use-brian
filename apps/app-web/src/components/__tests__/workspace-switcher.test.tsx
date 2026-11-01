@@ -55,9 +55,8 @@ vi.mock("@/lib/sidebar-close", () => ({ requestSidebarClose: vi.fn() }));
 vi.mock("@/lib/edition", () => ({
   deploymentCapabilities: () => ({ billing: false }),
 }));
-vi.mock("@/lib/api/workspaces", () => ({
-  updateWorkspacePickerPreferences: vi.fn(async () => ({})),
-}));
+const { pickerUpdate } = vi.hoisted(() => ({ pickerUpdate: vi.fn(async () => ({})) }));
+vi.mock("@/lib/api/workspaces", () => ({ updateWorkspacePickerPreferences: pickerUpdate }));
 vi.mock("@/lib/accounts", () => ({ getAccountsDir: () => [] }));
 vi.mock("@/lib/route-progress", () => ({ routeProgress: { start: vi.fn() } }));
 vi.mock("@/components/team-avatar", () => ({ TeamAvatar: ({ iconUrl }: { iconUrl: string | null }) => <img alt="" data-workspace-avatar src={iconUrl ?? undefined} /> }));
@@ -92,6 +91,7 @@ describe("[COMP:app-web/workspace-switcher] paints the shared workspace list", (
     desktopBridgeMock.mockReset().mockReturnValue(null);
     openAddAccountMock.mockReset();
     routerPush.mockReset();
+    pickerUpdate.mockClear();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -231,6 +231,8 @@ describe("[COMP:app-web/workspace-switcher] paints the shared workspace list", (
     expect(beta).toBeDefined();
     await act(async () => beta!.click());
     expect(routerPush).toHaveBeenCalledWith("/w/w2");
+    // Destination entry owns persistence; selecting it must not double-write recency.
+    expect(pickerUpdate).not.toHaveBeenCalled();
   });
 
   it("offers one desktop Add account entry instead of launching cloud or the standalone OSS page", async () => {

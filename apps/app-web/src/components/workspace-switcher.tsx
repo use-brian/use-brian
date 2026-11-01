@@ -64,7 +64,6 @@ import { signOutActiveAccount } from "@/lib/account-logout";
 import { requestSidebarClose } from "@/lib/sidebar-close";
 import { resetSurfaceCache } from "@/lib/surface-cache";
 import { deploymentCapabilities } from "@/lib/edition";
-import { updateWorkspacePickerPreferences } from "@/lib/api/workspaces";
 import {
   organizeWorkspacePicker,
   usesScalableWorkspacePicker,
@@ -368,9 +367,7 @@ export function WorkspaceSwitcher({ iconOnly = false }: { iconOnly?: boolean }) 
     setOpen(false);
     if (workspaceId === ctx.workspaceId) return;
     updateWorkspace(workspaceId, { pickerLastOpenedAt: new Date().toISOString() });
-    void updateWorkspacePickerPreferences(workspaceId, { opened: true }).catch(
-      () => {},
-    );
+    // The destination WorkspaceContextProvider persists this real entry once.
     // Button-driven nav (no `<a>` for the document click listener to catch).
     routeProgress.start();
     router.push(`/w/${workspaceId}`);
