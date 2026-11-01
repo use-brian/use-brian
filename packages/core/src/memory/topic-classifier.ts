@@ -485,6 +485,7 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
     }, TOPIC_CLASSIFIER_TIMEOUT_MS)
   })
   let result: TopicClassification
+  let timedOut = false
   try {
     try {
       result = await Promise.race([
@@ -494,12 +495,9 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
     } catch (error) {
       if (isInputAuthorityError(error)) throw error
       if (error !== timeoutError) throw error
-      // A deadline may interrupt an authority check. Await that same check;
-      // never admit the fallback through a second, independently healthy probe.
-      await check()
-      console.warn('[topic-classifier] deadline exceeded; using uncategorized fallback', {
-        timeoutMs: TOPIC_CLASSIFIER_TIMEOUT_MS,
-      })
+      // The final admission below joins any pending check and preserves a
+      // sticky refusal. Do not finish it here and immediately start it again.
+      timedOut = true
       result = { ...FALLBACK }
     }
     // Start (or join) the last check, then close new callback entries before
@@ -508,6 +506,9 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
     const finalCheck = check()
     closed = true
     await finalCheck
+    if (timedOut) console.warn('[topic-classifier] deadline exceeded; using uncategorized fallback', {
+      timeoutMs: TOPIC_CLASSIFIER_TIMEOUT_MS,
+    })
     return bindScopeSources(result, observed)
   } finally {
     closed = true

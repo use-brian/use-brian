@@ -171,6 +171,31 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('uses one slow final admission for timeout recovery instead of checking twice', async () => {
+    vi.useFakeTimers()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const provider = mockProvider('unused')
+    const decisionRuntime = executionFixture({ mode: 'llm_only', llm: provider })
+    decisionRuntime.run = () => new Promise(() => {})
+    const check = vi.fn(async () => {
+      if (check.mock.calls.length > 1) await new Promise(resolve => setTimeout(resolve, 5_000))
+    })
+    const returned = vi.fn()
+    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], decisionRuntime, assertInputAuthority: check })
+    void classification.then(returned)
+
+    await vi.advanceTimersByTimeAsync(6_999)
+    expect(returned).not.toHaveBeenCalled()
+    expect(warning).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(returned).toHaveBeenCalledWith(expect.objectContaining({ topic_label: '(uncategorized)', confidence: 0 }))
+    expect(check).toHaveBeenCalledTimes(2) // Initial admission plus one fresh final check.
+    expect(warning).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('passes the same total budget through the decision runtime to its LLM transport', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
