@@ -32,7 +32,7 @@ function fixture(user = 'hi', answer = 'Hey! What are we working on today?') {
 beforeEach(() => vi.clearAllMocks())
 
 describe('[COMP:api/turn-session-state] completed exchange inference admission', () => {
-  it.each(['Morning! What are we working on today?', 'Good morning! How can I help you today?', 'Hey! What are we working on today?', 'Hey there! What can I help you with today?', 'Hello! How can I help you today?',
+  it.each(['Hi! How can I help today?', 'How can I help?', 'Hello! How can I assist today?', 'Morning! What are we working on today?', 'Good morning! How can I help you today?', 'Hey! What are we working on today?', 'Hey there! What can I help you with today?', 'Hello! How can I help you today?',
     "Hey there. What's on your mind?", 'Hello! What’s on your mind?', 'Hi! What is on your mind?'])('skips inference only for a plain greeting with no open commitments: %s', async answer => {
     const f = fixture('hi', answer)
     await expect(runTurnSessionStateDiff(f.params)).resolves.toMatchObject({ upserts: 0, resolves: 0, usage: null })
@@ -43,6 +43,8 @@ describe('[COMP:api/turn-session-state] completed exchange inference admission',
   })
 
   it.each([
+    ['hi', 'Hi! How can I help today? I will remind you tomorrow.'],
+    ['hi', 'Hi! How can I help with your deadline today?'],
     ['hi', 'Hello! I will remind you tomorrow.'],
     ['hi', 'Hello! Your pending deadline is tomorrow.'],
     ['hi, remind me tomorrow', 'Hello!'],

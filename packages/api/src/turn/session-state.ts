@@ -20,7 +20,7 @@ function greetingOnly(user: Message, turns: readonly { content: ContentBlock[] }
   if (user.role !== 'user' || incoming === null || answer === null || answer.length > 180
     || turns.some(turn => turn.content.some(block => block.type !== 'text'))) return false
   if (!/^(?:hi|hello|hey|你好|您好|こんにちは)$/u.test(normalize(incoming))) return false
-  const help = "(?:how can i (?:help|assist) you(?: today)?|what can i help you with(?: today)?|what are we working on(?: today)?|what would you like to work on(?: today)?|what(?:['’]s| is) on your mind)"
+  const help = "(?:how can i (?:help|assist)(?: you)?(?: today)?|what can i help you with(?: today)?|what are we working on(?: today)?|what would you like to work on(?: today)?|what(?:['’]s| is) on your mind)"
   return new RegExp(`^(?:(?:hi|hello|hey|morning|good morning)(?: there)?(?: ${help})?|${help}|你好|您好|こんにちは)$`, 'u').test(normalize(answer))
 }
 
