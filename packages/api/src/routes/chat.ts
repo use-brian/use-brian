@@ -3996,6 +3996,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             authority: researchAssessment?.authority ?? nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
             provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
             capture: researchAssessment?.capture ?? classificationCapture,
+            measure: turnTiming.time,
           }))
         })(),
         (async () => nativeTranscriptAuthority && earlyStoredUserMsg
@@ -4003,6 +4004,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             authority: topicAssessmentBranch?.authority ?? nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
             provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
             capture: topicAssessmentBranch?.capture ?? classificationCapture,
+            measure: turnTiming.time,
             reply: { channelType: 'web', replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
           }))
         : undefined)(),

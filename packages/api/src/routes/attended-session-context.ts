@@ -10,6 +10,7 @@ import {assertSourceModelInputAuthority} from '../application-platform/model-sou
 import {resolveReplyText,type ResolveReplyParams} from '../routes/_reply-context.js'
 
 type ClassificationInput={authority:SessionContextAuthority;session:Session;message:SessionMessage;capture?:object}
+type ClassificationMeasure=<T>(counter:string,run:()=>Promise<T>)=>Promise<T>
 const classificationCaptures=new WeakMap<object,{authority:SessionContextAuthority;sessionId:string;messageId:string;sequence:number;query:Awaited<ReturnType<typeof readAdmittedSessionQuery>>}>()
 /** Data snapshot only; every classifier still checks current bound input authority. */
 export async function captureAttendedSessionClassification(input:ClassificationInput):Promise<object>{
@@ -55,6 +56,7 @@ export async function assessAttendedSessionMessage(input:{
  provider:TopicClassifierOptions['provider'];model:string;decisionRuntime?:TopicClassifierOptions['decisionRuntime'];
  reply?:Pick<ResolveReplyParams,'channelType'|'replyToMessageId'|'clientSnippet'>;
  capture?:object;
+ measure?:ClassificationMeasure;
 }):Promise<{
  publish:()=>Promise<{classification:TopicClassification;reply:Awaited<ReturnType<typeof resolveReplyText>>;history:SessionMessage[]}>;
  defer:()=>Promise<{classification:TopicClassification;reply:Awaited<ReturnType<typeof resolveReplyText>>;history:SessionMessage[];pendingAnnotation?:object}>;
@@ -85,24 +87,25 @@ export async function assessAttendedSessionMessage(input:{
  const expected=ephemeral?undefined:(await getPool().query<{id:string}>('SELECT scope_revision_id AS id FROM session_message_annotation_heads WHERE workspace_id=$1 AND session_id=$2 AND message_id=$3',
   [authority.execution.security.access.workspaceId,session.id,message.id])).rows[0]?.id
  const context={...executionToolContext(authority.execution,{appId:'native-session-topic'}),scopeAccumulator:authority.accumulator}
+ const check=()=>input.measure?input.measure('topic_authority',()=>assertSourceModelInputAuthority(context)):assertSourceModelInputAuthority(context)
  const options=bindScopeSources<TopicClassifierOptions>({provider:input.provider,model:input.model,decisionRuntime:input.decisionRuntime,
   allowTrivialShortcut,currentMessage:text(current),recentUserTurns:history.filter(row=>row.sequenceNum<message.sequenceNum&&row.role==='user'&&(!ephemeral||row.topicLabel)).slice(-8)
    .map(row=>({text:text(row),topicLabel:row.topicLabel})).filter(turn=>turn.text.length>0),
   knownTopicsThisSession:[...new Set(query.annotations.map(row=>row.topicLabel))].slice(-20),replyToText:reply?.text??null,
-  authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context),workspaceId:authority.execution.security.access.workspaceId,
+  authority,assertInputAuthority:check,workspaceId:authority.execution.security.access.workspaceId,
   runId:'memory-topic-'+message.id},boundScopeSources(query))
  const classification=await classifyTopic(options)
  return{defer:async()=>{
   // A sibling assessment/quota wait may have changed the original inputs.
   // Re-admit context before the transient verdict drives any plan or prompt.
-  await assertSourceModelInputAuthority(context)
+  await check()
   const pendingAnnotation=ephemeral?undefined:await prepareSessionMessageAnnotation({sessionId:session.id,messageId:message.id,
    classification,replyToText:reply?.text??null,authority,expectedRevision:expected})
   classifiedTranscripts.set(history,{execution:authority.execution,sessionId:session.id,through:message.sequenceNum,
    messageId:message.id,history:copyBoundHistory(history),sources:structuredClone(boundScopeSources(query))})
   return{classification,reply,history,pendingAnnotation}
  },publish:async()=>{
- if(ephemeral)await assertSourceModelInputAuthority(context)
+ if(ephemeral)await check()
  const annotation=ephemeral?null:await writeSessionMessageAnnotation({sessionId:session.id,messageId:message.id,classification,replyToText:reply?.text??null,authority,expectedRevision:expected})
  if(!ephemeral&&!annotation)throw new DerivedScopeError('scope_source_changed')
  await authority.execution.security.authority.assertCurrent()
@@ -211,6 +214,7 @@ export async function classifyAttendedResearchMessage(input:{
  authority:SessionContextAuthority;session:Session;message:SessionMessage;
  provider:ResearchClassifyOptions['provider'];model:string;decisionRuntime?:ResearchClassifyOptions['decisionRuntime'];
  capture?:object;
+ measure?:ClassificationMeasure;
 }):Promise<ResearchClassifyResult>{
  const {authority,session,message}=input
  if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
@@ -226,7 +230,7 @@ export async function classifyAttendedResearchMessage(input:{
  const context={...executionToolContext(authority.execution,{appId:'native-session-research'}),scopeAccumulator:authority.accumulator}
  const options=bindScopeSources<ResearchClassifyOptions>({provider:input.provider,model:input.model,decisionRuntime:input.decisionRuntime,
   message:text(current),recentConversation:recent,authority,signal:authority.execution.lifecycle.abortSignal,
-  assertInputAuthority:()=>assertSourceModelInputAuthority(context),workspaceId:authority.execution.security.access.workspaceId,
+  assertInputAuthority:()=>input.measure?input.measure('research_authority',()=>assertSourceModelInputAuthority(context)):assertSourceModelInputAuthority(context),workspaceId:authority.execution.security.access.workspaceId,
   runId:'research-intent-'+message.id},boundScopeSources(query))
  return classifyResearchIntent(options)
 }
