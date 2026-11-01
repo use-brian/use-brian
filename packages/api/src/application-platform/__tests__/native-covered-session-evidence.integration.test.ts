@@ -151,6 +151,7 @@ describe.sequential('[COMP:api/application-persistence] execution-only native ev
           'processed',(SELECT count(*) FROM native_field_dependency_work WHERE workspace_id=w AND processed),
           'covered',coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='validate_native_covered_field_dependency_work(uuid,uuid,bigint)'::regprocedure),0),
           'preparations',coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='prepare_native_session_message_covered(uuid,uuid,text,jsonb,jsonb)'::regprocedure),0),
+          'cohortProofs',coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='read_native_file_session_cohort_frame(uuid,text[],uuid[],text[],boolean)'::regprocedure),0),
           'coveredFrames',coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='read_native_covered_session_frame(uuid,text[],uuid[],text[])'::regprocedure),0),
           'fieldEvaluations',coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='application_session_eval_field(uuid,uuid,text,jsonb)'::regprocedure),0),
           'original',coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='application_current_field_snapshot(uuid,uuid)'::regprocedure),0));
@@ -360,6 +361,7 @@ describe.sequential('[COMP:api/application-persistence] execution-only native ev
     const after = await operation(client, 'state')
     expect(after).toMatchObject({ headers: 0, work: 0, pending: 0, fired: 0, processed: 0 })
     expect(after.covered - before.covered).toBe(1)
+    expect(after.cohortProofs - before.cohortProofs).toBe(1)
     expect(after.original).toBe(before.original)
   }), 120_000)
 

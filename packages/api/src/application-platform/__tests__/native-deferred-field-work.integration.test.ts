@@ -20,7 +20,7 @@ const constraint = 'application_field_derivation_dependencies'
 let f: Awaited<ReturnType<typeof persistentContextFixture>>
 let files: ScopeSource[]
 let sources: ScopeSource[]
-type State = { headers: number; work: number; pending: number; queued: number; fallback: boolean; fired: number; processed: number; batches: number; originalFields: number }
+type State = { headers: number; work: number; pending: number; queued: number; fallback: boolean; fired: number; processed: number; batches: number; cohortProofs: number; originalFields: number }
 
 async function authority() {
   const unbounded = await f.execution(), maximumAccess = { ...unbounded.security.ceiling, clearance: f.envelope.sensitivity,
@@ -118,6 +118,7 @@ describe.sequential('[COMP:api/application-persistence] deferred native field wo
           'fallback',coalesce((SELECT bool_or(fallback) FROM native_field_dependency_batches WHERE workspace_id=w),false),
           'fired',(SELECT count(*) FROM native_field_dependency_work WHERE workspace_id=w AND fired),
           'processed',(SELECT count(*) FROM native_field_dependency_work WHERE workspace_id=w AND processed),
+          'cohortProofs',coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='read_native_file_session_cohort_frame(uuid,text[],uuid[],text[],boolean)'::regprocedure),0),
           'batches',coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='validate_native_field_dependency_batch(uuid,uuid,jsonb)'::regprocedure),0),
           'originalFields',coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='application_current_field_snapshot(uuid,uuid)'::regprocedure),0));
         ELSIF action='trace' THEN PERFORM set_config('track_functions','all',true);RETURN '{}'::jsonb;
@@ -207,6 +208,7 @@ describe.sequential('[COMP:api/application-persistence] deferred native field wo
     const after = await state(client)
     expect(after).toMatchObject({ headers: 0, work: 0, pending: 0, fired: 0, processed: 0 })
     expect(after.batches - before.batches).toBe(1)
+    expect(after.cohortProofs - before.cohortProofs).toBe(1)
     expect(after.originalFields).toBe(before.originalFields)
   }), 90_000)
 
