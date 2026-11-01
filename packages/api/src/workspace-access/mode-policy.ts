@@ -17,15 +17,19 @@ export async function getWorkspaceAccessModeInTransaction(
   const canAdminister = member.role === 'owner' || member.role === 'admin'
   const policy = (await client.query<{
     mode: WorkspaceAccessModeState['mode']; setupState: WorkspaceAccessModeState['setupState']; policyRevision: string
-    defaultDepartmentId: string | null; defaultDepartmentName: string | null
+    defaultDepartmentId: string | null; defaultDepartmentName: string | null; cutoverReceiptId: string | null; canFinalize:boolean
   }>(`SELECT p.access_mode AS mode,p.setup_state AS "setupState",p.revision::text AS "policyRevision",
+    (w.department_read_v2 AND w.owner_user_id=$2 AND $4::boolean) AS "canFinalize",
+    p.completed_cutover_id AS "cutoverReceiptId",
     g.id AS "defaultDepartmentId",g.name AS "defaultDepartmentName"
-    FROM workspace_access_policies p LEFT JOIN workspace_groups g ON g.id=p.default_department_id AND g.workspace_id=p.workspace_id
+    FROM workspace_access_policies p JOIN workspaces w ON w.id=p.workspace_id LEFT JOIN workspace_groups g ON g.id=p.default_department_id AND g.workspace_id=p.workspace_id
       AND g.status='active' AND (g.directory_visibility='workspace' OR $3::boolean
         OR EXISTS(SELECT 1 FROM workspace_group_members gm WHERE gm.group_id=g.id AND gm.user_id=$2))
-    WHERE p.workspace_id=$1`, [workspaceId, userId, canAdminister])).rows[0]
+    WHERE p.workspace_id=$1`, [workspaceId, userId, canAdminister,member.role==='owner'])).rows[0]
   return {
     workspaceId, canAdminister, validForMs: await projectionLifetime(client, workspaceId, userId),
+    canFinalize:policy?.canFinalize??false,
+    cutoverReceiptId:policy?.cutoverReceiptId??null,
     mode: policy?.mode ?? 'departments', setupState: policy?.setupState ?? 'legacy', policyRevision: policy?.policyRevision ?? '1',
     defaultDepartmentId: policy?.defaultDepartmentId ?? null, defaultDepartmentName: policy?.defaultDepartmentName ?? null,
   }

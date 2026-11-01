@@ -23,7 +23,7 @@ import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } fro
 import { emitDocumentedByEdges } from './edge-hooks.js'
 import { admitDerivedFile, expandDerivedFileEvidence } from '../workspace-access/file-derived-admission.js'
 import { admitFileCreate } from '../workspace-access/file-create-admission.js'
-import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
+import { readAdmissionPolicy, usesClassicModeAdmission } from '../workspace-access/admission-policy-read.js'
 import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
 
 const FULL_SELECT = `
@@ -859,7 +859,7 @@ export async function supersedeWorkspaceFile(
     // admitted from this mutation-authorized canonical row, not root metadata.
     await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [workspaceId])
     const policy = await readAdmissionPolicy(client, workspaceId)
-    if (policy && policy.setupState !== 'legacy') {
+    if (usesClassicModeAdmission(policy)) {
       await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE', [workspaceId, userId])
     }
 
@@ -921,7 +921,7 @@ export async function supersedeWorkspaceFile(
     // scope triggers. Resolve immediately before INSERT so the one-use receipt
     // fences that current revision. Any denial rolls back both closes above;
     // the verified predecessor and workspace remain locked throughout.
-    if (policy && policy.setupState !== 'legacy') {
+    if (usesClassicModeAdmission(policy)) {
       const visibility = old.userId ? 'private' : 'workspace'
       const admitted = await admitWorkspaceResource(client, workspaceId, userId, {
         writerKind: 'workspace_file',

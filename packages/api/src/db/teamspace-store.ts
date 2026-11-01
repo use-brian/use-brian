@@ -17,7 +17,7 @@
  */
 
 import type { Sensitivity } from '@use-brian/core'
-import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
+import { readAdmissionPolicy, usesClassicModeAdmission } from '../workspace-access/admission-policy-read.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { getPool, query, queryWithRLS } from './client.js'
 
@@ -246,7 +246,7 @@ export function createTeamspaceStore() {
         const policy = await readAdmissionPolicy(client, params.workspaceId)
         // This legacy API has no reviewed department-link intent. Creating or
         // linking a container here would silently change its audience.
-        if (policy?.setupState === 'ready') {
+        if (usesClassicModeAdmission(policy)) {
           throw new WorkspaceAccessError('context_selection_required', 409)
         }
         const result = await client.query<Teamspace>(

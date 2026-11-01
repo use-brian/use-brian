@@ -4,9 +4,12 @@ export type WorkspaceAccessModeState = {
   workspaceId: string
   mode: WorkspaceAccessMode
   setupState: 'legacy' | 'ready'
+  /** Durable server-side cutover proof; absent on historical mode projections. */
+  cutoverReceiptId?: string | null
   policyRevision: string
   defaultDepartmentId: string | null
   defaultDepartmentName: string | null
+  canFinalize?: boolean
   canAdminister: boolean
   validForMs: number
 }

@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg'
 import type { WorkspaceFileCreateInput } from '@use-brian/core'
-import { readAdmissionPolicy } from './admission-policy-read.js'
+import { readAdmissionPolicy, usesClassicModeAdmission } from './admission-policy-read.js'
 import { admitWorkspaceResource } from './resource-admission.js'
 import { WorkspaceAccessError } from './policy.js'
 
@@ -27,7 +27,7 @@ export async function admitFileCreate(
   if (expectedPolicyRevision !== undefined && expectedPolicyRevision !== policy?.revision) {
     throw new WorkspaceAccessError('access_policy_conflict', 409)
   }
-  if (!policy || policy.setupState === 'legacy') return input
+  if (!usesClassicModeAdmission(policy)) return input
   if (input.compartments === null || input.projectIds === null) {
     throw new WorkspaceAccessError('access_mode_destination_conflict', 409)
   }

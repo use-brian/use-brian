@@ -6,6 +6,10 @@ import { createOfficeArtifactStore, type OfficeDbQuery } from './office-artifact
 import { createOfficeGenerationStore } from './office-generation.js'
 import { officeCreationPolicy, admitOfficeShell, type OfficeCreateOptions } from '../workspace-access/office-create-admission.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
+import { readOfficeGenerationEvidence } from '../office/generation-evidence.js'
+import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
+import { createHash } from 'node:crypto'
+import { captureAuthoringAuthoritySystem } from '../context-scope/workflow-authority.js'
 
 export type OfficeHumanGenerationOptions = {
   /** Supplied by requireAuth's route adapter, never request/model JSON. */
@@ -31,7 +35,56 @@ export async function createHumanOfficeGeneration(input: OfficeGenerationRequest
     await client.query('BEGIN')
     await applyRLSGucs(client, input.userId)
     const policy = await officeCreationPolicy(client, input.workspaceId)
-    if (!policy || policy.setupState === 'legacy') {
+    if (policy?.departmentReadV2 && (input.family !== 'document' || input.sourceHandles.length
+      || input.templateId || input.additionalContext || input.compartments.length || input.projectIds.length)) {
+      const live = await client.query(`SELECT s.id FROM auth_sessions s JOIN users u ON u.id=s.user_id
+        WHERE s.id=$1 AND s.user_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
+          AND s.auth_version=u.auth_version FOR SHARE OF s,u`,[proof.sessionId,input.userId])
+      if (!live.rows.length) throw new WorkspaceAccessError('authenticated_session_required',401)
+      const assistant = (await client.query<{id:string}>(`SELECT id FROM assistants WHERE workspace_id=$2
+        AND (id=$1 OR ($1=$3 AND kind='primary')) ORDER BY id LIMIT 1 FOR SHARE`,
+      [input.assistantId,input.workspaceId,APP_LEVEL_ASSISTANT_ID])).rows[0]
+      if (!assistant) throw new WorkspaceAccessError('context_not_available',404)
+      const source = await readOfficeGenerationEvidence(client,input.workspaceId,input)
+      const admitted = await admitWorkspaceResource(client,input.workspaceId,input.userId,{
+        visibility:source.private?'private':'workspace',sensitivity:input.sensitivity,destination:proof.destination,
+        inherited:source.sources.length?{...source.scope,visibility:source.private?'private':'workspace'}:undefined,
+        inheritedAuthority:'read',requestedLabels:{compartments:input.compartments.length?input.compartments:undefined,projectIds:input.projectIds},
+      })
+      const query: OfficeDbQuery = async <T>(actor: string, sql: string, params: unknown[]) => {
+        if (actor !== input.userId) throw new Error('office_generation_actor_mismatch')
+        return { rows: (await client.query(sql,params)).rows as T[] }
+      }
+      const artifacts = createOfficeArtifactStore(query)
+      const artifact = await artifacts.createShell({userId:input.userId,workspaceId:input.workspaceId,family:input.family,
+        title:input.outcome.trim().slice(0,1000),templateVersionId:input.templateId??null,capabilityVersion:1,
+        sensitivity:admitted.envelope.sensitivity,requiredCompartments:admitted.envelope.compartments,
+        projectIds:admitted.envelope.projectIds,visibilityUserIds:source.private?[input.userId]:[]})
+      const brief = {workspaceId:input.workspaceId,actingUserId:input.userId,assistantId:assistant.id,
+        family:input.family,outcome:input.outcome,audience:input.audience,sourceHandles:input.sourceHandles,
+        requestedSensitivityFloor:artifact.sensitivity,...(input.templateId?{templateId:input.templateId}:{}),
+        ...(input.additionalContext?{additionalContext:input.additionalContext}:{}),idempotencyKey:input.idempotencyKey}
+      const departments=artifact.compartments.filter(key=>key.startsWith('team:')).map(key=>key.slice(5))
+      const authoringAuthority=await captureAuthoringAuthoritySystem({userId:input.userId,workspaceId:input.workspaceId,
+        assistantId:assistant.id,contextGroupId:departments.length===1?departments[0]!:null,
+        contextProjectId:artifact.projectIds.length===1?artifact.projectIds[0]!:null},client)
+      const requestHash=createHash('sha256').update(JSON.stringify({brief,destination:proof.destination??null})).digest('hex')
+      const binding={protocol:'office_department_v2',actorUserId:input.userId,workspaceId:input.workspaceId,
+        authSessionId:proof.sessionId,requestHash,sourceFingerprint:source.fingerprint,sources:source.sources,authoringAuthority}
+      const job = await createOfficeGenerationStore(query).create({userId:input.userId,workspaceId:input.workspaceId,
+        artifactId:artifact.id,assistantId:assistant.id,jobKind:'create',brief,idempotencyKey:input.idempotencyKey,
+        templateVersionId:input.templateId,authorityProjection:{sensitivity:artifact.sensitivity,
+          visibilityUserIds:source.private?[input.userId]:[],compartments:artifact.compartments,projectIds:artifact.projectIds,
+          compartmentGrant:artifact.compartments,projectGrant:artifact.projectIds,sourceHandles:input.sourceHandles,creationBinding:binding}})
+      if (job.artifactId !== artifact.id) {
+        const previous=job.authorityProjection as {creationBinding?:{requestHash?:string}}
+        if (previous.creationBinding?.requestHash!==requestHash) throw new WorkspaceAccessError('office_generation_request_conflict',409)
+        await artifacts.deleteEmptyShell(input.userId,artifact.id)
+      }
+      await client.query('COMMIT')
+      return {artifactId:job.artifactId,jobId:job.id}
+    }
+    if (!policy || (policy.setupState === 'legacy' && !policy.departmentReadV2)) {
       if (proof.destination) throw new WorkspaceAccessError('access_mode_setup_required',409)
       await client.query('COMMIT'); return null
     }

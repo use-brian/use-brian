@@ -11,6 +11,7 @@
  */
 
 import { query } from '../db/client.js'
+import type { ScopeReviewCoverage } from '@use-brian/shared'
 import { getScopeReviewCoverage, SCOPE_REVIEW_REGISTRY_REVISION } from '../workspace-access/scope-review-registry.js'
 import {
   DEPARTMENT_ISOLATION_REQUIRED_CAPABILITIES,
@@ -68,6 +69,13 @@ export type ContextReadiness = {
   readyForActivation: boolean
   checks: ContextReadinessCheck[]
   legacyGeneral: Record<string, number>
+  /** Present only after an actual canonical coverage walk. This is review
+   * evidence, not an acknowledgement or an activation verdict. */
+  scopeInventory?: {
+    reviewedRevision: string | null
+    coverage: ScopeReviewCoverage
+    canAcknowledge: boolean
+  }
 }
 
 export type ReadinessQuery = <T extends Record<string, unknown>>(
@@ -240,6 +248,9 @@ export type ContextReadinessOptions = {
    * `scope_review` row (the binding gate) pass false; the row then reports
    * `not_evaluated`, so the verdict can never read activation-ready. */
   scopeReview?: boolean
+  /** Attended cutover review must inspect coverage before acknowledgement.
+   * This never makes the ordinary scope_review check pass by itself. */
+  reviewScopeInventory?: boolean
 }
 
 export async function getContextReadinessSystem(
@@ -275,7 +286,10 @@ export async function getContextReadinessSystem(
   // thousands of rows, 5-15s on a working brain), so it runs only when the
   // acknowledgement holds and its count can still change the verdict.
   const inventoryAcknowledged=reviewedInventoryRevision===String(SCOPE_REVIEW_REGISTRY_REVISION)
-  const coverage=evaluateScopeReview&&missingColumns.length===0&&inventoryAcknowledged
+  const walkInventory=evaluateScopeReview&&missingColumns.length===0
+    &&functionMissing('scope_review').length===0
+    &&(inventoryAcknowledged||options.reviewScopeInventory===true)
+  const coverage=walkInventory
     ? await getScopeReviewCoverage({query:queryFn},workspaceId)
     : {registryRevision:String(SCOPE_REVIEW_REGISTRY_REVISION),unresolved:'1',families:[]}
 
@@ -399,6 +413,9 @@ export async function getContextReadinessSystem(
       .every((item) => item.ready),
     checks,
     legacyGeneral,
+    ...(walkInventory ? {scopeInventory:{reviewedRevision:reviewedInventoryRevision,coverage,
+      canAcknowledge:CONTEXT_SCOPE_CODE_CAPABILITIES.scope_review
+        &&functionMissing('scope_review').length===0&&coverage.unresolved==='0'}} : {}),
   }
 }
 

@@ -45,6 +45,10 @@ const OSS_CHANNELS_330_SHA256 = '64aeddde4c05bd186b638be0b0c02f477dd16afb20358c0
 // their sequence prefixes. Preserve those existing local brains by recording
 // the final filename when the exact pre-rebase filename is already applied.
 const LEGACY_MIGRATION_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  '8171_department_mode_admission.sql': ['8148_department_mode_admission.sql'],
+  '8172_organization_cutover.sql': ['8149_organization_cutover.sql'],
+  '8173_department_office_publication.sql': ['8150_department_office_publication.sql'],
+  '8174_reviewed_legacy_knowledge_binding.sql': ['8151_reviewed_legacy_knowledge_binding.sql'],
   '552_association_order_financial_evidence.sql': ['537_association_order_financial_evidence.sql'],
   '405_chat_message_archive.sql': ['395_chat_message_archive.sql', '393_chat_message_archive.sql'],
   '406_local_chat_archive_sink.sql': ['396_local_chat_archive_sink.sql', '394_local_chat_archive_sink.sql'],

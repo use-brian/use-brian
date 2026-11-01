@@ -122,7 +122,7 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
           SELECT id FROM office_generation_jobs pending
            WHERE job_kind = ANY($3::text[]) AND status IN ('queued','running') AND cancel_requested_at IS NULL
              AND next_attempt_at <= now()
-             AND (authority_projection->'creationBinding'->>'protocol' IS DISTINCT FROM 'office_prompt_only_v1'
+             AND (coalesce(authority_projection->'creationBinding'->>'protocol','') NOT IN ('office_prompt_only_v1','office_department_v2')
                OR (initiated_by_user_id=$4::uuid AND EXISTS (
                  SELECT 1 FROM auth_sessions s JOIN users u ON u.id=s.user_id
                    WHERE s.id::text=pending.authority_projection->'creationBinding'->>'authSessionId'

@@ -1127,6 +1127,9 @@ export function workspaceAccessModeCacheKey(workspaceId:string,userId:string):st
 export function workspaceAccessMigrationCacheKey(workspaceId:string,userId:string,kind:'list'|'plan',cursor=''):string {
   return `${workspaceAccessCacheKey(workspaceId,userId)}:migration:${kind}:${cursor}`;
 }
+export function workspaceKnowledgeBindingCacheKey(workspaceId:string,userId:string):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:knowledge-bindings`;
+}
 
 export function workspaceCreationContextCacheKey(workspaceId:string,userId:string):string {return `${workspaceAccessCacheKey(workspaceId,userId)}:creation-context`;}
 

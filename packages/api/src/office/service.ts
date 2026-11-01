@@ -150,7 +150,7 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeService {
       }
       let job: OfficeGenerationJobRow
       try {
-        job = await deps.createJob({ userId: params.userId, workspaceId: params.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'create', brief, authorityProjection: { sensitivity: params.sensitivity, visibilityUserIds: [], compartments: params.compartments, projectIds: params.projectIds, compartmentGrant: params.compartmentGrant, projectGrant: params.projectGrant, sourceHandles: params.sourceHandles }, templateVersionId: params.templateId, idempotencyKey: params.idempotencyKey })
+        job = await deps.createJob({ userId: params.userId, workspaceId: params.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'create', brief, authorityProjection: { sensitivity: artifact.sensitivity, visibilityUserIds: [], compartments: artifact.compartments, projectIds: artifact.projectIds, compartmentGrant: params.compartmentGrant, projectGrant: params.projectGrant, sourceHandles: params.sourceHandles }, templateVersionId: params.templateId, idempotencyKey: params.idempotencyKey })
       } catch (cause) {
         await deps.deleteEmptyShell(params.userId, artifact.id)
         throw cause

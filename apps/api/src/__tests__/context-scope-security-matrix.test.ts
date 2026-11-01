@@ -323,6 +323,32 @@ describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', 
     }
   })
 
+  it('preserves released cutover migration names without replaying their DDL', async () => {
+    const renames = [
+      ['8148_department_mode_admission.sql', '8171_department_mode_admission.sql'],
+      ['8149_organization_cutover.sql', '8172_organization_cutover.sql'],
+      ['8150_department_office_publication.sql', '8173_department_office_publication.sql'],
+      ['8151_reviewed_legacy_knowledge_binding.sql', '8174_reviewed_legacy_knowledge_binding.sql'],
+    ] as const
+    const migrationsDir = fileURLToPath(new URL('../../../../packages/api/migrations', import.meta.url))
+    for (const [previous, current] of renames) {
+      await db.query('UPDATE public._migrations SET name=$1 WHERE name=$2', [previous, current])
+    }
+    try {
+      assert.equal(await migratePglite(db, migrationsDir), renames.length)
+      assert.equal(await migratePglite(db, migrationsDir), 0)
+      const names = renames.flatMap(([previous, current]) => [previous, current]).sort()
+      const ledger = await db.query<{ name: string }>(
+        'SELECT name FROM public._migrations WHERE name=ANY($1::text[]) ORDER BY name', [names])
+      assert.deepEqual(ledger.rows.map(row => row.name), names)
+    } finally {
+      for (const [previous, current] of renames) {
+        await db.query('INSERT INTO public._migrations(name) VALUES($1) ON CONFLICT DO NOTHING', [current])
+        await db.query('DELETE FROM public._migrations WHERE name=$1', [previous])
+      }
+    }
+  })
+
   it('reports an inaccessible id exactly like an unknown id and leaks no count', async () => {
     const scope = SCOPES.salesAtlas
     const predicate = buildAccessPredicate(access(scope), { alias: 'r', startIdx: 2 })

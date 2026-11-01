@@ -8,7 +8,7 @@ import type { query } from '../db/client.js'
 import { createDbContextScopeStore } from '../db/context-scope-store.js'
 import { resolveOperationCeilingsSystem } from '../db/workspace-store.js'
 import { resolveTurnScopeSystem, type TurnScopeAssistant } from '../context-scope/resolve-turn-scope.js'
-import { readAdmissionPolicy } from './admission-policy-read.js'
+import { readAdmissionPolicy, usesClassicModeAdmission } from './admission-policy-read.js'
 import { admitWorkspaceResource } from './resource-admission.js'
 import { WorkspaceAccessError } from './policy.js'
 
@@ -52,7 +52,7 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
   const policy = await readAdmissionPolicy(client, workspaceId)
   if (assistantWorkspaceId !== workspaceId) {
     const assistantPolicy = assistantWorkspaceId ? await readAdmissionPolicy(client, assistantWorkspaceId) : null
-    if (human || policy?.setupState === 'ready' || assistantPolicy?.setupState === 'ready') {
+    if (human || usesClassicModeAdmission(policy) || usesClassicModeAdmission(assistantPolicy)) {
       throw new WorkspaceAccessError('context_not_available', 404)
     }
     // Historical cross-workspace comment threads retain legacy behavior only
@@ -61,7 +61,7 @@ export async function admitSessionCreate<T extends Input>(client: PoolClient, pa
   if (params.expectedPolicyRevision !== undefined && params.expectedPolicyRevision !== policy?.revision) {
     throw new WorkspaceAccessError('access_policy_conflict', 409)
   }
-  if (!policy || policy.setupState === 'legacy') return params
+  if (!usesClassicModeAdmission(policy)) return params
   if (!human || !isPersonalChatRoot(params)) {
     throw new WorkspaceAccessError('session_admission_unsupported', 409)
   }
@@ -154,7 +154,7 @@ export async function admitAnchoredSession<T extends Input & {
   await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [workspaceId])
   const policy = await readAdmissionPolicy(client, workspaceId)
   const effectiveClearance = params.effectiveClearance ?? assistant.clearance ?? 'internal'
-  if (!policy || policy.setupState === 'legacy') return { ...params, workspaceId, effectiveClearance }
+  if (!usesClassicModeAdmission(policy)) return { ...params, workspaceId, effectiveClearance }
   if (assistant.workspaceId !== workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
   await client.query("SELECT set_config('app.session_creation_admission',$1,true)", [JSON.stringify({
     protocol: '1', provenance: 'anchored_thread', workspaceId,
@@ -216,7 +216,7 @@ export async function admitChannelRoom(client: PoolClient, params: {
   const department = { contextGroupId: group?.id ?? null, contextProjectId: projects[0] ?? null, contextCompartments: compartments }
   await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [params.workspaceId])
   const policy = await readAdmissionPolicy(client, params.workspaceId)
-  if (!policy || policy.setupState === 'legacy') return { effectiveClearance, ...department }
+  if (!usesClassicModeAdmission(policy)) return { effectiveClearance, ...department }
   await client.query("SELECT set_config('app.session_creation_admission',$1,true)", [JSON.stringify({
     protocol: '1', provenance: 'channel_room', workspaceId: params.workspaceId,
     policyRevision: policy.revision, actor: params.userId,

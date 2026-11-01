@@ -1,5 +1,5 @@
 import { admitProgrammaticCandidate } from '../ingest/programmatic-candidate-authority.js'
-import { readAdmissionPolicy } from './admission-policy-read.js'
+import { readAdmissionPolicy, usesClassicModeAdmission } from './admission-policy-read.js'
 import type { PoolClient } from 'pg'
 import { maxSensitivity, unionScopeRequirements, type AccessContext, type Sensitivity } from '@use-brian/core'
 import { buildAccessPredicate, buildCurrentMemberSourcePredicate } from '../db/access-predicate.js'
@@ -29,7 +29,7 @@ export async function admitTaskCreate<T extends TaskEnvelope>(client: PoolClient
   if (params.expectedPolicyRevision !== undefined && params.expectedPolicyRevision !== policy?.revision) {
     throw new WorkspaceAccessError('access_policy_conflict', 409)
   }
-  if (!policy || policy.setupState === 'legacy') return params
+  if (!usesClassicModeAdmission(policy)) return params
   // Explicit null is invalid, not omitted selection (including JS/HTTP callers).
   if (params.compartments === null || params.projectIds === null || params.visibility === null) {
     throw new WorkspaceAccessError('access_mode_destination_conflict', 409)

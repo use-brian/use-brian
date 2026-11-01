@@ -177,6 +177,21 @@ export function createPollWorker(options: PollWorkerOptions) {
           }
           continue
         }
+        if (job.dispatchLeaseId && store.finishDispatchLease && !isSessionResumeJob(job)) {
+          if (store.validateDispatchLease && !await store.validateDispatchLease(job)) continue
+          let success=false
+          try { await executor(job);success=true }
+          catch(error) {
+            if ((error as {code?:string}).code==='scheduled_job_stale_dispatch') continue
+            console.error(`[scheduler] Leased job ${job.id} execution failed:`,error)
+          }
+          const outcome=await store.finishDispatchLease(job.id,job.dispatchLeaseId,{
+            success,nextRunAt:job.schedule.type==='once'?new Date(0):computeNextRun(job.schedule,job.timezone),maxConsecutiveFailures})
+          if(outcome.applied&&outcome.disabled&&!success&&job.schedule.type!=='once'&&onJobAutoDisabled) {
+            try {await onJobAutoDisabled(job,outcome.failures)} catch(error){console.warn('[scheduler] onJobAutoDisabled failed:',error)}
+          }
+          continue
+        }
         // Path B durable chat resume — dispatch to `resumeHandler` instead
         // of the standard executor. Resume jobs are always treated as
         // one-time: they disable on completion regardless of `schedule`

@@ -1,0 +1,212 @@
+# Complete organization cutover
+
+This specification completes the runtime transition after the reviewed legacy
+cleanup. It does not equate an empty General inventory with a working `ready`
+workspace. The implementation must preserve ordinary creation, Office use,
+existing workflow execution and authorization during the transition.
+
+## Invariants
+
+- Prepare and apply through authenticated, revocable human sessions. Only the
+  current workspace owner can finalize a cutover. Review expiry, policy revision,
+  selected default department, inventory fingerprints and runtime capabilities
+  are part of the review, not caller-supplied certification.
+- No change to clearance, private visibility, Projects, connector credentials,
+  provider exposure or saved execution consent follows from activation.
+- Existing schedules keep their identifiers, cadence, delivery targets, history,
+  state and exact department/Project bindings. Convert their saved authoring
+  authority into the same snapshot and claim protocol as newly created schedules.
+  Revalidate that saved authority against current grants. Never mint a claim in
+  the migration: the normal dispatcher claims after commit.
+- Freeze the cross-family inventory and all relevant writers for the short apply
+  transaction. A quiet inventory page is not a live admission barrier. Refuse an
+  unknown producer or unresolved binding; never discard a family from the
+  readiness calculation just to make activation succeed.
+- A failure rolls back the entire transition. An acknowledged retry returns the
+  committed receipt and does not change schedules or advance policy a second time.
+
+## Permission-model routing
+
+Permission model v2 is already authoritative when `department_read_v2` is true.
+As the v2 canonical writer states, access mode, classification mode and legacy
+Team scope mode are not inputs to its write rule. Setup completion must not
+switch a v2 workspace into the superseded, partly implemented mode-admission
+protocol. In particular its source-free Office-only gate must not disable
+ordinary template generation, imports or copies which the department engine
+already governs.
+
+Keep the persisted setup state truthful. Read the permission-model flag alongside
+it and explicitly select the appropriate runtime, rather than returning a fake
+legacy policy. Classic ready-mode admission remains unchanged for workspaces on
+the pre-v2 rollback model. V2 continues to enforce the current department row
+rule, source/parent floors, private visibility, Project restrictions, provenance,
+holding, immutable snapshots and authenticated principal checks. Only the
+superseded mode-specific restrictions are model-gated; no source, credential,
+retention, Office ACL, scope-version or pinned execution guard is removed.
+
+V2 workflow authoring may resolve to General when the assistant has no home or
+default department. An omitted department alone is not a readiness failure in
+v2. Revalidate the saved authoring ceiling and current source permissions for
+that binding just as for a named department; preserve the classic mode's
+explicit-selection requirement.
+
+Canonical v2 Office shell creation admits the actual empty draft destination,
+including templates. Human generation saves the admitted shell envelope in the
+job rather than the raw request's omitted labels. Ambient retrieval is recorded as exact source evidence before construction; publication rechecks it and records Office source provenance in the same transaction. The established generation,
+import, compilation, copy, publication, live editing and release paths retain
+all of their resource-specific authorization and classification. Source/template
+selection must still be authorized, and generated output must inherit all
+material read. No source-derived content receives a source-free proof.
+
+The SQL backstop for the superseded creation-receipt protocol must select the
+same model as the TypeScript writer. Existing v2 department stamping, row
+policies and derivation guards stay enabled. Tests must show both successful
+operations and the same authorization denials before and after completion, not
+merely absence of an obsolete error.
+
+## Readiness and activation
+
+Completion itself is an attended review of the complete frozen inventory. A
+legacy workspace need not already have `reviewed_inventory_revision` populated:
+prepare walks the canonical coverage registry even when that acknowledgement is
+absent. It reports the actual coverage and every enforcement check, and may
+propose acknowledging the current registry only when coverage is zero and the
+compiled scope-review capability and database guards are present. It never
+treats an unevaluated inventory as complete. Unresolved families and missing
+guards remain blockers, alongside binding and scheduling blockers.
+
+The existing acknowledgement, complete coverage and proposed registry revision
+are immutable review evidence. Apply repeats the same review under the writer
+barrier, updates the acknowledgement with the ordinary audited policy update,
+and verifies full activation readiness before committing. Failure after that
+update rolls back acknowledgement, setup state, schedule conversions and receipt
+together. Classification mode and read/mutation grants stay unchanged. Tests
+must start with an absent acknowledgement instead of pre-seeding completion.
+
+### Legacy knowledge-source binding
+
+An unbound legacy knowledge source requires attended configuration before setup
+can finish. Organization migration progress exposes this independently of owner
+finalization, so a current workspace admin who can read the selected department
+can configure the source without granting the workspace owner data access.
+Prepare and apply require the same live human session and an explicit department
+choice. The review shows the source ID, future scope and retained entry count;
+it captures source/entry fingerprints, policy revision and expiry. Revalidation
+uses normal configuration admission and current v2 read authority. A source with
+a live sync lease, a held source/output, an existing binding or output outside
+the chosen department cannot be adopted. No creator is converted into consent.
+
+Apply converts only that legacy source's null binding to the authenticated
+reviewer's explicit binding, once, through a database guard backed by an
+immutable backend-only review. Preserve its ID, location, connector, checkpoints,
+entries, entry scope versions and provenance. Do not delete/recreate it or force
+a sync during the conversion. Existing sync snapshots are fenced by the changed
+binding version and the normal dispatcher captures fresh bound authority after
+commit. Unreviewed direct SQL and app-role attempts remain forbidden. A receipt
+and ordinary workspace invalidation make the recovery visible in the product.
+Cover sync through the real knowledge worker after finalization, with a separate
+workspace owner and configuring admin, and denial when that admin's department
+read edge is absent, expired or revoked.
+
+Migration `8174_reviewed_legacy_knowledge_binding.sql` adds
+`workspace_knowledge_binding_reviews`: workspace/source, attending actor/session,
+selected department, policy revision, idempotency key, immutable evidence/hash,
+expiry and prepared/applying/applied/cancelled lifecycle with an atomic receipt.
+It has no app-role write path and no cascading dependency that prevents later
+normal source removal. Its guard extends only the reviewed null-to-bound source
+transition; the existing immutable-binding guard handles every other operation.
+
+Review returns concrete remaining blockers with IDs and content-free evidence.
+It covers all inventory families, principal defaults, configured connectors and
+intake, enabled workflow triggers, live/queued jobs and old-worker barriers. The
+server's compiled capability manifest and positive runtime tests determine
+support. A mode change alone never claims a missing producer implementation.
+
+Apply locks workspace, policy, review, principals and dependent resources in the
+canonical order. It rechecks the entire review, converts eligible schedules,
+advances `setup_state` using the existing audited policy writer and records a
+content-free receipt atomically. It neither deletes retained records nor forces
+strict classification. Existing policy audit and invalidation notifications
+remain enabled.
+
+## Required validation
+
+Use the guarded disposable PostgreSQL fixture with the current department read
+model, real application role, actual authenticated route and worker/store paths.
+Large-graph and knowledge-sync fixtures remove their own synthetic workspaces
+before closing their pools. Acceptance files share a disposable cluster, so a
+12,000-link stress graph must not become unrelated later fixtures' seed workload.
+Keep production statement deadlines and all descendant-limit assertions intact.
+Cover successful generation and publication for every Office family with sources
+and a selected template, copy/import/release paths, existing event workflows,
+schedule claims and dispatch after migration, all preserved data/bindings and
+expected authorization denials. Test concurrent admission/policy changes, source
+revocation/holding, stale previews, expiry, cancellation, replay and rollback at
+each transaction boundary. Do not replace positive tests with assertions that
+unsupported operations refuse. Run the repository unit suite and smoke test.
+
+Production deployment and cutover remain explicit user actions. The PR must be
+based on and target `develop`; it must not contain workspace-specific data or
+local cleanup artifacts.
+
+## Dispatch leases at the transition
+
+Before a previously unpinned job executes, the poll worker assigns an opaque
+dispatch lease. Nag writes and outcome/failure bookkeeping compare that identity;
+they cannot disable, delete or overwrite a row converted to a pinned schedule.
+Cutover refuses any outstanding dispatch lease or active run of a schedule it
+would convert, including an expired discovery awaiting normal recovery. No lease
+or claim is fabricated by migration. Existing cadence, nag state and delivery
+fields are preserved, and the normal dispatcher claims the converted row.
+
+The final barrier first validates the owner without row locks, acquires the short
+workspace/table writer barrier, then locks/rechecks workspace, policy, session,
+review and selected resources. It refuses contention rather than retaining locks
+across confirmation. Inventory includes every record in every family, including
+large provenance graphs. Read each ordered metadata projection through a
+transaction-local cursor in batches of 500 and incrementally hash the same
+newline-separated ID, row-version and metadata representation. Keep existing
+fingerprints stable, never truncate a family, and retain only one batch in the
+API process. Check the shared 10-second inventory deadline before and after
+every fetch, including the final family; exceeding it refuses the transition
+and rolls back. Monotonic wall-clock checks bound review/apply work; PostgreSQL
+17+ additionally enforces a 20-second transaction timeout, so a slow inventory
+cannot retain the global writer barrier indefinitely. All API
+and worker processes must run the cutover-capable release before activation;
+deployment itself is not performed by the migration client.
+
+## Owner completion surface
+
+Organization migration progress exposes Finish setup only to the actual workspace
+owner on permission model v2. It uses the normal revocable browser session and
+prepares a server review for the currently displayed default department. The
+confirmation shows that retained content and grants stay unchanged, the number
+of schedule conversions, the reviewed inventory count, revision, hash and expiry.
+An authority refresh cancels confirmation; apply rechecks all evidence. Blocked
+reviews display remaining record IDs and never offer activation. Network retries
+reuse the confirmed review. Completion refreshes mode, registry and migration
+progress through the normal organization event/cache path.
+
+Completed setup also reconciles fully applied Department migration plans in the
+same transaction, so the refreshed list does not retain obsolete finalizer
+blockers. Paused/cancelled and empty plans retain their state. A plan targeting
+a different mode remains explicitly unresolved rather than claiming that its
+original target was applied.
+
+## Authenticated API
+
+`POST /api/workspaces/:workspaceId/access/cutover/preview` accepts the selected
+`targetDepartmentId` and an idempotency UUID. `apply` accepts only the returned
+`reviewId` and `payloadHash`. Both require the current owner session. Apply is
+replayable with the same review after a lost response; a stale or expired review
+requires a new preview. The mode projection returns `cutoverReceiptId` and
+`canFinalize`, independently of ordinary administration and record read access.
+
+## Completing setup after deployment
+
+Deploy the migrations and updated API/worker processes together. Sign in as the
+workspace owner, open **Organization → Access → Migration progress**, and choose
+**Finish setup**. Review the existing default department and saved schedule
+conversion count, then confirm. If the workspace is busy or evidence changes,
+retry with a fresh review. The mode changes to Ready only after the atomic
+receipt commits. Deployment alone does not activate a workspace.
