@@ -353,17 +353,31 @@ async function sessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:r
 }
 
 const messagePublications=new WeakMap<object,{authority:SessionContextAuthority}>()
+const pendingContextRevisions=new WeakMap<object,{
+ authority:SessionContextAuthority;execution:ExecutionContext;sessionId:string;kind:SessionContextKind;sources:readonly ScopeSource[];floor:ScopeEvidence;
+ write:(client:PoolClient,checked:ScopeEvidence)=>Promise<SessionContextRevision|null>;
+}>()
 /** Atomic native transcript batch; the callback never receives an owner connection. */
 export async function withSessionMessagePublication<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
- run:(client:PoolClient)=>Promise<T>,options?:{turnToken?:string;stoppedTurnToken?:string;measure?:PublicationMeasure}):Promise<T>{
+ run:(client:PoolClient)=>Promise<T>,options?:{turnToken?:string;stoppedTurnToken?:string;measure?:PublicationMeasure;pendingAnnotation?:object}):Promise<T>{
  const {execution}=requireAuthority(authority)
+ const pending=options?.pendingAnnotation?pendingContextRevisions.get(options.pendingAnnotation):undefined
+ if(options?.pendingAnnotation&&(!pending||pending.kind!=='message_annotation'||pending.execution!==execution||pending.sessionId!==execution.lifecycle.sessionId))missing()
+ const combined=new ContextScopeAccumulator({sources:structuredClone([...sources])})
+ if(pending)combined.note({sources:structuredClone([...pending.sources])})
  const turnToken=options?.turnToken,stoppedTurnToken=options?.stoppedTurnToken
  if(turnToken&&stoppedTurnToken)changed()
  if(execution.lifecycle.sessionPersisted===false||!(execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member')
   &&!nativeDelegatedSessionPublication(execution))changed()
- return transaction(authority,structuredClone(sources),'retain',false,async client=>{
+ return transaction(authority,combined.evidence.sources??[],'retain',false,async client=>{
   messagePublications.set(client,{authority})
-  try{return await run(client)}finally{messagePublications.delete(client)}
+  try{
+   if(pending){
+    const checked=await validateCallerScopeEvidence(pending.floor,execution.security.ceiling,client)
+    if(!await pending.write(client,checked))changed()
+   }
+   return await run(client)
+  }finally{messagePublications.delete(client)}
  },execution.lifecycle.sessionId,stoppedTurnToken,turnToken,false,undefined,options?.measure)
 }
 /** A JSON descriptor, owner transaction or retained callback cannot mint a live frame. */
@@ -419,12 +433,13 @@ export async function sessionContextGeneration(sessionId: string): Promise<strin
   return value
 }
 
-/** Canonical semantic write; pointer/CAS/receipt and payload commit together. */
-export async function writeSessionContextRevision(input: {
+type SessionContextRevisionInput = {
   sessionId: string; parentId?: string; kind: SessionContextKind; content: Record<string, unknown>
   authority?: SessionContextAuthority; derivation?: DerivedWriteEvidence; expectedRevision?: string
   expectedCursor?: number | null; expectedGeneration?: string
-}): Promise<SessionContextRevision | null> {
+}
+/** Snapshot a semantic command, never an authorization or a publication receipt. */
+export async function prepareSessionContextRevision(input:SessionContextRevisionInput):Promise<object> {
   const authority = requireAuthority(input.authority), { execution } = authority
   // Snapshot semantic inputs before the first await. The original live
   // authority is not serializable and must remain the canonical instance.
@@ -458,7 +473,7 @@ export async function writeSessionContextRevision(input: {
   preparedEvidence.note({ sources: await readExternalSourceAncestors(execution.security.access.workspaceId,evidence.sources) })
   const preparedSources = preparedEvidence.evidence.sources ?? []
   const payload = structuredClone(command.content), parentId = command.parentId ?? randomUUID(), id = randomUUID()
-  const stored = await transaction(authority,preparedSources,'retain',false,async (client,checked) => {
+  const write = async (client:PoolClient,checked:ScopeEvidence):Promise<SessionContextRevision|null> => {
     const publicationSources = checked.sources ?? []
     const result=(await client.query<{value:{source:ScopeSource;createdAt:string;userId:string;assistantId:string}|null}>(
       'SELECT publish_native_session_context_revision($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) AS value',
@@ -474,7 +489,18 @@ export async function writeSessionContextRevision(input: {
     const createdAt=new Date(result.createdAt)
     return bindScopeSource({id,parentId:(command.kind==='compact_summary'||command.kind==='session_title')?command.sessionId:parentId,sessionId:command.sessionId,source,content:payload,
       userId:result.userId,assistantId:result.assistantId,createdAt,lastAccessedAt:createdAt,accessCount:0,survivalCount:0},source)
-  },command.sessionId,undefined,undefined,false,preparedEvidence.evidence)
+  }
+  const pending=Object.freeze({})
+  pendingContextRevisions.set(pending,{authority,execution,sessionId:command.sessionId,kind:command.kind,sources:preparedSources,floor:preparedEvidence.evidence,write})
+  return pending
+}
+
+/** Canonical semantic write; pointer/CAS/receipt and payload commit together. */
+export async function writeSessionContextRevision(input:SessionContextRevisionInput):Promise<SessionContextRevision|null> {
+  const token=await prepareSessionContextRevision(input),pending=pendingContextRevisions.get(token)!
+  const {authority}=pending
+  if(authority.execution!==pending.execution)missing()
+  const stored=await transaction(authority,pending.sources,'retain',false,pending.write,pending.sessionId,undefined,undefined,false,pending.floor)
   if (stored) authority.accumulator.note({ sources: boundScopeSources(stored) })
   return stored
 }

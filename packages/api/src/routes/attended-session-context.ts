@@ -4,7 +4,7 @@ import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic
 import {getPool} from '../db/client.js'
 import {readAdmittedSessionQuery,captureSessionTopics,sessionQueryRootMetadata} from '../db/session-query-reader.js'
 import {readSessionQueryFrame} from '../db/session-context-revisions.js'
-import {writeSessionMessageAnnotation} from '../db/session-message-annotations.js'
+import {writeSessionMessageAnnotation,prepareSessionMessageAnnotation} from '../db/session-message-annotations.js'
 import type {Session,SessionMessage} from '../db/sessions.js'
 import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
 import {resolveReplyText,type ResolveReplyParams} from '../routes/_reply-context.js'
@@ -41,7 +41,7 @@ async function classificationQuery(input:ClassificationInput,topicThroughSequenc
 }
 
 type ClassifiedTranscript = {
- execution:SessionContextAuthority['execution'];sessionId:string;through:number;messageId:string;annotationId:string;
+ execution:SessionContextAuthority['execution'];sessionId:string;through:number;messageId:string;annotationId?:string;
  history:SessionMessage[];sources:ScopeSource[];
 }
 const classifiedTranscripts=new WeakMap<readonly SessionMessage[],ClassifiedTranscript>()
@@ -55,7 +55,10 @@ export async function assessAttendedSessionMessage(input:{
  provider:TopicClassifierOptions['provider'];model:string;decisionRuntime?:TopicClassifierOptions['decisionRuntime'];
  reply?:Pick<ResolveReplyParams,'channelType'|'replyToMessageId'|'clientSnippet'>;
  capture?:object;
-}):Promise<{publish:()=>Promise<{classification:TopicClassification;reply:Awaited<ReturnType<typeof resolveReplyText>>;history:SessionMessage[]}>}>{
+}):Promise<{
+ publish:()=>Promise<{classification:TopicClassification;reply:Awaited<ReturnType<typeof resolveReplyText>>;history:SessionMessage[]}>;
+ defer:()=>Promise<{classification:TopicClassification;reply:Awaited<ReturnType<typeof resolveReplyText>>;history:SessionMessage[];pendingAnnotation?:object}>;
+}>{
  const {authority,session,message}=input
  if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
  const query=await classificationQuery(input,message.sequenceNum-1)
@@ -89,7 +92,16 @@ export async function assessAttendedSessionMessage(input:{
   authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context),workspaceId:authority.execution.security.access.workspaceId,
   runId:'memory-topic-'+message.id},boundScopeSources(query))
  const classification=await classifyTopic(options)
- return{publish:async()=>{
+ return{defer:async()=>{
+  // A sibling assessment/quota wait may have changed the original inputs.
+  // Re-admit context before the transient verdict drives any plan or prompt.
+  await assertSourceModelInputAuthority(context)
+  const pendingAnnotation=ephemeral?undefined:await prepareSessionMessageAnnotation({sessionId:session.id,messageId:message.id,
+   classification,replyToText:reply?.text??null,authority,expectedRevision:expected})
+  classifiedTranscripts.set(history,{execution:authority.execution,sessionId:session.id,through:message.sequenceNum,
+   messageId:message.id,history:copyBoundHistory(history),sources:structuredClone(boundScopeSources(query))})
+  return{classification,reply,history,pendingAnnotation}
+ },publish:async()=>{
  if(ephemeral)await assertSourceModelInputAuthority(context)
  const annotation=ephemeral?null:await writeSessionMessageAnnotation({sessionId:session.id,messageId:message.id,classification,replyToText:reply?.text??null,authority,expectedRevision:expected})
  if(!ephemeral&&!annotation)throw new DerivedScopeError('scope_source_changed')
@@ -125,17 +137,21 @@ export async function readClassifiedSessionHistory(authority:SessionContextAutho
   // Metadata narrows this optimization only. It never admits stored plaintext.
   return (await getPool().query<{current:boolean}>(`SELECT
    (SELECT coalesce(max(sequence_num),0) FROM session_messages WHERE workspace_id=$1 AND session_id=$2)=$3
-   AND EXISTS(SELECT 1 FROM session_message_annotation_heads h JOIN session_messages m
+   AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM session_message_annotation_heads h JOIN session_messages m
     ON m.workspace_id=h.workspace_id AND m.session_id=h.session_id AND m.id=h.message_id
-    WHERE h.workspace_id=$1 AND h.session_id=$2 AND h.message_id=$4 AND h.scope_revision_id=$5 AND m.sequence_num=$3) AS current`,
-   [execution.security.access.workspaceId,sessionId,receipt!.through,receipt!.messageId,receipt!.annotationId])).rows[0]?.current===true
+    WHERE h.workspace_id=$1 AND h.session_id=$2 AND h.message_id=$4 AND h.scope_revision_id=$5 AND m.sequence_num=$3)) AS current`,
+   [execution.security.access.workspaceId,sessionId,receipt!.through,receipt!.messageId,receipt!.annotationId??null])).rows[0]?.current===true
  }
  await execution.security.authority.assertCurrent()
  if(!await current())return fresh()
  try{
-  const topicRoots=await sessionQueryRootMetadata(execution.security.access.workspaceId,sessionId,0,receipt.through)
+  const topicRoots=receipt.annotationId?await sessionQueryRootMetadata(execution.security.access.workspaceId,sessionId,0,receipt.through):[]
   const rows=await readSessionQueryFrame(authority,[...receipt.sources,...topicRoots],async client=>{
    if(!await current())return{value:null,sources:[]}
+   // A pending annotation has not been read or persisted. Re-admit the complete
+   // original body/topic query before reusing its bytes, without fabricating a
+   // current-annotation observation. The frame validates these sources freshly.
+   if(!receipt.annotationId)return{value:bindScopeSources(copyBoundHistory(receipt.history),receipt.sources),sources:receipt.sources}
    // The newly written annotation has not had a query-field observation yet.
    // Capture current topics through the unchanged canonical query, including
    // its field policy and row bounds; only the immutable body query is reused.

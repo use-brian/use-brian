@@ -4031,7 +4031,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
 
       const nativeClassification = topicAssessment
-        ? await turnTiming.time('topic_annotation', () => topicAssessment.publish())
+        ? await turnTiming.time('topic_annotation', () => topicAssessment.defer())
         : undefined
       topicAssessmentBranch?.mergeEvidence()
 
@@ -7112,7 +7112,8 @@ export function chatRoutes(options: WebChatOptions): Router {
         await turnTiming.time('reply_publication', () => authority.execute(async () => {
           if (nativeTranscriptAuthority && 'derivation' in batchWrite) {
             return withSessionMessagePublication(nativeTranscriptAuthority, batchWrite.derivation.sources, publish,
-              {measure:turnTiming.time,...(turnLeaseToken ? abortController.signal.aborted ? { stoppedTurnToken: turnLeaseToken } : { turnToken: turnLeaseToken } : {})})
+              {measure:turnTiming.time,pendingAnnotation:nativeClassification?.pendingAnnotation,
+                ...(turnLeaseToken ? abortController.signal.aborted ? { stoppedTurnToken: turnLeaseToken } : { turnToken: turnLeaseToken } : {})})
           }
           const tx = await getPool().connect()
           try {

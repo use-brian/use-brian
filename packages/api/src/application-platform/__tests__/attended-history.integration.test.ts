@@ -294,6 +294,47 @@ describe.sequential('[COMP:api/application-persistence] actual admitted reply hi
   const result=await classifyAttendedSessionMessage({authority,session:f.session,message:rows.at(-1)!,provider:classifierProvider(),model:'fixture'})
   return{f,rows,authority,result}
  }
+ it('uses a pending topic with freshly revalidated history and no early annotation write',async()=>{
+  const {f,rows}=await setup(),authority=await f.modelContext()
+  const assessment=await assessAttendedSessionMessage({authority,session:f.session,message:rows.at(-1)!,provider:classifierProvider(),model:'fixture'})
+  const result=await assessment.defer()
+  expect(result.classification.topic_label).toBe('fictional admitted topic')
+  expect(result.pendingAnnotation).toBeDefined()
+  expect(await readSessionMessageAnnotation(f.session.id,rows.at(-1)!.id,await f.modelContext())).toBeNull()
+  const full=vi.spyOn(sessionQueries,'readAdmittedSessionQuery'),topics=vi.spyOn(sessionQueries,'captureSessionTopics')
+  result.history[0].content=[{type:'text',text:'Untrusted mutation'}]
+  const history=await readClassifiedSessionHistory(authority,f.session.id,result.history)
+  expect(full).not.toHaveBeenCalled();expect(topics).not.toHaveBeenCalled()
+  expect(history[0].content).toEqual(rows[0].content)
+  expect(history.at(-1)?.topicLabel).toBeNull()
+  expect(await attendedSessionTurnCount(authority,history)).toBe(2)
+ })
+ it('recaptures an older topic added while the current topic is pending',async()=>{
+  const {f,rows}=await setup(),authority=await f.modelContext()
+  const assessment=await assessAttendedSessionMessage({authority,session:f.session,message:rows.at(-1)!,provider:classifierProvider(),model:'fixture'})
+  const result=await assessment.defer()
+  await classifyAttendedSessionMessage({authority:await f.modelContext(),session:f.session,message:rows[0],provider:classifierProvider(),model:'fixture'})
+  const full=vi.spyOn(sessionQueries,'readAdmittedSessionQuery')
+  const history=await readClassifiedSessionHistory(authority,f.session.id,result.history)
+  expect(full).toHaveBeenCalledTimes(1)
+  expect(history[0].topicLabel).toBe('fictional admitted topic')
+ })
+ it('does not expose pending-history bytes after membership withdrawal',async()=>{
+  const {f,rows}=await setup(),authority=await f.modelContext()
+  const assessment=await assessAttendedSessionMessage({authority,session:f.session,message:rows.at(-1)!,provider:classifierProvider(),model:'fixture'})
+  const result=await assessment.defer()
+  await f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.ownerId])
+  await expect(readClassifiedSessionHistory(authority,f.session.id,result.history)).rejects.toMatchObject({reason:'authority_changed'})
+ })
+ it.each(['edit','hold'] as const)('rechecks topic source %s after assessment and before transient use',async change=>{
+  const {f,rows}=await setup(),authority=await f.modelContext()
+  const assessment=await assessAttendedSessionMessage({authority,session:f.session,message:rows.at(-1)!,provider:classifierProvider(),model:'fixture'})
+  if(change==='edit')await f.pool.query('UPDATE session_messages SET content=$2 WHERE id=$1',
+   [rows[0].id,JSON.stringify([{type:'text',text:'Fictional replacement input'}])])
+  else await f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[rows[0].id])
+  await expect(assessment.defer()).rejects.toBeDefined()
+  expect(await readSessionMessageAnnotation(f.session.id,rows.at(-1)!.id,await f.modelContext())).toBeNull()
+ })
  it('reuses private body bytes with fresh topics and complete query evidence after classification',async()=>{
   const {f,rows,authority,result}=await classified()
   // Public returned arrays cannot alter the private retained body receipt.
