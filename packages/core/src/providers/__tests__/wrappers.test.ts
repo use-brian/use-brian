@@ -152,7 +152,7 @@ describe('[COMP:providers/wrappers] wrapProvider', () => {
       .toThrow(/idle for 50ms/)
   })
 
-  it('forwards SessionOptions (incl. signal) to the underlying provider', () => {
+  it('forwards SessionOptions (incl. signal) at the first checked send', async () => {
     const createSessionSpy = vi.fn((_opts: SessionOptions): ProviderSession => ({
       async *send(): AsyncIterable<StreamChunk> {
         yield { type: 'message_start', model: 'fake' }
@@ -168,10 +168,11 @@ describe('[COMP:providers/wrappers] wrapProvider', () => {
     const controller = new AbortController()
     const wrapped = wrapProvider(base)
 
-    wrapped.createSession({
+    const session = wrapped.createSession({
       model: 'fake', systemPrompt: 'sp', signal: controller.signal,
     })
-
+    expect(createSessionSpy).not.toHaveBeenCalled()
+    await collectStream(session.send([]))
     expect(createSessionSpy).toHaveBeenCalledWith(expect.objectContaining({
       signal: controller.signal,
     }))

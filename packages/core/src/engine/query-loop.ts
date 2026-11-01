@@ -6,7 +6,7 @@ import { selectInitialToolSchemas, type ToolSelectionOptions } from './tool-sele
 import { createToolDiscovery } from './tool-discovery.js'
 import { getHeapStatistics } from 'node:v8'
 import { renderSystemContext } from '../providers/system-context.js'
-import { isInputAuthorityError } from '../providers/input-authority.js'
+import { isInputAuthorityError, ownsInputAdmission, captureInputAdmissionProvider } from '../providers/input-authority.js'
 import type { LLMProvider, Message, ContentBlock, TokenUsage, AssistantResponse, SendOptions, ThinkingLevel, ToolDefinition, ToolParameter } from '../providers/types.js'
 import type { Tool, ToolContext, ToolResultMeta } from '../tools/types.js'
 import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
@@ -72,6 +72,12 @@ function isAuthorityBoundaryError(error: unknown): boolean {
 const invalidModelContexts = new WeakSet<object>()
 async function assertModelInputAuthority(context: ToolContext): Promise<void> {
   return assertModelAuthority(context, 'input')
+}
+/** Keep sticky refusal and live leases during preparation. An audited provider
+ * owns the unchanged complete source check at dispatch, not an earlier receipt. */
+async function assertModelInputPreparation(context: ToolContext, provider: QueryLoopOptions['provider'],
+  model: string, messages: Message[]): Promise<void> {
+  return assertModelAuthority(context, 'input', ownsInputAdmission(provider, { model, messages }) ? async () => true : undefined)
 }
 /** The final host sink uses the same sticky boundary as streamed loop events. */
 export async function assertModelOutputAuthority(context: ToolContext): Promise<void> {
@@ -682,7 +688,7 @@ async function* queryLoopCore(
   options: QueryLoopOptions & { stallWatchdog?: StallWatchdog },
 ): AsyncGenerator<QueryEvent> {
   const {
-    provider,
+    provider: originalProvider,
     model,
     systemPrompt,
     runtimeSystemContext,
@@ -692,6 +698,7 @@ async function* queryLoopCore(
     maxToolCalls = DEFAULT_HARD_LIMIT,
     stallWatchdog,
   } = options
+  const provider = captureInputAdmissionProvider(originalProvider)
   // Every event the loop hands its consumer is progress; so is every
   // provider chunk (below) and every tool start / end (tool-executor).
   const tools = new Map(admittedTools)
@@ -759,7 +766,7 @@ async function* queryLoopCore(
   // `context.abortSignal` rides through to the provider's underlying `fetch`
   // so a client disconnect actually cancels in-flight HTTP, instead of being
   // a no-op while we wait for Cloud Run's 300s cap.
-  await assertModelInputAuthority(context)
+  await assertModelInputPreparation(context, provider, model, options.messages)
   const session = options.stateless ? null : provider.createSession({
     assertInputAuthority: () => assertModelInputAuthority(context),
     model,
@@ -959,7 +966,7 @@ async function* queryLoopCore(
 
     try {
       await context.authority?.assertCurrent()
-      await assertModelInputAuthority(context)
+      await assertModelInputPreparation(context, provider, model, session ? nextMessages : statelessHistory)
       // Stateless: send full history via provider.stream() (no rawHistory accumulation).
       // Stateful: send only new messages via session.send() (preserves thought signatures).
       const sendOpts: SendOptions = {

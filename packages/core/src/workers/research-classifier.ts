@@ -1,7 +1,7 @@
 import {bindScopeSources,boundScopeSources} from '../security/source-evidence.js'
 import {isTrivialChatMessage} from '../classification/trivial-chat.js'
 import {DerivedScopeError} from '../security/derived-scope.js'
-import {assertInputAuthority,isInputAuthorityError} from '../providers/input-authority.js'
+import {assertInputAuthority,assertProviderInputPreparation,captureInputAdmissionProvider,isInputAuthorityError} from '../providers/input-authority.js'
 import type {SessionContextAuthority} from '../memory/session-state-types.js'
 /**
  * Pre-flight classifier for adaptive research-mode entry.
@@ -219,19 +219,18 @@ async function classifyResearchWithLlm(params: {
   message: string
   recentConversation: Array<{ role: 'user' | 'assistant'; text: string }>
 }): Promise<ResearchClassifyResult> {
-  await assertInputAuthority(params.assertInputAuthority)
-  const stream = params.provider.stream({
+  const provider = captureInputAdmissionProvider(params.provider)
+  const messages = [{ role: 'user' as const, content: JSON.stringify({
+    currentMessage: params.message,
+    recentConversation: params.recentConversation,
+  }) }]
+  await assertProviderInputPreparation(provider, { model: params.model, messages }, params.assertInputAuthority)
+  const stream = provider.stream({
     assertInputAuthority: params.assertInputAuthority,
     signal: params.signal,
     model: params.model,
     systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-    messages: [{
-      role: 'user',
-      content: JSON.stringify({
-        currentMessage: params.message,
-        recentConversation: params.recentConversation,
-      }),
-    }],
+    messages,
     maxTokens: 128,
     temperature: 0,
   })
@@ -328,6 +327,7 @@ async function classifyResearchIntentCurrent(
         }],
       },
       operation: {
+        assertInputAuthority: options.assertInputAuthority,
         decide(response, { profile }) {
           const answer = response.answers[0]
           const probabilities = answer?.evidence.probabilities

@@ -1,3 +1,4 @@
+import { registerInputAdmissionOwner, assertProviderInputPreparation, captureInputAdmissionProvider } from './input-authority.js'
 /**
  * Open runtime seam for a hosted deployment to select provider credentials.
  * The open edition supplies no pool and keeps using its environment values.
@@ -71,29 +72,32 @@ export function wrapCredentialPoolProvider(options: {
     if (!lease) {
       throw new Error(`[provider-credentials] no eligible credential for ${options.providerId}`)
     }
-    return { lease, provider: options.create(lease.secret) }
+    return { lease, provider: captureInputAdmissionProvider(options.create(lease.secret)) }
   }
 
-  return {
+  return registerInputAdmissionOwner({
     name: template.name,
     models: template.models,
 
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
       const resolved = await resolveProvider()
+      await assertProviderInputPreparation(resolved.provider, request, request.assertInputAuthority)
       yield* meteredStream(resolved.provider.stream(request), resolved.lease, request.model)
     },
 
     createSession(sessionOptions: SessionOptions): ProviderSession {
-      let resolved: { lease: ExternalCredentialLease; session: ProviderSession } | null = null
+      let resolved: { lease: ExternalCredentialLease; provider: LLMProvider; session?: ProviderSession } | null = null
       return {
         async *send(messages, sendOptions): AsyncIterable<StreamChunk> {
           if (!resolved) {
             const selected = await resolveProvider()
             resolved = {
               lease: selected.lease,
-              session: selected.provider.createSession(sessionOptions),
+              provider: selected.provider,
             }
           }
+          await assertProviderInputPreparation(resolved.provider, { ...sessionOptions, messages }, sendOptions?.assertInputAuthority ?? sessionOptions.assertInputAuthority)
+          resolved.session ??= resolved.provider.createSession(sessionOptions)
           yield* meteredStream(
             resolved.session.send(messages, sendOptions),
             resolved.lease,
@@ -102,5 +106,5 @@ export function wrapCredentialPoolProvider(options: {
         },
       }
     },
-  }
+  })
 }

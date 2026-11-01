@@ -1,3 +1,4 @@
+import { registerInputAdmissionOwner, assertProviderInputPreparation, captureInputAdmissionProvider } from './input-authority.js'
 /**
  * Routing provider — model id → provider instance, per request.
  *
@@ -142,7 +143,7 @@ export function createRoutingProvider(
     })
   }
 
-  return {
+  return registerInputAdmissionOwner({
     name: 'routing',
     models: Object.values(providers).flatMap((p) => p.models),
 
@@ -152,9 +153,12 @@ export function createRoutingProvider(
         : options?.resolveModel?.(request.model, {
             allowProviderFallback: request.allowProviderFallback,
           }) ?? request.model
-      return effectiveFor(model, request.allowProviderFallback !== false).stream(
-        model === request.model ? request : { ...request, model },
-      )
+      const selected = captureInputAdmissionProvider(effectiveFor(model, request.allowProviderFallback !== false))
+      const actual = model === request.model ? request : { ...request, model }
+      return (async function* () {
+        await assertProviderInputPreparation(selected, actual, request.assertInputAuthority)
+        yield* selected.stream(actual)
+      })()
     },
 
     createSession(sessionOpts: SessionOptions): ProviderSession {
@@ -163,9 +167,14 @@ export function createRoutingProvider(
         : options?.resolveModel?.(sessionOpts.model, {
             allowProviderFallback: sessionOpts.allowProviderFallback,
           }) ?? sessionOpts.model
-      return effectiveFor(model, sessionOpts.allowProviderFallback !== false).createSession(
-        model === sessionOpts.model ? sessionOpts : { ...sessionOpts, model },
-      )
+      const selected = captureInputAdmissionProvider(effectiveFor(model, sessionOpts.allowProviderFallback !== false))
+      const actual = model === sessionOpts.model ? sessionOpts : { ...sessionOpts, model }
+      let inner: ProviderSession | undefined
+      return { async *send(messages, opts) {
+        await assertProviderInputPreparation(selected, { ...actual, messages }, opts?.assertInputAuthority ?? actual.assertInputAuthority)
+        inner ??= selected.createSession(actual)
+        yield* inner.send(messages, opts)
+      } }
     },
-  }
+  })
 }

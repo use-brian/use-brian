@@ -5,6 +5,7 @@ import { buildTool, type ToolContext } from '../../tools/types.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
 import { queryLoop, assertModelOutputAuthority, type QueryEvent, type QueryLoopOptions } from '../query-loop.js'
 import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
+import { registerInputAdmissionOwner } from '../../providers/input-authority.js'
 vi.mock('../../compaction/compact.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../compaction/compact.js')>(),compactConversation: vi.fn(),
 }))
@@ -54,6 +55,24 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     expect(hook.mock.calls.every(([current]) => current.scopeAccumulator === ctx.scopeAccumulator)).toBe(true)
     expect(p.send).toHaveBeenCalledTimes(1)
     expect(events.some(event => event.type === 'text_delta')).toBe(true)
+  })
+  it.each([false,true])('delegates owned preparation but preserves dispatch and output checks (%s)', async stateless => {
+    const p = provider()
+    const input = vi.fn(async () => {})
+    const output = vi.fn(async () => {})
+    const owned = registerInputAdmissionOwner({ ...p.value,
+      async *stream(request) {
+        await request.assertInputAuthority?.()
+        yield* (p.value as LLMProvider).stream(request)
+      },
+      createSession(options) {
+        return { send: (messages, opts) => this.stream({ ...options, messages,
+          assertInputAuthority: opts?.assertInputAuthority ?? options.assertInputAuthority }) }
+      },
+    })
+    await run(owned, { ...context(input), assertModelOutputAuthority: output }, { stateless })
+    expect(input).toHaveBeenCalledTimes(1)
+    expect(output).toHaveBeenCalled()
   })
   it('carries the native lease to physical dispatch even without source facts', async () => {
     const p = provider(); let revoked = false

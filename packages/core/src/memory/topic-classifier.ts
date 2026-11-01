@@ -25,7 +25,7 @@
 import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
 import { isTrivialChatMessage } from '../classification/trivial-chat.js'
 import { DerivedScopeError } from '../security/derived-scope.js'
-import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
+import { assertInputAuthority, assertProviderInputPreparation, captureInputAdmissionProvider, isInputAuthorityError } from '../providers/input-authority.js'
 import type { SessionContextAuthority } from './session-state-types.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
@@ -180,16 +180,18 @@ async function classifyTopicWithLlm(
 ): Promise<TopicClassification> {
   let usage: TokenUsage | null = null
   let servedModel = opts.model
+  const provider = captureInputAdmissionProvider(opts.provider)
   try {
-    await assertInputAuthority(opts.assertInputAuthority)
+    const messages = [{ role: 'user' as const, content: buildClassifierPrompt(opts) }]
+    await assertProviderInputPreparation(provider, { model: opts.model, messages }, opts.assertInputAuthority)
     opts.signal.throwIfAborted()
     const response = await collectStream(
-      opts.provider.stream({
+      provider.stream({
         model: opts.model,
         assertInputAuthority: opts.assertInputAuthority,
         signal: opts.signal,
         systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: buildClassifierPrompt(opts) }],
+        messages,
         // Keep room for complete JSON on providers with mandatory reasoning,
         // while requesting their smallest reasoning budget for this task.
         maxTokens: 2000,

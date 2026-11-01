@@ -5,7 +5,10 @@ import { createAnthropicProvider } from '../anthropic.js'
 import { wrapProvider } from '../wrappers.js'
 import { wrapFallback } from '../wrap-fallback.js'
 import { wrapEndpointFallback } from '../wrap-endpoint-fallback.js'
-import { isInputAuthorityError } from '../input-authority.js'
+import { isInputAuthorityError, assertInputAuthority, registerInputAdmissionOwner, ownsInputAdmission } from '../input-authority.js'
+import { createRoutingProvider } from '../routing.js'
+import { wrapCredentialPoolProvider } from '../credential-pool.js'
+import { wrapDocumentAdaptation } from '../document-adaptation.js'
 import type { LLMProvider, ProviderRequest, StreamChunk } from '../types.js'
 
 const request: ProviderRequest = { model: 'gemini-3-flash',systemPrompt: 'Fictional input',messages: [{ role: 'user',content: 'Fictional record' }] }
@@ -21,6 +24,109 @@ function dispatch(provider: LLMProvider, stateless: boolean, input = request) {
 // Transport/recovery mechanics. The API integration suite supplies independent source ACL proof.
 describe('[COMP:engine/model-input-authority] provider attempts', () => {
   afterEach(() => vi.unstubAllGlobals())
+  function ownedProvider(before: () => void = () => {}): LLMProvider {
+    return registerInputAdmissionOwner({
+      name: 'gemini', models: ['gemini-3-flash-standard'],
+      async *stream(input) {
+        before()
+        await assertInputAuthority(input.assertInputAuthority)
+        yield { type: 'text_delta', text: 'Admitted fictional result' }
+      },
+      createSession(options) {
+        return { send: (messages, opts) => this.stream({ ...options, messages,
+          assertInputAuthority: opts?.assertInputAuthority ?? options.assertInputAuthority }) }
+      },
+    })
+  }
+  it.each([false,true])('delegates nested preparation to a fresh physical check (%s)', async stateless => {
+    const check = vi.fn(async () => {})
+    const routed = createRoutingProvider({ gemini: wrapProvider(ownedProvider()) })
+    await drain(dispatch(routed, stateless, { ...request, model: 'gemini-3-flash-standard', assertInputAuthority: check }))
+    expect(check).toHaveBeenCalledTimes(1)
+  })
+  it.each([false,true])('still refuses revocation during owned request preparation (%s)', async stateless => {
+    let revoked = false
+    const check = vi.fn(async () => { if (revoked) throw denied() })
+    await expect(drain(dispatch(wrapProvider(ownedProvider(() => { revoked = true })), stateless,
+      { ...request, assertInputAuthority: check }))).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(check).toHaveBeenCalledTimes(1)
+  })
+  it('invalidates registration on method replacement and never trusts copied metadata', async () => {
+    const base = ownedProvider()
+    expect(ownsInputAdmission({ ...base }, request)).toBe(false)
+    const replaced = vi.fn(() => (async function* () {})())
+    base.stream = replaced
+    expect(ownsInputAdmission(base, request)).toBe(false)
+    await expect(drain(wrapProvider(base).stream({ ...request, assertInputAuthority: async () => { throw denied() } })))
+      .rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(replaced).not.toHaveBeenCalled()
+  })
+  it.each(['fallback','routing','wrapper','document'] as const)('pins owned methods across asynchronous preparation (%s)', async kind => {
+    const base = ownedProvider()
+    const wrapped = kind === 'fallback' ? wrapFallback(base, ownedProvider())
+      : kind === 'routing' ? createRoutingProvider({ gemini: base })
+      : kind === 'document' ? wrapDocumentAdaptation(base, { nativePdf: false, vision: false })
+      : wrapProvider(base)
+    const check = vi.fn(async () => { throw denied() })
+    const pending = wrapped.stream({ ...request, model: 'gemini-3-flash-standard', assertInputAuthority: check })[Symbol.asyncIterator]().next()
+    const replaced = vi.fn(() => (async function* () { yield { type: 'text_delta' as const, text: 'Unchecked' } })())
+    base.stream = replaced
+    await expect(pending).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(replaced).not.toHaveBeenCalled()
+    expect(check).toHaveBeenCalledTimes(1)
+  })
+  it.each(['fallback','routing','wrapper','document'] as const)('pins session construction across asynchronous preparation (%s)', async kind => {
+    const base = ownedProvider()
+    const wrapped = kind === 'fallback' ? wrapFallback(base, ownedProvider())
+      : kind === 'routing' ? createRoutingProvider({ gemini: base })
+      : kind === 'document' ? wrapDocumentAdaptation(base, { nativePdf: false, vision: false })
+      : wrapProvider(base)
+    const check = vi.fn(async () => { throw denied() })
+    const session = wrapped.createSession({ ...request, model: 'gemini-3-flash-standard', assertInputAuthority: check })
+    const pending = session.send(request.messages)[Symbol.asyncIterator]().next()
+    const replaced = vi.fn(() => ({ send: () => (async function* () {})() }))
+    base.createSession = replaced
+    await expect(pending).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(replaced).not.toHaveBeenCalled()
+    expect(check).toHaveBeenCalledTimes(1)
+  })
+  it('defers unknown primary session construction until admission', async () => {
+    const primary = fixtureProvider(() => (async function* () {})())
+    primary.createSession = vi.fn(primary.createSession)
+    const session = wrapFallback(primary, ownedProvider()).createSession({ ...request,
+      assertInputAuthority: async () => { throw denied() } })
+    expect(primary.createSession).not.toHaveBeenCalled()
+    await expect(drain(session.send(request.messages))).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(primary.createSession).not.toHaveBeenCalled()
+  })
+  it.each([false,true])('checks the actual credential-selected child after revocation (%s)', async stateless => {
+    let revoked = false
+    const child = fixtureProvider(() => (async function* () { throw new Error('Must not dispatch') })())
+    child.createSession = vi.fn(child.createSession)
+    child.stream = vi.fn(child.stream)
+    const pooled = wrapCredentialPoolProvider({ providerId: 'gemini', systemFallback: 'template',
+      create: secret => secret === 'template' ? ownedProvider() : child,
+      pool: { resolve: async () => {
+        revoked = true
+        return { credentialId: null, provider: 'gemini', secret: 'selected', source: 'system', recordSpend: async () => {} }
+      } },
+    })
+    await expect(drain(dispatch(pooled, stateless, { ...request,
+      assertInputAuthority: async () => { if (revoked) throw denied() } }))).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(child.stream).not.toHaveBeenCalled()
+    expect(child.createSession).not.toHaveBeenCalled()
+  })
+  it('retains admission before auxiliary document work', async () => {
+    const distill = vi.fn(async () => ({ text: 'Fictional attachment', model: 'fixture' }))
+    const provider = wrapDocumentAdaptation(ownedProvider(), { nativePdf: false, vision: false,
+      distill: { configKey: 'fixture', distill } })
+    const input: ProviderRequest = { ...request, messages: [{ role: 'user', content: [{
+      type: 'image', mimeType: 'application/pdf', data: 'ZmljdGlvbmFs',
+    }] }], assertInputAuthority: async () => { throw denied() } }
+    expect(ownsInputAdmission(provider, input)).toBe(false)
+    await expect(drain(wrapProvider(provider).stream(input))).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(distill).not.toHaveBeenCalled()
+  })
   it('recognizes nested SDK refusals and terminates cyclic error causes', () => {
     expect(isInputAuthorityError(new Error('SDK wrapper', { cause: denied() }))).toBe(true)
     const cycle = new Error('Cycle'); cycle.cause = cycle

@@ -2,7 +2,7 @@ import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import type { LLMProvider, ProviderSession, SessionOptions, SendOptions, Message, StreamChunk, StreamFn, TokenUsage } from './types.js'
 import { fitMessagesToBudget, resolveInputTokenLimit, isContextOverflowError, MODEL_CONTEXT_FIT_RATIO } from './context-budget.js'
-import { assertInputAuthority } from './input-authority.js'
+import { assertInputAuthority, ownsInputAdmission, registerInputAdmissionOwner, captureInputAdmissionProvider } from './input-authority.js'
 
 /**
  * Composable stream wrappers.
@@ -827,10 +827,10 @@ export function defaultWrappers(options?: {
   /** First-chunk (prefill) window — see `wrapIdleTimeout`. Default 90s. */
   firstChunkTimeoutMs?: number
   verbose?: boolean
-}): StreamWrapper[] {
+}, admissionOwner?: LLMProvider): StreamWrapper[] {
   return [
     (inner) => async function* (request) {
-      await assertInputAuthority(request.assertInputAuthority)
+      if (!admissionOwner || !ownsInputAdmission(admissionOwner, request)) await assertInputAuthority(request.assertInputAuthority)
       yield* inner(request)
     },
     wrapContextBudget(),
@@ -865,15 +865,16 @@ export function wrapProvider(
   base: LLMProvider,
   options?: { idleTimeoutMs?: number; firstChunkTimeoutMs?: number; verbose?: boolean },
 ): LLMProvider {
-  const wrappers = defaultWrappers(options)
-  const wrappedStream: StreamFn = composeWrappers(base.stream, ...wrappers)
+  base = captureInputAdmissionProvider(base)
+  const wrappers = defaultWrappers(options, base)
+  const wrappedStream: StreamFn = composeWrappers(base.stream.bind(base), ...wrappers)
 
-  return {
+  return registerInputAdmissionOwner({
     name: base.name,
     models: base.models,
     stream: wrappedStream,
     createSession(sessionOpts: SessionOptions): ProviderSession {
-      const inner = base.createSession(sessionOpts)
+      let inner: ProviderSession | undefined
       return {
         send(messages: Message[], sendOpts?: SendOptions): AsyncIterable<StreamChunk> {
           // Adapt session.send (closure over sendOpts) into the StreamFn shape
@@ -884,7 +885,10 @@ export function wrapProvider(
           // successful stream — see gemini.ts), so re-sending trimmed messages
           // on the budget wrapper's retry is safe. The other wrappers don't
           // touch `req.messages`, so this is a no-op for them.
-          const adaptedFn: StreamFn = (req) => inner.send(req.messages, { ...sendOpts, signal: req.signal, httpRetryWindow: req.httpRetryWindow, assertInputAuthority: req.assertInputAuthority })
+          const adaptedFn: StreamFn = (req) => {
+            inner ??= base.createSession(sessionOpts)
+            return inner.send(req.messages, { ...sendOpts, signal: req.signal, httpRetryWindow: req.httpRetryWindow, assertInputAuthority: req.assertInputAuthority })
+          }
           const wrapped = composeWrappers(adaptedFn, ...wrappers)
           return wrapped({
             assertInputAuthority: sendOpts?.assertInputAuthority ?? sessionOpts.assertInputAuthority,
@@ -897,10 +901,10 @@ export function wrapProvider(
             inputTokenLimit: sessionOpts.inputTokenLimit,
             temperature: sessionOpts.temperature,
             thinkingLevel: sendOpts?.thinkingLevel ?? sessionOpts.thinkingLevel,
-            signal: sessionOpts.signal,
+            signal: sendOpts?.signal ?? sessionOpts.signal,
           })
         },
       }
     },
-  }
+  })
 }

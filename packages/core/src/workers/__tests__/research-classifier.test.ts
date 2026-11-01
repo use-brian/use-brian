@@ -94,6 +94,22 @@ describe('[COMP:workers/research-classifier] detectOperateSiteIntent', () => {
 })
 
 describe('[COMP:workers/research-classifier] classifyResearchIntent', () => {
+  it('binds current authority to a configured non-LLM decision primary', async () => {
+    const llm = makeProvider('{"research":false}')
+    let revoked = false
+    const refusal = Object.assign(new Error('Fictional input unavailable'), { reason: 'authority_changed', retrySafe: false })
+    const check = vi.fn(async () => { if (revoked) throw refusal })
+    const primary = fixtureDecisionProvider(async request => {
+      expect(request.assertInputAuthority).toBeTypeOf('function')
+      revoked = true
+      await request.assertInputAuthority!()
+      throw new Error('Must not consume revoked state')
+    })
+    await expect(classifyResearchIntent({ provider: llm, message: 'Compare battery suppliers',
+      assertInputAuthority: check, decisionRuntime: executionFixture({ llm, primary }) }))
+      .rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(llm.stream).not.toHaveBeenCalled()
+  })
   it('accepts a terminal injected decision without calling the LLM', async () => {
     const llm = makeProvider('{"research":false}')
     const decisionRuntime = executionFixture({

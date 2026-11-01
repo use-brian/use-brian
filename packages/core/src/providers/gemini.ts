@@ -15,7 +15,7 @@ import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, Sessio
 import type { GoogleTransport } from './google-transport.js'
 import { aiStudioTransport } from './google-transport.js'
 import { createGeminiHttpRetry } from './gemini-http-retry.js'
-import { assertInputAuthority } from './input-authority.js'
+import { assertInputAuthority, registerInputAdmissionOwner } from './input-authority.js'
 import { systemContextParts, extractHistorySystemContext } from './system-context.js'
 
 /** Alias → real Google model id, derived from the model registry (each
@@ -1135,7 +1135,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
       }
     },
   }
-  return {
+  return registerInputAdmissionOwner({
     ...provider,
     stream: request => bufferProviderStream(signal => provider.stream({ ...request, signal }), request.signal),
     createSession: options => {
@@ -1144,5 +1144,5 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
         signal => session.send(messages, { ...opts, signal }), opts?.signal ?? options.signal,
       ) }
     },
-  }
+  })
 }
