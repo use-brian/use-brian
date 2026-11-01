@@ -19,6 +19,7 @@ describe("[COMP:app-web/office-document-editor] document page reflow below md", 
     expect(phoneBlock).toContain(".office-document-stage { width: 100%; min-width: 0; }");
     expect(phoneBlock).toContain("width: min(var(--office-page-width, 612pt), 100%);");
     expect(phoneBlock).toContain("min-height: auto;");
+    expect(phoneBlock).toContain(".office-document-body { min-height: 0; }");
     expect(phoneBlock).toContain(".office-document-prosemirror { min-width: 0; }");
   });
 });

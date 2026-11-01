@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { Editor } from "@tiptap/core";
+import { Collaboration } from "@tiptap/extension-collaboration";
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -10,8 +12,9 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { DocumentEditor } from "../document-editor";
 import { DOCUMENT_EDITOR_ACTIONS } from "../document/editor-actions";
-import { documentPageStartIds, measureDocumentPaginationBlocks } from "../document/pagination-decorations";
-import { documentFixture } from "./editor-fixtures";
+import { documentPageLayout, measureDocumentPaginationBlocks, refreshDocumentPagination } from "../document/pagination-decorations";
+import { officeDocumentEditorExtensions } from "../document/editor-schema";
+import { documentFixture, uid } from "./editor-fixtures";
 import { documentSnapshotToEditorJson, officeCapabilityManifest, snapshotToYDoc, yDocToSnapshot, getDocumentFragment } from "@use-brian/office-model";
 
 vi.mock("@/lib/use-doc-media", () => ({
@@ -50,25 +53,97 @@ describe("[COMP:app-web/office-document-editor] Document editor", () => {
   });
 
   it("places visual page starts at overflow and explicit break boundaries", () => {
-    const starts = documentPageStartIds([
+    const layout = documentPageLayout([
       { id: "first", heightPx: 70, spacingBeforePx: 0, breakAfter: false },
       { id: "overflow", heightPx: 40, spacingBeforePx: 8, breakAfter: false },
       { id: "break", heightPx: 0, spacingBeforePx: 8, breakAfter: true },
       { id: "after-break", heightPx: 20, spacingBeforePx: 8, breakAfter: false },
     ], 100);
-    expect([...starts]).toEqual(["overflow", "after-break"]);
+    expect([...layout.pageStarts]).toEqual([["overflow", 30], ["after-break", 52]]);
+    expect(layout.pageCount).toBe(3);
   });
 
   it("measures collapsed margins once, including preceding bottom margins", () => {
     const body = document.createElement('main');
     body.innerHTML = '<p id="one" style="margin-bottom:30px"></p><p id="two" style="margin-top:20px"></p>';
+    vi.spyOn(body, 'getBoundingClientRect').mockReturnValue({ top: 100 } as DOMRect);
     const children = [...body.children];
     vi.spyOn(children[0], 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 140, height: 40 } as DOMRect);
     vi.spyOn(children[1], 'getBoundingClientRect').mockReturnValue({ top: 170, bottom: 210, height: 40 } as DOMRect);
     const blocks = measureDocumentPaginationBlocks(body);
     expect(blocks.map(b => b.spacingBeforePx)).toEqual([0, 30]);
-    expect([...documentPageStartIds(blocks, 105)]).toEqual(['two']);
-    expect([...documentPageStartIds(blocks, 110)]).toEqual([]);
+    expect([...documentPageLayout(blocks, 105).pageStarts.keys()]).toEqual(['two']);
+    expect([...documentPageLayout(blocks, 110).pageStarts.keys()]).toEqual([]);
+  });
+
+  it("fills a short page when the following indivisible table cannot fit", () => {
+    const layout = documentPageLayout([
+      { id: "signature-table", heightPx: 350, spacingBeforePx: 0, breakAfter: false },
+      { id: "schedule-heading", heightPx: 40, spacingBeforePx: 0, breakAfter: false },
+      { id: "schedule-table", heightPx: 630, spacingBeforePx: 0, breakAfter: false },
+    ], 880);
+    expect([...layout.pageStarts]).toEqual([["schedule-table", 490]]);
+    expect(layout.pageCount).toBe(2);
+  });
+
+  it("accounts for the leading paragraph margin and leaves oversized blocks reachable", () => {
+    const layout = documentPageLayout([
+      { id: "first", heightPx: 70, spacingBeforePx: 20, breakAfter: false },
+      { id: "oversized", heightPx: 160, spacingBeforePx: 15, breakAfter: false },
+      { id: "last", heightPx: 20, spacingBeforePx: 0, breakAfter: false },
+    ], 100);
+    expect([...layout.pageStarts]).toEqual([["oversized", 10], ["last", 0]]);
+    expect(layout.pageCount).toBe(3);
+    expect(layout.overflowPx).toBe(60);
+  });
+
+  it("projects repeatable gaps and full final-page height without changing collaborative content", () => {
+    const snapshot = documentFixture();
+    snapshot.sections = [snapshot.sections[0]];
+    snapshot.sections[0].page = { ...snapshot.sections[0].page, heightPt: 300, marginTopPt: 30, marginBottomPt: 30 };
+    snapshot.sections[0].nodes = [0, 1, 2].map(index => ({
+      id: uid(800 + index), kind: "paragraph", styleName: "Body", alignment: "start",
+      runs: [{ id: uid(810 + index), text: "Synthetic page content", style: snapshot.sections[0].header[0].style }],
+    }));
+    const doc = snapshotToYDoc(snapshot);
+    const editor = new Editor({ extensions: [...officeDocumentEditorExtensions(), Collaboration.configure({ fragment: getDocumentFragment(doc) })] });
+    document.body.append(editor.view.dom);
+    try {
+      const section = editor.view.dom.querySelector<HTMLElement>(".office-document-section")!;
+      vi.spyOn(section, "getBoundingClientRect").mockReturnValue({ left: 20, width: 800 } as DOMRect);
+      const body = section.querySelector<HTMLElement>(".office-document-body")!;
+      vi.spyOn(body, "getBoundingClientRect").mockReturnValue({ top: 0 } as DOMRect);
+      const heights = [100, 50, 200];
+      let top = 0;
+      for (const [index, child] of [...body.children].entries()) {
+        const rect = { top, bottom: top + heights[index], height: heights[index], left: index === 2 ? 128 : 120, width: 500 } as DOMRect;
+        vi.spyOn(child, "getBoundingClientRect").mockImplementation(() => {
+          // A stale projection must be removed before measuring the next layout.
+          expect(child.classList.contains("office-document-page-start")).toBe(false);
+          return rect;
+        });
+        top += heights[index];
+      }
+      for (let pass = 0; pass < 3; pass += 1) {
+        refreshDocumentPagination(editor);
+        expect(body.children[2].getAttribute("data-office-page-start")).toBe("true");
+        expect((body.children[2] as HTMLElement).style.getPropertyValue("--office-page-remainder")).toBe("170px");
+        expect((body.children[2] as HTMLElement).style.getPropertyValue("--office-page-divider-left")).toBe("-108px");
+        expect((body.children[2] as HTMLElement).style.getPropertyValue("--office-page-divider-width")).toBe("800px");
+        expect(body.style.getPropertyValue("--office-paginated-body-height")).toBe("calc(720px + 1 * 1.5rem)");
+        expect(yDocToSnapshot(doc)).toEqual(snapshot);
+      }
+      // A page-size edit fits the same blocks on one sheet and clears old gaps.
+      getDocumentFragment(doc).get(0).setAttribute("page", { ...snapshot.sections[0].page, heightPt: 600 } as never);
+      refreshDocumentPagination(editor);
+      const resizedBody = editor.view.dom.querySelector<HTMLElement>(".office-document-body")!;
+      expect(resizedBody.querySelector(".office-document-page-start")).toBeNull();
+      expect(resizedBody.style.getPropertyValue("--office-paginated-body-height")).toBe("calc(720px + 0 * 1.5rem)");
+    } finally {
+      editor.view.dom.remove();
+      editor.destroy();
+      doc.destroy();
+    }
   });
 
   it("centers and separates printable pages without framing the editable canvas", () => {
@@ -168,8 +243,10 @@ describe("[COMP:app-web/office-document-editor] Document editor", () => {
       snapshot.sections[0].page.marginTopPt = 12;
       act(() => getDocumentFragment(doc).get(0).setAttribute('page', { ...snapshot.sections[0].page } as never));
       await act(async () => { await new Promise(resolve => window.setTimeout(resolve, 10)); });
-      expect(header.style.getPropertyValue('--office-header-image-width')).toBe('8pt');
-      expect(header.style.getPropertyValue('--office-header-image-height')).toBe('12pt');
+      // Collaborative page edits may replace the DOM subtree; inspect the live view.
+      const resizedHeader = container.querySelector<HTMLElement>('.office-document-header')!;
+      expect(resizedHeader.style.getPropertyValue('--office-header-image-width')).toBe('8pt');
+      expect(resizedHeader.style.getPropertyValue('--office-header-image-height')).toBe('12pt');
       expect(yDocToSnapshot(doc)).toEqual(snapshot);
     }
     const css = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../app/globals.css'), 'utf8');

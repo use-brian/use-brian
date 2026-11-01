@@ -3073,17 +3073,22 @@ button.doc-comment-card:hover {
 }
 .office-document-section { counter-increment: office-page; }
 /* Contain paragraph margins so DOM gaps and printable-body metrics agree. */
-.office-document-body { min-width: 0; display: flow-root; }
+.office-document-body {
+  min-width: 0;
+  min-height: var(--office-paginated-body-height, 0px);
+  display: flow-root;
+}
 .office-document-body > * { margin-block: 0; }
 .office-document-page-start {
   position: relative;
-  margin-top: calc(var(--office-margin-bottom, 72pt) + 1.5rem + var(--office-margin-top, 72pt)) !important;
+  margin-top: calc(var(--office-margin-bottom, 72pt) + 1.5rem + var(--office-margin-top, 72pt) + var(--office-page-remainder, 0px)) !important;
 }
 .office-document-page-start::before {
+  /* Match the paper even when this block is an indented or narrow table. */
   position: absolute;
   top: calc(-1 * (var(--office-margin-top, 72pt) + 1.5rem));
-  right: calc(-1 * var(--office-margin-right, 72pt) - 1px);
-  left: calc(-1 * var(--office-margin-left, 72pt) - 1px);
+  left: var(--office-page-divider-left);
+  width: var(--office-page-divider-width);
   height: 1.5rem;
   border-top: 1px solid color-mix(in srgb, var(--border) 88%, var(--foreground) 12%);
   border-bottom: 1px solid color-mix(in srgb, var(--border) 88%, var(--foreground) 12%);
@@ -3102,6 +3107,7 @@ button.doc-comment-card:hover {
 @media (max-width: 767px) {
   .office-document-stage { width: 100%; min-width: 0; }
   .office-document-prosemirror { min-width: 0; }
+  .office-document-body { min-height: 0; }
   .office-document-section {
     width: min(var(--office-page-width, 612pt), 100%);
     min-height: auto;
@@ -3118,8 +3124,6 @@ button.doc-comment-card:hover {
   }
   .office-document-page-start::before {
     top: -2.25rem;
-    right: calc(-1rem - 1px);
-    left: calc(-1rem - 1px);
   }
 }
 .office-document-prosemirror p { white-space: pre-wrap; }
