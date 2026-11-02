@@ -20,7 +20,7 @@ import type {Tool,ToolContext} from '../tools/types.js'
 
 export type RoutineCalendarCall={name:string;input:{calendarId:string;timeMin:string;timeMax:string;maxResults:number}}
 type Candidate={calls:RoutineCalendarCall[]}
-type ScopeVocabulary={targets:Array<{id:string;name:string;calendarId:string}>;ranges:Array<{id:string;timeMin:string;timeMax:string}>;reason?:string}
+type ScopeVocabulary={targets:Array<{id:string;name:string;calendarId:string}>;ranges:Array<{id:string;timeMin:string;timeMax:string;labels:string[]}>;reason?:string}
 const planData=new WeakMap<object,{calls:RoutineCalendarCall[];current:()=>void}>()
 type RoutineReadPlan=Readonly<{kind:'calendar_events'}>
 export type RoutineReadPlanningResult={plan:RoutineReadPlan|null;durationMs:number;model:string|null;usage:TokenUsage|null;path:string;scopeCounts?:{targets:number;ranges:number;questions:number}}
@@ -46,7 +46,7 @@ function localDayRange(now:number,timeZone:string):{timeMin:string;timeMax:strin
 
 /** Data vocabulary only. Historical success is not current source permission. */
 function scopeVocabularyFor(messages:Message[],names:string[],now:number,history:readonly RoutineCalendarCall[]=[],timeZone='UTC'):ScopeVocabulary{
- const targets=new Map<string,{name:string;calendarId:string}>(),ranges=new Map<string,{timeMin:string;timeMax:string}>()
+ const targets=new Map<string,{name:string;calendarId:string}>(),ranges=new Map<string,{timeMin:string;timeMax:string;labels:string[]}>()
  const result=(reason?:string):ScopeVocabulary=>({targets:[...targets.values()].map((target,index)=>({id:`target_${index}`,...target})),
   ranges:[...ranges.values()].map((range,index)=>({id:`range_${index}`,...range})),...(reason?{reason}:{})})
  const successes=new Set<string>(),uses:Array<{id:string;name:string;input:Record<string,unknown>}>=[]
@@ -65,10 +65,11 @@ function scopeVocabularyFor(messages:Message[],names:string[],now:number,history
   }
  }
  for(const [index,call] of history.entries())if(names.includes(call.name)){const id=`history_${index}`;successes.add(id);uses.push({id,name:call.name,input:call.input})}
- const addRange=(timeMin:string,timeMax:string)=>{
+ const addRange=(timeMin:string,timeMax:string,label:string)=>{
   const start=Date.parse(timeMin),end=Date.parse(timeMax)
   if(!iso.safeParse(timeMin).success||!iso.safeParse(timeMax).success||end<=start||end-start>366*86400_000)return
-  ranges.set(timeMin+'\n'+timeMax,{timeMin,timeMax})
+  const key=timeMin+'\n'+timeMax,existing=ranges.get(key)
+  if(existing){if(!existing.labels.includes(label))existing.labels.push(label)}else ranges.set(key,{timeMin,timeMax,labels:[label]})
  }
  for(const name of names)targets.set(name+'\nprimary',{name,calendarId:'primary'})
  for(const use of uses){
@@ -76,7 +77,7 @@ function scopeVocabularyFor(messages:Message[],names:string[],now:number,history
   const calendarId=use.input.calendarId??'primary'
   if(typeof calendarId!=='string'||!calendarId||calendarId.length>1024)continue
   targets.set(use.name+'\n'+calendarId,{name:use.name,calendarId})
-  if(typeof use.input.timeMin==='string'&&typeof use.input.timeMax==='string')addRange(use.input.timeMin,use.input.timeMax)
+  if(typeof use.input.timeMin==='string'&&typeof use.input.timeMax==='string')addRange(use.input.timeMin,use.input.timeMax,'Historical exact window')
  }
  // Preserve every historical target; too many choices means ordinary planning,
  // never silently dropping an account/calendar from the model's vocabulary.
@@ -85,18 +86,18 @@ function scopeVocabularyFor(messages:Message[],names:string[],now:number,history
  const historical=[...ranges.values()]
  const current=new Date(now).toISOString(),day=localDayRange(now,timeZone)
  if(!day)return result('scope_timezone')
- addRange(day.timeMin,day.timeMax)
- addRange(current,day.timeMax)
- addRange(current,new Date(now+7*86400_000).toISOString())
- addRange(current,new Date(now+30*86400_000).toISOString())
+ addRange(day.timeMin,day.timeMax,`Current local day (${timeZone})`)
+ addRange(current,day.timeMax,`Remainder of today (${timeZone})`)
+ addRange(current,new Date(now+7*86400_000).toISOString(),'Next 7 days from now')
+ addRange(current,new Date(now+30*86400_000).toISOString(),'Next 30 days from now')
  // Existing explicit endpoints remain selectable. A contiguous union permits
  // one bounded read instead of fishing through successive date partitions.
  const old=historical
  if(old.length){
   const start=old.reduce((a,b)=>Date.parse(a.timeMin)<Date.parse(b.timeMin)?a:b).timeMin
   const end=old.reduce((a,b)=>Date.parse(a.timeMax)>Date.parse(b.timeMax)?a:b).timeMax
-  addRange(start,end)
-  for(const range of old)if(Date.parse(range.timeMax)>now)addRange(current,range.timeMax)
+  addRange(start,end,'Contiguous union of historical windows')
+  for(const range of old)if(Date.parse(range.timeMax)>now)addRange(current,range.timeMax,'Now to a historical window end')
  }
  if(ranges.size+1>TYPESAFE_JEV_CAPABILITIES.maxOptions)return result('scope_option_limit')
  return result()
@@ -143,12 +144,12 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
  }
  const runtime=captureClassifierDecisionRuntime(input.runtime,check,active)!
  const questions:DecisionQuestion[]=[{
-  kind:'choice',id:'routine',prompt:'Select calendar ONLY when one read of the selected calendars over ONE listed shared window exactly satisfies the entire current task under every supplied governing system/runtime instruction and full conversation. The model chooses calendars/accounts and dates each time; there is NO default. Honor explicit user instructions and clearly established scope. Choose ordinary for an unlisted identity/window, different windows per calendar, discovery, filtering, writes, research, compound operations, ambiguity or further planning. Never silently omit a required calendar, substitute an account, broaden dates or fish for activity. Historical success is identity evidence, never permission.',
+  kind:'choice',id:'routine',prompt:'Select calendar ONLY when one read of the selected calendars over ONE listed shared window exactly satisfies the entire current task under every supplied governing system/runtime instruction and full conversation. The model chooses calendars/accounts and dates each time; there is NO default. Honor explicit user instructions and clearly established scope. When dates are unstated and no range is clearly established, choose a reasonable listed window using the full context; missing dates alone are not ambiguity. Choose ordinary for an unlisted identity/window, different windows per calendar, discovery, filtering, writes, research, compound operations, ambiguous calendar/account scope, conflicting scope constraints or further planning. Never silently omit a required calendar, substitute an account, broaden dates or fish for activity. Historical success is identity evidence, never permission.',
   options:[{value:'ordinary',description:'Continue the normal model/tool loop'},{value:'calendar',description:'The explicit target inclusions and listed shared window completely satisfy this task'}],
  },...targets.map((target):DecisionQuestion=>({kind:'boolean',id:target.id,
   prompt:'Include exactly this account/calendar in the complete routine read? '+JSON.stringify({name:target.name,calendarId:target.calendarId})+' Answer false if unnecessary or the global decision is ordinary. Include every required target; do not substitute primary for a named calendar. Primary plus a concrete ID on the same account is unresolved aliasing: choose ordinary.',
- })),{kind:'choice',id:'range',prompt:'Choose the exact date window shared by EVERY selected calendar. Choose none when unlisted, ambiguous, different per calendar, or the global decision is ordinary. Do not silently shorten or broaden the requested period.',
-  options:[{value:'none',description:'Unrepresented/ambiguous window or ordinary planning'},...ranges.map(range=>({value:range.id,description:JSON.stringify({timeMin:range.timeMin,timeMax:range.timeMax})}))],
+ })),{kind:'choice',id:'range',prompt:'Evaluate the calendar date scope independently from the other questions, using the full request and conversation. Choose the most appropriate listed window for the requested calendar read. Explicit dates and a clearly established conversation range take precedence. An undated request with no clearly established range delegates the date choice to you: select the listed window you judge reasonable from the full context. Missing dates alone are not ambiguity and are not a reason to choose none. Choose none ONLY for conflicting date constraints, an explicit or established window absent from the list, or incompatible different windows requested for different calendars. Do not condition this answer on an answer to another question; the host separately enforces the overall plan decision. Do not silently shorten or broaden an explicit or established period.',
+  options:[{value:'none',description:'Conflicting date constraints, an unlisted explicit/established window, or incompatible different windows requested per calendar. NOT merely unstated dates.'},...ranges.map(range=>({value:range.id,description:JSON.stringify({labels:range.labels,timeMin:range.timeMin,timeMax:range.timeMax})}))],
  }]
  const decodedPlans=new WeakMap<Candidate,{calls:RoutineCalendarCall[];bytes:string}>()
  const decode=(response:DecisionResponse):Candidate|null=>{

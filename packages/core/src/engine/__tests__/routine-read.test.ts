@@ -52,6 +52,35 @@ async function runHost(f:ReturnType<typeof setup>,onEvent?:(event:QueryEvent)=>v
  while(true){const result=await iterator.next();if(result.done)return{events,result:result.value};events.push(result.value);onEvent?.(result.value)}
 }
 describe('[COMP:engine/routine-read] full-context host calendar reads',()=>{
+ it.each([7,30])('preserves the model-chosen %s-day window for an undated request without imposing a default',async days=>{
+  const f=setup(),original=f.evaluate.getMockImplementation()!
+  f.input.messages=[...history.slice(0,2),{role:'user',content:'Check that calendar now.'}]
+  let selectedWindow:{timeMin:string;timeMax:string}|undefined
+  f.evaluate.mockImplementation(async request=>{
+   const response=await original(request)
+   const state=request.state as unknown as {now:string;ranges:Array<{id:string;timeMin:string;timeMax:string}>}
+   const selectedEnd=new Date(Date.parse(state.now)+days*86_400_000).toISOString()
+   const selected=state.ranges.find(value=>value.timeMin===state.now&&value.timeMax===selectedEnd)!
+   selectedWindow={timeMin:selected.timeMin,timeMax:selected.timeMax}
+   expect(selected).toBeDefined()
+   for(const id of ['routine','range'])expect(request.questions.find(question=>question.id===id)?.prompt.toLowerCase()).toContain('missing dates alone are not ambiguity')
+   expect(request.questions.find(question=>question.id==='range')?.prompt).not.toMatch(/global ordinary|EVERY selected/)
+   expect(request.questions.find(question=>question.id==='range')?.prompt).toContain('independently from the other questions')
+   response.answers[response.answers.length-1]={kind:'choice',questionId:'range',value:selected.id,evidence:{source:'unavailable'}}
+   return response
+  })
+  const {result}=await runHost(f)
+  expect(result.complete).toBe(true)
+  expect(f.list).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({calendarId:'fictional-calendar',...selectedWindow,maxResults:2500}))
+ })
+ it('retains ordinary planning for an explicit unrepresented period rather than substituting an available window',async()=>{
+  const f=setup({choose:()=> 'ordinary'})
+  f.input.messages=[...history.slice(0,2),{role:'user',content:'Check that calendar only from 2032-08-11T09:15:00Z to 2032-08-11T10:45:00Z.'}]
+  const result=await planRoutineCalendarRead(f.input)
+  expect(result.plan).toBeNull();expect(f.list).not.toHaveBeenCalled()
+  const rangeQuestion=f.evaluate.mock.calls[0][0].questions.find(question=>question.id==='range')!
+  expect(rangeQuestion.prompt).toContain('Explicit dates and a clearly established conversation range take precedence')
+ })
  it('represents all historical calendar targets without enumerating subsets',async()=>{
   const f=setup(),historyCalls=Array.from({length:5},(_,index)=>({name:f.tool.name,input:{...range,calendarId:`fictional-calendar-${index}`,maxResults:2500}}))
   const result=await planRoutineCalendarRead({...f.input,historyCalls})
@@ -134,8 +163,8 @@ describe('[COMP:engine/routine-read] full-context host calendar reads',()=>{
   await planRoutineCalendarRead({...f.input,now:Date.parse(instant)})
   const state=f.evaluate.mock.calls[0][0].state as unknown as {ranges:Array<{timeMin:string;timeMax:string}>}
   const scopes=state.ranges
-  expect(scopes).toContainEqual(expect.objectContaining({timeMin:start,timeMax:end}))
-  expect(scopes).toContainEqual(expect.objectContaining({timeMin:new Date(instant).toISOString(),timeMax:end}))
+  expect(scopes).toContainEqual(expect.objectContaining({timeMin:start,timeMax:end,labels:expect.arrayContaining(['Current local day (America/New_York)'])}))
+  expect(scopes).toContainEqual(expect.objectContaining({timeMin:new Date(instant).toISOString(),timeMax:end,labels:expect.arrayContaining(['Remainder of today (America/New_York)'])}))
  })
  it('offers the true union of historical partitions without imposing it as a default',async()=>{
   const f=setup({choose:()=> 'ordinary'})
