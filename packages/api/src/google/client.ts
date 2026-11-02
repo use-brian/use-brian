@@ -330,8 +330,9 @@ export async function listCalendarEvents(
     maxResults?: number
     query?: string
     timeZone?: string
+    pageToken?: string
   },
-): Promise<CalendarEvent[]> {
+): Promise<{ items: CalendarEvent[]; nextPageToken?: string }> {
   const calendarId = encodeURIComponent(params.calendarId ?? 'primary')
   const qs = new URLSearchParams({
     singleEvents: 'true',
@@ -342,13 +343,19 @@ export async function listCalendarEvents(
   if (params.timeMax) qs.set('timeMax', params.timeMax)
   if (params.query) qs.set('q', params.query)
   if (params.timeZone) qs.set('timeZone', params.timeZone)
+  if (params.pageToken) qs.set('pageToken', params.pageToken)
 
-  const data = await calendarJson<{ items?: CalendarEvent[] }>(
+  const data = await calendarJson<{ items?: CalendarEvent[]; nextPageToken?: string }>(
     await fetch(`${CALENDAR_API}/calendars/${calendarId}/events?${qs}`, {
       headers: calendarHeaders(accessToken),
     }),
   )
-  return data.items ?? []
+  if (!data || typeof data !== 'object' || Array.isArray(data)
+    || data.items !== undefined && !Array.isArray(data.items)
+    || data.nextPageToken !== undefined && (typeof data.nextPageToken !== 'string' || !data.nextPageToken)) {
+    throw new Error('Invalid Google Calendar event-list response')
+  }
+  return { items: data.items ?? [], ...(data.nextPageToken ? { nextPageToken: data.nextPageToken } : {}) }
 }
 
 export async function getCalendarEvent(
