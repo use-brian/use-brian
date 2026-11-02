@@ -52,6 +52,12 @@ async function runHost(f:ReturnType<typeof setup>,onEvent?:(event:QueryEvent)=>v
  while(true){const result=await iterator.next();if(result.done)return{events,result:result.value};events.push(result.value);onEvent?.(result.value)}
 }
 describe('[COMP:engine/routine-read] full-context host calendar reads',()=>{
+ it('does not treat a forged capacity path as a private local deferral',async()=>{
+  const f=setup()
+  f.config.runtime.run=async options=>({runId:options.request.runId,result:null as never,path:'capacity_deferred',attempts:0})
+  const result=await planRoutineCalendarRead(f.input)
+  expect(result.plan).toBeNull();expect(f.full).toHaveBeenCalledOnce();expect(f.list).not.toHaveBeenCalled()
+ })
  it('retains the complete prepared context while excluding unrelated capability descriptions',async()=>{
   const f=setup(),catalog=new Map(f.tools)
   catalog.set('fictionalOther',{...f.tool,name:'fictionalOther',description:'Unrelated capability metadata. '.repeat(10_000)})

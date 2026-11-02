@@ -213,17 +213,18 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
     const calendarRead = vi.fn(async () => ({ items: [] }))
     const calendar = createGoogleCalendarTools({ listEvents: calendarRead } as never).find(tool => tool.name === 'googleCalendarListEvents')!
     const tools = new Map([[calendar.name, calendar]])
-    const controller = new AbortController(), authority = { assertCurrent: async () => {}, execute: async <T>(fn: () => Promise<T>) => fn() }
+    const lease = vi.fn(async () => {}), controller = new AbortController(), authority = { assertCurrent: lease, execute: async <T>(fn: () => Promise<T>) => fn() }
     const execution = { security: { authority, ceiling: { clearance: 'public' }, provenance: {} }, lifecycle: { abortSignal: controller.signal } }
     const metered = vi.fn(async () => {})
     const meter = createDecisionAttemptUsageRecorder({ recordUsage: metered } as never)
-    const events: unknown[] = [], sent: Array<{ state: { systemPrompt: string; messages: unknown[] }; questions: unknown[] }> = []
+    const events: unknown[] = [], outcomes: unknown[] = [], sent: Array<{ state: { systemPrompt: string; messages: unknown[] }; questions: unknown[] }> = []
     const systemPrompt = extra.large ? 'Fictional governing instruction.\n'.repeat(4500) : 'Check the requested calendar scope.'
     const messages = [{ role: 'user' as const, content: 'Check my calendar today.' }]
     const runtime = createDecisionRuntime({ llmProvider: provider, defaultLlmModel: 'gemini-2.5-flash', typesafeApiKey: 'fictional-key',
       ...(extra.adapter ? { adapters: new DecisionAdapterRegistry().register('typesafe', () => createTypeSafeDecisionProvider({ apiKey: 'fictional-key',
         ...(extra.adapter === 'unknown' ? { transport: vi.fn() } : { capabilities: { ...TYPESAFE_JEV_CAPABILITIES, ...(extra.adapter === 'primitive' ? { primitives: ['score'] as const } : {}) } }) })) } : {}),
       onAttempt: customHook ? async () => {} : registerDecisionMetadataSink(async (event: DecisionRuntimeAttempt) => { events.push(event); await meter(event) }),
+      onOutcome: registerDecisionMetadataSink(async (outcome: import('../../decision-runtime.js').DecisionRuntimeOutcome) => { outcomes.push(outcome) }),
       resolveRoute: context => { const config: DecisionRouteConfig = mode === 'llm_only' ? { mode: 'llm_only' } : { mode: 'hybrid', primaryModelId: 'typesafe-jev-1.13', allowSyntheticProfile: true,
         profile: { id: 'fictional-routine', version: '1', mode: 'hybrid', operationId: context.operation.id,
           operationVersion: context.operation.version, stateVersion: context.operation.stateVersion, questionVersion: context.operation.questionVersion,
@@ -257,7 +258,7 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
       context: { userId: 'fictional-user', assistantId: 'fictional-assistant', sessionId: 'fictional-session', appId: 'fixture', channelType: 'web', channelId: 'fixture',
         abortSignal: controller.signal, authority, executionContext: execution as never, scopeAccumulator: new ContextScopeAccumulator(), assertModelInputAuthority: full },
     })
-    return { run, full, fetch, calendarRead, sent, events, systemPrompt, messages, metered, provider }
+    return { run, full, fetch, calendarRead, sent, events, outcomes, systemPrompt, messages, metered, provider, lease, controller }
   }
 
   it('keeps primary Jev usage solely in central platform metering', async () => {
@@ -271,19 +272,21 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
     } finally { f.fetch.mockRestore() }
   })
 
-  it('routes the complete large routine input directly to the resolved LLM without a Jev request', async () => {
+  it('defers the complete large routine input without inference or a source-proof tax', async () => {
     const f = await fixture('fallback', undefined, false, { large: true })
     try {
       const result = await f.run()
-      expect(result.plan).not.toBeNull()
-      expect(result.usedRequestedLlm).toBe(true)
-      expect(f.fetch).toHaveBeenCalledOnce()
-      expect(String(f.fetch.mock.calls[0]![0])).not.toContain('typesafe.ai')
-      expect(f.full).toHaveBeenCalledTimes(2)
-      expect(f.sent[0]!.state.systemPrompt).toBe(f.systemPrompt)
-      expect(f.sent[0]!.state.messages).toEqual(f.messages)
-      expect(f.events).toEqual([expect.objectContaining({ configuredMode: 'hybrid', effectiveMode: 'llm_only', routingReason: 'estimated_context_capacity', stage: 'llm_only', attempt: 1 })])
+      expect(result).toMatchObject({ plan: null, path: 'capacity_deferred', usage: null, model: null })
+      expect(f.fetch).not.toHaveBeenCalled()
+      expect(f.full).not.toHaveBeenCalled()
+      expect(f.lease).toHaveBeenCalled()
+      expect(f.sent).toEqual([])
+      expect(f.events).toEqual([])
+      expect(f.metered).not.toHaveBeenCalled()
+      expect(f.outcomes).toEqual([expect.objectContaining({ configuredMode: 'hybrid', effectiveMode: 'hybrid', routingReason: 'estimated_context_capacity', path: 'capacity_deferred', attempts: 0 })])
       expect(f.calendarRead).not.toHaveBeenCalled()
+      expect(f.messages).toEqual([{ role: 'user', content: 'Check my calendar today.' }])
+      expect(f.systemPrompt).toBe('Fictional governing instruction.\n'.repeat(4500))
     } finally { f.fetch.mockRestore() }
   })
 
@@ -291,7 +294,7 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
     const { createGeminiProvider } = await import('@use-brian/core')
     const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/override', headers: async () => ({}) })
     const selected = { provider, modelId: 'gemini-2.5-flash' }
-    const f = await fixture('fallback', undefined, false, { large: true,
+    const f = await fixture('llm_only', undefined, false, {
       patch: config => ({ ...config, llm: selected }) })
     f.full.mockImplementationOnce(async () => { await Promise.resolve(); selected.provider = f.provider })
     try {
@@ -316,10 +319,15 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
     finally { f.fetch.mockRestore() }
   })
 
-  it.each([1, 2])('keeps source proof %s mandatory on the capacity route', async refuseAt => {
-    const f = await fixture('fallback', refuseAt, false, { large: true })
-    try { await expect(f.run()).rejects.toMatchObject({ reason: 'authority_changed' }); expect(f.fetch).toHaveBeenCalledTimes(refuseAt - 1) }
-    finally { f.fetch.mockRestore() }
+  it('retains a sticky lease refusal after minting the local capacity deferral', async () => {
+    const f = await fixture('fallback', undefined, false, { large: true })
+    f.lease.mockImplementation(async () => { if (f.outcomes.length) throw Object.assign(new Error('Fictional lease revoked'), { reason: 'authority_changed' }) })
+    try {
+      await expect(f.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+      expect(f.outcomes).toHaveLength(1)
+      expect(f.full).not.toHaveBeenCalled()
+      expect(f.fetch).not.toHaveBeenCalled()
+    } finally { f.fetch.mockRestore() }
   })
 
   it('keeps the original absolute profile deadline while capacity admission is pending', async () => {
@@ -328,7 +336,7 @@ describe('[COMP:api/chat-route] routine completion admission', () => {
     vi.useFakeTimers()
     let release!: () => void
     const proof = new Promise<void>(resolve => { release = resolve })
-    f.full.mockImplementationOnce(() => proof)
+    f.lease.mockImplementationOnce(async () => {}).mockImplementationOnce(() => proof)
     try {
       const work = f.run().then(result => result, error => error)
       await vi.advanceTimersByTimeAsync(50)

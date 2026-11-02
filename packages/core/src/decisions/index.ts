@@ -8,6 +8,6 @@ export { withDecisionInvocation, DECISION_INVOCATION_MAX_MS } from './invocation
 // Trusted host composition only; none of these bindings are request data.
 export { registerClassifierDecisionRuntime, registerDecisionMetadataSink, isDecisionMetadataSink,
   transferClassifierDecisionOperation, ownsClassifierDecisionOperation, disableClassifierDecisionOperation,
-  assertDecisionBookkeeping, qualifyClassifierLlmCompletion, ownsClassifierCapacityFallback } from './authority-ownership.js'
+  assertDecisionBookkeeping, qualifyClassifierLlmCompletion, ownsClassifierCapacityFallback, createClassifierCapacityDeferral } from './authority-ownership.js'
 
 export { ownsDecisionInputCapacity } from './transport-budget.js'

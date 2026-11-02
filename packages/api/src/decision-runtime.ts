@@ -16,7 +16,7 @@ import {
   DecisionAdapterRegistry,
   DecisionProviderError,
   assertDecisionCapabilities, assertDecisionNonCapacityCapabilities, decisionInputCapacityExceeded,
-  validateDecisionRoute, ownsDecisionInputCapacity, ownsClassifierCapacityFallback,
+  validateDecisionRoute, ownsDecisionInputCapacity, ownsClassifierCapacityFallback, createClassifierCapacityDeferral,
   type DecisionRoute,
   createTypeSafeDecisionProvider,
   executeDecisionCascade,
@@ -400,7 +400,7 @@ export function createDecisionRuntime(
         && ownsClassifierCapacityFallback(runOptions.operation)
         && decisionInputCapacityExceeded(request, primary.provider.capabilities)
       if (primary.provider && !capacityFallback) assertDecisionCapabilities(request, primary.provider.capabilities)
-      const effectiveMode = capacityFallback ? 'llm_only' : primary.effectiveMode
+      const effectiveMode = primary.effectiveMode
       const routing = capacityFallback ? { routingReason: 'estimated_context_capacity' as const } : {}
 
 
@@ -432,12 +432,12 @@ export function createDecisionRuntime(
         invocation.assertActive()
       }
       if (metadataOnly && isDecisionMetadataSink(perRunAttempt)) registerDecisionMetadataSink(recordAttempt)
-      const result = await executeDecisionCascade({
-        request,
-        operation,
-        route: capacityFallback ? { mode: 'llm_only' } : configuredRoute,
-        onAttempt: recordAttempt,
-      })
+      let result: DecisionCascadeResult<T>
+      if (capacityFallback) {
+        await assertDecisionBookkeeping(operation, () => assertInputAuthority(runOptions.operation.assertInputAuthority))
+        invocation.assertActive()
+        result = createClassifierCapacityDeferral(operation, request.runId)
+      } else result = await executeDecisionCascade({ request, operation, route: configuredRoute, onAttempt: recordAttempt })
       invocation.assertActive()
       await onOutcome?.({
         runId: result.runId,
@@ -452,6 +452,7 @@ export function createDecisionRuntime(
       })
       await assertDecisionBookkeeping(operation, () => assertInputAuthority(runOptions.operation.assertInputAuthority))
       invocation.assertActive()
+      if (capacityFallback) return result
       return ownsClassifierCapacityFallback(operation) ? { ...result,
         usedRequestedLlm,
       } : result

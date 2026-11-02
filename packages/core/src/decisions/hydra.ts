@@ -175,6 +175,7 @@ export interface DecisionExecutionPort {
 }
 
 export type DecisionCascadePath =
+  | 'capacity_deferred'
   | 'llm_only'
   | 'primary_complete'
   | 'generation'

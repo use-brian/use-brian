@@ -12,11 +12,30 @@ import { DecisionProviderError } from '../types.js'
 import { decisionRequest } from './fixtures.js'
 import { createTypeSafeDecisionProvider } from '../adapters/typesafe.js'
 import { decisionCompletionInput } from '../invocation.js'
-import { captureClassifierDecisionRuntime, registerClassifierDecisionRuntime, registerClassifierLlmCompletion, qualifyClassifierLlmCompletion } from '../authority-ownership.js'
+import { captureClassifierDecisionRuntime, registerClassifierDecisionRuntime, registerClassifierLlmCompletion, qualifyClassifierLlmCompletion, createClassifierCapacityDeferral, consumeClassifierCapacityDeferral } from '../authority-ownership.js'
 import type { DecisionExecutionPort } from '../hydra.js'
 import { llmProviderWithJson } from './fixtures.js'
 
 describe('[COMP:decisions/hydra] completion admission composition', () => {
+  it('binds static capacity deferral to the exact fixed invocation and consumes it once', async () => {
+    const makeOperation = () => registerClassifierLlmCompletion({ assertInputAuthority: async () => {},
+      decide: () => ({ kind: 'complete' as const, result: null }), validateResult: (value: null) => value,
+      safeFailure: () => null, completeWithLlm: async () => ({ result: null, providerId: 'fixture', model: { catalogId: 'fixture', wireId: 'fixture' } }),
+    }, () => true, { inputCapacityFallback: true })
+    const operation = makeOperation(), foreign = makeOperation()
+    expect(() => createClassifierCapacityDeferral(operation, 'fictional-run')).toThrow('Unowned')
+    const runtime = registerClassifierDecisionRuntime({ run: async options => {
+      qualifyClassifierLlmCompletion(options.operation, { provider: llmProviderWithJson({}), modelId: 'fixture' }, options.request)
+      return createClassifierCapacityDeferral(options.operation, options.request.runId)
+    }, observe: vi.fn() } as DecisionExecutionPort)
+    const result = await captureClassifierDecisionRuntime(runtime, operation.assertInputAuthority, async () => {})!.run({ request: decisionRequest(), operation })
+    expect(Object.isFrozen(result)).toBe(true)
+    expect(consumeClassifierCapacityDeferral(operation, { ...result })).toBe(false)
+    expect(consumeClassifierCapacityDeferral(foreign, result)).toBe(false)
+    expect(consumeClassifierCapacityDeferral(operation, result)).toBe(true)
+    expect(consumeClassifierCapacityDeferral(operation, result)).toBe(false)
+  })
+
   it('refuses completion ownership when a fixed operation method changes before capture', async () => {
     const full = vi.fn(async () => {}), qualify = vi.fn(() => true)
     const operation = registerClassifierLlmCompletion({ assertInputAuthority: full,

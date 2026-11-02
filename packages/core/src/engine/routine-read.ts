@@ -7,7 +7,7 @@ import {safeTrace,type TurnTrace} from './turn-ledger.js'
 import {z} from 'zod'
 import {randomUUID} from 'node:crypto'
 import {createLlmDecisionProvider,buildLlmDecisionMessages} from '../decisions/adapters/llm.js'
-import {captureClassifierDecisionRuntime,registerClassifierLlmCompletion} from '../decisions/authority-ownership.js'
+import {captureClassifierDecisionRuntime,registerClassifierLlmCompletion,consumeClassifierCapacityDeferral} from '../decisions/authority-ownership.js'
 import {decisionCompletionInput} from '../decisions/invocation.js'
 import type {DecisionExecutionPort,DecisionCompletionRoute,DecisionExecutionOperation} from '../decisions/hydra.js'
 import type {DecisionResponse,DecisionQuestion} from '../decisions/types.js'
@@ -195,9 +195,7 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
  let usage:TokenUsage|null=null,model:string|null=null
  try{
   await active()
-  const result=await runtime.run<Candidate|null>({workspaceId:input.workspaceId,llm:input.llm,request:{runId:randomUUID(),
-   operation:{id:'chat.tool-selection',version:'3',stateVersion:'3',questionVersion:'3'},state:JSON.parse(JSON.stringify(state)),signal,questions},
-   operation:registerClassifierLlmCompletion<DecisionExecutionOperation<Candidate|null>>({assertInputAuthority:check,decide:response=>({kind:'complete',result:decode(response)}),
+  const operation=registerClassifierLlmCompletion<DecisionExecutionOperation<Candidate|null>>({assertInputAuthority:check,decide:response=>({kind:'complete',result:decode(response)}),
     validateResult:validatePlan,safeFailure:()=>null,
     async completeWithLlm(completion){
      const response=await createLlmDecisionProvider({provider:completion.llm.provider}).evaluate({...completion.request,
@@ -206,7 +204,13 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
      return{result:decode(response),providerId:response.providerId,model:response.model,usage:response.usage}
     }},(route,request)=>ownsInputAdmission(route.provider,{
      model:route.modelId,messages:buildLlmDecisionMessages(request),allowProviderFallback:false,
-    }),{inputCapacityFallback:true})})
+    }),{inputCapacityFallback:true})
+  const result=await runtime.run<Candidate|null>({workspaceId:input.workspaceId,llm:input.llm,request:{runId:randomUUID(),
+   operation:{id:'chat.tool-selection',version:'3',stateVersion:'3',questionVersion:'3'},state:JSON.parse(JSON.stringify(state)),signal,questions},operation})
+  if(consumeClassifierCapacityDeferral(operation,result)){
+   await active();current();closed=true
+   return{...empty('capacity_deferred'),scopeCounts,inputCounts}
+  }
   // Capture the private model-selected bytes before the final authority await.
   // A runtime hook cannot replace or mutate its returned object into new scope.
   const selected=validatePlan(result.result)

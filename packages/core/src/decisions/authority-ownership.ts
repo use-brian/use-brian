@@ -1,6 +1,6 @@
 /** Private classifier boundary ownership, never permission receipts. [COMP:decisions/hydra] */
 import { assertInputAuthority } from '../providers/input-authority.js'
-import type { DecisionExecutionPort, DecisionCompletionRoute } from './hydra.js'
+import type { DecisionExecutionPort, DecisionCompletionRoute, DecisionExecutionOperation, DecisionCascadeResult } from './hydra.js'
 import type { DecisionRequest } from './types.js'
 
 type Check = () => Promise<void>
@@ -41,6 +41,23 @@ export function ownsClassifierLlmCompletion(operation: Operation): boolean {
 export function ownsClassifierCapacityFallback(operation: Operation): boolean {
   return ownsClassifierLlmCompletion(operation) && completion(operation)?.inputCapacityFallback === true
 }
+// Static no-inference deferrals are bound to one fixed completion invocation.
+// This is not source authority and is never accepted by a provider or writer.
+const capacityDeferrals = new WeakMap<object, object>()
+export function createClassifierCapacityDeferral<T>(operation: DecisionExecutionOperation<T>, runId: string): DecisionCascadeResult<T> {
+  if (!ownsClassifierCapacityFallback(operation)) throw new Error('Unowned classifier capacity deferral')
+  const result = Object.freeze({ runId, result: operation.validateResult(operation.safeFailure('unsupported_capability')),
+    path: 'capacity_deferred' as const, attempts: 0 })
+  capacityDeferrals.set(result, completion(operation)!.identity)
+  return result
+}
+export function consumeClassifierCapacityDeferral(operation: Operation, result: object): boolean {
+  const entry = completion(operation)
+  if (!entry || capacityDeferrals.get(result) !== entry.identity) return false
+  capacityDeferrals.delete(result)
+  return true
+}
+
 /** Audited wrappers preserve callback ancestry, not a successful allow result. */
 export function transferClassifierDecisionCheck(source: Check | undefined, target: Check): Check {
   const boundary = source && checks.get(source)
