@@ -214,14 +214,12 @@ export function routineCalendarReadDeclineReason(input: {
   modelRoute: Pick<import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm, 'routeKind'> | null
   calendarTools: ReadonlyMap<string, Tool>
   preparedTools: ReadonlyMap<string, Tool>
-  preselected?: readonly string[]
 }): string | null {
   if (!input.nativeOutput || !input.nativeTranscript) return 'native_boundary'
   if (!input.decisionRuntime) return 'decision_runtime'
   if (input.research || input.coordinator || input.site || input.document) return 'specialized_mode'
   if (input.modelRoute && input.modelRoute.routeKind !== 'managed') return 'custom_model'
   if (!input.calendarTools.size) return 'calendar_tools'
-  if (input.preselected !== undefined && !input.preselected.some(name => input.calendarTools.has(name) || name === 'mcp_call' || name === 'mcp_search')) return 'initial_selection'
   if (![...input.calendarTools].every(([name, tool]) => input.preparedTools.get(name) === tool)) return 'tool_identity'
   return null
 }
@@ -7412,7 +7410,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           nativeOutput: Boolean(nativeOutputBoundary), nativeTranscript: Boolean(nativeTranscriptAuthority),
           decisionRuntime: Boolean(options.decisionRuntime), research: researchMode, coordinator: coordinatorMode,
           site: Boolean(operateSiteIntent), document: Boolean(docCtx), modelRoute: customLlmRuntime,
-          calendarTools: boundRoutineCalendarTools, preparedTools: preparedRun.tools, preselected: adaptive?.toolNames,
+          calendarTools: boundRoutineCalendarTools, preparedTools: preparedRun.tools,
         })
         console.info('[chat] routine eligibility', {
           reason: routineDeclineReason ?? 'eligible',

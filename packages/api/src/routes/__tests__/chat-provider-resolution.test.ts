@@ -170,7 +170,7 @@ describe('[COMP:api/chat-route] routine read model-route eligibility', () => {
   const eligible = {
     nativeOutput: true, nativeTranscript: true, decisionRuntime: true,
     research: false, coordinator: false, site: false, document: false,
-    modelRoute: null, calendarTools: tools, preparedTools: tools, preselected: ['mcp_call'],
+    modelRoute: null, calendarTools: tools, preparedTools: tools,
   }
   it('retains a resolved managed registry route rather than treating its runtime object as custom', async () => {
     const provider = { name: 'managed-fixture' } as import('@use-brian/core').LLMProvider
@@ -192,12 +192,8 @@ describe('[COMP:api/chat-route] routine read model-route eligibility', () => {
   it.each(['research', 'coordinator', 'site', 'document'] as const)('keeps the %s profile on its existing path', key => {
     expect(routineCalendarReadDeclineReason({ ...eligible, [key]: true })).toBe('specialized_mode')
   })
-  it('retains exact tool identity and the initial selection gate', () => {
+  it('requires exact bound tool identity independently of advisory schema selection', () => {
     expect(routineCalendarReadDeclineReason({ ...eligible, calendarTools: new Map() })).toBe('calendar_tools')
     expect(routineCalendarReadDeclineReason({ ...eligible, preparedTools: new Map([[tool.name, { ...tool }]]) })).toBe('tool_identity')
-    expect(routineCalendarReadDeclineReason({ ...eligible, preselected: [] })).toBe('initial_selection')
-    expect(routineCalendarReadDeclineReason({ ...eligible, preselected: ['unrelatedTool'] })).toBe('initial_selection')
-    expect(routineCalendarReadDeclineReason({ ...eligible, preselected: undefined })).toBeNull()
-    expect(routineCalendarReadDeclineReason({ ...eligible, preselected: [tool.name] })).toBeNull()
   })
 })
