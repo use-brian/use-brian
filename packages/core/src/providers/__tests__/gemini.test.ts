@@ -450,26 +450,22 @@ describe('[COMP:providers/gemini-json-mode] responseFormat json → responseMime
     expect(seen).toEqual(['end_turn'])
   })
 
-  it('maps responseSchema into generationConfig — the mime type alone is only a hint', async () => {
+  it.each(['stateless', 'session'] as const)('maps strict JSON Schema through responseJsonSchema for %s requests', async mode => {
     // responseMimeType asks for JSON; responseSchema is what actually engages
     // the constrained decoder. Documenting the mime type as decoder-constraining
     // is what let 56 malformed-JSON extraction failures go unexplained
     // (2026-07-20) — each one an episode that stored nothing.
     fetchMock.mockResolvedValueOnce(sseOk())
     const { createGeminiProvider } = await import('../gemini.js')
-    const schema = { type: 'object', properties: { summary: { type: 'string' } } }
-    await drain(
-      createGeminiProvider('test-key').stream({
-        model: 'gemini-flash',
-        systemPrompt: 'sys',
-        messages: [{ role: 'user', content: 'extract' }],
-        responseFormat: 'json',
-        responseSchema: schema,
-      }),
-    )
+    const schema = { type: 'object', additionalProperties: false, required: ['summary'], properties: { summary: { type: 'string' } } }
+    const provider = createGeminiProvider('test-key')
+    const options = { model: 'gemini-flash', systemPrompt: 'sys', responseFormat: 'json' as const, responseSchema: schema }
+    const messages = [{ role: 'user' as const, content: 'extract' }]
+    await drain(mode === 'stateless' ? provider.stream({ ...options, messages }) : provider.createSession(options).send(messages))
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
     expect(body.generationConfig?.responseMimeType).toBe('application/json')
-    expect(body.generationConfig?.responseSchema).toEqual(schema)
+    expect(body.generationConfig?.responseJsonSchema).toEqual(schema)
+    expect(body.generationConfig?.responseSchema).toBeUndefined()
   })
 
   it('omits deprecated sampling parameters for Gemini 3+ while preserving older-model behavior', async () => {
@@ -506,7 +502,7 @@ describe('[COMP:providers/gemini-json-mode] responseFormat json → responseMime
     // Fail-open degrades to the unconstrained call the caller had before.
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
     fetchMock
-      .mockResolvedValueOnce(new Response('{"error":{"message":"Invalid JSON payload: responseSchema"}}', { status: 400 }))
+      .mockResolvedValueOnce(new Response('{"error":{"message":"Invalid JSON payload: responseJsonSchema"}}', { status: 400 }))
       .mockResolvedValueOnce(sseOk())
     const { createGeminiProvider } = await import('../gemini.js')
     await drain(
@@ -520,6 +516,7 @@ describe('[COMP:providers/gemini-json-mode] responseFormat json → responseMime
     )
     expect(fetchMock).toHaveBeenCalledTimes(2)
     const retry = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string)
+    expect(retry.generationConfig?.responseJsonSchema).toBeUndefined()
     expect(retry.generationConfig?.responseSchema).toBeUndefined()
     // The mime-type hint survives the retry — only the schema is dropped.
     expect(retry.generationConfig?.responseMimeType).toBe('application/json')

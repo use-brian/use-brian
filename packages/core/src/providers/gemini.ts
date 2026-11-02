@@ -119,8 +119,8 @@ type GeminiRequest = {
     maxOutputTokens?: number
     temperature?: number
     responseMimeType?: string
-    /** Gemini's OpenAPI-subset JSON Schema — what actually constrains the decoder. */
-    responseSchema?: Record<string, unknown>
+    /** JSON Schema field; the older responseSchema rejects additionalProperties. */
+    responseJsonSchema?: Record<string, unknown>
     thinkingConfig?: { thinkingLevel?: 'LOW' | 'HIGH'; includeThoughts?: boolean }
   }
 }
@@ -560,7 +560,7 @@ async function* streamGeminiSSE(
   if (
     response.status === 400 &&
     request.generationConfig &&
-    'responseSchema' in request.generationConfig
+    'responseJsonSchema' in request.generationConfig
   ) {
     const detail = await response.text()
     debugDocumentFlow('stream_error', { model: modelId, error: true, providerError: new Error(`Gemini API error 400: ${detail}`) })
@@ -568,7 +568,7 @@ async function* streamGeminiSSE(
       `[gemini] responseSchema REJECTED (400) for model=${modelId} — retrying without it. ` +
       `Output is no longer decoder-constrained for this call; fix the schema to restore the guarantee.`,
     )
-    const { responseSchema: _dropped, ...generationConfig } = request.generationConfig
+    const { responseJsonSchema: _dropped, ...generationConfig } = request.generationConfig
     response = await send({ ...request, generationConfig })
   }
 
@@ -724,7 +724,7 @@ function buildRequest(
       ...(options.responseFormat === 'json' && toolEntries.length === 0
         ? {
             responseMimeType: 'application/json',
-            ...(options.responseSchema ? { responseSchema: options.responseSchema } : {}),
+            ...(options.responseSchema ? { responseJsonSchema: options.responseSchema } : {}),
           }
         : {}),
       ...(() => {

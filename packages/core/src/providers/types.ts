@@ -215,9 +215,9 @@ export type ProviderRequest = {
    */
   responseFormat?: 'json'
   /**
-   * The actual decoder constraint: a JSON Schema (Gemini's OpenAPI subset —
-   * `type` / `properties` / `required` / `items` / `enum` / `additionalProperties`,
-   * no `$ref`, no `oneOf`) the output is forced to satisfy. Only meaningful
+   * The actual decoder constraint: a JSON Schema supported by the provider
+   * (Gemini uses generationConfig.responseJsonSchema, preserving keywords such
+   * as additionalProperties). Only meaningful
    * alongside `responseFormat: 'json'`.
    *
    * Deliberately typed as an opaque record rather than a Zod type: the mapping
