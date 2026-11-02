@@ -6,14 +6,14 @@ import {DEFAULT_HARD_LIMIT,type LoopDetector} from './loop-detector.js'
 import {safeTrace,type TurnTrace} from './turn-ledger.js'
 import {z} from 'zod'
 import {randomUUID} from 'node:crypto'
-import {createLlmDecisionProvider} from '../decisions/adapters/llm.js'
-import {captureClassifierDecisionRuntime} from '../decisions/authority-ownership.js'
+import {createLlmDecisionProvider,buildLlmDecisionMessages} from '../decisions/adapters/llm.js'
+import {captureClassifierDecisionRuntime,registerClassifierLlmCompletion} from '../decisions/authority-ownership.js'
 import {decisionCompletionInput} from '../decisions/invocation.js'
-import type {DecisionExecutionPort,DecisionCompletionRoute} from '../decisions/hydra.js'
+import type {DecisionExecutionPort,DecisionCompletionRoute,DecisionExecutionOperation} from '../decisions/hydra.js'
 import type {DecisionResponse,DecisionQuestion} from '../decisions/types.js'
 import {TYPESAFE_JEV_CAPABILITIES} from '../decisions/adapters/typesafe.js'
 import type {Message,TokenUsage} from '../providers/types.js'
-import {isInputAuthorityError,assertInputAuthority} from '../providers/input-authority.js'
+import {isInputAuthorityError,assertInputAuthority,ownsInputAdmission} from '../providers/input-authority.js'
 import {estimateStringTokens} from '../compaction/index.js'
 import {fitMessagesToBudget,resolveInputTokenLimit,MODEL_CONTEXT_FIT_RATIO,MAX_TOOL_RESULT_TOKENS} from '../providers/context-budget.js'
 import type {Tool,ToolContext} from '../tools/types.js'
@@ -197,14 +197,16 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
   await active()
   const result=await runtime.run<Candidate|null>({workspaceId:input.workspaceId,llm:input.llm,request:{runId:randomUUID(),
    operation:{id:'chat.tool-selection',version:'3',stateVersion:'3',questionVersion:'3'},state:JSON.parse(JSON.stringify(state)),signal,questions},
-   operation:{assertInputAuthority:check,decide:response=>({kind:'complete',result:decode(response)}),
+   operation:registerClassifierLlmCompletion<DecisionExecutionOperation<Candidate|null>>({assertInputAuthority:check,decide:response=>({kind:'complete',result:decode(response)}),
     validateResult:validatePlan,safeFailure:()=>null,
     async completeWithLlm(completion){
      const response=await createLlmDecisionProvider({provider:completion.llm.provider}).evaluate({...completion.request,
       model:{catalogId:completion.llm.modelId,wireId:completion.llm.modelId},...decisionCompletionInput(completion,{signal,assertInputAuthority:check})})
      usage=response.usage??null;model=response.model.wireId
      return{result:decode(response),providerId:response.providerId,model:response.model,usage:response.usage}
-    }}})
+    }},(route,request)=>ownsInputAdmission(route.provider,{
+     model:route.modelId,messages:buildLlmDecisionMessages(request),allowProviderFallback:false,
+    }))})
   // Capture the private model-selected bytes before the final authority await.
   // A runtime hook cannot replace or mutate its returned object into new scope.
   const selected=validatePlan(result.result)

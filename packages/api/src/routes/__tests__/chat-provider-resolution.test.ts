@@ -197,3 +197,75 @@ describe('[COMP:api/chat-route] routine read model-route eligibility', () => {
     expect(routineCalendarReadDeclineReason({ ...eligible, preparedTools: new Map([[tool.name, { ...tool }]]) })).toBe('tool_identity')
   })
 })
+
+// Exercise the real runtime and physical provider adapters, including the
+// private routine planner, without contacting a provider or Calendar.
+describe('[COMP:api/chat-route] routine completion admission', () => {
+  async function fixture(mode: 'llm_only' | 'fallback', refuseAt?: number, customHook = false) {
+    const { createDecisionRuntime } = await import('../../decision-runtime.js')
+    const { createGeminiProvider, createGoogleCalendarTools, ContextScopeAccumulator } = await import('@use-brian/core')
+    const { planRoutineCalendarRead } = await import('../../../../core/dist/engine/routine-read.js')
+    const full = vi.fn(async () => {
+      if (full.mock.calls.length === refuseAt) throw Object.assign(new Error('Fictional source withdrawn'), { reason: 'authority_changed', retrySafe: false })
+    })
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/routine', headers: async () => ({}) })
+    const calendarRead = vi.fn(async () => ({ items: [] }))
+    const calendar = createGoogleCalendarTools({ listEvents: calendarRead } as never).find(tool => tool.name === 'googleCalendarListEvents')!
+    const tools = new Map([[calendar.name, calendar]])
+    const controller = new AbortController(), authority = { assertCurrent: async () => {}, execute: async <T>(fn: () => Promise<T>) => fn() }
+    const execution = { security: { authority, ceiling: { clearance: 'public' }, provenance: {} }, lifecycle: { abortSignal: controller.signal } }
+    const runtime = createDecisionRuntime({ llmProvider: provider, defaultLlmModel: 'gemini-2.5-flash', typesafeApiKey: 'fictional-key',
+      ...(customHook ? { onAttempt: async () => {} } : {}),
+      resolveRoute: context => mode === 'llm_only' ? { mode: 'llm_only' } : { mode: 'hybrid', primaryModelId: 'typesafe-jev-1.13', allowSyntheticProfile: true,
+        profile: { id: 'fictional-routine', version: '1', mode: 'hybrid', operationId: context.operation.id,
+          operationVersion: context.operation.version, stateVersion: context.operation.stateVersion, questionVersion: context.operation.questionVersion,
+          modelCatalogId: 'typesafe-jev-1.13', modelWireId: 'jev-1.13.0', evaluationSegment: 'global', status: 'approved', evidence: 'synthetic',
+          totalTimeoutMs: 30_000, primaryTimeoutMs: 10_000, maxAttempts: 2 } },
+    })
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url).includes('typesafe.ai')) return new Response('{}', { status: 503 })
+      const body = JSON.parse(init!.body as string)
+      const request = JSON.parse(body.contents[0].parts[0].text)
+      const answers = Object.fromEntries(request.questions.map((question: { id: string; kind: string }) => [question.id,
+        { value: question.id === 'routine' ? 'calendar' : question.id === 'range' ? request.state.ranges[0].id : true }]))
+      const packet = { candidates: [{ content: { parts: [{ text: JSON.stringify({ answers }) }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } }
+      return new Response('data: ' + JSON.stringify(packet) + '\n\n', { headers: { 'content-type': 'text/event-stream' } })
+    })
+    const run = () => planRoutineCalendarRead({ runtime, llm: { provider, modelId: 'gemini-2.5-flash' }, workspaceId: 'fictional-workspace',
+      systemPrompt: 'Check the requested calendar scope.', messages: [{ role: 'user', content: 'Check my calendar today.' }], tools, calendarTools: tools,
+      assertInputAuthority: full, now: Date.parse('2031-06-02T00:00:00Z'),
+      context: { userId: 'fictional-user', assistantId: 'fictional-assistant', sessionId: 'fictional-session', appId: 'fixture', channelType: 'web', channelId: 'fixture',
+        abortSignal: controller.signal, authority, executionContext: execution as never, scopeAccumulator: new ContextScopeAccumulator(), assertModelInputAuthority: full },
+    })
+    return { run, full, fetch, calendarRead }
+  }
+
+  it.each(['llm_only', 'fallback'] as const)('keeps fresh physical and final checks for owned %s planning', async mode => {
+    const f = await fixture(mode)
+    try {
+      expect((await f.run()).plan).not.toBeNull()
+      expect(f.full).toHaveBeenCalledTimes(mode === 'fallback' ? 3 : 2)
+      expect(f.fetch).toHaveBeenCalledTimes(mode === 'fallback' ? 2 : 1)
+      expect(f.calendarRead).not.toHaveBeenCalled()
+    } finally { f.fetch.mockRestore() }
+  })
+
+  it.each([1, 2, 3])('refuses the plan when source admission %s fails', async refuseAt => {
+    const f = await fixture('fallback', refuseAt)
+    try {
+      await expect(f.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+      expect(f.fetch).toHaveBeenCalledTimes(refuseAt - 1)
+      expect(f.calendarRead).not.toHaveBeenCalled()
+    } finally { f.fetch.mockRestore() }
+  })
+
+  it('retains conservative checks with an arbitrary metadata hook', async () => {
+    const f = await fixture('llm_only', undefined, true)
+    try {
+      expect((await f.run()).plan).not.toBeNull()
+      expect(f.full.mock.calls.length).toBeGreaterThan(2)
+      expect(f.calendarRead).not.toHaveBeenCalled()
+    } finally { f.fetch.mockRestore() }
+  })
+})
