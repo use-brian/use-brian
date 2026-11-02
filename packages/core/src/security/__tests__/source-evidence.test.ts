@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { bindScopeSource, boundScopeSource, bindScopeSources, boundScopeSources, inheritScopeSources } from '../source-evidence.js'
 import { ContextScopeAccumulator, scopeEvidenceFromRows } from '../context-scope.js'
 import { deriveResourceScope, type ScopeSource } from '../derived-scope.js'
@@ -29,6 +29,19 @@ describe('[COMP:security/source-evidence] canonical reader bindings', () => {
     expect(boundScopeSources(original)).toEqual([source(), { ...source(), resourceId: 'later-original' }])
     expect(boundScopeSources(inheritScopeSources({}, { sources: [source()] }))).toEqual([])
     expect(boundScopeSources(inheritScopeSources({}, JSON.parse(JSON.stringify(original))))).toEqual([])
+  })
+
+  it('propagates a large trusted binding without repeating snapshot copies', () => {
+    const original = bindScopeSources({}, Array.from({ length: 3000 }, (_, index) => ({
+      ...source(), resourceId: `fixture-contributor-${index}`,
+    })))
+    const copy = vi.spyOn(globalThis, 'structuredClone')
+    try {
+      const target = inheritScopeSources({}, original)
+      expect(copy).not.toHaveBeenCalled()
+      expect(boundScopeSources(target)).toHaveLength(3000)
+      expect(copy).toHaveBeenCalledTimes(1)
+    } finally { copy.mockRestore() }
   })
 
   it('unions inherited evidence without losing an existing target obligation', () => {
