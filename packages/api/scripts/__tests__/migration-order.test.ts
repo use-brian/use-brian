@@ -51,6 +51,21 @@ describe('[COMP:api/migration-order] Migration file ordering', () => {
     ])
   })
 
+  it('places the query-scope privilege repair before native turn requirements', () => {
+    const ordered = orderMigrationFiles([{ dir: '/open', files: [
+      '8183_native_turn_requirements.sql',
+      '8182_native_deferred_late_proof.sql',
+      '81830_legacy_query_scope_privileges.sql',
+      '8181_feishu_application_notifications.sql',
+    ] }])
+    expect(ordered.map(({ file }) => file)).toEqual([
+      '8181_feishu_application_notifications.sql',
+      '8182_native_deferred_late_proof.sql',
+      '81830_legacy_query_scope_privileges.sql',
+      '8183_native_turn_requirements.sql',
+    ])
+  })
+
   it('ignores non-sql files', () => {
     const ordered = orderMigrationFiles([
       { dir: '/open', files: ['001_a.sql', 'README.md', '.DS_Store'] },
