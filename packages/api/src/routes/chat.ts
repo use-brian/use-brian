@@ -3965,14 +3965,15 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Authored input precedes generated annotation. The current typed query
       // binds both this row and the historical classifier/reply inputs.
       const earlyStoredUserMsg = nativeTranscriptAuthority
-        ? prePersistedUserMsg ?? await addSessionMessage({
+        ? prePersistedUserMsg ?? await turnTiming.time('authored_input_save', () => addSessionMessage({
             sessionId: session.id,
             role: 'user',
             content: userContentBlocks.length > 0 ? userContentBlocks : [{ type: 'text', text: userMessageText }],
             senderUserId: user.id,
             scope: inputMessageScope,
-          })
+          }))
         : undefined
+      if (earlyStoredUserMsg && !prePersistedUserMsg) turnTiming.observe('authored_input_saved')
       const activeCapabilities = new Set(await options.capabilityStore.listActive(assistant.id))
       const sensitivityAccumulator = new SensitivityAccumulator()
       const compartmentAccumulator = new CompartmentAccumulator()
