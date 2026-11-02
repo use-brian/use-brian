@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto'
 import pg from 'pg'
 import {afterAll,afterEach,beforeAll,describe,expect,it,vi} from 'vitest'
 import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,type LLMProvider,type QueryEvent} from '@use-brian/core'
-import {createNativeAttendedOutputBoundary,tryAssertNativeCombinedOutput} from '../model-source-authority.js'
+import {createNativeAttendedOutputBoundary,tryAssertNativeCombinedOutput,tryAssertNativePreparationCurrent} from '../model-source-authority.js'
 import {tryNativeCombinedOutputEvidence} from '../../context-scope/native-invocation-evidence.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
@@ -11,6 +11,7 @@ import {createDbMemoryStore} from '../../db/memory-store.js'
 import {listWorkspaceFilesIndexRanked} from '../../db/workspace-files.js'
 import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
 import {runAssistantTurn} from '../../turn/kernel.js'
+import {prepareAssistantRun} from '../../turn/prepare.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -92,6 +93,23 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
  })
  afterEach(async()=>{vi.restoreAllMocks();await unhold()})
  afterAll(async()=>{try{await f?.cleanup()}finally{await getAppPool().end();await getPool().end()}})
+ it('assembles a native run without an early graph proof but refuses a later source hold before provider dispatch',async()=>{
+  const c=await setup(),full=vi.fn(()=>c.boundary.assertOutputAuthority(c.context))
+  const prepared=await trace(()=>prepareAssistantRun({
+   executionContext:c.authority.execution,model:{provider,model:'fixture'},candidateTools:new Map(),bindTools:tools=>tools,
+   beforeAssembly:async canonical=>{if(canonical&&await tryAssertNativePreparationCurrent(c.boundary,c.context))return;await full()},
+  }))
+  expect(full).not.toHaveBeenCalled();expect(nativeProofs(prepared.sql)).toBe(0)
+  await hold()
+  const createSession=vi.fn(provider.createSession),guardedProvider={...provider,createSession},onEvent=vi.fn(async()=>{})
+  await expect(runAssistantTurn({sessionId:session.id,policy:{admission:'personal'},lease:{mode:'none'},abortController:new AbortController(),
+   model:{provider:guardedProvider,model:'fixture',configuredProviders:undefined,customLlm:null},
+   loop:{ledger:NOOP_TURN_LEDGER,context:c.context,systemPrompt:'Fictional current sources',messages:[{role:'user',content:'Reply briefly.'}],
+    tools:prepared.value.tools,maxTurns:1},
+   sink:{kind:'sse',nativeOutputBoundary:c.boundary,assertOutputAuthority:c.boundary.assertOutputAuthority,onEvent},
+  })).rejects.toMatchObject({reason:'authority_changed'})
+  expect(createSession).not.toHaveBeenCalled();expect(onEvent).not.toHaveBeenCalled()
+ })
  it('uses one fresh proof per operation and reads again on the next operation',async()=>{
   const c=await setup()
   for(let n=0;n<2;n++){

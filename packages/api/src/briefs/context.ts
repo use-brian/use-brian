@@ -235,13 +235,27 @@ export function configureBriefTurnContext(resolver: BriefTurnResolver | null): v
   registered = resolver
 }
 
+/** Freeze the preparation implementation before its caller awaits authority.
+ * The canonical flag describes this exact captured callback, never a grant. */
+export function captureBriefRunPreparation() {
+  const resolver = registered
+  return Object.freeze({
+    canonical: resolver === null || resolver === resolveBriefTurn,
+    apply: (ec: ExecutionContext, tools: Map<string, Tool>) => applyResolvedBriefToRun(ec, tools, resolver),
+  })
+}
+
 /**
  * The prepare-stage hook: the contribution, the guarded tools, and, for an
  * unattended (system) execution, the frozen-basis check before provider work.
  */
 export async function applyBriefToRun(ec: ExecutionContext, tools: Map<string, Tool>): Promise<{ contribution: { name: string; content: string } | null; tools: Map<string, Tool>; turn: BriefTurn | null }> {
-  if (!registered) return { contribution: null, tools, turn: null }
-  const turn = await registered(ec)
+  return captureBriefRunPreparation().apply(ec, tools)
+}
+
+async function applyResolvedBriefToRun(ec: ExecutionContext, tools: Map<string, Tool>, resolver: BriefTurnResolver | null): Promise<{ contribution: { name: string; content: string } | null; tools: Map<string, Tool>; turn: BriefTurn | null }> {
+  if (!resolver) return { contribution: null, tools, turn: null }
+  const turn = await resolver(ec)
   if (!turn) return { contribution: null, tools, turn: null }
   if (ec.identity.kind === 'system') {
     await assertUnattendedBasis('job', ec.identity.jobId, turn.workspaceId, turn)

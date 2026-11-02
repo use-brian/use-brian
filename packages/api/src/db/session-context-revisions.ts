@@ -366,6 +366,7 @@ export async function withSessionMessagePublication<T>(authority:SessionContextA
  const combined=new ContextScopeAccumulator({sources:structuredClone([...sources])})
  if(pending)combined.note({sources:structuredClone([...pending.sources])})
  const turnToken=options?.turnToken,stoppedTurnToken=options?.stoppedTurnToken
+ const time:PublicationMeasure=options?.measure??((_counter,run)=>run())
  if(turnToken&&stoppedTurnToken)changed()
  if(execution.lifecycle.sessionPersisted===false||!(execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member')
   &&!nativeDelegatedSessionPublication(execution))changed()
@@ -373,8 +374,8 @@ export async function withSessionMessagePublication<T>(authority:SessionContextA
   messagePublications.set(client,{authority})
   try{
    if(pending){
-    const checked=await validateCallerScopeEvidence(pending.floor,execution.security.ceiling,client)
-    if(!await pending.write(client,checked))changed()
+    const checked=await time('publication_annotation_validate',()=>validateCallerScopeEvidence(pending.floor,execution.security.ceiling,client))
+    if(!await time('publication_annotation_write',()=>pending.write(client,checked)))changed()
    }
    return await run(client)
   }finally{messagePublications.delete(client)}

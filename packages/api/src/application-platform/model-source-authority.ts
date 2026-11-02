@@ -139,7 +139,8 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
 const nativeOutputBrand:unique symbol=Symbol('native-attended-output')
 /** Created only by the canonical host factory; runtime identity is also checked. */
 export type NativeAttendedOutputBoundary={readonly [nativeOutputBrand]:true;readonly assertOutputAuthority:(context:ToolContext)=>Promise<void>}
-type NativeOutputBinding={execution:ExecutionContext;accumulator:ContextScopeAccumulator;input:Omit<DeliveryAudienceInput,'scopeEvidence'>}
+type NativeOutputBinding={execution:ExecutionContext;accumulator:ContextScopeAccumulator;input:Omit<DeliveryAudienceInput,'scopeEvidence'>;
+ authority:ExecutionContext['security']['authority'];assertCurrent:ExecutionContext['security']['authority']['assertCurrent']}
 const nativeOutputBindings=new WeakMap<NativeAttendedOutputBoundary,NativeOutputBinding>()
 function assertNativeOutputBinding(binding:NativeOutputBinding,context:ToolContext):void{
  if(invalid.has(binding.execution)||context.executionContext!==binding.execution
@@ -156,7 +157,8 @@ function nativeOutputFailure(execution:ExecutionContext,error:unknown):never{
  * operation; a custom callback cannot claim that it checked the same recipient. */
 export function createNativeAttendedOutputBoundary(execution:ExecutionContext,accumulator:ContextScopeAccumulator,
  input:Omit<DeliveryAudienceInput,'scopeEvidence'>):NativeAttendedOutputBoundary{
- const binding:NativeOutputBinding={execution,accumulator,input:structuredClone(input)}
+ const binding:NativeOutputBinding={execution,accumulator,input:structuredClone(input),
+  authority:execution.security.authority,assertCurrent:execution.security.authority.assertCurrent}
  const authorize=createAttendedDeliveryAudienceAuthorizer(execution)
  const boundary:NativeAttendedOutputBoundary=Object.freeze({[nativeOutputBrand]:true as const,
   assertOutputAuthority:async(context:ToolContext)=>{
@@ -183,6 +185,24 @@ export function ownsNativeAttendedAssembly(boundary:NativeAttendedOutputBoundary
   &&execution.identity.principal.authenticationKind==='native_session'&&execution.ownership.kind==='workspace'
   &&!execution.security.access.sharedAudience&&binding.input.recipientType==='individual'
   &&!execution.surface.systemRead&&!execution.surface.clientSelfMemory&&!getApplicationExecutionBinding(execution)
+}
+/** Lease-only internal preparation for an exact native sink owner. This must
+ * never guard a model, tool, user callback or publication effect. */
+export async function tryAssertNativePreparationCurrent(boundary:NativeAttendedOutputBoundary,context:ToolContext):Promise<boolean>{
+ const binding=nativeOutputBindings.get(boundary)
+ if(!binding)return false
+ try{
+  assertNativeOutputBinding(binding,context)
+  if(!ownsNativeAttendedAssembly(boundary,binding.execution,binding.accumulator))return false
+  const current=()=>{
+   assertNativeOutputBinding(binding,context)
+   if(binding.execution.security.authority!==binding.authority||binding.authority.assertCurrent!==binding.assertCurrent)denied()
+  }
+  current()
+  await binding.assertCurrent.call(binding.authority)
+  current()
+  return true
+ }catch(error){nativeOutputFailure(binding.execution,error)}
 }
 /** False/null keeps the original caller and recipient boundaries. The optional
  * snapshot fences only this admission's awaited handoff; it is not a permission

@@ -3,7 +3,7 @@ import {generateAttendedSessionTitle} from './attended-session-title.js'
 import {readSessionTitle} from '../db/session-title-store.js'
 import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
-import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary} from '../application-platform/model-source-authority.js'
+import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary,tryAssertNativePreparationCurrent} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
 import { captureAttendedSessionClassification, forkAttendedSessionClassification, assessAttendedSessionMessage, captureNativeClassifiedAssembly, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
@@ -7321,12 +7321,15 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (turnPolicy.confirmations === 'addresser_or_admin') roomTurnAddressers.set(session.id, user.id)
 
       try {
-        // Resolve the current recipient before any provider work. The same
-        // high-water evidence is checked again before each streamed event.
-        await assertDeliveryAudience()
         const presentedDocumentInputs = new Map<string, PresentedDocumentInput>()
         const preparedRun = await prepareAssistantRun({
           executionContext,
+          beforeAssembly: async canonicalBrief => {
+            if (canonicalBrief && nativeOutputBoundary && await tryAssertNativePreparationCurrent(nativeOutputBoundary, {
+              ...executionToolContext(executionContext, { appId: 'native-run-preparation' }), scopeAccumulator,
+            })) return
+            await assertDeliveryAudience()
+          },
           model: {
             provider: turnProvider,
             model,
