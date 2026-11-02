@@ -83,9 +83,10 @@ describe.sequential('[COMP:api/native-turn-frame] canonical observation capture 
     expect(await acquire(client)).not.toBeNull()
     const after = (await client.query(`SELECT ${helper}('stats') value`)).rows[0].value as Json
     const difference = (signature: string) => (after[signature] ?? 0) - (before[signature] ?? 0)
-    expect(difference('native_turn_capture_requirements(uuid,jsonb,jsonb)')).toBe(2)
-    expect(difference('read_native_turn_query_requirements(uuid,jsonb,jsonb)')).toBe(1)
-    expect(difference('read_native_turn_requirements(uuid,jsonb)')).toBe(1)
+    expect(difference('native_turn_capture_compact_requirements(uuid,jsonb,jsonb)')).toBe(2)
+    expect(difference('read_native_turn_compact_requirements(uuid,jsonb,jsonb)')).toBe(2)
+    expect(difference('read_native_turn_query_requirements(uuid,jsonb,jsonb)')).toBe(0)
+    expect(difference('read_native_turn_requirements(uuid,jsonb)')).toBe(0)
     expect(difference('capture_native_session_projection_batch(uuid,uuid,integer,text)')).toBe(0)
     expect(difference('native_detached_eval_point_state(uuid,text,uuid,text[],jsonb,jsonb)')).toBe(0)
   }), 60_000)

@@ -119,7 +119,7 @@ describe.sequential('[COMP:api/native-turn-frame] shared publication dependencie
     const name = `turn_publication_${randomUUID().replaceAll('-', '')}`
     await f.pool.query(`CREATE FUNCTION ${name}(enable boolean) RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $fixture$
       BEGIN IF enable THEN PERFORM set_config('track_functions','all',true);END IF;
-      RETURN coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='read_native_turn_requirements(uuid,jsonb)'::regprocedure),0);END $fixture$`)
+      RETURN coalesce((SELECT calls FROM pg_stat_xact_user_functions WHERE funcid='read_native_turn_compact_requirements(uuid,jsonb,jsonb)'::regprocedure),0);END $fixture$`)
     try {
       await withSessionMessagePublication(authority, sources, async db => {
         const before = Number((await db.query(`SELECT ${name}(true) count`)).rows[0].count)
