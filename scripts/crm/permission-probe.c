@@ -5,10 +5,13 @@
  * is partial and its wrappers can change plans: this is not a ceiling certificate.
  */
 #include "postgres.h"
+#include "common/cryptohash.h"
 #include "fmgr.h"
 #include "catalog/pg_namespace_d.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type_d.h"
+#include "catalog/pg_language_d.h"
+#include "nodes/plannodes.h"
 #include "access/transam.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/makefuncs.h"
@@ -26,6 +29,8 @@
 PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(crm_probe_begin);
 PG_FUNCTION_INFO_V1(crm_probe_end);
+PG_FUNCTION_INFO_V1(crm_probe_plan_begin);
+PG_FUNCTION_INFO_V1(crm_probe_observe_begin);
 PG_FUNCTION_INFO_V1(crm_probe_hash);
 PG_FUNCTION_INFO_V1(crm_probe_rls);
 PG_FUNCTION_INFO_V1(crm_probe_predicate);
@@ -39,8 +44,16 @@ static int used;
 static struct {Oid root; Oid caller; Oid callee; uint64 calls;} edges[MAX_EDGES];
 static Oid call_stack[MAX_DEPTH];
 static int edge_count, call_depth;
+static struct {Oid root;Oid caller;uint64 calls;} direct_edges[MAX_EDGES];
+static int direct_edge_count;
 static uint64 hashes, privileges, predicates, application_predicates, direct_predicates;
 static bool enabled;
+static bool preserve_plans, observe_only;
+#define MAX_PLANS 4096
+static struct {char hash[65];uint64 calls;} plans[MAX_PLANS];
+static int plan_count;
+static int planning_depth;
+static uint64 unobserved_index_quals, unobserved_join_keys, unsupported_plans, unobserved_sql_functions;
 static needs_fmgr_hook_type previous_needs;
 static fmgr_hook_type previous_hook;
 static planner_hook_type previous_planner;
@@ -53,6 +66,16 @@ static int builtin_count;
 static bool probe_needs(Oid oid) {
  /* pg_catalog's C fast path cannot use fmgr_hook. Explicit hash calls are
   * replaced below with identical C dispatch. SQL/public functions use the hook. */
+ if(preserve_plans && planning_depth>0) {
+  HeapTuple tuple=SearchSysCache1(PROCOID,ObjectIdGetDatum(oid));
+  if(!HeapTupleIsValid(tuple)) return previous_needs?previous_needs(oid):false;
+  Form_pg_proc proc=(Form_pg_proc)GETSTRUCT(tuple);
+  bool sql=proc->prolang==SQLlanguageId;
+  ReleaseSysCache(tuple);
+  /* Keep normal SQL inlining while the planner runs. Executor initialization
+   * happens afterward, when actual non-inlined SQL calls can use fmgr_hook. */
+  if(sql) {if(enabled)unobserved_sql_functions++;return previous_needs?previous_needs(oid):false;}
+ }
  return true;
 }
 static void probe_hook(FmgrHookEventType event,FmgrInfo *flinfo,Datum *arg) {
@@ -142,18 +165,105 @@ static Node *probe_expression(Node *node,void *context) {
  }
  return expression_tree_mutator(node,probe_expression,context);
 }
+/* Post-planner calibration mode. No raw Query mutation and no changed scan or
+ * join keys. Missing key/function coverage is explicit, never a passing count.
+ * This mode is intentionally a diagnostic until all uncovered feeds are proved. */
+static Node *probe_planned_expression(Node *node,void *context) {
+ if(!node)return NULL;
+ /* Hashed SubPlans compile their testexpr as an operator-key descriptor,
+  * not as an ordinary Boolean expression. Preserve it like HashJoin keys. */
+ if(IsA(node,SubPlan) && ((SubPlan*)node)->useHashTable) {
+  SubPlan *copy=(SubPlan*)copyObject(node);
+  unobserved_join_keys++;
+  copy->args=(List*)probe_planned_expression((Node*)copy->args,NULL);
+  return (Node*)copy;
+ }
+ bool predicate=(IsA(node,OpExpr) && ((OpExpr*)node)->opresulttype==BOOLOID)
+  || IsA(node,NullTest) || IsA(node,BooleanTest) || IsA(node,ScalarArrayOpExpr);
+ Node *copy=expression_tree_mutator(node,probe_planned_expression,NULL);
+ if(predicate)return direct_wrap(copy);
+ if(IsA(copy,FuncExpr)) {
+  FuncExpr *function=(FuncExpr*)copy;
+  for(int i=0;i<builtin_count;i++)if(function->funcid==hash_map[i].original){function->funcid=hash_map[i].replacement;break;}
+ }
+ return copy;
+}
+static void probe_plan(Plan *plan) {
+ if(!plan)return;
+ plan->targetlist=(List*)probe_planned_expression((Node*)plan->targetlist,NULL);
+ plan->qual=(List*)probe_planned_expression((Node*)plan->qual,NULL);
+ #define REWRITE(field) field=(__typeof__(field))probe_planned_expression((Node*)field,NULL)
+ #define CHILDREN(items) do{ListCell *item;foreach(item,items)probe_plan(lfirst_node(Plan,item));}while(0)
+ switch(nodeTag(plan)) {
+ case T_Result: REWRITE(((Result*)plan)->resconstantqual);break;
+ case T_Append: CHILDREN(((Append*)plan)->appendplans);break;
+ case T_MergeAppend: CHILDREN(((MergeAppend*)plan)->mergeplans);break;
+ case T_BitmapAnd: CHILDREN(((BitmapAnd*)plan)->bitmapplans);break;
+ case T_BitmapOr: CHILDREN(((BitmapOr*)plan)->bitmapplans);break;
+ case T_SubqueryScan: probe_plan(((SubqueryScan*)plan)->subplan);break;
+ case T_IndexScan: unobserved_index_quals+=list_length(((IndexScan*)plan)->indexqual);break;
+ case T_IndexOnlyScan: unobserved_index_quals+=list_length(((IndexOnlyScan*)plan)->indexqual);break;
+ case T_BitmapIndexScan: unobserved_index_quals+=list_length(((BitmapIndexScan*)plan)->indexqual);break;
+ case T_BitmapHeapScan: REWRITE(((BitmapHeapScan*)plan)->bitmapqualorig);break;
+ case T_NestLoop: REWRITE(((NestLoop*)plan)->join.joinqual);break;
+ case T_HashJoin:
+  REWRITE(((HashJoin*)plan)->join.joinqual);
+  unobserved_join_keys+=list_length(((HashJoin*)plan)->hashclauses);break;
+ case T_MergeJoin:
+  REWRITE(((MergeJoin*)plan)->join.joinqual);
+  unobserved_join_keys+=list_length(((MergeJoin*)plan)->mergeclauses);break;
+ case T_FunctionScan: REWRITE(((FunctionScan*)plan)->functions);break;
+ case T_ValuesScan: REWRITE(((ValuesScan*)plan)->values_lists);break;
+ case T_Limit: REWRITE(((Limit*)plan)->limitCount);REWRITE(((Limit*)plan)->limitOffset);break;
+ case T_Hash: REWRITE(((Hash*)plan)->hashkeys);break;
+ case T_Memoize: REWRITE(((Memoize*)plan)->param_exprs);break;
+ case T_SeqScan: case T_Material: case T_Sort: case T_IncrementalSort:
+ case T_Unique: case T_Group: case T_CteScan: case T_WorkTableScan:
+ case T_LockRows: case T_ProjectSet: case T_RecursiveUnion: break;
+ case T_Agg: CHILDREN(((Agg*)plan)->chain);break;
+ default: unsupported_plans++;break;
+ }
+ probe_plan(plan->lefttree);probe_plan(plan->righttree);
+ #undef REWRITE
+ #undef CHILDREN
+}
+/* Retain only digests of the unmodified chosen plans, never SQL or constants.
+ * Comparing these within the same warmed fixture detects plan changes beneath
+ * nested PL/pgSQL and SQL calls, not merely the outer SELECT FunctionScan. */
+static void remember_plan(PlannedStmt *plan) {
+ char *serialized=nodeToString(plan);uint8 digest[32];char hex[65];
+ pg_cryptohash_ctx *context=pg_cryptohash_create(PG_SHA256);
+ if(!context || pg_cryptohash_init(context)<0 || pg_cryptohash_update(context,(uint8*)serialized,strlen(serialized))<0 || pg_cryptohash_final(context,digest,sizeof(digest))<0)
+  ereport(ERROR,(errmsg("CRM plan fingerprint failed")));
+ pg_cryptohash_free(context);pfree(serialized);
+ for(int i=0;i<32;i++)sprintf(hex+i*2,"%02x",digest[i]);hex[64]='\0';
+ int i;for(i=0;i<plan_count;i++)if(strcmp(plans[i].hash,hex)==0)break;
+ if(i==MAX_PLANS){enabled=false;ereport(ERROR,(errmsg("CRM plan fingerprint capacity exceeded")));}
+ if(i==plan_count){strcpy(plans[i].hash,hex);plans[plan_count++].calls=0;}
+ plans[i].calls++;
+}
 static PlannedStmt *probe_planner(Query *parse,const char *text,int options,ParamListInfo params) {
- /* Install once before preparing measured statements. Hooks stay present after
-  * end(), so a prepared plan cannot silently lose counters on the next operation. */
- if(rls_oid) parse=(Query*)probe_expression((Node*)parse,NULL);
- return previous_planner?previous_planner(parse,text,options,params):standard_planner(parse,text,options,params);
+ if(rls_oid && !preserve_plans)parse=(Query*)probe_expression((Node*)parse,NULL);
+ PlannedStmt *result;
+ planning_depth++;
+ PG_TRY();{result=previous_planner?previous_planner(parse,text,options,params):standard_planner(parse,text,options,params);}
+ PG_FINALLY();{planning_depth--;}
+ PG_END_TRY();
+ if(enabled && preserve_plans)remember_plan(result);
+ if(rls_oid && preserve_plans && !observe_only) {
+  probe_plan(result->planTree);
+  ListCell *item;foreach(item,result->subplans)probe_plan(lfirst_node(Plan,item));
+  if(result->parallelModeNeeded || result->partPruneInfos!=NIL)unsupported_plans++;
+ }
+ return result;
 }
 void _PG_init(void) {
  previous_needs=needs_fmgr_hook;needs_fmgr_hook=probe_needs;
  previous_hook=fmgr_hook;fmgr_hook=probe_hook;
  previous_planner=planner_hook;planner_hook=probe_planner;
 }
-Datum crm_probe_begin(PG_FUNCTION_ARGS) {
+static Datum start_probe(bool plan_mode,bool observer) {
+ preserve_plans=plan_mode;observe_only=observer;
  Oid boolean=BOOLOID;
  if(!rls_oid) {
   rls_oid=probe_oid("rls",1,&boolean);direct_oid=probe_oid("direct",1,&boolean);
@@ -171,8 +281,12 @@ Datum crm_probe_begin(PG_FUNCTION_ARGS) {
   }
   SPI_finish();
  }
- used=0;edge_count=0;call_depth=0;hashes=0;privileges=0;predicates=0;application_predicates=0;direct_predicates=0;enabled=true;PG_RETURN_VOID();
+ unobserved_index_quals=0;unobserved_join_keys=0;unsupported_plans=0;unobserved_sql_functions=0;
+ plan_count=0;used=0;edge_count=0;direct_edge_count=0;call_depth=0;hashes=0;privileges=0;predicates=0;application_predicates=0;direct_predicates=0;enabled=true;PG_RETURN_VOID();
 }
+Datum crm_probe_begin(PG_FUNCTION_ARGS) {return start_probe(false,false);}
+Datum crm_probe_plan_begin(PG_FUNCTION_ARGS) {return start_probe(true,false);}
+Datum crm_probe_observe_begin(PG_FUNCTION_ARGS) {return start_probe(true,true);}
 Datum crm_probe_end(PG_FUNCTION_ARGS) {
  StringInfoData out;enabled=false;initStringInfo(&out);
  appendStringInfo(&out,"{\"hashes\":%llu,\"privileges\":%llu,\"rls\":%llu,\"applicationPredicates\":%llu,\"directPredicates\":%llu,\"functions\":[",(unsigned long long)hashes,(unsigned long long)privileges,(unsigned long long)predicates,(unsigned long long)application_predicates,(unsigned long long)direct_predicates);
@@ -185,7 +299,17 @@ Datum crm_probe_end(PG_FUNCTION_ARGS) {
   if(i) appendStringInfoChar(&out,',');
   appendStringInfo(&out,"{\"root\":%u,\"caller\":%u,\"callee\":%u,\"calls\":%llu}",edges[i].root,edges[i].caller,edges[i].callee,(unsigned long long)edges[i].calls);
  }
- appendStringInfo(&out,"],\"openFrames\":%d}",call_depth);
+ appendStringInfoString(&out,"],\"directEdges\":[");
+ for(int i=0;i<direct_edge_count;i++) {
+  if(i)appendStringInfoChar(&out,',');
+  appendStringInfo(&out,"{\"root\":%u,\"caller\":%u,\"calls\":%llu}",direct_edges[i].root,direct_edges[i].caller,(unsigned long long)direct_edges[i].calls);
+ }
+ appendStringInfoString(&out,"],\"plans\":[");
+ for(int i=0;i<plan_count;i++) {
+  if(i)appendStringInfoChar(&out,',');
+  appendStringInfo(&out,"{\"hash\":\"%s\",\"calls\":%llu}",plans[i].hash,(unsigned long long)plans[i].calls);
+ }
+ appendStringInfo(&out,"],\"openFrames\":%d,\"postPlanningMode\":%s,\"coverageComplete\":false,\"unobservedIndexQuals\":%llu,\"unobservedJoinKeys\":%llu,\"unsupportedPlans\":%llu,\"unobservedSqlHookRequests\":%llu}",call_depth,preserve_plans?"true":"false",(unsigned long long)unobserved_index_quals,(unsigned long long)unobserved_join_keys,(unsigned long long)unsupported_plans,(unsigned long long)unobserved_sql_functions);
  PG_RETURN_DATUM(DirectFunctionCall1(jsonb_in,CStringGetDatum(out.data)));
 }
 Datum crm_probe_hash(PG_FUNCTION_ARGS) {
@@ -215,7 +339,14 @@ Datum crm_probe_predicate(PG_FUNCTION_ARGS) {
 }
 
 Datum crm_probe_direct(PG_FUNCTION_ARGS) {
- if(enabled) direct_predicates++;
+ if(enabled) {
+  direct_predicates++;
+  Oid root=call_depth?call_stack[0]:InvalidOid,caller=call_depth?call_stack[call_depth-1]:InvalidOid;
+  int i;for(i=0;i<direct_edge_count;i++)if(direct_edges[i].root==root && direct_edges[i].caller==caller)break;
+  if(i==MAX_EDGES){enabled=false;ereport(ERROR,(errmsg("CRM direct-predicate attribution capacity exceeded")));}
+  if(i==direct_edge_count){direct_edges[i].root=root;direct_edges[i].caller=caller;direct_edges[direct_edge_count++].calls=0;}
+  direct_edges[i].calls++;
+ }
  if(PG_ARGISNULL(0)) PG_RETURN_NULL();
  PG_RETURN_BOOL(PG_GETARG_BOOL(0));
 }

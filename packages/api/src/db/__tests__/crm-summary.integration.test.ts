@@ -113,6 +113,67 @@ describe.sequential('[COMP:crm/r2-store] single-capture summary on real PostgreS
     ]))
   })
 
+  it('reacquires independent registered policy data at both final boundaries', async () => {
+    const f = await fixture(), person = await f.add('person')
+    await owner.query(`CREATE TABLE crm_summary_policy_fixture(workspace_id uuid PRIMARY KEY,restricted boolean NOT NULL);
+      REVOKE ALL ON crm_summary_policy_fixture FROM PUBLIC,app_user;
+      CREATE FUNCTION crm_summary_policy_rules(t text,restricted boolean) RETURNS jsonb LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+       SELECT jsonb_agg(jsonb_build_object('key',key,'read',CASE WHEN restricted AND key='archivedAt' THEN '[["finance"]]'::jsonb ELSE '[]'::jsonb END,
+        'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb)) FROM unnest(public.application_native_field_keys(t)) key $$;
+      REVOKE ALL ON FUNCTION crm_summary_policy_rules(text,boolean) FROM PUBLIC;
+      CREATE FUNCTION crm_summary_policy_record(w uuid,o jsonb,t text,i text) RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+       DECLARE source jsonb;restricted boolean;BEGIN
+        IF t<>'person' OR NOT EXISTS(SELECT 1 FROM public.entities WHERE workspace_id=w AND id=i::uuid AND kind=t) THEN RETURN NULL;END IF;
+        SELECT policy.restricted INTO STRICT restricted FROM public.crm_summary_policy_fixture policy WHERE policy.workspace_id=w;
+        source:=public.read_scope_source(w,'entity',i::uuid);
+        RETURN jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion','1','policyVersion',CASE WHEN restricted THEN '2' ELSE '1' END,
+         'recordVersion',source->>'version','fieldKeys',public.application_native_field_keys(t),'fields',public.crm_summary_policy_rules(t,restricted),'source',source);END $$;
+      REVOKE ALL ON FUNCTION crm_summary_policy_record(uuid,jsonb,text,text) FROM PUBLIC;
+      CREATE FUNCTION crm_summary_policy_catalog(w uuid,o jsonb,t text) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+       SELECT jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion','1','policyVersion','1','fieldKeys',public.application_native_field_keys(t),
+        'fields',public.crm_summary_policy_rules(t,false),'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,'sensitivity','public','compartments','[]'::jsonb,'projectIds','[]'::jsonb)) $$;
+      REVOKE ALL ON FUNCTION crm_summary_policy_catalog(uuid,jsonb,text) FROM PUBLIC`)
+    try {
+      await owner.query('INSERT INTO crm_summary_policy_fixture VALUES($1,false)', [f.workspaceId])
+      await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
+        VALUES('native','1',ARRAY['finance'],'crm_summary_policy_record(uuid,jsonb,text,text)'::regprocedure,'crm_summary_policy_catalog(uuid,jsonb,text)'::regprocedure)`)
+      await owner.query(`INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key)
+        VALUES($1,'{"kind":"native","moduleKey":"native"}','person','native')`, [f.workspaceId])
+      const before = await getCrmSummary(f.access)
+      expect(before.totals.contacts).toBe(1)
+      const version = (await owner.query('SELECT scope_version FROM entities WHERE id=$1', [person.id])).rows[0].scope_version
+      await owner.query('UPDATE crm_summary_policy_fixture SET restricted=true WHERE workspace_id=$1', [f.workspaceId])
+      expect((await owner.query('SELECT scope_version FROM entities WHERE id=$1', [person.id])).rows[0].scope_version).toBe(version)
+      await expect(getCrmSummary(f.access)).rejects.toMatchObject({ code: 'access_unavailable' })
+      await owner.query('UPDATE crm_summary_policy_fixture SET restricted=false WHERE workspace_id=$1', [f.workspaceId])
+      expect(await getCrmSummary(f.access)).toEqual(before)
+      for (const boundary of [1, 2]) {
+        let reached = 0
+        const original = pg.Client.prototype.query
+        const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function(this: pg.Client, ...args: Parameters<typeof original>) {
+          const text = typeof args[0] === 'string' ? args[0] : String((args[0] as { text?: string })?.text ?? '')
+          if (text.includes('SELECT ord,snapshot FROM read_native_session_field_snapshots(') && ++reached === boundary) {
+            return owner.query('UPDATE crm_summary_policy_fixture SET restricted=true WHERE workspace_id=$1', [f.workspaceId])
+              .then(() => Reflect.apply(original, this, args))
+          }
+          return Reflect.apply(original, this, args)
+        } as typeof original)
+        try {
+          await expect(getCrmSummary(f.access)).rejects.toMatchObject({ code: 'access_unavailable' })
+          expect(reached).toBe(boundary)
+        } finally {
+          spy.mockRestore()
+          await owner.query('UPDATE crm_summary_policy_fixture SET restricted=false WHERE workspace_id=$1', [f.workspaceId])
+        }
+        expect(await getCrmSummary(f.access)).toEqual(before)
+      }
+    } finally {
+      await owner.query('DELETE FROM application_native_resource_owners WHERE workspace_id=$1', [f.workspaceId])
+      await owner.query("DELETE FROM application_native_field_contracts WHERE module_key='native'")
+      await owner.query('DROP FUNCTION crm_summary_policy_record(uuid,jsonb,text,text),crm_summary_policy_catalog(uuid,jsonb,text),crm_summary_policy_rules(text,boolean); DROP TABLE crm_summary_policy_fixture')
+    }
+  })
+
   async function waitForWriter(client: pg.PoolClient) {
     const pid = (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
     return { pid }
