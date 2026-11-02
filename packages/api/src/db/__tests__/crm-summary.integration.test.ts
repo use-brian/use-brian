@@ -174,6 +174,73 @@ describe.sequential('[COMP:crm/r2-store] single-capture summary on real PostgreS
     }
   })
 
+  it('rechecks clock-dependent record policy at each final boundary without a policy write', async () => {
+    const f = await fixture(), person = await f.add('person')
+    await owner.query(`CREATE TABLE crm_summary_expiry_fixture(workspace_id uuid NOT NULL,record_id uuid NOT NULL,expires_at timestamptz NOT NULL,PRIMARY KEY(workspace_id,record_id));
+      REVOKE ALL ON crm_summary_expiry_fixture FROM PUBLIC,app_user;
+      CREATE FUNCTION crm_summary_expiry_rules(t text,expired boolean) RETURNS jsonb LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+       SELECT jsonb_agg(jsonb_build_object('key',key,'read',CASE WHEN expired AND key='archivedAt' THEN '[["finance"]]'::jsonb ELSE '[]'::jsonb END,
+        'write','[]'::jsonb,'releaseReadTo','[]'::jsonb,'releaseWriteTo','[]'::jsonb)) FROM unnest(public.application_native_field_keys(t)) key $$;
+      REVOKE ALL ON FUNCTION crm_summary_expiry_rules(text,boolean) FROM PUBLIC;
+      CREATE FUNCTION crm_summary_expiry_record(w uuid,o jsonb,t text,i text) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+       DECLARE source jsonb;expired boolean;BEGIN
+        IF t<>'person' OR NOT EXISTS(SELECT 1 FROM public.entities WHERE workspace_id=w AND id=i::uuid AND kind=t) THEN RETURN NULL;END IF;
+        SELECT clock_timestamp()>=policy.expires_at INTO STRICT expired FROM public.crm_summary_expiry_fixture policy WHERE policy.workspace_id=w AND policy.record_id=i::uuid;
+        source:=public.read_scope_source(w,'entity',i::uuid);
+        RETURN jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion','1','policyVersion',CASE WHEN expired THEN '2' ELSE '1' END,
+         'recordVersion',source->>'version','fieldKeys',public.application_native_field_keys(t),'fields',public.crm_summary_expiry_rules(t,expired),'source',source);END $$;
+      REVOKE ALL ON FUNCTION crm_summary_expiry_record(uuid,jsonb,text,text) FROM PUBLIC;
+      CREATE FUNCTION crm_summary_expiry_catalog(w uuid,o jsonb,t text) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+       SELECT jsonb_build_object('moduleKey','native','origin',o,'typeKey',t,'schemaVersion','1','policyVersion','1','fieldKeys',public.application_native_field_keys(t),
+        'fields',public.crm_summary_expiry_rules(t,false),'scope',jsonb_build_object('workspaceId',w,'userId',NULL,'assistantId',NULL,'sensitivity','public','compartments','[]'::jsonb,'projectIds','[]'::jsonb)) $$;
+      REVOKE ALL ON FUNCTION crm_summary_expiry_catalog(uuid,jsonb,text) FROM PUBLIC`)
+    try {
+      await owner.query("INSERT INTO crm_summary_expiry_fixture VALUES($1,$2,clock_timestamp()+interval '1 hour')", [f.workspaceId, person.id])
+      const contract = (await owner.query(`SELECT application_native_record_port_valid('crm_summary_expiry_record(uuid,jsonb,text,text)'::regprocedure) AS valid,
+        provolatile FROM pg_proc WHERE oid='crm_summary_expiry_record(uuid,jsonb,text,text)'::regprocedure`)).rows[0]
+      expect(contract).toEqual({ valid: true, provolatile: 'v' })
+      await owner.query(`INSERT INTO application_native_field_contracts(module_key,contract_version,role_keys,metadata_reader,catalog_reader)
+        VALUES('native','1',ARRAY['finance'],'crm_summary_expiry_record(uuid,jsonb,text,text)'::regprocedure,'crm_summary_expiry_catalog(uuid,jsonb,text)'::regprocedure)`)
+      await owner.query(`INSERT INTO application_native_resource_owners(workspace_id,origin,resource_type,module_key)
+        VALUES($1,'{"kind":"native","moduleKey":"native"}','person','native')`, [f.workspaceId])
+      const before = await getCrmSummary(f.access)
+      expect(before.totals.contacts).toBe(1)
+      const stableInputs = async () => (await owner.query(`SELECT e.scope_version,
+        (SELECT to_jsonb(p) FROM crm_summary_expiry_fixture p WHERE p.workspace_id=e.workspace_id AND p.record_id=e.id) AS policy,
+        (SELECT to_jsonb(c) FROM application_native_field_contracts c WHERE c.module_key='native') AS contract,
+        (SELECT prosrc FROM pg_proc WHERE oid='crm_summary_expiry_record(uuid,jsonb,text,text)'::regprocedure) AS body
+        FROM entities e WHERE e.id=$1`, [person.id])).rows[0]
+      for (const boundary of [1, 2]) {
+        await owner.query("UPDATE crm_summary_expiry_fixture SET expires_at=clock_timestamp()+interval '10 seconds' WHERE workspace_id=$1", [f.workspaceId])
+        const inputs = await stableInputs()
+        let reached = 0
+        const original = pg.Client.prototype.query
+        const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function(this: pg.Client, ...args: Parameters<typeof original>) {
+          const text = typeof args[0] === 'string' ? args[0] : String((args[0] as { text?: string })?.text ?? '')
+          if (text.includes('SELECT ord,snapshot FROM read_native_session_field_snapshots(') && ++reached === boundary) {
+            // Time advances; no entity, policy, registry or function write occurs
+            // between capture and this independent final validation.
+            return owner.query(`SELECT pg_sleep(GREATEST(0,EXTRACT(EPOCH FROM(expires_at-clock_timestamp())))::double precision+0.05)
+              FROM crm_summary_expiry_fixture WHERE workspace_id=$1 AND record_id=$2`, [f.workspaceId, person.id])
+              .then(() => Reflect.apply(original, this, args))
+          }
+          return Reflect.apply(original, this, args)
+        } as typeof original)
+        try {
+          await expect(getCrmSummary(f.access)).rejects.toMatchObject({ code: 'access_unavailable' })
+          expect(reached).toBe(boundary)
+        } finally { spy.mockRestore() }
+        expect(await stableInputs()).toEqual(inputs)
+        await owner.query("UPDATE crm_summary_expiry_fixture SET expires_at=clock_timestamp()+interval '1 hour' WHERE workspace_id=$1", [f.workspaceId])
+        expect(await getCrmSummary(f.access)).toEqual(before)
+      }
+    } finally {
+      await owner.query('DELETE FROM application_native_resource_owners WHERE workspace_id=$1', [f.workspaceId])
+      await owner.query("DELETE FROM application_native_field_contracts WHERE module_key='native'")
+      await owner.query('DROP FUNCTION crm_summary_expiry_record(uuid,jsonb,text,text),crm_summary_expiry_catalog(uuid,jsonb,text),crm_summary_expiry_rules(text,boolean); DROP TABLE crm_summary_expiry_fixture')
+    }
+  }, 60_000)
+
   async function waitForWriter(client: pg.PoolClient) {
     const pid = (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
     return { pid }
