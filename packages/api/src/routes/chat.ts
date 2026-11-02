@@ -5,7 +5,7 @@ import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
 import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { captureAttendedSessionClassification, forkAttendedSessionClassification, assessAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
+import { captureAttendedSessionClassification, forkAttendedSessionClassification, assessAttendedSessionMessage, captureNativeClassifiedAssembly, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
@@ -4104,8 +4104,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
+      const nativeClassificationAssembly = topicAssessment && nativeTranscriptAuthority && nativeOutputBoundary
+        ? captureNativeClassifiedAssembly(topicAssessment, nativeTranscriptAuthority, nativeOutputBoundary) : undefined
       const nativeClassification = topicAssessment
-        ? await turnTiming.time('topic_annotation', () => topicAssessment.defer())
+        ? await turnTiming.time('topic_annotation', () => nativeClassificationAssembly?.defer() ?? topicAssessment.defer())
         : undefined
       topicAssessmentBranch?.mergeEvidence()
 
@@ -4169,23 +4171,29 @@ export function chatRoutes(options: WebChatOptions): Router {
       // reactivates the most-recent dormant attempt. Runs before
       // buildActivePlanBlock so the transition takes effect this turn.
       if (options.planStore && classification) {
+        const planStore = options.planStore
+        const activeAttemptId = planStore.activeAttemptId.bind(planStore)
+        const recentDormantAttemptId = planStore.recentDormantAttemptId.bind(planStore)
+        const setAttemptState = planStore.setAttemptState.bind(planStore)
+        const effect = <T>(run: () => Promise<T>): Promise<T> => nativeClassificationAssembly?.runEffect(run) ?? run()
         try {
           if (classification.state === 'shift') {
-            const activeId = await options.planStore.activeAttemptId(session.id)
+            const activeId = await effect(() => activeAttemptId(session.id))
             if (activeId) {
-              await options.planStore.setAttemptState({
+              await effect(() => setAttemptState({
                 sessionId: session.id, attemptId: activeId, state: 'dormant',
-              })
+              }))
             }
           } else if (classification.state === 'resume') {
-            const dormantId = await options.planStore.recentDormantAttemptId(session.id)
+            const dormantId = await effect(() => recentDormantAttemptId(session.id))
             if (dormantId) {
-              await options.planStore.setAttemptState({
+              await effect(() => setAttemptState({
                 sessionId: session.id, attemptId: dormantId, state: 'active',
-              })
+              }))
             }
           }
         } catch (err) {
+          if (isAuthorityChangedError(err)) throw err
           console.error('[chat] plan lifecycle transition failed:', err)
         }
       }
@@ -4418,7 +4426,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // boundary; null (never compacted) loads full history.
       const dbMessages = await turnTiming.time('history_read', async () => nativeTranscriptAuthority
         ? nativeClassification
-          ? await readClassifiedSessionHistory(nativeTranscriptAuthority, session.id, nativeClassification.history, session.compactBoundarySequence)
+          ? await (nativeClassificationAssembly?.readHistory(session.compactBoundarySequence)
+            ?? readClassifiedSessionHistory(nativeTranscriptAuthority, session.id, nativeClassification.history, session.compactBoundarySequence))
           : await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, session.compactBoundarySequence)
         : await getSessionMessages(session.id, {
             fromSequence: session.compactBoundarySequence,
@@ -4851,14 +4860,18 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Episodic context (topic-scoped history for resume/cross-topic).
       let episodicContext: string | null = null
       if (options.episodicStore && classification) {
+        const store = options.episodicStore, fetchByTopic = store.fetchByTopic.bind(store)
         try {
           episodicContext = await fetchEpisodicContext({
             authority: { execution: executionContext, accumulator: scopeAccumulator },
-            store: options.episodicStore,
+            store: nativeClassificationAssembly ? { ...store,
+              fetchByTopic: query => nativeClassificationAssembly.runEffect(() => fetchByTopic(query)),
+            } : store,
             sessionId: session.id,
             classification,
           })
         } catch (err) {
+          if (isAuthorityChangedError(err)) throw err
           console.error('[chat] episodic context fetch failed:', err)
         }
       }

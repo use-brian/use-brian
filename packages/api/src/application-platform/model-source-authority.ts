@@ -174,6 +174,16 @@ export function createNativeAttendedOutputBoundary(execution:ExecutionContext,ac
  nativeOutputBindings.set(boundary,binding)
  return boundary
 }
+/** Identity only for internal native assembly. This never proves source permission. */
+export function ownsNativeAttendedAssembly(boundary:NativeAttendedOutputBoundary,execution:ExecutionContext,accumulator:ContextScopeAccumulator):boolean{
+ const binding=nativeOutputBindings.get(boundary)
+ if(!binding||binding.execution!==execution||binding.accumulator!==accumulator)return false
+ if(invalid.has(execution))nativeOutputFailure(execution,new Error('Native source authority was refused'))
+ return execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'
+  &&execution.identity.principal.authenticationKind==='native_session'&&execution.ownership.kind==='workspace'
+  &&!execution.security.access.sharedAudience&&binding.input.recipientType==='individual'
+  &&!execution.surface.systemRead&&!execution.surface.clientSelfMemory&&!getApplicationExecutionBinding(execution)
+}
 /** False/null keeps the original caller and recipient boundaries. The optional
  * snapshot fences only this admission's awaited handoff; it is not a permission
  * receipt for another event or operation. No caller can supply proof or allow. */

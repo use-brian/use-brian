@@ -1,10 +1,14 @@
 import {runAssistantTurn} from '../../turn/kernel.js'
+import {randomUUID} from 'node:crypto'
 import {validateAttendedAudienceEvidence} from '../../context-scope/attended-audience.js'
 import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
-import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,type QueryEvent,type LLMProvider} from '@use-brian/core'
-import {captureAttendedSessionClassification,forkAttendedSessionClassification,assessAttendedSessionMessage,classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory,readClassifiedSessionHistory,attendedSessionTurnCount} from '../../routes/attended-session-context.js'
+import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,queryLoop,type QueryEvent,type LLMProvider} from '@use-brian/core'
+import {captureAttendedSessionClassification,forkAttendedSessionClassification,assessAttendedSessionMessage,captureNativeClassifiedAssembly,classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory,readClassifiedSessionHistory,attendedSessionTurnCount} from '../../routes/attended-session-context.js'
 import * as sessionQueries from '../../db/session-query-reader.js'
-import {addSessionMessage} from '../../db/sessions.js'
+import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
+import {authSessionStore} from '../../db/auth-session-store.js'
+import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
+import {createNativeAttendedOutputBoundary,assertSourceModelInputAuthority} from '../model-source-authority.js'
 import {readSessionMessageAnnotation} from '../../db/session-message-annotations.js'
 import {bindSessionContextRetainedAuthority,writeSessionContextRevision} from '../../db/session-context-revisions.js'
 import {getAppPool,getPool} from '../../db/client.js'
@@ -25,6 +29,108 @@ describe.sequential('[COMP:api/application-persistence] actual admitted reply hi
   const authority=await f.modelContext(),query=await readAdmittedSessionQuery({sessionId:f.session.id,throughSequence:rows.at(-1)!.sequenceNum,authority})
   return{f,rows,query}
  }
+ async function stagedSetup(){
+  fixture=await persistentContextFixture();const f=fixture
+  const auth=(await authSessionStore.create(f.ownerId,{deviceLabel:'Fictional staging browser',userAgent:null,ipAddress:null}))!
+  const claims={userId:f.ownerId,sessionId:auth.id,authVersion:auth.authVersion}
+  const session=await createPersonalWebSession({assistantId:f.assistantId,userId:f.ownerId,workspaceId:f.workspaceId,
+   channelType:'web',channelId:randomUUID(),appOrigin:'chat'},
+   {actorUserId:f.ownerId,authSessionId:auth.id,authVersion:auth.authVersion})
+  const scope={...f.envelope,userId:f.ownerId,assistantId:f.assistantId}
+  const earlier=await addSessionMessage({sessionId:session.id,role:'user',content:'Fictional earlier topic request',scope})
+  const message=await addSessionMessage({sessionId:session.id,role:'user',content:'Fictional current topic request',scope})
+  const authority=await resolveSessionTitleAuthority({claims,sessionId:session.id,readOnly:false})
+  const capture=await captureAttendedSessionClassification({authority,session,message})
+  const fork=forkAttendedSessionClassification({authority,session,message,capture})
+  const measurements:string[]=[]
+  const assessment=await assessAttendedSessionMessage({authority:fork.authority,session,message,capture:fork.capture,
+   provider:classifierProvider(),model:'fixture',measure:async(counter,run)=>{measurements.push(counter);return run()}})
+  const boundary=createNativeAttendedOutputBoundary(authority.execution,authority.accumulator,{
+   workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.ownerId,sessionId:session.id,
+   channelType:'web',channelId:session.channelId,recipientType:'individual',
+  })
+  const handoff=captureNativeClassifiedAssembly(assessment,authority,boundary)
+  expect(handoff).toBeDefined()
+  return{f,session,scope,earlier,message,authority,assessment,boundary,handoff:handoff!,measurements,fork,claims}
+ }
+ it('stages immutable classifier bytes and captured history without the two repeated full proofs',async()=>{
+  const c=await stagedSetup(),before=c.measurements.length
+  const framed=vi.spyOn(await import('../../db/session-context-revisions.js'),'readSessionQueryFrame')
+  const result=await c.handoff.defer();c.fork.mergeEvidence()
+  result.history[0].content='Untrusted mutation of returned staging bytes'
+  const history=await c.handoff.readHistory()
+  expect(history[0].content).toBe(c.earlier.content)
+  expect(boundScopeSources(history)).toEqual(boundScopeSources(result.history))
+  expect(c.measurements).toHaveLength(before)
+  expect(framed).not.toHaveBeenCalled()
+  expect(Object.isFrozen(result.classification)).toBe(true)
+  expect(result.pendingAnnotation).toBeDefined()
+  expect(await readSessionMessageAnnotation(c.session.id,c.message.id,c.authority)).toBeNull()
+ })
+ it('keeps current selector metadata and falls back when a new physical message arrives',async()=>{
+  const c=await stagedSetup();await c.handoff.defer()
+  const added=await addSessionMessage({sessionId:c.session.id,role:'user',content:'Fictional later message',scope:c.scope})
+  const full=vi.spyOn(sessionQueries,'readAdmittedSessionQuery')
+  const history=await c.handoff.readHistory()
+  expect(full).toHaveBeenCalledOnce()
+  expect(history.at(-1)?.id).toBe(added.id)
+ })
+ it('does not let private staged history authorize a held source at actual query-loop dispatch',async()=>{
+  const c=await stagedSetup();await c.handoff.defer();c.fork.mergeEvidence()
+  const history=await c.handoff.readHistory()
+  await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.earlier.id])
+  const stream=vi.fn<LLMProvider['stream']>(async function*(){yield{type:'text_delta',text:'Must not dispatch'}})
+  const provider:LLMProvider={name:'fictional-staged-dispatch',models:['fixture'],stream,createSession(){throw new Error('Stateless fixture expected')}}
+  const context={...executionToolContext(c.authority.execution,{appId:'fictional-staged-input'}),scopeAccumulator:c.authority.accumulator,
+   assertModelInputAuthority:assertSourceModelInputAuthority}
+  await expect((async()=>{for await(const _event of queryLoop({provider,model:'fixture',systemPrompt:'Fictional context',messages:history.map(row=>({role:row.role as 'user',content:row.content as string})),
+   tools:new Map(),ledger:NOOP_TURN_LEDGER,context,stateless:true,maxTurns:1})){/* consume */}})()).rejects.toMatchObject({reason:'authority_changed'})
+  expect(stream).not.toHaveBeenCalled()
+ })
+ it('checks each actual effect freshly and makes source refusal sticky before custom callbacks',async()=>{
+  const c=await stagedSetup();await c.handoff.defer()
+  const before=c.measurements.length,effect=vi.fn(async()=>7)
+  expect(await c.handoff.runEffect(effect)).toBe(7)
+  expect(await c.handoff.runEffect(effect)).toBe(7)
+  expect(c.measurements).toHaveLength(before+2)
+  await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.earlier.id])
+  await expect(c.handoff.runEffect(effect)).rejects.toMatchObject({reason:'authority_changed'})
+  const refused=c.measurements.length
+  await expect(c.handoff.runEffect(effect)).rejects.toMatchObject({reason:'authority_changed'})
+  expect(c.measurements).toHaveLength(refused)
+  expect(effect).toHaveBeenCalledTimes(2)
+ })
+ it('keeps ordinary custom effect failures separate from authority refusal',async()=>{
+  const c=await stagedSetup();await c.handoff.defer()
+  const failure=new Error('Fictional ordinary store failure')
+  await expect(c.handoff.runEffect(async()=>{throw failure})).rejects.toBe(failure)
+  await expect(c.handoff.runEffect(async()=>9)).resolves.toBe(9)
+ })
+ it('refuses copied owners and replaced assessment methods instead of granting staging privileges',async()=>{
+  const c=await stagedSetup()
+  expect(captureNativeClassifiedAssembly({...c.assessment},c.authority,c.boundary)).toBeUndefined()
+  expect(captureNativeClassifiedAssembly(c.assessment,c.authority,{...c.boundary})).toBeUndefined()
+  c.assessment.defer=async()=>{throw new Error('Must not run replaced method')}
+  expect(captureNativeClassifiedAssembly(c.assessment,c.authority,c.boundary)).toBeUndefined()
+  await expect(c.handoff.defer()).rejects.toMatchObject({reason:'authority_changed'})
+ })
+ it('refuses a root accumulator replaced while the staging lease is pending',async()=>{
+  const c=await stagedSetup(),pending=c.handoff.defer()
+  queueMicrotask(()=>{(c.authority as {accumulator:ContextScopeAccumulator}).accumulator=new ContextScopeAccumulator()})
+  await expect(pending).rejects.toMatchObject({reason:'authority_changed'})
+  expect(await readSessionMessageAnnotation(c.session.id,c.message.id,{...c.authority,accumulator:new ContextScopeAccumulator()})).toBeNull()
+ })
+ it('rejects a genuinely different root authority substituted before handoff creation',async()=>{
+  const c=await stagedSetup(),replacement=await resolveSessionTitleAuthority({claims:c.claims,sessionId:c.session.id,readOnly:false})
+  const root=c.authority as {execution:typeof c.authority.execution;accumulator:ContextScopeAccumulator}
+  root.execution=replacement.execution;root.accumulator=replacement.accumulator
+  const boundary=createNativeAttendedOutputBoundary(root.execution,root.accumulator,{
+   workspaceId:c.f.workspaceId,assistantId:c.f.assistantId,userId:c.f.ownerId,sessionId:c.session.id,
+   channelType:'web',channelId:c.session.channelId,recipientType:'individual',
+  })
+  expect(captureNativeClassifiedAssembly(c.assessment,c.authority,boundary)).toBeUndefined()
+  await expect(c.handoff.defer()).rejects.toMatchObject({reason:'authority_changed'})
+ })
  it('preserves the complete admitted query evidence through a web reply snippet',async()=>{
   const {f,rows,query}=await setup()
   const reply=await resolveReplyText({session:f.session,channelType:'web',replyToMessageId:rows[1].id,clientSnippet:'Fictional selected phrase',readableHistory:query.history})
