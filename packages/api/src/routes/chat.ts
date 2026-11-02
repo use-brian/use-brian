@@ -7452,12 +7452,14 @@ export function chatRoutes(options: WebChatOptions): Router {
           deferToolSchemas: customLlmRuntime?.routeKind !== 'custom' &&
             registryRow(customLlmRuntime?.selector ?? preparedRun.model.model)?.provider === 'gemini',
           routineCalendarRead: routineDeclineReason === null && options.decisionRuntime ? {
-              runtime:options.decisionRuntime, llm:{provider:backgroundProvider,modelId:backgroundModel},
+              runtime:options.decisionRuntime, llm:{provider:preparedRun.model.provider,modelId:preparedRun.model.model},
               workspaceId:assistant.workspaceId??undefined, calendarTools:boundRoutineCalendarTools,historyCalls:routineHistoryCalls,
               onResult:async result=>{
                 turnTiming.add('routine_planning',result.durationMs)
                 await recordOverheadUsage({usageStore:options.usageStore,userId:user.id,assistantId:assistant.id,sessionId:session.id,
-                  userMessageId:storedUserMsg.id,model:result.model,usage:result.usage,source:'overhead:classifier',triggerKey:'chat_tool_selection',...backgroundUsageAttribution})
+                  userMessageId:storedUserMsg.id,model:result.model,usage:result.usage,source:'overhead:classifier',triggerKey:'chat_tool_selection',
+                  ...(result.usedRequestedLlm?{modelTier:customLlmRuntime?.modelTier??logicalTier,
+                    providerKeySource:customLlmRuntime?.providerKeySource??(usedLegacyByoKey?'user' as const:'platform' as const)}:{})})
                 console.info('[chat] routine planning',{path:result.path,selected:result.plan!==null,durationMs:result.durationMs,...(result.scopeCounts?{scopeCounts:result.scopeCounts}:{}),...(result.inputCounts?{inputCounts:result.inputCounts}:{})})
               },
             } : undefined,

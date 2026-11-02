@@ -12,13 +12,13 @@ const sinks = new WeakSet<object>()
 const operations = new WeakMap<object, { boundary: Boundary; calls: Operation }>()
 const checks = new WeakMap<Check, Boundary>()
 const requests = new WeakMap<DecisionRequest, { boundary: Boundary; check: Check | undefined }>()
-type Completion = { identity: object; calls: Operation; qualify: (route: DecisionCompletionRoute, request: Pick<DecisionRequest, 'state' | 'questions'>) => boolean; qualified?: () => void }
+type Completion = { identity: object; calls: Operation; qualify: (route: DecisionCompletionRoute, request: Pick<DecisionRequest, 'state' | 'questions'>) => boolean; qualified?: () => void; inputCapacityFallback: boolean }
 const completions = new WeakMap<object, Completion>()
 
 /** Only fixed domain completion factories enroll their captured pure callbacks. */
 export function registerClassifierLlmCompletion<T extends Operation>(operation: T,
-  qualify: Completion['qualify'], qualified?: () => void): T {
-  completions.set(operation, { identity: {}, calls: { ...operation }, qualify, qualified })
+  qualify: Completion['qualify'], options?: { qualified?: () => void; inputCapacityFallback?: boolean }): T {
+  completions.set(operation, { identity: {}, calls: { ...operation }, qualify, qualified: options?.qualified, inputCapacityFallback: options?.inputCapacityFallback === true })
   return operation
 }
 function completion(operation: Operation): Completion | undefined {
@@ -37,6 +37,9 @@ export function qualifyClassifierLlmCompletion(operation: Operation, route: Deci
 export function ownsClassifierLlmCompletion(operation: Operation): boolean {
   const boundary = owned(operation), entry = completion(operation)
   return !!boundary?.enabled && !!entry && boundary.completion === entry.identity
+}
+export function ownsClassifierCapacityFallback(operation: Operation): boolean {
+  return ownsClassifierLlmCompletion(operation) && completion(operation)?.inputCapacityFallback === true
 }
 /** Audited wrappers preserve callback ancestry, not a successful allow result. */
 export function transferClassifierDecisionCheck(source: Check | undefined, target: Check): Check {

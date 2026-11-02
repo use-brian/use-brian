@@ -134,6 +134,17 @@ describe('[COMP:decisions/runtime] certified classifier admission', () => {
     expect(replacement).not.toHaveBeenCalled()
   })
 
+  it('does not enroll research in the routine-only capacity route', async () => {
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const fetch = vi.fn(async () => typedCompletionResponse())
+    vi.stubGlobal('fetch', fetch)
+    const result = await classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Fictional research context. '.repeat(6000),
+      toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
+      decisionRuntime: classifierRuntime({ llmProvider: provider }), assertInputAuthority: async () => {} })
+    expect(result.research).toBe(false)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it.each(['llm_only', 'fallback'] as const)('admits a fixed typed %s completion only at physical dispatch and final return', async mode => {
     const full = vi.fn(async () => {})
     const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })

@@ -16,15 +16,16 @@ import { assertDecisionCapabilities, validateDecisionResponse } from '../validat
 
 const DEFAULT_ENDPOINT = 'https://api.typesafe.ai/v1/systemone'
 
-export const TYPESAFE_JEV_CAPABILITIES: DecisionCapabilities = {
-  primitives: ['choice', 'boolean', 'score'],
+export const TYPESAFE_JEV_CAPABILITIES: DecisionCapabilities = Object.freeze({
+  primitives: Object.freeze(['choice', 'boolean', 'score'] as const),
   batch: true,
   maxOptions: 255,
   maxQuestions: 64,
   maxRubricLevels: 10,
   maxInputTokens: 64_000,
-  uncertainty: ['native_distribution'],
-}
+  maxQuestionInputTokens: 32_000,
+  uncertainty: Object.freeze(['native_distribution'] as const),
+})
 
 export type TypeSafeTransportRequest = {
   url: string
@@ -284,5 +285,5 @@ export function createTypeSafeDecisionProvider(options: {
       }
     },
   }
-  return options.transport ? provider : registerDecisionTransportOwner(provider)
+  return options.transport ? provider : registerDecisionTransportOwner(provider, options.capabilities === undefined)
 }

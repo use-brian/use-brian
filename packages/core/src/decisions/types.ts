@@ -173,6 +173,8 @@ export type DecisionCapabilities = {
   maxQuestions: number
   maxRubricLevels: number
   maxInputTokens: number
+  /** Complete state plus any one question, when the provider has a separate limit. */
+  maxQuestionInputTokens?: number
   uncertainty: readonly UncertaintySource[]
 }
 

@@ -184,6 +184,8 @@ export type DecisionCascadePath =
   | 'safe_default'
 
 export type DecisionCascadeResult<T> = {
+  /** Host routing fact for caller attribution, never input authority. */
+  usedRequestedLlm?: boolean
   runId: string
   result: T
   path: DecisionCascadePath

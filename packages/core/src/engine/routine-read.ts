@@ -23,7 +23,7 @@ type Candidate={calls:RoutineCalendarCall[]}
 type ScopeVocabulary={targets:Array<{id:string;name:string;calendarId:string}>;ranges:Array<{id:string;timeMin:string;timeMax:string;labels:string[]}>;reason?:string}
 const planData=new WeakMap<object,{calls:RoutineCalendarCall[];current:()=>void}>()
 type RoutineReadPlan=Readonly<{kind:'calendar_events'}>
-export type RoutineReadPlanningResult={plan:RoutineReadPlan|null;durationMs:number;model:string|null;usage:TokenUsage|null;path:string;scopeCounts?:{targets:number;ranges:number;questions:number};inputCounts?:Record<string,number>}
+export type RoutineReadPlanningResult={usedRequestedLlm?:boolean;plan:RoutineReadPlan|null;durationMs:number;model:string|null;usage:TokenUsage|null;path:string;scopeCounts?:{targets:number;ranges:number;questions:number};inputCounts?:Record<string,number>}
 const iso=z.string().datetime({offset:true})
 const callInput=z.object({calendarId:z.string().min(1).max(1024),timeMin:iso,timeMax:iso,maxResults:z.number().int().min(1).max(2500)}).strict()
 
@@ -206,17 +206,17 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
      return{result:decode(response),providerId:response.providerId,model:response.model,usage:response.usage}
     }},(route,request)=>ownsInputAdmission(route.provider,{
      model:route.modelId,messages:buildLlmDecisionMessages(request),allowProviderFallback:false,
-    }))})
+    }),{inputCapacityFallback:true})})
   // Capture the private model-selected bytes before the final authority await.
   // A runtime hook cannot replace or mutate its returned object into new scope.
   const selected=validatePlan(result.result)
   const selectedCalls=selected?structuredClone(decodedPlans.get(selected)!.calls):null
   await check();current()
-  if(!selectedCalls)return{...empty(result.path),scopeCounts,inputCounts,model:model??result.primaryResponse?.model.wireId??null,usage:usage??result.primaryResponse?.usage??null}
+  if(!selectedCalls)return{...empty(result.path),usedRequestedLlm:result.usedRequestedLlm,scopeCounts,inputCounts,model:model??result.primaryResponse?.model.wireId??null,usage}
   const calls=selectedCalls
   const plan:RoutineReadPlan=Object.freeze({kind:'calendar_events'})
   planData.set(plan,{calls,current})
-  return{plan,durationMs:Date.now()-started,model:model??result.primaryResponse?.model.wireId??null,usage:usage??result.primaryResponse?.usage??null,path:result.path,scopeCounts,inputCounts}
+  return{plan,durationMs:Date.now()-started,model:model??result.primaryResponse?.model.wireId??null,usage,path:result.path,usedRequestedLlm:result.usedRequestedLlm,scopeCounts,inputCounts}
  }catch(error){if(refusal)throw refusal;if(isInputAuthorityError(error)||signal.aborted)throw error;return{...empty('unavailable'),scopeCounts,inputCounts}}
  finally{closed=true;if(pending)await pending}
 }

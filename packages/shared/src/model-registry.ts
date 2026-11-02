@@ -151,6 +151,8 @@ export type DecisionModelCapabilities = {
   maxQuestions: number
   maxRubricLevels: number
   maxInputTokens: number
+  /** Complete state plus any one question, when the provider has a separate limit. */
+  maxQuestionInputTokens?: number
   uncertainty: readonly ('native_distribution' | 'self_reported' | 'unavailable')[]
 }
 
@@ -477,6 +479,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
       maxQuestions: 64,
       maxRubricLevels: 10,
       maxInputTokens: 64_000,
+      maxQuestionInputTokens: 32_000,
       uncertainty: ['native_distribution'],
     },
   },

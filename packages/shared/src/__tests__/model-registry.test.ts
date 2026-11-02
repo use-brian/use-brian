@@ -458,6 +458,7 @@ describe('[COMP:providers/model-registry] decision-only models', () => {
       decisionCapabilities: {
         adapterId: 'typesafe',
         wireModelId: 'jev-1.13.0',
+        maxInputTokens: 64_000, maxQuestionInputTokens: 32_000,
         primitives: ['choice', 'boolean', 'score'],
       },
     })
