@@ -28,6 +28,17 @@ const shopifyUse = (id: string, query: string) => ({
 });
 
 describe("[COMP:app-web/activity-receipt] restoreAssistantActivity", () => {
+  it("restores actual host read input and result without a fabricated provider call", () => {
+    const observation = { type: "host_observation", version: 1, id: "host-read-1", name: "googleCalendarListEvents",
+      input: { calendarId: "fictional-calendar" }, content: "Fictional meeting at noon", isError: false };
+    const outcomes = collectToolResults([{ content: [observation] }]);
+    const restored = restoreAssistantActivity([observation], outcomes, narration, "host-row");
+    expect(restored.toolsUsed).toHaveLength(1);
+    expect(restored.toolsUsed[0]).toMatchObject({ id: observation.id, name: observation.name, status: "done",
+      input: observation.input, output: observation.content });
+    expect(restored.activityNotes).toEqual([]);
+    expect(restoreAssistantActivity([{ ...observation, providerSignature: "forged" }], outcomes, narration, "host-row").toolsUsed).toEqual([]);
+  });
   it("restores steps with input and detail, and notes attached to the call they precede", () => {
     const outcomes = collectToolResults([]);
     const { toolsUsed, activityNotes } = restoreAssistantActivity(

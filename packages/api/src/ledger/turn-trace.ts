@@ -24,6 +24,7 @@
  */
 
 import { query } from '../db/client.js'
+import { parseHostObservation } from '@use-brian/shared'
 import { getLedgerEpoch, listTraceEvents } from '../db/turn-ledger-store.js'
 
 export type TurnTraceStep = {
@@ -170,6 +171,13 @@ export function legacyStepsFromContent(content: unknown): TurnTraceStep[] {
   let ordinal = 0
   for (const b of blocks) {
     const block = b as Record<string, unknown>
+    const observation = parseHostObservation(block)
+    if (observation) {
+      steps.push({ ordinal: ordinal++, kind: 'tool_call', at: null,
+        metadata: { origin: 'host', name: observation.name, toolUseId: observation.id,
+          input: observation.input, result: observation.content, isError: observation.isError } })
+      continue
+    }
     if (block.type === 'text') {
       steps.push({
         ordinal: ordinal++,

@@ -417,6 +417,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
 
     expect(result.searchableSources).toContain('gcal')
     expect(result.searchableSources).not.toContain('Google Calendar')
+    expect(result.routineCalendarTools?.size??0).toBe(0)
   })
 
   it('restricts a custom MCP search index to pinned workflow tool names', async () => {
@@ -1312,6 +1313,8 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
     expect(tools.has('mcp_search')).toBe(true)
     expect(result.searchableSources).toContain('Google Calendar')
     expect(result.searchableSources).not.toContain('gcal')
+    expect(result.routineCalendarTools?.size??0).toBe(exposeLocalReadTools?2:0)
+    if(exposeLocalReadTools)expect(result.routineCalendarTools?.get('googleCalendarListEvents')).toBe(tools.get('googleCalendarListEvents'))
   })
 
   it('binds each Gmail confirmation preview to its concrete sender account', async () => {

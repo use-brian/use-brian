@@ -13,6 +13,7 @@ import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationReque
 import { createAccumulator } from '../providers/accumulator.js'
 import { createStallWatchdog, withStallSignal, type StallWatchdog } from './stall-watchdog.js'
 import { createToolExecutor } from './tool-executor.js'
+import {executeRoutineCalendarRead,type RoutineReadOptions,type HostReadReceipt} from './routine-read.js'
 import { safeTrace, type TurnLedger, type TurnTrace } from './turn-ledger.js'
 import { createLoopDetector, DEFAULT_HARD_LIMIT } from './loop-detector.js'
 import {
@@ -146,7 +147,7 @@ export type QueryEvent =
    * side channel — never serialized to the model, never persisted to
    * session_messages. Consumers can merge it into analytics event metadata.
    */
-  | { type: 'tool_result'; id: string; results: ContentBlock[]; metaByToolUseId?: Record<string, ToolResultMeta> }
+  | { type: 'tool_result'; id: string; results: ContentBlock[]; metaByToolUseId?: Record<string, ToolResultMeta>; hostRead?:HostReadReceipt }
   /**
    * Retraction of a tool call the engine already streamed `tool_start`
    * (and possibly `tool_result`) for, but then dropped from the persisted
@@ -285,6 +286,8 @@ export type QueryLoopOptions = {
   /** Host opt-in only for adapters that re-read the session tool array on every send. */
   deferToolSchemas?: boolean
   toolSelection?: ToolSelectionOptions
+  /** Canonical host-owned read adapters; late planning sees the entire prepared context. */
+  routineCalendarRead?: RoutineReadOptions
   context: ToolContext
   /**
    * Turn-ledger recorder — REQUIRED, deliberately not optional (an optional
@@ -771,8 +774,12 @@ async function* queryLoopCore(
   // `context.abortSignal` rides through to the provider's underlying `fetch`
   // so a client disconnect actually cancels in-flight HTTP, instead of being
   // a no-op while we wait for Cloud Run's 300s cap.
+
+
+  // Preserve the ordinary admission/constructor order before recording input.
+  // Routine reads delay construction until their real observations are ready.
   await assertModelInputPreparation(context, provider, model, options.messages)
-  const session = options.stateless ? null : provider.createSession({
+  const createPreparedSession = () => provider.createSession({
     assertInputAuthority: () => assertModelInputAuthority(context),
     model,
     systemPrompt,
@@ -782,6 +789,7 @@ async function* queryLoopCore(
     inputTokenLimit: options.inputTokenLimit,
     signal: context.abortSignal,
   })
+  let session = !options.routineCalendarRead && !options.stateless ? createPreparedSession() : null
 
   // Turn-ledger trace for this invocation. Fire-and-forget by contract; a
   // recorder failure must never fail the turn (safeTrace + the recorder's
@@ -871,6 +879,20 @@ async function* queryLoopCore(
       type: 'status',
       message: `Resuming session from approval ${rc.approvalId} (tool=${rc.suspendedToolName}, step=${rc.loopStepIndex})`,
     }
+  }
+
+  const routine = yield* executeRoutineCalendarRead({options,tools,loopDetector,deniedTools,ledger:ledgerTrace,
+    assertInputAuthority:()=>assertModelInputAuthority(context)})
+  loopStepIndex+=routine.calls
+  for(const observation of routine.records){
+    if(!observation.isError && observation.content.trim())terminalEvidence.push({tool:observation.name,input:serializeTerminalToolInput(observation.input),result:observation.content.slice(0,MAX_TERMINAL_EVIDENCE_CHARS)})
+  }
+  if(terminalEvidence.length>MAX_TERMINAL_EVIDENCE)terminalEvidence.splice(0,terminalEvidence.length-MAX_TERMINAL_EVIDENCE)
+  if(routine.messages.length){nextMessages.push(...routine.messages);if(options.stateless)statelessHistory.push(...routine.messages)}
+  if(routine.complete){toolDefinitions.length=0;tools.clear()}
+  if(options.routineCalendarRead){
+    await assertModelInputPreparation(context, provider, model, nextMessages)
+    session=options.stateless?null:createPreparedSession()
   }
 
   for (let turn = 0; turn < maxTurns; turn++) {
@@ -1157,7 +1179,7 @@ async function* queryLoopCore(
       debugDocumentFlow('stream_error', { sessionId: context.sessionId, model, turn, error: true, providerError: stallWatchdog?.error ?? err, timeout: !!stallWatchdog?.error, aborted: context.abortSignal?.aborted })
       if (isAuthorityBoundaryError(err)) throw err
       // Layer 4: reactive compact on context overflow — compact and retry once
-      if (isContextOverflowError(err) && !hasAttemptedReactiveCompact && options.compactModel) {
+      if (isContextOverflowError(err) && !routine.complete && !hasAttemptedReactiveCompact && options.compactModel) {
         hasAttemptedReactiveCompact = true
         yield { type: 'status', message: 'Context too large, compacting...' }
         try {
@@ -1486,6 +1508,8 @@ async function* queryLoopCore(
     appendTerminalEvidence(response.content, allToolResults, terminalEvidence)
 
     // ── Phase 3b: Per-turn assistant record ────────────────────
+    if(response.content.some(block=>(block as {type:string}).type==='host_observation'))throw new Error('Provider output cannot author host observations')
+
     // Emit the completed turn (assistant content + its matched tool_results)
     // for consumers that persist transcripts. This fires for EVERY turn
     // including intermediate tool-use turns — unlike `turn_complete` which

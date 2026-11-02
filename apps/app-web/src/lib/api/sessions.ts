@@ -1,4 +1,5 @@
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
+import { parseHostObservation } from "@use-brian/shared";
 /**
  * Typed fetchers for the app-web session-resume flow.
  *
@@ -992,7 +993,7 @@ export function extractToolUses(
   for (const block of content) {
     if (!block || typeof block !== "object") continue;
     const b = block as { type?: unknown; id?: unknown; name?: unknown; input?: unknown };
-    if (b.type !== "tool_use" || typeof b.name !== "string") continue;
+    if ((b.type !== "tool_use" && !parseHostObservation(block)) || typeof b.name !== "string") continue;
     uses.push({
       id: typeof b.id === "string" ? b.id : `tool_${uses.length}`,
       name: b.name,

@@ -1,3 +1,4 @@
+import {assertHostObservationPublication} from '@use-brian/core'
 /** Actual native transcript publication. [COMP:api/application-persistence] */
 import {z} from 'zod'
 import type pg from 'pg'
@@ -22,6 +23,8 @@ function transcriptJson(value:unknown):unknown {
 }
 export async function publishNativeSessionMessage(input:NativeSessionMessageInput,client?:Pick<pg.ClientBase,'query'>):Promise<SessionMessage>{
  const {authority,sessionId}=input,{execution}=authority
+ assertHostObservationPublication(input.content,execution)
+ if(input.role!=='assistant' && Array.isArray(input.content)&&input.content.some(block=>block?.type==='host_observation'))throw new Error('Host observations require assistant-owned publication')
  if(execution.lifecycle.sessionId!==sessionId||execution.lifecycle.sessionPersisted===false
   ||input.senderAssistantId!=null&&input.senderAssistantId!==execution.assistant.id
   ||[input.replyToText,input.topicLabel,input.topicConfidence].some(value=>value!==undefined&&value!==null))throw new DerivedScopeError('scope_evidence_missing')
@@ -54,6 +57,10 @@ export async function publishNativeSessionMessageBatch(input: {
  measure?:<T>(counter:string,run:()=>Promise<T>)=>Promise<T>;
 },client?:Pick<pg.ClientBase,'query'>):Promise<SessionMessage[]>{
  const {authority,sessionId}=input,{execution}=authority
+ for(const row of input.messages){
+  assertHostObservationPublication(row.content,execution)
+  if(row.role!=='assistant' && Array.isArray(row.content)&&row.content.some(block=>block?.type==='host_observation'))throw new Error('Host observations require assistant-owned publication')
+ }
  const time=input.measure??(<T>(_counter:string,run:()=>Promise<T>)=>run())
  if(execution.lifecycle.sessionId!==sessionId||execution.lifecycle.sessionPersisted===false||input.messages.length<1||input.messages.length>512
   ||input.messages.some(row=>row.senderAssistantId!=null&&row.senderAssistantId!==execution.assistant.id

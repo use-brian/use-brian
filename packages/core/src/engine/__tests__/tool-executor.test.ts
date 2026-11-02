@@ -48,6 +48,32 @@ async function drainResults(executor: ReturnType<typeof createToolExecutor>): Pr
 }
 
 describe('[COMP:engine/tool-executor] basic execution', () => {
+  it.each(['result', 'refusal'] as const)('collects a %s settling during a yielded side event', async outcome => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const refusal = Object.assign(new Error('Fictional source withdrawn'), { reason: 'authority_changed' })
+    const tool = makeTool({ name: 'guardedRead', fn: async () => {
+      await gate
+      if (outcome === 'refusal') throw refusal
+      return { data: 'Fictional successful read' }
+    } })
+    const executor = createToolExecutor({ tools: new Map([[tool.name, tool]]), context: ctx, loopDetector: createLoopDetector() })
+    executor.addTool('call_1', tool.name, {})
+    let pending = true
+    const iterator = executor.getRemainingResults(() => pending)[Symbol.asyncIterator]()
+    expect((await iterator.next()).done).toBe(false)
+    pending = false
+    release()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    if (outcome === 'refusal') await expect(iterator.next()).rejects.toBe(refusal)
+    else {
+      const result = await iterator.next()
+      expect(result.done).toBe(false)
+      expect(result.value?.blocks).toEqual([expect.objectContaining({ type: 'tool_result', content: 'Fictional successful read' })])
+      expect((await iterator.next()).done).toBe(true)
+    }
+  })
+
   it('withholds an ambiguous result when live authority changes during execution', async () => {
     const execute = vi.fn(async <T>(operation: () => Promise<T>) => {
       await operation()

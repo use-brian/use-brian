@@ -1,3 +1,4 @@
+import {registerCanonicalCalendarRead,assertRoutineCalendarDispatch} from '../../engine/routine-read-ownership.js'
 /**
  * Google Calendar tools — lazy-discovered through mcp_search in normal chat.
  *
@@ -428,9 +429,12 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 10_000,
-    async execute(input) {
+    async execute(input, context) {
+      const { timeMin: requestedMin, timeMax, query, maxResults, calendarId, pageToken } = input
+      const dispatch = assertRoutineCalendarDispatch(listEvents, context)
+      const assertDispatchCurrent = dispatch ? await dispatch : undefined
+      assertDispatchCurrent?.()
       try {
-        const { timeMin: requestedMin, timeMax, query, maxResults, calendarId, pageToken } = input
         if (pageToken && !requestedMin) throw new Error('Calendar continuation requires the original timeMin')
         const timeMin = requestedMin ?? new Date().toISOString()
         const scope = { calendarId: calendarId ?? 'primary', timeMin,
@@ -462,6 +466,8 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
       }
     },
   })
+
+  registerCanonicalCalendarRead(listEvents)
 
   const getEvent = buildTool({
     name: 'googleCalendarGetEvent',

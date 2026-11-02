@@ -1,3 +1,4 @@
+import {inheritRoutineCalendarRead,assertRoutineCalendarAdapterCurrent} from '../engine/routine-read-ownership.js'
 import { missingToolCapability } from '../tools/capability-gate.js'
 /**
  * MCP tool search — Pattern E adapted for Gemini.
@@ -576,14 +577,14 @@ export function createMcpSearchTools(params: {
       if (entry.kind !== 'local' || entry.tool.isReadOnly !== true || entry.tool.hiddenFromModel
         || counts.get(entry.toolName) !== 1 || ['mcp_search', 'mcp_call'].includes(entry.toolName)
         || ambiguousEntryKeys.has(`${entry.server}:${entry.toolName}`)) continue
-      reads.push({
+      reads.push(inheritRoutineCalendarRead(entry.tool,{
         ...entry.tool,
         deferredSchemaOnly: true,
         // One dispatcher owns approval and denied-call state across both names.
         requiresConfirmation: false,
         resolveConfirmation: undefined,
         execute: (input, context) => callTool.execute({ server: entry.server, tool: entry.toolName, args: input }, context),
-      })
+      }))
     }
     return [searchTool, callTool, ...reads]
   }
@@ -1157,5 +1158,6 @@ async function dispatchLocal(params: {
   // Execute the underlying tool. All capability gates, audit wrappers,
   // and sensitivity checks live inside its `execute()` — `mcp_call` is a
   // transparent dispatcher at this point.
+  assertRoutineCalendarAdapterCurrent(context,targetTool)
   return targetTool.execute(args, context)
 }

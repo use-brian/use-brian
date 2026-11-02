@@ -1,4 +1,5 @@
 import { publishNativeSessionMessage } from './session-message-publication.js'
+import { hostObservationReplay } from '@use-brian/shared'
 import { readSessionContextRevisions, writeSessionContextRevision, type SessionContextRevision } from './session-context-revisions.js'
 import { classifySession, sessionKindSql } from '../session-kind.js'
 import type pg from 'pg'
@@ -1438,6 +1439,14 @@ export function toStampedMessages(
   },
 ): Array<{ role: 'user' | 'assistant' | 'system'; content: unknown }> {
   return dbMessages.map((m) => {
+    const observation = Array.isArray(m.content) && m.content.some(block => block?.type === 'host_observation') ? hostObservationReplay(m.content, {recordedAt:m.createdAt.toISOString(),timeZone:timezone||'UTC',
+      assistant:m.senderAssistantId && assistantVoices
+        ? assistantVoices.names.get(m.senderAssistantId) ?? (m.senderAssistantId===assistantVoices.currentAssistantId?'current assistant':'another assistant')
+        : 'unspecified assistant'}) : null
+    if (observation) {
+      if (m.role !== 'assistant') throw new Error('Host observations require an assistant-owned transcript row')
+      return observation
+    }
     const base = {
       role: m.role as 'user' | 'assistant' | 'system',
       content: m.content,
@@ -1630,6 +1639,7 @@ export async function addSessionMessage(params: {
   if (params.scope && params.derivation || params.derivationTarget && (!params.derivation || params.scope)) {
     throw new Error('session_message_scope_conflict')
   }
+  if(Array.isArray(params.content)&&params.content.some(block=>block?.type==='host_observation'))throw new Error('Host observations require the native executor batch publisher')
   if(params.authority&&params.derivation)return publishNativeSessionMessage({...params,derivation:params.derivation,authority:params.authority},client)
   const sql =
     `INSERT INTO session_messages

@@ -1,3 +1,4 @@
+import {inheritRoutineCalendarRead,ownsRoutineCalendarRead} from '@use-brian/core'
 /**
  * MCP tool injection — discovers tools from the user's connected MCP
  * servers and injects them into the query loop's tool map.
@@ -410,6 +411,8 @@ export type McpInjectionResult = {
   restrictedSearchToolNames?: string[]
   /** Trusted runtime block, present only when usable matched rules emitted write tools. */
   knowledgeCapturePrompt?: string
+  /** Exact built-in read adapters for optional host planning; never an execution grant. */
+  routineCalendarTools?: ReadonlyMap<string, Tool>
 }
 
 export async function injectMcpTools(params: {
@@ -597,6 +600,7 @@ export async function injectMcpTools(params: {
   const legacySourceAuthorities = new Set<() => Promise<void>>()
   const unavailable: string[] = []
   const originalTools = new Map(tools)
+  const routineCalendarTools = new Map<string, Tool>()
   const runtimeActorId = contextScope?.access?.userId ?? actorIdentity?.userId
   const protectedSources = new Set<ConnectorSourceRuntime>()
   const noteProtectedUnavailable = () => {
@@ -2215,6 +2219,10 @@ export async function injectMcpTools(params: {
         continue
       }
       tools.set(tool.name, tool)
+      if (exposeLocalReadTools && tool.isReadOnly && ownsRoutineCalendarRead(tool) && baseToolName(tool.name)==='googleCalendarListEvents'
+        && index.entries.some(entry=>entry.kind==='local'&&entry.server==='gcal'&&entry.toolName===tool.name)) {
+        routineCalendarTools.set(tool.name,tool)
+      }
     }
 
     const remoteCount = searchSources.reduce(
@@ -2269,6 +2277,8 @@ export async function injectMcpTools(params: {
           return invoke(context, () => tool.describeConfirmation!(input, context))
         } } : {}),
       })
+      inheritRoutineCalendarRead(tool,tools.get(name)!)
+      if(routineCalendarTools.get(name)===tool)routineCalendarTools.set(name,tools.get(name)!)
     }
     await authority.assertCurrent()
     await assertBindingsCurrent()
@@ -2284,6 +2294,7 @@ export async function injectMcpTools(params: {
     searchableSources,
     restrictedSearchToolNames: [...restrictedSearchToolNames],
     knowledgeCapturePrompt,
+    routineCalendarTools:[...routineCalendarTools].every(([name,tool])=>tools.get(name)===tool)?routineCalendarTools:undefined,
   }
 }
 
@@ -2439,11 +2450,11 @@ async function injectInstanceVariants(opts: {
     const suffix = instanceToolSuffix(extra.id, extra.label)
     for (const tool of variantTools) {
       const canonical = tool.name
-      const variant: Tool = {
+      const variant: Tool = inheritRoutineCalendarRead(tool,{
         ...tool,
         name: `${canonical}${suffix}`,
         description: `[${extra.label}] ${tool.description}`,
-      }
+      })
       if (
         (await applyPolicyOrSkip(
           variant,
@@ -2798,7 +2809,8 @@ async function injectGoogleTools(
 
   /** Wrap a variant tool set with the per-instance health probe (when wired). */
   function probeVariant(built: Tool[], instanceId: string): Tool[] {
-    return healthReport ? wrapToolsWithHealthProbe(built, instanceId, healthReport) : built
+    if(!healthReport)return built
+    return wrapToolsWithHealthProbe(built,instanceId,healthReport).map((tool,index)=>inheritRoutineCalendarRead(built[index],tool))
   }
 
   // ── Prevalidate all connected Google connectors in parallel ──

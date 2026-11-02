@@ -1,3 +1,5 @@
+import {consumeHostReadObservation,combineHostReadObservations,inheritRoutineCalendarRead,type RoutineCalendarCall} from '@use-brian/core'
+import {parseHostObservation,type HostObservation} from '@use-brian/shared'
 import {boundScopeSources} from '@use-brian/core'
 import {generateAttendedSessionTitle} from './attended-session-title.js'
 import {readSessionTitle} from '../db/session-title-store.js'
@@ -6951,6 +6953,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         stopReason: string               // diagnostic for empty-turn logging
       }
       const pendingAssistantTurns: PendingTurn[] = []
+      const pendingHostObservations:HostObservation[][]=[]
       let lastAssistantMessageId: string | null = null
       // Settle the research activity from what the turn actually did
       // (features/research.md -> "Delivery"). Saved only with an inspected
@@ -7057,6 +7060,11 @@ export function chatRoutes(options: WebChatOptions): Router {
         const publish = async (tx: PoolClient) => {
           const nativeRows: Array<Parameters<typeof publishNativeSessionMessageBatch>[0]['messages'][number]> = []
           const nativeSaved = new Map<number, { isLast: boolean; attachments: typeof outboundAttachments }>()
+          if(pendingHostObservations.length){
+            if(!nativeTranscriptAuthority || !('derivation' in batchWrite))throw new Error('Host reads require native publication')
+            nativeSaved.set(nativeRows.length,{isLast:false,attachments:[]})
+            nativeRows.push({role:'assistant',content:combineHostReadObservations(pendingHostObservations,executionContext),senderAssistantId:assistant.id})
+          }
           for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
             const turn = pendingAssistantTurns[turnIdx]
             // Pure empty response (safety filter / MAX_TOKENS with zero
@@ -7330,6 +7338,23 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       try {
         const presentedDocumentInputs = new Map<string, PresentedDocumentInput>()
+        const boundRoutineCalendarTools=new Map<string,Tool>()
+        // Typed vocabulary from the same admitted history; never parse untrusted replay prose.
+        const successfulHistoricalCalls=new Set(dbMessages.flatMap(row=>Array.isArray(row.content)?row.content.flatMap(block=>
+          block?.type==='tool_result'&&block.isError!==true&&typeof block.toolUseId==='string'?[block.toolUseId]:[]):[]))
+        const routineHistoryCalls:RoutineCalendarCall[]=dbMessages.flatMap(row=>row.role==='assistant'&&Array.isArray(row.content)
+          ? row.content.flatMap(block=>{
+            const observation=parseHostObservation(block)
+            let name=observation?.name,input=observation&&!observation.isError?observation.input:undefined
+            if(block?.type==='tool_use'&&successfulHistoricalCalls.has(block.id)){
+              name=block.name;input=block.input
+              if(name==='mcp_call'&&input?.server==='gcal'&&typeof input.tool==='string'&&input.args&&typeof input.args==='object'){
+                name=input.tool;input=input.args as Record<string,unknown>
+              }
+            }
+            return name&&input&&typeof input.timeMin==='string'&&typeof input.timeMax==='string'&&(input.calendarId===undefined||typeof input.calendarId==='string')
+              ? [{name,input:{calendarId:input.calendarId??'primary',timeMin:input.timeMin,timeMax:input.timeMax,maxResults:2500}}]:[]
+          }) : [])
         const preparedRun = await prepareAssistantRun({
           executionContext,
           beforeAssembly: async canonicalBrief => {
@@ -7345,13 +7370,17 @@ export function chatRoutes(options: WebChatOptions): Router {
             inputTokenLimit: customLlmRuntime?.inputTokenLimit,
           },
           candidateTools: loopTools,
-          bindTools: (candidateTools, execution) => bindToolsToAgentAccess(candidateTools, {
-            clearance: execution.security.access.clearance,
-            compartments: execution.security.access.compartments,
-            mutationCompartments: execution.security.access.mutationCompartments,
-            projectIds: execution.security.access.projectIds,
-            sharedAudience: execution.security.access.sharedAudience,
-          }),
+          bindTools: (candidateTools, execution) => {
+            const bound=bindToolsToAgentAccess(candidateTools, {
+              clearance: execution.security.access.clearance, compartments: execution.security.access.compartments,
+              mutationCompartments: execution.security.access.mutationCompartments, projectIds: execution.security.access.projectIds,
+              sharedAudience: execution.security.access.sharedAudience,
+            })
+            for(const [name,tool] of preparedConnectors.routineCalendarTools??[]){
+              if(candidateTools.get(name)===tool && bound.has(name))boundRoutineCalendarTools.set(name,inheritRoutineCalendarRead(tool,bound.get(name)!))
+            }
+            return bound
+          },
           trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
           userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         })
@@ -7389,6 +7418,19 @@ export function chatRoutes(options: WebChatOptions): Router {
           // re-read the session declarations. Snapshot-based adapters do not.
           deferToolSchemas: customLlmRuntime?.routeKind !== 'custom' &&
             registryRow(customLlmRuntime?.selector ?? preparedRun.model.model)?.provider === 'gemini',
+          routineCalendarRead: nativeOutputBoundary && nativeTranscriptAuthority && options.decisionRuntime && !researchMode && !coordinatorMode
+            && !operateSiteIntent && !docCtx && !customLlmRuntime && boundRoutineCalendarTools.size
+            && (adaptive?.toolNames===undefined || adaptive.toolNames.some(name=>boundRoutineCalendarTools.has(name)||name==='mcp_call'||name==='mcp_search'))
+            && [...boundRoutineCalendarTools].every(([name,tool])=>preparedRun.tools.get(name)===tool) ? {
+              runtime:options.decisionRuntime, llm:{provider:backgroundProvider,modelId:backgroundModel},
+              workspaceId:assistant.workspaceId??undefined, calendarTools:boundRoutineCalendarTools,historyCalls:routineHistoryCalls,
+              onResult:async result=>{
+                turnTiming.add('routine_planning',result.durationMs)
+                await recordOverheadUsage({usageStore:options.usageStore,userId:user.id,assistantId:assistant.id,sessionId:session.id,
+                  userMessageId:storedUserMsg.id,model:result.model,usage:result.usage,source:'overhead:classifier',triggerKey:'chat_tool_selection',...backgroundUsageAttribution})
+                console.info('[chat] routine planning',{path:result.path,selected:result.plan!==null,durationMs:result.durationMs})
+              },
+            } : undefined,
           toolSelection: options.decisionRuntime && storedUserSource && rawMessage?.trim() ? {
             runtime: options.decisionRuntime, workspaceId: assistant.workspaceId ?? undefined,
             preselected: adaptive?.toolNames,
@@ -8128,7 +8170,9 @@ export function chatRoutes(options: WebChatOptions): Router {
               metadata: { mode: sanitize(event.mode), count: event.inputs.length },
             })
           }
+          if(event.type==='tool_result' && event.hostRead)pendingHostObservations.push(consumeHostReadObservation(event.hostRead,executionContext))
           if (event.type === 'assistant_turn') {
+            if(event.response.content.some(block=>(block as {type:string}).type==='host_observation'))throw new Error('Provider output cannot author host observations')
             // Per-turn buffering. Each assistant_turn arrives with its own
             // tool_results already paired, so the flush site doesn't need
             // to claim-across-turns. Intermediate tool_use turns reach the

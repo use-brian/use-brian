@@ -69,6 +69,18 @@ const textResponse = (text: string): AssistantResponse => ({
 describe('[COMP:api/turn-ledger-recorder] event shapes', () => {
   beforeEach(() => db.reset())
 
+  it('records a real host read without fabricating a provider call',async()=>{
+    const {store,puts}=fakePayloads()
+    const handle=createTurnLedger({workspaceId:'ws1',assistantId:'as1',sessionId:'se1',payloads:store})
+    const trace=handle.ledger.startTrace({actor:'assistant_turn',model:'mock-model',systemPrompt:'sys',messages:[]})
+    trace.hostRead!({observations:[{type:'host_observation',version:1,id:'host-fictional',name:'googleCalendarListEvents',input:{calendarId:'fictional-calendar'},content:'[]',isError:false}]})
+    await handle.flush()
+    expect(db.events).toHaveLength(1)
+    expect(db.events[0]).toMatchObject({kind:'tool_call',metadata:{origin:'host',name:'googleCalendarListEvents',toolUseId:'host-fictional',hasResult:true}})
+    expect(puts).toContain('[]')
+    expect(db.events.some(event=>event.kind==='provider_call')).toBe(false)
+  })
+
   it('records provider_call with system + message + response refs, pointer-only', async () => {
     const { store } = fakePayloads()
     const handle = createTurnLedger({
