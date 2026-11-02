@@ -14,6 +14,15 @@ describe('[COMP:context-engine/layer-1-system-prompt] system-prompt constants', 
     expect(LAYER_1_SYSTEM_PROMPT).toContain('Two search attempts with no useful results = stop searching')
   })
 
+  it('distinguishes a live recheck from discussion of earlier observations', () => {
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('fresh read through an appropriate available tool during the current request')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('Earlier conversation results do not prove that external state is unchanged')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('Reuse a successful host or tool read already obtained for this request')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('summarize or discuss earlier findings without refreshing')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('If a current read is unavailable or fails, say you could not verify')
+    expect(LAYER_1_SYSTEM_PROMPT).not.toContain('MUST be answered from a tool result obtained this conversation')
+  })
+
   it('allows opportunistic worker delegation while preferring cheaper concurrency', () => {
     expect(LAYER_1_SYSTEM_PROMPT).toContain('2 or more isolated subtasks')
     expect(LAYER_1_SYSTEM_PROMPT).toContain('connector batch operation')
