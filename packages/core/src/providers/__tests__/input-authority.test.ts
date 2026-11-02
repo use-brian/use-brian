@@ -6,7 +6,7 @@ import { wrapProvider } from '../wrappers.js'
 import { wrapFallback } from '../wrap-fallback.js'
 import { wrapEndpointFallback } from '../wrap-endpoint-fallback.js'
 import { isInputAuthorityError, assertInputAuthority, registerInputAdmissionOwner, ownsInputAdmission } from '../input-authority.js'
-import { createRoutingProvider } from '../routing.js'
+import { createRoutingProvider, bindExactModelProvider } from '../routing.js'
 import { wrapCredentialPoolProvider } from '../credential-pool.js'
 import { wrapDocumentAdaptation } from '../document-adaptation.js'
 import type { LLMProvider, ProviderRequest, StreamChunk } from '../types.js'
@@ -51,6 +51,30 @@ describe('[COMP:engine/model-input-authority] provider attempts', () => {
       { ...request, assertInputAuthority: check }))).rejects.toMatchObject({ reason: 'authority_changed' })
     expect(check).toHaveBeenCalledTimes(1)
   })
+  it.each([false, true])('pins exact managed child methods and model before asynchronous admission (%s)', async stateless => {
+    const base = ownedProvider(), replacement = vi.fn()
+    const stream = base.stream.bind(base)
+    base.createSession = options => ({ send: (messages, send) => stream({ ...options, messages,
+      assertInputAuthority: send?.assertInputAuthority ?? options.assertInputAuthority }) })
+    registerInputAdmissionOwner(base)
+    const exact = bindExactModelProvider(base, 'gemini-3-flash-standard')
+    const full = vi.fn(async () => { await Promise.resolve(); base.stream = replacement; base.createSession = replacement })
+    await drain(dispatch(exact, stateless, { ...request, model: 'wrong-model', assertInputAuthority: full }))
+    expect(full).toHaveBeenCalledOnce()
+    expect(replacement).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('does not certify or construct an unknown exact-model child before admission (%s)', async stateless => {
+    const stream = vi.fn(() => (async function* () {})()), createSession = vi.fn(() => ({ send: stream }))
+    const exact = bindExactModelProvider({ name: 'fixture', models: [], stream, createSession }, 'fixture-model')
+    expect(ownsInputAdmission(exact, request)).toBe(false)
+    const full = vi.fn(async () => { throw denied() })
+    await expect(drain(dispatch(exact, stateless, { ...request, assertInputAuthority: full }))).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(full).toHaveBeenCalledOnce()
+    expect(stream).not.toHaveBeenCalled()
+    expect(createSession).not.toHaveBeenCalled()
+  })
+
   it('invalidates registration on method replacement and never trusts copied metadata', async () => {
     const base = ownedProvider()
     expect(ownsInputAdmission({ ...base }, request)).toBe(false)

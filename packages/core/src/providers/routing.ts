@@ -1,4 +1,4 @@
-import { registerInputAdmissionOwner, assertProviderInputPreparation, captureInputAdmissionProvider } from './input-authority.js'
+import { registerInputAdmissionOwner, assertProviderInputPreparation, captureInputAdmissionProvider, ownsInputAdmission } from './input-authority.js'
 /**
  * Routing provider — model id → provider instance, per request.
  *
@@ -37,6 +37,35 @@ import {
   type DistillateCachePort,
   type DocumentDistillPort,
 } from './document-adaptation.js'
+
+/** Exact managed-model forwarding keeps the captured child's admission contract. */
+export function bindExactModelProvider(provider: LLMProvider, model: string): LLMProvider {
+  const child = captureInputAdmissionProvider(provider)
+  return registerInputAdmissionOwner({
+    name: child.name,
+    models: child.models,
+    stream(request) {
+      const actual = { ...request, model, allowProviderFallback: false }
+      return (async function* () {
+        await assertProviderInputPreparation(child, actual, actual.assertInputAuthority)
+        actual.signal?.throwIfAborted()
+        yield* child.stream(actual)
+      })()
+    },
+    createSession(options) {
+      const actual = { ...options, model, allowProviderFallback: false }
+      let session: ProviderSession | undefined
+      return { async *send(messages, options) {
+        const sendOptions = options ? { ...options } : undefined
+        const check = sendOptions?.assertInputAuthority ?? actual.assertInputAuthority
+        await assertProviderInputPreparation(child, { ...actual, messages }, check)
+        ;(sendOptions?.signal ?? actual.signal)?.throwIfAborted()
+        session ??= child.createSession(actual)
+        yield* session.send(messages, sendOptions)
+      } }
+    },
+  }, input => ownsInputAdmission(child, { ...input, model, allowProviderFallback: false }))
+}
 
 export type RoutingProviderOptions = {
   /** Forwarded to `wrapFallback` for every routed same-class fallback pair —

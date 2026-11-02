@@ -5,6 +5,8 @@ import {
   classifyTopic,
   createTypeSafeDecisionProvider,
   createGeminiProvider,
+  createRoutingProvider,
+  wrapProvider,
   bindScopeSources,
   ContextScopeAccumulator,
   createExecutionContext,
@@ -20,6 +22,9 @@ import {
   type DecisionRuntimeOperation,
   type CreateDecisionRuntimeOptions,
 } from '../decision-runtime.js'
+
+import { createWorkspaceCustomLlmResolver } from '../custom-llm-runtime.js'
+import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
 
 type Result = { verdict: 'ordinary' | 'research' | 'safe' }
 
@@ -88,6 +93,46 @@ const classifierSource = { workspaceId: 'fictional-workspace', userId: null, ass
 
 describe('[COMP:decisions/runtime] certified classifier admission', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it.each(['llm_only', 'fallback'] as const)('preserves owned admission through the actual managed resolver and boot provider factories (%s)', async mode => {
+    const full = vi.fn(async () => {})
+    const raw = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const routed = createRoutingProvider({ gemini: wrapProvider(raw) })
+    const route = await createWorkspaceCustomLlmResolver({
+      getTierRouteSystem: async () => ({ modelAlias: 'gemini-3.6-flash-standard' }),
+    } as unknown as WorkspaceCustomLlmEndpointStore, { managedProvider: routed })({ workspaceId: 'fictional-workspace', requestedTier: 'standard' })
+    expect(route?.routeKind).toBe('managed')
+    const fetch = vi.fn(async (url: unknown) => String(url).includes('typesafe.ai') ? new Response('{}', { status: 503 }) : typedCompletionResponse())
+    vi.stubGlobal('fetch', fetch)
+    const result = await classifyResearchIntent({ provider: route!.provider, model: route!.selector, message: 'Check my calendar today',
+      workspaceId: 'fictional-workspace', toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
+      decisionRuntime: classifierRuntime({ llmProvider: routed, defaultLlmModel: 'gemini-3.5-flash-lite',
+        ...(mode === 'llm_only' ? { resolveRoute: () => ({ mode: 'llm_only' as const }) } : {}) }), assertInputAuthority: full })
+    expect(result.toolNames).toEqual(['calendarListEvents'])
+    expect(fetch).toHaveBeenCalledTimes(mode === 'fallback' ? 2 : 1)
+    expect(full).toHaveBeenCalledTimes(mode === 'fallback' ? 3 : 2)
+  })
+
+  it.each(['dispatch', 'final', 'method'] as const)('keeps the actual managed route guarded against %s changes', async boundary => {
+    const refusal = authorityRefusal(), replacement = vi.fn(async function* () { throw new Error('Unexpected replacement') })
+    const raw = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const routed = createRoutingProvider({ gemini: wrapProvider(raw) })
+    const route = await createWorkspaceCustomLlmResolver({ getTierRouteSystem: async () => ({ modelAlias: 'gemini-3.6-flash-standard' }) } as unknown as WorkspaceCustomLlmEndpointStore, { managedProvider: routed })({ workspaceId: 'fictional-workspace', requestedTier: 'standard' })
+    const full = vi.fn(async () => {
+      await Promise.resolve()
+      if (boundary === 'method') routed.stream = replacement
+      else if (full.mock.calls.length === (boundary === 'dispatch' ? 1 : 2)) throw refusal
+    })
+    const fetch = vi.fn(async () => typedCompletionResponse())
+    vi.stubGlobal('fetch', fetch)
+    const result = classifyResearchIntent({ provider: route!.provider, model: route!.selector, message: 'Check my calendar today',
+      toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
+      decisionRuntime: classifierRuntime({ llmProvider: routed, resolveRoute: () => ({ mode: 'llm_only' }) }), assertInputAuthority: full })
+    if (boundary === 'method') await expect(result).resolves.toMatchObject({ toolNames: ['calendarListEvents'] })
+    else await expect(result).rejects.toBe(refusal)
+    expect(fetch).toHaveBeenCalledTimes(boundary === 'dispatch' ? 0 : 1)
+    expect(replacement).not.toHaveBeenCalled()
+  })
 
   it.each(['llm_only', 'fallback'] as const)('admits a fixed typed %s completion only at physical dispatch and final return', async mode => {
     const full = vi.fn(async () => {})
