@@ -64,6 +64,7 @@ static int builtin_count;
 
 
 static bool probe_needs(Oid oid) {
+ if(observe_only)return previous_needs?previous_needs(oid):false;
  /* pg_catalog's C fast path cannot use fmgr_hook. Explicit hash calls are
   * replaced below with identical C dispatch. SQL/public functions use the hook. */
  if(preserve_plans && planning_depth>0) {
@@ -79,7 +80,7 @@ static bool probe_needs(Oid oid) {
  return true;
 }
 static void probe_hook(FmgrHookEventType event,FmgrInfo *flinfo,Datum *arg) {
- if (enabled && get_func_namespace(flinfo->fn_oid)==PG_PUBLIC_NAMESPACE) {
+ if (enabled && !observe_only && get_func_namespace(flinfo->fn_oid)==PG_PUBLIC_NAMESPACE) {
   if(event==FHET_START) {
   int i; for(i=0;i<used;i++) if(entries[i].oid==flinfo->fn_oid) break;
   if(i==MAX_ENTRIES) {enabled=false;ereport(ERROR,(errmsg("CRM permission probe capacity exceeded")));}

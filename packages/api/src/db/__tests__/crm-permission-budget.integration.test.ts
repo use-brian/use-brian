@@ -454,6 +454,8 @@ describe.skipIf(!library || !planMode).sequential('[COMP:crm/permission-budget] 
     const observer = await measured(() => getCrmSummary(f.access), f.access, true)
     expect(observer.failure).toBeUndefined()
     expect(observer.result).toEqual(plain)
+    expect(observer.functions).toEqual([])
+    expect(observer.directPredicates).toBe(0)
     await freshBackends()
     const capture = await measured(() => getCrmSummary(f.access), f.access)
     expect(capture.failure).toBeUndefined()
