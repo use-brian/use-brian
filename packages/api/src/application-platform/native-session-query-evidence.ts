@@ -47,8 +47,15 @@ export async function readOriginalNativeSessionQueryCaptures(client:Pick<PoolCli
 /** The database creates the proof here; no caller can supply a proof carrier. */
 export async function readNativeSessionQueryEvidence(client:Pick<PoolClient,'query'>,workspaceId:string,
  selection:NativeSessionQuerySelection):Promise<{captures:NativeSessionQueryCaptures;sources:ScopeSource[];native:CompleteNativeEvidence}|null>{
- const raw=(await client.query<{value:unknown}>('SELECT read_native_session_query_evidence($1,$2,$3,$4) AS value',
-  [workspaceId,selection.sessionId,selection.throughSequence,selection.topicThroughSequence])).rows[0]?.value
+ const args=[workspaceId,selection.sessionId,selection.throughSequence,selection.topicThroughSequence]
+ // Presence is deployment capability metadata, never admission. The private
+ // operation repeats its code, actor and source checks on every invocation.
+ const installed=(await client.query<{available:boolean}>(
+  "SELECT to_regprocedure('public.read_native_turn_session_query(uuid,uuid,integer,integer)') IS NOT NULL AS available")).rows[0]?.available===true
+ let raw:unknown=installed?(await client.query<{value:unknown}>('SELECT read_native_turn_session_query($1,$2,$3,$4) AS value',args)).rows[0]?.value:null
+ // NULL is possible only before observation writes. A post-write exception or
+ // malformed packet must abort the enclosing frame, never retry the old reader.
+ if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_session_query_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value
  if(raw===null)return null
  const parsed=packet.parse(raw),value={history:parsed.history,annotations:parsed.annotations}
  const roots=nativeSessionQueryCaptureSources(value,workspaceId)
