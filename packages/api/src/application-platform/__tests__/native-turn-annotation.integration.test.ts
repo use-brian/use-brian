@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto'
-import {afterAll,afterEach,describe,expect,it} from 'vitest'
+import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
 import {bindScopeSources,boundScopeSources,ContextScopeAccumulator,type TopicClassification} from '@use-brian/core'
 import {readSessionMessageScopeSource} from '../../db/sessions.js'
 import {getAppPool,getPool} from '../../db/client.js'
@@ -8,12 +8,13 @@ import {prepareSessionMessageAnnotation,writeSessionMessageAnnotation} from '../
 import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
 import {withSessionMessagePublication} from '../../db/session-context-revisions.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
+import * as nativeEvidence from '../native-session-evidence.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 
 describe.sequential('[COMP:api/native-turn-frame] annotation publication cohort',()=>{
  let fixture:Awaited<ReturnType<typeof persistentContextFixture>>|undefined
- afterEach(async()=>{await fixture?.cleanup();fixture=undefined})
+ afterEach(async()=>{vi.restoreAllMocks();await fixture?.cleanup();fixture=undefined})
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
  async function setup(topicThroughSequence=2){
   fixture=await persistentContextFixture();const f=fixture;await f.history();const authority=await f.modelContext(f.firstId)
@@ -36,7 +37,7 @@ describe.sequential('[COMP:api/native-turn-frame] annotation publication cohort'
  it.each(['commit','application_field_derivation_dependencies','ALL'])('saves the annotation and reply with independent cohorts through %s',async flush=>{
   const {f,authority,sources,messageId,pendingAnnotation,command}=await setup()
   const generation=Number((await f.pool.query('SELECT session_context_generation FROM sessions WHERE id=$1',[f.session.id])).rows[0].session_context_generation)
-  const measurements:string[]=[]
+  const measurements:string[]=[],jointRead=vi.spyOn(nativeEvidence,'readNativePublicationCohorts')
   const replies=await withSessionMessagePublication(authority,sources,async db=>{
    const rows=await publishNativeSessionMessageBatch(command,db)
    if(flush!=='commit')await db.query(`SET CONSTRAINTS ${flush} IMMEDIATE`)
@@ -44,7 +45,13 @@ describe.sequential('[COMP:api/native-turn-frame] annotation publication cohort'
   },{pendingAnnotation,measure:async(counter,run)=>{
    try{return await run()}finally{measurements.push(counter)}
   }})
-  expect(measurements.filter(name=>name.startsWith('publication_annotation_'))).toEqual(['publication_annotation_validate','publication_annotation_write'])
+  const sharedPrewrite=(await f.pool.query("SELECT to_regprocedure('read_native_turn_publication_cohorts(uuid,jsonb)') IS NOT NULL available")).rows[0].available
+  expect(jointRead).toHaveBeenCalledTimes(1)
+  const acquired=await jointRead.mock.results[0].value
+  if(sharedPrewrite)expect(acquired).not.toBeNull();else expect(acquired).toBeNull()
+  expect(measurements).toContain('publication_validate')
+  expect(measurements.filter(name=>name.startsWith('publication_annotation_'))).toEqual(sharedPrewrite
+   ?['publication_annotation_write']:['publication_annotation_validate','publication_annotation_write'])
   const heads=(await f.pool.query(`SELECT r.id,r.parent_id,c.content FROM session_message_annotation_heads h JOIN session_context_scope_revisions r ON r.workspace_id=h.workspace_id AND r.id=h.scope_revision_id JOIN session_context_revision_contents c ON c.workspace_id=r.workspace_id AND c.revision_id=r.id WHERE h.message_id=$1`,[messageId])).rows
   expect(heads).toHaveLength(1);expect(heads[0].content).toEqual({topicLabel:'Planning',topicConfidence:0.9,replyToText:null})
   const edges=(await f.pool.query(`SELECT d.resource_kind,d.resource_id,e.source_kind,e.source_id FROM scope_derivations d JOIN scope_derivation_sources e ON e.workspace_id=d.workspace_id AND e.derivation_id=d.id WHERE d.workspace_id=$1 AND d.resource_id=ANY($2::uuid[])`,[f.workspaceId,[heads[0].id,replies[0].id]])).rows

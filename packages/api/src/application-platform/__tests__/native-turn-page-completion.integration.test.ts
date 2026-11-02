@@ -38,10 +38,10 @@ describe.sequential('[COMP:api/native-turn-frame] sealed native Page obligations
     ELSIF action='completion' THEN DROP TRIGGER application_field_derivation_dependencies ON native_turn_publication_seals;
     ELSIF action='helper' THEN ALTER FUNCTION native_turn_page_event(jsonb) COST 101;
     ELSIF action='helper-body' THEN
-     EXECUTE $attack$CREATE OR REPLACE FUNCTION native_turn_page_event(event jsonb) RETURNS boolean LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+     EXECUTE $attack$CREATE OR REPLACE FUNCTION public.native_turn_page_event(event jsonb) RETURNS boolean LANGUAGE plpgsql VOLATILE SECURITY DEFINER
       SET search_path=pg_catalog,public,pg_temp AS $body$BEGIN RAISE EXCEPTION 'changed_page_helper_must_not_execute';END$body$$attack$;
     ELSIF action='contract-body' THEN
-     EXECUTE $attack$CREATE OR REPLACE FUNCTION native_turn_publication_contract() RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER
+     EXECUTE $attack$CREATE OR REPLACE FUNCTION public.native_turn_publication_contract() RETURNS boolean LANGUAGE plpgsql STABLE SECURITY DEFINER
       SET search_path=pg_catalog,public,pg_temp AS $body$BEGIN RAISE EXCEPTION 'changed_page_contract_must_not_execute';END$body$$attack$;
     ELSIF action IN('late-page','historical-page','historical-unknown','predecessor-page') THEN
      source:=read_scope_source('${f.workspaceId}'::uuid,'page_event_changed',(payload->>'id')::uuid);
@@ -162,13 +162,18 @@ describe.sequential('[COMP:api/native-turn-frame] sealed native Page obligations
   expect(pageFlushed).toBe(true)
  })
  it('refuses a replaced small contract before invoking its executable',async()=>{
-  const{authority,sources,command,op}=await setup();let refusal:unknown
-  await expect(withSessionMessagePublication(authority,sources,async db=>{
+  const{authority,sources,command,op}=await setup();let refusal:unknown,stage='publication'
+  try{await withSessionMessagePublication(authority,sources,async db=>{
    await publishNativeSessionMessageBatch(command,db)
-   await op(db,'contract-body')
-   try{await op(db,'exact')}catch(error){refusal=error;throw error}
-  })).rejects.toThrow()
-  expect(refusal).toMatchObject({code:'42501',message:'scope_source_changed'})
+   expect((await op(db,'state')).work).toBe(1)
+   expect(await op(db,'exact')).toEqual({delegated:true})
+   stage='replacement';await op(db,'contract-body')
+   expect((await db.query("SELECT prosrc LIKE '%changed_page_contract_must_not_execute%' changed FROM pg_proc WHERE oid='public.native_turn_publication_contract()'::regprocedure")).rows[0].changed).toBe(true)
+   stage='delegate'
+   try{await op(db,'exact');stage='escaped'}catch(error){refusal=error;throw error}
+  })}catch(error){refusal??=error}
+  const sql=refusal&&typeof refusal==='object'&&'cause'in refusal?refusal.cause:refusal
+  expect({stage,refusal:sql}).toMatchObject({stage:'delegate',refusal:{code:'42501',message:'scope_source_changed'}})
  })
  it('preserves genuine unowned Page publication through the original file writer',async()=>{
   const{f,op,page}=await setup(),receipt=await page()

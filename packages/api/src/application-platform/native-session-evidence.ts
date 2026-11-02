@@ -10,12 +10,39 @@ const historyResult=z.discriminatedUnion('available',[
  z.object({purpose:z.literal('memory_history'),available:z.literal(false)}).strict(),
  z.object({purpose:z.literal('memory_history'),available:z.literal(true),root:scope,scopes:z.array(labelScope).max(8192)}).strict(),
 ])
-type NativeEvidence={kind:'complete';evidence:ScopeEvidence;current:ScopeSource[]}
+type CompleteNativeEvidence={kind:'complete';evidence:ScopeEvidence;current:ScopeSource[]}
+type NativeEvidence=CompleteNativeEvidence
  |{kind:'memory_history';available:false}|{kind:'memory_history';available:true;root:ScopeSource;scopes:ResourceScope[]}
 const result=z.discriminatedUnion('admitted',[
  z.object({admitted:z.literal(false)}).strict(),
  z.object({admitted:z.literal(true),immutable:z.array(scope),current:z.array(scope)}).strict(),
 ])
+const cohortProof=z.object({immutable:z.array(scope),current:z.array(scope)}).strict()
+const publicationResult=z.object({admitted:z.literal(true),cohorts:z.tuple([cohortProof,cohortProof])}).strict()
+
+/** Private host acquisition: the database independently projects each exact
+ * original cohort. A union proof cannot stand in for either cohort's floor. */
+export async function readNativePublicationCohorts(client:Pick<PoolClient,'query'>,workspaceId:string,
+ rawCohorts:readonly [readonly ScopeSource[],readonly ScopeSource[]]):Promise<[CompleteNativeEvidence,CompleteNativeEvidence]|null>{
+ const cohorts=structuredClone(rawCohorts)
+ if(cohorts.some(roots=>!roots.length||roots.length>4096||roots.some(root=>root.workspaceId!==workspaceId
+  ||!['application_field','session_context_revision','session_message','workspace_file'].includes(root.resourceKind))))return null
+ const installed=(await client.query<{available:boolean}>(
+  "SELECT to_regprocedure('public.read_native_turn_publication_cohorts(uuid,jsonb)') IS NOT NULL AS available")).rows[0]?.available===true
+ if(!installed)return null
+ const identities=cohorts.map(roots=>roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version})))
+ const raw=(await client.query<{value:unknown}>('SELECT read_native_turn_publication_cohorts($1,$2) AS value',
+  [workspaceId,JSON.stringify(identities)])).rows[0]?.value
+ if(raw===null)return null
+ const parsed=publicationResult.parse(raw)
+ return parsed.cohorts.map((proof,index)=>{
+  if([...proof.immutable,...proof.current].some(source=>source.workspaceId!==workspaceId)
+   ||cohorts[index].some(root=>!proof.current.some(source=>source.resourceKind===root.resourceKind&&source.resourceId===root.resourceId)
+    ||['application_field','session_context_revision'].includes(root.resourceKind)&&!proof.immutable.some(source=>
+     source.resourceKind===root.resourceKind&&source.resourceId===root.resourceId&&source.version===root.version)))throw new Error('Native publication cohort unavailable')
+  return{kind:'complete',evidence:new ContextScopeAccumulator({sources:[...cohorts[index],...proof.immutable]}).evidence,current:proof.current}
+ }) as [CompleteNativeEvidence,CompleteNativeEvidence]
+}
 /** Null means an unchanged original-family fallback; no authorization result is cached. */
 export async function readNativeSessionEvidence(client:Pick<PoolClient,'query'>,workspaceId:string,roots:readonly ScopeSource[]):Promise<NativeEvidence|null>{
  if(!roots.length||roots.length>4096||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')||roots.some(root=>!['application_field','session_context_revision','session_message','memory','workspace_file'].includes(root.resourceKind)))return null

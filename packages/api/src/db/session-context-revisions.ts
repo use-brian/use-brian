@@ -12,7 +12,7 @@ import {
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from './client.js'
 import { recordDerivedResource, validateDerivedWriteInputs } from './derived-scope-store.js'
-import { validateCallerScopeEvidence,readValidatedNativeTitleGroup,readValidatedNativeSessionQuery } from '../context-scope/caller-evidence.js'
+import { validateCallerScopeEvidence,readValidatedNativeTitleGroup,readValidatedNativeSessionQuery,readValidatedNativePublicationCohorts } from '../context-scope/caller-evidence.js'
 import type {NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
 import {readOriginalNativeSessionQueryCaptures,nativeSessionQueryCaptureSources,type NativeSessionQuerySelection,type NativeSessionQueryCaptures} from '../application-platform/native-session-query-evidence.js'
 import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
@@ -50,10 +50,11 @@ function nativeDelegatedSessionPublication(execution:ExecutionContext):boolean{
   &&!getApplicationExecutionBinding(execution)
 }
 async function transaction<T>(authority: SessionContextAuthority, sources: readonly ScopeSource[], action: 'context' | 'retain',
-  owner: boolean, run: (client: PoolClient, checked:ScopeEvidence) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string, activeTurnToken?:string,nativeMutation=false,
-  scalarFloor?:Pick<ScopeEvidence,'sensitivity'|'compartments'|'projectIds'>,measure?:PublicationMeasure): Promise<T> {
+  owner: boolean, run: (client: PoolClient, checked:ScopeEvidence,annotationChecked?:ScopeEvidence) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string, activeTurnToken?:string,nativeMutation=false,
+  scalarFloor?:Pick<ScopeEvidence,'sensitivity'|'compartments'|'projectIds'>,measure?:PublicationMeasure,annotationFloor?:ScopeEvidence): Promise<T> {
   const time:PublicationMeasure=measure??((_counter,run)=>run())
   const floor=scalarFloor===undefined?{}:structuredClone({sensitivity:scalarFloor.sensitivity,compartments:scalarFloor.compartments,projectIds:scalarFloor.projectIds})
+  const pendingFloor=annotationFloor===undefined?undefined:structuredClone(annotationFloor)
   let publicationAttempted=false
   try {
     const { execution, accumulator } = requireAuthority(authority), before = JSON.stringify(accumulator.evidence)
@@ -118,10 +119,16 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         // waits and immediately before the boundary that consumes it.
         contextProof = external || cohort.independent ? await prepare!(execution, cohort.sources, 'context') : undefined
         if (contextProof) await pinPreparedExternalSourceAuthority(client, execution, contextProof)
-        const checked=await time('publication_validate',()=>validateCallerScopeEvidence({...floor,sources:[...sources]},execution.security.ceiling,client))
+        const validation=await time('publication_validate',async()=>{
+          const evidence={...floor,sources:[...sources]}
+          const cohorts=pendingFloor&&!owner&&!external&&!cohort.independent
+            ?await readValidatedNativePublicationCohorts([evidence,pendingFloor],execution.security.ceiling,client):null
+          return cohorts??[await validateCallerScopeEvidence(evidence,execution.security.ceiling,client)]
+        })
+        const [checked,annotationChecked]=validation
         prepared = external && action==='retain' ? await prepare!(execution, sources, 'retain') : undefined
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
-        const value = await time('publication_write',()=>run(client,checked))
+        const value = await time('publication_write',()=>run(client,checked,annotationChecked))
         await execution.security.authority.assertCurrent()
         if (execution.lifecycle.abortSignal.aborted&&!finalizing || JSON.stringify(accumulator.evidence) !== before
           || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()
@@ -370,16 +377,16 @@ export async function withSessionMessagePublication<T>(authority:SessionContextA
  if(turnToken&&stoppedTurnToken)changed()
  if(execution.lifecycle.sessionPersisted===false||!(execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member')
   &&!nativeDelegatedSessionPublication(execution))changed()
- return transaction(authority,combined.evidence.sources??[],'retain',false,async client=>{
+ return transaction(authority,combined.evidence.sources??[],'retain',false,async(client,_checked,annotationChecked)=>{
   messagePublications.set(client,{authority})
   try{
    if(pending){
-    const checked=await time('publication_annotation_validate',()=>validateCallerScopeEvidence(pending.floor,execution.security.ceiling,client))
+    const checked=annotationChecked??await time('publication_annotation_validate',()=>validateCallerScopeEvidence(pending.floor,execution.security.ceiling,client))
     if(!await time('publication_annotation_write',()=>pending.write(client,checked)))changed()
    }
    return await run(client)
   }finally{messagePublications.delete(client)}
- },execution.lifecycle.sessionId,stoppedTurnToken,turnToken,false,undefined,options?.measure)
+ },execution.lifecycle.sessionId,stoppedTurnToken,turnToken,false,undefined,options?.measure,pending?.floor)
 }
 /** A JSON descriptor, owner transaction or retained callback cannot mint a live frame. */
 export function assertSessionMessagePublicationFrame(client:object,authority:SessionContextAuthority):void{

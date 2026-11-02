@@ -1,4 +1,4 @@
-import { readNativeSessionEvidence } from '../application-platform/native-session-evidence.js'
+import { readNativeSessionEvidence,readNativePublicationCohorts } from '../application-platform/native-session-evidence.js'
 import {readNativeTitleGroupEvidence,type NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
 import {readNativeSessionQueryEvidence,type NativeSessionQuerySelection,type NativeSessionQueryCaptures} from '../application-platform/native-session-query-evidence.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
@@ -368,6 +368,25 @@ export async function tryValidateNativeScopeEvidence(evidence:ScopeEvidence,ceil
  * This function accepts source identities only, never a precomputed allow result. */
 export async function tryValidateNativeCombinedOutputEvidence(evidence:ScopeEvidence,caller:AccessCeiling,recipient:AccessCeiling,client:Pick<PoolClient,'query'>):Promise<ScopeEvidence|null>{
  return validateScopeEvidence(evidence,caller,'caller',client,undefined,true,readNativeSessionEvidence,[recipient])
+}
+
+/** Own the fresh acquisition and both exact validators in one private operation.
+ * No caller can inject, retain or invoke the alternate proof reader. */
+export async function readValidatedNativePublicationCohorts(evidence:readonly [ScopeEvidence,ScopeEvidence],ceiling:AccessCeiling,
+ client:Pick<PoolClient,'query'>):Promise<[ScopeEvidence,ScopeEvidence]|null>{
+ const cohorts=structuredClone(evidence),originalCeiling=intersectAccessCeilings(ceiling,ceiling)
+ try{
+  const acquired=await readNativePublicationCohorts(client,originalCeiling.workspaceId,[cohorts[0].sources??[],cohorts[1].sources??[]])
+  if(!acquired)return null
+  const checked:ScopeEvidence[]=[]
+  for(const [index,cohort] of cohorts.entries()){
+   const read:typeof readNativeSessionEvidence=async()=>acquired[index]
+   const current=await validateScopeEvidence(cohort,originalCeiling,'caller',client,undefined,true,read)
+   if(!current)throw unavailable('caller','source_unverifiable')
+   checked.push(current)
+  }
+  return checked as [ScopeEvidence,ScopeEvidence]
+ }catch(error){throw scopeEvidenceFailureOf(error)?error:unavailable('caller','source_unverifiable',error)}
 }
 
 /** This entrypoint owns the identity-only SQL read. The alternate reader never
