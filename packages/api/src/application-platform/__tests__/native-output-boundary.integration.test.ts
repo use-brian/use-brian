@@ -46,18 +46,39 @@ const provider:LLMProvider={name:'fictional-output',models:['fixture'],createSes
  yield{type:'text_delta' as const,text:'Fictional current answer'}
  yield{type:'message_end' as const,stopReason:'end_turn' as const,usage:{inputTokens:1,outputTokens:1}}
 })()}),stream(){throw new Error('Unexpected stateless fixture request')}}
-async function run(fused:boolean,options:{custom?:boolean;revoke?:boolean;observerMutation?:boolean;abort?:boolean;throwSink?:boolean}={}){
+async function run(fused:boolean,options:{custom?:boolean;revoke?:boolean;revokeTerminal?:boolean;terminalMutation?:'loop'|'sink'|'during-proof'|'lease'|'microtask';observerMutation?:boolean;abort?:boolean;throwSink?:boolean}={}){
  const c=await setup(),seen:QueryEvent[]=[]
- const custom=vi.fn(async()=>{}),abortController=new AbortController()
- const execute=()=>runAssistantTurn({sessionId:session.id,policy:{admission:'personal'},lease:{mode:'none'},abortController,
+ const custom=vi.fn(async()=>{}),afterLoop=vi.fn(async()=>{}),abortController=new AbortController()
+ let terminalSeen=false,mutateNextLease=false
+ const refuseLate=async()=>{throw Object.assign(new Error('Fictional late callback refusal'),{reason:'authority_changed',retrySafe:false})}
+ if(options.terminalMutation==='lease'){
+  const lease=c.authority.execution.security.authority,check=lease.assertCurrent.bind(lease)
+  vi.spyOn(lease,'assertCurrent').mockImplementation(async()=>{await check();if(mutateNextLease){mutateNextLease=false;c.authority.accumulator.note({projectIds:[randomUUID()]})}})
+ }
+ const params:Parameters<typeof runAssistantTurn>[0]={sessionId:session.id,policy:{admission:'personal'},lease:{mode:'none'},abortController,
   model:{provider,model:'fixture',configuredProviders:undefined,customLlm:null},
   loop:{ledger:NOOP_TURN_LEDGER,context:{...c.context,...(options.custom?{assertModelOutputAuthority:custom}:{})},systemPrompt:'Fictional current sources',
    messages:[{role:'user',content:'Reply briefly.'}],tools:new Map(),maxTurns:1},
   sink:{kind:'sse',assertOutputAuthority:c.boundary.assertOutputAuthority,...(fused?{nativeOutputBoundary:c.boundary}:{}),
-   ...(options.observerMutation?{onOutputAuthorityTiming:()=>{c.authority.accumulator.note({projectIds:[randomUUID()]})}}:{}),
-   onEvent:async event=>{seen.push(event);if(options.revoke&&seen.length===1)await hold();if(options.abort)abortController.abort();if(options.throwSink)throw new Error('Fictional sink failure')}},
- })
- return{...c,seen,custom,execute}
+   onOutputAuthorityTiming:()=>{
+    if(options.observerMutation)c.authority.accumulator.note({projectIds:[randomUUID()]})
+    if(terminalSeen&&options.terminalMutation==='during-proof')params.sink.assertOutputAuthority=refuseLate
+    if(terminalSeen&&options.terminalMutation==='lease')mutateNextLease=true
+    if(terminalSeen&&options.terminalMutation==='microtask')queueMicrotask(()=>c.authority.accumulator.note({projectIds:[randomUUID()]}))
+   },
+   afterLoop,
+   onEvent:async event=>{
+    seen.push(event)
+    if(options.revoke&&seen.length===1||options.revokeTerminal&&event.type==='turn_complete')await hold()
+    if(event.type==='turn_complete'){
+     terminalSeen=true
+     if(options.terminalMutation==='loop')params.loop.context.assertModelOutputAuthority=refuseLate
+     if(options.terminalMutation==='sink')params.sink.assertOutputAuthority=refuseLate
+    }
+    if(options.abort)abortController.abort();if(options.throwSink)throw new Error('Fictional sink failure')
+   }},
+ }
+ return{...c,seen,custom,afterLoop,execute:()=>runAssistantTurn(params)}
 }
 describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=>{
  beforeAll(async()=>{
@@ -78,12 +99,12 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
    expect(result.value).toBe(true);expect(nativeProofs(result.sql)).toBe(1)
   }
  })
- it('removes exactly one duplicate proof per real outer event while preserving final checks',async()=>{
+ it('removes one duplicate proof per outer event and final boundary while preserving fresh checks',async()=>{
   const original=await run(false),baseline=await trace(original.execute)
   const current=await run(true),optimized=await trace(current.execute)
   expect(optimized.value).toEqual(baseline.value);expect(current.seen).toEqual(original.seen)
   expect(current.seen.length).toBeGreaterThan(0)
-  expect(nativeProofs(baseline.sql)-nativeProofs(optimized.sql)).toBe(current.seen.length)
+  expect(nativeProofs(baseline.sql)-nativeProofs(optimized.sql)).toBe(current.seen.length+1)
  })
  it('retains both boundaries for a custom loop output callback',async()=>{
   const original=await run(false,{custom:true}),baseline=await trace(original.execute)
@@ -118,6 +139,18 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
   const current=await run(true,{revoke:true})
   await expect(current.execute()).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
   expect(current.seen).toHaveLength(1)
+ })
+ it('rechecks a source held by the terminal event callback before final host handling',async()=>{
+  const current=await run(true,{revokeTerminal:true})
+  await expect(current.execute()).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+  expect(current.seen.at(-1)?.type).toBe('turn_complete')
+  expect(current.afterLoop).not.toHaveBeenCalled()
+ })
+ it.each(['loop','sink','during-proof','lease','microtask'] as const)('refuses terminal %s authority mutation before final host handling',async terminalMutation=>{
+  const current=await run(true,{terminalMutation})
+  await expect(current.execute()).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+  expect(current.seen.at(-1)?.type).toBe('turn_complete')
+  expect(current.afterLoop).not.toHaveBeenCalled()
  })
  it('cannot revive a source-authority refusal after the hold is removed',async()=>{
   const c=await setup();await hold()

@@ -223,23 +223,40 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     : () => {}
 
   const collector = createTurnOutputCollector({ format: params.outputFormat ?? 'compact' })
-  let combinedReceipt:{event:QueryEvent;evidence:string}|undefined
+  type OutputFence={evidence:string;recipient:TurnSink['assertOutputAuthority'];boundary:TurnSink['nativeOutputBoundary']}
+  let combinedReceipt:{event:QueryEvent;fence:OutputFence}|undefined
   const refuseCombinedReceipt=()=>{throw Object.assign(new Error('The output evidence changed.'),{reason:'authority_changed' as const,retrySafe:false})}
-  const tryCombinedOutput=params.sink.nativeOutputBoundary&&!params.loop.context.assertModelOutputAuthority
+  const assertOutputFence=(current:ToolContext,fence:OutputFence)=>{
+    if(current.executionContext!==original.execution||current.authority!==original.authority
+      ||current.scopeAccumulator!==original.accumulator||JSON.stringify(original.accumulator?.evidence)!==fence.evidence
+      ||params.loop.context.assertModelOutputAuthority||params.sink.assertOutputAuthority!==fence.recipient
+      ||params.sink.nativeOutputBoundary!==fence.boundary)refuseCombinedReceipt()
+  }
+  const nativeBoundary=params.sink.nativeOutputBoundary
+  const tryCombinedProof=nativeBoundary&&!params.loop.context.assertModelOutputAuthority
     &&params.sink.kind==='sse'
-    ?async(current:ToolContext,event:QueryEvent):Promise<boolean>=>{
-      combinedReceipt=undefined
+    ?async(current:ToolContext):Promise<OutputFence|null>=>{
+      // A later custom callback retains the ordinary two-boundary path.
+      if(params.loop.context.assertModelOutputAuthority||params.sink.nativeOutputBoundary!==nativeBoundary)return null
       if(current.executionContext!==original.execution||current.authority!==original.authority||current.scopeAccumulator!==original.accumulator)refuseCombinedReceipt()
+      const recipient=params.sink.assertOutputAuthority
       const started=Date.now()
-      let admitted:boolean
-      try{admitted=await tryAssertNativeCombinedOutput(params.sink.nativeOutputBoundary!,current,params.sink.assertOutputAuthority)}
+      let admitted:Readonly<{evidence:string}>|null
+      try{admitted=await tryAssertNativeCombinedOutput(nativeBoundary,current,recipient,true)}
       catch(error){recordOutputTiming(current,started);throw error}
-      if(!admitted)return false
+      if(!admitted)return null
+      const fence:OutputFence={evidence:admitted.evidence,recipient,boundary:nativeBoundary}
       recordOutputTiming(current,started)
-      if(current.executionContext!==original.execution||current.authority!==original.authority||current.scopeAccumulator!==original.accumulator)refuseCombinedReceipt()
-      combinedReceipt={event,evidence:JSON.stringify(original.accumulator?.evidence)}
-      return true
+      assertOutputFence(current,fence)
+      return fence
     }:undefined
+  const tryCombinedOutput=tryCombinedProof?async(current:ToolContext,event:QueryEvent):Promise<boolean>=>{
+    combinedReceipt=undefined
+    const fence=await tryCombinedProof(current)
+    if(!fence)return false
+    combinedReceipt={event,fence}
+    return true
+  }:undefined
   try {
     if (params.budget) await params.budget()
     // Loop and sink failures propagate unchanged: the runner's own error path
@@ -274,8 +291,12 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       const receipt=combinedReceipt
       combinedReceipt=undefined
       if(receipt){
-        if(receipt.event!==event||context.executionContext!==original.execution||context.authority!==original.authority
-          ||context.scopeAccumulator!==original.accumulator||JSON.stringify(original.accumulator?.evidence)!==receipt.evidence)refuseCombinedReceipt()
+        // Consume only this event's private fence. Keep any post-yield mutation
+        // failure inside the core's sticky authority wrapper as well.
+        await assertModelOutputAuthority(context,async()=>true,()=>{
+          if(receipt.event!==event)refuseCombinedReceipt()
+          assertOutputFence(context,receipt.fence)
+        })
       }else if (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json') {
         await assertSinkOutputAuthority(context)
       }
@@ -295,8 +316,16 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       : null
     const result: TurnLoopResult = { selection, finalText, aborted: params.abortController.signal.aborted }
     if (!result.aborted) {
-      await assertModelOutputAuthority(context)
-      if (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json') {
+      // Fresh final admission, through the same sticky wrapper as stream output.
+      // The last event's receipt cannot survive its arbitrary sink callback.
+      let combined=false
+      let terminalFence:OutputFence|undefined
+      await assertModelOutputAuthority(context,tryCombinedProof?async()=>{
+        terminalFence=await tryCombinedProof(context)??undefined
+        combined=terminalFence!==undefined
+        return combined
+      }:undefined,()=>{if(terminalFence)assertOutputFence(context,terminalFence)})
+      if (!combined && (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json')) {
         await assertSinkOutputAuthority(context)
       }
     }

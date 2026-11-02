@@ -80,10 +80,10 @@ async function assertModelInputPreparation(context: ToolContext, provider: Query
   return assertModelAuthority(context, 'input', ownsInputAdmission(provider, { model, messages }) ? async () => true : undefined)
 }
 /** The final host sink uses the same sticky boundary as streamed loop events. */
-export async function assertModelOutputAuthority(context: ToolContext): Promise<void> {
-  return assertModelAuthority(context, 'output')
+export async function assertModelOutputAuthority(context: ToolContext, tryBoundary?: () => Promise<boolean>, assertBoundaryCurrent?: () => void): Promise<void> {
+  return assertModelAuthority(context, 'output', tryBoundary, assertBoundaryCurrent)
 }
-async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'output',tryBoundary?:()=>Promise<boolean>): Promise<void> {
+async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'output',tryBoundary?:()=>Promise<boolean>,assertBoundaryCurrent?:()=>void): Promise<void> {
   const check = boundary === 'input' ? context.assertModelInputAuthority : context.assertModelOutputAuthority
   if (!check && !context.authority && !tryBoundary) return
   const identity = context.executionContext ?? context
@@ -95,6 +95,7 @@ async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'o
     const combined=tryBoundary?await tryBoundary():false
     if(!combined)await check?.(context)
     if(combined)await context.authority?.assertCurrent()
+    assertBoundaryCurrent?.()
     // A concurrent/nested denial during the awaited operation is sticky too.
     if(invalidModelContexts.has(identity))throw Object.assign(new Error('The model context is unavailable.'),{
       reason:'authority_changed' as const,retrySafe:false,

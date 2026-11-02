@@ -182,6 +182,35 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     await expect(run(p.value,ctx)).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
     expect(p.createSession).toHaveBeenCalledTimes(1);expect(p.send).toHaveBeenCalledTimes(1)
   })
+  it('runs a new combined final proof through both lease checks',async()=>{
+    const output=vi.fn(async()=>{}),lease=vi.fn(async()=>{}),combined=vi.fn(async()=>true)
+    const ctx={...context(async()=>{}),assertModelOutputAuthority:output,
+      authority:{assertCurrent:lease,execute:async<T>(operation:()=>Promise<T>)=>operation()}}
+    await assertModelOutputAuthority(ctx,combined)
+    expect(combined).toHaveBeenCalledTimes(1);expect(lease).toHaveBeenCalledTimes(2)
+    expect(output).not.toHaveBeenCalled()
+    await assertModelOutputAuthority(ctx,async()=>false)
+    expect(output).toHaveBeenCalledTimes(1)
+  })
+  it('cannot use a combined final proof to revive a prior refusal',async()=>{
+    const combined=vi.fn(async()=>true),ctx={...context(async()=>{}),
+      assertModelOutputAuthority:async()=>{throw new Error('Fictional final refusal')}}
+    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({reason:'authority_changed'})
+    await expect(assertModelOutputAuthority(ctx,combined)).rejects.toMatchObject({reason:'authority_changed'})
+    expect(combined).not.toHaveBeenCalled()
+  })
+  it('refuses final output if the lease changes during the combined proof',async()=>{
+    let revoked=false
+    const ctx={...context(async()=>{}),authority:{assertCurrent:async()=>{if(revoked)throw new Error('Fictional revoked lease')},execute:async<T>(operation:()=>Promise<T>)=>operation()}}
+    await expect(assertModelOutputAuthority(ctx,async()=>{revoked=true;return true})).rejects.toMatchObject({reason:'authority_changed'})
+  })
+  it('latches a final evidence-fence refusal even after its transient mutation is gone',async()=>{
+    const output=vi.fn(async()=>{}),ctx={...context(async()=>{}),assertModelOutputAuthority:output}
+    await expect(assertModelOutputAuthority(ctx,async()=>true,()=>{throw new Error('Fictional final evidence mutation')}))
+      .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+    expect(output).not.toHaveBeenCalled()
+  })
   it('uses an invocation-local combined boundary for every event without skipping input checks',async()=>{
     const p=provider(),input=vi.fn(async()=>{}),output=vi.fn(async()=>{}),combined=vi.fn(async()=>true)
     const events=await run(p.value,{...context(input),assertModelOutputAuthority:output},{tryAssertOutputBoundary:combined})

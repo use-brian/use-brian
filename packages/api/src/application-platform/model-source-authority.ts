@@ -174,12 +174,18 @@ export function createNativeAttendedOutputBoundary(execution:ExecutionContext,ac
  nativeOutputBindings.set(boundary,binding)
  return boundary
 }
-/** False means the original caller and recipient boundaries must both run.
- * This operation never accepts a proof/allow argument and never returns one. */
+/** False/null keeps the original caller and recipient boundaries. The optional
+ * snapshot fences only this admission's awaited handoff; it is not a permission
+ * receipt for another event or operation. No caller can supply proof or allow. */
+type NativeOutputEvidenceFence=Readonly<{evidence:string}>
+export function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutputBoundary,context:ToolContext,
+ recipientCallback:((context:ToolContext)=>Promise<void>)|undefined):Promise<boolean>
+export function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutputBoundary,context:ToolContext,
+ recipientCallback:((context:ToolContext)=>Promise<void>)|undefined,captureFence:true):Promise<NativeOutputEvidenceFence|null>
 export async function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutputBoundary,context:ToolContext,
- recipientCallback:((context:ToolContext)=>Promise<void>)|undefined):Promise<boolean>{
+ recipientCallback:((context:ToolContext)=>Promise<void>)|undefined,captureFence=false):Promise<boolean|NativeOutputEvidenceFence|null>{
  const binding=nativeOutputBindings.get(boundary)
- if(!binding||recipientCallback!==boundary.assertOutputAuthority)return false
+ if(!binding||recipientCallback!==boundary.assertOutputAuthority)return captureFence?null:false
  const {execution,accumulator}=binding
  try{
   assertNativeOutputBinding(binding,context)
@@ -191,8 +197,9 @@ export async function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutpu
   await execution.security.authority.assertCurrent()
   assertNativeOutputBinding(binding,context)
   if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
-  if(!evidence)return false
+  if(!evidence)return captureFence?null:false
   accumulator.note(evidence)
-  return true
+  // Capture synchronously at admission, before resolving to an awaited caller.
+  return captureFence?Object.freeze({evidence:JSON.stringify(accumulator.evidence)}):true
  }catch(error){nativeOutputFailure(execution,error)}
 }
