@@ -2278,10 +2278,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     typesafeApiKey: env.TYPESAFE_API_KEY,
     configureAdapters: ports.configureDecisionAdapters,
     resolveRoute: workspaceDecisionRouteResolver,
-    onAttempt: async (attempt) => {
+    onAttempt: ports.recordDecisionAttempt ? async (attempt) => {
       await recordDecisionUsage(attempt)
       await ports.recordDecisionAttempt?.(attempt)
-    },
+    } : recordDecisionUsage,
     onOutcome: ports.recordDecisionOutcome,
   })
   if (operatorDecisionDefault) {

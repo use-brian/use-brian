@@ -1,4 +1,5 @@
 import { decisionTransportBudget, registerDecisionTransportOwner } from '../transport-budget.js'
+import { assertDecisionResponseAuthority } from '../authority-ownership.js'
 import { assertInputAuthority, isInputAuthorityError } from '../../providers/input-authority.js'
 /** TypeSafe System One / Jev decision adapter. [COMP:decisions/typesafe] */
 
@@ -257,7 +258,7 @@ export function createTypeSafeDecisionProvider(options: {
         }
         // Response acquisition ends the transport budget, never total authority.
         if (controller.signal.aborted) throw new DecisionProviderError(request.signal?.aborted ? 'cancelled' : 'timeout', 'decision deadline exhausted', { dispatched: true })
-        await assertInputAuthority(request.assertInputAuthority)
+        await assertDecisionResponseAuthority(request)
         if (controller.signal.aborted || request.deadlineAt !== undefined && request.deadlineAt <= Date.now()) {
           throw new DecisionProviderError(request.signal?.aborted ? 'cancelled' : 'timeout', 'decision deadline exhausted', { dispatched: true })
         }

@@ -5,6 +5,8 @@
  */
 
 import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
+import { assertDecisionBookkeeping, bindClassifierDecisionRequest, disableClassifierDecisionOperation,
+  transferClassifierDecisionOperation, isDecisionMetadataSink } from './authority-ownership.js'
 import type {
   DecisionDisposition,
   DecisionFailureKind,
@@ -361,18 +363,20 @@ export function executeDecisionCascade<T>(options: ExecuteDecisionCascadeOptions
   const profileBudget = route.profile?.totalTimeoutMs
   const deadlineAt = Math.min(options.request.deadlineAt ?? Infinity,
     typeof profileBudget === 'number' && Number.isFinite(profileBudget) && profileBudget > 0 ? startedAt + profileBudget : Infinity)
-  const inputCheck = options.operation.assertInputAuthority
+  const operation = transferClassifierDecisionOperation(options.operation, { ...options.operation })
+  if (!isDecisionMetadataSink(options.onAttempt)) disableClassifierDecisionOperation(operation)
+  const inputCheck = operation.assertInputAuthority
   const onAttempt = options.onAttempt
   return withDecisionInvocation({
     signal: options.request.signal, ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}), now,
     call: (invocation) => executeDecisionCascadeCurrent({
       ...options, route, request: { ...options.request, signal: invocation.signal,
         ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}) },
-      operation: { ...options.operation, assertInputAuthority: async () => {
+      operation: transferClassifierDecisionOperation(operation, { ...operation, assertInputAuthority: async () => {
         invocation.assertActive()
         await assertInputAuthority(inputCheck)
         invocation.assertActive()
-      } },
+      } }),
       onAttempt: async attempt => {
         invocation.assertActive()
         await onAttempt?.(attempt)
@@ -392,15 +396,21 @@ async function executeDecisionCascadeCurrent<T>(
   const primary = route.primary ? captureDecisionTransport(route.primary) : undefined
   const transportBudgetOwned = !!primary && ownsDecisionTransportBudget(primary)
   const check = currentInputCheck(operation.assertInputAuthority)
+  if (!transportBudgetOwned || route.mode !== 'hybrid') disableClassifierDecisionOperation(operation)
+  const bookkeeping = async () => {
+    request.signal?.throwIfAborted()
+    await assertDecisionBookkeeping(operation, check)
+    request.signal?.throwIfAborted()
+  }
   // Pure route validation exposes no input. The actual completion/primary
   // branch checks current input before dispatch, including unknown providers.
   validateDecisionRoute(request, route)
 
   let attempts = 0
   const emit = async (record: DecisionAttemptRecord): Promise<void> => {
-    await check()
+    await bookkeeping()
     await options.onAttempt?.(record)
-    await check()
+    await bookkeeping()
   }
 
   const safe = async (kind: DecisionFailureKind): Promise<DecisionCascadeResult<T>> => {
@@ -421,6 +431,9 @@ async function executeDecisionCascadeCurrent<T>(
     primaryResponse?: DecisionResponse,
     followUpReason?: DecisionFollowUpReason,
   ): Promise<DecisionCompletion<T>> => {
+    // LLM completion and arbitrary completion callbacks retain their original
+    // full admission schedule until independently certified.
+    disableClassifierDecisionOperation(operation)
     await check()
     attempts += 1
     const startedAt = now()
@@ -519,10 +532,11 @@ async function executeDecisionCascadeCurrent<T>(
       now,
       call: (signal) => {
         const attempt = { ...request, signal, deadlineAt: transportBudgetOwned ? totalDeadline : primaryDeadline, assertInputAuthority: check }
+        if (transportBudgetOwned) bindClassifierDecisionRequest(operation, attempt)
         return primary!.evaluate(transportBudgetOwned ? bindDecisionTransportBudget(attempt, profile.primaryTimeoutMs) : attempt)
       },
     })
-    await check()
+    await bookkeeping()
     disposition = operation.decide(primaryResponse, { profile })
     await emit({
       runId: request.runId,
@@ -540,6 +554,7 @@ async function executeDecisionCascadeCurrent<T>(
     })
   } catch (error) {
     if (isInputAuthorityError(error)) throw error
+    disableClassifierDecisionOperation(operation)
     primaryFailure = normalizeDecisionFailure(error)
     await emit({
       runId: request.runId,

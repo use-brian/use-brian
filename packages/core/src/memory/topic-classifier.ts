@@ -32,6 +32,7 @@ import { collectStream } from '../providers/accumulator.js'
 import type { DecisionAnswer, DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
 import { DecisionProviderError } from '../decisions/types.js'
 import { decisionCompletionInput } from '../decisions/invocation.js'
+import { captureClassifierDecisionRuntime, assertClassifierBookkeeping } from '../decisions/authority-ownership.js'
 
 export type TopicState = 'continue' | 'shift' | 'resume' | 'cross-topic'
 
@@ -412,14 +413,14 @@ async function classifyTopicCurrent(
         },
       },
     })
-    await assertInputAuthority(opts.assertInputAuthority)
+    await assertClassifierBookkeeping(opts.assertInputAuthority)
     if (cascade.failureKind === 'timeout') {
       console.warn('[topic-classifier] decision deadline exceeded; using uncategorized fallback')
     }
     return cascade.result
   } catch (error) {
     if (isInputAuthorityError(error)) throw error
-    await assertInputAuthority(opts.assertInputAuthority)
+    await assertClassifierBookkeeping(opts.assertInputAuthority)
     if (error instanceof DecisionProviderError && error.kind === 'timeout') {
       console.warn('[topic-classifier] decision deadline exceeded; using uncategorized fallback')
     }
@@ -428,16 +429,24 @@ async function classifyTopicCurrent(
 }
 
 /** Current, complete input evidence survives every classifier decision and fallback. */
-export async function classifyTopic(opts: TopicClassifierOptions): Promise<TopicClassification> {
-  const inputs = boundScopeSources(opts)
-  if (opts.authority) {
+export async function classifyTopic(incoming: TopicClassifierOptions): Promise<TopicClassification> {
+  const opts = { ...incoming }
+  const inputs = boundScopeSources(incoming), authority = opts.authority
+  const execution = authority?.execution, accumulator = authority?.accumulator
+  const assertCurrent = execution?.security.authority.assertCurrent.bind(execution.security.authority)
+  const lifecycleSignal = execution?.lifecycle.abortSignal
+  if (authority) {
     if (inputs.length === 0 || typeof opts.assertInputAuthority !== 'function') {
       throw new DerivedScopeError('scope_evidence_missing')
     }
-    opts.authority.accumulator.note({ sources: inputs })
+    accumulator!.note({ sources: inputs })
   } else if (inputs.length > 0) {
     throw new DerivedScopeError('scope_evidence_missing')
   }
+  // Capture bytes and host callbacks before any awaited lease or route lookup.
+  const input = structuredClone({ recentUserTurns: opts.recentUserTurns, replyToText: opts.replyToText,
+    currentMessage: opts.currentMessage, knownTopicsThisSession: opts.knownTopicsThisSession })
+  const observed = accumulator ? structuredClone(accumulator.evidence.sources ?? []) : inputs
   // Recovery may not turn an earlier refusal into success if a later probe
   // happens to pass. One invocation has one continuous authority window.
   let refusal: unknown
@@ -452,9 +461,9 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
     if (refusal) throw refusal
     if (pending) return pending
     pending = (async () => {
-      if (opts.authority) {
-        await assertInputAuthority(() => opts.authority!.execution.security.authority.assertCurrent())
-        if (opts.authority.execution.lifecycle.abortSignal.aborted) {
+      if (assertCurrent) {
+        await assertInputAuthority(assertCurrent)
+        if (lifecycleSignal!.aborted) {
           throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
         }
       }
@@ -462,12 +471,24 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
     })().catch(error => { refusal = error; throw error })
     try { await pending } finally { pending = undefined }
   }
-  await check()
-  // Snapshot only after admission. Every later prompt/decision/fallback uses
-  // this same data, rather than mutable options across asynchronous providers.
-  const input = structuredClone({ recentUserTurns: opts.recentUserTurns, replyToText: opts.replyToText,
-    currentMessage: opts.currentMessage, knownTopicsThisSession: opts.knownTopicsThisSession })
-  const observed = opts.authority ? structuredClone(opts.authority.accumulator.evidence.sources ?? []) : inputs
+  const active = async () => {
+    if (closed) throw closedError
+    if (refusal) throw refusal
+    if (pending) await pending
+    opts.signal?.throwIfAborted()
+    try {
+      if (assertCurrent) {
+        await assertInputAuthority(assertCurrent)
+        if (lifecycleSignal!.aborted) {
+          throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+        }
+      }
+    } catch (error) { refusal = error; throw error }
+    opts.signal?.throwIfAborted()
+    if (refusal) throw refusal
+  }
+  const decisionRuntime = captureClassifierDecisionRuntime(opts.decisionRuntime, check, active)
+  await assertClassifierBookkeeping(check)
   if (opts.allowTrivialShortcut !== false && !input.replyToText && isTrivialChatMessage(input.currentMessage)) {
     const prior = [...input.recentUserTurns].reverse().find(turn => turn.topicLabel)?.topicLabel
     const finalCheck = check()
@@ -480,7 +501,7 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
   const signal = AbortSignal.any([
     controller.signal,
     ...(opts.signal ? [opts.signal] : []),
-    ...(opts.authority ? [opts.authority.execution.lifecycle.abortSignal] : []),
+    ...(lifecycleSignal ? [lifecycleSignal] : []),
   ])
   const deadlineAt = Date.now() + TOPIC_CLASSIFIER_TIMEOUT_MS
   const timeoutError = new Error('topic classifier deadline exceeded')
@@ -496,7 +517,7 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
   try {
     try {
       result = await Promise.race([
-        classifyTopicCurrent({ ...opts, ...input, assertInputAuthority: check, signal, deadlineAt }),
+        classifyTopicCurrent({ ...opts, ...input, decisionRuntime, assertInputAuthority: check, signal, deadlineAt }),
         deadline,
       ])
     } catch (error) {

@@ -5,6 +5,7 @@ import {isTrivialChatMessage} from '../classification/trivial-chat.js'
 import {DerivedScopeError} from '../security/derived-scope.js'
 import {assertInputAuthority,assertProviderInputPreparation,captureInputAdmissionProvider,isInputAuthorityError} from '../providers/input-authority.js'
 import { decisionCompletionInput } from '../decisions/invocation.js'
+import { captureClassifierDecisionRuntime, assertClassifierBookkeeping } from '../decisions/authority-ownership.js'
 import type {SessionContextAuthority} from '../memory/session-state-types.js'
 /**
  * Pre-flight classifier for adaptive research-mode entry.
@@ -419,37 +420,59 @@ async function classifyResearchIntentCurrent(
 }
 
 /** Complete admitted classifier inputs survive deterministic paths and provider fallback. */
-export async function classifyResearchIntent(options: ResearchClassifyOptions): Promise<ResearchClassifyResult> {
-  const inputs=boundScopeSources(options),authority=options.authority
-  if(authority){
-    if(!inputs.length||typeof options.assertInputAuthority!=='function')throw new DerivedScopeError('scope_evidence_missing')
-    authority.accumulator.note({sources:inputs})
-  } else if(inputs.length)throw new DerivedScopeError('scope_evidence_missing')
-  let refusal:unknown,pending:Promise<void>|undefined
-  const check=async()=>{
-    if(refusal)throw refusal
-    if(pending)return pending
-    pending=(async()=>{
-      if(authority){
-        await assertInputAuthority(()=>authority.execution.security.authority.assertCurrent())
-        if(authority.execution.lifecycle.abortSignal.aborted)throw Object.assign(new Error('The classifier context is unavailable.'),{reason:'authority_changed',retrySafe:false})
-      }
-      await assertInputAuthority(options.assertInputAuthority)
-    })().catch(error=>{refusal=error;throw error})
-    try{await pending}finally{pending=undefined}
+export async function classifyResearchIntent(incoming: ResearchClassifyOptions): Promise<ResearchClassifyResult> {
+  const options = { ...incoming }
+  const inputs = boundScopeSources(incoming), authority = options.authority
+  const execution = authority?.execution, accumulator = authority?.accumulator
+  const assertCurrent = execution?.security.authority.assertCurrent.bind(execution.security.authority)
+  const lifecycleSignal = execution?.lifecycle.abortSignal
+  if (authority) {
+    if (!inputs.length || typeof options.assertInputAuthority !== 'function') throw new DerivedScopeError('scope_evidence_missing')
+    accumulator!.note({ sources: inputs })
+  } else if (inputs.length) throw new DerivedScopeError('scope_evidence_missing')
+  // Capture bytes and host callbacks before any awaited lease or route lookup.
+  const input = structuredClone({ message: options.message, recentConversation: options.recentConversation, toolCandidates: options.toolCandidates })
+  const observed = accumulator ? structuredClone(accumulator.evidence.sources ?? []) : inputs
+  const signal = AbortSignal.any([...(options.signal ? [options.signal] : []), ...(lifecycleSignal ? [lifecycleSignal] : [])])
+  let refusal: unknown, pending: Promise<void> | undefined, closed = false
+  const closedError = new Error('The research classifier authority window has closed')
+  const assertLease = async () => {
+    options.signal?.throwIfAborted()
+    if (assertCurrent) {
+      await assertInputAuthority(assertCurrent)
+      if (lifecycleSignal!.aborted) throw Object.assign(new Error('The classifier context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+    }
+    options.signal?.throwIfAborted()
   }
-  await check()
-  const input=structuredClone({message:options.message,recentConversation:options.recentConversation,toolCandidates:options.toolCandidates})
-  const observed=authority?structuredClone(authority.accumulator.evidence.sources??[]):inputs
-  const signal=AbortSignal.any([...(options.signal?[options.signal]:[]),...(authority?[authority.execution.lifecycle.abortSignal]:[])])
-  let result:ResearchClassifyResult
-  try{result=await classifyResearchIntentCurrent({...options,...input,signal,assertInputAuthority:check})}
-  catch(error){
-    if(isInputAuthorityError(error))throw error
-    await check()
-    result={research:false,operateSite:false,reason:null,usage:null,model:null}
+  const check = async () => {
+    if (closed) throw closedError
+    if (refusal) throw refusal
+    if (pending) return pending
+    pending = (async () => { await assertLease(); await assertInputAuthority(options.assertInputAuthority) })()
+      .catch(error => { refusal = error; throw error })
+    try { await pending } finally { pending = undefined }
   }
-  await check()
-  if(options.toolCandidates!==undefined&&result.toolNames===undefined&&result.reason!=='operate_site_fast_path')result={...result,toolNames:[]}
-  return bindScopeSources(result,observed)
+  const active = async () => {
+    if (closed) throw closedError
+    if (refusal) throw refusal
+    if (pending) await pending
+    try { await assertLease() } catch (error) { refusal = error; throw error }
+    if (refusal) throw refusal
+  }
+  const decisionRuntime = captureClassifierDecisionRuntime(options.decisionRuntime, check, active)
+  try {
+    await assertClassifierBookkeeping(check)
+    let result: ResearchClassifyResult
+    try { result = await classifyResearchIntentCurrent({ ...options, ...input, decisionRuntime, signal, assertInputAuthority: check }) }
+    catch (error) {
+      if (isInputAuthorityError(error)) throw error
+      await check()
+      result = { research: false, operateSite: false, reason: null, usage: null, model: null }
+    }
+    const finalCheck = check()
+    closed = true
+    await finalCheck
+    if (options.toolCandidates !== undefined && result.toolNames === undefined && result.reason !== 'operate_site_fast_path') result = { ...result, toolNames: [] }
+    return bindScopeSources(result, observed)
+  } finally { closed = true }
 }
