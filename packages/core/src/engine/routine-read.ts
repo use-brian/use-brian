@@ -20,7 +20,7 @@ import type {Tool,ToolContext} from '../tools/types.js'
 export type RoutineCalendarCall={name:string;input:{calendarId:string;timeMin:string;timeMax:string;maxResults:number}}
 type Candidate={id:string;calls:RoutineCalendarCall[]}
 const planData=new WeakMap<object,{calls:RoutineCalendarCall[];current:()=>void}>()
-export type RoutineReadPlan=Readonly<{kind:'calendar_events'}>
+type RoutineReadPlan=Readonly<{kind:'calendar_events'}>
 export type RoutineReadPlanningResult={plan:RoutineReadPlan|null;durationMs:number;model:string|null;usage:TokenUsage|null;path:string}
 const iso=z.string().datetime({offset:true})
 const callInput=z.object({calendarId:z.string().min(1).max(1024),timeMin:iso,timeMax:iso,maxResults:z.number().int().min(1).max(2500)}).strict()
@@ -208,7 +208,7 @@ export function consumeHostReadObservation(receipt:HostReadReceipt,execution:Non
 }
 
 /** Exact executor output, with first-page exhaustion and the executor's own cap. */
-export function isCompleteRoutineRead(call:RoutineCalendarCall,block:Extract<import('../providers/types.js').ContentBlock,{type:'tool_result'}>,meta:import('../tools/types.js').ToolResultMeta|undefined):boolean{
+function isCompleteRoutineRead(call:RoutineCalendarCall,block:Extract<import('../providers/types.js').ContentBlock,{type:'tool_result'}>,meta:import('../tools/types.js').ToolResultMeta|undefined):boolean{
  return !block.isError && meta?.calendarReadComplete===true && meta.outputTruncated===false
   && meta.calendarReadCalendarId===call.input.calendarId && meta.calendarReadTimeMin===call.input.timeMin
   && meta.calendarReadTimeMax===call.input.timeMax && meta.calendarReadQuery===undefined && meta.calendarReadPageToken===undefined
