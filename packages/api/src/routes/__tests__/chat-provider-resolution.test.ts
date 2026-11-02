@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import ts from 'typescript'
-import { ChatTurnRefusal, chatTurnErrorEvent, customModelMediaRefusal, resolveWorkspaceTurnLlm } from '../chat.js'
+import { ChatTurnRefusal, chatTurnErrorEvent, customModelMediaRefusal, resolveWorkspaceTurnLlm, routineCalendarReadDeclineReason } from '../chat.js'
 import { CUSTOM_MODEL_IMAGE_REJECTION } from '../_channel-error-text.js'
 import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
 import { DeliveryAudienceUnverifiedError } from '../../context-scope/delivery-authority.js'
@@ -161,4 +161,43 @@ describe('[COMP:api/chat-route] detached failure outcome', () => {
       expect(evaluate('actor', notice, recovered)).toEqual({ senderUserId: 'actor' })
     },
   )
+})
+
+
+describe('[COMP:api/chat-route] routine read model-route eligibility', () => {
+  const tool = { name: 'googleCalendarListEvents' } as import('@use-brian/core').Tool
+  const tools = new Map([[tool.name, tool]])
+  const eligible = {
+    nativeOutput: true, nativeTranscript: true, decisionRuntime: true,
+    research: false, coordinator: false, site: false, document: false,
+    modelRoute: null, calendarTools: tools, preparedTools: tools, preselected: ['mcp_call'],
+  }
+  it('retains a resolved managed registry route rather than treating its runtime object as custom', async () => {
+    const provider = { name: 'managed-fixture' } as import('@use-brian/core').LLMProvider
+    const runtime = { provider, selector: 'gemini-3.6-flash-standard', profileId: null,
+      modelTier: 'standard', providerKeySource: 'platform', routeKind: 'managed', inputTokenLimit: 1_048_576, maxTokens: 8192 } as import('../../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm
+    const resolved = await resolveWorkspaceTurnLlm({ workspaceId: 'fictional-workspace', requestedTier: 'standard', platformProvider: provider,
+      resolveWorkspaceCustomLlm: vi.fn(async () => runtime), resolveLegacyByoKey: null, buildLegacyByoProvider: null })
+    expect(resolved.customRuntime).toBe(runtime)
+    expect(routineCalendarReadDeclineReason({ ...eligible, modelRoute: resolved.customRuntime })).toBeNull()
+    expect(routineCalendarReadDeclineReason(eligible)).toBeNull()
+  })
+  it('keeps custom and unknown route kinds conservative', () => {
+    expect(routineCalendarReadDeclineReason({ ...eligible, modelRoute: { routeKind: 'custom' } })).toBe('custom_model')
+    expect(routineCalendarReadDeclineReason({ ...eligible, modelRoute: {} as never })).toBe('custom_model')
+  })
+  it.each(['nativeOutput', 'nativeTranscript', 'decisionRuntime'] as const)('still requires %s', key => {
+    expect(routineCalendarReadDeclineReason({ ...eligible, [key]: false })).not.toBeNull()
+  })
+  it.each(['research', 'coordinator', 'site', 'document'] as const)('keeps the %s profile on its existing path', key => {
+    expect(routineCalendarReadDeclineReason({ ...eligible, [key]: true })).toBe('specialized_mode')
+  })
+  it('retains exact tool identity and the initial selection gate', () => {
+    expect(routineCalendarReadDeclineReason({ ...eligible, calendarTools: new Map() })).toBe('calendar_tools')
+    expect(routineCalendarReadDeclineReason({ ...eligible, preparedTools: new Map([[tool.name, { ...tool }]]) })).toBe('tool_identity')
+    expect(routineCalendarReadDeclineReason({ ...eligible, preselected: [] })).toBe('initial_selection')
+    expect(routineCalendarReadDeclineReason({ ...eligible, preselected: ['unrelatedTool'] })).toBe('initial_selection')
+    expect(routineCalendarReadDeclineReason({ ...eligible, preselected: undefined })).toBeNull()
+    expect(routineCalendarReadDeclineReason({ ...eligible, preselected: [tool.name] })).toBeNull()
+  })
 })

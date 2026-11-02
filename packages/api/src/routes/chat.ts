@@ -202,6 +202,30 @@ export function filterBrainSurfaceTools(
 }
 
 
+/** Routing eligibility only. The private planner/executor still owns admission. */
+export function routineCalendarReadDeclineReason(input: {
+  nativeOutput: boolean
+  nativeTranscript: boolean
+  decisionRuntime: boolean
+  research: boolean
+  coordinator: boolean
+  site: boolean
+  document: boolean
+  modelRoute: Pick<import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm, 'routeKind'> | null
+  calendarTools: ReadonlyMap<string, Tool>
+  preparedTools: ReadonlyMap<string, Tool>
+  preselected?: readonly string[]
+}): string | null {
+  if (!input.nativeOutput || !input.nativeTranscript) return 'native_boundary'
+  if (!input.decisionRuntime) return 'decision_runtime'
+  if (input.research || input.coordinator || input.site || input.document) return 'specialized_mode'
+  if (input.modelRoute && input.modelRoute.routeKind !== 'managed') return 'custom_model'
+  if (!input.calendarTools.size) return 'calendar_tools'
+  if (input.preselected !== undefined && !input.preselected.some(name => input.calendarTools.has(name) || name === 'mcp_call' || name === 'mcp_search')) return 'initial_selection'
+  if (![...input.calendarTools].every(([name, tool]) => input.preparedTools.get(name) === tool)) return 'tool_identity'
+  return null
+}
+
 // WU-6.4 — Path B fast-path index. When a workspace-scoped tool call
 // suspends, the `awaiting_approval` event carries both the persisted
 // `pending_approvals` row id AND the loop-internal `toolCallId`. The
@@ -7384,6 +7408,17 @@ export function chatRoutes(options: WebChatOptions): Router {
           trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
           userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         })
+        const routineDeclineReason = routineCalendarReadDeclineReason({
+          nativeOutput: Boolean(nativeOutputBoundary), nativeTranscript: Boolean(nativeTranscriptAuthority),
+          decisionRuntime: Boolean(options.decisionRuntime), research: researchMode, coordinator: coordinatorMode,
+          site: Boolean(operateSiteIntent), document: Boolean(docCtx), modelRoute: customLlmRuntime,
+          calendarTools: boundRoutineCalendarTools, preparedTools: preparedRun.tools, preselected: adaptive?.toolNames,
+        })
+        console.info('[chat] routine eligibility', {
+          reason: routineDeclineReason ?? 'eligible',
+          route: customLlmRuntime?.routeKind === 'managed' ? 'managed' : customLlmRuntime ? 'custom' : 'default',
+          injected: preparedConnectors.routineCalendarTools?.size ?? 0, bound: boundRoutineCalendarTools.size,
+        })
         // The selector sees the current user request, not automatic file,
         // memory or other ambient context. Validate precisely that source.
         const selectionScope = new ContextScopeAccumulator(executionContext.security.provenance)
@@ -7418,10 +7453,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // re-read the session declarations. Snapshot-based adapters do not.
           deferToolSchemas: customLlmRuntime?.routeKind !== 'custom' &&
             registryRow(customLlmRuntime?.selector ?? preparedRun.model.model)?.provider === 'gemini',
-          routineCalendarRead: nativeOutputBoundary && nativeTranscriptAuthority && options.decisionRuntime && !researchMode && !coordinatorMode
-            && !operateSiteIntent && !docCtx && !customLlmRuntime && boundRoutineCalendarTools.size
-            && (adaptive?.toolNames===undefined || adaptive.toolNames.some(name=>boundRoutineCalendarTools.has(name)||name==='mcp_call'||name==='mcp_search'))
-            && [...boundRoutineCalendarTools].every(([name,tool])=>preparedRun.tools.get(name)===tool) ? {
+          routineCalendarRead: routineDeclineReason === null && options.decisionRuntime ? {
               runtime:options.decisionRuntime, llm:{provider:backgroundProvider,modelId:backgroundModel},
               workspaceId:assistant.workspaceId??undefined, calendarTools:boundRoutineCalendarTools,historyCalls:routineHistoryCalls,
               onResult:async result=>{
