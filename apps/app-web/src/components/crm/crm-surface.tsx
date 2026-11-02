@@ -174,7 +174,7 @@ const EMPTY_PIPELINE: CrmPipeline = {
 
 type CrmPrimitive = "deal" | "contact" | "company";
 
-export type CrmRouteRecord = { kind: CrmPrimitive; id: string };
+type CrmRouteRecord = { kind: CrmPrimitive; id: string };
 
 type CrmCollectionPayload = {
   section: CrmSection;

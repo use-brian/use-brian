@@ -2101,7 +2101,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
     }
 
-    send('status', { status: session.status })
+    send('status', {
+      status: session.status,
+      startedAt: session.status === 'running' ? session.turnStartedAt?.getTime() ?? null : null,
+    })
     let closeForAuthority = () => { res.end() }
     const authority = createSessionStreamAuthority(async () => {
       const current = await findSessionById(req.params.id)

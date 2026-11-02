@@ -111,17 +111,25 @@ describe('[COMP:api/turn-lease] ownership guards', () => {
     await expect(startTurnLease('s-1')).resolves.toBe('tok-1')
     const sql = sqlOf()
     expect(sql).toContain('gen_random_uuid()')
+    expect(sql).toContain('turn_started_at = COALESCE($3::timestamptz, now())')
     expect(sql).toContain('cancel_requested_at = NULL')
     expect(sql).toContain('turn_end_reason = NULL')
     // No answering assistant given = the binding answers.
     expect(sql).toContain('turn_assistant_id = $2')
-    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', null])
+    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', null, null])
   })
 
   it('startTurnLease stamps the answering assistant of a re-addressed turn', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ turn_lease_token: 'tok-2' }], rowCount: 1 } as never)
     await startTurnLease('s-1', 'a-taskmaster')
-    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', 'a-taskmaster'])
+    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', 'a-taskmaster', null])
+  })
+
+  it('keeps the attended request start instead of dropping preparation time', async () => {
+    const startedAt = new Date('2026-01-01T00:00:00Z')
+    mockQuery.mockResolvedValueOnce({ rows: [{ turn_lease_token: 'tok-3' }], rowCount: 1 } as never)
+    await startTurnLease('s-1', 'assistant-fixture', startedAt)
+    expect(mockQuery.mock.calls[0][1]).toEqual(['s-1', 'assistant-fixture', startedAt])
   })
 
   it('touchTurnLease refreshes and reads the cancel flag in ONE statement', async () => {
@@ -138,6 +146,7 @@ describe('[COMP:api/turn-lease] ownership guards', () => {
     // a 20s timer.
     expect(mockQuery).toHaveBeenCalledTimes(1)
     expect(sqlOf()).toContain('RETURNING cancel_requested_at')
+    expect(sqlOf()).not.toContain('turn_started_at')
     expect(sqlOf()).toContain('turn_lease_token = $2')
   })
 

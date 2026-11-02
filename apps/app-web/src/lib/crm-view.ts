@@ -130,6 +130,28 @@ export const CRM_SECTIONS = ["deals", "contacts", "companies"] as const;
 export type CrmSection = (typeof CRM_SECTIONS)[number];
 export type CrmRecordKind = "deal" | "contact" | "company";
 
+/** Read selection in the persistent layout, including on history navigation.
+ * Pathnames are used rather than child params so the desktop parent route
+ * observes the same selection as Next's layout. */
+export function crmRouteFromPathname(pathname: string | null, workspaceId: string):
+  | { type: "collection" }
+  | { type: "record"; record: { kind: CrmRecordKind; id: string } }
+  | { type: "invalid" } {
+  const collection = crmCollectionHref(workspaceId);
+  if (pathname === collection || pathname === `${collection}/`) return { type: "collection" };
+  if (!pathname?.startsWith(`${collection}/`)) return { type: "invalid" };
+  const parts = pathname.slice(collection.length + 1).replace(/\/$/, "").split("/");
+  if (parts.length !== 2) return { type: "invalid" };
+  try {
+    const kind = decodeURIComponent(parts[0]);
+    const id = decodeURIComponent(parts[1]);
+    if ((kind === "deal" || kind === "contact" || kind === "company") && id) {
+      return { type: "record", record: { kind, id } };
+    }
+  } catch { /* Malformed percent encoding is an unavailable route. */ }
+  return { type: "invalid" };
+}
+
 /** Canonical collection/detail hrefs. Search state is kept verbatim so
  * opening a record and returning to its collection preserves the lens. */
 export function crmCollectionHref(workspaceId: string, search = ""): string {

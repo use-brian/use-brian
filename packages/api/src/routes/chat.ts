@@ -2376,6 +2376,7 @@ export function chatRoutes(options: WebChatOptions): Router {
     // `turn_timings` analytics event (docs/architecture/platform/analytics.md)
     // so a slow turn names its phase instead of being inferred from logs.
     const turnTiming = createTurnTiming()
+    const requestStartedAt = new Date()
     let turnTimingIdentity: { userId: string; assistantId: string; sessionId: string } | null = null
     let turnTimingOutcome = 'completed'
     // The token this turn registered in `activeTurnAborts`, kept SEPARATE from
@@ -6856,6 +6857,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // precheck above (refusing if a live turn raced us there).
       const slot = await takeTurnLease({
         sessionId: session.id,
+        startedAt: requestStartedAt,
         admission: turnPolicy.admission,
         // The answering assistant: a doc-dock or room send may re-address the
         // turn away from the session's binding (live-work.md "Voice label").

@@ -155,6 +155,7 @@ describe('[COMP:api/sessions-route] readSessionById', () => {
     expect(mockQuery).toHaveBeenCalledOnce()
     const [sql, params] = mockQuery.mock.calls[0]
     expect(sql).toMatch(/^SELECT/)
+    expect(sql).toContain('turn_started_at as "turnStartedAt"')
     expect(sql).not.toMatch(/UPDATE|INSERT|FOR UPDATE|FOR SHARE/)
     expect(params).toEqual(['s_1'])
   })

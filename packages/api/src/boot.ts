@@ -1,3 +1,4 @@
+import { feishuNotificationRoutes } from './routes/feishu-notifications.js'
 import { enqueueNativeSessionStateJob } from './db/session-state-jobs.js'
 import { createSessionStateWorker } from './workers/session-state-worker.js'
 import { enqueueNativeSessionTitleJob } from './db/session-title-jobs.js'
@@ -10073,6 +10074,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           archiveMedia: chatArchiveLiveMedia,
           }))
       }
+      app.use('/internal/notifications/feishu', feishuNotificationRoutes({ pool: getPool(), integrations: integrationStore }))
       if (env.FEISHU_CONNECTOR_SECRET) {
         app.use('/internal/feishu', feishuRoutes({
           backgroundModel,

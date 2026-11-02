@@ -658,6 +658,49 @@ function followedTurn(direct = false) {
 }
 
 describe("[COMP:app-web/turn-reconnect] returning sender outcomes", () => {
+  it("restores elapsed time after navigating away and mounting a fresh chat", () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-01-01T00:00:00Z");
+    vi.setSystemTime(start + 45_000);
+    const { scope, onEvent } = followedTurn();
+    let startedAt: number | null = null;
+    scope.setRemoteStartedAt.mockImplementation(value => {
+      startedAt = typeof value === "function" ? value(startedAt) : value;
+    });
+    onEvent("status", { status: "running", startedAt: start });
+    expect(startedAt).toBe(start);
+    const html = renderToString(React.createElement(I18nProvider, { locale: "en", dict: en,
+      children: React.createElement(ChatActivityFeed, { events: [], tools: [], startedAt, replyStreaming: false }),
+    }));
+    expect(html).toContain("45s");
+    vi.advanceTimersByTime(10_000);
+    onEvent("snapshot", { text: "" });
+    onEvent("status", { status: "running", startedAt: start });
+    expect(startedAt).toBe(start);
+    // The next turn, unlike a re-subscription, starts a new clock.
+    onEvent("turn_started", {});
+    expect(startedAt).toBe(start + 55_000);
+  });
+
+  it.each([undefined, null, "invalid", -1, NaN])("falls back safely for missing/invalid start time %s", startedAt => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    const { scope, onEvent } = followedTurn();
+    onEvent("status", { status: "running", startedAt });
+    const update = scope.setRemoteStartedAt.mock.calls[0][0];
+    expect(update(null)).toBe(100_000);
+    expect(update(50_000)).toBe(50_000);
+  });
+
+  it("preserves an earlier direct start and ignores an idle turn's old timestamp", () => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("status", { status: "running", startedAt: 60_000 });
+    expect(scope.setRemoteStartedAt.mock.calls[0][0](50_000)).toBe(50_000);
+    scope.setRemoteStartedAt.mockClear();
+    onEvent("status", { status: "idle", startedAt: 60_000 });
+    expect(scope.setRemoteStartedAt).not.toHaveBeenCalled();
+  });
+
   it("restores text completion on reconnect without treating it as turn completion", () => {
     const { scope, onEvent } = followedTurn();
     onEvent("snapshot", { text: "Hello", replyPhase: "saving" });

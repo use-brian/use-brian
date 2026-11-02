@@ -1783,7 +1783,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           }
           if (working && acceptsMirror) {
             setRemoteActive(true);
-            setRemoteStartedAt((current) => current ?? Date.now());
+            // Re-entry mounts a new surface, not a new turn. Restore the
+            // lease's start rather than timing from this subscription.
+            const startedAt = typeof payload.startedAt === "number" &&
+              Number.isFinite(payload.startedAt) && payload.startedAt > 0
+              ? Math.min(payload.startedAt, Date.now()) : null;
+            setRemoteStartedAt((current) => startedAt === null
+              ? current ?? Date.now()
+              : Math.min(current ?? startedAt, startedAt));
           }
           break;
         }

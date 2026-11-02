@@ -6,7 +6,7 @@ const authFetch = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/auth-fetch", () => ({ authFetch }));
 
 import { fetchCrmRecord, updateCrmRecord, type CrmRecordBundle } from "@/lib/api/crm";
-import { crmCollectionHref, crmRecordHref, crmRecordMatchesRoute } from "@/lib/crm-view";
+import { crmCollectionHref, crmRecordHref, crmRecordMatchesRoute, crmRouteFromPathname } from "@/lib/crm-view";
 
 function response(body: unknown, status = 200): Response {
   return {
@@ -53,6 +53,23 @@ const bundle: CrmRecordBundle = {
 afterEach(() => authFetch.mockReset());
 
 describe("[COMP:app-web/crm-record-route] CRM record route", () => {
+  it("reads collection and encoded record paths in the owning workspace", () => {
+    expect(crmRouteFromPathname(crmCollectionHref("space / one"), "space / one"))
+      .toEqual({ type: "collection" });
+    for (const kind of ["deal", "contact", "company"] as const) {
+      expect(crmRouteFromPathname(crmRecordHref("space / one", kind, "record / one"), "space / one"))
+        .toEqual({ type: "record", record: { kind, id: "record / one" } });
+    }
+  });
+
+  it.each([
+    "/w/other/crm/contact/one", "/w/space/crm/unknown/one",
+    "/w/space/crm/contact", "/w/space/crm/contact/",
+    "/w/space/crm/contact/%ZZ", "/w/space/crm/contact/one/extra",
+  ])("rejects malformed or foreign record paths: %s", (path) => {
+    expect(crmRouteFromPathname(path, "space")).toEqual({ type: "invalid" });
+  });
+
   it("builds detail and collection URLs without losing the collection lens", () => {
     const search = "section=contacts&filter=orphaned&q=example";
     expect(crmRecordHref("space / one", "contact", "person / one", search)).toBe(

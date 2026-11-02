@@ -98,6 +98,8 @@ export type Session = {
    */
   appOrigin: string | null
   status: string
+  /** Current lease's start, unchanged by heartbeat or reconnect reads. */
+  turnStartedAt?: Date | null
   /** Deprecated scalar slot; semantic reads require readCompactSummary. Always null in native DTOs. */
   compactSummary: string | null
   compactionCount: number
@@ -677,7 +679,7 @@ export async function readSessionById(id: string): Promise<Session | null> {
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             channel_type as "channelType", channel_id as "channelId",
-            app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
+            app_id as "appId", app_origin as "appOrigin", status, turn_started_at as "turnStartedAt", NULL::text as "compactSummary",
             compaction_count as "compactionCount",
             compact_boundary_sequence as "compactBoundarySequence", NULL::text AS title,
             downgrade_notice_sent as "downgradeNoticeSent",
@@ -849,17 +851,18 @@ export async function takeTurnSlot(sessionId: string): Promise<void> {
  * turn rather than the session's binding. Omitted (NULL) means the bound
  * assistant answers.
  */
-export async function startTurnLease(sessionId: string, assistantId: string | null = null): Promise<string> {
+export async function startTurnLease(sessionId: string, assistantId: string | null = null, startedAt: Date | null = null): Promise<string> {
   const result = await query<{ turn_lease_token: string }>(
     `UPDATE sessions
         SET turn_lease_token = gen_random_uuid(),
+            turn_started_at = COALESCE($3::timestamptz, now()),
             turn_heartbeat_at = now(),
             cancel_requested_at = NULL,
             turn_end_reason = NULL,
             turn_assistant_id = $2
       WHERE id = $1
       RETURNING turn_lease_token`,
-    [sessionId, assistantId],
+    [sessionId, assistantId, startedAt],
   )
   const token = result.rows[0]?.turn_lease_token
   if (!token) throw new Error(`startTurnLease: session ${sessionId} not found`)
