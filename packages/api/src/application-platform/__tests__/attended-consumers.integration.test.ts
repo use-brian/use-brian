@@ -1,15 +1,17 @@
 import { createDbSessionStateStore } from '../../db/session-state-store.js'
+import pg from 'pg'
 import { writeSessionContextRevision, sessionContextGeneration } from '../../db/session-context-revisions.js'
 import { createDbEpisodicStore } from '../../db/episodic-store.js'
 import { addSessionMessage, findSessionById, readCompactSummary } from '../../db/sessions.js'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
-import { DecisionAdapterRegistry, executeDecisionCascade, createTypeSafeDecisionProvider, type TopicClassifierOptions, bindScopeSources, executionToolContext, classifyTopic, boundScopeSources, createCompactionCircuitBreaker, type LLMProvider, type StreamFn } from '@use-brian/core'
+import { DecisionAdapterRegistry, executeDecisionCascade, createTypeSafeDecisionProvider, type TopicClassifierOptions, bindScopeSources, executionToolContext, classifyTopic, boundScopeSources, createCompactionCircuitBreaker, queryLoop, NOOP_TURN_LEDGER, type LLMProvider, type StreamFn } from '@use-brian/core'
 import { getAppPool, getPool } from '../../db/client.js'
 import { createDbMemoryStore } from '../../db/memory-store.js'
 import { houseKeepEpisodic, runProactiveCompaction } from '../../routes/proactive-compaction.js'
 import { createDecisionRuntime } from '../../decision-runtime.js'
 import { assertSourceModelInputAuthority } from '../model-source-authority.js'
 import { persistentContextFixture } from './fixtures/persistent-context.js'
+import { readAttendedSessionHistory } from '../../routes/attended-session-context.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
 await assertLocalFixture()
@@ -34,6 +36,41 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
       circuitBreaker: createCompactionCircuitBreaker(),
     })
   }
+
+  it('assembles admitted native history without another graph proof but refuses a later source hold before model dispatch', async () => {
+    fixture = await persistentContextFixture()
+    const f = fixture, original = await f.history(), current = await f.modelContext()
+    const history = await readAttendedSessionHistory(current, f.session.id)
+    const stream = vi.fn<StreamFn>(async function* () { yield { type: 'text_delta', text: 'Must not reach the fictional provider' } })
+    const sql: string[] = [], query = pg.Client.prototype.query
+    const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function (this: pg.Client, ...args: Parameters<typeof query>) {
+      sql.push(typeof args[0] === 'string' ? args[0] : String((args[0] as { text?: string })?.text ?? ''))
+      return query.apply(this, args)
+    } as typeof query)
+    let assembled: Awaited<ReturnType<typeof runProactiveCompaction>>
+    try {
+      assembled = await runProactiveCompaction({
+        sessionMessages: history, timezone: 'UTC', session: f.session, tier: 'standard', channelClass: 'web',
+        provider: provider(stream), model: 'fixture', systemPrompt: 'Fictional native assembly.',
+        assistantId: f.assistantId, userId: f.ownerId, ownerId: f.ownerId, channelType: 'web',
+        memoryStore: createDbMemoryStore(), persistLongTermContext: false, persistSessionSummary: true,
+        authority: current.execution.security.authority, modelContext: current,
+      })
+    } finally { spy.mockRestore() }
+    expect(assembled.compacted).toBe(false)
+    expect(assembled.messages.flatMap(boundScopeSources)).toEqual(history.flatMap(boundScopeSources))
+    expect(sql.filter(text => /read_native_(?:turn_scope|file_session)_evidence|validate_scope_evidence/.test(text))).toEqual([])
+    expect(stream).not.toHaveBeenCalled()
+    await f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1', [original[0].id])
+    const context = { ...executionToolContext(current.execution, { appId: 'fictional-compaction-dispatch' }),
+      scopeAccumulator: current.accumulator, assertModelInputAuthority: assertSourceModelInputAuthority }
+    const dispatch = async () => {
+      for await (const _event of queryLoop({ provider: provider(stream), model: 'fixture', systemPrompt: 'Fictional current history.',
+        messages: assembled.messages, tools: new Map(), ledger: NOOP_TURN_LEDGER, context, stateless: true, maxTurns: 1 })) { /* consume */ }
+    }
+    await expect(dispatch()).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(stream).not.toHaveBeenCalled()
+  })
 
 
   it('refuses withdrawn topic-classifier inputs before provider dispatch and keeps a second reader usable', async () => {

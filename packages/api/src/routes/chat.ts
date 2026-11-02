@@ -4491,7 +4491,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // internally. We apply web-only post-transforms (stripUnsignedToolUses,
       // retryHint injection) to the returned message array before the query
       // loop.
-      await assertDeliveryAudience()
+      if (!nativeOutputBoundary) await assertDeliveryAudience()
       const compactionResult = await turnTiming.time('compaction', () => runProactiveCompaction({
         modelContext: { execution: executionContext, accumulator: scopeAccumulator },
         sessionMessages: dbMessages,
@@ -7111,7 +7111,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           }
           if (nativeRows.length && nativeTranscriptAuthority && 'derivation' in batchWrite) {
             const rows=await publishNativeSessionMessageBatch({sessionId:session.id,messages:nativeRows,
-              derivation:batchWrite.derivation,derivationTarget:batchWrite.derivationTarget,authority:nativeTranscriptAuthority},tx)
+              derivation:batchWrite.derivation,derivationTarget:batchWrite.derivationTarget,authority:nativeTranscriptAuthority,measure:turnTiming.time},tx)
             for (const [index,stored] of rows.entries()) {
               const metadata=nativeSaved.get(index)
               if(metadata)savedTurns.push({stored,...metadata})

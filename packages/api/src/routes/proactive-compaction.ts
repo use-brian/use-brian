@@ -50,6 +50,7 @@ import { recordOverheadUsage } from './_overhead-usage.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
+import { getApplicationExecutionBinding } from '../application-platform/execution-context.js'
 
 /**
  * Hard cap on the persisted `sessions.compact_summary` text. Acts as a
@@ -383,29 +384,54 @@ export async function runProactiveCompaction(
   const persistSessionSummary = params.persistSessionSummary !== false
   const compactionModel = params.model ?? 'gemini-3.6-flash-pro'
   const binding = params.modelContext
-  const modelContext = binding ? {
-    ...executionToolContext(binding.execution, { appId: 'Use Brian' }),
-    scopeAccumulator: binding.accumulator,
+  const execution = binding?.execution, accumulator = binding?.accumulator
+  const authority = params.authority, assertCurrent = authority?.assertCurrent, execute = authority?.execute
+  const executeWithAuthority = execute?.bind(authority)
+  const inputAuthority = execution?.security.authority, assertInputCurrent = inputAuthority?.assertCurrent
+  const applicationBinding = execution ? getApplicationExecutionBinding(execution) : undefined
+  const modelContext = execution ? {
+    ...executionToolContext(execution, { appId: 'Use Brian' }),
+    scopeAccumulator: accumulator!,
   } : undefined
-  const assertModelInput = async () => {
+  const unavailable = (): never => {
+    throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+  }
+  const assertModelBinding = () => {
+    if (params.authority !== authority || authority?.assertCurrent !== assertCurrent || authority?.execute !== execute
+      || params.modelContext !== binding) unavailable()
     if (!modelContext) {
-      if (sessionMessages.some((row) => boundScopeSources(row).length > 0)) {
-        throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
-      }
+      if (binding || sessionMessages.some((row) => boundScopeSources(row).length > 0)) unavailable()
       return
     }
-    if (params.modelContext !== binding || binding!.execution !== modelContext.executionContext
-      || binding!.accumulator !== modelContext.scopeAccumulator
-      || !(modelContext.scopeAccumulator instanceof ContextScopeAccumulator)) {
-      throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
-    }
-    await modelContext.executionContext!.security.authority.assertCurrent()
+    if (binding!.execution !== execution || binding!.accumulator !== accumulator
+      || !(accumulator instanceof ContextScopeAccumulator)
+      || execution!.security.authority !== inputAuthority || inputAuthority?.assertCurrent !== assertInputCurrent
+      || getApplicationExecutionBinding(execution!) !== applicationBinding) unavailable()
+  }
+  // Only canonical native callers may assemble already admitted bytes without
+  // another full graph proof. No permission result survives this operation.
+  const nativeAssembly = !!execution && Object.isFrozen(execution) && Object.isFrozen(execution.security)
+    && Object.isFrozen(execution.identity) && Object.isFrozen(execution.security.access)
+    && authority === inputAuthority && !applicationBinding
+    && execution.identity.kind === 'attended' && execution.identity.principal.kind === 'workspace_member'
+    && (execution.identity.principal.authenticationKind === 'native_session' || execution.identity.principal.authenticationKind === 'verified_channel')
+    && execution.identity.principal.userId === execution.security.access.userId
+    && execution.security.access.userId === userId && execution.assistant.id === assistantId
+    && execution.security.access.assistantId === assistantId && execution.lifecycle.sessionId === session.id
+    && execution.ownership.kind === 'workspace' && execution.ownership.workspaceId === execution.security.access.workspaceId
+    && !execution.surface.systemRead && !execution.surface.clientSelfMemory && !execution.security.access.systemRead
+  const assertModelInput = async () => {
+    assertModelBinding()
+    if (!modelContext) return
+    await assertInputCurrent!.call(inputAuthority)
+    assertModelBinding()
     await assertSourceModelInputAuthority(modelContext)
+    assertModelBinding()
   }
   const guarded = async <T>(operation: () => Promise<T>): Promise<T> => {
     await assertModelInput()
     try {
-      const result = await (params.authority ? params.authority.execute(operation) : operation())
+      const result = await (executeWithAuthority ? executeWithAuthority(operation) : operation())
       await assertModelInput()
       return result
     } catch (error) {
@@ -414,14 +440,17 @@ export async function runProactiveCompaction(
     }
   }
 
-  await params.authority?.assertCurrent()
+  assertModelBinding()
+  await assertCurrent?.call(authority)
+  assertModelBinding()
   const priorSummary = persistSessionSummary ? await readCompactSummary(session.id, binding) : null
+  assertModelBinding()
   if (priorSummary) sessionMessages = suppliedRows.filter(row => row.sequenceNum >= priorSummary.boundarySequence)
   else if (persistSessionSummary && binding && session.compactBoundarySequence !== null) {
     throw Object.assign(new DerivedScopeError('scope_source_changed'), { reason: 'authority_changed' as const, retrySafe: false })
   }
   if (modelContext) modelContext.scopeAccumulator.note(scopeEvidenceFromRows(sessionMessages))
-  await assertModelInput()
+  if (!nativeAssembly) await assertModelInput()
 
   const breaker = params.circuitBreaker ?? defaultCompactionBreaker
   const sessionId = session.id
@@ -450,6 +479,7 @@ export async function runProactiveCompaction(
       : ensureToolResultPairing(stamped)
     return { messages: passthrough, compacted: false, episodes: [] }
   }
+  if (nativeAssembly) await assertModelInput()
 
   // Compaction IS needed. Set up the deterministic fallback + auto-heal
   // accounting shared by every exit below. The fallback fits history to the

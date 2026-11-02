@@ -6,9 +6,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 // end (its 1:1 mapping is part of the refactored flow's back-map contract).
 // `vi.hoisted` lets the mock fns share a reference with the test body
 // despite vi.mock's hoisting behavior.
-const { mockSetCompactSummaryAndBoundary, mockFindSessionById } = vi.hoisted(() => ({
+const { mockSetCompactSummaryAndBoundary, mockFindSessionById, mockReadCompactSummary, mockSourceAuthority } = vi.hoisted(() => ({
   mockSetCompactSummaryAndBoundary: vi.fn(),
   mockFindSessionById: vi.fn(),
+  mockReadCompactSummary: vi.fn(async () => null),
+  mockSourceAuthority: vi.fn(async () => {}),
 }))
 
 vi.mock('../../db/sessions.js', async () => {
@@ -17,8 +19,10 @@ vi.mock('../../db/sessions.js', async () => {
     ...actual,
     setCompactSummaryAndBoundary: mockSetCompactSummaryAndBoundary,
     findSessionById: mockFindSessionById,
+    readCompactSummary: mockReadCompactSummary,
   }
 })
+vi.mock('../../application-platform/model-source-authority.js', () => ({ assertSourceModelInputAuthority: mockSourceAuthority }))
 
 // `recordOverheadUsage` touches the (here-unmocked) UsageStore only when
 // a usageStore is passed, so tests omit it and the helper no-ops.
@@ -27,8 +31,8 @@ import {
   findRecentSplit, houseKeepEpisodic, runProactiveCompaction,
   recentTailBudgetTokens, RECENT_TAIL_BUDGET_RATIO,
 } from '../proactive-compaction.js'
-import { createCompactionCircuitBreaker, compactionThreshold, estimateTokens } from '@use-brian/core'
-import type { Message, EpisodicMemoryRecord, EpisodicStore, MemoryStore, LLMProvider, StreamChunk, AnalyticsLogger } from '@use-brian/core'
+import { createCompactionCircuitBreaker, compactionThreshold, estimateTokens, createExecutionContext, ContextScopeAccumulator, bindScopeSources, boundScopeSources } from '@use-brian/core'
+import type { Message, EpisodicMemoryRecord, EpisodicStore, MemoryStore, LLMProvider, StreamChunk, AnalyticsLogger, ScopeSource } from '@use-brian/core'
 import type { Session, SessionMessage } from '../../db/sessions.js'
 
 const userText = (text: string): Message => ({
@@ -327,6 +331,100 @@ function baseParams(overrides: Partial<Parameters<typeof runProactiveCompaction>
     persistSessionSummary: overrides.persistSessionSummary ?? false,
   } as Parameters<typeof runProactiveCompaction>[0]
 }
+
+describe('[COMP:api/proactive-compaction] canonical native assembly boundaries', () => {
+  beforeEach(() => {
+    mockReadCompactSummary.mockReset().mockResolvedValue(null)
+    mockSourceAuthority.mockReset().mockResolvedValue(undefined)
+    mockSetCompactSummaryAndBoundary.mockReset()
+  })
+  const source: ScopeSource = { workspaceId: 'fictional-workspace', resourceKind: 'session_message', resourceId: 'fictional-message',
+    version: '1', userId: null, assistantId: null, sensitivity: 'internal', compartments: [], projectIds: [] }
+  function native(authenticationKind: 'native_session' | 'credential_attribution' = 'native_session') {
+    const authority = { assertCurrent: vi.fn(async () => {}), execute: async <T>(run: () => Promise<T>) => run() }
+    const execution = createExecutionContext({
+      identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'u1', authenticationKind } },
+      ownership: { kind: 'workspace', workspaceId: source.workspaceId },
+      access: { workspaceId: source.workspaceId, userId: 'u1', assistantId: 'a1', assistantKind: 'primary',
+        clearance: 'internal', compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: [] },
+      writeDefaults: { compartments: [], projectIds: [] }, authority,
+      lifecycle: { sessionId: 's1', channelType: 'web', channelId: 'c1', abortSignal: new AbortController().signal },
+    })
+    const modelContext = { execution, accumulator: new ContextScopeAccumulator() }
+    const stream = vi.fn<LLMProvider['stream']>(async function* () { yield { type: 'text_delta', text: 'Fictional compact summary' } })
+    const params = { ...baseParams({ sessionMessages: [bindScopeSources(makeSessionMessage({ sequenceNum: 1, role: 'user',
+      content: [{ type: 'text', text: 'Fictional current request' }] }), [source])], provider: { ...mockProviderWithSummary(''), stream } }),
+      modelContext, authority, persistLongTermContext: false }
+    return { params, modelContext, authority, stream }
+  }
+  it('keeps the lease and source tags without repeating the full proof for pure assembly', async () => {
+    const c = native(), result = await runProactiveCompaction(c.params)
+    expect(result.compacted).toBe(false)
+    expect(c.authority.assertCurrent).toHaveBeenCalledOnce()
+    expect(mockSourceAuthority).not.toHaveBeenCalled()
+    expect(c.stream).not.toHaveBeenCalled()
+    expect(boundScopeSources(result.messages[0])).toEqual([source])
+    expect(c.modelContext.accumulator.evidence.sources).toEqual([source])
+    expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
+  })
+  it('retains the independently admitted summary read and its evidence on the pure path', async () => {
+    const c = native(), summarySource = { ...source, resourceKind: 'session_context_revision', resourceId: 'fictional-summary' }
+    const summary = bindScopeSources({ id: 'fictional-summary', summary: 'Fictional prior context', boundarySequence: 1 }, [summarySource])
+    mockReadCompactSummary.mockImplementationOnce(async () => {
+      c.modelContext.accumulator.note({ sources: [summarySource] })
+      return summary as never
+    })
+    const result = await runProactiveCompaction({ ...c.params, persistSessionSummary: true })
+    expect(mockReadCompactSummary).toHaveBeenCalledWith('s1', c.modelContext)
+    expect(boundScopeSources(result.messages[0])).toEqual([summarySource])
+    expect(c.modelContext.accumulator.evidence.sources).toEqual(expect.arrayContaining([source, summarySource]))
+    expect(mockSourceAuthority).not.toHaveBeenCalled()
+  })
+  it('refuses bound rows without a model binding before any awaited lease or provider', async () => {
+    const c = native()
+    await expect(runProactiveCompaction({ ...c.params, modelContext: undefined })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(c.authority.assertCurrent).not.toHaveBeenCalled()
+    expect(c.stream).not.toHaveBeenCalled()
+  })
+  it.each(['binding', 'execution', 'accumulator', 'authority', 'method'] as const)('refuses %s replacement during the initial lease', async change => {
+    const c = native()
+    c.authority.assertCurrent.mockImplementationOnce(async () => {
+      if (change === 'binding') c.params.modelContext = { ...c.modelContext }
+      if (change === 'execution') c.modelContext.execution = native().modelContext.execution
+      if (change === 'accumulator') c.modelContext.accumulator = new ContextScopeAccumulator()
+      if (change === 'authority') c.params.authority = native().authority
+      if (change === 'method') c.authority.assertCurrent = vi.fn(async () => {})
+    })
+    await expect(runProactiveCompaction(c.params)).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(c.stream).not.toHaveBeenCalled()
+    expect(mockSourceAuthority).not.toHaveBeenCalled()
+  })
+  it.each(['custom', 'unknown'] as const)('keeps the conservative full proof for %s authority', async kind => {
+    const c = native(kind === 'unknown' ? 'credential_attribution' : 'native_session')
+    if (kind === 'custom') c.params.authority = { ...c.authority }
+    expect((await runProactiveCompaction(c.params)).compacted).toBe(false)
+    expect(mockSourceAuthority).toHaveBeenCalledOnce()
+  })
+  it('refuses binding replacement during the independently admitted summary read', async () => {
+    const c = native()
+    c.params.persistSessionSummary = true
+    mockReadCompactSummary.mockImplementationOnce(async () => {
+      c.params.modelContext = { ...c.modelContext }
+      return null
+    })
+    await expect(runProactiveCompaction(c.params)).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(c.stream).not.toHaveBeenCalled()
+    expect(mockSourceAuthority).not.toHaveBeenCalled()
+  })
+  it('retains full admission before actual compaction and refuses before dispatch', async () => {
+    const c = native()
+    mockSourceAuthority.mockRejectedValueOnce(Object.assign(new Error('Fictional source withdrawn'), { reason: 'authority_changed' }))
+    await expect(runProactiveCompaction({ ...c.params, unconditional: true })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(mockSourceAuthority).toHaveBeenCalledOnce()
+    expect(c.stream).not.toHaveBeenCalled()
+    expect(mockSetCompactSummaryAndBoundary).not.toHaveBeenCalled()
+  })
+})
 
 describe('[COMP:api/proactive-compaction] runProactiveCompaction — persistence invariants', () => {
   beforeEach(() => {

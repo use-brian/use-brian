@@ -28,7 +28,11 @@ describe.sequential('[COMP:api/native-turn-frame] shared publication dependencie
   }
   it.each([1, 3, 7])('commits %s outputs with one shared manifest and no pending completion debt', async count => {
     const { f, command, sources } = await setup(count)
-    const rows = await publishNativeSessionMessageBatch(command)
+    const measurements: string[] = []
+    const rows = await publishNativeSessionMessageBatch({ ...command, measure: async (counter, run) => {
+      try { return await run() } finally { measurements.push(counter) }
+    } })
+    expect(measurements).toEqual(['publication_batch_lease_before', 'publication_batch_sql', 'publication_batch_lease_after'])
     expect(rows).toHaveLength(count)
     const frames = (await f.pool.query('SELECT id FROM native_turn_frames WHERE workspace_id=$1', [f.workspaceId])).rows
     expect(frames).toHaveLength(1)
@@ -82,7 +86,11 @@ describe.sequential('[COMP:api/native-turn-frame] shared publication dependencie
       BEGIN ${mutation} RETURN NEW;END $fixture$`)
     try {
       await f.pool.query(`CREATE TRIGGER ${name} AFTER INSERT ON session_messages FOR EACH ROW WHEN (NEW.session_id='${f.session.id}'::uuid) EXECUTE FUNCTION ${name}()`)
-      await expect(publishNativeSessionMessageBatch(command)).rejects.toThrow()
+      const measurements: string[] = []
+      await expect(publishNativeSessionMessageBatch({ ...command, measure: async (counter, run) => {
+        try { return await run() } finally { measurements.push(counter) }
+      } })).rejects.toThrow()
+      expect(measurements).toContain('publication_batch_sql')
       expect((await f.pool.query('SELECT id FROM native_turn_frames WHERE workspace_id=$1', [f.workspaceId])).rows).toEqual([])
       expect((await f.pool.query('SELECT count(*)::int count FROM session_messages WHERE session_id=$1', [f.session.id])).rows[0].count).toBe(3)
       expect((await f.pool.query('SELECT content,scope_held FROM session_messages WHERE id=$1', [firstMessageId])).rows[0]).toEqual(before)
