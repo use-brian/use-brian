@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bindScopeSource, boundScopeSource, bindScopeSources, boundScopeSources } from '../source-evidence.js'
+import { bindScopeSource, boundScopeSource, bindScopeSources, boundScopeSources, inheritScopeSources } from '../source-evidence.js'
 import { ContextScopeAccumulator, scopeEvidenceFromRows } from '../context-scope.js'
 import { deriveResourceScope, type ScopeSource } from '../derived-scope.js'
 
@@ -16,6 +16,31 @@ describe('[COMP:security/source-evidence] canonical reader bindings', () => {
     expect(JSON.stringify(result)).not.toContain('aggregate-contributor')
     bindScopeSource(result,first); bindScopeSources(result,[])
     expect(boundScopeSources(result)).toEqual([first,hidden])
+  })
+
+  it('inherits only trusted snapshots and isolates later rebinding and exposed mutations', () => {
+    const original = bindScopeSources({}, [source()])
+    const inherited = inheritScopeSources({}, original)
+    bindScopeSource(original, { ...source(), resourceId: 'later-original' })
+    bindScopeSource(inherited, { ...source(), resourceId: 'later-target' })
+    const exposed = boundScopeSources(inherited)
+    exposed[0].compartments.length = 0
+    expect(boundScopeSources(inherited)).toEqual([source(), { ...source(), resourceId: 'later-target' }])
+    expect(boundScopeSources(original)).toEqual([source(), { ...source(), resourceId: 'later-original' }])
+    expect(boundScopeSources(inheritScopeSources({}, { sources: [source()] }))).toEqual([])
+    expect(boundScopeSources(inheritScopeSources({}, JSON.parse(JSON.stringify(original))))).toEqual([])
+  })
+
+  it('unions inherited evidence without losing an existing target obligation', () => {
+    const original = bindScopeSources({}, [source(), { ...source(), resourceId: 'second-observation' }])
+    const target = bindScopeSource({}, { ...source(), resourceId: 'existing-obligation' })
+    inheritScopeSources(target, original)
+    inheritScopeSources(target, original)
+    inheritScopeSources(target, target)
+    inheritScopeSources(target, {})
+    expect(boundScopeSources(target)).toEqual([
+      { ...source(), resourceId: 'existing-obligation' }, source(), { ...source(), resourceId: 'second-observation' },
+    ])
   })
 
   it('collects bindings on arrays and terminates cyclic array/object graphs', () => {

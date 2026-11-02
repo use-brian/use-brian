@@ -77,6 +77,14 @@ describe('[COMP:shared/application-platform] application wire boundaries', () =>
       }
     }
   })
+  it('validates repeated nested batches independently without reusing parsed values', async () => {
+    const input = Array.from({ length: 1000 }, (_, id) => ({ id, nested: [null, true, 'value', 1, { amount: id / 100 }] }))
+    const first = applicationJsonSchema.parse(input)
+    expect(await applicationJsonSchema.parseAsync(input)).toEqual(first)
+    input[500].nested.push(Infinity)
+    expect(applicationJsonSchema.safeParse(input).success).toBe(false)
+    expect(applicationJsonSchema.safeParse(first).success).toBe(true)
+  })
   it('keeps uncertain effect state separate from safe retry', () => {
     const error = new ApplicationPlatformError('outcome_uncertain', 'Reconcile the saved receipt.', 'uncertain')
     expect(error.retrySafe).toBe(false)

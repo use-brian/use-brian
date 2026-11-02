@@ -11,7 +11,7 @@
  */
 
 import {
-  bindScopeSources,boundScopeSources,stitchMailboxThreads, validateCrmCustomFieldValue as validateCustomFieldValue,
+  bindScopeSources,boundScopeSources,inheritScopeSources,stitchMailboxThreads, validateCrmCustomFieldValue as validateCustomFieldValue,
   CRM_CUSTOM_FIELD_TYPES, CRM_CONFIG_ENTITY_KINDS, CRM_PIPELINE_STAGE_CATEGORIES, CrmOperationsError,
   type AccessContext,
   type EntityRecord,
@@ -1361,11 +1361,11 @@ export async function getCrmSummary(
     stageMap.set(row.stageId, summary)
   }
   const row = aggregate.rows[0]
-  return bindScopeSources({
+  return inheritScopeSources({
     totals: { deals: Number(row?.deals ?? 0), contacts: Number(row?.contacts ?? 0), companies: Number(row?.companies ?? 0) },
     attention: { overdue: Number(row?.overdue ?? 0), stale: Number(row?.stale ?? 0), noAmount: Number(row?.noAmount ?? 0), orphaned: Number(row?.orphaned ?? 0) },
     stages: [...stageMap.values()],
-  },boundScopeSources(aggregate))
+  },aggregate)
   })
 }
 

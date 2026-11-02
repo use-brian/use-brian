@@ -1,7 +1,7 @@
 /** Canonical legacy CRM point admission, without DTO-specific ACLs. [COMP:api/application-records] */
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { AccessContext,ScopeSource } from '@use-brian/core'
-import { bindScopeSources,boundScopeSources,RANK,decodeCrmAmount } from '@use-brian/core'
+import { bindScopeSources,boundScopeSources,inheritScopeSources,RANK,decodeCrmAmount } from '@use-brian/core'
 import { ApplicationPlatformError,applicationQuerySchema,type ApplicationQuery } from '@use-brian/shared'
 import { currentCanonicalPublicShare } from '../application-platform/public-share-context.js'
 import { canonicalNativeResourceDefinitions } from '../application-platform/native-resources.js'
@@ -222,8 +222,9 @@ export async function queryLegacyCanonicalCrmSql<T extends QueryResultRow>(acces
         bound?.assertLive();await assertPointScopes(client,access,sources)
         if((await readCurrentScopeSources(client,access.workspaceId,sources)).some(source=>source.state!=='current'))throw new ApplicationPlatformError('access_unavailable','The source changed.')
         await bound?.execution?.security.authority.assertCurrent();bound?.assertLive()
-        for(const row of result.rows)bindScopeSources(row,sources)
-        bindScopeSources(result.rows,sources);bindScopeSources(result,sources)
+        bindScopeSources(result,sources)
+        for(const row of result.rows)inheritScopeSources(row,result)
+        inheritScopeSources(result.rows,result)
         if(own)await client.query('COMMIT')
         return result
       })
