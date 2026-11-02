@@ -12,8 +12,28 @@ import { DecisionProviderError } from '../types.js'
 import { decisionRequest } from './fixtures.js'
 import { createTypeSafeDecisionProvider } from '../adapters/typesafe.js'
 import { decisionCompletionInput } from '../invocation.js'
+import { captureClassifierDecisionRuntime, registerClassifierDecisionRuntime, registerClassifierLlmCompletion, qualifyClassifierLlmCompletion } from '../authority-ownership.js'
+import type { DecisionExecutionPort } from '../hydra.js'
+import { llmProviderWithJson } from './fixtures.js'
 
 describe('[COMP:decisions/hydra] completion admission composition', () => {
+  it('refuses completion ownership when a fixed operation method changes before capture', async () => {
+    const full = vi.fn(async () => {}), qualify = vi.fn(() => true)
+    const operation = registerClassifierLlmCompletion({ assertInputAuthority: full,
+      decide: () => ({ kind: 'unavailable' as const, reason: 'invalid_response' as const }),
+      validateResult: (value: unknown) => value, safeFailure: () => null,
+      completeWithLlm: async () => ({ result: null, providerId: 'fixture', model: { catalogId: 'fixture', wireId: 'fixture' } }),
+    }, qualify)
+    operation.completeWithLlm = async () => ({ result: null, providerId: 'changed', model: { catalogId: 'fixture', wireId: 'fixture' } })
+    const run = vi.fn(async (options: Parameters<DecisionExecutionPort['run']>[0]) => {
+      expect(qualifyClassifierLlmCompletion(options.operation, { provider: llmProviderWithJson({}), modelId: 'fixture' }, options.request)).toBe(false)
+      return { runId: 'fixture', result: null, path: 'safe_failure', attempts: 0 }
+    })
+    const runtime = registerClassifierDecisionRuntime({ run, observe: vi.fn() } as unknown as DecisionExecutionPort)
+    await captureClassifierDecisionRuntime(runtime, full, async () => {})!.run({ request: decisionRequest(), operation })
+    expect(qualify).not.toHaveBeenCalled()
+  })
+
   it.each([undefined, async () => {}])('retains original admission with an injected callback %s', async current => {
     const refusal = Object.assign(new Error('Synthetic source revoked'), { reason: 'authority_changed', retrySafe: false })
     const original = vi.fn(async () => { throw refusal })
@@ -280,6 +300,8 @@ describe('[COMP:decisions/hydra] bounded cascade', () => {
   })
 
   it('enforces the total budget even when a provider ignores abort', async () => {
+    vi.useFakeTimers()
+    try {
     const short = { ...profile(), totalTimeoutMs: 8, primaryTimeoutMs: 2 }
     const complete = vi.fn(async () => new Promise<Awaited<ReturnType<DecisionCascadeOperation<Result>['completeWithLlm']>>>((resolve) => {
       setTimeout(() => resolve({
@@ -288,7 +310,7 @@ describe('[COMP:decisions/hydra] bounded cascade', () => {
         model: { catalogId: 'fixture-llm', wireId: 'fixture-llm-v1' },
       }), 25)
     }))
-    await expect(executeDecisionCascade({
+    const rejected = expect(executeDecisionCascade({
       request: decisionRequest(),
       operation: operation({ complete }),
       route: {
@@ -298,7 +320,10 @@ describe('[COMP:decisions/hydra] bounded cascade', () => {
         allowSyntheticProfile: true,
       },
     })).rejects.toMatchObject({ kind: 'timeout' })
+    await vi.advanceTimersByTimeAsync(30)
+    await rejected
     expect(complete.mock.calls.length).toBeLessThanOrEqual(1)
+    } finally { vi.useRealTimers() }
   })
 
   it('records every attempt exactly once with stage and attribution', async () => {

@@ -1,11 +1,11 @@
 import {buildToolSelectionQuestions} from '../engine/tool-selection.js'
-import {createLlmDecisionProvider} from '../decisions/adapters/llm.js'
+import {createLlmDecisionProvider,buildLlmDecisionMessages,decisionLlmOutputBudget} from '../decisions/adapters/llm.js'
 import {bindScopeSources,boundScopeSources} from '../security/source-evidence.js'
 import {isTrivialChatMessage} from '../classification/trivial-chat.js'
 import {DerivedScopeError} from '../security/derived-scope.js'
-import {assertInputAuthority,assertProviderInputPreparation,captureInputAdmissionProvider,isInputAuthorityError} from '../providers/input-authority.js'
+import {assertInputAuthority,assertProviderInputPreparation,captureInputAdmissionProvider,isInputAuthorityError,ownsInputAdmission} from '../providers/input-authority.js'
 import { decisionCompletionInput } from '../decisions/invocation.js'
-import { captureClassifierDecisionRuntime, assertClassifierBookkeeping } from '../decisions/authority-ownership.js'
+import { captureClassifierDecisionRuntime, assertClassifierBookkeeping, registerClassifierLlmCompletion } from '../decisions/authority-ownership.js'
 import type {SessionContextAuthority} from '../memory/session-state-types.js'
 /**
  * Pre-flight classifier for adaptive research-mode entry.
@@ -24,6 +24,7 @@ import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
 import type {
   DecisionExecutionPort,
+  DecisionExecutionOperation,
   DecisionResponse,
 } from '../decisions/index.js'
 
@@ -240,7 +241,7 @@ async function classifyResearchWithLlm(params: {
     model: params.model,
     systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
     messages,
-    maxTokens: 128,
+    ...decisionLlmOutputBudget(provider, { wireId: params.model }, 128),
     temperature: 0,
   })
 
@@ -345,7 +346,7 @@ async function classifyResearchIntentCurrent(
           ],
         }, ...(selection?.questions ?? [])],
       },
-      operation: {
+      operation: registerClassifierLlmCompletion<DecisionExecutionOperation<ResearchClassifyResult>>({
         assertInputAuthority: options.assertInputAuthority,
         decide(response, { profile }) {
           const answer = response.answers.find(answer => answer.questionId === 'intent')
@@ -403,7 +404,9 @@ async function classifyResearchIntentCurrent(
             } : {}),
           }
         },
-      },
+      }, (route, request) => combined && ownsInputAdmission(route.provider, {
+        model: route.modelId, messages: buildLlmDecisionMessages(request), allowProviderFallback: false,
+      })),
     })
     return result.result
   }

@@ -8,7 +8,7 @@
  */
 
 import {
-  assertInputAuthority,
+  assertInputAuthority, captureInputAdmissionProvider, qualifyClassifierLlmCompletion, DECISION_INVOCATION_MAX_MS,
   registerClassifierDecisionRuntime, registerDecisionMetadataSink, isDecisionMetadataSink,
   transferClassifierDecisionOperation, disableClassifierDecisionOperation, assertDecisionBookkeeping,
   withDecisionInvocation,
@@ -288,7 +288,7 @@ export function createDecisionRuntime(
     async observe<T>(runOptions: DecisionObservationRunOptions<T>): Promise<DecisionObservationResult<T>> {
       const admissionStartedAt = Date.now()
       const inputCheck = runOptions.operation.assertInputAuthority
-      const initialDeadline = Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + 120_000)
+      const initialDeadline = Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + DECISION_INVOCATION_MAX_MS)
       return withDecisionInvocation({ signal: runOptions.request.signal, deadlineAt: initialDeadline, call: async invocation => {
       runOptions = { ...runOptions, request: { ...runOptions.request, signal: invocation.signal, deadlineAt: initialDeadline },
         operation: { ...runOptions.operation, assertInputAuthority: async () => {
@@ -347,7 +347,7 @@ export function createDecisionRuntime(
       runOptions = { ...runOptions, operation: capturedOperation }
       const admissionStartedAt = Date.now()
       const inputCheck = runOptions.operation.assertInputAuthority
-      const initialDeadline = Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + 120_000)
+      const initialDeadline = Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + DECISION_INVOCATION_MAX_MS)
       return withDecisionInvocation({ signal: runOptions.request.signal, deadlineAt: initialDeadline, call: async invocation => {
       runOptions = { ...runOptions, request: { ...runOptions.request, signal: invocation.signal, deadlineAt: initialDeadline },
         operation: transferClassifierDecisionOperation(runOptions.operation, { ...runOptions.operation, assertInputAuthority: async () => {
@@ -366,10 +366,13 @@ export function createDecisionRuntime(
       invocation.assertActive()
       if (config.profile) invocation.tightenDeadline(admissionStartedAt + config.profile.totalTimeoutMs)
       const primary = configuredPrimary(config, adapters)
-      const llm = config.llm === undefined
+      const selectedLlm = config.llm === undefined
         ? (runOptions.llm ?? resolveDefaultLlm())
         : config.llm
-      if (!llm) policyError('decision route has no permitted LLM completion lane')
+      if (!selectedLlm) policyError('decision route has no permitted LLM completion lane')
+      // A resolved route cannot replace its provider methods during admission.
+      const capturedLlm = { ...selectedLlm, provider: captureInputAdmissionProvider(selectedLlm.provider) }
+      const llm = qualifyClassifierLlmCompletion(runOptions.operation, capturedLlm, runOptions.request) ? capturedLlm : selectedLlm
 
       const request: DecisionRequest = {
         ...runOptions.request,
@@ -386,6 +389,13 @@ export function createDecisionRuntime(
         }),
       })
       const recordAttempt = async (attempt: DecisionAttemptRecord) => {
+        if (['research.intent', 'memory.topic', 'chat.tool-selection'].includes(attempt.operationId)) {
+          console.info('[decision-runtime] classifier attempt', {
+            operation: attempt.operationId, stage: attempt.stage, outcome: attempt.outcome,
+            ...(attempt.failureKind ? { failureKind: attempt.failureKind } : {}),
+            latencyMs: attempt.latencyMs, attempt: attempt.attempt,
+          })
+        }
         const attributed: DecisionRuntimeAttempt = {
           ...priceUsage(attempt),
           ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),

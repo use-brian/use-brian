@@ -4,6 +4,7 @@ import {
   classifyResearchIntent,
   classifyTopic,
   createTypeSafeDecisionProvider,
+  createGeminiProvider,
   bindScopeSources,
   ContextScopeAccumulator,
   createExecutionContext,
@@ -58,6 +59,13 @@ function authorityRefusal() {
   return Object.assign(new Error('Fictional source withdrawn'), { reason: 'authority_changed', retrySafe: false })
 }
 
+function typedCompletionResponse() {
+  const answers = { intent: { value: 'ordinary' }, group0_rank1: { value: 't0' }, group0_rank2: { value: 'none' }, group0_rank3: { value: 'none' } }
+  const packet = { candidates: [{ content: { parts: [{ text: JSON.stringify({ answers }) }] }, finishReason: 'STOP' }],
+    usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } }
+  return new Response('data: ' + JSON.stringify(packet) + '\n\n', { headers: { 'content-type': 'text/event-stream' } })
+}
+
 function classifierAuthority(assertCurrent: () => Promise<void>): SessionContextAuthority {
   return {
     accumulator: new ContextScopeAccumulator(),
@@ -80,6 +88,94 @@ const classifierSource = { workspaceId: 'fictional-workspace', userId: null, ass
 
 describe('[COMP:decisions/runtime] certified classifier admission', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it.each(['llm_only', 'fallback'] as const)('admits a fixed typed %s completion only at physical dispatch and final return', async mode => {
+    const full = vi.fn(async () => {})
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const fetch = vi.fn(async (url: unknown) => {
+      if (String(url).includes('typesafe.ai')) { expect(full).toHaveBeenCalledTimes(1); return new Response('{}', { status: 503 }) }
+      expect(full).toHaveBeenCalledTimes(mode === 'fallback' ? 2 : 1)
+      return typedCompletionResponse()
+    })
+    vi.stubGlobal('fetch', fetch)
+    const runtime = classifierRuntime({ llmProvider: provider, defaultLlmModel: 'gemini-2.5-flash',
+      ...(mode === 'llm_only' ? { resolveRoute: () => ({ mode: 'llm_only' as const }) } : {}) })
+    const result = await classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+      workspaceId: 'fictional-workspace', toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
+      decisionRuntime: runtime, assertInputAuthority: full })
+    expect(result).toMatchObject({ research: false, toolNames: ['calendarListEvents'] })
+    expect(fetch).toHaveBeenCalledTimes(mode === 'fallback' ? 2 : 1)
+    expect(full).toHaveBeenCalledTimes(mode === 'fallback' ? 3 : 2)
+  })
+
+  it.each(['primary', 'dispatch', 'final'] as const)('keeps a source refusal sticky at the typed fallback %s boundary', async boundary => {
+    const refusal = authorityRefusal()
+    const full = vi.fn(async () => { if (full.mock.calls.length === (boundary === 'primary' ? 1 : boundary === 'dispatch' ? 2 : 3)) throw refusal })
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const fetch = vi.fn(async (url: unknown) => String(url).includes('typesafe.ai') ? new Response('{}', { status: 503 }) : typedCompletionResponse())
+    vi.stubGlobal('fetch', fetch)
+    await expect(classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+      workspaceId: 'fictional-workspace', toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
+      decisionRuntime: classifierRuntime({ llmProvider: provider, defaultLlmModel: 'gemini-2.5-flash' }), assertInputAuthority: full })).rejects.toBe(refusal)
+    expect(fetch).toHaveBeenCalledTimes(boundary === 'primary' ? 0 : boundary === 'dispatch' ? 1 : 2)
+  })
+
+  it('pins the qualified provider methods before an awaited physical proof', async () => {
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const replacement = vi.fn(async function* () { throw new Error('Replacement must not execute') })
+    const full = vi.fn(async () => { await Promise.resolve(); provider.stream = replacement })
+    vi.stubGlobal('fetch', vi.fn(async () => typedCompletionResponse()))
+    const result = await classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+      toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
+      decisionRuntime: classifierRuntime({ resolveRoute: () => ({ mode: 'llm_only' }), llmProvider: provider }), assertInputAuthority: full })
+    expect(result.toolNames).toEqual(['calendarListEvents']);expect(full).toHaveBeenCalledTimes(2)
+    expect(replacement).not.toHaveBeenCalled()
+  })
+
+  it('does not certify a provider replaced while route resolution is pending', async () => {
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const full = vi.fn(async () => {}), original = provider.stream.bind(provider)
+    const replacement = vi.fn(async function* (request: Parameters<LLMProvider['stream']>[0]) {
+      expect(full.mock.calls.length).toBeGreaterThan(1)
+      yield* original(request)
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => typedCompletionResponse()))
+    await classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+      toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
+      decisionRuntime: classifierRuntime({ resolveRoute: async () => { await Promise.resolve();provider.stream = replacement;return { mode: 'llm_only' } }, llmProvider: provider }), assertInputAuthority: full })
+    expect(replacement).toHaveBeenCalledOnce();expect(full.mock.calls.length).toBeGreaterThan(2)
+  })
+
+  it('does not dispatch a certified completion after cancellation during its physical proof', async () => {
+    let release!: () => void, entered!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const controller = new AbortController()
+    const full = vi.fn(async () => { entered(); await pending })
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const fetch = vi.fn(async () => typedCompletionResponse())
+    vi.stubGlobal('fetch', fetch)
+    const work = classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+      toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }], signal: controller.signal,
+      decisionRuntime: classifierRuntime({ resolveRoute: () => ({ mode: 'llm_only' }), llmProvider: provider }), assertInputAuthority: full })
+    const rejected = expect(work).rejects.toBeDefined()
+    await started
+    controller.abort(new Error('Fictional cancellation'))
+    release()
+    await rejected
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('retains conservative completion checks for an arbitrary accounting hook', async () => {
+    const full = vi.fn(async () => {})
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => String(url).includes('typesafe.ai') ? new Response('{}', { status: 503 }) : typedCompletionResponse()))
+    await classifyResearchIntent({ provider, model: 'gemini-2.5-flash', message: 'Check my calendar today',
+      workspaceId: 'fictional-workspace', toolCandidates: [{ name: 'calendarListEvents', description: 'Read calendar events' }],
+      decisionRuntime: classifierRuntime({ llmProvider: provider, defaultLlmModel: 'gemini-2.5-flash', onAttempt: async () => {} }), assertInputAuthority: full })
+    expect(full.mock.calls.length).toBeGreaterThan(3)
+  })
 
   it.each(['ordinary', 'research_focused'])('admits the merged %s decision at physical dispatch and final return only', async intent => {
     const full = vi.fn(async () => {})

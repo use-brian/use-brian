@@ -1,17 +1,53 @@
 /** Private classifier boundary ownership, never permission receipts. [COMP:decisions/hydra] */
 import { assertInputAuthority } from '../providers/input-authority.js'
-import type { DecisionExecutionPort } from './hydra.js'
+import type { DecisionExecutionPort, DecisionCompletionRoute } from './hydra.js'
 import type { DecisionRequest } from './types.js'
 
 type Check = () => Promise<void>
 type Operation = { assertInputAuthority?: Check; decide: unknown; validateResult: unknown; safeFailure: unknown; completeWithLlm: unknown }
-type Boundary = { active: Check; enabled: boolean }
+type Boundary = { active: Check; enabled: boolean; completion?: object }
 const keys = ['assertInputAuthority', 'decide', 'validateResult', 'safeFailure', 'completeWithLlm'] as const
 const runtimes = new WeakMap<DecisionExecutionPort, DecisionExecutionPort['run']>()
 const sinks = new WeakSet<object>()
 const operations = new WeakMap<object, { boundary: Boundary; calls: Operation }>()
 const checks = new WeakMap<Check, Boundary>()
 const requests = new WeakMap<DecisionRequest, { boundary: Boundary; check: Check | undefined }>()
+type Completion = { identity: object; calls: Operation; qualify: (route: DecisionCompletionRoute, request: Pick<DecisionRequest, 'state' | 'questions'>) => boolean; qualified?: () => void }
+const completions = new WeakMap<object, Completion>()
+
+/** Only fixed domain completion factories enroll their captured pure callbacks. */
+export function registerClassifierLlmCompletion<T extends Operation>(operation: T,
+  qualify: Completion['qualify'], qualified?: () => void): T {
+  completions.set(operation, { identity: {}, calls: { ...operation }, qualify, qualified })
+  return operation
+}
+function completion(operation: Operation): Completion | undefined {
+  const entry = completions.get(operation)
+  return entry && keys.every(key => entry.calls[key] === operation[key]) ? entry : undefined
+}
+/** The runtime calls this only after pinning the actual resolved LLM route. */
+export function qualifyClassifierLlmCompletion(operation: Operation, route: DecisionCompletionRoute, request: Pick<DecisionRequest, 'state' | 'questions'>): boolean {
+  const boundary = owned(operation), entry = completion(operation)
+  if (boundary) boundary.completion = undefined
+  if (!boundary?.enabled || !entry || !entry.qualify(route, request)) return false
+  boundary.completion = entry.identity
+  entry.qualified?.()
+  return true
+}
+export function ownsClassifierLlmCompletion(operation: Operation): boolean {
+  const boundary = owned(operation), entry = completion(operation)
+  return !!boundary?.enabled && !!entry && boundary.completion === entry.identity
+}
+/** Audited wrappers preserve callback ancestry, not a successful allow result. */
+export function transferClassifierDecisionCheck(source: Check | undefined, target: Check): Check {
+  const boundary = source && checks.get(source)
+  if (boundary) checks.set(target, boundary)
+  return target
+}
+export function sharesClassifierCompletionAdmission(a: Check | undefined, b: Check | undefined): boolean {
+  const boundary = a && checks.get(a)
+  return !!boundary?.enabled && !!boundary.completion && !!b && checks.get(b) === boundary
+}
 
 /** The API factory registers only runtimes with captured, audited metadata hooks. */
 export function registerClassifierDecisionRuntime<T extends DecisionExecutionPort>(runtime: T): T {
@@ -45,6 +81,8 @@ export function captureClassifierDecisionRuntime(runtime: DecisionExecutionPort 
     run(options) {
       const operation = { ...options.operation }
       operations.set(operation, { boundary, calls: { ...operation } })
+      const entry = completion(options.operation)
+      if (entry) completions.set(operation, { ...entry, calls: { ...operation } })
       return capturedRun({ ...options, operation })
     },
     observe: observe.bind(runtime),
@@ -54,7 +92,12 @@ export function captureClassifierDecisionRuntime(runtime: DecisionExecutionPort 
 /** Known wrappers explicitly carry ownership onto captured replacement closures. */
 export function transferClassifierDecisionOperation<T extends Operation>(source: Operation, target: T): T {
   const boundary = owned(source)
-  if (boundary) operations.set(target, { boundary, calls: { ...target } })
+  if (boundary) {
+    operations.set(target, { boundary, calls: { ...target } })
+    if (target.assertInputAuthority) checks.set(target.assertInputAuthority, boundary)
+  }
+  const entry = completion(source)
+  if (entry) completions.set(target, { ...entry, calls: { ...target } })
   return target
 }
 export function ownsClassifierDecisionOperation(operation: Operation): boolean {

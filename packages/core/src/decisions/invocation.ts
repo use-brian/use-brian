@@ -1,6 +1,10 @@
 /** Terminal decision deadlines, including admission. [COMP:decisions/hydra] */
 import { DecisionProviderError } from './types.js'
 import { assertInputAuthority } from '../providers/input-authority.js'
+import { sharesClassifierCompletionAdmission, transferClassifierDecisionCheck } from './authority-ownership.js'
+
+/** Finite host ceiling; operator profiles and caller deadlines may only narrow it. */
+export const DECISION_INVOCATION_MAX_MS = 120_000
 
 /** An injected runtime may narrow admission, never replace the caller's check. */
 export function decisionCompletionInput(
@@ -10,13 +14,15 @@ export function decisionCompletionInput(
   const signal = original.signal ? AbortSignal.any([context.signal, original.signal]) : context.signal
   const current = context.request.assertInputAuthority
   const prior = original.assertInputAuthority
-  return { signal, assertInputAuthority: async () => {
+  const check = async () => {
     signal.throwIfAborted()
     await assertInputAuthority(current)
     signal.throwIfAborted()
-    if (prior !== current) await assertInputAuthority(prior)
+    if (prior !== current && !sharesClassifierCompletionAdmission(current, prior)) await assertInputAuthority(prior)
     signal.throwIfAborted()
-  } }
+  }
+  if (sharesClassifierCompletionAdmission(current, prior)) transferClassifierDecisionCheck(current, check)
+  return { signal, assertInputAuthority: check }
 }
 
 export async function withDecisionInvocation<T>(options: {

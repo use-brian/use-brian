@@ -6,7 +6,8 @@
 
 import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
 import { assertDecisionBookkeeping, bindClassifierDecisionRequest, disableClassifierDecisionOperation,
-  transferClassifierDecisionOperation, isDecisionMetadataSink } from './authority-ownership.js'
+  transferClassifierDecisionOperation, isDecisionMetadataSink, ownsClassifierLlmCompletion,
+  transferClassifierDecisionCheck } from './authority-ownership.js'
 import type {
   DecisionDisposition,
   DecisionFailureKind,
@@ -345,14 +346,14 @@ async function withDeadline<T>(params: {
 function currentInputCheck(check?: () => Promise<void>): () => Promise<void> {
   let refused: unknown
   let pending: Promise<void> | undefined
-  return async () => {
+  return transferClassifierDecisionCheck(check, async () => {
     if (refused) throw refused
     // A transport deadline may leave its current check pending. Recovery must
     // await that same check, never race a second healthy probe past its refusal.
     if (pending) return pending
     pending = assertInputAuthority(check).catch(error => { refused = error; throw error })
     try { await pending } finally { pending = undefined }
-  }
+  })
 }
 
 export function executeDecisionCascade<T>(options: ExecuteDecisionCascadeOptions<T>): Promise<DecisionCascadeResult<T>> {
@@ -396,7 +397,8 @@ async function executeDecisionCascadeCurrent<T>(
   const primary = route.primary ? captureDecisionTransport(route.primary) : undefined
   const transportBudgetOwned = !!primary && ownsDecisionTransportBudget(primary)
   const check = currentInputCheck(operation.assertInputAuthority)
-  if (!transportBudgetOwned || route.mode !== 'hybrid') disableClassifierDecisionOperation(operation)
+  if ((!transportBudgetOwned || route.mode !== 'hybrid')
+    && !(route.mode === 'llm_only' && ownsClassifierLlmCompletion(operation))) disableClassifierDecisionOperation(operation)
   const bookkeeping = async () => {
     request.signal?.throwIfAborted()
     await assertDecisionBookkeeping(operation, check)
@@ -414,7 +416,8 @@ async function executeDecisionCascadeCurrent<T>(
   }
 
   const safe = async (kind: DecisionFailureKind): Promise<DecisionCascadeResult<T>> => {
-    await check()
+    if (ownsClassifierLlmCompletion(operation)) await bookkeeping()
+    else await check()
     return {
       runId: request.runId,
       result: operation.validateResult(operation.safeFailure(kind)),
@@ -431,10 +434,9 @@ async function executeDecisionCascadeCurrent<T>(
     primaryResponse?: DecisionResponse,
     followUpReason?: DecisionFollowUpReason,
   ): Promise<DecisionCompletion<T>> => {
-    // LLM completion and arbitrary completion callbacks retain their original
-    // full admission schedule until independently certified.
-    disableClassifierDecisionOperation(operation)
-    await check()
+    // Only fixed, route-qualified completions delegate to actual LLM dispatch.
+    if (ownsClassifierLlmCompletion(operation)) await bookkeeping()
+    else { disableClassifierDecisionOperation(operation); await check() }
     attempts += 1
     const startedAt = now()
     try {
@@ -452,7 +454,8 @@ async function executeDecisionCascadeCurrent<T>(
           deadlineAt,
         }),
       })
-      await check()
+      if (ownsClassifierLlmCompletion(operation)) await bookkeeping()
+      else await check()
       const validated = { ...completion, result: operation.validateResult(completion.result) }
       await emit({
         runId: request.runId,
@@ -554,7 +557,7 @@ async function executeDecisionCascadeCurrent<T>(
     })
   } catch (error) {
     if (isInputAuthorityError(error)) throw error
-    disableClassifierDecisionOperation(operation)
+    if (!ownsClassifierLlmCompletion(operation)) disableClassifierDecisionOperation(operation)
     primaryFailure = normalizeDecisionFailure(error)
     await emit({
       runId: request.runId,

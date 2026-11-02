@@ -96,6 +96,14 @@ describe('[COMP:workers/research-classifier] detectOperateSiteIntent', () => {
 describe('[COMP:workers/research-classifier] classifyResearchIntent', () => {
   afterEach(() => vi.useRealTimers())
 
+  it.each(['fixture-model', 'gemini-3.5-flash-lite'])('preserves bounded legacy research output with reasoning room for %s', async model => {
+    const provider = makeProvider('{"research":false}')
+    await classifyResearchIntent({ provider, model, message: 'Compare battery recycling methods' })
+    expect(provider.stream).toHaveBeenCalledOnce()
+    expect(vi.mocked(provider.stream).mock.calls[0]![0]).toMatchObject({ maxTokens: model === 'fixture-model' ? 128 : 1024 })
+    expect(vi.mocked(provider.stream).mock.calls[0]![0].thinkingLevel).toBe(model === 'fixture-model' ? undefined : 'low')
+  })
+
   it('aborts an in-flight LLM fallback at the shorter decision deadline', async () => {
     vi.useFakeTimers()
     const aborted = vi.fn()
