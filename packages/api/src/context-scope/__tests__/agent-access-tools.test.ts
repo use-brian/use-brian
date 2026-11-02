@@ -65,7 +65,13 @@ describe('[COMP:api/agent-access-ceiling] host read context forwarding',()=>{
     let compositions=0
     const events:import('@use-brian/core').QueryEvent[]=[]
     const provider:import('@use-brian/core').LLMProvider={name:'fixture',models:['fixture'],stream(){throw new Error('Unexpected stateless dispatch')},createSession:()=>({send:async function*(){compositions++;yield{type:'text_delta',text:'Fictional calendar answer'};yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}}})}
-    const runtime=executionFixture({llm:provider,totalTimeoutMs:1000,primaryTimeoutMs:900,primary:fixtureDecisionProvider(async request=>({providerId:'fixture-decision',model:request.model,answers:[{kind:'choice',questionId:'routine',value:(request.state as unknown as {candidates:{id:string}[]}).candidates[0].id,evidence:{source:'unavailable'}}]}))})
+    const runtime=executionFixture({llm:provider,totalTimeoutMs:1000,primaryTimeoutMs:900,primary:fixtureDecisionProvider(async request=>{
+      const state=request.state as unknown as {targets:Array<{id:string}>;ranges:Array<{id:string}>}
+      const answers:import('@use-brian/core').DecisionAnswer[]=request.questions.map(question=>question.kind==='boolean'
+        ? {kind:'boolean',questionId:question.id,value:question.id===state.targets[0].id,evidence:{source:'unavailable'}}
+        : {kind:'choice',questionId:question.id,value:question.id==='routine'?'calendar':state.ranges[0].id,evidence:{source:'unavailable'}})
+      return{providerId:'fixture-decision',model:request.model,answers}
+    })})
     const replacement=vi.fn(async()=>({data:[]}))
     const running=(async()=>{for await(const event of queryLoop({provider,model:'fixture',systemPrompt:'Check only the chosen calendar.',messages:[{role:'user',content:'Check my calendar.'}],tools:bound,context:input,ledger:NOOP_TURN_LEDGER,maxTurns:1,
       routineCalendarRead:{runtime,llm:{provider,modelId:'fixture'},calendarTools:bound},confirmationResolver:{resolve:()=>false,waitForDecision:async()=>{

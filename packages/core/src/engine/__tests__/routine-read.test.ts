@@ -5,7 +5,7 @@ import {ContextScopeAccumulator} from '../../security/context-scope.js'
 import type {ToolContext,Tool} from '../../tools/types.js'
 import type {LLMProvider,Message} from '../../providers/types.js'
 import {executionFixture,fixtureDecisionProvider} from '../../decisions/__tests__/execution-fixture.js'
-import type {DecisionRequest} from '../../decisions/types.js'
+import type {DecisionRequest,DecisionAnswer} from '../../decisions/types.js'
 import {planRoutineCalendarRead,executeRoutineCalendarRead,consumeHostReadObservation} from '../routine-read.js'
 import {createLoopDetector} from '../loop-detector.js'
 import {NOOP_TURN_LEDGER} from '../turn-ledger.js'
@@ -30,9 +30,13 @@ function setup(options:{page?:unknown;choose?:(request:DecisionRequest)=>string;
  const stream=vi.fn(async function*(){yield{type:'text_delta' as const,text:'No events in the requested scope.'};yield{type:'message_end' as const,stopReason:'end_turn' as const,usage:{inputTokens:1,outputTokens:1}}})
  const provider:LLMProvider={name:'fixture',models:['fixture'],stream,createSession:vi.fn(()=>({send:stream}))}
  const evaluate=vi.fn(async(request:DecisionRequest)=>{
-  const state=request.state as unknown as {candidates:Array<{id:string;calls:Array<{input:Record<string,unknown>}>}>}
-  const choice=options.choose?.(request)??state.candidates.find(candidate=>candidate.calls.length===1&&candidate.calls[0].input.calendarId==='fictional-calendar'&&candidate.calls[0].input.timeMax===range.timeMax)?.id??'ordinary'
-  return{providerId:'fixture-decision',model:request.model,answers:[{kind:'choice' as const,questionId:'routine',value:choice,evidence:{source:'unavailable' as const}}]}
+  const state=request.state as unknown as {targets:Array<{id:string;calendarId:string}>;ranges:Array<{id:string;timeMax:string}>}
+  const choice=options.choose?.(request)??'calendar'
+  const selectedRange=state.ranges.find(value=>value.timeMax===range.timeMax)??state.ranges[0]
+  const answers:DecisionAnswer[]=request.questions.map(question=>question.kind==='boolean'
+   ? {kind:'boolean',questionId:question.id,value:choice==='all_concrete'?state.targets.some(target=>target.id===question.id&&target.calendarId!=='primary'):state.targets.some(target=>target.id===question.id&&target.calendarId==='fictional-calendar'),evidence:{source:'unavailable'}}
+   : {kind:'choice',questionId:question.id,value:question.id==='routine'?(choice==='all_concrete'?'calendar':choice):selectedRange.id,evidence:{source:'unavailable'}})
+  return{providerId:'fixture-decision',model:request.model,answers}
  })
  const runtime=executionFixture({primary:fixtureDecisionProvider(evaluate),llm:provider,totalTimeoutMs:1000,primaryTimeoutMs:900})
  const config={runtime,llm:{provider,modelId:'fixture'},calendarTools:tools}
@@ -48,6 +52,62 @@ async function runHost(f:ReturnType<typeof setup>,onEvent?:(event:QueryEvent)=>v
  while(true){const result=await iterator.next();if(result.done)return{events,result:result.value};events.push(result.value);onEvent?.(result.value)}
 }
 describe('[COMP:engine/routine-read] full-context host calendar reads',()=>{
+ it('represents all historical calendar targets without enumerating subsets',async()=>{
+  const f=setup(),historyCalls=Array.from({length:5},(_,index)=>({name:f.tool.name,input:{...range,calendarId:`fictional-calendar-${index}`,maxResults:2500}}))
+  const result=await planRoutineCalendarRead({...f.input,historyCalls})
+  expect(result.plan).not.toBeNull();expect(result.scopeCounts).toMatchObject({targets:7,questions:9})
+  const request=f.evaluate.mock.calls[0][0],state=request.state as unknown as {targets:Array<{calendarId:string}>}
+  expect(request.operation).toMatchObject({version:'3',stateVersion:'3',questionVersion:'3'})
+  expect(state.targets.map(target=>target.calendarId)).toEqual(expect.arrayContaining(['primary','fictional-calendar',...historyCalls.map(call=>call.input.calendarId)]))
+  expect(request.questions).toHaveLength(9);expect(request.state).not.toHaveProperty('candidates')
+ })
+ it('keeps more than twelve distinct historical windows within the real option bound',async()=>{
+  const f=setup(),historyCalls=Array.from({length:15},(_,index)=>({name:f.tool.name,input:{calendarId:'fictional-calendar',timeMin:new Date(Date.UTC(2031,0,1,index)).toISOString(),timeMax:new Date(Date.UTC(2031,0,1,index+1)).toISOString(),maxResults:2500}}))
+  const result=await planRoutineCalendarRead({...f.input,historyCalls})
+  expect(result.plan).not.toBeNull()
+  const state=f.evaluate.mock.calls[0][0].state as unknown as {ranges:unknown[]}
+  for(const call of historyCalls)expect(state.ranges).toContainEqual(expect.objectContaining({timeMin:call.input.timeMin,timeMax:call.input.timeMax}))
+ })
+ it.each(['questions','options'] as const)('declines actual provider %s overflow without dropping scope',async kind=>{
+  const f=setup(),historyCalls=Array.from({length:kind==='questions'?62:255},(_,index)=>({name:f.tool.name,input:{calendarId:kind==='questions'?`fictional-calendar-${index}`:'fictional-calendar',timeMin:new Date(Date.UTC(2031,0,1,index)).toISOString(),timeMax:new Date(Date.UTC(2031,0,1,index+1)).toISOString(),maxResults:2500}}))
+  const result=await planRoutineCalendarRead({...f.input,historyCalls})
+  expect(result.plan).toBeNull();expect(result.path).toBe(kind==='questions'?'scope_question_limit':'scope_option_limit')
+  expect(f.evaluate).not.toHaveBeenCalled();expect(f.list).not.toHaveBeenCalled()
+ })
+ it.each(['missing','duplicate','unknown','wrong_type','empty','primary_alias','range_none'] as const)('rejects %s scope answers rather than inventing a complete plan',async kind=>{
+  const f=setup(),original=f.evaluate.getMockImplementation()!
+  f.evaluate.mockImplementation(async request=>{
+   const response=await original(request)
+   if(kind==='missing')response.answers.pop()
+   if(kind==='duplicate')response.answers[response.answers.length-1]=response.answers[0]
+   if(kind==='unknown')response.answers[response.answers.length-1]={kind:'choice',questionId:'range',value:'unknown-window',evidence:{source:'unavailable'}}
+   if(kind==='wrong_type')response.answers[1]={kind:'choice',questionId:response.answers[1].questionId,value:'true',evidence:{source:'unavailable'}}
+   if(kind==='empty'||kind==='primary_alias')for(const answer of response.answers)if(answer.kind==='boolean')answer.value=kind==='primary_alias'
+   if(kind==='range_none')response.answers[response.answers.length-1]={kind:'choice',questionId:'range',value:'none',evidence:{source:'unavailable'}}
+   return response
+  })
+  expect((await planRoutineCalendarRead(f.input)).plan).toBeNull();expect(f.list).not.toHaveBeenCalled()
+ })
+ it.each(['mutate','replace'] as const)('keeps exact decoded scope when a runtime tries to %s its result during final admission',async kind=>{
+  const f=setup(),run=f.config.runtime.run.bind(f.config.runtime)
+  let returned:{result:{calls:Array<{name:string;input:{calendarId:string;timeMin:string;timeMax:string;maxResults:number}}>}}|undefined
+  f.config.runtime.run=async options=>{const result=await run(options);returned=result as unknown as typeof returned;return result}
+  let changed=false
+  f.full.mockImplementation(async()=>{
+   if(!returned||changed)return
+   await Promise.resolve();changed=true
+   if(kind==='mutate')returned.result.calls[0].input.calendarId='primary'
+   else returned.result={calls:[{name:f.tool.name,input:{...range,calendarId:'primary',maxResults:2500}}]}
+  })
+  const {result}=await runHost(f)
+  expect(changed).toBe(true);expect(result.complete).toBe(true)
+  expect(f.list).toHaveBeenCalledWith(expect.objectContaining({calendarId:'fictional-calendar',...range}))
+ })
+ it('declines a selected scope that cannot fit the remaining real tool budget before I/O',async()=>{
+  const f=setup();const result=await runHost(f,undefined,{maxToolCalls:1})
+  expect(result.result.calls).toBe(0);expect(f.list).not.toHaveBeenCalled()
+ })
+
  it('declines host execution when capped observations cannot fit the smaller model retry budget',async()=>{
   const f=setup();const {result}=await runHost(f,undefined,{inputTokenLimit:128_000})
   expect(result.calls).toBe(0);expect(result.complete).toBe(false);expect(f.list).not.toHaveBeenCalled()
@@ -72,16 +132,16 @@ describe('[COMP:engine/routine-read] full-context host calendar reads',()=>{
  ])('offers the actual local day and its remainder across DST at %s',async(instant,start,end)=>{
   const f=setup();f.context.userTimezone='America/New_York'
   await planRoutineCalendarRead({...f.input,now:Date.parse(instant)})
-  const state=f.evaluate.mock.calls[0][0].state as unknown as {candidates:Array<{calls:Array<{input:Record<string,unknown>}>}>}
-  const scopes=state.candidates.flatMap(candidate=>candidate.calls.map(call=>call.input))
+  const state=f.evaluate.mock.calls[0][0].state as unknown as {ranges:Array<{timeMin:string;timeMax:string}>}
+  const scopes=state.ranges
   expect(scopes).toContainEqual(expect.objectContaining({timeMin:start,timeMax:end}))
   expect(scopes).toContainEqual(expect.objectContaining({timeMin:new Date(instant).toISOString(),timeMax:end}))
  })
  it('offers the true union of historical partitions without imposing it as a default',async()=>{
   const f=setup({choose:()=> 'ordinary'})
   await planRoutineCalendarRead({...f.input,historyCalls:[{name:f.tool.name,input:{calendarId:'fictional-calendar',timeMin:'2031-06-01T00:00:00Z',timeMax:'2031-06-10T00:00:00Z',maxResults:2500}}]})
-  const state=f.evaluate.mock.calls[0][0].state as unknown as {candidates:Array<{calls:Array<{input:Record<string,unknown>}>}>}
-  expect(state.candidates.flatMap(candidate=>candidate.calls.map(call=>call.input))).toContainEqual(expect.objectContaining({timeMin:'2031-06-01T00:00:00Z',timeMax:range.timeMax}))
+  const state=f.evaluate.mock.calls[0][0].state as unknown as {ranges:Array<{timeMin:string;timeMax:string}>}
+  expect(state.ranges).toContainEqual(expect.objectContaining({timeMin:'2031-06-01T00:00:00Z',timeMax:range.timeMax}))
   expect(f.list).not.toHaveBeenCalled()
  })
  it('sends the complete governing context and preserves the exact model-selected calendar/window',async()=>{
@@ -214,10 +274,7 @@ describe('[COMP:engine/routine-read] full-context host calendar reads',()=>{
   expect(f.list).not.toHaveBeenCalled()
  })
  it('closes pending dispatch when the consumer returns during a second host call',async()=>{
-  const f=setup({choose:request=>{
-   const candidates=(request.state as unknown as {candidates:Array<{id:string;calls:unknown[]}>}).candidates
-   return candidates.find(candidate=>candidate.calls.length===2)!.id
-  }})
+  const f=setup({choose:()=> 'all_concrete'})
   f.input.messages.push({role:'assistant',content:[{type:'tool_use',id:'other',name:f.tool.name,input:{...range,calendarId:'second-fictional-calendar'}}]},
     {role:'user',content:[{type:'tool_result',toolUseId:'other',name:f.tool.name,content:'[]'}]})
   let entered!:()=>void,release!:()=>void

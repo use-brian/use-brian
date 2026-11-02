@@ -38,8 +38,11 @@ describe.sequential('[COMP:api/native-host-observation] executed host carrier pu
    yield{type:'message_end',stopReason:'end_turn',usage:{inputTokens:1,outputTokens:1}}
   }})}
   const runtime=executionFixture({llm:provider,totalTimeoutMs:60_000,primaryTimeoutMs:50_000,primary:fixtureDecisionProvider(async request=>{
-   const state=request.state as unknown as {candidates:Array<{id:string}>}
-   return{providerId:'fixture-decision',model:request.model,answers:[{kind:'choice',questionId:'routine',value:state.candidates[0].id,evidence:{source:'unavailable'}}]}
+   const state=request.state as unknown as {targets:Array<{id:string}>;ranges:Array<{id:string}>}
+   const answers:import('@use-brian/core').DecisionAnswer[]=request.questions.map(question=>question.kind==='boolean'
+    ? {kind:'boolean',questionId:question.id,value:question.id===state.targets[0].id,evidence:{source:'unavailable'}}
+    : {kind:'choice',questionId:question.id,value:question.id==='routine'?'calendar':state.ranges[0].id,evidence:{source:'unavailable'}})
+   return{providerId:'fixture-decision',model:request.model,answers}
   })})
   const batches:HostObservation[][]=[];let reply:unknown;let receipt:object|undefined
   for await(const event of queryLoop({provider,model:'fixture',systemPrompt:'Read the chosen calendar only.',messages:[{role:'user',content:'Check my calendar.'}],tools,context,

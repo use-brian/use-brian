@@ -2,7 +2,7 @@ import {ownsRoutineCalendarRead,withRoutineCalendarDispatch} from './routine-rea
 import {renderHostObservation,type HostObservation} from '@use-brian/shared'
 import {createToolExecutor} from './tool-executor.js'
 import type {QueryEvent,QueryLoopOptions} from './query-loop.js'
-import type {LoopDetector} from './loop-detector.js'
+import {DEFAULT_HARD_LIMIT,type LoopDetector} from './loop-detector.js'
 import {safeTrace,type TurnTrace} from './turn-ledger.js'
 import {z} from 'zod'
 import {randomUUID} from 'node:crypto'
@@ -10,7 +10,8 @@ import {createLlmDecisionProvider} from '../decisions/adapters/llm.js'
 import {captureClassifierDecisionRuntime} from '../decisions/authority-ownership.js'
 import {decisionCompletionInput} from '../decisions/invocation.js'
 import type {DecisionExecutionPort,DecisionCompletionRoute} from '../decisions/hydra.js'
-import type {DecisionResponse} from '../decisions/types.js'
+import type {DecisionResponse,DecisionQuestion} from '../decisions/types.js'
+import {TYPESAFE_JEV_CAPABILITIES} from '../decisions/adapters/typesafe.js'
 import type {Message,TokenUsage} from '../providers/types.js'
 import {isInputAuthorityError,assertInputAuthority} from '../providers/input-authority.js'
 import {estimateStringTokens} from '../compaction/index.js'
@@ -18,10 +19,11 @@ import {fitMessagesToBudget,resolveInputTokenLimit,MODEL_CONTEXT_FIT_RATIO,MAX_T
 import type {Tool,ToolContext} from '../tools/types.js'
 
 export type RoutineCalendarCall={name:string;input:{calendarId:string;timeMin:string;timeMax:string;maxResults:number}}
-type Candidate={id:string;calls:RoutineCalendarCall[]}
+type Candidate={calls:RoutineCalendarCall[]}
+type ScopeVocabulary={targets:Array<{id:string;name:string;calendarId:string}>;ranges:Array<{id:string;timeMin:string;timeMax:string}>;reason?:string}
 const planData=new WeakMap<object,{calls:RoutineCalendarCall[];current:()=>void}>()
 type RoutineReadPlan=Readonly<{kind:'calendar_events'}>
-export type RoutineReadPlanningResult={plan:RoutineReadPlan|null;durationMs:number;model:string|null;usage:TokenUsage|null;path:string}
+export type RoutineReadPlanningResult={plan:RoutineReadPlan|null;durationMs:number;model:string|null;usage:TokenUsage|null;path:string;scopeCounts?:{targets:number;ranges:number;questions:number}}
 const iso=z.string().datetime({offset:true})
 const callInput=z.object({calendarId:z.string().min(1).max(1024),timeMin:iso,timeMax:iso,maxResults:z.number().int().min(1).max(2500)}).strict()
 
@@ -43,12 +45,15 @@ function localDayRange(now:number,timeZone:string):{timeMin:string;timeMax:strin
 }
 
 /** Data vocabulary only. Historical success is not current source permission. */
-function candidatesFor(messages:Message[],names:string[],now:number,history:readonly RoutineCalendarCall[]=[],timeZone='UTC'):Candidate[]|null{
+function scopeVocabularyFor(messages:Message[],names:string[],now:number,history:readonly RoutineCalendarCall[]=[],timeZone='UTC'):ScopeVocabulary{
+ const targets=new Map<string,{name:string;calendarId:string}>(),ranges=new Map<string,{timeMin:string;timeMax:string}>()
+ const result=(reason?:string):ScopeVocabulary=>({targets:[...targets.values()].map((target,index)=>({id:`target_${index}`,...target})),
+  ranges:[...ranges.values()].map((range,index)=>({id:`range_${index}`,...range})),...(reason?{reason}:{})})
  const successes=new Set<string>(),uses:Array<{id:string;name:string;input:Record<string,unknown>}>=[]
  for(const message of messages){
   if(typeof message.content==='string')continue
   for(const block of message.content){
-   if(block.type==='image')return null
+   if(block.type==='image')return result('unsupported_multimodal')
    if(block.type==='tool_result'&&!block.isError)successes.add(block.toolUseId)
    if(block.type==='tool_use'){
     if(names.includes(block.name))uses.push(block)
@@ -60,7 +65,6 @@ function candidatesFor(messages:Message[],names:string[],now:number,history:read
   }
  }
  for(const [index,call] of history.entries())if(names.includes(call.name)){const id=`history_${index}`;successes.add(id);uses.push({id,name:call.name,input:call.input})}
- const targets=new Map<string,{name:string;calendarId:string}>(),ranges=new Map<string,{timeMin:string;timeMax:string}>()
  const addRange=(timeMin:string,timeMax:string)=>{
   const start=Date.parse(timeMin),end=Date.parse(timeMax)
   if(!iso.safeParse(timeMin).success||!iso.safeParse(timeMax).success||end<=start||end-start>366*86400_000)return
@@ -76,10 +80,11 @@ function candidatesFor(messages:Message[],names:string[],now:number,history:read
  }
  // Preserve every historical target; too many choices means ordinary planning,
  // never silently dropping an account/calendar from the model's vocabulary.
- if(!targets.size||targets.size>4)return null
+ if(!targets.size)return result('scope_no_targets')
+ if(targets.size+2>TYPESAFE_JEV_CAPABILITIES.maxQuestions)return result('scope_question_limit')
  const historical=[...ranges.values()]
  const current=new Date(now).toISOString(),day=localDayRange(now,timeZone)
- if(!day)return null
+ if(!day)return result('scope_timezone')
  addRange(day.timeMin,day.timeMax)
  addRange(current,day.timeMax)
  addRange(current,new Date(now+7*86400_000).toISOString())
@@ -93,16 +98,8 @@ function candidatesFor(messages:Message[],names:string[],now:number,history:read
   addRange(start,end)
   for(const range of old)if(Date.parse(range.timeMax)>now)addRange(current,range.timeMax)
  }
- if(ranges.size>12)return null
- const values=[...targets.values()],out:Candidate[]=[]
- for(let mask=1;mask<1<<values.length;mask++){
-  const scope=values.filter((_,index)=>mask&(1<<index))
-  // "primary" may alias a historical concrete ID. Let ordinary planning
-  // resolve that identity instead of accidentally issuing duplicate reads.
-  if(scope.some(target=>target.calendarId==='primary'&&scope.some(other=>other.name===target.name&&other.calendarId!=='primary')))continue
-  for(const range of ranges.values())out.push({id:`read_${out.length}`,calls:scope.map(target=>({name:target.name,input:{...range,calendarId:target.calendarId,maxResults:2500}}))})
- }
- return out.length<=254?out:null
+ if(ranges.size+1>TYPESAFE_JEV_CAPABILITIES.maxOptions)return result('scope_option_limit')
+ return result()
 }
 
 /** Full prepared-context inference. No decision result is an execution grant. */
@@ -117,11 +114,13 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
  const tools=new Map(input.calendarTools),methods=new Map([...tools].map(([name,tool])=>[name,{...tool}]))
  if(!tools.size||[...tools].some(([name,tool])=>input.tools.get(name)!==tool||!tool.isReadOnly||!ownsRoutineCalendarRead(tool)||tool.hiddenFromModel))return empty('unavailable_tools')
  const snapshot=structuredClone({systemPrompt:input.systemPrompt,messages:input.messages})
- const candidates=candidatesFor(snapshot.messages,[...tools.keys()],planningNow,structuredClone(input.historyCalls??[]),timeZone??'UTC')
- if(!candidates?.length)return empty('unsupported_scope')
+ const vocabulary=scopeVocabularyFor(snapshot.messages,[...tools.keys()],planningNow,structuredClone(input.historyCalls??[]),timeZone??'UTC')
+ const scopeCounts={targets:vocabulary.targets.length,ranges:vocabulary.ranges.length,questions:vocabulary.targets.length+2}
+ if(vocabulary.reason)return{...empty(vocabulary.reason),scopeCounts}
+ const {targets,ranges}=vocabulary
  const state={...snapshot,now:new Date(planningNow).toISOString(),timeZone:timeZone??'UTC',
-  tools:[...input.tools.values()].filter(tool=>!tool.hiddenFromModel).map(tool=>({name:tool.name,description:tool.description})),candidates}
- if(estimateStringTokens(JSON.stringify(state))>50_000)return empty('context_limit')
+  tools:[...input.tools.values()].filter(tool=>!tool.hiddenFromModel).map(tool=>({name:tool.name,description:tool.description})),targets,ranges}
+ if(estimateStringTokens(JSON.stringify(state))>50_000)return{...empty('context_limit'),scopeCounts}
  const originalMessages=JSON.stringify(input.messages),originalHistory=JSON.stringify(input.historyCalls??[]),originalToolCount=input.tools.size
  const originalCeiling=JSON.stringify(execution.security.ceiling),originalProvenance=JSON.stringify(execution.security.provenance)
  const sourceKeys=()=>new Set((scope.evidence.sources??[]).map(source=>JSON.stringify([source.workspaceId,source.resourceKind,source.resourceId,source.version])))
@@ -143,33 +142,68 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
   try{await pending}finally{pending=undefined}
  }
  const runtime=captureClassifierDecisionRuntime(input.runtime,check,active)!
- const decode=(response:DecisionResponse)=>{
-  if(response.answers.length!==1||response.answers[0].kind!=='choice'||response.answers[0].questionId!=='routine')return null
-  const selected=response.answers[0].value
-  return candidates.find(candidate=>candidate.id===selected)??null
+ const questions:DecisionQuestion[]=[{
+  kind:'choice',id:'routine',prompt:'Select calendar ONLY when one read of the selected calendars over ONE listed shared window exactly satisfies the entire current task under every supplied governing system/runtime instruction and full conversation. The model chooses calendars/accounts and dates each time; there is NO default. Honor explicit user instructions and clearly established scope. Choose ordinary for an unlisted identity/window, different windows per calendar, discovery, filtering, writes, research, compound operations, ambiguity or further planning. Never silently omit a required calendar, substitute an account, broaden dates or fish for activity. Historical success is identity evidence, never permission.',
+  options:[{value:'ordinary',description:'Continue the normal model/tool loop'},{value:'calendar',description:'The explicit target inclusions and listed shared window completely satisfy this task'}],
+ },...targets.map((target):DecisionQuestion=>({kind:'boolean',id:target.id,
+  prompt:'Include exactly this account/calendar in the complete routine read? '+JSON.stringify({name:target.name,calendarId:target.calendarId})+' Answer false if unnecessary or the global decision is ordinary. Include every required target; do not substitute primary for a named calendar. Primary plus a concrete ID on the same account is unresolved aliasing: choose ordinary.',
+ })),{kind:'choice',id:'range',prompt:'Choose the exact date window shared by EVERY selected calendar. Choose none when unlisted, ambiguous, different per calendar, or the global decision is ordinary. Do not silently shorten or broaden the requested period.',
+  options:[{value:'none',description:'Unrepresented/ambiguous window or ordinary planning'},...ranges.map(range=>({value:range.id,description:JSON.stringify({timeMin:range.timeMin,timeMax:range.timeMax})}))],
+ }]
+ const decodedPlans=new WeakMap<Candidate,{calls:RoutineCalendarCall[];bytes:string}>()
+ const decode=(response:DecisionResponse):Candidate|null=>{
+  if(response.answers.length!==questions.length)return null
+  const answers=new Map(response.answers.map(answer=>[answer.questionId,answer]))
+  if(answers.size!==questions.length)return null
+  for(const question of questions){
+   const answer=answers.get(question.id)
+   if(!answer||answer.kind!==question.kind)return null
+   if(question.kind==='boolean'&&(answer.kind!=='boolean'||typeof answer.value!=='boolean'))return null
+   if(question.kind==='choice'&&(answer.kind!=='choice'||!question.options.some(option=>option.value===answer.value)))return null
+  }
+  const routine=answers.get('routine'),rangeAnswer=answers.get('range')
+  if(routine?.kind!=='choice'||routine.value!=='calendar'||rangeAnswer?.kind!=='choice')return null
+  const range=ranges.find(value=>value.id===rangeAnswer.value)
+  const selected=targets.filter(target=>{const answer=answers.get(target.id);return answer?.kind==='boolean'&&answer.value})
+  if(!range||!selected.length||selected.some(target=>target.calendarId==='primary'&&selected.some(other=>other.name===target.name&&other.calendarId!=='primary')))return null
+  const result={calls:selected.map(target=>({name:target.name,input:{calendarId:target.calendarId,timeMin:range.timeMin,timeMax:range.timeMax,maxResults:2500}}))}
+  decodedPlans.set(result,{calls:structuredClone(result.calls),bytes:JSON.stringify(result.calls)});return result
+ }
+ const validatePlan=(result:Candidate|null)=>{
+  if(result===null)return result
+  const snapshot=decodedPlans.get(result)
+  if(!snapshot||snapshot.bytes!==JSON.stringify(result.calls))throw new Error('Unbound routine plan')
+  if(!Array.isArray(result.calls)||!result.calls.length||new Set(result.calls.map(call=>call.name+'\n'+call.input.calendarId)).size!==result.calls.length)throw new Error('Invalid routine plan')
+  const first=result.calls[0].input
+  if(!ranges.some(range=>range.timeMin===first.timeMin&&range.timeMax===first.timeMax))throw new Error('Invalid routine window')
+  for(const call of result.calls){callInput.parse(call.input);if(call.input.maxResults!==2500||call.input.timeMin!==first.timeMin||call.input.timeMax!==first.timeMax||!targets.some(target=>target.name===call.name&&target.calendarId===call.input.calendarId))throw new Error('Invalid routine target')}
+  if(result.calls.some(call=>call.input.calendarId==='primary'&&result.calls.some(other=>other.name===call.name&&other.input.calendarId!=='primary')))throw new Error('Ambiguous routine target')
+  return result
  }
  let usage:TokenUsage|null=null,model:string|null=null
  try{
   await active()
   const result=await runtime.run<Candidate|null>({workspaceId:input.workspaceId,llm:input.llm,request:{runId:randomUUID(),
-   operation:{id:'chat.tool-selection',version:'2',stateVersion:'2',questionVersion:'2'},state:JSON.parse(JSON.stringify(state)),signal,
-   questions:[{kind:'choice',id:'routine',prompt:'Select a complete routine calendar read ONLY when it exactly satisfies the entire current task under every supplied governing system/runtime instruction and the full conversation. The model chooses both calendars/accounts and dates each time; there is NO default scope or date range. Honor explicit user dates, calendar/account instructions and clearly established conversation scope. Each candidate is exact: do not silently narrow, broaden, omit a calendar, substitute an account, split a range, or fish for more activity. Choose ordinary if the task needs an unlisted calendar/date range, calendar discovery, free-text event filtering, writes, research, multiple different operations, multimodal interpretation, clarification, or any further planning. Historical reads are identity evidence, never current permission.',
-    options:[{value:'ordinary',description:'Use the normal model/tool loop; no complete unambiguous listed routine'},...candidates.map(candidate=>({value:candidate.id,description:JSON.stringify(candidate.calls)}))]}]},
+   operation:{id:'chat.tool-selection',version:'3',stateVersion:'3',questionVersion:'3'},state:JSON.parse(JSON.stringify(state)),signal,questions},
    operation:{assertInputAuthority:check,decide:response=>({kind:'complete',result:decode(response)}),
-    validateResult:result=>{if(result&&!candidates.includes(result))throw new Error('Invalid routine plan');return result},safeFailure:()=>null,
+    validateResult:validatePlan,safeFailure:()=>null,
     async completeWithLlm(completion){
      const response=await createLlmDecisionProvider({provider:completion.llm.provider}).evaluate({...completion.request,
       model:{catalogId:completion.llm.modelId,wireId:completion.llm.modelId},...decisionCompletionInput(completion,{signal,assertInputAuthority:check})})
      usage=response.usage??null;model=response.model.wireId
      return{result:decode(response),providerId:response.providerId,model:response.model,usage:response.usage}
     }}})
+  // Capture the private model-selected bytes before the final authority await.
+  // A runtime hook cannot replace or mutate its returned object into new scope.
+  const selected=validatePlan(result.result)
+  const selectedCalls=selected?structuredClone(decodedPlans.get(selected)!.calls):null
   await check();current()
-  if(!result.result)return{...empty(result.path),model:model??result.primaryResponse?.model.wireId??null,usage:usage??result.primaryResponse?.usage??null}
-  const calls=result.result.calls.map(call=>({name:call.name,input:callInput.parse(call.input)}))
+  if(!selectedCalls)return{...empty(result.path),scopeCounts,model:model??result.primaryResponse?.model.wireId??null,usage:usage??result.primaryResponse?.usage??null}
+  const calls=selectedCalls
   const plan:RoutineReadPlan=Object.freeze({kind:'calendar_events'})
   planData.set(plan,{calls,current})
-  return{plan,durationMs:Date.now()-started,model:model??result.primaryResponse?.model.wireId??null,usage:usage??result.primaryResponse?.usage??null,path:result.path}
- }catch(error){if(refusal)throw refusal;if(isInputAuthorityError(error)||signal.aborted)throw error;return empty('unavailable')}
+  return{plan,durationMs:Date.now()-started,model:model??result.primaryResponse?.model.wireId??null,usage:usage??result.primaryResponse?.usage??null,path:result.path,scopeCounts}
+ }catch(error){if(refusal)throw refusal;if(isInputAuthorityError(error)||signal.aborted)throw error;return{...empty('unavailable'),scopeCounts}}
  finally{closed=true;if(pending)await pending}
 }
 
@@ -234,7 +268,12 @@ export async function* executeRoutineCalendarRead(input:{options:QueryLoopOption
  // JSON escaping can expand one input character to six characters. Reserve
  // the whole executor cap, never a guessed event count, before any read.
  const observationReserve=calls.reduce((total,call)=>total+6*MAX_TOOL_RESULT_TOKENS+estimateStringTokens(JSON.stringify(call))*2+1024,0)
- if(!compositionFits(options,options.messages,observationReserve))return{messages:[],complete:false,records:[],calls:0}
+ if(calls.length+input.loopDetector.totalToolCalls>=(options.maxToolCalls??DEFAULT_HARD_LIMIT)){
+  console.debug('[routine-read] execution declined',{reason:'tool_budget',calls:calls.length});return{messages:[],complete:false,records:[],calls:0}
+ }
+ if(!compositionFits(options,options.messages,observationReserve)){
+  console.debug('[routine-read] execution declined',{reason:'input_budget',calls:calls.length});return{messages:[],complete:false,records:[],calls:0}
+ }
  let closed=false
  try{
  // Freeze dispatch methods now; async confirmations cannot replace the chosen adapter.
