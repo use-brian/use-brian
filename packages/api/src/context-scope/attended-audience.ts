@@ -147,6 +147,17 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
 /** Optional personal-web operation: both current caller and recipient obligations
  * are validated by one closed native proof. Unsupported destinations decline. */
 export async function tryValidateNativePersonalOutput(execution:ExecutionContext,input:DeliveryAudienceInput):Promise<ScopeEvidence|null>{
+ const pinned=structuredClone(input)
+ const ceiling=await tryResolveNativePersonalRecipient(execution,pinned)
+ if(!ceiling)return null
+ const result=await tryNativeCombinedOutputEvidence(execution,pinned.scopeEvidence??{},ceiling)
+ await execution.security.authority.assertCurrent()
+ return result
+}
+
+/** Fresh destination metadata only. It grants no source, retention or delivery
+ * permission; callers must independently validate the complete evidence. */
+export async function tryResolveNativePersonalRecipient(execution:ExecutionContext,input:DeliveryAudienceInput):Promise<AccessCeiling|null>{
  const pinned=structuredClone(input),actor=execution.security.access.userId
  if(!isWebTransport(pinned.channelType)||pinned.sessionId!==execution.lifecycle.sessionId
   ||execution.lifecycle.sessionPersisted===false||execution.security.access.sharedAudience
@@ -168,8 +179,5 @@ export async function tryValidateNativePersonalOutput(execution:ExecutionContext
  if(!sink.allowed)throw new DeliveryAudienceUnverifiedError(sink.detail,sink.diagnostic)
  if(!recipient.allowed)throw new DeliveryAudienceUnverifiedError(recipient.detail,recipient.diagnostic)
  if(sink.ceiling.userId!==actor||recipient.ceiling.userId!==actor)throw new DeliveryAudienceUnverifiedError(undefined,'binding_recipient_conflict')
- const ceiling=intersectAccessCeilings(sink.ceiling,recipient.ceiling)
- const result=await tryNativeCombinedOutputEvidence(execution,pinned.scopeEvidence??{},ceiling)
- await execution.security.authority.assertCurrent()
- return result
+ return intersectAccessCeilings(sink.ceiling,recipient.ceiling)
 }

@@ -1,10 +1,10 @@
 import {tryNativeInvocationEvidence} from '../context-scope/native-invocation-evidence.js'
-import {createAttendedDeliveryAudienceAuthorizer,tryValidateNativePersonalOutput} from '../context-scope/attended-audience.js'
+import {createAttendedDeliveryAudienceAuthorizer,tryValidateNativePersonalOutput,tryResolveNativePersonalRecipient} from '../context-scope/attended-audience.js'
 import {DeliveryAudienceUnverifiedError,isDeliveryAudienceUnverifiedError,type DeliveryAudienceInput} from '../context-scope/delivery-authority.js'
 import { nativeSessionQueryContextSources } from './session-query-context.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 /** Fresh source permission at model input/output boundaries. [COMP:api/external-source-access] */
-import { ContextScopeAccumulator, type ExecutionContext, type ScopeSource, type ToolContext } from '@use-brian/core'
+import { accessCeilingContains,intersectAccessCeilings,ContextScopeAccumulator, type ExecutionContext, type ScopeSource, type ToolContext } from '@use-brian/core'
 import { SourceProtocolError } from '@use-brian/brian-app/connector'
 import { getAppPool, applyRLSGucs, rollbackAndRelease, runWithAgentAccess } from '../db/client.js'
 import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
@@ -203,6 +203,48 @@ export async function tryAssertNativePreparationCurrent(boundary:NativeAttendedO
   current()
   return true
  }catch(error){nativeOutputFailure(binding.execution,error)}
+}
+/** An exact native pre-write guard, never a source/allow receipt for the writer.
+ * Fresh native retention is sufficient only under the original caller ceiling,
+ * a containing current recipient, and no independent delivery obligation. */
+type NativePublicationAssemblyFence=Readonly<{assertUnchanged:()=>void}>
+export async function tryAssertNativePublicationPreparationCurrent(boundary:NativeAttendedOutputBoundary,context:ToolContext):Promise<NativePublicationAssemblyFence|null>{
+ const binding=nativeOutputBindings.get(boundary)
+ if(!binding)return null
+ const {execution,accumulator}=binding,ceiling=execution.security.ceiling
+ const originalCeiling=JSON.stringify(ceiling),signal=context.abortSignal,lifecycleSignal=execution.lifecycle.abortSignal
+ const originalEvidence=JSON.stringify(accumulator.evidence),originalProvenance=JSON.stringify(execution.security.provenance)
+ try{
+  const caller=intersectAccessCeilings(ceiling,ceiling)
+  const current=()=>{
+   assertNativeOutputBinding(binding,context)
+   if(execution.security.authority!==binding.authority||binding.authority.assertCurrent!==binding.assertCurrent
+    ||execution.security.ceiling!==ceiling||JSON.stringify(ceiling)!==originalCeiling
+    ||context.abortSignal!==signal||execution.lifecycle.abortSignal!==lifecycleSignal||signal.aborted||lifecycleSignal.aborted
+    ||JSON.stringify(accumulator.evidence)!==originalEvidence
+    ||JSON.stringify(execution.security.provenance)!==originalProvenance)denied()
+  }
+  current()
+  if(!ownsNativeAttendedAssembly(boundary,execution,accumulator)||execution.lifecycle.abortSignal.aborted||context.abortSignal.aborted)return null
+  await binding.assertCurrent.call(binding.authority);current()
+  if(execution.security.provenance?.sources?.length)return null
+  const evidence=new ContextScopeAccumulator(execution.security.provenance)
+  evidence.note(structuredClone(accumulator.evidence))
+  const sources=evidence.evidence.sources??[]
+  if(!sources.length||sources.some(source=>source.workspaceId!==caller.workspaceId
+   ||!['application_field','session_context_revision','session_message','memory','workspace_file'].includes(source.resourceKind)
+   ||!source.resourceId||!source.version))return null
+  const recipient=await tryResolveNativePersonalRecipient(execution,binding.input);current()
+  if(!recipient||!accessCeilingContains(recipient,caller))return null
+  const {sensitivity,compartments,projectIds}=evidence.evidence
+  await validateAudienceScopeEvidence({sensitivity,compartments,projectIds},caller);current()
+  const external=await readExternalSourceAncestors(caller.workspaceId,sources);current()
+  await binding.assertCurrent.call(binding.authority);current()
+  if(external.length)return null
+  // The awaited caller must fence its synchronous assembly too: a microtask
+  // after this function resolves must not replace the roots it just inspected.
+  return Object.freeze({assertUnchanged:()=>{try{current()}catch(error){nativeOutputFailure(execution,error)}}})
+ }catch(error){nativeOutputFailure(execution,error)}
 }
 /** False/null keeps the original caller and recipient boundaries. The optional
  * snapshot fences only this admission's awaited handoff; it is not a permission

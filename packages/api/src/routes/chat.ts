@@ -3,7 +3,7 @@ import {generateAttendedSessionTitle} from './attended-session-title.js'
 import {readSessionTitle} from '../db/session-title-store.js'
 import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
-import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary,tryAssertNativePreparationCurrent} from '../application-platform/model-source-authority.js'
+import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary,tryAssertNativePreparationCurrent,tryAssertNativePublicationPreparationCurrent} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
 import { captureAttendedSessionClassification, forkAttendedSessionClassification, assessAttendedSessionMessage, captureNativeClassifiedAssembly, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
@@ -7006,7 +7006,14 @@ export function chatRoutes(options: WebChatOptions): Router {
           return
         }
         turnTiming.mark('loop')
-        await assertDeliveryAudience()
+        // Only a containing fresh native recipient with no external delivery
+        // obligation may defer its full graph proof to actual publication.
+        let publicationAssembly = nativeOutputBoundary && !abortController.signal.aborted
+          ? await tryAssertNativePublicationPreparationCurrent(nativeOutputBoundary, {
+            ...executionToolContext(executionContext, { appId: 'native-publication-preparation' }), scopeAccumulator,
+          }) : null
+        if (publicationAssembly) publicationAssembly.assertUnchanged()
+        else await assertDeliveryAudience()
         flushed = true
 
         console.log(
@@ -7026,10 +7033,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         })()
 
         // ONE transaction for every buffered row (scoped-context.md → "Live
-        // authority for interactive and public turns"). The audience was
-        // verified just above; the writes take about a second, then the lease
-        // and the audience are verified again once the rows are committed,
-        // exactly where the old per-row sequence checked after each commit.
+        // authority for interactive and public turns"). The native transaction
+        // freshly admits retention and derives each stored scope. Lease and
+        // recipient authority are checked again after the actual commit.
         // A refusal before the transaction persists nothing; one after it
         // reports `operationMayHaveExecuted`. Per-row checks cost two audience
         // and two lease resolutions per turn and, with a round trip per
@@ -7046,6 +7052,8 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
         const savedTurns: SavedTurn[] = []
         const batchWrite = currentTurnWrite()
+        publicationAssembly?.assertUnchanged()
+        publicationAssembly = null
         const publish = async (tx: PoolClient) => {
           const nativeRows: Array<Parameters<typeof publishNativeSessionMessageBatch>[0]['messages'][number]> = []
           const nativeSaved = new Map<number, { isLast: boolean; attachments: typeof outboundAttachments }>()
