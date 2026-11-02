@@ -1,6 +1,42 @@
 -- [COMP:api/native-turn-frame]
 -- Share immutable dependencies across one transcript batch, with fresh completion proof.
 BEGIN;
+-- Authenticate the exact three helpers omitted from the historical ACL repair.
+-- PUBLIC/private status is canonical; only known inherited runtime grants go.
+DO $mutation_scope_acl$
+DECLARE actual pg_proc;expected jsonb;owner_id oid;runtime_id oid;old_fingerprint text;legacy_ids oid[]:='{}';
+BEGIN
+ SELECT relowner INTO owner_id FROM pg_class WHERE oid='public.memories'::regclass;
+ SELECT oid INTO runtime_id FROM pg_roles WHERE rolname='app_user';
+ FOR expected IN SELECT value FROM jsonb_array_elements('[{"signature":"agent_mutation_scope_allows(text[])","metadata":{"probin":null,"procost":100,"prokind":"f","proname":"agent_mutation_scope_allows","prorows":0,"pronargs":1,"proconfig":null,"proretset":false,"prosecdef":false,"prorettype":"16","prosqlbody":null,"prosupport":"-","proargmodes":null,"proargnames":["p_compartments"],"proargtypes":["1009"],"proisstrict":false,"proparallel":"u","protrftypes":null,"provariadic":"0","provolatile":"s","proleakproof":false,"proallargtypes":null,"pronargdefaults":0},"body":"189133d375ac4e1174a01b87d7d3299ba904d06a29c63dd9ec163aae76eb2f02","public":true},{"signature":"session_context_payload_shape(text,jsonb)","metadata":{"probin":null,"procost":100,"prokind":"f","proname":"session_context_payload_shape","prorows":0,"pronargs":2,"proconfig":["search_path=pg_catalog, public, pg_temp"],"proretset":false,"prosecdef":false,"prorettype":"16","prosqlbody":null,"prosupport":"-","proargmodes":null,"proargnames":["k","p"],"proargtypes":["25","3802"],"proisstrict":false,"proparallel":"u","protrftypes":null,"provariadic":"0","provolatile":"i","proleakproof":false,"proallargtypes":null,"pronargdefaults":0},"body":"a9f966fbc2028792c40f1430169dc79f6816cd3c20b3a503969ffe93efd67bd4","public":false},{"signature":"validate_session_context_revision_pair()","metadata":{"probin":null,"procost":100,"prokind":"f","proname":"validate_session_context_revision_pair","prorows":0,"pronargs":0,"proconfig":["search_path=pg_catalog, public, pg_temp"],"proretset":false,"prosecdef":true,"prorettype":"2279","prosqlbody":null,"prosupport":"-","proargmodes":null,"proargnames":null,"proargtypes":[],"proisstrict":false,"proparallel":"u","protrftypes":null,"provariadic":"0","provolatile":"v","proleakproof":false,"proallargtypes":null,"pronargdefaults":0},"body":"bad40bab0f7f176bd7cdcf2de5142502ddd2662fa8b3071b47a5dbe70cfff3c0","public":false}]'::jsonb) LOOP
+  SELECT * INTO actual FROM pg_proc WHERE oid=to_regprocedure('public.'||(expected->>'signature'));
+  IF actual.oid IS NULL OR actual.proowner IS DISTINCT FROM owner_id
+   OR actual.pronamespace IS DISTINCT FROM 'public'::regnamespace
+   OR actual.prolang IS DISTINCT FROM (SELECT oid FROM pg_language WHERE lanname='plpgsql')
+   OR (to_jsonb(actual)-ARRAY['oid','prosrc','proowner','proacl','prolang','pronamespace','proargdefaults']) IS DISTINCT FROM expected->'metadata'
+   OR actual.proargdefaults IS NOT NULL
+   OR encode(sha256(convert_to(actual.prosrc,'UTF8')),'hex') IS DISTINCT FROM expected->>'body'
+   OR NOT EXISTS(SELECT 1 FROM aclexplode(coalesce(actual.proacl,acldefault('f',actual.proowner))) a
+    WHERE a.grantee=owner_id AND a.grantor=owner_id AND a.privilege_type='EXECUTE' AND NOT a.is_grantable)
+   OR (expected->>'public')::boolean IS DISTINCT FROM EXISTS(
+    SELECT 1 FROM aclexplode(coalesce(actual.proacl,acldefault('f',actual.proowner))) a WHERE a.grantee=0)
+   OR EXISTS(SELECT 1 FROM aclexplode(coalesce(actual.proacl,acldefault('f',actual.proowner))) a
+    WHERE a.grantor<>owner_id OR a.is_grantable OR a.privilege_type<>'EXECUTE'
+     OR a.grantee NOT IN(owner_id,0,coalesce(runtime_id,0)))
+  THEN RAISE EXCEPTION 'Native mutation scope legacy ACL prerequisite changed: %',expected->>'signature';END IF;
+  IF runtime_id IS NOT NULL AND EXISTS(SELECT 1 FROM aclexplode(actual.proacl) a WHERE a.grantee=runtime_id) THEN
+   old_fingerprint:=encode(sha256(convert_to(to_jsonb(actual)::text,'UTF8')),'hex');
+   IF EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid<>actual.oid AND position(old_fingerprint IN p.prosrc)>0)
+    OR EXISTS(SELECT 1 FROM public.native_turn_contract_helpers WHERE signature=expected->>'signature')
+   THEN RAISE EXCEPTION 'Native mutation scope legacy ACL has an existing pin: %',expected->>'signature';END IF;
+   legacy_ids:=array_append(legacy_ids,actual.oid);
+  END IF;
+ END LOOP;
+ -- The complete closed repair roster passed before the first ACL change.
+ FOR actual IN SELECT * FROM pg_proc WHERE oid=ANY(legacy_ids) LOOP
+  EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM app_user',actual.oid::regprocedure);
+ END LOOP;
+END $mutation_scope_acl$;
 DO $flat_covered_manifest$
 DECLARE actual pg_proc;expected jsonb;dependency jsonb;body text;pins text;pin_count integer;
  old_pin text;new_pin text;definition text;trusted text;lineage_values text;semantic_hash text;
