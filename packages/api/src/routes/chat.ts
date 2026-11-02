@@ -7460,7 +7460,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 turnTiming.add('routine_planning',result.durationMs)
                 await recordOverheadUsage({usageStore:options.usageStore,userId:user.id,assistantId:assistant.id,sessionId:session.id,
                   userMessageId:storedUserMsg.id,model:result.model,usage:result.usage,source:'overhead:classifier',triggerKey:'chat_tool_selection',...backgroundUsageAttribution})
-                console.info('[chat] routine planning',{path:result.path,selected:result.plan!==null,durationMs:result.durationMs,...(result.scopeCounts?{scopeCounts:result.scopeCounts}:{})})
+                console.info('[chat] routine planning',{path:result.path,selected:result.plan!==null,durationMs:result.durationMs,...(result.scopeCounts?{scopeCounts:result.scopeCounts}:{}),...(result.inputCounts?{inputCounts:result.inputCounts}:{})})
               },
             } : undefined,
           toolSelection: options.decisionRuntime && storedUserSource && rawMessage?.trim() ? {

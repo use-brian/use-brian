@@ -23,7 +23,7 @@ type Candidate={calls:RoutineCalendarCall[]}
 type ScopeVocabulary={targets:Array<{id:string;name:string;calendarId:string}>;ranges:Array<{id:string;timeMin:string;timeMax:string;labels:string[]}>;reason?:string}
 const planData=new WeakMap<object,{calls:RoutineCalendarCall[];current:()=>void}>()
 type RoutineReadPlan=Readonly<{kind:'calendar_events'}>
-export type RoutineReadPlanningResult={plan:RoutineReadPlan|null;durationMs:number;model:string|null;usage:TokenUsage|null;path:string;scopeCounts?:{targets:number;ranges:number;questions:number}}
+export type RoutineReadPlanningResult={plan:RoutineReadPlan|null;durationMs:number;model:string|null;usage:TokenUsage|null;path:string;scopeCounts?:{targets:number;ranges:number;questions:number};inputCounts?:Record<string,number>}
 const iso=z.string().datetime({offset:true})
 const callInput=z.object({calendarId:z.string().min(1).max(1024),timeMin:iso,timeMax:iso,maxResults:z.number().int().min(1).max(2500)}).strict()
 
@@ -120,8 +120,7 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
  if(vocabulary.reason)return{...empty(vocabulary.reason),scopeCounts}
  const {targets,ranges}=vocabulary
  const state={...snapshot,now:new Date(planningNow).toISOString(),timeZone:timeZone??'UTC',
-  tools:[...input.tools.values()].filter(tool=>!tool.hiddenFromModel).map(tool=>({name:tool.name,description:tool.description})),targets,ranges}
- if(estimateStringTokens(JSON.stringify(state))>50_000)return{...empty('context_limit'),scopeCounts}
+  tools:[...tools.values()].map(tool=>({name:tool.name,description:tool.description})),targets,ranges}
  const originalMessages=JSON.stringify(input.messages),originalHistory=JSON.stringify(input.historyCalls??[]),originalToolCount=input.tools.size
  const originalCeiling=JSON.stringify(execution.security.ceiling),originalProvenance=JSON.stringify(execution.security.provenance)
  const sourceKeys=()=>new Set((scope.evidence.sources??[]).map(source=>JSON.stringify([source.workspaceId,source.resourceKind,source.resourceId,source.version])))
@@ -144,13 +143,25 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
  }
  const runtime=captureClassifierDecisionRuntime(input.runtime,check,active)!
  const questions:DecisionQuestion[]=[{
-  kind:'choice',id:'routine',prompt:'Select calendar ONLY when one read of the selected calendars over ONE listed shared window exactly satisfies the entire current task under every supplied governing system/runtime instruction and full conversation. The model chooses calendars/accounts and dates each time; there is NO default. Honor explicit user instructions and clearly established scope. When dates are unstated and no range is clearly established, choose a reasonable listed window using the full context; missing dates alone are not ambiguity. Choose ordinary for an unlisted identity/window, different windows per calendar, discovery, filtering, writes, research, compound operations, ambiguous calendar/account scope, conflicting scope constraints or further planning. Never silently omit a required calendar, substitute an account, broaden dates or fish for activity. Historical success is identity evidence, never permission.',
+  kind:'choice',id:'routine',prompt:'Select calendar ONLY when one read of the selected calendars over ONE listed shared window exactly satisfies the entire current task under every supplied governing system/runtime instruction and full conversation. The listed tool capabilities are the complete eligible Calendar-read set, NOT the assistant capability set. Unrelated or compound operations require ordinary planning. The model chooses calendars/accounts and dates each time; there is NO default. Honor explicit user instructions and clearly established scope. When dates are unstated and no range is clearly established, choose a reasonable listed window using the full context; missing dates alone are not ambiguity. Choose ordinary for an unlisted identity/window, different windows per calendar, discovery, filtering, writes, research, compound operations, ambiguous calendar/account scope, conflicting scope constraints or further planning. Never silently omit a required calendar, substitute an account, broaden dates or fish for activity. Historical success is identity evidence, never permission.',
   options:[{value:'ordinary',description:'Continue the normal model/tool loop'},{value:'calendar',description:'The explicit target inclusions and listed shared window completely satisfy this task'}],
  },...targets.map((target):DecisionQuestion=>({kind:'boolean',id:target.id,
   prompt:'Include exactly this account/calendar in the complete routine read? '+JSON.stringify({name:target.name,calendarId:target.calendarId})+' Answer false if unnecessary or the global decision is ordinary. Include every required target; do not substitute primary for a named calendar. Primary plus a concrete ID on the same account is unresolved aliasing: choose ordinary.',
  })),{kind:'choice',id:'range',prompt:'Evaluate the calendar date scope independently from the other questions, using the full request and conversation. Choose the most appropriate listed window for the requested calendar read. Explicit dates and a clearly established conversation range take precedence. An undated request with no clearly established range delegates the date choice to you: select the listed window you judge reasonable from the full context. Missing dates alone are not ambiguity and are not a reason to choose none. Choose none ONLY for conflicting date constraints, an explicit or established window absent from the list, or incompatible different windows requested for different calendars. Do not condition this answer on an answer to another question; the host separately enforces the overall plan decision. Do not silently shorten or broaden an explicit or established period.',
   options:[{value:'none',description:'Conflicting date constraints, an unlisted explicit/established window, or incompatible different windows requested per calendar. NOT merely unstated dates.'},...ranges.map(range=>({value:range.id,description:JSON.stringify({labels:range.labels,timeMin:range.timeMin,timeMax:range.timeMax})}))],
  }]
+ // Keep every governing byte; omit only unrelated capability descriptions.
+ // The provider also checks its actual request independently before dispatch.
+ const serializedState=JSON.stringify(state),serializedQuestions=JSON.stringify(questions)
+ const serializedInput=JSON.stringify({state,questions}),wireReserveTokens=256
+ const inputCounts={systemCharacters:JSON.stringify(state.systemPrompt).length,messageCharacters:JSON.stringify(state.messages).length,
+  toolCharacters:JSON.stringify(state.tools).length,targetCharacters:JSON.stringify(targets).length,rangeCharacters:JSON.stringify(ranges).length,
+  questionCharacters:serializedQuestions.length,stateCharacters:serializedState.length,totalCharacters:serializedInput.length,
+  toolCount:state.tools.length,messageCount:state.messages.length,wireReserveTokens,
+  estimatedTokens:estimateStringTokens(serializedInput)+wireReserveTokens,adapterEstimatedTokens:Math.ceil(serializedInput.length/4),
+  maxEstimatedTokens:50_000,providerMaxInputTokens:TYPESAFE_JEV_CAPABILITIES.maxInputTokens}
+ if(inputCounts.estimatedTokens>inputCounts.maxEstimatedTokens||inputCounts.adapterEstimatedTokens+wireReserveTokens>inputCounts.providerMaxInputTokens)
+  return{...empty('context_limit'),scopeCounts,inputCounts}
  const decodedPlans=new WeakMap<Candidate,{calls:RoutineCalendarCall[];bytes:string}>()
  const decode=(response:DecisionResponse):Candidate|null=>{
   if(response.answers.length!==questions.length)return null
@@ -199,12 +210,12 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
   const selected=validatePlan(result.result)
   const selectedCalls=selected?structuredClone(decodedPlans.get(selected)!.calls):null
   await check();current()
-  if(!selectedCalls)return{...empty(result.path),scopeCounts,model:model??result.primaryResponse?.model.wireId??null,usage:usage??result.primaryResponse?.usage??null}
+  if(!selectedCalls)return{...empty(result.path),scopeCounts,inputCounts,model:model??result.primaryResponse?.model.wireId??null,usage:usage??result.primaryResponse?.usage??null}
   const calls=selectedCalls
   const plan:RoutineReadPlan=Object.freeze({kind:'calendar_events'})
   planData.set(plan,{calls,current})
-  return{plan,durationMs:Date.now()-started,model:model??result.primaryResponse?.model.wireId??null,usage:usage??result.primaryResponse?.usage??null,path:result.path,scopeCounts}
- }catch(error){if(refusal)throw refusal;if(isInputAuthorityError(error)||signal.aborted)throw error;return{...empty('unavailable'),scopeCounts}}
+  return{plan,durationMs:Date.now()-started,model:model??result.primaryResponse?.model.wireId??null,usage:usage??result.primaryResponse?.usage??null,path:result.path,scopeCounts,inputCounts}
+ }catch(error){if(refusal)throw refusal;if(isInputAuthorityError(error)||signal.aborted)throw error;return{...empty('unavailable'),scopeCounts,inputCounts}}
  finally{closed=true;if(pending)await pending}
 }
 

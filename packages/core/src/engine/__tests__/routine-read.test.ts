@@ -52,6 +52,32 @@ async function runHost(f:ReturnType<typeof setup>,onEvent?:(event:QueryEvent)=>v
  while(true){const result=await iterator.next();if(result.done)return{events,result:result.value};events.push(result.value);onEvent?.(result.value)}
 }
 describe('[COMP:engine/routine-read] full-context host calendar reads',()=>{
+ it('retains the complete prepared context while excluding unrelated capability descriptions',async()=>{
+  const f=setup(),catalog=new Map(f.tools)
+  catalog.set('fictionalOther',{...f.tool,name:'fictionalOther',description:'Unrelated capability metadata. '.repeat(10_000)})
+  const messages:Message[]=[...history,{role:'user',content:'Fictional prior context. '.repeat(4_300)}]
+  const systemPrompt='Fictional governing context. '.repeat(1_500)
+  const result=await planRoutineCalendarRead({...f.input,tools:catalog,systemPrompt,messages})
+  expect(result.plan).not.toBeNull()
+  const state=f.evaluate.mock.calls[0][0].state as unknown as {systemPrompt:string;messages:Message[];tools:Array<{name:string;description:string}>}
+  expect(state.systemPrompt).toBe(systemPrompt);expect(JSON.stringify(state.messages)).toBe(JSON.stringify(messages))
+  expect(state.tools).toEqual([{name:f.tool.name,description:f.tool.description}])
+  expect(result.inputCounts).toMatchObject({toolCount:1,messageCount:messages.length,maxEstimatedTokens:50_000,providerMaxInputTokens:64_000})
+  expect(result.inputCounts!.estimatedTokens).toBeLessThan(50_000)
+  expect(result.inputCounts!.questionCharacters).toBeGreaterThan(0)
+  expect(JSON.stringify(result.inputCounts)).not.toContain('Fictional')
+  expect(f.list).not.toHaveBeenCalled()
+ })
+ it('includes all question and option bytes in the conservative input bound',async()=>{
+  const f=setup(),baseline=await planRoutineCalendarRead(f.input)
+  const padding=4*49_900-baseline.inputCounts!.stateCharacters
+  f.evaluate.mockClear()
+  const result=await planRoutineCalendarRead({...f.input,systemPrompt:f.input.systemPrompt+'x'.repeat(padding)})
+  expect(result.inputCounts!.stateCharacters/4).toBeLessThan(50_000)
+  expect(result.inputCounts!.estimatedTokens).toBeGreaterThan(50_000)
+  expect(result.path).toBe('context_limit');expect(result.plan).toBeNull()
+  expect(f.evaluate).not.toHaveBeenCalled();expect(f.list).not.toHaveBeenCalled()
+ })
  it.each([7,30])('preserves the model-chosen %s-day window for an undated request without imposing a default',async days=>{
   const f=setup(),original=f.evaluate.getMockImplementation()!
   f.input.messages=[...history.slice(0,2),{role:'user',content:'Check that calendar now.'}]
