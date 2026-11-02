@@ -1765,7 +1765,17 @@ export async function readSessionMessageScopeSource(
     [workspaceId, messageId],
   )
   const source = result.rows[0]?.source as (ScopeSource & { held?: boolean }) | null | undefined
-  return source && source.held !== true ? source : null
+  if (!source || source.held === true) return null
+  // Lifecycle flags belong to the snapshot check, never the retained descriptor.
+  // Native publication compares this exact canonical tuple with current evidence.
+  const {
+    workspaceId: sourceWorkspace, userId, assistantId, sensitivity,
+    compartments, projectIds, resourceKind, resourceId, version,
+  } = source
+  return {
+    workspaceId: sourceWorkspace, userId, assistantId, sensitivity,
+    compartments, projectIds, resourceKind, resourceId, version,
+  }
 }
 
 /**

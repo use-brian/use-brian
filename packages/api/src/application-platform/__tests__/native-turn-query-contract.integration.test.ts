@@ -9,12 +9,19 @@ const signature = 'application_query_scope_union_contains(jsonb,jsonb,integer)'
 const migration = await readFile(new URL('../../../migrations/8190_native_turn_query_contract.sql', import.meta.url), 'utf8')
 const bridge = migration.replace(/^BEGIN;\n/m, '').replace(/\nCOMMIT;\s*$/, '')
 const oldBody = migration.split('$canonical$')[1]
+// Later canonical successors legitimately change the native reader roster. Replay
+// this exact transition in the maintained pre-8196 upgrade fixture only.
+const upgradeBoundary = process.env.BRIAN_NATIVE_PUBLICATION_UPGRADE_BOUNDARY === '8195'
+  || (await pool.query(`SELECT to_regprocedure('public.publish_native_turn_annotation(uuid,uuid,uuid,uuid,jsonb,text,jsonb,uuid,bigint)') IS NULL AS predecessor`)).rows[0].predecessor
+afterAll(async () => { await pool.end() })
 
-describe.sequential('[COMP:api/native-turn-frame] canonical query successor authentication', () => {
-  afterAll(async () => { await pool.end() })
+describe.sequential('[COMP:api/native-turn-frame] current query helper compatibility', () => {
   it('leaves the complete native reader contract current after all migrations', async () => {
     expect((await pool.query('SELECT native_turn_helpers_current() valid')).rows[0].valid).toBe(true)
   })
+})
+
+describe.skipIf(!upgradeBoundary).sequential('[COMP:api/native-turn-frame] canonical query successor authentication (8195 upgrade profile)', () => {
   it.each(['canonical', 'body', 'metadata', 'acl', 'predecessor-pin', 'missing-pin', 'other-helper', 'guard', 'manifest-acl', 'manifest-rule', 'owner'] as const)(
     'authenticates the exact transition with %s state', async change => {
       const client = await pool.connect()
