@@ -81,6 +81,21 @@ describe('[COMP:api/migration-order] Migration file ordering', () => {
     ])
   })
 
+  it('places the legacy queue privilege repair before publication invalidation', () => {
+    const ordered = orderMigrationFiles([{ dir: '/open', files: [
+      '8195_native_publication_invalidation_contract.sql',
+      '8190_native_turn_query_contract.sql',
+      '81940_legacy_queue_privileges.sql',
+      '8189_native_query_formula_compilation.sql',
+    ] }])
+    expect(ordered.map(({ file }) => file)).toEqual([
+      '8189_native_query_formula_compilation.sql',
+      '8190_native_turn_query_contract.sql',
+      '81940_legacy_queue_privileges.sql',
+      '8195_native_publication_invalidation_contract.sql',
+    ])
+  })
+
   it('ignores non-sql files', () => {
     const ordered = orderMigrationFiles([
       { dir: '/open', files: ['001_a.sql', 'README.md', '.DS_Store'] },
