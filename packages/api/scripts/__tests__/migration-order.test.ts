@@ -114,6 +114,21 @@ describe('[COMP:api/migration-order] Migration file ordering', () => {
     expect(sql).toContain("name='8195_native_publication_invalidation_contract.sql'")
   })
 
+  it('repairs embedded legacy ACL snapshots after live ACL repair and before 8195', () => {
+    const files = [
+      '8195_native_publication_invalidation_contract.sql',
+      '81942_legacy_dependency_acl_snapshots.sql',
+      '81941_legacy_publication_privileges.sql',
+      '81940_legacy_queue_privileges.sql',
+    ]
+    expect(orderMigrationFiles([{ dir: '/open', files }]).map(({ file }) => file)).toEqual([
+      '81940_legacy_queue_privileges.sql',
+      '81941_legacy_publication_privileges.sql',
+      '81942_legacy_dependency_acl_snapshots.sql',
+      '8195_native_publication_invalidation_contract.sql',
+    ])
+  })
+
   it('ignores non-sql files', () => {
     const ordered = orderMigrationFiles([
       { dir: '/open', files: ['001_a.sql', 'README.md', '.DS_Store'] },
