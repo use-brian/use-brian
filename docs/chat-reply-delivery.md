@@ -15,12 +15,43 @@ an already yielded chunk, or alter the final text. Individually larger provider
 deltas retain their original size. Tool arguments and lifecycle events keep
 their existing order and identity.
 
-Every combined chunk still crosses the existing current source and recipient
-authorization checks. There is no permission cache, TTL, or revocation bypass.
-This reduces work from one expensive authorization round per provider token to
-one round per bounded queued chunk when the consumer is behind.
-Coalescing reduces repeated checks under backpressure; it does not shorten an
-individual permission check or the provider's own inference time.
+Coalescing reduces work when the consumer is behind. It does not shorten the
+provider's inference time. The authorization path depends on the response type,
+as described below.
+
+## Response delivery snapshots
+
+Native authenticated web chats use a response-bound delivery snapshot. Resolve
+user and assistant access before reading context. For shared web rooms, also
+intersect the stored room clearance, Department labels and Project scope before
+constructing prompt and tool authority. Exclude user-private rows. Shared Project
+rooms retain their additional Department exclusion. Office file conversations
+keep their file ceiling; provider groups keep their separate approved audience.
+
+On the first native output, admit the source evidence against the pinned
+recipient limit. Subsequent text or reasoning events with the same evidence
+reuse that response's admission. They do not resolve the destination again or
+resubmit all accumulated sources. When a tool adds an observation, admit only
+the new source observations and the complete accumulated label floor before
+releasing its output. A changed source version is a new observation.
+
+A snapshot belongs to one execution, accumulator, destination and permission
+ceiling. Cancellation, replacement of those bindings, or a failed admission
+refuses output permanently for that snapshot. The kernel checks runtime ownership;
+a copied object or custom callback cannot opt into snapshot handling.
+
+Independent connector ancestry, unsupported source families, non-native callers,
+Office/feed anchors and non-web destinations keep the existing live delivery
+protocol. Native fields that reveal independent ancestry also switch permanently
+to that protocol for the response. A cached native admission is never external
+source delivery consent.
+
+This is a delivery optimization, not a database permission freeze. Model input,
+tool execution, authentication and authority leases still use their existing
+checks. Source holds, retention and canonical publication/write-lineage checks
+remain in place. A live permission change can still stop the current response.
+Full next-response-only permission semantics requires a separate database
+read-admission design; the JavaScript execution snapshot alone cannot provide it.
 
 ## Authenticated transcript reads
 
@@ -78,7 +109,13 @@ discovery grants no permission, and no authorization result is cached between ca
 
 - Burst notifications coalesce under a paused consumer with unchanged text,
   bounded combined chunks, and preserved reasoning/tool/completion order.
-- Current source and recipient revocation still blocks the next emitted chunk.
+- Native web output admits unchanged evidence once; new tool evidence is checked
+  before release, without resubmitting the previously admitted sources.
+- Shared web room input authority cannot exceed the stored audience.
+- Snapshot identity, cancellation, sticky failures and live execution revocation
+  remain enforced; independent sources retain per-event delivery admission.
+- Current source and recipient revocation still blocks the next emitted chunk
+  on the existing live-delivery paths.
 - Reload returns a saved assistant reply with protected native dependencies to
   its authorized reader, and refuses a withdrawn or unrelated reader.
 - Admission is checked again after asynchronous response preparation.
