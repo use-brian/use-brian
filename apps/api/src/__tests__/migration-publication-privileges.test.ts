@@ -1,4 +1,4 @@
-/** [COMP:api/migration-owner-role] Upgrade after deployment re-grants debug SELECT. */
+/** [COMP:api/migration-owner-role] Upgrade with deployment ACLs baked into legacy guards. */
 import { PGlite } from '@electric-sql/pglite'
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm'
 import { vector } from '@electric-sql/pglite-pgvector'
@@ -11,6 +11,7 @@ import { migratePglite, preparePgliteRuntimeRole } from '../migrate-pglite.js'
 
 const migrationsDir = fileURLToPath(new URL('../../../../packages/api/migrations', import.meta.url))
 const repair = '81941_legacy_publication_privileges.sql'
+const dependencyRepair = '81942_legacy_dependency_acl_snapshots.sql'
 const blocked = '8195_native_publication_invalidation_contract.sql'
 const tables = [
   'native_turn_frames',
@@ -36,7 +37,23 @@ it('[COMP:api/migration-owner-role] repairs publication grants without accepting
       GRANT CREATE ON DATABASE postgres TO migration_owner;
       SET ROLE migration_owner;`)
     await preparePgliteRuntimeRole(db)
+    await migratePglite(db, migrationsDir, { through: '8184_native_query_policy_compilation.sql' })
+    // These grants predate 81850: its flat guard snapshots must capture the
+    // deployed ACLs, not the pristine owner-only queue ACLs from creation.
+    await db.exec(`GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE
+      public.native_field_dependency_batches,public.native_field_dependency_work,
+      public.scope_derivations,public.scope_derivation_sources TO app_user;
+      GRANT SELECT ON TABLE
+      public.native_field_dependency_batches,public.native_field_dependency_work,
+      public.scope_derivations,public.scope_derivation_sources TO "brian-debug";
+      GRANT USAGE,SELECT ON SEQUENCE public.native_field_dependency_work_id_seq TO app_user;`)
     await migratePglite(db, migrationsDir, { through: '8190_native_turn_query_contract.sql' })
+    const bakedDependencyGuard = (await db.query<{ prosrc: string }>(`SELECT prosrc FROM pg_proc
+      WHERE oid='public.application_native_dependency_batch_helpers_current()'::regprocedure`)).rows[0].prosrc
+    // The flat relation snapshot really includes the old runtime/debug ACLs.
+    assert.ok(bakedDependencyGuard.includes('app_user=arwd/migration_owner'))
+    assert.ok(bakedDependencyGuard.includes('brian-debug'))
+    assert.ok(bakedDependencyGuard.includes('app_user=rU/migration_owner'))
     const repairSql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${repair}`, 'utf8'), repair)
     const blockedSql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${blocked}`, 'utf8'), blocked)
     const snapshot = async () => ({
@@ -81,16 +98,65 @@ it('[COMP:api/migration-owner-role] repairs publication grants without accepting
     assert.deepEqual((await db.query(`SELECT to_jsonb(c) AS metadata FROM pg_class c
       WHERE oid=ANY($1::regclass[]) ORDER BY oid`, [tables])).rows, repaired)
     assert.equal(await migratePglite(db, migrationsDir, { through: repair }), 0)
-    // Repair only ACLs: independent structural authentication must still fail.
+    // 81940/81941 fix live ACLs but cannot fix the bad ACL snapshots baked by
+    // 81850. Authenticate this exact deployed predecessor failure before 81942.
+    await assert.rejects(db.transaction(tx => tx.exec(blockedSql)),
+      /native_invalidation_predecessor_changed: application_native_dependency_batch_helpers_current\(\)/)
+    assert.deepEqual((await db.query('SELECT name FROM _migrations WHERE name=$1', [blocked])).rows, [])
+    const dependencyRepairSql = toPgliteMigrationSql(
+      await readFile(`${migrationsDir}/${dependencyRepair}`, 'utf8'), dependencyRepair)
+    const guardNames = [
+      'application_native_dependency_batch_helpers_current',
+      'application_native_field_reference_helpers_current',
+    ]
+    const repairMetadata = async () => ({
+      relations: (await db.query(`SELECT to_jsonb(c) AS metadata FROM pg_class c
+        WHERE relnamespace='public'::regnamespace ORDER BY oid`)).rows,
+      functions: (await db.query(`SELECT CASE WHEN proname=ANY($1::text[])
+        THEN to_jsonb(p)-'prosrc' ELSE to_jsonb(p) END AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`, [guardNames])).rows,
+    })
+    const guardBodies = async () => (await db.query(`SELECT proname,prosrc FROM pg_proc
+      WHERE pronamespace='public'::regnamespace AND proname=ANY($1::text[])
+      ORDER BY proname`, [guardNames])).rows
+    const beforeDependencyRepair = await repairMetadata()
+    const legacyBodies = await guardBodies()
+    // Never re-bake arbitrary live drift into a trusted snapshot. Each trial
+    // rolls back both its mutation and any partial repair work on rejection.
+    for (const driftSql of [
+      'ALTER TABLE public.native_field_dependency_work DISABLE ROW LEVEL SECURITY',
+      'ALTER SEQUENCE public.native_field_dependency_work_id_seq INCREMENT BY 2',
+      'ALTER FUNCTION public.validate_native_field_dependency_batch(uuid,uuid,jsonb) COST 101',
+    ]) {
+      await assert.rejects(db.transaction(async tx => {
+        await tx.exec(driftSql)
+        await tx.exec(dependencyRepairSql)
+      }), /changed/i)
+      assert.deepEqual(await guardBodies(), legacyBodies)
+      assert.deepEqual(await repairMetadata(), beforeDependencyRepair)
+    }
+    assert.equal(await migratePglite(db, migrationsDir, { through: dependencyRepair }), 1)
+    assert.deepEqual(await repairMetadata(), beforeDependencyRepair)
+    const repairedBodies = await guardBodies()
+    assert.equal(repairedBodies.length, 2)
+    for (let i = 0; i < repairedBodies.length; i++) {
+      assert.notDeepEqual(repairedBodies[i], legacyBodies[i])
+    }
+    await db.transaction(tx => tx.exec(dependencyRepairSql))
+    assert.deepEqual(await guardBodies(), repairedBodies)
+    assert.deepEqual(await repairMetadata(), beforeDependencyRepair)
+    assert.equal(await migratePglite(db, migrationsDir, { through: dependencyRepair }), 0)
+    // Repair only ACL snapshots: independent structural authentication must still fail.
     await db.exec('ALTER TABLE public.native_turn_publication_work DISABLE ROW LEVEL SECURITY')
     await assert.rejects(migratePglite(db, migrationsDir, { through: blocked }), /native_annotation_publication_table_changed/)
     assert.deepEqual((await db.query('SELECT name FROM _migrations WHERE name=$1', [blocked])).rows, [])
     await db.exec('ALTER TABLE public.native_turn_publication_work ENABLE ROW LEVEL SECURITY')
-    await migratePglite(db, migrationsDir)
+    await migratePglite(db, migrationsDir, { through: '8201_native_turn_publication_cohorts.sql' })
     assert.deepEqual((await db.query('SELECT name FROM _migrations WHERE name=$1', [blocked])).rows, [{ name: blocked }])
     const installed = await snapshot()
     // Re-executing a historical repair must not invalidate newer manifest pins.
     await db.transaction(tx => tx.exec(repairSql))
+    await db.transaction(tx => tx.exec(dependencyRepairSql))
     assert.deepEqual(await snapshot(), installed)
   } finally {
     await db.close()
