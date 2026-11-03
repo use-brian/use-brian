@@ -46,6 +46,7 @@ import type { ResolvedWorkspaceCustomLlm } from '../custom-llm-runtime.js'
 import { ensureServableModel } from '../model-resolution.js'
 import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority,tryAssertNativeCombinedOutput,type NativeAttendedOutputBoundary } from '../application-platform/model-source-authority.js'
 import type { SessionPolicy } from '../session-kind.js'
+import { ownsWebResponsePermissionSnapshot, type WebResponsePermissionSnapshot } from '../context-scope/response-permission-snapshot.js'
 import { hasTurnAbort, registerTurnAbort, releaseTurn, startLeaseHeartbeat, takeTurnLease, unregisterTurnAbort } from './lease.js'
 import type { TurnBilling } from './billing.js'
 
@@ -56,13 +57,14 @@ const FINAL_ONLY_SINKS: ReadonlySet<TurnSinkKind> = new Set(['adapter', 'json', 
 
 export type TurnSink = {
   kind: TurnSinkKind
-  /** Host-only current recipient/source admission for a user-facing sink.
-   * Uses the original execution, lease and live accumulator; never a cached allow.
-   * Omission keeps the kernel's source-delivery validator.
+  /** Host-only recipient/source admission for a user-facing sink.
+   * Omission keeps the kernel's current source-delivery validator.
    */
   assertOutputAuthority?: (context: ToolContext) => Promise<void>
   /** Canonical native host capability; custom sink callbacks cannot opt in. */
   nativeOutputBoundary?: NativeAttendedOutputBoundary
+  /** Response-bound native web delivery only. Input and writer authority stay live. */
+  responsePermissionSnapshot?: WebResponsePermissionSnapshot
   /** Observational timing only; mutation of authority/evidence refuses output. */
   onOutputAuthorityTiming?: (milliseconds:number)=>void
   /** Every engine event, in order. The `sse` sink renders them; others may observe. */
@@ -170,7 +172,18 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       throw Object.assign(new Error('The output timing observer changed authority.'),{reason:'authority_changed' as const,retrySafe:false})
     }
   }
+  const responseSnapshot = params.sink.responsePermissionSnapshot
+  const assertResponseSnapshotBinding = (context: ToolContext) => {
+    if (responseSnapshot && (params.sink.kind !== 'sse'
+      || params.sink.responsePermissionSnapshot !== responseSnapshot
+      || params.sink.assertOutputAuthority !== responseSnapshot.assertOutputAuthority
+      || params.sink.nativeOutputBoundary
+      || !ownsWebResponsePermissionSnapshot(responseSnapshot, context))) {
+      throw Object.assign(new Error('The response permission snapshot changed.'), { reason: 'authority_changed' as const, retrySafe: false })
+    }
+  }
   const assertSinkOutputAuthority = async (context: ToolContext): Promise<void> => {
+    assertResponseSnapshotBinding(context)
     const started=Date.now()
     if (!params.sink.assertOutputAuthority) return assertSourceModelOutputAuthority(context)
     const assertIdentity = () => {
@@ -184,6 +197,7 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     assertIdentity()
     try{await params.sink.assertOutputAuthority(context)}finally{recordOutputTiming(context,started)}
     assertIdentity()
+    assertResponseSnapshotBinding(context)
   }
   const lease = params.lease ?? { mode: 'kernel' as const }
   let token: string | null = null
@@ -232,7 +246,7 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       ||params.loop.context.assertModelOutputAuthority||params.sink.assertOutputAuthority!==fence.recipient
       ||params.sink.nativeOutputBoundary!==fence.boundary)refuseCombinedReceipt()
   }
-  const nativeBoundary=params.sink.nativeOutputBoundary
+  const nativeBoundary=responseSnapshot ? undefined : params.sink.nativeOutputBoundary
   const tryCombinedProof=nativeBoundary&&!params.loop.context.assertModelOutputAuthority
     &&params.sink.kind==='sse'
     ?async(current:ToolContext):Promise<OutputFence|null>=>{
@@ -274,9 +288,12 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
         if (current.executionContext !== execution || current.scopeAccumulator !== accumulator) {
           throw Object.assign(new Error('The model context authority changed.'), { reason: 'authority_changed' as const,retrySafe: false })
         }
-        // Nested loop output re-enters host/model context. Delivery permission
-        // is checked at this kernel's actual user-facing sink below.
-        await assertSourceModelInputAuthority(current)
+        // Covered web output uses its destination-limited response snapshot.
+        // New source observations still require admission, but unchanged text
+        // chunks do not resubmit the complete accumulated source set. The input
+        // callback above and persistence retain their live source checks.
+        if (responseSnapshot) await assertSinkOutputAuthority(current)
+        else await assertSourceModelInputAuthority(current)
       } }
     for await (const event of queryLoop({
       ...params.loop,

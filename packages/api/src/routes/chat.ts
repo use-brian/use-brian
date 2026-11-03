@@ -40,6 +40,7 @@ import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
 import { createTurnTiming, markTurnEnd } from './turn-timings.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
+import { createWebResponsePermissionSnapshot } from '../context-scope/response-permission-snapshot.js'
 import {
   resolvePinnedContext,
   type ResolvedPinnedPageTarget,
@@ -3052,7 +3053,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         && executionContext.identity.principal.kind === 'workspace_member'
         && (session.workspaceId === undefined || session.workspaceId === executionContext.ownership.workspaceId)
         ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
-      const nativeOutputBoundary=nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
+      const responsePermissionSnapshot = nativeTranscriptAuthority
+        ? createWebResponsePermissionSnapshot(executionContext, scopeAccumulator, session)
+        : undefined
+      const nativeOutputBoundary=!responsePermissionSnapshot&&nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
         &&!executionContext.security.access.sharedAudience&&classifySession(session).surface==='chat'?createNativeAttendedOutputBoundary(executionContext,scopeAccumulator,{
         workspaceId:assistant.workspaceId??'',assistantId:assistant.id,userId:user.id,channelType:'web',
         channelId:session.channelId,sessionId:session.id,recipientType:turnPolicy.deliveryCeiling.recipientType,
@@ -7748,7 +7752,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           // section 6). See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
           },
-          sink: { kind: 'sse', ...(nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority ? { assertOutputAuthority:assertDeliveryAudience } : {}),
+          sink: { kind: 'sse', ...(responsePermissionSnapshot
+            ? { responsePermissionSnapshot, assertOutputAuthority: responsePermissionSnapshot.assertOutputAuthority,
+                onOutputAuthorityTiming: (ms: number) => turnTiming.add('audience_check', ms) }
+            : nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority ? { assertOutputAuthority:assertDeliveryAudience } : {}),
           onReplyTextComplete: () => postReply.announceTextCompletion(() => {
             sendActivityEvent('reply_text_complete', {})
             turnStream.setReplyPhase('saving')
