@@ -49,7 +49,7 @@ vi.mock('../../context-scope/attended-audience.js', () => ({
 
 import { ContextScopeAccumulator, createExecutionContext, executionToolContext, type ScopeSource, type ToolContext } from '@use-brian/core'
 import type { Session } from '../../db/sessions.js'
-import { createWebResponsePermissionSnapshot } from '../../context-scope/response-permission-snapshot.js'
+import { createRequestPermissionContext } from '../../context-scope/request-permission-context.js'
 import { validateAttendedAudienceEvidence, createAttendedDeliveryAudienceAuthorizer } from '../../context-scope/attended-audience.js'
 import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority } from '../../application-platform/model-source-authority.js'
 import { runAssistantTurn, TurnRefusal, servedTurnModel, turnUsageIdentity, type TurnSinkKind } from '../kernel.js'
@@ -299,11 +299,15 @@ function snapshotTurnFixture() {
   const context: ToolContext = { ...executionToolContext(execution, { appId: 'chat' }), scopeAccumulator: accumulator }
   const session = { id: 's-1', userId: 'actor', channelType: 'web', channelId: 'channel',
     visibility: 'personal', anchorKind: 'none', appOrigin: 'chat' } as Session
-  const snapshot = createWebResponsePermissionSnapshot(execution, accumulator, session)!
+  const snapshot = createRequestPermissionContext({ executionContext: execution, turnScope: {
+    access: execution.security.access, activeGroupId: null, activeProjectId: null,
+    effectiveCompartments: [], effectiveProjectIds: [], writeCompartments: [], writeProjectIds: [],
+    activeTeam: null, activeProject: null,
+  } }, accumulator, session)!
   expect(snapshot).toBeDefined()
   const options = params('sse', { abortController: controller,
     loop: { ...params('sse').loop, context },
-    sink: { kind: 'sse', responsePermissionSnapshot: snapshot, assertOutputAuthority: snapshot.assertOutputAuthority },
+    sink: { kind: 'sse', permissionContext: snapshot, assertOutputAuthority: snapshot.authorizeDelivery },
   })
   return { execution, authority, initial, accumulator, context, snapshot, options }
 }
@@ -415,7 +419,7 @@ describe('[COMP:api/turn-kernel] response permission snapshot integration', () =
     'rejects %s before rendering or publication', async kind => {
       const f = snapshotTurnFixture(), seen = vi.fn(), afterLoop = vi.fn(), counterfeit = vi.fn(async () => {})
       if (kind === 'forged snapshot') {
-        f.options.sink.responsePermissionSnapshot = { ...f.snapshot, assertOutputAuthority: counterfeit }
+        f.options.sink.permissionContext = { ...f.snapshot, authorizeDelivery: counterfeit }
         f.options.sink.assertOutputAuthority = counterfeit
       } else if (kind === 'changed callback') f.options.sink.assertOutputAuthority = counterfeit
       else if (kind === 'foreign execution') f.options.loop.context = snapshotTurnFixture().context
@@ -423,7 +427,7 @@ describe('[COMP:api/turn-kernel] response permission snapshot integration', () =
       else if (kind === 'non-SSE sink') f.options.sink.kind = 'adapter'
       else {
         // Replacement after the kernel has captured its response-bound capability.
-        loopBeforeEvent = () => { f.options.sink.responsePermissionSnapshot = snapshotTurnFixture().snapshot }
+        loopBeforeEvent = () => { f.options.sink.permissionContext = snapshotTurnFixture().snapshot }
       }
       simulateModelBoundaries = true
       loopEvents = [textTurn('not authorized')]

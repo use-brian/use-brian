@@ -40,7 +40,8 @@ import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
 import { createTurnTiming, markTurnEnd } from './turn-timings.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
-import { createWebResponsePermissionSnapshot } from '../context-scope/response-permission-snapshot.js'
+import { createRequestPermissionContext, type RequestPermissionContext } from '../context-scope/request-permission-context.js'
+import { createExecutionPermissionSnapshots } from '../context-scope/execution-permission-snapshots.js'
 import {
   resolvePinnedContext,
   type ResolvedPinnedPageTarget,
@@ -132,7 +133,7 @@ import {
   sessionMessageInputScope,
   automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
-import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
+import { resolveExecutionContextSystem, type ResolveExecutionContextInput } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../turn/prepare.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
@@ -2388,6 +2389,7 @@ export function chatRoutes(options: WebChatOptions): Router {
     // its own entry, and the Map leaking one row per turn for the process's
     // lifetime. Set once at registration, never cleared.
     let abortRegistryToken: string | null = null
+    let requestPermissions: RequestPermissionContext | undefined
 
     try {
       const jwtUserId = (req as { userId?: string }).userId
@@ -2962,7 +2964,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Resolve the one trusted scope before this entry point performs any
       // persistent semantic write or enters the normal model path.
       const abortController = new AbortController()
-      const resolvedExecution = await resolveExecutionContextSystem({
+      const executionInput: ResolveExecutionContextInput = {
         userId: user.id,
         assistant,
         // A room, doc comment thread or Feed draft reads only rows the whole
@@ -2993,7 +2995,8 @@ export function chatRoutes(options: WebChatOptions): Router {
             ?authSessionStore.validateAccess(credentialClaims):Promise.resolve(false):undefined}),
         sessionAuthority: session,
         ...(officeLane ? officeLaneExecutionBounds(officeLane, user.id, officeLaneDeps) : {}),
-      })
+      }
+      const resolvedExecution = await resolveExecutionContextSystem(executionInput)
       const turnScope = resolvedExecution.turnScope
       const executionContext = resolvedExecution.executionContext
       const authority = executionContext.security.authority
@@ -3053,10 +3056,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         && executionContext.identity.principal.kind === 'workspace_member'
         && (session.workspaceId === undefined || session.workspaceId === executionContext.ownership.workspaceId)
         ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
-      const responsePermissionSnapshot = nativeTranscriptAuthority
-        ? createWebResponsePermissionSnapshot(executionContext, scopeAccumulator, session)
+      const permissionContext = nativeTranscriptAuthority
+        ? createRequestPermissionContext(resolvedExecution, scopeAccumulator, session, {
+            createActionSnapshots: () => createExecutionPermissionSnapshots(executionInput),
+          })
         : undefined
-      const nativeOutputBoundary=!responsePermissionSnapshot&&nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
+      requestPermissions = permissionContext
+      const nativeOutputBoundary=!permissionContext&&nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
         &&!executionContext.security.access.sharedAudience&&classifySession(session).surface==='chat'?createNativeAttendedOutputBoundary(executionContext,scopeAccumulator,{
         workspaceId:assistant.workspaceId??'',assistantId:assistant.id,userId:user.id,channelType:'web',
         channelId:session.channelId,sessionId:session.id,recipientType:turnPolicy.deliveryCeiling.recipientType,
@@ -7752,8 +7758,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           // section 6). See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
           },
-          sink: { kind: 'sse', ...(responsePermissionSnapshot
-            ? { responsePermissionSnapshot, assertOutputAuthority: responsePermissionSnapshot.assertOutputAuthority,
+          sink: { kind: 'sse', ...(permissionContext
+            ? { permissionContext, assertOutputAuthority: permissionContext.authorizeDelivery,
                 onOutputAuthorityTiming: (ms: number) => turnTiming.add('audience_check', ms) }
             : nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority ? { assertOutputAuthority:assertDeliveryAudience } : {}),
           onReplyTextComplete: () => postReply.announceTextCompletion(() => {
@@ -9272,6 +9278,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
       res.end()
     } finally {
+      requestPermissions?.dispose()
       // The turn's per-phase wall-clock, once per request. Only a request that
       // reached the query loop is a turn (queued mid-turn input, 409s and
       // pre-flight refusals are not); those still surface through
