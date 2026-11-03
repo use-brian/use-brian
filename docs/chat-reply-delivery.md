@@ -21,8 +21,12 @@ as described below.
 
 ## Response delivery snapshots
 
-Native authenticated web chats use a response-bound delivery snapshot. Resolve
-user and assistant access before reading context. For shared web rooms, also
+Native authenticated web chats use one request permission context. It owns the
+selected execution permissions and derives delivery receipts from that same
+selection; there is no independent delivery permission loader or subscription.
+Its methods separate action selection (`beforeAction`) from destination/source
+admission (`authorizeDelivery`). Resolve user and assistant access before reading
+context. For shared web rooms, also
 intersect the stored room clearance, Department labels and Project scope before
 constructing prompt and tool authority. Exclude user-private rows. Shared Project
 rooms retain their additional Department exclusion. Office file conversations
@@ -35,10 +39,13 @@ resubmit all accumulated sources. When a tool adds an observation, admit only
 the new source observations and the complete accumulated label floor before
 releasing its output. A changed source version is a new observation.
 
-A snapshot belongs to one execution, accumulator, destination and permission
-ceiling. Cancellation, replacement of those bindings, or a failed admission
-refuses output permanently for that snapshot. The kernel checks runtime ownership;
-a copied object or custom callback cannot opt into snapshot handling.
+A delivery receipt belongs to one selected execution, accumulator, destination
+and permission ceiling. A new action selection discards old cached receipts,
+without changing completed results or the executions held by in-flight actions.
+Those older executions must receive fresh delivery admission before reusing a
+receipt. Cancellation, replacement of bindings, or failed delivery admission
+refuses output. A delivery failure stays invalid for the request. The kernel
+checks runtime ownership; a copied owner or custom callback cannot opt in.
 
 Independent connector ancestry, unsupported source families, non-native callers,
 Office/feed anchors and non-web destinations keep the existing live delivery
@@ -52,6 +59,10 @@ checks. Source holds, retention and canonical publication/write-lineage checks
 remain in place. A live permission change can still stop the current response.
 Full next-response-only permission semantics requires a separate database
 read-admission design; the JavaScript execution snapshot alone cannot provide it.
+The [request permission context](action-permission-snapshots.md) owns lazy event
+invalidation and the trusted-resolver adapter. Native chat delivery now uses that
+shared owner. Automatic action-start execution switching is still pending and
+does not change the live-input, writer or database guarantees above.
 
 ## Authenticated transcript reads
 
