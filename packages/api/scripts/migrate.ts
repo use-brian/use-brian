@@ -5,6 +5,7 @@ import dotenv from 'dotenv'
 import pg from 'pg'
 import { orderMigrationFiles } from './migration-order.js'
 import { findAppliedMigrationRenames } from './migration-renames.js'
+import { nativePageCompletionRecoverySql } from './migration-recovery.js'
 
 export type MigrationOptions = {
   databaseUrl: string
@@ -18,6 +19,9 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
   const client = new pg.Client({ connectionString: databaseUrl })
   await client.connect()
   try {
+    // Session-scoped: migration files commit independently. Serialize before
+    // reading the ledger so another runner cannot retain a stale applied set.
+    await client.query("SELECT pg_advisory_lock(hashtextextended('use-brian:migrations', 0))")
     // Create migrations tracking table if it doesn't exist
     await client.query(`
       CREATE TABLE IF NOT EXISTS public._migrations (
@@ -26,7 +30,11 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
       )
     `)
 
-    // Get already-applied migrations
+    // Historical SQL may have committed before its separate ledger insertion.
+    // Recognize only the independently authenticated, known completed boundary.
+    await client.query(await nativePageCompletionRecoverySql())
+
+    // Get already-applied migrations after serialized recovery.
     const { rows: applied } = await client.query('SELECT name FROM public._migrations ORDER BY name')
     const appliedSet = new Set(applied.map((r) => r.name))
 
