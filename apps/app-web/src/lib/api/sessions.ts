@@ -1,4 +1,5 @@
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
+import { parseHostObservation } from "@use-brian/shared";
 /**
  * Typed fetchers for the app-web session-resume flow.
  *
@@ -47,6 +48,8 @@ const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Sidebar list row — mirrors what /api/sessions returns. */
 export type DocSession = {
+  /** Browser request start, only for reconciling transient activity; never content authority. */
+  statusReadStartedAt?: number;
   /** Metadata link only; opening it still requires current history admission. */
   recoveredFromSessionId?: string;
   transport?: string;
@@ -990,7 +993,7 @@ export function extractToolUses(
   for (const block of content) {
     if (!block || typeof block !== "object") continue;
     const b = block as { type?: unknown; id?: unknown; name?: unknown; input?: unknown };
-    if (b.type !== "tool_use" || typeof b.name !== "string") continue;
+    if ((b.type !== "tool_use" && !parseHostObservation(block)) || typeof b.name !== "string") continue;
     uses.push({
       id: typeof b.id === "string" ? b.id : `tool_${uses.length}`,
       name: b.name,

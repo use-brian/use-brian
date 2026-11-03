@@ -1,3 +1,4 @@
+import { connectorAuthorizationPopupResponse } from "@/lib/connector-authorization-popup-response";
 import { withConnectWorkspace } from "@/lib/connector-auto-expose";
 import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { NextResponse } from "next/server";
@@ -71,14 +72,9 @@ export async function GET(request: Request) {
     return NextResponse.redirect(forward);
   }
 
-  const { connector, createNew, instanceId, workspaceId, nonce, continuation } = parseConnectorState(stateRaw);
+  const parsedState = parseConnectorState(stateRaw);
+  const { connector, createNew, instanceId, workspaceId, nonce, continuation } = parsedState;
   const isGdriveByo = connector === "gdrive-byo";
-
-  if (error || !code || !connector) {
-    return NextResponse.redirect(
-      new URL(connectorsPath(workspaceId, { error: "consent_denied" }), appOrigin),
-    );
-  }
 
   // CSRF gate (WS3 #5): the `state` nonce must match the companion cookie the
   // connect handler set before redirecting. A forged callback (attacker-planted
@@ -87,17 +83,25 @@ export async function GET(request: Request) {
   const cookieStore = await cookies();
   const cookieNonce = cookieStore.get(CONNECTOR_OAUTH_STATE_COOKIE)?.value;
   if (!verifyConnectorState({ stateNonce: nonce, cookieNonce })) {
+    // Failure carries no authority and never stores or resumes anything. Keep
+    // even an expired/superseded consent window out of Studio.
+    if (parsedState.popup) return connectorAuthorizationPopupResponse(parsedState, false);
     return NextResponse.redirect(
       new URL(connectorsPath(workspaceId, { error: "invalid_state" }), appOrigin),
     );
   }
+
+  const fail = (reason: string) => parsedState.popup
+    ? connectorAuthorizationPopupResponse(parsedState, false)
+    : NextResponse.redirect(new URL(connectorsPath(workspaceId, { error: reason }), appOrigin));
+  if (error || !code || !connector) return fail("consent_denied");
 
   // A BYO Drive secret is stored in the API's workspace credential table, not
   // in this Next process. Keep app-web's only job to the cookie-bound CSRF gate,
   // then forward the raw code for server-side exchange and encrypted storage.
   if (isGdriveByo) {
     const accessToken = cookieStore.get("access_token")?.value;
-    if (!accessToken) return NextResponse.redirect(new URL("/login", appOrigin));
+    if (!accessToken) return parsedState.popup ? fail("login_required") : NextResponse.redirect(new URL("/login", appOrigin));
 
     try {
       const redirectUri = `${appOrigin}/api/auth/callback/google-connector`;
@@ -120,9 +124,7 @@ export async function GET(request: Request) {
         const reason = detail.includes("app_credentials_missing")
           ? "app_credentials_missing"
           : "token_exchange_failed";
-        return NextResponse.redirect(
-          new URL(connectorsPath(workspaceId, { error: reason }), appOrigin),
-        );
+        return fail(reason);
       }
       const stored = (await exchangeRes.json().catch(() => ({}))) as {
         connectorInstanceId?: string;
@@ -134,6 +136,7 @@ export async function GET(request: Request) {
         provider: "gdrive",
         connectorInstanceId: stored.connectorInstanceId,
       });
+      if (parsedState.popup) return connectorAuthorizationPopupResponse(parsedState, !!resumedPath);
       if (resumedPath) return NextResponse.redirect(new URL(resumedPath, appOrigin));
       return NextResponse.redirect(
         new URL(
@@ -146,9 +149,7 @@ export async function GET(request: Request) {
       );
     } catch (err) {
       console.error("[google-connector] BYO Drive callback error:", err);
-      return NextResponse.redirect(
-        new URL(connectorsPath(workspaceId, { error: "unexpected" }), appOrigin),
-      );
+      return fail("unexpected");
     }
   }
 
@@ -170,9 +171,7 @@ export async function GET(request: Request) {
 
     if (!tokenRes.ok) {
       console.error("[google-connector] token exchange failed:", await tokenRes.text());
-      return NextResponse.redirect(
-        new URL(connectorsPath(workspaceId, { error: "token_exchange_failed" }), appOrigin),
-      );
+      return fail("token_exchange_failed");
     }
 
     const tokens = (await tokenRes.json()) as {
@@ -182,9 +181,7 @@ export async function GET(request: Request) {
 
     if (!tokens.refresh_token) {
       console.error("[google-connector] no refresh_token returned");
-      return NextResponse.redirect(
-        new URL(connectorsPath(workspaceId, { error: "no_refresh_token" }), appOrigin),
-      );
+      return fail("no_refresh_token");
     }
 
     // Fetch the connected Google account's email
@@ -206,7 +203,7 @@ export async function GET(request: Request) {
     // Send refresh token to Express backend to store in the connector row
     const accessToken = cookieStore.get("access_token")?.value;
     if (!accessToken) {
-      return NextResponse.redirect(new URL("/login", appOrigin));
+      return parsedState.popup ? fail("login_required") : NextResponse.redirect(new URL("/login", appOrigin));
     }
 
     // `instanceId` (reconnect) re-points an EXISTING instance's credential —
@@ -233,9 +230,7 @@ export async function GET(request: Request) {
 
     if (!storeRes.ok) {
       console.error("[google-connector] store credentials failed:", await storeRes.text());
-      return NextResponse.redirect(
-        new URL(connectorsPath(workspaceId, { error: "store_failed" }), appOrigin),
-      );
+      return fail("store_failed");
     }
 
     // Thread the minted/reconnected instance UUID back to the connectors
@@ -252,6 +247,7 @@ export async function GET(request: Request) {
       provider: connector,
       connectorInstanceId: stored.connectorInstanceId,
     });
+    if (parsedState.popup) return connectorAuthorizationPopupResponse(parsedState, !!resumedPath);
     if (resumedPath) return NextResponse.redirect(new URL(resumedPath, appOrigin));
 
     return NextResponse.redirect(
@@ -265,9 +261,7 @@ export async function GET(request: Request) {
     );
   } catch (err) {
     console.error("[google-connector] callback error:", err);
-    return NextResponse.redirect(
-      new URL(connectorsPath(workspaceId, { error: "unexpected" }), appOrigin),
-    );
+    return fail("unexpected");
   }
 }
 

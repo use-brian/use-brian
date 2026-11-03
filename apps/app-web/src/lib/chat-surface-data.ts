@@ -47,6 +47,7 @@
  * [COMP:app-web/chat-sessions-cache]
  */
 
+import { recordChatSessionRecency, useChatSessionFeedback } from "@/lib/chat-send-feedback";
 import { useCallback, useEffect, useState } from "react";
 import {
   listWorkspaceAssistants,
@@ -54,6 +55,8 @@ import {
 } from "@/lib/api/views";
 import {
   listPersonalSessions,
+  fetchSessionMessages,
+  type DocSessionMessage,
   setSessionArchived,
   listWorkspaceSessions,
   type DocSession,
@@ -65,6 +68,7 @@ import {
   chatSessionsCacheKey,
   chatSharedSessionsCacheKey,
   chatTranscriptCacheKey,
+  chatTranscriptIntentCacheKey,
 } from "@/lib/surface-prefetch";
 import {
   invalidateSurfaceCache,
@@ -238,16 +242,24 @@ export function useProjectChatSessionsData(workspaceId: string, projectId: strin
       setExhaustedCursor(next.length < 50 ? next.at(-1)?.id ?? last.id : null);
     } catch (error) { setPageError(error); } finally { setPaging(false); }
   };
-  return { ...rows, error: rows.error ?? pageError, paging, hasMore: rows.data?.at(-1)?.id !== exhaustedCursor, more };
+  const presented = useChatSessionFeedback(workspaceId, rows.data);
+  return { ...rows, data: presented ?? undefined, error: rows.error ?? pageError, paging, hasMore: rows.data?.at(-1)?.id !== exhaustedCursor, more };
 }
 
 /** Keep creations made during an older read; the next read is authoritative. */
 async function readChatList<T extends DocSession>(key: string, fetch: () => Promise<T[]>): Promise<T[]> {
   const before = new Set(readSurfaceCache<T[]>(key).data?.map(row => row.id));
-  const rows = await fetch();
+  const statusReadStartedAt = Date.now();
+  const rows = (await fetch()).map(row => ({ ...row, statusReadStartedAt }));
   const added = (readSurfaceCache<T[]>(key).data ?? []).filter(row =>
     !before.has(row.id) && !rows.some(fetched => fetched.id === row.id));
-  return [...added, ...rows];
+  // A server snapshot can predate the local send even when it lands later.
+  // Preserve only recency on authorized rows, never an absent row or its title.
+  const current = new Map((readSurfaceCache<T[]>(key).data ?? []).map(row => [row.id, row]));
+  return [...added, ...rows.map(row => {
+    const local = current.get(row.id);
+    return local && local.lastActive > row.lastActive ? { ...row, lastActive: local.lastActive } : row;
+  })].sort((a, b) => b.lastActive.localeCompare(a.lastActive));
 }
 
 /** Publish a server-confirmed creation in every list that renders its audience. */
@@ -265,6 +277,35 @@ export function cacheCreatedChatSession(workspaceId: string, row: DocSession | W
       seedSurfaceCache(key, [row], { expiresInMs: () => SURFACE_CONTENT_LEASE_MS, keepInflightOnExpiry: true }, true);
     }
   }
+}
+
+/** Promote only already-authorized rows; rollback cannot undo a newer send. */
+export function promoteChatSession(workspaceId: string, sessionId: string, contextProjectId?: string | null): () => void {
+  const personalKey = chatSessionsCacheKey(workspaceId);
+  const sharedKey = chatSharedSessionsCacheKey(workspaceId);
+  const known = [...(readSurfaceCache<DocSession[]>(personalKey).data ?? []),
+    ...(readSurfaceCache<DocSession[]>(sharedKey).data ?? [])].find(row => row.id === sessionId);
+  const keys = [personalKey, sharedKey, chatSharedSessionsCacheKey(workspaceId, contextProjectId ?? known?.contextProjectId ?? null)];
+  const previousActivity = keys.flatMap(key => readSurfaceCache<DocSession[]>(key).data ?? [])
+    .filter(row => row.id === sessionId).map(row => Date.parse(row.lastActive)).filter(Number.isFinite);
+  const changedAt = new Date(Math.max(Date.now(), ...previousActivity.map(time => time + 1))).toISOString();
+  const rollbackPresentation = recordChatSessionRecency(workspaceId, sessionId, changedAt);
+  const previous = new Map<string, string>();
+  for (const key of keys) {
+    mutateSurfaceCache<DocSession[]>(key, rows => rows.map(row => {
+      if (row.id !== sessionId) return row;
+      previous.set(key, row.lastActive);
+      return { ...row, lastActive: changedAt };
+    }).sort((a, b) => b.lastActive.localeCompare(a.lastActive)));
+  }
+  return () => {
+    rollbackPresentation();
+    for (const [key, lastActive] of previous) {
+      mutateSurfaceCache<DocSession[]>(key, rows => rows.map(row =>
+        row.id === sessionId && row.lastActive === changedAt ? { ...row, lastActive } : row,
+      ).sort((a, b) => b.lastActive.localeCompare(a.lastActive)));
+    }
+  };
 }
 
 // ── Optimistic patches ───────────────────────────────────────────────────
@@ -475,11 +516,14 @@ export function useChatSessionsData(
     await Promise.all([refreshRoster(), refreshShared(), refreshPersonal()]);
   }, [refreshPersonal, refreshRoster, refreshShared]);
 
+  const presentedPersonal = useChatSessionFeedback(wid, personalDenied ? null : personal.data ?? disk?.personal ?? null);
+  const presentedShared = useChatSessionFeedback(wid, sharedDenied ? null : shared.data ?? disk?.shared ?? null);
+
   return {
     assistants: roster.data ?? EMPTY_ASSISTANTS,
     assistantsLoaded: roster.data !== undefined || roster.error !== undefined,
-    personal: personalDenied ? null : personal.data ?? disk?.personal ?? null,
-    shared: sharedDenied ? null : shared.data ?? disk?.shared ?? null,
+    personal: presentedPersonal ?? null,
+    shared: presentedShared ?? null,
     personalError: personal.error ?? roster.error,
     revalidating: roster.revalidating || personal.revalidating || shared.revalidating,
     refresh,
@@ -489,6 +533,56 @@ export function useChatSessionsData(
 }
 
 // ── Transcripts ──────────────────────────────────────────────────────────
+
+type TranscriptIntent = {
+  sessionId: string;
+  expiresAt: number;
+  controller: AbortController;
+  promise: Promise<DocSessionMessage[]>;
+  consumed: boolean;
+};
+
+/** Warm only deliberate pointer/keyboard intent, never every visible row. */
+export function warmChatTranscript(sessionId: string): void {
+  if (typeof window === "undefined" || !getUserInfo()?.id || readCachedTranscript(sessionId) !== undefined) return;
+  const key = chatTranscriptIntentCacheKey();
+  const existing = readSurfaceCache<TranscriptIntent>(key).data;
+  if (existing?.sessionId === sessionId && existing.expiresAt > Date.now()) return;
+  evictSurfaceCacheKey(key);
+  const controller = new AbortController();
+  const intent: TranscriptIntent = {
+    sessionId, expiresAt: Date.now() + 10_000, controller, consumed: false,
+    promise: fetchSessionMessages(sessionId, { strict: true, signal: controller.signal }),
+  };
+  seedSurfaceCache(key, intent, {
+    expiresInMs: value => value.expiresAt - Date.now(),
+    dispose: value => { if (!value.consumed) value.controller.abort(); },
+  });
+  void intent.promise.catch(() => {
+    if (readSurfaceCache<TranscriptIntent>(key).data === intent) evictSurfaceCacheKey(key);
+  });
+}
+
+/** Consume one intent read. Live refreshes always bypass pre-turn bytes. */
+export async function fetchChatTranscript(
+  sessionId: string,
+  options: { force?: boolean; signal: AbortSignal },
+): Promise<DocSessionMessage[]> {
+  const key = chatTranscriptIntentCacheKey();
+  const intent = readSurfaceCache<TranscriptIntent>(key).data;
+  if (intent?.sessionId === sessionId && !options.force && intent.expiresAt > Date.now()) {
+    intent.consumed = true;
+    evictSurfaceCacheKey(key);
+    const abort = () => intent.controller.abort();
+    if (options.signal.aborted) abort();
+    options.signal.addEventListener("abort", abort, { once: true });
+    try { return await intent.promise; }
+    finally { options.signal.removeEventListener("abort", abort); }
+  }
+  // A selection or fresh read supersedes speculative work for any other chat.
+  evictSurfaceCacheKey(key);
+  return fetchSessionMessages(sessionId, { strict: true, signal: options.signal });
+}
 
 /** The cached transcript for a session, or `undefined` when cold. */
 export function readCachedTranscript<T>(sessionId: string): T[] | undefined {

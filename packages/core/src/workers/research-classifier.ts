@@ -1,6 +1,11 @@
+import {buildToolSelectionQuestions} from '../engine/tool-selection.js'
+import {createLlmDecisionProvider,buildLlmDecisionMessages,decisionLlmOutputBudget} from '../decisions/adapters/llm.js'
 import {bindScopeSources,boundScopeSources} from '../security/source-evidence.js'
+import {isTrivialChatMessage} from '../classification/trivial-chat.js'
 import {DerivedScopeError} from '../security/derived-scope.js'
-import {assertInputAuthority,isInputAuthorityError} from '../providers/input-authority.js'
+import {assertInputAuthority,assertProviderInputPreparation,captureInputAdmissionProvider,isInputAuthorityError,ownsInputAdmission} from '../providers/input-authority.js'
+import { decisionCompletionInput } from '../decisions/invocation.js'
+import { captureClassifierDecisionRuntime, assertClassifierBookkeeping, registerClassifierLlmCompletion } from '../decisions/authority-ownership.js'
 import type {SessionContextAuthority} from '../memory/session-state-types.js'
 /**
  * Pre-flight classifier for adaptive research-mode entry.
@@ -19,6 +24,7 @@ import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
 import type {
   DecisionExecutionPort,
+  DecisionExecutionOperation,
   DecisionResponse,
 } from '../decisions/index.js'
 
@@ -109,9 +115,13 @@ export type ResearchClassifyOptions = {
   decisionRuntime?: DecisionExecutionPort
   workspaceId?: string
   runId?: string
+  /** Already scoped capability metadata; never an execution grant. */
+  toolCandidates?: Array<{name:string;description:string}>
 }
 
 export type ResearchClassifyResult = {
+  /** Present when preparation owns selection, including an empty choice. */
+  toolNames?: string[]
   /** Whether the classifier flagged the message as needing research mode. */
   research: boolean
   /** Smallest sufficient research effort; absent for ordinary/site requests. */
@@ -181,7 +191,7 @@ const RESEARCH_OPERATION = {
 } as const
 
 function primaryResearchResult(response: DecisionResponse): ResearchClassifyResult | null {
-  const answer = response.answers[0]
+  const answer = response.answers.find(answer => answer.questionId === 'intent')
   if (answer?.kind !== 'choice') return null
   const common = {
     usage: response.usage
@@ -218,24 +228,25 @@ async function classifyResearchWithLlm(params: {
   message: string
   recentConversation: Array<{ role: 'user' | 'assistant'; text: string }>
 }): Promise<ResearchClassifyResult> {
-  await assertInputAuthority(params.assertInputAuthority)
-  const stream = params.provider.stream({
+  const provider = captureInputAdmissionProvider(params.provider)
+  const messages = [{ role: 'user' as const, content: JSON.stringify({
+    currentMessage: params.message,
+    recentConversation: params.recentConversation,
+  }) }]
+  await assertProviderInputPreparation(provider, { model: params.model, messages }, params.assertInputAuthority)
+  params.signal?.throwIfAborted()
+  const stream = provider.stream({
     assertInputAuthority: params.assertInputAuthority,
     signal: params.signal,
     model: params.model,
     systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-    messages: [{
-      role: 'user',
-      content: JSON.stringify({
-        currentMessage: params.message,
-        recentConversation: params.recentConversation,
-      }),
-    }],
-    maxTokens: 128,
+    messages,
+    ...decisionLlmOutputBudget(provider, { wireId: params.model }, 128),
     temperature: 0,
   })
 
   const response = await collectStream(stream)
+  params.signal?.throwIfAborted()
   await assertInputAuthority(params.assertInputAuthority)
   const text = response.content
     .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
@@ -294,8 +305,7 @@ async function classifyResearchIntentCurrent(
 
   // Only clearly trivial short chat bypasses assessment. A short substantive
   // question can need several sources without containing a research keyword.
-  const trivialChat = /^(?:(?:hi|hello|hey)(?: there)?|thanks|thank you|ok(?:ay)?|sure|got it|yes|no|早晨|你好|多謝|谢谢|謝謝|こんにちは|ありがとう|而家得閒嗎)[\s!?.,。！？，]*$/iu
-  if (!message.trim() || (effectiveLength(message) <= minMessageLength && trivialChat.test(message.trim()))) {
+  if (!message.trim() || (effectiveLength(message) <= minMessageLength && isTrivialChatMessage(message))) {
     return { research: false, operateSite: false, reason: null, usage: null, model: null }
   }
 
@@ -305,19 +315,28 @@ async function classifyResearchIntentCurrent(
     .map((turn) => ({ role: turn.role, text: turn.text.trim().slice(0, 2000) }))
 
   if (options.decisionRuntime) {
-    const result = await options.decisionRuntime.run({
+    const combined = options.toolCandidates !== undefined
+    const selection = combined ? buildToolSelectionQuestions(options.toolCandidates!) : null
+    const decode = (response: DecisionResponse): ResearchClassifyResult | null => {
+      const intent = primaryResearchResult(response)
+      if (!intent) return null
+      if (!combined) return intent
+      const toolAnswers = response.answers.filter(answer => answer.questionId !== 'intent')
+      return { ...intent, toolNames: selection ? selection.namesFrom({ ...response, answers: toolAnswers }) : [] }
+    }
+    const result = await options.decisionRuntime.run<ResearchClassifyResult>({
       ...(options.workspaceId ? { workspaceId: options.workspaceId } : {}),
       llm: { provider, modelId: model },
       request: {
         runId: options.runId ?? `research-intent-${Date.now()}`,
-        operation: RESEARCH_OPERATION,
-        state: { currentMessage: message, recentConversation },
+        operation: combined ? { ...RESEARCH_OPERATION, version: '3', stateVersion: '2', questionVersion: '3' } : RESEARCH_OPERATION,
+        state: { currentMessage: message, recentConversation, ...(combined ? { tools: selection?.catalog ?? [] } : {}) },
         assertInputAuthority: options.assertInputAuthority,
         signal: options.signal,
         questions: [{
           kind: 'choice',
           id: 'intent',
-          prompt: 'Assess fresh evidence needs using recent dialogue. Existing-context explanation is ordinary; new evidence can require research even in a short follow-up. Choose the smallest sufficient research effort. One named site is a site operation.',
+          prompt: (combined ? CLASSIFIER_SYSTEM_PROMPT.replace('Return JSON only. No explanation.', 'Answer the intent choice question; do not output a separate JSON object.') + '\n' : '') + 'Assess fresh evidence needs using recent dialogue. Existing-context explanation is ordinary; new evidence can require research even in a short follow-up. Choose the smallest sufficient research effort. One named site is a site operation.',
           options: [
             { value: 'ordinary', description: 'Normal request or contextual follow-up' },
             { value: 'research_focused', description: 'Narrow multi-source investigation: two angles, one wave' },
@@ -325,11 +344,12 @@ async function classifyResearchIntentCurrent(
             { value: 'research_deep', description: 'Broad, exhaustive or conflicting evidence: five workers, four waves' },
             { value: 'operate_site', description: 'Open, browse, log into, or act on one named site' },
           ],
-        }],
+        }, ...(selection?.questions ?? [])],
       },
-      operation: {
+      operation: registerClassifierLlmCompletion<DecisionExecutionOperation<ResearchClassifyResult>>({
+        assertInputAuthority: options.assertInputAuthority,
         decide(response, { profile }) {
-          const answer = response.answers[0]
+          const answer = response.answers.find(answer => answer.questionId === 'intent')
           const probabilities = answer?.evidence.probabilities
           const policy = profile?.policy
           const reviewBelow = typeof policy === 'object' && policy !== null && !Array.isArray(policy)
@@ -342,18 +362,32 @@ async function classifyResearchIntentCurrent(
           ) {
             return { kind: 'follow_up', reason: 'uncertain' }
           }
-          const result = primaryResearchResult(response)
+          const result = decode(response)
           return result
             ? { kind: 'complete', result }
             : { kind: 'unavailable', reason: 'invalid_response' }
         },
-        validateResult: validateResearchResult,
-        safeFailure: () => ({ research: false, operateSite: false, reason: null, usage: null, model: null }),
+        validateResult: result => {
+          validateResearchResult(result)
+          if (combined && (!Array.isArray(result.toolNames) || result.toolNames.some(name => !selection?.catalog.some(tool => tool.name === name)))) {
+            throw new Error('Invalid preparation selection')
+          }
+          return result
+        },
+        safeFailure: () => ({ research: false, operateSite: false, reason: null, usage: null, model: null, ...(combined ? { toolNames: [] } : {}) }),
         async completeWithLlm(context) {
+          if (combined) {
+            const response = await createLlmDecisionProvider({ provider: context.llm.provider }).evaluate({
+              ...context.request, model: { catalogId: context.llm.modelId, wireId: context.llm.modelId },
+              ...decisionCompletionInput(context, options),
+            })
+            const result = decode(response)
+            if (!result) throw new Error('Invalid preparation result')
+            return { result, providerId: response.providerId, model: response.model, usage: response.usage }
+          }
           const result = await classifyResearchWithLlm({
             provider: context.llm.provider,
-            assertInputAuthority: options.assertInputAuthority,
-            signal: options.signal,
+            ...decisionCompletionInput(context, options),
             model: context.llm.modelId,
             message,
             recentConversation,
@@ -370,7 +404,9 @@ async function classifyResearchIntentCurrent(
             } : {}),
           }
         },
-      },
+      }, (route, request) => combined && ownsInputAdmission(route.provider, {
+        model: route.modelId, messages: buildLlmDecisionMessages(request), allowProviderFallback: false,
+      })),
     })
     return result.result
   }
@@ -387,36 +423,59 @@ async function classifyResearchIntentCurrent(
 }
 
 /** Complete admitted classifier inputs survive deterministic paths and provider fallback. */
-export async function classifyResearchIntent(options: ResearchClassifyOptions): Promise<ResearchClassifyResult> {
-  const inputs=boundScopeSources(options),authority=options.authority
-  if(authority){
-    if(!inputs.length||typeof options.assertInputAuthority!=='function')throw new DerivedScopeError('scope_evidence_missing')
-    authority.accumulator.note({sources:inputs})
-  } else if(inputs.length)throw new DerivedScopeError('scope_evidence_missing')
-  let refusal:unknown,pending:Promise<void>|undefined
-  const check=async()=>{
-    if(refusal)throw refusal
-    if(pending)return pending
-    pending=(async()=>{
-      if(authority){
-        await assertInputAuthority(()=>authority.execution.security.authority.assertCurrent())
-        if(authority.execution.lifecycle.abortSignal.aborted)throw Object.assign(new Error('The classifier context is unavailable.'),{reason:'authority_changed',retrySafe:false})
-      }
-      await assertInputAuthority(options.assertInputAuthority)
-    })().catch(error=>{refusal=error;throw error})
-    try{await pending}finally{pending=undefined}
+export async function classifyResearchIntent(incoming: ResearchClassifyOptions): Promise<ResearchClassifyResult> {
+  const options = { ...incoming }
+  const inputs = boundScopeSources(incoming), authority = options.authority
+  const execution = authority?.execution, accumulator = authority?.accumulator
+  const assertCurrent = execution?.security.authority.assertCurrent.bind(execution.security.authority)
+  const lifecycleSignal = execution?.lifecycle.abortSignal
+  if (authority) {
+    if (!inputs.length || typeof options.assertInputAuthority !== 'function') throw new DerivedScopeError('scope_evidence_missing')
+    accumulator!.note({ sources: inputs })
+  } else if (inputs.length) throw new DerivedScopeError('scope_evidence_missing')
+  // Capture bytes and host callbacks before any awaited lease or route lookup.
+  const input = structuredClone({ message: options.message, recentConversation: options.recentConversation, toolCandidates: options.toolCandidates })
+  const observed = accumulator ? structuredClone(accumulator.evidence.sources ?? []) : inputs
+  const signal = AbortSignal.any([...(options.signal ? [options.signal] : []), ...(lifecycleSignal ? [lifecycleSignal] : [])])
+  let refusal: unknown, pending: Promise<void> | undefined, closed = false
+  const closedError = new Error('The research classifier authority window has closed')
+  const assertLease = async () => {
+    options.signal?.throwIfAborted()
+    if (assertCurrent) {
+      await assertInputAuthority(assertCurrent)
+      if (lifecycleSignal!.aborted) throw Object.assign(new Error('The classifier context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+    }
+    options.signal?.throwIfAborted()
   }
-  await check()
-  const input=structuredClone({message:options.message,recentConversation:options.recentConversation})
-  const observed=authority?structuredClone(authority.accumulator.evidence.sources??[]):inputs
-  const signal=AbortSignal.any([...(options.signal?[options.signal]:[]),...(authority?[authority.execution.lifecycle.abortSignal]:[])])
-  let result:ResearchClassifyResult
-  try{result=await classifyResearchIntentCurrent({...options,...input,signal,assertInputAuthority:check})}
-  catch(error){
-    if(isInputAuthorityError(error))throw error
-    await check()
-    result={research:false,operateSite:false,reason:null,usage:null,model:null}
+  const check = async () => {
+    if (closed) throw closedError
+    if (refusal) throw refusal
+    if (pending) return pending
+    pending = (async () => { await assertLease(); await assertInputAuthority(options.assertInputAuthority) })()
+      .catch(error => { refusal = error; throw error })
+    try { await pending } finally { pending = undefined }
   }
-  await check()
-  return bindScopeSources(result,observed)
+  const active = async () => {
+    if (closed) throw closedError
+    if (refusal) throw refusal
+    if (pending) await pending
+    try { await assertLease() } catch (error) { refusal = error; throw error }
+    if (refusal) throw refusal
+  }
+  const decisionRuntime = captureClassifierDecisionRuntime(options.decisionRuntime, check, active)
+  try {
+    await assertClassifierBookkeeping(check)
+    let result: ResearchClassifyResult
+    try { result = await classifyResearchIntentCurrent({ ...options, ...input, decisionRuntime, signal, assertInputAuthority: check }) }
+    catch (error) {
+      if (isInputAuthorityError(error)) throw error
+      await check()
+      result = { research: false, operateSite: false, reason: null, usage: null, model: null }
+    }
+    const finalCheck = check()
+    closed = true
+    await finalCheck
+    if (options.toolCandidates !== undefined && result.toolNames === undefined && result.reason !== 'operate_site_fast_path') result = { ...result, toolNames: [] }
+    return bindScopeSources(result, observed)
+  } finally { closed = true }
 }

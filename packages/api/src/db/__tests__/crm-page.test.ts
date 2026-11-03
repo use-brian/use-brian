@@ -113,11 +113,11 @@ describe('[COMP:api/crm-page-http] CRM page store', () => {
       .mockResolvedValueOnce({ rows: [{
         deals: '3', contacts: '8', companies: '4', overdue: '1', stale: '2',
         noAmount: '1', orphaned: '3',
+        stages: [
+          { stageId: 'stage-1', currency: 'USD', stageCount: '3', value: '1200' },
+          { stageId: 'stage-1', currency: 'HKD', stageCount: '3', value: '7000' },
+        ],
       }] })
-      .mockResolvedValueOnce({ rows: [
-        { stageId: 'stage-1', currency: 'USD', stageCount: '3', value: '1200' },
-        { stageId: 'stage-1', currency: 'HKD', stageCount: '3', value: '7000' },
-      ] })
 
     const summary = await getCrmSummary(ctx, 'pipeline-1')
 
@@ -126,7 +126,7 @@ describe('[COMP:api/crm-page-http] CRM page store', () => {
     expect(summary.stages).toEqual([{
       stageId: 'stage-1', count: 3, values: { USD: 1200, HKD: 7000 },
     }])
-    expect(mocks.canonicalQuery).toHaveBeenCalledTimes(2)
+    expect(mocks.canonicalQuery).toHaveBeenCalledTimes(1)
     for (const call of mocks.canonicalQuery.mock.calls) {
       expect(call[0]).toBe(ctx)
       expect(call[1]).toEqual([

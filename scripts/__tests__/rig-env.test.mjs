@@ -1,13 +1,57 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
-import { DEFAULT_DATABASE_URL, maskUrl, readDotEnvValue, resolveRigDatabase } from '../rig-env.mjs'
+import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
+import { DEFAULT_DATABASE_URL, maskUrl, readDotEnvValue, resolveRigDatabase, rigRuntimeDatabase } from '../rig-env.mjs'
 
 const root = '/repo/brian-platform/use-brian'
 /** A readText stub: one canned `.env` body at <root>/.env, nothing elsewhere. */
 const dotenv = (body) => (path) => (path === `${root}/.env` ? body : null)
 const none = () => null
+const apiRequire = createRequire(new URL('../../packages/api/package.json', import.meta.url))
+const pgRequire = createRequire(apiRequire.resolve('pg'))
+const { parse: parsePgConnection } = pgRequire('pg-connection-string')
 
 describe('[COMP:platform/local-rig] local rig database resolution', () => {
+  test('normal runtime connects to the same database as a restricted role with an independent secret', () => {
+    const db = resolveRigDatabase({ root, env: { DATABASE_URL: 'postgres://owner:owner-secret@127.0.0.1:5999/brain?sslmode=disable' }, readText: none })
+    const runtime = rigRuntimeDatabase(db)
+    const url = new URL(runtime.url)
+    assert.equal(url.username, 'app_user')
+    assert.match(url.password, /^[a-f0-9]{64}$/)
+    assert.equal(url.password, runtime.password)
+    assert.equal(url.host, '127.0.0.1:5999')
+    assert.equal(url.pathname, '/brain')
+    assert.equal(url.search, '?sslmode=disable')
+    assert.notEqual(rigRuntimeDatabase(db).password, runtime.password)
+    assert.throws(() => rigRuntimeDatabase({ ...db, isLoopback: false }), /loopback/)
+    assert.throws(() => rigRuntimeDatabase(db, "unsafe'password"), /Unsafe/)
+  })
+
+  test('the actual normal rig launch environment overrides an inherited owner app connection', () => {
+    const rig = readFileSync(new URL('../rig-up.sh', import.meta.url), 'utf8')
+    const assignments = rig.slice(rig.indexOf('  launch_env=('), rig.indexOf('  launch_args=()'))
+    const runtime = rigRuntimeDatabase(resolveRigDatabase({ root, env: {}, readText: none }))
+    const result = spawnSync('bash', ['-c', assignments + '\nenv "${launch_env[@]}" node -e \'console.log(new URL(process.env.DATABASE_URL_APP).username); console.log(new URL(process.env.DATABASE_URL).username)\''], {
+      env: { PATH: process.env.PATH, RIG_DB_URL: DEFAULT_DATABASE_URL, RIG_APP_DB_URL: runtime.url,
+        DATABASE_URL_APP: DEFAULT_DATABASE_URL, API_PORT_FILE: '/dev/null', API_PORT: '4100', CORE_ONLY: '1' },
+      encoding: 'utf8',
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout.trim(), 'app_user\nbrian')
+  })
+  test('query credentials cannot override the canonical runtime login', () => {
+    const db = resolveRigDatabase({ root, env: { DATABASE_URL: 'postgres://owner:owner-secret@127.0.0.1:5999/brain?user=owner&password=query-secret&sslmode=disable' }, readText: none })
+    const runtime = rigRuntimeDatabase(db)
+    const parsed = parsePgConnection(runtime.url)
+    assert.equal(parsed.user, 'app_user')
+    assert.equal(parsed.password, runtime.password)
+    assert.equal(parsed.host, '127.0.0.1')
+    assert.equal(parsed.port, '5999')
+    assert.equal(parsed.database, 'brain')
+    assert.equal(parsed.ssl, false)
+  })
   test('administrative mode cannot inherit a real database or dotenv URL', () => {
     const db = resolveRigDatabase({ root,
       env: { USEBRIAN_ADMIN_ONLY: '1', DATABASE_URL: 'postgres://remote.example/real' },

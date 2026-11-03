@@ -1,3 +1,4 @@
+import { bufferProviderStream } from './stream-backpressure.js'
 import type { HttpRetryWindow } from './types.js'
 /**
  * Gemini provider using REST API directly (not the SDK).
@@ -14,7 +15,7 @@ import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, Sessio
 import type { GoogleTransport } from './google-transport.js'
 import { aiStudioTransport } from './google-transport.js'
 import { createGeminiHttpRetry } from './gemini-http-retry.js'
-import { assertInputAuthority } from './input-authority.js'
+import { assertInputAuthority, registerInputAdmissionOwner } from './input-authority.js'
 import { systemContextParts, extractHistorySystemContext } from './system-context.js'
 
 /** Alias → real Google model id, derived from the model registry (each
@@ -118,8 +119,8 @@ type GeminiRequest = {
     maxOutputTokens?: number
     temperature?: number
     responseMimeType?: string
-    /** Gemini's OpenAPI-subset JSON Schema — what actually constrains the decoder. */
-    responseSchema?: Record<string, unknown>
+    /** JSON Schema field; the older responseSchema rejects additionalProperties. */
+    responseJsonSchema?: Record<string, unknown>
     thinkingConfig?: { thinkingLevel?: 'LOW' | 'HIGH'; includeThoughts?: boolean }
   }
 }
@@ -480,6 +481,27 @@ export function stripLeadingEnvelopeLeak(firstTurnText: string): string {
 
 // ── SSE streaming via REST API ─────────────────────────────────
 
+/** Credential and host-admission work may not accept a signal. Stop waiting on
+ * cancellation, handle its eventual settlement, and never dispatch afterward. */
+function awaitStreamPreparation<T>(start: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  signal?.throwIfAborted()
+  const pending = start()
+  if (!signal) return pending
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => { signal.removeEventListener('abort', abort); reject(signal.reason) }
+    signal.addEventListener('abort', abort, { once: true })
+    pending.then(value => {
+      signal.removeEventListener('abort', abort)
+      if (signal.aborted) reject(signal.reason)
+      else resolve(value)
+    }, error => {
+      signal.removeEventListener('abort', abort)
+      reject(error)
+    })
+    if (signal.aborted) abort()
+  })
+}
+
 async function* streamGeminiSSE(
   transport: GoogleTransport,
   modelId: string,
@@ -494,7 +516,7 @@ async function* streamGeminiSSE(
   const url = transport.endpoint(modelId, 'streamGenerateContent', { alt: 'sse' })
   const retryHttp = createGeminiHttpRetry(signal, { transport: transport.kind, model: modelId, window: httpRetryWindow })
   signal?.throwIfAborted()
-  const headers = await transport.headers()
+  const headers = await awaitStreamPreparation(() => transport.headers(), signal)
   const responseWindowMs = registryRow(modelId)?.firstResponseTimeoutMs
   let dispatcher = responseWindowMs ? PREFILL_DISPATCHERS.get(responseWindowMs) : undefined
   if (responseWindowMs && !dispatcher) {
@@ -512,7 +534,7 @@ async function* streamGeminiSSE(
     const serialized = JSON.stringify(body)
     debugDocumentFlow('gemini_wire', { model: modelId, mode, gemini: body })
     return retryHttp(async attemptSignal => {
-      await assertInputAuthority(checkInput)
+      await awaitStreamPreparation(() => assertInputAuthority(checkInput), attemptSignal)
       attemptSignal.throwIfAborted()
       return fetch(url, {
         method: 'POST',
@@ -538,7 +560,7 @@ async function* streamGeminiSSE(
   if (
     response.status === 400 &&
     request.generationConfig &&
-    'responseSchema' in request.generationConfig
+    'responseJsonSchema' in request.generationConfig
   ) {
     const detail = await response.text()
     debugDocumentFlow('stream_error', { model: modelId, error: true, providerError: new Error(`Gemini API error 400: ${detail}`) })
@@ -546,7 +568,7 @@ async function* streamGeminiSSE(
       `[gemini] responseSchema REJECTED (400) for model=${modelId} — retrying without it. ` +
       `Output is no longer decoder-constrained for this call; fix the schema to restore the guarantee.`,
     )
-    const { responseSchema: _dropped, ...generationConfig } = request.generationConfig
+    const { responseJsonSchema: _dropped, ...generationConfig } = request.generationConfig
     response = await send({ ...request, generationConfig })
   }
 
@@ -702,7 +724,7 @@ function buildRequest(
       ...(options.responseFormat === 'json' && toolEntries.length === 0
         ? {
             responseMimeType: 'application/json',
-            ...(options.responseSchema ? { responseSchema: options.responseSchema } : {}),
+            ...(options.responseSchema ? { responseJsonSchema: options.responseSchema } : {}),
           }
         : {}),
       ...(() => {
@@ -863,7 +885,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
       : aiStudioTransport(keyOrTransport)
   const toolCallCounter = { value: 0 }
 
-  return {
+  const provider: LLMProvider = {
     name: 'gemini',
     models: [...providerModelIds('gemini')],
 
@@ -1113,4 +1135,14 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
       }
     },
   }
+  return registerInputAdmissionOwner({
+    ...provider,
+    stream: request => bufferProviderStream(signal => provider.stream({ ...request, signal }), request.signal),
+    createSession: options => {
+      const session = provider.createSession!(options)
+      return { send: (messages, opts) => bufferProviderStream(
+        signal => session.send(messages, { ...opts, signal }), opts?.signal ?? options.signal,
+      ) }
+    },
+  })
 }

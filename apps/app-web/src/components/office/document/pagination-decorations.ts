@@ -23,15 +23,12 @@ export const DocumentPaginationDecorations = Extension.create({
 
 export function refreshDocumentPagination(editor: Editor): void {
   editor.view.dispatch(editor.state.tr.setMeta(paginationDecorationKey, DecorationSet.empty));
-  const firstObjectIds = pageStartIdsFromEditorDom(editor.view.dom);
+  const attributes = pageAttributesFromEditorDom(editor.view.dom);
   const decorations: Decoration[] = [];
   editor.state.doc.descendants((node, position) => {
     if (typeof node.attrs.id !== "string") return;
-    if (!firstObjectIds.has(node.attrs.id)) return;
-    decorations.push(Decoration.node(position, position + node.nodeSize, {
-      class: "office-document-page-start",
-      "data-office-page-start": "true",
-    }));
+    const attrs = attributes.get(node.attrs.id);
+    if (attrs) decorations.push(Decoration.node(position, position + node.nodeSize, attrs));
   });
   editor.view.dispatch(editor.state.tr.setMeta(
     paginationDecorationKey,
@@ -46,29 +43,39 @@ export type DocumentPaginationBlock = {
   breakAfter: boolean;
 };
 
-export function documentPageStartIds(blocks: DocumentPaginationBlock[], pageBodyHeightPx: number): Set<string> {
-  const starts = new Set<string>();
+export function documentPageLayout(blocks: DocumentPaginationBlock[], pageBodyHeightPx: number): {
+  pageStarts: Map<string, number>;
+  pageCount: number;
+  overflowPx: number;
+} {
+  const pageStarts = new Map<string, number>();
   let used = 0;
+  let overflowPx = 0;
   let forceNextPage = false;
   for (const block of blocks) {
     if (block.breakAfter) {
       forceNextPage = used > 0 || forceNextPage;
+      // Break markers occupy DOM space too, even though they have no content.
+      used += Math.max(0, block.spacingBeforePx) + Math.max(0, block.heightPx);
       continue;
     }
-    const height = Math.max(0, block.heightPx) + (used > 0 ? Math.max(0, block.spacingBeforePx) : 0);
+    const height = Math.max(0, block.heightPx) + Math.max(0, block.spacingBeforePx);
     if (forceNextPage || (used > 0 && used + height > pageBodyHeightPx)) {
-      starts.add(block.id);
+      // The new page's margin replaces this block's ordinary spacing-before.
+      // Keep the unused outgoing body area, not just the two page margins.
+      pageStarts.set(block.id, Math.max(0, pageBodyHeightPx - used));
+      overflowPx += Math.max(0, used - pageBodyHeightPx);
       used = Math.max(0, block.heightPx);
       forceNextPage = false;
       continue;
     }
     used += height;
   }
-  return starts;
+  return { pageStarts, pageCount: pageStarts.size + 1, overflowPx };
 }
 
-function pageStartIdsFromEditorDom(root: HTMLElement): Set<string> {
-  const starts = new Set<string>();
+function pageAttributesFromEditorDom(root: HTMLElement): Map<string, Record<string, string>> {
+  const attributes = new Map<string, Record<string, string>>();
   for (const section of root.querySelectorAll<HTMLElement>(".office-document-section")) {
     const style = window.getComputedStyle(section);
     const pageHeight = cssLengthPx(style.getPropertyValue("--office-page-height"), 792 * 4 / 3);
@@ -76,22 +83,40 @@ function pageStartIdsFromEditorDom(root: HTMLElement): Set<string> {
     const bottomMargin = cssLengthPx(style.getPropertyValue("--office-margin-bottom"), 72 * 4 / 3);
     const borderHeight = (Number.parseFloat(style.borderTopWidth) || 0) + (Number.parseFloat(style.borderBottomWidth) || 0);
     const bodyHeight = Math.max(1, pageHeight - topMargin - bottomMargin - borderHeight);
-    const blocks = measureDocumentPaginationBlocks(section.querySelector<HTMLElement>(".office-document-body"));
-    for (const id of documentPageStartIds(blocks, bodyHeight)) starts.add(id);
+    const body = section.querySelector<HTMLElement>(".office-document-body");
+    if (!body) continue;
+    const blocks = measureDocumentPaginationBlocks(body);
+    const { pageStarts, pageCount, overflowPx } = documentPageLayout(blocks, bodyHeight);
+    // Reserve the final page's body area; the section supplies outer margins.
+    attributes.set(body.id, {
+      style: `--office-paginated-body-height: calc(${pageCount * pageHeight - topMargin - bottomMargin - borderHeight + overflowPx}px + ${pageCount - 1} * 1.5rem);`,
+    });
+    const paper = section.getBoundingClientRect();
+    for (const child of body.children) {
+      if (!(child instanceof HTMLElement)) continue;
+      const remainingPx = pageStarts.get(child.id);
+      if (remainingPx === undefined) continue;
+      const block = child.getBoundingClientRect();
+      attributes.set(child.id, {
+        class: "office-document-page-start",
+        "data-office-page-start": "true",
+        style: `--office-page-remainder: ${remainingPx + borderHeight}px; --office-page-divider-left: ${paper.left - block.left - child.clientLeft}px; --office-page-divider-width: ${paper.width}px;`,
+      });
+    }
   }
-  return starts;
+  return attributes;
 }
 
 // Read adjacent border-box positions, not a sum of CSS margins: vertical
 // margins may collapse and a previous block's margin-bottom may own the gap.
 // The caller removes page decorations first, so gutters never feed back in.
 export function measureDocumentPaginationBlocks(body: HTMLElement | null): DocumentPaginationBlock[] {
-  let previousBottom: number | undefined;
+  let previousBottom = body?.getBoundingClientRect().top ?? 0;
   return [...(body?.children ?? [])]
     .filter((child): child is HTMLElement => child instanceof HTMLElement)
     .map((child) => {
       const rect = child.getBoundingClientRect();
-      const spacingBeforePx = previousBottom === undefined ? 0 : Math.max(0, rect.top - previousBottom);
+      const spacingBeforePx = Math.max(0, rect.top - previousBottom);
       previousBottom = rect.bottom;
       return {
         id: child.id,

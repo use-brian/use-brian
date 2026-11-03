@@ -8,6 +8,7 @@ import { coalesceAssistantRunMessages } from "@/components/chat-app/chat-transcr
 export type FeedChatTurn = {
   text: string;
   visibleText: string;
+  replyPhase: "generating" | "saving" | "finishing";
   reasoning: string;
   resetAnswer: boolean;
   log: EventLog;
@@ -24,7 +25,7 @@ export type FeedChatTurn = {
 };
 
 export function newFeedChatTurn(now = Date.now()): FeedChatTurn {
-  return { text: "", visibleText: "", reasoning: "", resetAnswer: false, log: EMPTY_LOG,
+  return { text: "", visibleText: "", replyPhase: "generating", reasoning: "", resetAnswer: false, log: EMPTY_LOG,
     tools: [], workers: {}, toolStarts: {}, startedAt: now, sequence: 0,
     researchPhase: null, citations: [], fileAttachments: [], documents: [] };
 }
@@ -39,11 +40,13 @@ export function foldFeedChatEvent(previous: FeedChatTurn, event: string, data: R
   const id = str(data.id);
   switch (event) {
     case "text_delta":
+      next.replyPhase = "generating";
       next.text = (next.resetAnswer ? "" : next.text) + str(data.text);
       next.visibleText = next.text;
       next.resetAnswer = false;
       break;
     case "snapshot":
+      if (data.replyPhase === "generating" || data.replyPhase === "saving" || data.replyPhase === "finishing") next.replyPhase = data.replyPhase;
       // The relay sends snapshots, never deltas. Repeated frames must not duplicate text.
       if (typeof data.text === "string") next.text = next.visibleText = data.text;
       next.resetAnswer = false;
@@ -65,6 +68,7 @@ export function foldFeedChatEvent(previous: FeedChatTurn, event: string, data: R
       break;
     }
     case "tool_start": {
+      next.replyPhase = "generating";
       const name = str(data.name);
       if (!id || !name || next.tools.some(tool => tool.id === id)) break;
       const narration = describeToolFromInput(name, {}, dict);
@@ -99,7 +103,11 @@ export function foldFeedChatEvent(previous: FeedChatTurn, event: string, data: R
       if (data.phase === "research_starting") next.researchPhase = "starting";
       if (data.phase === "research_parallel") next.researchPhase = "parallel";
       break;
+    case "reply_text_complete":
+      if (next.replyPhase === "generating") next.replyPhase = "saving";
+      break;
     case "assistant_message_saved":
+      if (id) next.replyPhase = "finishing";
       next.messageId = id || next.messageId;
       break;
     case "citation":

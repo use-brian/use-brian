@@ -77,4 +77,22 @@ describe('[COMP:api/migration-order] Migration filename compatibility', () => {
       },
     ])
   })
+
+  it('preserves reviewed cutover upgrades without skipping same-number chat migrations', () => {
+    const renames = [
+      { previousName: '8148_department_mode_admission.sql', currentName: '8171_department_mode_admission.sql' },
+      { previousName: '8149_organization_cutover.sql', currentName: '8172_organization_cutover.sql' },
+      { previousName: '8150_department_office_publication.sql', currentName: '8173_department_office_publication.sql' },
+      { previousName: '8151_reviewed_legacy_knowledge_binding.sql', currentName: '8174_reviewed_legacy_knowledge_binding.sql' },
+    ]
+    const chatNames = [
+      '8148_native_chat_read_frame.sql',
+      '8149_existing_workspace_policy_epochs.sql',
+      '8150_native_file_session_evidence.sql',
+      '8151_native_file_session_title.sql',
+    ]
+    expect(findAppliedMigrationRenames(new Set(chatNames))).toEqual([])
+    expect(findAppliedMigrationRenames(new Set([...chatNames, ...renames.map(r => r.previousName)]))).toEqual(renames)
+    expect(findAppliedMigrationRenames(new Set(renames.flatMap(r => [r.previousName, r.currentName])))).toEqual([])
+  })
 })

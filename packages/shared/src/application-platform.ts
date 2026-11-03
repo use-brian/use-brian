@@ -106,9 +106,11 @@ export type ApplicationFieldDefinition = ApplicationResourceDefinition['fields']
 export type ApplicationJson = null | boolean | number | string | ApplicationJson[] | { [key: string]: ApplicationJson }
 // Record validates every value but drops own __proto__ keys. Intersection
 // restores validated wire keys through Zod's data-property object spread merge.
-export const applicationJsonSchema: z.ZodType<ApplicationJson> = z.lazy(() => z.union([
+export const applicationJsonSchema: z.ZodType<ApplicationJson> = z.lazy(() => applicationJsonValueSchema).and(z.unknown())
+// Compile the recursive vocabulary once; each parse still visits every value.
+const applicationJsonValueSchema = z.union([
   z.null(), z.boolean(), z.number().finite(), z.string(), z.array(applicationJsonSchema), z.record(applicationJsonSchema),
-])).and(z.unknown())
+])
 export const applicationQuerySchema = z.object({
   fields: z.array(fieldKey).max(128).optional(),
   filters: z.array(z.object({ field: fieldKey, op: z.enum(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'contains']), value: applicationJsonSchema }).strict()).max(32).default([]),

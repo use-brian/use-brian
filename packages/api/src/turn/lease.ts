@@ -89,6 +89,8 @@ export async function takeTurnLease(params: {
   waitForSlot?: (sessionId: string) => Promise<boolean>
   /** The answering assistant when the runner re-addresses (see `startTurnLease`). */
   assistantId?: string
+  /** Includes attended request preparation in the visible elapsed time. */
+  startedAt?: Date
 }): Promise<TurnSlotOutcome> {
   // A personal session with a wait (a messaging channel: a second message
   // while the first turn runs) waits for the slot instead of refusing.
@@ -116,7 +118,7 @@ export async function takeTurnLease(params: {
     await reclaimStaleTurn(sessionId)
     await takeTurnSlot(sessionId)
   }
-  return { taken: true, token: await startTurnLease(sessionId, params.assistantId ?? null) }
+  return { taken: true, token: await startTurnLease(sessionId, params.assistantId ?? null, params.startedAt ?? null) }
 }
 
 /**

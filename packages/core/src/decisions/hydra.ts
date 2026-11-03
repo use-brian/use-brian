@@ -5,6 +5,9 @@
  */
 
 import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
+import { assertDecisionBookkeeping, bindClassifierDecisionRequest, disableClassifierDecisionOperation,
+  transferClassifierDecisionOperation, isDecisionMetadataSink, ownsClassifierLlmCompletion,
+  transferClassifierDecisionCheck } from './authority-ownership.js'
 import type {
   DecisionDisposition,
   DecisionFailureKind,
@@ -16,6 +19,8 @@ import type {
   JsonValue,
 } from './types.js'
 import { DecisionProviderError } from './types.js'
+import { withDecisionInvocation } from './invocation.js'
+import { bindDecisionTransportBudget, captureDecisionTransport, ownsDecisionTransportBudget } from './transport-budget.js'
 import type { LLMProvider } from '../providers/types.js'
 import { isJsonValue } from './validate.js'
 
@@ -170,6 +175,7 @@ export interface DecisionExecutionPort {
 }
 
 export type DecisionCascadePath =
+  | 'capacity_deferred'
   | 'llm_only'
   | 'primary_complete'
   | 'generation'
@@ -179,6 +185,8 @@ export type DecisionCascadePath =
   | 'safe_default'
 
 export type DecisionCascadeResult<T> = {
+  /** Host routing fact for caller attribution, never input authority. */
+  usedRequestedLlm?: boolean
   runId: string
   result: T
   path: DecisionCascadePath
@@ -341,35 +349,78 @@ async function withDeadline<T>(params: {
 function currentInputCheck(check?: () => Promise<void>): () => Promise<void> {
   let refused: unknown
   let pending: Promise<void> | undefined
-  return async () => {
+  return transferClassifierDecisionCheck(check, async () => {
     if (refused) throw refused
     // A transport deadline may leave its current check pending. Recovery must
     // await that same check, never race a second healthy probe past its refusal.
     if (pending) return pending
     pending = assertInputAuthority(check).catch(error => { refused = error; throw error })
     try { await pending } finally { pending = undefined }
-  }
+  })
 }
 
-export async function executeDecisionCascade<T>(
+export function executeDecisionCascade<T>(options: ExecuteDecisionCascadeOptions<T>): Promise<DecisionCascadeResult<T>> {
+  const now = options.now ?? Date.now
+  const startedAt = now()
+  const primary = options.route.primary ? captureDecisionTransport(options.route.primary) : undefined
+  const route = { ...options.route, ...(primary ? { primary } : {}) }
+  const profileBudget = route.profile?.totalTimeoutMs
+  const deadlineAt = Math.min(options.request.deadlineAt ?? Infinity,
+    typeof profileBudget === 'number' && Number.isFinite(profileBudget) && profileBudget > 0 ? startedAt + profileBudget : Infinity)
+  const operation = transferClassifierDecisionOperation(options.operation, { ...options.operation })
+  if (!isDecisionMetadataSink(options.onAttempt)) disableClassifierDecisionOperation(operation)
+  const inputCheck = operation.assertInputAuthority
+  const onAttempt = options.onAttempt
+  return withDecisionInvocation({
+    signal: options.request.signal, ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}), now,
+    call: (invocation) => executeDecisionCascadeCurrent({
+      ...options, route, request: { ...options.request, signal: invocation.signal,
+        ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}) },
+      operation: transferClassifierDecisionOperation(operation, { ...operation, assertInputAuthority: async () => {
+        invocation.assertActive()
+        await assertInputAuthority(inputCheck)
+        invocation.assertActive()
+      } }),
+      onAttempt: async attempt => {
+        invocation.assertActive()
+        await onAttempt?.(attempt)
+        invocation.assertActive()
+      },
+    }),
+  })
+}
+
+async function executeDecisionCascadeCurrent<T>(
   options: ExecuteDecisionCascadeOptions<T>,
 ): Promise<DecisionCascadeResult<T>> {
   const now = options.now ?? Date.now
   const random = options.random ?? Math.random
   const { request, operation, route } = options
+  const admissionStartedAt = now()
+  const primary = route.primary ? captureDecisionTransport(route.primary) : undefined
+  const transportBudgetOwned = !!primary && ownsDecisionTransportBudget(primary)
   const check = currentInputCheck(operation.assertInputAuthority)
-  await check()
+  if ((!transportBudgetOwned || route.mode !== 'hybrid')
+    && !(route.mode === 'llm_only' && ownsClassifierLlmCompletion(operation))) disableClassifierDecisionOperation(operation)
+  const bookkeeping = async () => {
+    request.signal?.throwIfAborted()
+    await assertDecisionBookkeeping(operation, check)
+    request.signal?.throwIfAborted()
+  }
+  // Pure route validation exposes no input. The actual completion/primary
+  // branch checks current input before dispatch, including unknown providers.
   validateDecisionRoute(request, route)
 
   let attempts = 0
   const emit = async (record: DecisionAttemptRecord): Promise<void> => {
-    await check()
+    await bookkeeping()
     await options.onAttempt?.(record)
-    await check()
+    await bookkeeping()
   }
 
   const safe = async (kind: DecisionFailureKind): Promise<DecisionCascadeResult<T>> => {
-    await check()
+    if (ownsClassifierLlmCompletion(operation)) await bookkeeping()
+    else await check()
     return {
       runId: request.runId,
       result: operation.validateResult(operation.safeFailure(kind)),
@@ -386,7 +437,9 @@ export async function executeDecisionCascade<T>(
     primaryResponse?: DecisionResponse,
     followUpReason?: DecisionFollowUpReason,
   ): Promise<DecisionCompletion<T>> => {
-    await check()
+    // Only fixed, route-qualified completions delegate to actual LLM dispatch.
+    if (ownsClassifierLlmCompletion(operation)) await bookkeeping()
+    else { disableClassifierDecisionOperation(operation); await check() }
     attempts += 1
     const startedAt = now()
     try {
@@ -404,7 +457,8 @@ export async function executeDecisionCascade<T>(
           deadlineAt,
         }),
       })
-      await check()
+      if (ownsClassifierLlmCompletion(operation)) await bookkeeping()
+      else await check()
       const validated = { ...completion, result: operation.validateResult(completion.result) }
       await emit({
         runId: request.runId,
@@ -453,7 +507,7 @@ export async function executeDecisionCascade<T>(
   }
 
   const profile = route.profile!
-  const totalDeadline = earlierDeadline(request, profile.totalTimeoutMs, now())
+  const totalDeadline = earlierDeadline(request, profile.totalTimeoutMs, admissionStartedAt)
   const sampled = route.mode !== 'shadow' || random() < profile.shadowSampleRate!
   if (!sampled) {
     try {
@@ -467,7 +521,9 @@ export async function executeDecisionCascade<T>(
     }
   }
 
-  await check()
+  // The exact audited default adapter performs this fresh check at physical
+  // dispatch. Unknown or replaced callables retain preparation admission.
+  if (!transportBudgetOwned) await check()
   attempts += 1
   const primaryAttempt = attempts
   const primaryStartedAt = now()
@@ -478,11 +534,15 @@ export async function executeDecisionCascade<T>(
   try {
     primaryResponse = await withDeadline({
       parent: request.signal,
-      deadlineAt: primaryDeadline,
+      deadlineAt: transportBudgetOwned ? totalDeadline : primaryDeadline,
       now,
-      call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline, assertInputAuthority: check }),
+      call: (signal) => {
+        const attempt = { ...request, signal, deadlineAt: transportBudgetOwned ? totalDeadline : primaryDeadline, assertInputAuthority: check }
+        if (transportBudgetOwned) bindClassifierDecisionRequest(operation, attempt)
+        return primary!.evaluate(transportBudgetOwned ? bindDecisionTransportBudget(attempt, profile.primaryTimeoutMs) : attempt)
+      },
     })
-    await check()
+    await bookkeeping()
     disposition = operation.decide(primaryResponse, { profile })
     await emit({
       runId: request.runId,
@@ -500,13 +560,14 @@ export async function executeDecisionCascade<T>(
     })
   } catch (error) {
     if (isInputAuthorityError(error)) throw error
+    if (!ownsClassifierLlmCompletion(operation)) disableClassifierDecisionOperation(operation)
     primaryFailure = normalizeDecisionFailure(error)
     await emit({
       runId: request.runId,
       operationId: request.operation.id,
       attempt: primaryAttempt,
       stage: 'primary_decision',
-      providerId: route.primary!.id,
+      providerId: primary!.id,
       modelCatalogId: request.model.catalogId,
       modelWireId: request.model.wireId,
       latencyMs: Math.max(0, now() - primaryStartedAt),
@@ -616,12 +677,44 @@ export async function executeDecisionCascade<T>(
  * This deliberately has no LLM completion lane. Domain callers continue their
  * mandatory legacy work regardless of the returned disposition.
  */
-export async function executeDecisionObservation<T>(
+export function executeDecisionObservation<T>(options: ExecuteDecisionObservationOptions<T>): Promise<DecisionObservationResult<T>> {
+  const now = options.now ?? Date.now
+  const startedAt = now()
+  const primary = options.route.primary ? captureDecisionTransport(options.route.primary) : undefined
+  const route = { ...options.route, ...(primary ? { primary } : {}) }
+  const profileBudget = route.profile?.totalTimeoutMs
+  const deadlineAt = Math.min(options.request.deadlineAt ?? Infinity,
+    typeof profileBudget === 'number' && Number.isFinite(profileBudget) && profileBudget > 0 ? startedAt + profileBudget : Infinity)
+  const inputCheck = options.operation.assertInputAuthority
+  const onAttempt = options.onAttempt
+  return withDecisionInvocation({
+    signal: options.request.signal, ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}), now,
+    call: (invocation) => executeDecisionObservationCurrent({
+      ...options, route, request: { ...options.request, signal: invocation.signal,
+        ...(Number.isFinite(deadlineAt) ? { deadlineAt } : {}) },
+      operation: { ...options.operation, assertInputAuthority: async () => {
+        invocation.assertActive()
+        await assertInputAuthority(inputCheck)
+        invocation.assertActive()
+      } },
+      onAttempt: async attempt => {
+        invocation.assertActive()
+        await onAttempt?.(attempt)
+        invocation.assertActive()
+      },
+    }),
+  })
+}
+
+async function executeDecisionObservationCurrent<T>(
   options: ExecuteDecisionObservationOptions<T>,
 ): Promise<DecisionObservationResult<T>> {
   const now = options.now ?? Date.now
   const random = options.random ?? Math.random
   const { request, operation, route } = options
+  const admissionStartedAt = now()
+  const primary = route.primary ? captureDecisionTransport(route.primary) : undefined
+  const transportBudgetOwned = !!primary && ownsDecisionTransportBudget(primary)
   const check = currentInputCheck(operation.assertInputAuthority)
   await check()
   validateDecisionRoute(request, route)
@@ -635,14 +728,17 @@ export async function executeDecisionObservation<T>(
   }
 
   const startedAt = now()
-  const totalDeadline = earlierDeadline(request, profile.totalTimeoutMs, startedAt)
+  const totalDeadline = earlierDeadline(request, profile.totalTimeoutMs, admissionStartedAt)
   const primaryDeadline = Math.min(totalDeadline, startedAt + profile.primaryTimeoutMs)
   try {
     const response = await withDeadline({
       parent: request.signal,
-      deadlineAt: primaryDeadline,
+      deadlineAt: transportBudgetOwned ? totalDeadline : primaryDeadline,
       now,
-      call: (signal) => route.primary!.evaluate({ ...request, signal, deadlineAt: primaryDeadline, assertInputAuthority: check }),
+      call: (signal) => {
+        const attempt = { ...request, signal, deadlineAt: transportBudgetOwned ? totalDeadline : primaryDeadline, assertInputAuthority: check }
+        return primary!.evaluate(transportBudgetOwned ? bindDecisionTransportBudget(attempt, profile.primaryTimeoutMs) : attempt)
+      },
     })
     await check()
     let disposition = operation.decide(response, { profile })
@@ -678,7 +774,7 @@ export async function executeDecisionObservation<T>(
       operationId: request.operation.id,
       attempt: 1,
       stage: 'primary_decision',
-      providerId: route.primary!.id,
+      providerId: primary!.id,
       modelCatalogId: request.model.catalogId,
       modelWireId: request.model.wireId,
       latencyMs: Math.max(0, now() - startedAt),

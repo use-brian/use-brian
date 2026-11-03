@@ -1048,11 +1048,11 @@ export const TuningChatPanel = forwardRef<
                 />
               </span>
               <div className="flex-1 min-w-0 pt-0.5 space-y-2">
-                <ChatActivityFeed events={turn.log.events} tools={turn.tools} replyStreaming={!!streamingText} researchPhase={turn.researchPhase} startedAt={turn.startedAt} />
+                <ChatActivityFeed events={turn.log.events} tools={turn.tools} replyStreaming={!!streamingText} replyPhase={turn.replyPhase} researchPhase={turn.researchPhase} startedAt={turn.startedAt} />
                 {streamingText ? (
                   <div className="text-[14px] leading-[1.6] text-foreground break-words chat-markdown prose prose-sm dark:prose-invert max-w-none">
                     <ChatMarkdown text={streamingText} />
-                    <span className="inline-block w-[2px] h-[16px] bg-primary rounded-full animate-pulse ml-0.5 align-text-bottom" />
+                    {turn.replyPhase === "generating" && <span aria-hidden className="inline-block w-[2px] h-[16px] bg-foreground rounded-full animate-pulse ml-0.5 align-text-bottom" />}
                   </div>
                 ) : !turn.log.events.length && !turn.tools.length ? (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground py-1">

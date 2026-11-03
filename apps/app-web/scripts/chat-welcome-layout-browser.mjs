@@ -33,8 +33,9 @@ export function verifyChatWelcomeLayout() {
     return { field:rect(field), composer:rect(composer), welcome:rect(welcome), icon:rect(icon), heading:rect(heading),
       value:field.value, sameInput:window.__welcomeLayoutInput === field, scrollHeight:field.scrollHeight, clientHeight:field.clientHeight,
       viewport:innerHeight, overflow:document.documentElement.scrollWidth > innerWidth,
-      iconFilter:getComputedStyle(icon).filter, iconLoaded:icon.complete && icon.naturalWidth > 0,
-      decorative:icon.getAttribute('alt') === '' && icon.getAttribute('aria-hidden') === 'true' };
+      iconLoaded:icon instanceof SVGElement && icon.querySelectorAll('rect').length > 0,
+      animation:getComputedStyle(icon).animationName,
+      decorative:icon.getAttribute('aria-hidden') === 'true' && icon.getAttribute('focusable') === 'false' };
   })()`);
 
   browser('open', `${baseUrl}/api/auth/dev-login`);
@@ -42,17 +43,20 @@ export function verifyChatWelcomeLayout() {
   const workspace = new URL(location).pathname.match(/^\/w\/([^/]+)/)?.[1];
   assert.ok(workspace, 'Local dev login must resolve a workspace');
   browser('open', `${baseUrl}/w/${workspace}/chat`);
+  // Wait for the hydrated top bar before clicking through a cold route load.
+  browser('wait', 'button[aria-label="New chat"]');
   // A rig may remember an earlier thread; explicitly start a fresh draft.
   browser('find', 'role', 'button', 'click', '--name', 'New chat', '--exact');
   browser('set', 'viewport', '1440', '1000');
   browser('wait', '[data-chat-welcome-composer] textarea');
-  browser('wait', '--fn', 'document.querySelector("[data-chat-welcome-icon]")?.complete');
+  browser('wait', '[data-chat-welcome-icon] rect');
   evaluate('window.__welcomeLayoutInput = document.querySelector("[data-chat-welcome-composer] textarea"); true');
   const empty = measure();
   assert.equal(evaluate('document.querySelector("[data-chat-work-entry]") !== null'), false, 'Fresh Chat must not render the retired work disclosure');
   assert.ok(empty.welcome.bottom <= empty.viewport && empty.welcome.bottom >= empty.viewport - 80, 'Welcome composer must dock near the bottom');
   assert.ok(empty.icon.bottom < empty.heading.top && empty.heading.bottom < empty.composer.top, 'Brian icon must be above the question and composer');
-  assert.ok(empty.iconLoaded && empty.decorative && empty.iconFilter === 'grayscale(1)', 'Use the decorative grey Brian brand icon');
+  assert.ok(empty.iconLoaded && empty.decorative, 'Use the decorative Brian pixel mascot');
+  assert.equal(empty.icon.height, 76, 'Wide panes give Brian more presence');
   browser('screenshot', `${output}/desktop.png`);
 
   const draft = Array.from({ length: 8 }, (_, index) => `Step ${index + 1}: describe a fictional release task.`).join('\n');
@@ -71,6 +75,7 @@ export function verifyChatWelcomeLayout() {
   browser('set', 'viewport', '390', '844');
   const phone = measure();
   assert.ok(phone.sameInput && phone.value === draft, 'Resize must preserve the input and its draft');
+  assert.equal(phone.icon.height, 58, 'Narrow panes keep Brian compact');
   assert.ok(!phone.overflow && phone.composer.bottom <= phone.viewport, 'Phone composer must fit the viewport');
   assert.ok(phone.welcome.bottom >= phone.viewport - 40, 'Phone composer must remain at the bottom');
   browser('screenshot', `${output}/phone-draft.png`);
@@ -85,6 +90,13 @@ export function verifyChatWelcomeLayout() {
   assert.ok(measure().composer.bottom <= 390, 'Landscape composer must remain reachable');
   browser('set', 'viewport', '1440', '1000');
   assert.ok(Math.abs(measure().field.height - empty.field.height) <= 2, 'Empty prompt must return to its original height');
+  browser('set', 'media', 'dark', 'reduced-motion');
+  evaluate("document.documentElement.classList.add('dark'); true");
+  assert.equal(measure().animation, 'none', 'Reduced motion disables the greeting hop');
+  assert.ok(evaluate(`Array.from(document.querySelector('[data-chat-welcome-icon]').querySelectorAll('*')).every(el => getComputedStyle(el).animationName === 'none')`), 'Reduced motion disables blinking');
+  browser('hover', '[data-chat-welcome-icon]');
+  assert.ok(evaluate(`Array.from(document.querySelector('[data-chat-welcome-icon]').querySelectorAll('g')).every(el => getComputedStyle(el).transform === 'none')`), 'Reduced motion also disables hover movement');
+  browser('screenshot', `${output}/dark-reduced-motion.png`);
   console.log(JSON.stringify({ desktop:empty.field.height, expanded:expanded.field.height, capped:capped.field.height, phone:phone.field.height, cleared:cleared.field.height, output }));
   browser('close');
 

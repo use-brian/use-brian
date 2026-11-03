@@ -43,8 +43,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from "react";
 import Link from "next/link";
+import { PreviewCard } from "@base-ui/react/preview-card";
+import { useAppPopupBoundary } from "@/lib/app-viewport";
+import { stashChatHandoff, personalChatHandoffPath } from "@/lib/chat-handoff";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Archive, Brain, ChevronRight, Folder, FolderOpen, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, SquarePen, Trash2 } from "lucide-react";
+import { Archive, Brain, ChevronRight, Folder, FolderOpen, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, RefreshCw, SquarePen, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 import { Skeleton } from "@/components/skeleton";
@@ -72,6 +75,7 @@ import {
   patchSharedChatSessions,
   cacheCreatedChatSession,
   useChatSessionsData,
+  warmChatTranscript,
   useProjectChatSessionsData,
   setChatSessionArchived,
 } from "@/lib/chat-surface-data";
@@ -81,6 +85,7 @@ import { chatArchivedSessionsCacheKey, chatSessionsCacheKey, chatSharedSessionsC
 import { isRoomUnread } from "@/lib/chat-seen";
 import { navigateChatLocation } from "@/lib/chat-last-location";
 import { requestSidebarClose } from "@/lib/sidebar-close";
+import { needsChatActivityPoll, useObservedChatSessions } from "@/lib/chat-stream-observation";
 
 /** Compact single-line rows, with a 44px phone target (M3) and room for the row menu. */
 const rowCls = (active: boolean) =>
@@ -224,9 +229,10 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         const row = byId.get(sessionId);
         const persistedWorking = row?.status === "running";
         if (
-          !row ||
-          persistedWorking === override.working ||
-          now - override.changedAt >= ROOM_ACTIVITY_OVERRIDE_GRACE_MS
+          !row && override.working ||
+          row && (row.statusReadStartedAt ?? 0) > override.changedAt &&
+          (persistedWorking === override.working ||
+            !override.working || now - override.changedAt >= ROOM_ACTIVITY_OVERRIDE_GRACE_MS)
         ) {
           delete next[sessionId];
           changed = true;
@@ -313,23 +319,24 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const ChannelsIcon = channelsOpen ? FolderOpen : Folder;
   const visibleAmbient = ambientRows;
   const showAmbient = othersOpen;
-  const hasWorkingRoom =
-    (sharedRows ?? []).some((row) => row.status === "running") ||
-    Object.values(activityBySession).some((activity) => activity.working);
+  const observedSessions = useObservedChatSessions(workspaceId);
+  const hasWorkingRoom = needsChatActivityPoll(
+    view === "workspace" ? sharedRows ?? [] : rows ?? [], activityBySession, observedSessions,
+  );
 
   // A room may finish after the user switches to another room, at which point
   // neither of the old room's page streams remains to deliver turn_completed.
-  // Poll only while work is known live; the authoritative list status then
+  // Poll only for work without a live observer; the authoritative list status then
   // settles the old row and stops this interval.
   useEffect(() => {
-    if (view !== "workspace" || !hasWorkingRoom) return;
+    if (!hasWorkingRoom) return;
     const poll = window.setInterval(() => {
       // A forced revalidation of the cached shared list: rows stay painted
       // while the status column catches up.
-      void refreshShared().catch(() => {});
+      void (view === "workspace" ? refreshShared() : refresh()).catch(() => {});
     }, ROOM_ACTIVITY_STATUS_POLL_MS);
     return () => window.clearInterval(poll);
-  }, [hasWorkingRoom, refreshShared, view]);
+  }, [hasWorkingRoom, refreshShared, refresh, view]);
 
   const onRename = useCallback(
     async (row: DocSession) => {
@@ -488,6 +495,8 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         href={href}
         prefetch={false}
         onClick={event => onChatLinkClick(event, href)}
+        onPointerEnter={event => { if (event.pointerType !== "touch" && row.id !== activeSessionId) warmChatTranscript(row.id); }}
+        onFocus={() => { if (row.id !== activeSessionId) warmChatTranscript(row.id); }}
         aria-current={row.id === activeSessionId ? "page" : undefined}
         className={cn(rowCls(row.id === activeSessionId), styles.conversation)}
       >
@@ -591,6 +600,17 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
     }
   }, [base, creatingShared, router, t, workspaceId]);
 
+  const startPersonalChat = (projectId: string | null) => {
+    if (!primary) return;
+    const requestId = stashChatHandoff({ workspaceId, assistantId: primary.id,
+      ...(projectId ? { contextProjectId: projectId } : {}),
+      draftOnly: true, text: "", ts: Date.now() });
+    if (!requestId) return;
+    requestSidebarClose();
+    const href = personalChatHandoffPath(workspaceId, primary.id, requestId);
+    if (!navigateChatLocation(href)) router.push(href, { scroll: false });
+  };
+
   return (
     <div className="-mx-1 flex min-w-0 flex-col gap-3 pt-1 md:-mx-[3px] md:gap-5 md:pt-0">
       {view === "personal" ? (
@@ -628,19 +648,25 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
 
       {view === "personal" && (
         <div>
-          <div className={sectionHeaderCls}>{t.railAria}</div>
+          <div data-chat-history-heading className="flex min-h-11 items-center justify-between pl-2.5 text-sm font-normal text-sidebar-foreground/50 md:min-h-8">
+            <span>{t.railAria}</span>
+            {/* Always reserve the recovery slot so refresh failures cannot move the rail. */}
+            <span className="flex size-11 shrink-0 items-center justify-center md:size-8">
+              {personalUnavailable && (
+                <Tooltip label={`${t.railLoadFailed} ${t.railRetry}`}>
+                  <button type="button" disabled={revalidating} onClick={() => void refresh()}
+                    aria-label={`${t.railLoadFailed} ${t.railRetry}`}
+                    className="flex size-11 items-center justify-center rounded-md text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sidebar-foreground disabled:opacity-50 md:size-8">
+                    <RefreshCw aria-hidden className={cn("size-3.5", revalidating && "animate-spin motion-reduce:animate-none")} />
+                  </button>
+                </Tooltip>
+              )}
+            </span>
+            <span role="status" className="sr-only">{personalUnavailable ? t.railLoadFailed : ""}</span>
+          </div>
           <div className="flex flex-col">
             {initialPersonalLoad && !personalError && <RailRowsSkeleton />}
-            {personalUnavailable && (
-              <div role="alert" className="px-2 py-1 text-xs text-sidebar-foreground/70">
-                <p>{t.railLoadFailed}</p>
-                <button type="button" disabled={revalidating} onClick={() => void refresh()}
-                  className="min-h-11 rounded px-2 text-sidebar-foreground underline disabled:opacity-50 md:min-h-8">
-                  {t.railRetry}
-                </button>
-              </div>
-            )}
-            {rows !== null && !personalError && personalGroups.length === 0 && (
+            {rows !== null && personalGroups.length === 0 && (
               <div className="select-none px-2 py-1 text-[12px] text-sidebar-foreground/40">
                 {t.railEmpty}
               </div>
@@ -650,7 +676,9 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
             )}
             {normalGroups.map(group => (
               <PersonalChatGroup key={group.id} workspaceId={workspaceId} group={group}
-                activeSessionId={activeSessionId} renderRow={renderRow} />
+                activeSessionId={activeSessionId} renderRow={renderRow}
+                project={(projects.data ?? []).find(project => group.rows[0]?.contextProjectId === project.id)}
+                onCreate={startPersonalChat} creating={!primary} activity={activityBySession} />
             ))}
             {channelGroups.length > 0 && (
               <section className={cn(styles.chatGroup, "flex flex-col gap-0.5")} data-open={channelsOpen} data-chat-channels>
@@ -662,7 +690,8 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
                 {channelsOpen && <div className="flex flex-col gap-0.5 pl-3">
                   {channelGroups.map(group => (
                     <PersonalChatGroup key={group.id} workspaceId={workspaceId} group={group}
-                      activeSessionId={activeSessionId} renderRow={renderRow} />
+                      activeSessionId={activeSessionId} renderRow={renderRow}
+                      onCreate={startPersonalChat} creating={!primary} activity={activityBySession} />
                   ))}
                 </div>}
               </section>
@@ -674,12 +703,12 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       {view === "workspace" && (
         <div className="flex flex-col">
           <ProjectChatGroup workspaceId={workspaceId} project={null} activeSessionId={activeSessionId}
-            renderRow={renderRow} onCreate={startWorkspaceChat} creating={creatingShared} />
+            renderRow={renderRow} onCreate={startWorkspaceChat} creating={creatingShared} activity={activityBySession} />
           {projects.loading && initialProjectsLoad && <RailRowsSkeleton rows={2} />}
           {Boolean(projects.error) && <p role="alert" className="px-2 text-xs text-destructive">{t.projectChatsFailed}</p>}
           {(projects.data ?? []).filter(p => p.status === "active" && p.shared?.status !== "quarantined").map(project => (
             <ProjectChatGroup key={project.id} workspaceId={workspaceId} project={project} activeSessionId={activeSessionId}
-              renderRow={renderRow} onCreate={startWorkspaceChat} creating={creatingShared} />
+              renderRow={renderRow} onCreate={startWorkspaceChat} creating={creatingShared} activity={activityBySession} />
           ))}
         </div>
       )}
@@ -725,7 +754,9 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
 }
 
 /** Personal grouping never requests a shared transcript or changes its binding. */
-function PersonalChatGroup({ workspaceId, group, activeSessionId, renderRow }: {
+function PersonalChatGroup({ workspaceId, group, activeSessionId, renderRow, project, onCreate, creating, activity }: {
+  project?: ContextProject; onCreate: (projectId: string | null) => void; creating: boolean;
+  activity: Record<string, RoomActivityOverride>;
   workspaceId: string;
   group: { id: string; label: string; kind: "general" | "project" | "channel"; transport?: string; sourceLabel?: string; named?: boolean; rows: DocSession[] };
   activeSessionId: string | null;
@@ -738,17 +769,20 @@ function PersonalChatGroup({ workspaceId, group, activeSessionId, renderRow }: {
     activeSessionId, group.rows.some(row => row.id === activeSessionId), group.kind === "general",
   );
   const window = useChatGroupWindow(scopeKey, group.rows, activeSessionId);
-  const Icon = group.kind === "channel" ? MessageSquare : open ? FolderOpen : Folder;
   return <section className={cn(styles.chatGroup, "flex flex-col gap-0.5")} data-open={open} data-personal-chat-group={group.kind}>
-    <button type="button"
+    {group.kind === "channel" ? <button type="button"
       className={cn(styles.titleHost, "flex min-h-11 w-full min-w-0 items-center gap-2 rounded-[10px] px-2.5 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}
       aria-expanded={open} onClick={toggleOpen}
       title={group.sourceLabel && group.sourceLabel !== group.label ? `${group.label} (${group.sourceLabel})` : group.label}>
-      {group.kind === "channel" ? <span aria-hidden className="flex size-4 shrink-0 items-center justify-center [&>svg]:size-4" data-channel-icon={group.transport}>
+      <span aria-hidden className="flex size-4 shrink-0 items-center justify-center [&>svg]:size-4" data-channel-icon={group.transport}>
         <ConnectorIcon connectorId={group.transport ?? ""} fallback={group.transport === "brain_inspection" ? <Brain className="size-4" /> : <MessageSquare className="size-4" />} />
-      </span> : <Icon aria-hidden className="size-4 shrink-0" />}
+      </span>
       <SidebarTitle>{group.label}</SidebarTitle>
-    </button>
+    </button> : <FolderHeading name={group.label} open={open} toggleOpen={toggleOpen}
+      workspaceId={workspaceId} rows={group.rows} activeSessionId={activeSessionId} activity={activity}
+      audience={t.viewPersonal} description={project?.description}
+      canCreate={group.kind === "general" || Boolean(project?.status === "active" && project.shared?.status !== "quarantined")}
+      creating={creating} onCreate={() => onCreate(project?.id ?? null)} />}
     {open && <div className="flex flex-col gap-0.5" data-chat-group-rows>
       {window.visibleRows.map(row => renderRow(row, `/w/${workspaceId}/chat?s=${encodeURIComponent(row.id)}`))}
       {window.hasHidden && <button type="button" data-chat-show-more
@@ -759,7 +793,8 @@ function PersonalChatGroup({ workspaceId, group, activeSessionId, renderRow }: {
 }
 
 /** Each scope has its own authorized page; a busy General list cannot hide a Project. */
-function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, onCreate, creating }: {
+function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, onCreate, creating, activity }: {
+  activity: Record<string, RoomActivityOverride>;
   workspaceId: string; project: ContextProject | null; activeSessionId: string | null;
   renderRow: (row: WorkspaceSession, href: string) => React.ReactNode;
   onCreate: (projectId: string | null) => Promise<void>; creating: boolean;
@@ -774,24 +809,11 @@ function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, on
   const window = useChatGroupWindow(scopeKey, rows.data ?? [], activeSessionId);
   const initialLoad = useInitialRailLoad(scopeKey, rows.data !== undefined);
   const canCreate = !project || !project.shared || project.shared.myRole === "owner" || project.shared.myRole === "participant";
-  const FolderIcon = open ? FolderOpen : Folder;
   return <section className={cn(styles.chatGroup, "flex flex-col gap-0.5")} data-open={open} data-workspace-chat-group={project?.id ?? "general"}>
-    <div className={cn(styles.actionHost, styles.titleHost, "relative flex items-center rounded-[10px] hover:bg-sidebar-accent")}>
-      <button type="button" className={cn(styles.groupToggle, "flex min-h-11 w-full min-w-0 items-center gap-2 rounded-[10px] px-2.5 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}
-        aria-expanded={open} onClick={toggleOpen} title={project?.name ?? t.generalChats}
-        onPointerUp={event => {
-          // Safari need not focus a tapped button. Give hoverless users a
-          // stable reveal path to the adjacent compose action.
-          if (event.pointerType !== "mouse") event.currentTarget.focus({ preventScroll: true });
-        }}>
-        <FolderIcon aria-hidden className="size-4 shrink-0" />
-        <SidebarTitle>{project?.name ?? t.generalChats}</SidebarTitle>
-      </button>
-      {canCreate && <button type="button" className={cn(styles.hoverAction, styles.composeAction, "absolute top-1/2 right-0 flex size-11 -translate-y-1/2 items-center justify-center rounded-md text-sidebar-foreground/60 transition-opacity hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:size-8")}
-        aria-label={format(t.newChatInProject, { name: project?.name ?? t.generalChats })}
-        title={format(t.newChatInProject, { name: project?.name ?? t.generalChats })}
-        disabled={creating} onClick={() => void onCreate(project?.id ?? null)}><SquarePen aria-hidden className="size-4" /></button>}
-    </div>
+    <FolderHeading name={project?.name ?? t.generalChats} open={open} toggleOpen={toggleOpen}
+      workspaceId={workspaceId} rows={rows.data} activeSessionId={activeSessionId} activity={activity}
+      hasMore={rows.hasMore} audience={t.viewWorkspace} description={project?.description}
+      canCreate={canCreate} creating={creating} onCreate={() => void onCreate(project?.id ?? null)} />
     {open && <div className="flex flex-col gap-0.5" data-chat-group-rows>
       {rows.loading && initialLoad && <RailRowsSkeleton />}
       {Boolean(rows.error) && <p role="alert" className="px-2 text-xs text-destructive">{t.projectChatsFailed}</p>}
@@ -803,6 +825,53 @@ function ProjectChatGroup({ workspaceId, project, activeSessionId, renderRow, on
         disabled={rows.paging} onClick={async () => { if (!window.hasHidden) await rows.more(); window.showMore(); }}>{t.moreChats}</button>}
     </div>}
   </section>;
+}
+
+/** A preview never fetches or changes scope; compose reuses each audience's launcher. */
+function FolderHeading({ name, open, toggleOpen, workspaceId, rows, activeSessionId, activity,
+  hasMore, audience, description, canCreate, creating, onCreate }: {
+  name: string; open: boolean; toggleOpen: () => void; workspaceId: string;
+  rows?: DocSession[]; activeSessionId: string | null; activity: Record<string, RoomActivityOverride>;
+  hasMore?: boolean; audience: string; description?: string | null;
+  canCreate: boolean; creating: boolean; onCreate: () => void;
+}) {
+  const t = useT().chatApp;
+  const boundary = useAppPopupBoundary();
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const FolderIcon = open ? FolderOpen : Folder;
+  const unread = (rows ?? []).filter(row => row.humanCount !== 1 && row.id !== activeSessionId &&
+    isRoomUnread(workspaceId, row.id, row.lastActive)).length;
+  const active = (rows ?? []).filter(row => activity[row.id]?.working ?? row.status === "running").length;
+  return <div className={cn(styles.actionHost, styles.titleHost, "relative flex items-center rounded-[10px] hover:bg-sidebar-accent")}>
+    <PreviewCard.Root open={previewOpen} onOpenChange={setPreviewOpen}>
+      <PreviewCard.Trigger data-chat-folder-heading delay={450} closeDelay={150} render={<button type="button" />}
+        className={cn(styles.groupToggle, "flex min-h-11 w-full min-w-0 items-center gap-2 rounded-[10px] px-2.5 text-left text-sm hover:bg-sidebar-accent md:min-h-8")}
+        aria-expanded={open} onClick={() => { setPreviewOpen(false); toggleOpen(); }}
+        onPointerUp={event => {
+          if (event.pointerType !== "mouse") event.currentTarget.focus({ preventScroll: true });
+        }}>
+        <FolderIcon aria-hidden className="size-4 shrink-0" />
+        <SidebarTitle>{name}</SidebarTitle>
+      </PreviewCard.Trigger>
+      <PreviewCard.Portal>
+        <PreviewCard.Positioner side="right" align="start" sideOffset={8} collisionBoundary={boundary} className="z-50">
+          <PreviewCard.Popup data-chat-folder-preview className="w-72 max-w-[calc(var(--native-app-width,100vw)-1rem)] max-h-[min(80dvh,var(--available-height))] overflow-y-auto rounded-xl bg-popover p-3 text-sm text-popover-foreground shadow-md ring-1 ring-foreground/10">
+            <div className="flex items-start gap-2"><Folder aria-hidden className="mt-0.5 size-4 shrink-0" /><span className="min-w-0 break-words font-medium">{name}</span></div>
+            {rows && <div className="mt-2 flex items-start gap-2 text-xs text-muted-foreground"><MessageSquare aria-hidden className="size-4 shrink-0" /><span>{format(rows.length === 1 && !hasMore ? t.folderChatSummaryOne : t.folderChatSummary, {
+              count: `${rows.length}${hasMore ? "+" : ""}`, unread, active,
+            })}</span></div>}
+            <div className="mt-2 border-t border-border pt-2 text-xs text-muted-foreground">
+              <p>{audience}</p>
+              {description && <p className="mt-1 whitespace-pre-wrap break-words">{description}</p>}
+            </div>
+          </PreviewCard.Popup>
+        </PreviewCard.Positioner>
+      </PreviewCard.Portal>
+    </PreviewCard.Root>
+    {canCreate && <button type="button" className={cn(styles.hoverAction, styles.composeAction, "absolute top-1/2 right-0 flex size-11 -translate-y-1/2 items-center justify-center rounded-md text-sidebar-foreground/60 transition-opacity hover:bg-sidebar-accent hover:text-sidebar-accent-foreground md:size-8")}
+      aria-label={format(t.newChatInProject, { name })} title={format(t.newChatInProject, { name })}
+      disabled={creating} onClick={() => { setPreviewOpen(false); onCreate(); }}><SquarePen aria-hidden className="size-4" /></button>}
+  </div>;
 }
 
 /** Shared disclosure behavior; Personal and Work supply separate scoped keys. */

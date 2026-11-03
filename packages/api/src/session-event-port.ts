@@ -58,6 +58,7 @@ export type SessionEvent =
       sessionId: string
       payload: {
         text: string
+        replyPhase?: 'generating' | 'saving' | 'finishing'
         activity: string | null
         reasoning?: string | null
         senderUserId?: string
@@ -95,11 +96,12 @@ export type SessionEvent =
        * nobody asked for rather than just silently clearing the "Working"
        * card. Omitted for an ordinary completion (the overwhelmingly common
        * case, and what every pre-migration-424 publisher sends). See
-       * `TurnEndReason` in `db/sessions.ts`.
+       * `TurnEndReason` in `db/sessions.ts`. `failed` is the live route's
+       * sanitized failure signal; arbitrary exception details are not persisted.
        */
       payload: {
         senderUserId: string
-        reason?: 'stopped_by_user' | 'stalled_reclaimed' | 'timeout'
+        reason?: 'stopped_by_user' | 'stalled_reclaimed' | 'timeout' | 'failed'
         /** Display name of whoever pressed stop, when `reason` is a stop. */
         stoppedByName?: string | null
       }

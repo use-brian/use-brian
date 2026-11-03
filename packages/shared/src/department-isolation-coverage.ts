@@ -72,7 +72,9 @@ export const DEPARTMENT_ISOLATION_SUITES: readonly DepartmentIsolationSuite[] = 
     'src/workspace-access/__tests__/command-review.integration.test.ts','src/workspace-access/__tests__/history.integration.test.ts']},
   {id:'organization',packageDir:'packages/api',integration:true,testFiles:[
     'src/workspace-access/__tests__/org-chart.integration.test.ts',
-    'src/workspace-access/__tests__/organization-command-review.integration.test.ts']},
+    'src/workspace-access/__tests__/organization-command-review.integration.test.ts',
+    'src/workspace-access/__tests__/organization-cutover.integration.test.ts',
+    'src/workspace-access/__tests__/legacy-knowledge-binding.integration.test.ts']},
   {id:'review-lifecycle',packageDir:'packages/api',integration:true,testFiles:[
     'src/workspace-access/__tests__/scope-review.integration.test.ts',
     'src/context-scope/__tests__/department-isolation.integration.test.ts']},
@@ -81,6 +83,8 @@ export const DEPARTMENT_ISOLATION_SUITES: readonly DepartmentIsolationSuite[] = 
   {id:'strict-intake',packageDir:'packages/api',integration:false,testFiles:[
     'src/ingest/__tests__/programmatic-capture.test.ts','src/ingest/__tests__/room-ingest.test.ts']},
   {id:'ui',packageDir:'apps/app-web',integration:false,testFiles:[
+    'src/components/workspace-access/__tests__/migration-progress.test.tsx',
+    'src/components/workspace-access/__tests__/legacy-knowledge-bindings.test.tsx',
     'src/components/workspace-access/__tests__/workspace-access.test.tsx',
     'src/components/workspace-access/__tests__/scope-review.test.tsx',
     'src/components/organization/__tests__/organization-chart.test.tsx',

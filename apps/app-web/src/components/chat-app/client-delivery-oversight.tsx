@@ -31,8 +31,9 @@ export function ClientDeliveryOversight({workspaceId,scope,onDraft,chatId,hideWh
   const resource=useCachedResource<ProtectedProjection<DeliveryPage>>(key,()=>fetchDeliveryCommitments(workspaceId,scope,cursor,chatId),lifecycle);
   const page=useProtectedProjection(key,resource.data,()=>setSelected(null),resource.refresh);
   useEffect(()=>{setCursor(undefined);setSelected(null)},[scopeKey]);
+  if(!page && hideWhileLoading)return null;
   if(!page) return resource.error ? <div role="alert" className="space-y-2 text-sm"><p>{t.unavailable}</p><Button variant="outline" onClick={()=>void resource.refresh()} className="min-h-8 max-sm:min-h-11">{t.retry}</Button></div>
-    : hideWhileLoading ? null : <div aria-label={t.loading} className="space-y-2"><Skeleton className="h-8 w-40"/><Skeleton className="h-11 w-full"/></div>;
+    : <div aria-label={t.loading} className="space-y-2"><Skeleton className="h-8 w-40"/><Skeleton className="h-11 w-full"/></div>;
   if(page.commitments.length===0)return hideWhenEmpty?null:<p className="text-sm text-muted-foreground">{t.empty}</p>;
   return <section aria-label={t.title} className="min-w-0 space-y-3 border-t pt-3" data-testid="client-delivery-oversight">
     <h2 className="text-sm font-medium">{t.title}</h2>

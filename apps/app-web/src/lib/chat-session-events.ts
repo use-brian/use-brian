@@ -1,3 +1,4 @@
+import { settleChatSessionFeedback } from "@/lib/chat-send-feedback";
 /**
  * Tiny event bus telling the Chat app's session rail to re-fetch. Mirrors
  * `assistant-events.ts` / `approvals-events.ts`.
@@ -86,6 +87,7 @@ export function dispatchChatSessionActivity(
   detail: ChatSessionActivityDetail,
 ): void {
   if (typeof window === "undefined") return;
+  if (!detail.working) settleChatSessionFeedback(detail.workspaceId, detail.sessionId);
   window.dispatchEvent(
     new CustomEvent<ChatSessionActivityDetail>(CHAT_SESSION_ACTIVITY_EVENT, {
       detail,

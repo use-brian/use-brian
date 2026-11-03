@@ -417,6 +417,7 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
 
     expect(result.searchableSources).toContain('gcal')
     expect(result.searchableSources).not.toContain('Google Calendar')
+    expect(result.routineCalendarTools?.size??0).toBe(0)
   })
 
   it('restricts a custom MCP search index to pinned workflow tool names', async () => {
@@ -1292,7 +1293,7 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
     expect(exchanged).not.toContain('refresh-ci-gc2')
   })
 
-  it('advertises the official Calendar name when Google tools are folded behind search', async () => {
+  it.each([false, true])('advertises Calendar and optionally exposes guarded read schemas (%s)', async exposeLocalReadTools => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore } = googleStores()
     const result = await injectMcpTools({
@@ -1303,12 +1304,17 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
       settingsStore: settingsStoreStub() as never,
       connectorInstanceStore: connectorInstanceStore as never,
       keepBuiltinsDirect: false,
+      exposeLocalReadTools,
     })
 
-    expect(tools.has('googleCalendarListEvents')).toBe(false)
+    expect(tools.has('googleCalendarListEvents')).toBe(exposeLocalReadTools)
+    expect(tools.has('googleCalendarCreateEvent')).toBe(false)
+    expect(tools.has('gmailSendMessage')).toBe(false)
     expect(tools.has('mcp_search')).toBe(true)
     expect(result.searchableSources).toContain('Google Calendar')
     expect(result.searchableSources).not.toContain('gcal')
+    expect(result.routineCalendarTools?.size??0).toBe(exposeLocalReadTools?2:0)
+    if(exposeLocalReadTools)expect(result.routineCalendarTools?.get('googleCalendarListEvents')).toBe(tools.get('googleCalendarListEvents'))
   })
 
   it('binds each Gmail confirmation preview to its concrete sender account', async () => {

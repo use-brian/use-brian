@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs'
+import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import type { AccessCeiling, ContentBlock } from '@use-brian/core'
 import { AuthorityChangedError, createAuthorityLease } from '../../context-scope/authority-lease.js'
 import { DeliveryAudienceUnverifiedError } from '../../context-scope/delivery-authority.js'
 import type { TurnLoopResult } from '../../turn/kernel.js'
-import { createChatPostReplyBoundary } from '../chat-post-reply.js'
+import { createChatPostReplyBoundary, afterReplyPublication } from '../chat-post-reply.js'
 
 const ceiling: AccessCeiling = { workspaceId: 'workspace', userId: 'actor', clearance: 'internal',
   compartments: [], mutationCompartments: [], projectIds: [], visibilityAssistantIds: ['assistant'] }
@@ -11,6 +13,51 @@ const content: ContentBlock[] = [{ type: 'text', text: 'Hello.' }]
 const completed: TurnLoopResult = { selection: { kind: 'text', text: 'Hello.' }, finalText: null, aborted: false }
 
 describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
+  it('announces text completion once without claiming a saved reply or hiding a later failure', () => {
+    const boundary = createChatPostReplyBoundary(), announce = vi.fn()
+    boundary.announceTextCompletion(announce)
+    expect(boundary.isPublishedReply()).toBe(false)
+    expect(boundary.notice(new AuthorityChangedError())).toBeNull()
+    boundary.beginFinalization(completed, false, new AbortController().signal)
+    boundary.announceTextCompletion(announce)
+    expect(announce).toHaveBeenCalledOnce()
+    boundary.recordPublishedReply(content)
+    expect(boundary.isPublishedReply()).toBe(true)
+  })
+  it('announces text completion only for successful live text and does not imply publication', () => {
+    const boundary = createChatPostReplyBoundary(), abort = new AbortController()
+    expect(boundary.beginFinalization(completed, false, abort.signal)).toBe(true)
+    expect(boundary.isPublishedReply()).toBe(false)
+    expect(boundary.beginFinalization(completed, true, abort.signal)).toBe(false)
+    expect(boundary.beginFinalization({ ...completed, aborted: true }, false, abort.signal)).toBe(false)
+    expect(boundary.beginFinalization({ ...completed, selection: { kind: 'empty', reason: 'tools_only' } }, false, abort.signal)).toBe(false)
+    abort.abort()
+    expect(boundary.beginFinalization(completed, false, abort.signal)).toBe(false)
+  })
+
+  it('does not start locking source reads or inference before publication commits', async () => {
+    let publish!: () => void
+    const pending = new Promise<void>(resolve => { publish = resolve })
+    const events: string[] = []
+    const result = afterReplyPublication(() => pending, async () => {
+      events.push('inference')
+      events.push('persist')
+      return 7
+    })
+    await Promise.resolve()
+    expect(events).toEqual([])
+    publish()
+    await expect(result).resolves.toBe(7)
+    expect(events).toEqual(['inference', 'persist'])
+  })
+
+  it('does not start follow-up work when publication fails', async () => {
+    const failure = new Error('Fictional publication failure'), persist = vi.fn()
+    await expect(afterReplyPublication(async () => { throw failure }, async () => {
+      persist()
+    })).rejects.toBe(failure)
+    expect(persist).not.toHaveBeenCalled()
+  })
   it('retains the saved reply while refusing follow-up effects under a changed policy', async () => {
     let policyCurrent = true
     const authority = createAuthorityLease(ceiling, async () => ceiling, async () => policyCurrent)
@@ -20,6 +67,7 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
     await authority.execute(async () => { saved.push(content) })
     await authority.assertCurrent()
     boundary.recordPublishedReply(content)
+    expect(boundary.isPublishedReply()).toBe(true)
     policyCurrent = false
     const followUp = vi.fn()
     let failure: unknown
@@ -44,6 +92,7 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
     } catch (error) { failure = error }
     expect(failure).toMatchObject({ operationMayHaveExecuted: true })
     expect(boundary.notice(failure)).toBeNull()
+    expect(boundary.isPublishedReply()).toBe(false)
     expect(boundary.notice(new AuthorityChangedError())).toBeNull()
   })
 
@@ -54,6 +103,7 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
     const boundary = createChatPostReplyBoundary()
     boundary.beginFinalization(completed, false, new AbortController().signal)
     boundary.recordPublishedReply(row)
+    expect(boundary.isPublishedReply()).toBe(false)
     expect(boundary.notice(new AuthorityChangedError())).toBeNull()
   })
 
@@ -69,6 +119,7 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
     ] as [TurnLoopResult, boolean][]) {
       boundary.beginFinalization(result, providerFailed, new AbortController().signal)
       boundary.recordPublishedReply(content)
+      expect(boundary.isPublishedReply()).toBe(false)
       expect(boundary.notice(new AuthorityChangedError())).toBeNull()
     }
   })
@@ -83,6 +134,153 @@ describe('[COMP:api/chat-post-reply] completed reply authority refusal', () => {
     }
     expect(boundary.notice(new AuthorityChangedError())).not.toBeNull()
     abort.abort()
+    expect(boundary.isPublishedReply()).toBe(false)
     expect(boundary.notice(new AuthorityChangedError())).toBeNull()
+  })
+})
+
+// Exercise the actual route boundary with a delayed/failed release and a late
+// follow-up error. No provider or database boundary is needed for these states.
+const route = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
+const metadataStart = route.indexOf('      // Metadata has its own durable, freshly authorized worker.')
+const metadataScheduling = route.slice(metadataStart, route.indexOf('      if (shouldTitle) {', metadataStart))
+function titleScheduling(accepted: boolean, failure?: Error) {
+  const enqueue = vi.fn(async () => { if (failure) throw failure; return accepted })
+  const readTitle = vi.fn(async () => null)
+  const scope = {
+    options: { enqueueSessionTitleJob: enqueue }, nativeTranscriptAuthority: {}, turnReleased: true,
+    postReply: { isPublishedReply: () => true },
+    classifySession: () => ({ anchor: { kind: 'none' }, transport: 'web', lane: 'conversation' }),
+    session: { id: 'session', assistantId: 'assistant' }, assistant: { id: 'assistant' }, roomResponseGroupContext: null, docToolsTurn: true, docWrittenPageIds: new Set(),
+    pinSessionTitleClaims: () => ({ userId: 'actor' }), req: {}, storedUserMsg: { id: 'message' },
+    isAuthorityChangedError: (error: unknown) => error instanceof AuthorityChangedError,
+    isDeliveryAudienceUnverifiedError: () => false, readSessionTitle: readTitle, isPlaceholderTitle: () => false,
+    attendedSessionTurnCount: vi.fn(async () => 1), dbMessages: [],
+    authority: { execute: (fn: () => unknown) => fn() }, countSessionTurns: vi.fn(async () => 2),
+  }
+  const code = ts.transpileModule(`return (async () => { ${metadataScheduling}; return { titleQueued, shouldTitle }; })();`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+  return { enqueue, readTitle, scope, run: () => new Function(...Object.keys(scope), code)(...Object.values(scope)) }
+}
+
+describe('[COMP:api/chat-post-reply] durable title scheduling', () => {
+  it('queues ordinary Chat even when page tools are available, without reading title history inline', async () => {
+    const test = titleScheduling(true)
+    await expect(test.run()).resolves.toEqual({ titleQueued: true, shouldTitle: false })
+    expect(test.enqueue).toHaveBeenCalledOnce()
+    expect(test.readTitle).not.toHaveBeenCalled()
+  })
+  it('retains the original inline path when no durable job was accepted', async () => {
+    const test = titleScheduling(false)
+    await expect(test.run()).resolves.toEqual({ titleQueued: false, shouldTitle: true })
+    expect(test.readTitle).toHaveBeenCalledOnce()
+  })
+  it('does not queue a turn that still owes document effects', async () => {
+    const test = titleScheduling(true)
+    test.scope.docWrittenPageIds.add('page')
+    await expect(test.run()).resolves.toEqual({ titleQueued: false, shouldTitle: true })
+    expect(test.enqueue).not.toHaveBeenCalled()
+  })
+  it('retains inline titles for a different answering assistant', async () => {
+    const test = titleScheduling(true)
+    test.scope.assistant.id = 'other-assistant'
+    await expect(test.run()).resolves.toEqual({ titleQueued: false, shouldTitle: true })
+    expect(test.enqueue).not.toHaveBeenCalled()
+    expect(test.readTitle).toHaveBeenCalledOnce()
+  })
+  it('propagates authority loss instead of starting an inline fallback', async () => {
+    const failure = new AuthorityChangedError(), test = titleScheduling(false, failure)
+    await expect(test.run()).rejects.toBe(failure)
+    expect(test.readTitle).not.toHaveBeenCalled()
+  })
+})
+
+const releaseBlock = route.slice(route.indexOf('      // Release the lease we took at claim time'),
+  route.indexOf('      // Memory nudge: judge utility'))
+const catchBlock = route.slice(route.indexOf('      if (sessionIdForError && userIdForError) {'),
+  route.indexOf('      // Only log if we have at least user context'))
+function routeBoundary(released: boolean, grouped = false, writtenPages: string[] = []) {
+  const events: string[] = []
+  const bus: unknown[] = []
+  const releaseTurn = vi.fn(async () => released)
+  const scope = {
+    session: { id: 'session' }, user: { id: 'actor' }, releaseTurn,
+    activeResolvers: new Map(), abortRegistryToken: null,
+    unregisterTurnAbort: vi.fn(), roomTurnAddressers: new Map(), approvalResolverIndex: new Map(),
+    turnPolicy: { liveFollow: true }, isBackgroundTurn: true, clientGone: true,
+    publishSessionEvent: (event: unknown) => bus.push(event),
+    docCtx: false, docToolsTurn: true, docWrittenPageIds: new Set(writtenPages), roomResponseGroupContext: grouped ? {} : null,
+    postReply: { isPublishedReply: () => true }, turnInboxHandle: { close: vi.fn() },
+    sendEvent: (name: string) => events.push(name), turnTiming: { add: vi.fn(), snapshot: () => ({ total_ms: 10 }) },
+    sessionIdForError: 'session', userIdForError: 'actor', postReplyNotice: {}, recoveryDelivered: false,
+  }
+  const code = ts.transpileModule(`return (async () => {
+    let turnLeaseToken = 'lease', turnReleased = false, turnCompletionPublished = false;
+    ${releaseBlock}
+    const tokenAfterRelease = turnLeaseToken;
+    ${catchBlock}
+    return { tokenAfterRelease };
+  })();`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
+  return { events, bus, releaseTurn, run: () => new Function(...Object.keys(scope), code)(...Object.values(scope)) }
+}
+describe('[COMP:api/chat-post-reply] foreground route boundary', () => {
+  it('announces one completion after release and never repeats it on a late metadata failure', async () => {
+    const test = routeBoundary(true)
+    expect(await test.run()).toEqual({ tokenAfterRelease: null })
+    expect(test.events).toEqual(['reply_complete'])
+    expect(test.bus).toHaveLength(1)
+  })
+  it('retains cleanup ownership and withholds readiness when release fails', async () => {
+    const test = routeBoundary(false)
+    expect(await test.run()).toEqual({ tokenAfterRelease: 'lease' })
+    expect(test.events).toEqual([])
+    expect(test.releaseTurn).toHaveBeenCalledTimes(2)
+  })
+  it('keeps actual page authoring pending while allowing ordinary chats with page capabilities', async () => {
+    const test = routeBoundary(true, false, ['page'])
+    await test.run()
+    expect(test.events).toEqual([])
+  })
+  it('keeps a multi-assistant response group on its existing full completion boundary', async () => {
+    const test = routeBoundary(true, true)
+    await test.run()
+    expect(test.events).toEqual([])
+  })
+})
+
+
+describe('[COMP:api/chat-post-reply] nonblocking commitment analysis', () => {
+  const start = route.indexOf('            const stateJobKind = classifySession(session)')
+  const end = route.indexOf('            // Source-authority reads lock rows too.', start)
+  const body = ts.transpileModule(route.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor
+  function setup() {
+    const events: string[] = []
+    const scope = {
+      classifySession: () => ({ anchor: { kind: 'none' }, transport: 'web', lane: 'conversation' }),
+      session: { id: 'session', assistantId: 'assistant' }, assistant: { id: 'assistant' }, user: { id: 'actor' },
+      nativeTranscriptAuthority: {}, roomResponseGroupContext: null, docToolsTurn: false, docWrittenPageIds: new Set(),
+      executionContext: {identity: {kind: 'attended', principal: {kind: 'workspace_member', authenticationKind: 'native_session'}}},
+      options: { enqueueSessionStateJob: vi.fn(async () => { events.push('enqueue'); return true }), analytics: {logEvent: vi.fn()} },
+      publishReply: vi.fn(async () => { events.push('saved') }), postReply: { isPublishedReply: () => true },
+      lastAssistantMessageId: 'reply', storedUserMsg: { id: 'question' }, req: {}, pinSessionTitleClaims: () => ({ userId: 'actor' }),
+      isAuthorityChangedError: () => false, isDeliveryAudienceUnverifiedError: () => false,
+      console: { warn: vi.fn() },
+    }
+    const run = () => new AsyncFunction(...Object.keys(scope), body)(...Object.values(scope))
+    return { scope, events, run }
+  }
+  it('returns after saving and enqueueing without waiting for the worker model', async () => {
+    const f = setup(); await f.run()
+    expect(f.events).toEqual(['saved', 'enqueue'])
+    expect(f.scope.options.enqueueSessionStateJob).toHaveBeenCalledWith(expect.objectContaining({ userMessageId: 'question', assistantMessageId: 'reply' }))
+  })
+  it('never enqueues failed publication and never falls back to blocking inference on queue failure', async () => {
+    const f = setup(); f.scope.publishReply.mockRejectedValue(new Error('save failed'))
+    await expect(f.run()).rejects.toThrow('save failed')
+    expect(f.scope.options.enqueueSessionStateJob).not.toHaveBeenCalled()
+    f.scope.publishReply.mockResolvedValue();f.scope.options.enqueueSessionStateJob.mockRejectedValue(new Error('queue unavailable'))
+    await f.run()
+    expect(f.scope.options.analytics.logEvent).toHaveBeenLastCalledWith(expect.objectContaining({eventName:'session_state_diff_enqueue_failed'}))
   })
 })

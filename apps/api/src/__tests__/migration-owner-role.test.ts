@@ -18,9 +18,9 @@ import { vector } from '@electric-sql/pglite-pgvector'
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
-import { migratePglite } from '../migrate-pglite.js'
+import { migratePglite, preparePgliteRuntimeRole } from '../migrate-pglite.js'
 
 const migrationsDir = fileURLToPath(
   new URL('../../../../packages/api/migrations', import.meta.url),
@@ -31,7 +31,7 @@ const SKILL_ID = '00000000-0000-4000-8000-0000000000b1'
 const DEPARTMENT = 'team:00000000-0000-4000-8000-0000000000d1'
 
 /** A database provisioned the way the self-host recipe leaves it. */
-async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean; legacyDefaults?: boolean } = {}): Promise<PGlite> {
+async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean; legacyDefaults?: boolean; prepareRuntime?: boolean } = {}): Promise<PGlite> {
   const db = new PGlite({ extensions: { vector, pg_trgm } })
   await db.waitReady
   if (options.varyOids) {
@@ -44,7 +44,9 @@ async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean; leg
     assert.notDeepEqual((await db.query(`SELECT 'public'::regnamespace::oid AS namespace,
       (SELECT oid FROM pg_language WHERE lanname='plpgsql') AS language`)).rows, before)
   }
-  if (options.appUser) {
+  if (options.prepareRuntime) {
+    await preparePgliteRuntimeRole(db)
+  } else if (options.appUser) {
     await db.exec('CREATE ROLE app_user NOLOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT')
   }
   await db.exec(`
@@ -57,6 +59,7 @@ async function openAsOwner(options: { appUser?: boolean; varyOids?: boolean; leg
     GRANT CREATE ON DATABASE postgres TO migration_owner;
     SET ROLE migration_owner;
   `)
+  if (options.prepareRuntime) await preparePgliteRuntimeRole(db)
   if (options.legacyDefaults) {
     await db.exec(`
       ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO app_user;
@@ -99,7 +102,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
     const facade = 'public.read_admitted_native_scope_snapshot(uuid,text,uuid)'
     const sql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${migration}`, 'utf8'), migration)
     const snapshots = async () => ({
-      functions: (await db.query(`SELECT to_jsonb(p) AS metadata FROM pg_proc p
+      functions: (await db.query<{ metadata: Record<string, unknown> }>(`SELECT to_jsonb(p) AS metadata FROM pg_proc p
         WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows,
       defaults: (await db.query('SELECT to_jsonb(d) AS metadata FROM pg_default_acl d ORDER BY oid')).rows,
       ledger: (await db.query('SELECT * FROM _migrations ORDER BY name')).rows,
@@ -144,7 +147,247 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       [{ private: false, facade: true, later_private: false }])
       assert.deepEqual((await db.query(`SELECT to_jsonb(d) AS metadata FROM pg_default_acl d WHERE defaclobjtype<>'f' ORDER BY oid`)).rows, retainedDefaults)
       assert.equal(await migratePglite(db, migrationsDir, { through: migration }), 0)
+      const captureRepair = '81560_legacy_native_function_privileges.sql'
+      const capture = 'public.capture_native_session_projection_batch(uuid,uuid,integer,text)'
+      const captureSql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${captureRepair}`, 'utf8'), captureRepair)
+      const ordered = (await readdir(migrationsDir)).filter(name => name.endsWith('.sql')).sort()
+      assert.equal(ordered[ordered.indexOf(captureRepair) - 1], '8155_native_validation_query_plans.sql')
+      assert.equal(ordered[ordered.indexOf(captureRepair) + 1], '8156_native_file_capture_frame.sql')
+      await migratePglite(db, migrationsDir, { through: '8155_native_validation_query_plans.sql' })
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS legacy`, [capture])).rows, [{ legacy: true }])
+      const captureDefinition = (await db.query<{ definition: string }>('SELECT pg_get_functiondef($1::regprocedure) AS definition', [capture])).rows[0].definition
+      const captureCases = [
+        { name: 'body', change: captureDefinition.replace('$function$', '$function$\n-- Fictional capture drift\n'), restore: captureDefinition },
+        { name: 'execution property', change: `ALTER FUNCTION ${capture} COST 101`, restore: `ALTER FUNCTION ${capture} COST 100` },
+        { name: 'unknown principal', change: `GRANT EXECUTE ON FUNCTION ${capture} TO legacy_privilege_probe`, restore: `REVOKE ALL ON FUNCTION ${capture} FROM legacy_privilege_probe` },
+        { name: 'PUBLIC access', change: `GRANT EXECUTE ON FUNCTION ${capture} TO PUBLIC`, restore: `REVOKE ALL ON FUNCTION ${capture} FROM PUBLIC` },
+        { name: 'grant option', change: `GRANT EXECUTE ON FUNCTION ${capture} TO app_user WITH GRANT OPTION`, restore: `REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION ${capture} FROM app_user` },
+        { name: 'later helper execution property', change: 'ALTER FUNCTION public.application_current_field_snapshot(uuid,uuid) COST 101', restore: 'ALTER FUNCTION public.application_current_field_snapshot(uuid,uuid) COST 100' },
+        { name: 'missing owner grant', change: `REVOKE ALL ON FUNCTION ${capture} FROM migration_owner`, restore: `GRANT EXECUTE ON FUNCTION ${capture} TO migration_owner` },
+      ]
+      for (const scenario of captureCases) {
+        await t.test(`refuses capture ${scenario.name} atomically`, async () => {
+          try {
+            await db.exec(scenario.change)
+            const before = await snapshots()
+            await assert.rejects(migratePglite(db, migrationsDir, { through: captureRepair }), /Legacy native function prerequisite changed/)
+            assert.deepEqual(await snapshots(), before)
+          } finally { await db.exec(scenario.restore) }
+        })
+      }
+      const beforeCaptureRepair = (await db.query(`SELECT oid,to_jsonb(p)-'proacl' AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows
+      assert.equal(await migratePglite(db, migrationsDir, { through: captureRepair }), 1)
+      assert.deepEqual((await db.query(`SELECT oid,to_jsonb(p)-'proacl' AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows, beforeCaptureRepair)
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS exposed`, [capture])).rows, [{ exposed: false }])
+      const repaired = await snapshots()
+      await db.transaction(async tx => { await tx.exec(captureSql) })
+      assert.deepEqual(await snapshots(), repaired)
+      await migratePglite(db, migrationsDir, { through: '8156_native_file_capture_frame.sql' })
+      const partial = await snapshots()
+      await db.transaction(async tx => { await tx.exec(captureSql) })
+      assert.deepEqual(await snapshots(), partial)
+      const queryRepair = '81660_legacy_native_query_privileges.sql'
+      const queryHelper = 'public.application_session_field_keys(text)'
+      const materializer = 'public.application_materialize_field_envelope(uuid,jsonb,integer)'
+      const querySql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${queryRepair}`, 'utf8'), queryRepair)
+      assert.equal(ordered[ordered.indexOf(queryRepair) - 1], '8165_native_personal_title_acquisition.sql')
+      assert.equal(ordered[ordered.indexOf(queryRepair) + 1], '8166_native_session_query_acquisition.sql')
+      await migratePglite(db, migrationsDir, { through: '8165_native_personal_title_acquisition.sql' })
+      const queryHelpers = [queryHelper, 'public.application_session_query_bounds(uuid,jsonb)', materializer,
+        'public.application_session_query_scan(uuid,uuid,text,integer,text[],jsonb,jsonb)',
+        'public.read_native_application_session_projection(uuid,uuid,integer,text)']
+      for (const helper of queryHelpers) assert.equal((await db.query<{ exposed: boolean }>(
+        "SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS exposed", [helper])).rows[0].exposed, true)
+      const queryDefinition = (await db.query<{ definition: string }>('SELECT pg_get_functiondef($1::regprocedure) AS definition', [queryHelper])).rows[0].definition
+      const materializerDefinition = (await db.query<{ definition: string }>('SELECT pg_get_functiondef($1::regprocedure) AS definition', [materializer])).rows[0].definition
+      const changedDefault = materializerDefinition.replace('DEFAULT 0', 'DEFAULT 1')
+      assert.notEqual(changedDefault, materializerDefinition)
+      const queryCases = [
+        { name: 'body', change: queryDefinition.replace('$function$', '$function$\n-- Fictional query drift\n'), restore: queryDefinition },
+        { name: 'unknown principal', change: `GRANT EXECUTE ON FUNCTION ${queryHelper} TO legacy_privilege_probe`, restore: `REVOKE ALL ON FUNCTION ${queryHelper} FROM legacy_privilege_probe` },
+        { name: 'PUBLIC access', change: `GRANT EXECUTE ON FUNCTION ${queryHelper} TO PUBLIC`, restore: `REVOKE ALL ON FUNCTION ${queryHelper} FROM PUBLIC` },
+        { name: 'grant option', change: `GRANT EXECUTE ON FUNCTION ${queryHelper} TO app_user WITH GRANT OPTION`, restore: `REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION ${queryHelper} FROM app_user` },
+        { name: 'later helper cost', change: `ALTER FUNCTION ${materializer} COST 101`, restore: `ALTER FUNCTION ${materializer} COST 100` },
+        { name: 'different integer default', change: changedDefault, restore: materializerDefinition },
+      ]
+      for (const scenario of queryCases) await t.test(`refuses query ${scenario.name} atomically`, async () => {
+        try {
+          await db.exec(scenario.change)
+          const before = await snapshots()
+          await assert.rejects(migratePglite(db, migrationsDir, { through: queryRepair }), /Legacy native query prerequisite changed/)
+          assert.deepEqual(await snapshots(), before)
+        } finally { await db.exec(scenario.restore) }
+      })
+      const beforeQueryRepair = (await db.query(`SELECT oid,to_jsonb(p)-'proacl' AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows
+      assert.equal(await migratePglite(db, migrationsDir, { through: queryRepair }), 1)
+      assert.deepEqual((await db.query(`SELECT oid,to_jsonb(p)-'proacl' AS metadata FROM pg_proc p
+        WHERE pronamespace='public'::regnamespace ORDER BY oid`)).rows, beforeQueryRepair)
+      for (const helper of queryHelpers) assert.equal((await db.query<{ exposed: boolean }>(
+        "SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS exposed", [helper])).rows[0].exposed, false)
+      const queryRepaired = await snapshots()
+      await db.transaction(async tx => { await tx.exec(querySql) })
+      assert.deepEqual(await snapshots(), queryRepaired)
+      const scopeRepair = '81690_legacy_native_scope_privileges.sql'
+      const scopeHelper = 'public.application_session_eval_scope_current(uuid,text,uuid,text,jsonb)'
+      const scopeSql = toPgliteMigrationSql(await readFile(`${migrationsDir}/${scopeRepair}`, 'utf8'), scopeRepair)
+      assert.equal(ordered[ordered.indexOf(scopeRepair) - 1], '8168_native_source_edge_dispatch.sql')
+      assert.equal(ordered[ordered.indexOf(scopeRepair) + 1], '8169_native_covered_helper_manifest.sql')
+      await migratePglite(db, migrationsDir, { through: '8168_native_source_edge_dispatch.sql' })
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS legacy`, [scopeHelper])).rows, [{ legacy: true }])
+      const scopeDefinition = (await db.query<{ definition: string }>('SELECT pg_get_functiondef($1::regprocedure) AS definition', [scopeHelper])).rows[0].definition
+      const scopeDefault = scopeDefinition.replace('memo jsonb)', "memo jsonb DEFAULT '{}'::jsonb)")
+      assert.notEqual(scopeDefault, scopeDefinition)
+      const scopeCases = [
+        { name: 'body', change: scopeDefinition.replace('$function$', '$function$\n-- Fictional scope drift\n'), restore: scopeDefinition },
+        { name: 'cost', change: `ALTER FUNCTION ${scopeHelper} COST 101`, restore: `ALTER FUNCTION ${scopeHelper} COST 100` },
+        { name: 'configuration', change: `ALTER FUNCTION ${scopeHelper} SET work_mem='8MB'`, restore: `ALTER FUNCTION ${scopeHelper} RESET work_mem` },
+        { name: 'owner', change: `RESET ROLE; ALTER FUNCTION ${scopeHelper} OWNER TO legacy_privilege_probe; SET ROLE migration_owner`, restore: `RESET ROLE; ALTER FUNCTION ${scopeHelper} OWNER TO migration_owner; SET ROLE migration_owner` },
+        { name: 'unknown principal', change: `GRANT EXECUTE ON FUNCTION ${scopeHelper} TO legacy_privilege_probe`, restore: `REVOKE ALL ON FUNCTION ${scopeHelper} FROM legacy_privilege_probe` },
+        { name: 'PUBLIC access', change: `GRANT EXECUTE ON FUNCTION ${scopeHelper} TO PUBLIC`, restore: `REVOKE ALL ON FUNCTION ${scopeHelper} FROM PUBLIC` },
+        { name: 'grant option', change: `GRANT EXECUTE ON FUNCTION ${scopeHelper} TO app_user WITH GRANT OPTION`, restore: `REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION ${scopeHelper} FROM app_user` },
+        { name: 'missing owner grant', change: `REVOKE ALL ON FUNCTION ${scopeHelper} FROM migration_owner`, restore: `GRANT EXECUTE ON FUNCTION ${scopeHelper} TO migration_owner` },
+      ]
+      for (const scenario of scopeCases) await t.test(`refuses scope ${scenario.name} atomically`, async () => {
+        try {
+          await db.exec(scenario.change)
+          const before = await snapshots()
+          await assert.rejects(migratePglite(db, migrationsDir, { through: scopeRepair }), /Legacy native scope prerequisite changed/)
+          assert.deepEqual(await snapshots(), before)
+        } finally { await db.exec(scenario.restore) }
+      })
+      await t.test('refuses an added scope argument default atomically', async () => {
+        const changed = await openAsOwner({ appUser: true })
+        try {
+          await changed.exec('CREATE TABLE memories(id uuid); CREATE TABLE _migrations(name text PRIMARY KEY)')
+          await changed.exec(scopeDefault)
+          await changed.exec(`REVOKE ALL ON FUNCTION ${scopeHelper} FROM PUBLIC; GRANT EXECUTE ON FUNCTION ${scopeHelper} TO app_user`)
+          const before = (await changed.query('SELECT to_jsonb(p) metadata FROM pg_proc p WHERE oid=$1::regprocedure', [scopeHelper])).rows
+          const repairBody = scopeSql.replace(/^BEGIN;\s*/m, '').replace(/COMMIT;\s*$/, '')
+          await assert.rejects(changed.transaction(tx => tx.exec(repairBody)), /Legacy native scope prerequisite changed/)
+          assert.deepEqual((await changed.query('SELECT to_jsonb(p) metadata FROM pg_proc p WHERE oid=$1::regprocedure', [scopeHelper])).rows, before)
+        } finally { await changed.close() }
+      })
+      await t.test('accepts the exact private scope helper when app_user is absent', async () => {
+        const absent = await openAsOwner()
+        try {
+          await absent.exec('CREATE TABLE memories(id uuid); CREATE TABLE _migrations(name text PRIMARY KEY)')
+          await absent.exec(scopeDefinition)
+          await absent.exec(`REVOKE ALL ON FUNCTION ${scopeHelper} FROM PUBLIC`)
+          const before = (await absent.query('SELECT to_jsonb(p) metadata FROM pg_proc p WHERE oid=$1::regprocedure', [scopeHelper])).rows
+          await absent.exec(scopeSql)
+          assert.deepEqual((await absent.query('SELECT to_jsonb(p) metadata FROM pg_proc p WHERE oid=$1::regprocedure', [scopeHelper])).rows, before)
+          await assertOrdinaryOwner(absent)
+        } finally { await absent.close() }
+      })
+      const beforeScopeRepair = await snapshots()
+      assert.equal(await migratePglite(db, migrationsDir, { through: scopeRepair }), 1)
+      const afterScopeRepair = await snapshots()
+      const scopeOid = (await db.query<{ oid: number }>('SELECT $1::regprocedure::oid oid', [scopeHelper])).rows[0].oid
+      // Exactly one ACL may change; all other full catalog rows and defaults
+      // remain byte-identical, including already installed guard fingerprints.
+      const withoutScopeAcl = (rows: typeof beforeScopeRepair.functions) => rows.map(row => {
+        const metadata = { ...(row.metadata as Record<string, unknown>) }
+        if (Number(metadata.oid) === Number(scopeOid)) delete metadata.proacl
+        return metadata
+      })
+      assert.deepEqual(withoutScopeAcl(afterScopeRepair.functions), withoutScopeAcl(beforeScopeRepair.functions))
+      assert.deepEqual(afterScopeRepair.defaults, beforeScopeRepair.defaults)
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') AS exposed`, [scopeHelper])).rows, [{ exposed: false }])
+      await db.exec(scopeSql)
+      assert.deepEqual(await snapshots(), afterScopeRepair)
+      await migratePglite(db, migrationsDir, { through: '8184_native_query_policy_compilation.sql' })
+      const publicationMigration='8188_native_turn_shared_publication.sql'
+      const publicationSql=toPgliteMigrationSql(await readFile(`${migrationsDir}/${publicationMigration}`,'utf8'),publicationMigration)
+        .replace(/^BEGIN;\s*/m,'').replace(/COMMIT;\s*$/,'')
+      const mutationHelper='public.agent_mutation_scope_allows(text[])'
+      const mutationBefore=(await db.query<{raw:Record<string,unknown>;definition:string;fingerprint:string}>(
+        `SELECT to_jsonb(p) raw,pg_get_functiondef(oid) definition,
+         encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') fingerprint FROM pg_proc p WHERE oid=$1::regprocedure`,[mutationHelper])).rows[0]
+      assert.deepEqual((await db.query(`SELECT a.grantee::regrole::text grantee,a.grantor::regrole::text grantor,a.is_grantable
+        FROM pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a
+        WHERE p.oid=$1::regprocedure AND a.grantee='app_user'::regrole`,[mutationHelper])).rows,
+      [{grantee:'app_user',grantor:'migration_owner',is_grantable:false}])
+      const privateMutationHelpers=['session_context_payload_shape(text,jsonb)','validate_session_context_revision_pair()']
+      const privateMutationBefore=(await db.query<{signature:string;raw:Record<string,unknown>}>(
+        'SELECT oid::regprocedure::text signature,to_jsonb(p) raw FROM pg_proc p WHERE oid=ANY($1::regprocedure[]) ORDER BY signature',
+        [privateMutationHelpers])).rows
+      assert.equal(privateMutationBefore.length,2)
+      assert.deepEqual((await db.query(`SELECT bool_and(has_function_privilege('app_user',signature,'EXECUTE')) inherited
+        FROM unnest($1::text[]) signature`,[privateMutationHelpers])).rows,[{inherited:true}])
+      const mutationCases=[
+        {name:'body',change:mutationBefore.definition.replace('$function$','$function$\n-- Fictional mutation helper drift\n')},
+        {name:'metadata',change:`ALTER FUNCTION ${mutationHelper} COST 101`},
+        {name:'grant option',change:`GRANT EXECUTE ON FUNCTION ${mutationHelper} TO app_user WITH GRANT OPTION`},
+        {name:'unknown principal',change:`GRANT EXECUTE ON FUNCTION ${mutationHelper} TO legacy_privilege_probe`},
+        {name:'foreign grantor',change:`RESET ROLE; UPDATE pg_proc SET proacl=ARRAY[
+          'migration_owner=X/migration_owner','=X/migration_owner','app_user=X/legacy_privilege_probe']::aclitem[]
+          WHERE oid='${mutationHelper}'::regprocedure; SET ROLE migration_owner`},
+        {name:'missing PUBLIC grant',change:`REVOKE EXECUTE ON FUNCTION ${mutationHelper} FROM PUBLIC`},
+        {name:'existing fingerprint consumer',change:`CREATE FUNCTION fictional_mutation_pin() RETURNS text LANGUAGE sql AS
+          'SELECT ''${mutationBefore.fingerprint}''::text'`},
+        {name:'existing manifest entry',change:`INSERT INTO native_turn_contract_helpers(signature,fingerprint)
+          VALUES('agent_mutation_scope_allows(text[])','${mutationBefore.fingerprint}')`},
+        {name:'qualified manifest entry',change:`INSERT INTO native_turn_contract_helpers(signature,fingerprint)
+          VALUES('public.agent_mutation_scope_allows(text[])','${mutationBefore.fingerprint}')`},
+        ...privateMutationHelpers.flatMap(signature=>[
+          {name:`private ${signature} PUBLIC grant`,change:`GRANT EXECUTE ON FUNCTION ${signature} TO PUBLIC`},
+          {name:`private ${signature} unknown principal`,change:`GRANT EXECUTE ON FUNCTION ${signature} TO legacy_privilege_probe`},
+          {name:`private ${signature} grant option`,change:`GRANT EXECUTE ON FUNCTION ${signature} TO app_user WITH GRANT OPTION`},
+          {name:`private ${signature} existing fingerprint consumer`,change:`DO $fixture$ DECLARE pin text;BEGIN
+            SELECT encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') INTO pin FROM pg_proc p WHERE oid='${signature}'::regprocedure;
+            EXECUTE format('CREATE FUNCTION fictional_private_mutation_pin() RETURNS text LANGUAGE sql AS %L','SELECT '||quote_literal(pin)||'::text');
+          END $fixture$`},
+        ]),
+      ]
+      for(const scenario of mutationCases)await t.test(`refuses mutation helper ${scenario.name} atomically`,async()=>{
+        await db.exec('BEGIN')
+        try{
+          await db.exec(scenario.change)
+          const before=await snapshots()
+          await db.exec('SAVEPOINT publication_attempt')
+          await assert.rejects(db.exec(publicationSql),scenario.name==='qualified manifest entry'
+            ? /Native turn predecessor contract changed/
+            : /Native mutation scope legacy ACL (prerequisite changed|has an existing pin)/)
+          await db.exec('ROLLBACK TO SAVEPOINT publication_attempt')
+          assert.deepEqual(await snapshots(),before)
+        }finally{await db.exec('ROLLBACK')}
+      })
       await migratePglite(db, migrationsDir)
+      const mutationAfter=(await db.query<{raw:Record<string,unknown>}>(
+        'SELECT to_jsonb(p) raw FROM pg_proc p WHERE oid=$1::regprocedure',[mutationHelper])).rows[0].raw
+      assert.deepEqual({...mutationAfter,proacl:mutationBefore.raw.proacl},mutationBefore.raw)
+      assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',$1::regprocedure,'EXECUTE') executable,
+        NOT EXISTS(SELECT 1 FROM pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a
+         WHERE p.oid=$1::regprocedure AND a.grantee='app_user'::regrole) no_redundant_grant`,[mutationHelper])).rows,
+      [{executable:true,no_redundant_grant:true}])
+      const privateMutationAfter=(await db.query<{signature:string;raw:Record<string,unknown>}>(
+        'SELECT oid::regprocedure::text signature,to_jsonb(p) raw FROM pg_proc p WHERE oid=ANY($1::regprocedure[]) ORDER BY signature',
+        [privateMutationHelpers])).rows
+      // These bodies receive the independently authenticated publication patch;
+      // the compatibility repair changes only their known inherited ACLs.
+      assert.deepEqual(privateMutationAfter.map((row,index)=>({...row,raw:{...row.raw,
+        prosrc:privateMutationBefore[index].raw.prosrc,proacl:privateMutationBefore[index].raw.proacl}})),privateMutationBefore)
+      assert.deepEqual((await db.query(`SELECT bool_and(NOT has_function_privilege('app_user',signature,'EXECUTE')) private
+        FROM unnest($1::text[]) signature`,[privateMutationHelpers])).rows,[{private:true}])
+      const scopeInstalled = await snapshots()
+      await db.exec(scopeSql)
+      assert.deepEqual(await snapshots(), scopeInstalled)
+      await db.exec(`ALTER FUNCTION ${scopeHelper} COST 101`)
+      const installedCustomMetadata = await snapshots()
+      await db.exec(scopeSql)
+      assert.deepEqual(await snapshots(), installedCustomMetadata)
+      await db.exec(`ALTER FUNCTION ${scopeHelper} COST 100`)
+      assert.deepEqual((await db.query('SELECT application_native_covered_evidence_helpers_current() AS current')).rows, [{ current: true }])
+      const queryInstalled = await snapshots()
+      await db.transaction(async tx => { await tx.exec(querySql) })
+      assert.deepEqual(await snapshots(), queryInstalled)
+      assert.deepEqual((await db.query('SELECT application_native_session_query_acquisition_current() AS current')).rows, [{ current: true }])
+      const upgraded = await snapshots()
+      await db.transaction(async tx => { await tx.exec(captureSql) })
+      assert.deepEqual(await snapshots(), upgraded)
       assert.deepEqual((await db.query('SELECT application_memory_statement_helpers_current() AS current')).rows, [{ current: true }])
       assert.deepEqual((await db.query(`SELECT has_function_privilege('app_user',
         'public.application_memory_statement_state(uuid,uuid,text[],jsonb)','EXECUTE') AS exposed`)).rows, [{ exposed: false }])
@@ -301,7 +544,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
   })
 
   it('replays the whole chain from empty without a superuser', async () => {
-    const db = await openAsOwner()
+    const db = await openAsOwner({ prepareRuntime: true })
     try {
       // One connection for every file, so the baseline's row_security = off
       // is still in force when the later data-rewriting migrations run.
@@ -315,7 +558,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
   })
 
   it('relabels free-form compartments on upgrade, bypassing triggers and restoring them', async () => {
-    const db = await openAsOwner()
+    const db = await openAsOwner({ prepareRuntime: true })
     try {
       await migratePglite(db, migrationsDir, { through: '649_department_read_policy.sql' })
 
@@ -438,7 +681,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
 // owner boundary. The real selective-order upgrade is separately exercised on PG18.
 describe('[COMP:api/migration-owner-role] Memory successor parity8126',()=>{
   async function prerequisite(){
-    const db=await openAsOwner({appUser:true})
+    const db=await openAsOwner({prepareRuntime:true})
     await migratePglite(db,migrationsDir,{through:'8125_association_drain_continuation.sql'})
     await assertOrdinaryOwner(db)
     const {readFile}=await import('node:fs/promises')
@@ -468,6 +711,18 @@ describe('[COMP:api/migration-owner-role] Memory successor parity8126',()=>{
       const pending=(await readdir(migrationsDir)).filter(name=>name.endsWith('.sql')&&!installed.has(name)).sort()
       assert(pending.includes('8126_native_memory_successor_derivation_parity.sql'))
       assert(pending.includes('8127_native_memory_retraction_hold_binding.sql'))
+      // Full-chain replay uses the same role-before-migrate table defaults as
+      // embedded product boot, including the shared evidence relations.
+      assert.deepEqual((await f.db.query(`SELECT c.relname,
+        array_agg(a.privilege_type ORDER BY a.privilege_type) privileges,
+        bool_and(a.grantor=c.relowner AND NOT a.is_grantable) owner_grants
+        FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
+        JOIN pg_roles r ON r.oid=a.grantee AND r.rolname='app_user'
+        WHERE c.oid IN('public.scope_derivations'::regclass,'public.scope_derivation_sources'::regclass)
+        GROUP BY c.relname ORDER BY c.relname`)).rows, [
+        {relname:'scope_derivation_sources',privileges:['DELETE','INSERT','SELECT','UPDATE'],owner_grants:true},
+        {relname:'scope_derivations',privileges:['DELETE','INSERT','SELECT','UPDATE'],owner_grants:true},
+      ])
       assert.equal(await migratePglite(f.db,migrationsDir),pending.length)
       assert.equal(await migratePglite(f.db,migrationsDir),0)
       await assertOrdinaryOwner(f.db)

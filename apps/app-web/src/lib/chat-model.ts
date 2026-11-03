@@ -47,29 +47,32 @@ export type ChatModelState = {
 };
 
 /**
- * Model-tier state for a chat surface. Initial value is the cached choice if
- * present, else `defaultTier`. Persists on change, resolves the workspace
- * plan, and snaps an over-tier selection down once the plan is known.
+ * Model-tier state for a chat surface. The first client render matches SSR;
+ * restore the cached choice after hydration before enabling persistence.
+ * Resolve the workspace plan and clamp an over-tier choice once it is known.
  */
 export function useChatModelTier(
   workspaceId: string,
   defaultTier: ModelTier,
 ): ChatModelState {
   const capabilities = deploymentCapabilities();
-  const [model, setModel] = useState<ModelTier>(
-    () => readCachedTier() ?? defaultTier,
-  );
+  const [model, setModel] = useState<ModelTier>(defaultTier);
+  const [restored, setRestored] = useState(false);
+  useEffect(() => {
+    setModel(readCachedTier() ?? defaultTier);
+    setRestored(true);
+  }, [defaultTier]);
   const [plan, setPlan] = useState<string | null>(null);
 
   // Persist the choice (shared key across surfaces).
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!restored || typeof window === "undefined") return;
     try {
       window.localStorage.setItem(MODEL_STORAGE_KEY, model);
     } catch {
       /* private mode — non-fatal */
     }
-  }, [model]);
+  }, [model, restored]);
 
   // Resolve the workspace plan for tier gating (per-workspace billing).
   useEffect(() => {

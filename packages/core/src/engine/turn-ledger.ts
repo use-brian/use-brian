@@ -82,6 +82,8 @@ export interface TurnTrace {
    * `tool_use` blocks, outputs in `toolResults`).
    */
   turn(info: { turn: number; response: AssistantResponse; toolResults: ContentBlock[] }): void
+  /** Actual host executor calls, without a fabricated provider turn. */
+  hostRead?(info:{observations:import('@use-brian/shared').HostObservation[]}):void
   /** Retrieval provenance — called by the context-assembly / search seams. */
   retrieval(info: TurnRetrievalProvenance): void
   /** Confirmation / approval markers. */

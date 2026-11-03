@@ -115,6 +115,26 @@ describe("[COMP:recordings/live-interaction] routes and authorization", () => {
     ownerId = "other";
     expect((await request(app).get(url)).status).toBe(403);
   });
+  it("reports capture settling only after validating its owner and chat scope", async () => {
+    const isProcessing = vi.fn(async () => true);
+    const capture = { id, ownerId: id, workspaceId: id, chatSessionId: id };
+    const authorize = vi.fn(async () => true);
+    const service = createLiveInteractionService({
+      store: { isProcessing, listCaptureErrors: async () => [], listJobs: async () => [], capture: async () => capture } as unknown as LiveInteractionStore,
+      authorize, answer: async () => "", publish: async () => {},
+    });
+    const app = express().use((req, _res, next) => { Object.assign(req, { userId: id }); next(); })
+      .use(recordingInteractionRoutes({ service }));
+    const url = `/jobs?workspaceId=${id}&chatSessionId=${id}&captureIds=${id}`;
+    expect((await request(app).get(url)).body).toEqual({ processing: true, jobs: [], captureErrors: [] });
+    expect(isProcessing).toHaveBeenCalledWith(id, id, id, [id]);
+    expect((await request(app).get(url.replace(`captureIds=${id}`, "captureIds=invalid"))).status).toBe(400);
+    capture.chatSessionId = "22222222-2222-4222-8222-222222222222";
+    expect((await request(app).get(url)).status).toBe(403);
+    capture.chatSessionId = id; authorize.mockResolvedValue(false);
+    expect((await request(app).get(url)).status).toBe(403);
+    expect(isProcessing).toHaveBeenCalledTimes(1);
+  });
   it("handles split wake phrases, empty questions, and cancellation", () => {
     expect(defaultRuleDecision("Hey")).toEqual({
       action: "begin",

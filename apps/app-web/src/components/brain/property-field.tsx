@@ -9,7 +9,8 @@
  *
  * Commit contract: every editable value receives an async `onCommit` that
  * resolves `{ ok, error? }`. While the promise is pending the row dims;
- * on failure the draft reverts and the error renders under the row. The
+ * on failure title drafts remain editable for retry; other properties revert.
+ * The error renders under the row. The
  * caller (detail-drawer.tsx) owns the wire call + optimistic body patch.
  *
  * Spec: docs/architecture/brain/corrections.md → "Entry page view".
@@ -784,11 +785,15 @@ export function PageTitle({
     }
     setBusy(true);
     setError(null);
-    const result = await onCommit(next);
-    setBusy(false);
-    if (!result.ok) {
-      setDraft(committedRef.current);
-      setError(result.error ?? t.brainPage.detailDrawer.saveFailed);
+    try {
+      const result = await onCommit(next);
+      if (!result.ok) {
+        setError(result.error ?? t.brainPage.detailDrawer.saveFailed);
+      }
+    } catch {
+      setError(t.brainPage.detailDrawer.saveFailed);
+    } finally {
+      setBusy(false);
     }
   }
 

@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg'
 import { scopeGrantContains, maxSensitivity, unionScopeRequirements, type AccessContext, type ResourceScope, type WorkspaceFileCreateInput } from '@use-brian/core'
 import { assertExecutionResourceScope } from '../db/access-predicate.js'
 import { createDbContextScopeStore } from '../db/context-scope-store.js'
-import { readAdmissionPolicy } from './admission-policy-read.js'
+import { readAdmissionPolicy, usesClassicModeAdmission } from './admission-policy-read.js'
 import { admitWorkspaceResource } from './resource-admission.js'
 import { WorkspaceAccessError } from './policy.js'
 
@@ -69,7 +69,7 @@ export async function admitBoundFile(client: PoolClient, actor: string, input: W
     if (key.startsWith('project:') && !(await client.query("SELECT 1 FROM project_shared_scopes WHERE project_id::text=$1 AND workspace_id=$2 AND status='active'",[key.slice(8),input.workspaceId])).rows.length) throw denied()
   }
   const policy=await readAdmissionPolicy(client,input.workspaceId)
-  if (policy && policy.setupState!=='legacy') await admitWorkspaceResource(client,input.workspaceId,actor,{
+  if (usesClassicModeAdmission(policy)) await admitWorkspaceResource(client,input.workspaceId,actor,{
     writerKind:'workspace_file',rowVisibility:{userId:input.userId??null,assistantId:input.assistantId??null},
     visibility:input.userId?'private':'workspace',sensitivity:input.sensitivity??inherited.sensitivity,
     inherited:{...inherited,visibility:inherited.userId?'private':'workspace'},
@@ -87,7 +87,7 @@ export async function admitUploadedFile(client: PoolClient, actor: string, input
   const binding:FileUploadBinding=upload.admission_binding
   if (binding.executingAssistantId && binding.executingAssistantId!==access?.assistantId) throw denied()
   const policy=await readAdmissionPolicy(client,input.workspaceId)
-  if (policy?.setupState==='ready' && !binding.ready) throw new WorkspaceAccessError('access_policy_conflict',409)
+  if (usesClassicModeAdmission(policy) && !binding.ready) throw new WorkspaceAccessError('access_policy_conflict',409)
   const after={...input,...binding,createdByUserId:actor,createdByAssistantId:null}
   await admitBoundFile(client,actor,after,binding,access)
   return after

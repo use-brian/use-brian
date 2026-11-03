@@ -44,7 +44,7 @@ import { sanitizeDeliveryText } from '@use-brian/shared'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 import type { ResolvedWorkspaceCustomLlm } from '../custom-llm-runtime.js'
 import { ensureServableModel } from '../model-resolution.js'
-import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority } from '../application-platform/model-source-authority.js'
+import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority,tryAssertNativeCombinedOutput,type NativeAttendedOutputBoundary } from '../application-platform/model-source-authority.js'
 import type { SessionPolicy } from '../session-kind.js'
 import { hasTurnAbort, registerTurnAbort, releaseTurn, startLeaseHeartbeat, takeTurnLease, unregisterTurnAbort } from './lease.js'
 import type { TurnBilling } from './billing.js'
@@ -61,8 +61,14 @@ export type TurnSink = {
    * Omission keeps the kernel's source-delivery validator.
    */
   assertOutputAuthority?: (context: ToolContext) => Promise<void>
+  /** Canonical native host capability; custom sink callbacks cannot opt in. */
+  nativeOutputBoundary?: NativeAttendedOutputBoundary
+  /** Observational timing only; mutation of authority/evidence refuses output. */
+  onOutputAuthorityTiming?: (milliseconds:number)=>void
   /** Every engine event, in order. The `sse` sink renders them; others may observe. */
   onEvent?: (event: QueryEvent) => void | Promise<void>
+  /** SSE display only: final text is selected, but cleanup/publication still follow. */
+  onReplyTextComplete?: () => void
   /**
    * Runs after a clean loop while the lease is still held: flush buffered
    * turns, persist the reply. A throw here still releases the lease.
@@ -111,7 +117,7 @@ export type RunAssistantTurnParams = {
   abortController: AbortController
   model: TurnModel
   /** The assembled loop, minus what the kernel owns (model, liveness, abort). */
-  loop: Omit<QueryLoopOptions, 'provider' | 'model' | 'stallIdleMs'>
+  loop: Omit<QueryLoopOptions, 'provider' | 'model' | 'stallIdleMs' | 'tryAssertOutputBoundary'>
   /**
    * `kernel` (default): admit, lease, heartbeat and release the session.
    * `held`: the runner took the lease itself through `takeTurnLease`
@@ -156,7 +162,16 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     authority: params.loop.context.authority,
     accumulator: params.loop.context.scopeAccumulator,
   }
+  const recordOutputTiming=(context:ToolContext,started:number)=>{
+    const evidence=JSON.stringify(context.scopeAccumulator?.evidence)
+    params.sink.onOutputAuthorityTiming?.(Date.now()-started)
+    if(context.executionContext!==original.execution||context.authority!==original.authority
+      ||context.scopeAccumulator!==original.accumulator||JSON.stringify(context.scopeAccumulator?.evidence)!==evidence){
+      throw Object.assign(new Error('The output timing observer changed authority.'),{reason:'authority_changed' as const,retrySafe:false})
+    }
+  }
   const assertSinkOutputAuthority = async (context: ToolContext): Promise<void> => {
+    const started=Date.now()
     if (!params.sink.assertOutputAuthority) return assertSourceModelOutputAuthority(context)
     const assertIdentity = () => {
       if (!original.execution || !original.authority || !original.accumulator
@@ -167,7 +182,7 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       }
     }
     assertIdentity()
-    await params.sink.assertOutputAuthority(context)
+    try{await params.sink.assertOutputAuthority(context)}finally{recordOutputTiming(context,started)}
     assertIdentity()
   }
   const lease = params.lease ?? { mode: 'kernel' as const }
@@ -208,6 +223,40 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     : () => {}
 
   const collector = createTurnOutputCollector({ format: params.outputFormat ?? 'compact' })
+  type OutputFence={evidence:string;recipient:TurnSink['assertOutputAuthority'];boundary:TurnSink['nativeOutputBoundary']}
+  let combinedReceipt:{event:QueryEvent;fence:OutputFence}|undefined
+  const refuseCombinedReceipt=()=>{throw Object.assign(new Error('The output evidence changed.'),{reason:'authority_changed' as const,retrySafe:false})}
+  const assertOutputFence=(current:ToolContext,fence:OutputFence)=>{
+    if(current.executionContext!==original.execution||current.authority!==original.authority
+      ||current.scopeAccumulator!==original.accumulator||JSON.stringify(original.accumulator?.evidence)!==fence.evidence
+      ||params.loop.context.assertModelOutputAuthority||params.sink.assertOutputAuthority!==fence.recipient
+      ||params.sink.nativeOutputBoundary!==fence.boundary)refuseCombinedReceipt()
+  }
+  const nativeBoundary=params.sink.nativeOutputBoundary
+  const tryCombinedProof=nativeBoundary&&!params.loop.context.assertModelOutputAuthority
+    &&params.sink.kind==='sse'
+    ?async(current:ToolContext):Promise<OutputFence|null>=>{
+      // A later custom callback retains the ordinary two-boundary path.
+      if(params.loop.context.assertModelOutputAuthority||params.sink.nativeOutputBoundary!==nativeBoundary)return null
+      if(current.executionContext!==original.execution||current.authority!==original.authority||current.scopeAccumulator!==original.accumulator)refuseCombinedReceipt()
+      const recipient=params.sink.assertOutputAuthority
+      const started=Date.now()
+      let admitted:Readonly<{evidence:string}>|null
+      try{admitted=await tryAssertNativeCombinedOutput(nativeBoundary,current,recipient,true)}
+      catch(error){recordOutputTiming(current,started);throw error}
+      if(!admitted)return null
+      const fence:OutputFence={evidence:admitted.evidence,recipient,boundary:nativeBoundary}
+      recordOutputTiming(current,started)
+      assertOutputFence(current,fence)
+      return fence
+    }:undefined
+  const tryCombinedOutput=tryCombinedProof?async(current:ToolContext,event:QueryEvent):Promise<boolean>=>{
+    combinedReceipt=undefined
+    const fence=await tryCombinedProof(current)
+    if(!fence)return false
+    combinedReceipt={event,fence}
+    return true
+  }:undefined
   try {
     if (params.budget) await params.budget()
     // Loop and sink failures propagate unchanged: the runner's own error path
@@ -232,17 +281,34 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
     for await (const event of queryLoop({
       ...params.loop,
       context,
+      tryAssertOutputBoundary:tryCombinedOutput,
       provider: params.model.provider,
       model: servedTurnModel(params.model),
       stallIdleMs: params.stallIdleMs ?? DEFAULT_STALL_IDLE_MS,
     })) {
       // An aborted turn stops consuming: nothing after a stop reaches a sink.
       if (params.abortController.signal.aborted) break
-      if (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json') {
+      const receipt=combinedReceipt
+      combinedReceipt=undefined
+      if(receipt){
+        // Consume only this event's private fence. Keep any post-yield mutation
+        // failure inside the core's sticky authority wrapper as well.
+        await assertModelOutputAuthority(context,async()=>true,()=>{
+          if(receipt.event!==event)refuseCombinedReceipt()
+          assertOutputFence(context,receipt.fence)
+        })
+      }else if (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json') {
         await assertSinkOutputAuthority(context)
       }
       collector.observe(event)
       await params.sink.onEvent?.(event)
+      // The generator may await resource cleanup after yielding its terminal
+      // event. Stop the writing UI now, without releasing the lease or claiming
+      // persistence. This event already passed the source/delivery boundary.
+      if (event.type === 'turn_complete' && params.sink.kind === 'sse'
+        && !params.abortController.signal.aborted && collector.select().kind === 'text') {
+        params.sink.onReplyTextComplete?.()
+      }
     }
     const selection = collector.select()
     const finalText = FINAL_ONLY_SINKS.has(params.sink.kind) && selection.kind === 'text'
@@ -250,14 +316,23 @@ export async function runAssistantTurn(params: RunAssistantTurnParams): Promise<
       : null
     const result: TurnLoopResult = { selection, finalText, aborted: params.abortController.signal.aborted }
     if (!result.aborted) {
-      await assertModelOutputAuthority(context)
-      if (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json') {
+      // Fresh final admission, through the same sticky wrapper as stream output.
+      // The last event's receipt cannot survive its arbitrary sink callback.
+      let combined=false
+      let terminalFence:OutputFence|undefined
+      await assertModelOutputAuthority(context,tryCombinedProof?async()=>{
+        terminalFence=await tryCombinedProof(context)??undefined
+        combined=terminalFence!==undefined
+        return combined
+      }:undefined,()=>{if(terminalFence)assertOutputFence(context,terminalFence)})
+      if (!combined && (params.sink.kind === 'sse' || params.sink.kind === 'adapter' || params.sink.kind === 'json')) {
         await assertSinkOutputAuthority(context)
       }
     }
     await params.sink.afterLoop?.(result)
     return result
   } finally {
+    combinedReceipt=undefined
     stopHeartbeat()
     if (ownsAbortHandle) unregisterTurnAbort(params.sessionId, token!)
     if (token && lease.mode === 'kernel') await releaseTurn(params.sessionId, token, 'completed')

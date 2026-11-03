@@ -75,3 +75,9 @@ export type {
   PreToolUseDirective,
   PostToolUseHookContext,
 } from './hooks.js'
+
+export {consumeHostReadObservation,combineHostReadObservations,assertHostObservationPublication} from './routine-read.js'
+export type {RoutineCalendarCall} from './routine-read.js'
+export {inheritRoutineCalendarRead,ownsRoutineCalendarRead,withRoutineCalendarContext} from './routine-read-ownership.js'
+
+export type {HostReadReceipt} from "./routine-read.js"

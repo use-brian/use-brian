@@ -23,7 +23,7 @@ import type {
   SessionOptions,
   StreamChunk,
 } from './types.js'
-import { assertInputAuthority, isInputAuthorityError } from './input-authority.js'
+import { assertProviderInputPreparation, registerInputAdmissionOwner, captureInputAdmissionProvider, isInputAuthorityError } from './input-authority.js'
 
 // ── Error classification ───────────────────────────────────────
 
@@ -181,12 +181,13 @@ export function wrapFallback(
   const fallbackModelName = opts?.fallbackModel ?? fallback.models[0] ?? fallback.name
 
   async function* runStream(request: ProviderRequest): AsyncIterable<StreamChunk> {
-    await assertInputAuthority(request.assertInputAuthority)
+    const selectedPrimary = captureInputAdmissionProvider(primary)
+    await assertProviderInputPreparation(selectedPrimary, request, request.assertInputAuthority)
     // Phase 1 — try the primary. We must peek the first chunk to detect
     // whether the primary failed BEFORE emitting anything; mid-stream
     // errors fall through to the caller without a swap (we've already
     // started yielding partial text).
-    const primaryStream = primary.stream(request)
+    const primaryStream = selectedPrimary.stream(request)
     const peeked = await peekFirstChunk(primaryStream)
     if (peeked.kind === 'chunk') {
       yield* streamFromPeeked(peeked.first, peeked.rest)
@@ -205,8 +206,9 @@ export function wrapFallback(
       model: fallbackModelName,
     }
     try {
-      await assertInputAuthority(request.assertInputAuthority)
-      const fallbackStream = fallback.stream(fallbackRequest)
+      const selectedFallback = captureInputAdmissionProvider(fallback)
+      await assertProviderInputPreparation(selectedFallback, fallbackRequest, request.assertInputAuthority)
+      const fallbackStream = selectedFallback.stream(fallbackRequest)
       const fbPeeked = await peekFirstChunk(fallbackStream)
       if (fbPeeked.kind === 'error') {
         if (isInputAuthorityError(fbPeeked.error)) throw fbPeeked.error
@@ -231,12 +233,14 @@ export function wrapFallback(
   }
 
   function makeSession(sessionOpts: SessionOptions): ProviderSession {
-    const primarySession = primary.createSession(sessionOpts)
+    const selectedPrimary = captureInputAdmissionProvider(primary)
+    let primarySession: ProviderSession | undefined
     // Lazily construct the fallback session — we don't want to allocate
     // until we actually need to fall back. Sessions may hold resources
     // (HTTP clients, signature buffers); avoiding the eager construction
     // is the correct default.
     let fallbackSession: ProviderSession | null = null
+    let selectedFallback: LLMProvider | undefined
     const fallbackSessionOpts: SessionOptions = {
       ...sessionOpts,
       model: fallbackModelName,
@@ -245,7 +249,8 @@ export function wrapFallback(
     return {
       async *send(messages: Message[], opts2?: SendOptions): AsyncIterable<StreamChunk> {
         const check = opts2?.assertInputAuthority ?? sessionOpts.assertInputAuthority
-        await assertInputAuthority(check)
+        await assertProviderInputPreparation(selectedPrimary, { ...sessionOpts, messages }, check)
+        primarySession ??= selectedPrimary.createSession(sessionOpts)
         const primaryStream = primarySession.send(messages, opts2)
         const peeked = await peekFirstChunk(primaryStream)
         if (peeked.kind === 'chunk') {
@@ -259,8 +264,9 @@ export function wrapFallback(
         }
 
         try {
-          await assertInputAuthority(check)
-          if (!fallbackSession) fallbackSession = fallback.createSession(fallbackSessionOpts)
+          selectedFallback ??= captureInputAdmissionProvider(fallback)
+          await assertProviderInputPreparation(selectedFallback, { ...fallbackSessionOpts, messages }, check)
+          if (!fallbackSession) fallbackSession = selectedFallback.createSession(fallbackSessionOpts)
           const fbStream = fallbackSession.send(messages, opts2)
           const fbPeeked = await peekFirstChunk(fbStream)
           if (fbPeeked.kind === 'error') {
@@ -283,10 +289,10 @@ export function wrapFallback(
     }
   }
 
-  return {
+  return registerInputAdmissionOwner({
     name: primary.name,
     models: [...new Set([...primary.models, ...fallback.models])],
     stream: runStream,
     createSession: makeSession,
-  }
+  })
 }

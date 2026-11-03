@@ -4,6 +4,10 @@
  * both names lets old and new releases safely skip the same migration.
  */
 const migrationRenames = [
+  ['8148_department_mode_admission.sql', '8171_department_mode_admission.sql'],
+  ['8149_organization_cutover.sql', '8172_organization_cutover.sql'],
+  ['8150_department_office_publication.sql', '8173_department_office_publication.sql'],
+  ['8151_reviewed_legacy_knowledge_binding.sql', '8174_reviewed_legacy_knowledge_binding.sql'],
   ['752_file_ingest_bookkeeping_not_semantic.sql', '771_file_ingest_bookkeeping_not_semantic.sql'],
   ['611_member_operation_floor_per_statement.sql', '615_member_operation_floor_per_statement.sql'],
   ['537_association_order_financial_evidence.sql', '552_association_order_financial_evidence.sql'],

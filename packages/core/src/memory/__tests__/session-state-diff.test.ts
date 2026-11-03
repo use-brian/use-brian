@@ -89,6 +89,70 @@ function makeFlakyProvider(outputs: string[]): LLMProvider {
 }
 
 describe('[COMP:memory/session-state-diff] runSessionStateDiff', () => {
+  it('keeps inference when the host reports omitted tool context',async()=>{
+    const store=makeStore(),provider=makeProvider('{"upserts":[],"resolves":[]}'),stream=vi.spyOn(provider,'stream')
+    await runSessionStateDiff({provider,model:'flash',sessionId:'s1',userId:'u1',assistantId:'a1',store,
+      recentTurns:[{role:'user',content:'test'},{role:'assistant',content:'Here.'}],openCommitments:[],allowTrivialShortcut:false})
+    expect(stream).toHaveBeenCalledOnce()
+  })
+
+  it('waits for reply publication and rechecks authority before writing inferred commitments', async () => {
+    const store = makeStore()
+    let allow = true, release!: () => void, reached!: () => void
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    const waiting = new Promise<void>(resolve => { reached = resolve })
+    const refusal = Object.assign(new Error('Fictional authority change'), { reason: 'authority_changed', retrySafe: false })
+    const pending = runSessionStateDiff({ provider: makeProvider('{"upserts":[{"key":"task:example","summary":"Follow up on the draft"}],"resolves":[]}'),
+      model: 'fixture', sessionId: 's1', userId: 'u1', assistantId: 'a1', store,
+      recentTurns: [{role:'user',content:'Follow up on the draft'}], openCommitments: [],
+      beforePersist: async () => { reached(); await barrier },
+      assertInputAuthority: async () => { if (!allow) throw refusal },
+    })
+    await waiting
+    expect(store.upsert).not.toHaveBeenCalled()
+    allow = false
+    release()
+    await expect(pending).rejects.toBe(refusal)
+    expect(store.upsert).not.toHaveBeenCalled()
+  })
+  it.each(['I’m here.','Here.','Received.'])('skips the diff model for a plain trivial exchange ending in %s with no open commitments',async reply=>{
+    const store=makeStore(),provider=makeProvider('throw'),stream=vi.spyOn(provider,'stream'),check=vi.fn(async()=>{})
+    expect(await runSessionStateDiff({provider,model:'flash',sessionId:'s1',userId:'u1',assistantId:'a1',store,
+      recentTurns:[{role:'user',content:'test'},{role:'assistant',content:[{type:'text',text:reply}]}],
+      openCommitments:[],assertInputAuthority:check})).toEqual({upserts:0,resolves:0,usage:null,model:null})
+    expect(check).toHaveBeenCalledOnce()
+    expect(stream).not.toHaveBeenCalled()
+    expect(store.upsert).not.toHaveBeenCalled()
+    expect(store.resolve).not.toHaveBeenCalled()
+  })
+
+  it.each(['Here is the plan.','Received. I will remind you tomorrow.'])('retains state extraction for the substantive answer %s',async reply=>{
+    const store=makeStore(),provider=makeProvider('{"upserts":[],"resolves":[]}'),stream=vi.spyOn(provider,'stream')
+    await runSessionStateDiff({provider,model:'flash',sessionId:'s1',userId:'u1',assistantId:'a1',store,
+      recentTurns:[{role:'user',content:'test'},{role:'assistant',content:reply}],openCommitments:[]})
+    expect(stream).toHaveBeenCalledOnce()
+  })
+
+  it('rechecks authority after the publication gate before applying a generated commitment',async()=>{
+    const store=makeStore(),provider=makeProvider('{"upserts":[{"key":"fixture:key","summary":"Fictional follow-up"}],"resolves":[]}')
+    let current=true
+    const refused=Object.assign(new Error('scope_source_changed'),{reason:'authority_changed'})
+    await expect(runSessionStateDiff({provider,model:'flash',sessionId:'s1',userId:'u1',assistantId:'a1',store,
+      recentTurns:[{role:'user',content:'Follow up on this fictional task.'}],openCommitments:[],
+      assertInputAuthority:async()=>{if(!current)throw refused},beforePersist:async()=>{current=false},
+    })).rejects.toBe(refused)
+    expect(store.upsert).not.toHaveBeenCalled()
+  })
+
+  it.each(['open','substantive','tool'] as const)('retains the diff pass for %s context',async kind=>{
+    const store=makeStore(),provider=makeProvider('{"upserts":[],"resolves":[]}'),stream=vi.spyOn(provider,'stream')
+    await runSessionStateDiff({provider,model:'flash',sessionId:'s1',userId:'u1',assistantId:'a1',store,
+      recentTurns:[{role:'user',content:'yes'},{role:'assistant',content:kind==='tool'
+        ?[{type:'tool_use',id:'fictional-call',name:'fictionalTool',input:{}}]
+        :kind==='substantive'?'I will follow up tomorrow.':'okay'}],openCommitments:kind==='open'?[record()]:[]})
+    expect(stream).toHaveBeenCalledOnce()
+  })
+
   it('returns zero counts on empty input', async () => {
     const store = makeStore()
     const res = await runSessionStateDiff({

@@ -29,6 +29,7 @@ vi.mock("@/lib/user", () => ({
 const api = vi.hoisted(() => ({
   listWorkspaceAssistants: vi.fn(),
   listPersonalSessions: vi.fn(),
+  fetchSessionMessages: vi.fn(),
   listWorkspaceSessions: vi.fn(),
 }));
 vi.mock("@/lib/api/views", () => ({
@@ -38,7 +39,7 @@ vi.mock("@/lib/api/views", () => ({
 vi.mock("@/lib/api/sessions", () => ({
   listPersonalSessions: (...args: unknown[]) => api.listPersonalSessions(...args),
   listWorkspaceSessions: (...args: unknown[]) => api.listWorkspaceSessions(...args),
-  fetchSessionMessages: vi.fn(),
+  fetchSessionMessages: (...args: unknown[]) => api.fetchSessionMessages(...args),
 }));
 // The other warm targets import their SDKs; never called here.
 vi.mock("@/lib/api/crm", () => ({ fetchCrmConfig: vi.fn() }));
@@ -77,6 +78,9 @@ import { applySpineEventToSurfaceCache } from "@/lib/surface-cache-invalidation"
 import { dispatchChatSessionsRefresh } from "@/lib/chat-session-events";
 import {
   cacheCreatedChatSession,
+  warmChatTranscript,
+  fetchChatTranscript,
+  promoteChatSession,
   chatSessionsSnapshotKey,
   fetchPersonalChatSessions,
   isAuthoritativeRosterDenial,
@@ -149,6 +153,7 @@ beforeEach(() => {
   resetSurfaceCache();
   idb.store.clear();
   user.id = "u1";
+  api.fetchSessionMessages.mockReset();
   api.listWorkspaceAssistants.mockReset();
   api.listPersonalSessions.mockReset();
   api.listWorkspaceSessions.mockReset();
@@ -332,7 +337,7 @@ describe("[COMP:app-web/chat-sessions-cache] first paint and stale marks", () =>
     expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data).toEqual([created]);
     finish(PERSONAL);
     await pending;
-    expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data).toEqual([created, ...PERSONAL]);
+    expect(readSurfaceCache<typeof PERSONAL>(chatSessionsCacheKey("w1")).data).toEqual([created, ...PERSONAL.map(row => ({ ...row, statusReadStartedAt: expect.any(Number) }))]);
     const room = { ...SHARED[0], contextProjectId: "project-1" };
     cacheCreatedChatSession("w1", room, "workspace");
     expect(readSurfaceCache(chatSharedSessionsCacheKey("w1")).data).toEqual([room]);
@@ -436,7 +441,7 @@ describe("[COMP:app-web/chat-sessions-cache] list failures", () => {
     const latest = await healthyLists();
     api.listWorkspaceSessions.mockRejectedValue(new Error("chat_list_failed: 403"));
     await act(async () => { await latest().refreshShared(); await settle(); });
-    expect(latest().personal).toEqual(PERSONAL);
+    expect(latest().personal).toMatchObject(PERSONAL);
     expect(latest().personalError).toBeUndefined();
     expect(latest().shared).toBeNull();
     expect(readSurfaceCache(chatSharedSessionsCacheKey("w1")).data).toBeUndefined();
@@ -584,5 +589,161 @@ describe("[COMP:app-web/chat-sessions-cache] IndexedDB tier", () => {
     markSurfaceCacheStale(`chat-sessions:w1`);
     expect(isSurfaceCacheStale(chatSessionsCacheKey("w1"))).toBe(true);
     expect(readSurfaceCache(chatSessionsCacheKey("w1")).data).toEqual(PERSONAL);
+  });
+});
+
+
+describe("[COMP:app-web/chat-sessions-cache] immediate send recency", () => {
+  const older = { ...PERSONAL[0], id: "older", title: "Older", lastActive: "2026-01-01T00:00:00.000Z" };
+  const newer = { ...PERSONAL[0], id: "newer", title: "Newer", lastActive: "2026-02-01T00:00:00.000Z" };
+  it("promotes a mounted row before any response, survives a stale read, and rolls back a rejected send", async () => {
+    await loadSurfaceCache(chatSessionsCacheKey("w1"), async () => [newer, older]);
+    await loadSurfaceCache(chatRosterCacheKey("w1"), async () => ROSTER);
+    await loadSurfaceCache(chatSharedSessionsCacheKey("w1"), async () => []);
+    mount(<Probe />);
+    let resolveRead!: (rows: typeof PERSONAL) => void;
+    api.listPersonalSessions.mockImplementation(() => new Promise(resolve => { resolveRead = resolve; }));
+    const staleRead = fetchPersonalChatSessions("w1");
+    let rollback!: () => void;
+    act(() => { rollback = promoteChatSession("w1", "older"); });
+    expect(text("personal")).toBe("Older,Newer");
+    resolveRead([newer, older]);
+    expect((await staleRead).map(row => row.id)).toEqual(["older", "newer"]);
+    act(() => rollback());
+    expect(text("personal")).toBe("Newer,Older");
+  });
+
+  it("promotes a Project-only cached chat without inventing an unscoped list", async () => {
+    const key = chatSharedSessionsCacheKey("w1", "project-only");
+    await loadSurfaceCache(key, async () => [newer, older]);
+    promoteChatSession("w1", older.id, "project-only");
+    expect(readSurfaceCache<typeof PERSONAL>(key).data?.[0].id).toBe(older.id);
+    expect(readSurfaceCache(chatSharedSessionsCacheKey("w1")).data).toBeUndefined();
+  });
+
+  it("patches shared Project folders and cannot let an old rollback undo a newer send", async () => {
+    const projectRow = { ...SHARED[0], contextProjectId: "project-1" };
+    const keys = [chatSharedSessionsCacheKey("w1"), chatSharedSessionsCacheKey("w1", "project-1")];
+    for (const key of keys) await loadSurfaceCache(key, async () => [newer, projectRow]);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-01T00:00:00Z"));
+    const rollback = promoteChatSession("w1", projectRow.id);
+    for (const key of keys) expect(readSurfaceCache<typeof PERSONAL>(key).data?.[0].id).toBe(projectRow.id);
+    vi.advanceTimersByTime(1);
+    promoteChatSession("w1", projectRow.id);
+    rollback();
+    for (const key of keys) expect(readSurfaceCache<typeof PERSONAL>(key).data?.[0].lastActive).toBe("2026-11-01T00:00:00.001Z");
+    expect(readSurfaceCache(chatSessionsCacheKey("w2")).data).toBeUndefined();
+  });
+});
+
+
+describe("[COMP:app-web/chat-sessions-cache] saved-history send feedback", () => {
+  it("promotes the displayed disk row immediately with no memory slot and renewals pending", async () => {
+    const older = { ...PERSONAL[0], id: "disk-older", title: "Disk older", lastActive: "2026-01-01T00:00:00.000Z" };
+    const newer = { ...PERSONAL[0], id: "disk-newer", title: "Disk newer", lastActive: "2026-02-01T00:00:00.000Z" };
+    await writeChatSessionsSnapshot("u1", "w1", { personal: [newer, older], shared: [] });
+    api.listWorkspaceAssistants.mockImplementation(never);
+    api.listPersonalSessions.mockImplementation(never);
+    api.listWorkspaceSessions.mockImplementation(never);
+    mount(<Probe />);
+    await act(async () => { await settle(); });
+    expect(text("personal")).toBe("Disk newer,Disk older");
+    expect(readSurfaceCache(chatSessionsCacheKey("w1")).data).toBeUndefined();
+    let rollback!: () => void;
+    act(() => { rollback = promoteChatSession("w1", older.id); });
+    expect(text("personal")).toBe("Disk older,Disk newer");
+    // A local interaction grants neither a new list nor a new content lease.
+    expect(readSurfaceCache(chatSessionsCacheKey("w1")).data).toBeUndefined();
+    act(() => rollback());
+    expect(text("personal")).toBe("Disk newer,Disk older");
+  });
+});
+
+
+describe("[COMP:app-web/chat-sessions-cache] bounded transcript intent", () => {
+  it("consumes the pending hover read without a second request", async () => {
+    let resolve!: (rows: never[]) => void;
+    api.fetchSessionMessages.mockReturnValue(new Promise<never[]>(done => { resolve = done; }));
+    warmChatTranscript("intent-a");
+    warmChatTranscript("intent-a");
+    const controller = new AbortController();
+    const result = fetchChatTranscript("intent-a", { signal: controller.signal });
+    expect(api.fetchSessionMessages).toHaveBeenCalledTimes(1);
+    const transport = api.fetchSessionMessages.mock.calls[0][1].signal as AbortSignal;
+    expect(transport.aborted).toBe(false);
+    resolve([]);
+    expect(await result).toEqual([]);
+    // Consumption is one-shot; the next visit performs current admission.
+    await fetchChatTranscript("intent-a", { signal: controller.signal });
+    expect(api.fetchSessionMessages).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses a completed intent immediately without aborting its transport", async () => {
+    const rows = [{ id: "message-a" }];
+    api.fetchSessionMessages.mockResolvedValue(rows);
+    warmChatTranscript("intent-a");
+    await Promise.resolve();
+    expect(await fetchChatTranscript("intent-a", { signal: new AbortController().signal })).toBe(rows);
+    expect(api.fetchSessionMessages).toHaveBeenCalledTimes(1);
+    expect(api.fetchSessionMessages.mock.calls[0][1].signal.aborted).toBe(false);
+  });
+
+  it("cancels obsolete speculative work and the consumed visit's transport", async () => {
+    api.fetchSessionMessages.mockReturnValue(never());
+    warmChatTranscript("intent-a");
+    const first = api.fetchSessionMessages.mock.calls[0][1].signal as AbortSignal;
+    warmChatTranscript("intent-b");
+    expect(first.aborted).toBe(true);
+    const second = api.fetchSessionMessages.mock.calls[1][1].signal as AbortSignal;
+    const visit = new AbortController();
+    void fetchChatTranscript("intent-b", { signal: visit.signal });
+    expect(second.aborted).toBe(false);
+    visit.abort();
+    expect(second.aborted).toBe(true);
+  });
+
+  it("expires intent from request start and skips warmed transcript revisits", async () => {
+    vi.useFakeTimers();
+    try {
+      api.fetchSessionMessages.mockReturnValue(never());
+      warmChatTranscript("intent-a");
+      const signal = api.fetchSessionMessages.mock.calls[0][1].signal as AbortSignal;
+      vi.advanceTimersByTime(10_001);
+      expect(signal.aborted).toBe(true);
+      void fetchChatTranscript("intent-a", { signal: new AbortController().signal });
+      expect(api.fetchSessionMessages).toHaveBeenCalledTimes(2);
+      writeTranscriptCache("intent-cached", []);
+      await Promise.resolve();
+      warmChatTranscript("intent-cached");
+      expect(api.fetchSessionMessages).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("forces a post-turn read and never reuses another viewer's intent", async () => {
+    api.fetchSessionMessages.mockResolvedValue([]);
+    warmChatTranscript("intent-a");
+    const signal = api.fetchSessionMessages.mock.calls[0][1].signal as AbortSignal;
+    await fetchChatTranscript("intent-a", { force: true, signal: new AbortController().signal });
+    expect(signal.aborted).toBe(true);
+    expect(api.fetchSessionMessages).toHaveBeenCalledTimes(2);
+    warmChatTranscript("intent-a");
+    user.id = "another-viewer";
+    await fetchChatTranscript("intent-a", { signal: new AbortController().signal });
+    expect(api.fetchSessionMessages).toHaveBeenCalledTimes(4);
+  });
+
+  it("retries a failed warm and preserves denial on an already consumed read", async () => {
+    api.fetchSessionMessages.mockRejectedValueOnce(new Error("chat_history_failed: 403")).mockResolvedValue([]);
+    warmChatTranscript("intent-a");
+    await Promise.resolve();
+    await fetchChatTranscript("intent-a", { signal: new AbortController().signal });
+    expect(api.fetchSessionMessages).toHaveBeenCalledTimes(2);
+    let reject!: (error: Error) => void;
+    api.fetchSessionMessages.mockReturnValue(new Promise((_resolve, fail) => { reject = fail; }));
+    warmChatTranscript("intent-b");
+    const result = fetchChatTranscript("intent-b", { signal: new AbortController().signal });
+    reject(new Error("chat_history_failed: 403"));
+    await expect(result).rejects.toThrow("chat_history_failed: 403");
   });
 });

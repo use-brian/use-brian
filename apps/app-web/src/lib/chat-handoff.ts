@@ -81,7 +81,7 @@ export function parsePendingChatHandoff(
   const fileIds = stringIds(value.fileIds);
   const attachedRecordingIds = stringIds(value.attachedRecordingIds);
   const text = value.text.trim();
-  if (!text && fileIds.length === 0 && attachedRecordingIds.length === 0) {
+  if (!text && value.draftOnly !== true && fileIds.length === 0 && attachedRecordingIds.length === 0) {
     return null;
   }
   return {

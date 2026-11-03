@@ -5,8 +5,9 @@ import { persistentSourceFixture } from '../../application-platform/__tests__/fi
 import { assertSourceModelInputAuthority } from '../../application-platform/model-source-authority.js'
 import { applyRLSGucs,getAppPool,getPool } from '../client.js'
 import { addSessionMessage,getSessionMessages } from '../sessions.js'
-import { bindSessionContextRetainedAuthority,writeSessionContextRevision } from '../session-context-revisions.js'
-import { readSessionMessageAnnotation,writeSessionMessageAnnotation } from '../session-message-annotations.js'
+import { bindSessionContextRetainedAuthority,writeSessionContextRevision,withSessionMessagePublication } from '../session-context-revisions.js'
+import { readSessionMessageAnnotation,writeSessionMessageAnnotation,prepareSessionMessageAnnotation } from '../session-message-annotations.js'
+import { publishNativeSessionMessageBatch } from '../session-message-publication.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 
@@ -24,6 +25,64 @@ describe.sequential('[COMP:api/session-message-annotations] actual immutable mes
    recentUserTurns:[],knownTopicsThisSession:[],replyToText:null,authority,assertInputAuthority:()=>assertSourceModelInputAuthority(context)},history.flatMap(boundScopeSources))
   return {authority,message,history,classification:await classifyTopic(options)}
  }
+ async function pendingReply(){
+  f=await persistentContextFixture();const current=await input()
+  const pending=await prepareSessionMessageAnnotation({sessionId:f.session.id,messageId:current.message.id,
+   classification:current.classification,replyToText:null,authority:current.authority})
+  const publish=(fail=false)=>{
+   const sources=current.authority.accumulator.evidence.sources??boundScopeSources(current.classification)
+   return withSessionMessagePublication(current.authority,sources,async client=>{
+   const saved=await publishNativeSessionMessageBatch({sessionId:f!.session.id,
+    messages:[{role:'assistant',content:[{type:'text',text:'Fictional durable reply'}],senderAssistantId:f!.assistantId}],
+    authority:current.authority,derivation:{producer:'fixture:reply',sources}},client)
+   if(fail)throw new Error('Fictional publication failure')
+   return saved
+   },{pendingAnnotation:pending})
+  }
+  return{...current,pending,publish}
+ }
+ it('commits a pending topic and reply together without mutating the input accumulator',async()=>{
+  const current=await pendingReply(),before=structuredClone(current.authority.accumulator.evidence)
+  expect(await readSessionMessageAnnotation(f!.session.id,current.message.id,await f!.modelContext())).toBeNull()
+  const saved=await current.publish()
+  expect(saved).toHaveLength(1)
+  expect(await readSessionMessageAnnotation(f!.session.id,current.message.id,await f!.modelContext())).toMatchObject({topicLabel:'fictional current request'})
+  expect(current.authority.accumulator.evidence).toEqual(before)
+ })
+ it('rolls back the pending topic when the reply transaction fails',async()=>{
+  const current=await pendingReply(),before=(await f!.history()).length
+  await expect(current.publish(true)).rejects.toThrow('Fictional publication failure')
+  expect((await f!.history()).length).toBe(before)
+  expect(await readSessionMessageAnnotation(f!.session.id,current.message.id,await f!.modelContext())).toBeNull()
+ })
+ it('keeps the frozen annotation evidence separate from later reply inputs',async()=>{
+  const current=await pendingReply()
+  const later=await addSessionMessage({sessionId:f!.session.id,role:'user',content:[{type:'text',text:'Fictional later input'}],scope:f!.envelope})
+  const laterSources=boundScopeSources(later)
+  expect(laterSources.length).toBeGreaterThan(0)
+  current.authority.accumulator.note({sources:laterSources})
+  const saved=await current.publish()
+  const annotation=await readSessionMessageAnnotation(f!.session.id,current.message.id,await f!.modelContext())
+  const edges=async(kind:string,id:string)=>(await f!.pool.query(`SELECT s.source_id FROM scope_derivations d
+   JOIN scope_derivation_sources s ON s.workspace_id=d.workspace_id AND s.derivation_id=d.id
+   WHERE d.workspace_id=$1 AND d.resource_kind=$2 AND d.resource_id=$3`,[f!.workspaceId,kind,id])).rows.map(row=>row.source_id)
+  expect(await edges('session_context_revision',annotation!.revisionId)).not.toContain(later.id)
+  expect(await edges('session_message',saved[0].id)).toContain(later.id)
+ })
+ it('rejects a changed annotation head atomically with the reply',async()=>{
+  const current=await pendingReply(),before=(await f!.history()).length
+  await writeSessionMessageAnnotation({sessionId:f!.session.id,messageId:current.message.id,classification:current.classification,
+   replyToText:null,authority:current.authority})
+  await expect(current.publish()).rejects.toMatchObject({code:'scope_source_changed'})
+  expect((await f!.history()).length).toBe(before)
+ })
+ it('rejects a forged or cross-execution pending command',async()=>{
+  const current=await pendingReply(),other=await f!.modelContext()
+  for(const pending of [{},current.pending])await expect(withSessionMessagePublication(other,[],async()=>{},
+   {pendingAnnotation:pending})).rejects.toMatchObject({code:'scope_evidence_missing'})
+  current.authority.execution=other.execution
+  await expect(current.publish()).rejects.toMatchObject({code:'scope_evidence_missing'})
+ })
  it('publishes actual guarded classifier output separately from the native authored body',async()=>{
   f=await persistentContextFixture();const current=await input()
   const original=(await f.history()).flatMap(boundScopeSources)

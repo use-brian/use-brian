@@ -49,6 +49,13 @@ const fullEvents: TurnEventRow[] = [
 ]
 
 describe('[COMP:api/turn-trace] epoch routing', () => {
+  it('retains a durable host invocation in fallback audit without inventing a provider call', () => {
+    const observation = { type: 'host_observation', version: 1, id: 'host-read-1', name: 'googleCalendarListEvents',
+      input: { calendarId: 'fictional-calendar' }, content: 'Fictional meeting at noon', isError: false }
+    expect(legacyStepsFromContent([observation])).toEqual([{ ordinal: 0, kind: 'tool_call', at: null,
+      metadata: { origin: 'host', name: observation.name, toolUseId: observation.id,
+        input: observation.input, result: observation.content, isError: false } }])
+  })
   it('post-epoch turn resolves fidelity full with ordinal-ordered pointer steps', async () => {
     const read = createTurnTraceReader({
       listTraceEvents: async () => fullEvents,

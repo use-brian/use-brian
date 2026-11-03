@@ -8,11 +8,16 @@
  */
 
 import {
-  assertInputAuthority,
+  assertInputAuthority, captureInputAdmissionProvider, qualifyClassifierLlmCompletion, DECISION_INVOCATION_MAX_MS,
+  registerClassifierDecisionRuntime, registerDecisionMetadataSink, isDecisionMetadataSink,
+  transferClassifierDecisionOperation, disableClassifierDecisionOperation, assertDecisionBookkeeping,
+  withDecisionInvocation,
   calculateCost,
   DecisionAdapterRegistry,
   DecisionProviderError,
-  assertDecisionCapabilities,
+  assertDecisionCapabilities, assertDecisionNonCapacityCapabilities, decisionInputCapacityExceeded,
+  validateDecisionRoute, ownsDecisionInputCapacity, ownsClassifierCapacityFallback, createClassifierCapacityDeferral,
+  type DecisionRoute,
   createTypeSafeDecisionProvider,
   executeDecisionCascade,
   executeDecisionObservation,
@@ -75,6 +80,7 @@ export type DecisionRuntimeAttempt = DecisionAttemptRecord & {
   configuredMode: DecisionRouteConfig['mode']
   effectiveMode: DecisionRouteConfig['mode']
   operatorOverride: boolean
+  routingReason?: 'estimated_context_capacity'
 }
 
 type DecisionUsageTarget = {
@@ -83,6 +89,7 @@ type DecisionUsageTarget = {
 }
 
 const DECISION_USAGE_TARGETS: Readonly<Record<string, DecisionUsageTarget>> = {
+  'chat.tool-selection': { source: 'overhead:classifier', triggerKey: 'chat_tool_selection' },
   'research.intent': { source: 'overhead:classifier', triggerKey: 'adaptive_research_classifier' },
   'research.split': { source: 'overhead:splitter', triggerKey: 'parallel_split_classifier' },
   'memory.usefulness': { source: 'overhead:nudge', triggerKey: 'memory_nudge' },
@@ -133,9 +140,10 @@ export function isCentrallyMeteredDecisionModel(modelId: string): boolean {
 export function createDecisionAttemptUsageRecorder(
   usageStore: UsageStore | undefined,
 ): (attempt: DecisionRuntimeAttempt) => Promise<void> {
-  return async (attempt) => {
+  const recordUsage = usageStore?.recordUsage.bind(usageStore)
+  return registerDecisionMetadataSink(async (attempt: DecisionRuntimeAttempt) => {
     if (
-      !usageStore
+      !recordUsage
       || !attempt.workspaceId
       || attempt.stage !== 'primary_decision'
       || !attempt.usage
@@ -144,7 +152,7 @@ export function createDecisionAttemptUsageRecorder(
 
     const target = usageTargetForOperation(attempt.operationId)
     try {
-      await usageStore.recordUsage({
+      await recordUsage({
         userId: '',
         assistantId: '',
         workspaceId: attempt.workspaceId,
@@ -166,7 +174,7 @@ export function createDecisionAttemptUsageRecorder(
         error: error instanceof Error ? error.message : String(error),
       })
     }
-  }
+  })
 }
 
 export type DecisionRuntimeOutcome = {
@@ -179,6 +187,7 @@ export type DecisionRuntimeOutcome = {
   path: DecisionCascadeResult<unknown>['path']
   attempts: number
   failureKind?: DecisionCascadeResult<unknown>['failureKind']
+  routingReason?: 'estimated_context_capacity'
 }
 
 export type DecisionRuntimeOperation<T> = DecisionExecutionOperation<T>
@@ -259,6 +268,8 @@ function configuredPrimary(
 export function createDecisionRuntime(
   options: CreateDecisionRuntimeOptions,
 ): DecisionRuntime {
+  const onAttempt = options.onAttempt, onOutcome = options.onOutcome
+  const metadataOnly = isDecisionMetadataSink(onAttempt) && isDecisionMetadataSink(onOutcome)
   const adapters = options.adapters ?? new DecisionAdapterRegistry()
   if (options.typesafeApiKey?.trim() && !adapters.has('typesafe')) {
     const apiKey = options.typesafeApiKey
@@ -275,10 +286,18 @@ export function createDecisionRuntime(
       : options.defaultLlmModel,
   })
 
-  return {
+  const runtime: DecisionRuntime = {
     configuredAdapterIds: () => adapters.ids(),
     resolveRoute: async (context) => routeResolver(context),
     async observe<T>(runOptions: DecisionObservationRunOptions<T>): Promise<DecisionObservationResult<T>> {
+      const admissionStartedAt = Date.now()
+      const inputCheck = runOptions.operation.assertInputAuthority
+      const initialDeadline = Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + DECISION_INVOCATION_MAX_MS)
+      return withDecisionInvocation({ signal: runOptions.request.signal, deadlineAt: initialDeadline, call: async invocation => {
+      runOptions = { ...runOptions, request: { ...runOptions.request, signal: invocation.signal, deadlineAt: initialDeadline },
+        operation: { ...runOptions.operation, assertInputAuthority: async () => {
+          invocation.assertActive(); await assertInputAuthority(inputCheck); invocation.assertActive()
+        } } }
       await assertInputAuthority(runOptions.operation.assertInputAuthority)
       const routeContext: DecisionRouteContext = {
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
@@ -288,9 +307,12 @@ export function createDecisionRuntime(
         questionKinds: runOptions.request.questions.map((question) => question.kind),
       }
       const config = await routeResolver(routeContext)
+      invocation.assertActive()
+      if (config.profile) invocation.tightenDeadline(admissionStartedAt + config.profile.totalTimeoutMs)
       const primary = configuredPrimary(config, adapters)
       const request: DecisionRequest = {
         ...runOptions.request,
+        ...(config.profile ? { deadlineAt: Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + config.profile.totalTimeoutMs) } : {}),
         model: primary.model ?? modelRef(
           config.llm && config.llm !== null
             ? config.llm.modelId
@@ -311,7 +333,7 @@ export function createDecisionRuntime(
               operatorOverride: config.operatorOverride,
             },
         onAttempt: async (attempt) => {
-          await options.onAttempt?.({
+          await onAttempt?.({
             ...priceUsage(attempt),
             ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
             configuredMode: config.mode,
@@ -320,9 +342,24 @@ export function createDecisionRuntime(
           })
         },
       })
+      } })
     },
     async run<T>(runOptions: DecisionRuntimeRunOptions<T>): Promise<DecisionCascadeResult<T>> {
-      await assertInputAuthority(runOptions.operation.assertInputAuthority)
+      const perRunAttempt = runOptions.onAttempt
+      const capturedOperation = transferClassifierDecisionOperation(runOptions.operation, { ...runOptions.operation })
+      if (!metadataOnly || !isDecisionMetadataSink(perRunAttempt)) disableClassifierDecisionOperation(capturedOperation)
+      const requestedLlm = runOptions.llm ? { ...runOptions.llm } : undefined
+      runOptions = { ...runOptions, llm: requestedLlm, operation: capturedOperation }
+      const admissionStartedAt = Date.now()
+      const inputCheck = runOptions.operation.assertInputAuthority
+      const initialDeadline = Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + DECISION_INVOCATION_MAX_MS)
+      return withDecisionInvocation({ signal: runOptions.request.signal, deadlineAt: initialDeadline, call: async invocation => {
+      runOptions = { ...runOptions, request: { ...runOptions.request, signal: invocation.signal, deadlineAt: initialDeadline },
+        operation: transferClassifierDecisionOperation(runOptions.operation, { ...runOptions.operation, assertInputAuthority: async () => {
+          invocation.assertActive(); await assertInputAuthority(inputCheck); invocation.assertActive()
+        } }) }
+      // Route resolution receives operation metadata only. Hydra performs fresh
+      // input admission before the selected completion or decision provider.
       const routeContext: DecisionRouteContext = {
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
         kind: 'execution',
@@ -331,64 +368,96 @@ export function createDecisionRuntime(
         questionKinds: runOptions.request.questions.map((question) => question.kind),
       }
       const config = await routeResolver(routeContext)
+      invocation.assertActive()
+      if (config.profile) invocation.tightenDeadline(admissionStartedAt + config.profile.totalTimeoutMs)
       const primary = configuredPrimary(config, adapters)
-      const llm = config.llm === undefined
+      const selectedLlm = config.llm === undefined
         ? (runOptions.llm ?? resolveDefaultLlm())
         : config.llm
-      if (!llm) policyError('decision route has no permitted LLM completion lane')
+      if (!selectedLlm) policyError('decision route has no permitted LLM completion lane')
+      // A resolved route cannot replace its provider methods during admission.
+      const capturedLlm = { ...selectedLlm, provider: captureInputAdmissionProvider(selectedLlm.provider) }
+      const usedRequestedLlm = !!requestedLlm && selectedLlm.provider === requestedLlm.provider && selectedLlm.modelId === requestedLlm.modelId
 
       const request: DecisionRequest = {
         ...runOptions.request,
-        model: primary.model ?? modelRef(llm.modelId),
+        ...(config.profile ? { deadlineAt: Math.min(runOptions.request.deadlineAt ?? Infinity, admissionStartedAt + config.profile.totalTimeoutMs) } : {}),
+        model: primary.model ?? modelRef(selectedLlm.modelId),
       }
-      if (primary.provider) assertDecisionCapabilities(request, primary.provider.capabilities)
+      const configuredRoute: DecisionRoute = primary.effectiveMode === 'llm_only' ? { mode: 'llm_only' } : {
+        mode: primary.effectiveMode, primary: primary.provider, profile: config.profile,
+        allowOperationalFailover: config.allowOperationalFailover,
+        allowInvalidResponseRecovery: config.allowInvalidResponseRecovery,
+        allowSyntheticProfile: config.allowSyntheticProfile, operatorOverride: config.operatorOverride,
+      }
+      // Capacity cannot rescue invalid policy, malformed requests or unrelated
+      // capability defects. Validate the original selected route before routing.
+      validateDecisionRoute(request, configuredRoute)
+      if (primary.provider) assertDecisionNonCapacityCapabilities(request, primary.provider.capabilities)
+      const llm = qualifyClassifierLlmCompletion(runOptions.operation, capturedLlm, runOptions.request) ? capturedLlm : selectedLlm
+      const capacityFallback = primary.effectiveMode === 'hybrid' && config.allowOperationalFailover !== false
+        && !!primary.provider && ownsDecisionInputCapacity(primary.provider)
+        && ownsClassifierCapacityFallback(runOptions.operation)
+        && decisionInputCapacityExceeded(request, primary.provider.capabilities)
+      if (primary.provider && !capacityFallback) assertDecisionCapabilities(request, primary.provider.capabilities)
+      const effectiveMode = primary.effectiveMode
+      const routing = capacityFallback ? { routingReason: 'estimated_context_capacity' as const } : {}
 
-      const operation: DecisionCascadeOperation<T> = {
+
+      const operation: DecisionCascadeOperation<T> = transferClassifierDecisionOperation(runOptions.operation, {
         ...runOptions.operation,
         completeWithLlm: (context) => runOptions.operation.completeWithLlm({
           ...context,
           llm,
         }),
-      }
-      const result = await executeDecisionCascade({
-        request,
-        operation,
-        route: primary.effectiveMode === 'llm_only'
-          ? { mode: 'llm_only' }
-          : {
-              mode: primary.effectiveMode,
-              primary: primary.provider,
-              profile: config.profile,
-              allowOperationalFailover: config.allowOperationalFailover,
-              allowInvalidResponseRecovery: config.allowInvalidResponseRecovery,
-              allowSyntheticProfile: config.allowSyntheticProfile,
-              operatorOverride: config.operatorOverride,
-            },
-        onAttempt: async (attempt) => {
-          const attributed: DecisionRuntimeAttempt = {
-            ...priceUsage(attempt),
-            ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
-            configuredMode: config.mode,
-            effectiveMode: primary.effectiveMode,
-            operatorOverride: config.profile?.evidence === 'operator_override',
-          }
-          await options.onAttempt?.(attributed)
-          await runOptions.onAttempt?.(attributed)
-        },
       })
-      await options.onOutcome?.({
+      const recordAttempt = async (attempt: DecisionAttemptRecord) => {
+        if (['research.intent', 'memory.topic', 'chat.tool-selection'].includes(attempt.operationId)) {
+          console.info('[decision-runtime] classifier attempt', {
+            operation: attempt.operationId, stage: attempt.stage, outcome: attempt.outcome, ...routing,
+            ...(attempt.failureKind ? { failureKind: attempt.failureKind } : {}),
+            latencyMs: attempt.latencyMs, attempt: attempt.attempt,
+          })
+        }
+        const attributed: DecisionRuntimeAttempt = {
+          ...priceUsage(attempt),
+          ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
+          configuredMode: config.mode, effectiveMode, ...routing,
+          operatorOverride: config.profile?.evidence === 'operator_override',
+        }
+        invocation.assertActive()
+        await onAttempt?.(attributed)
+        invocation.assertActive()
+        await perRunAttempt?.(attributed)
+        invocation.assertActive()
+      }
+      if (metadataOnly && isDecisionMetadataSink(perRunAttempt)) registerDecisionMetadataSink(recordAttempt)
+      let result: DecisionCascadeResult<T>
+      if (capacityFallback) {
+        await assertDecisionBookkeeping(operation, () => assertInputAuthority(runOptions.operation.assertInputAuthority))
+        invocation.assertActive()
+        result = createClassifierCapacityDeferral(operation, request.runId)
+      } else result = await executeDecisionCascade({ request, operation, route: configuredRoute, onAttempt: recordAttempt })
+      invocation.assertActive()
+      await onOutcome?.({
         runId: result.runId,
         operationId: request.operation.id,
         ...(runOptions.workspaceId ? { workspaceId: runOptions.workspaceId } : {}),
         configuredMode: config.mode,
-        effectiveMode: primary.effectiveMode,
+        effectiveMode, ...routing,
         operatorOverride: config.profile?.evidence === 'operator_override',
         path: result.path,
         attempts: result.attempts,
         ...(result.failureKind ? { failureKind: result.failureKind } : {}),
       })
-      await assertInputAuthority(runOptions.operation.assertInputAuthority)
-      return result
+      await assertDecisionBookkeeping(operation, () => assertInputAuthority(runOptions.operation.assertInputAuthority))
+      invocation.assertActive()
+      if (capacityFallback) return result
+      return ownsClassifierCapacityFallback(operation) ? { ...result,
+        usedRequestedLlm,
+      } : result
+      } })
     },
   }
+  return metadataOnly ? registerClassifierDecisionRuntime(runtime) : runtime
 }

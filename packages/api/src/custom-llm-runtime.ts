@@ -2,6 +2,7 @@
 
 import {
   createOpenAICompatProvider,
+  bindExactModelProvider,
   wrapDocumentAdaptation,
   wrapEndpointFallback,
   wrapProvider,
@@ -525,19 +526,7 @@ export function createWorkspaceCustomLlmResolver(
       if (!options?.managedProvider) {
         throw new Error('[workspace-model-route] managed provider routing is unavailable')
       }
-      const exactProvider: LLMProvider = {
-        ...options.managedProvider,
-        stream: (request) => options.managedProvider!.stream({
-          ...request,
-          model: managedModel!,
-          allowProviderFallback: false,
-        }),
-        createSession: (sessionOptions) => options.managedProvider!.createSession({
-          ...sessionOptions,
-          model: managedModel!,
-          allowProviderFallback: false,
-        }),
-      }
+      const exactProvider = bindExactModelProvider(options.managedProvider, managedModel)
       return {
         provider: exactProvider,
         selector: managedModel,

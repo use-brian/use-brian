@@ -11,7 +11,7 @@ export type { WrapEndpointFallbackOptions, EndpointFallbackEvent, EndpointFallba
 export { createOpenAICompatProvider, DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL } from './openai-compat.js'
 export type { OpenAICompatProviderOptions } from './openai-compat.js'
 export * from './codex-app-server/index.js'
-export { createRoutingProvider } from './routing.js'
+export { createRoutingProvider, bindExactModelProvider } from './routing.js'
 export { wrapCredentialPoolProvider } from './credential-pool.js'
 export type { ExternalCredentialLease, ExternalCredentialPool } from './credential-pool.js'
 export {
@@ -38,4 +38,4 @@ export {
 export type { FitResult } from './context-budget.js'
 export { createAccumulator, collectStream } from './accumulator.js'
 export { createGeminiImageProvider, validateFeedImageSource, parseGeminiImageReceipt, type GeminiImageReceipt, type GeneratedImageReceipt } from './gemini-image.js'
-export { assertInputAuthority, isInputAuthorityError } from './input-authority.js'
+export { assertInputAuthority, isInputAuthorityError, captureInputAdmissionProvider } from './input-authority.js'

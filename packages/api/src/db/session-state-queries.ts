@@ -32,9 +32,9 @@ async function admittedKeyDomain(sessionId: string, authority: SessionContextAut
   if(parents.some(parent=>!ids.has(parent.id)))throw new DerivedScopeError('scope_source_changed')
   return admitted
 }
-export async function upsertSessionState(params: Parameters<SessionStateStore['upsert']>[0]): Promise<SessionStateRow> {
+export async function upsertSessionState(params: Parameters<SessionStateStore['upsert']>[0] & { expectedGeneration?: string }): Promise<SessionStateRow> {
   writeProof(params)
-  const expectedGeneration=await sessionContextGeneration(params.sessionId)
+  const expectedGeneration=params.expectedGeneration??await sessionContextGeneration(params.sessionId)
   const existing=(await admittedKeyDomain(params.sessionId,params.authority)).find(row=>record(row).key===params.key)
   const old=existing?record(existing):undefined,now=Date.now()
   // Preserve tool-authored content only for the established tool -> diff rule.
@@ -49,9 +49,9 @@ export async function upsertSessionState(params: Parameters<SessionStateStore['u
   if (!row) throw new DerivedScopeError('scope_source_changed')
   return record(row)
 }
-export async function resolveSessionState(params: Parameters<SessionStateStore['resolve']>[0]): Promise<SessionStateRow | null> {
+export async function resolveSessionState(params: Parameters<SessionStateStore['resolve']>[0] & { expectedGeneration?: string }): Promise<SessionStateRow | null> {
   writeProof(params)
-  const expectedGeneration=await sessionContextGeneration(params.sessionId)
+  const expectedGeneration=params.expectedGeneration??await sessionContextGeneration(params.sessionId)
   const existing=(await admittedKeyDomain(params.sessionId,params.authority)).find(row=>{
     const old=record(row);return old.key===params.key && old.status==='open'
   })

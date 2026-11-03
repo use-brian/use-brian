@@ -52,6 +52,8 @@ export type TurnStreamPublisher = {
   onToolStart(name: string): void
   /** An applied user input starts a new answer segment immediately. */
   resetAnswer(): void
+  /** Display-only completion state; never releases the running turn. */
+  setReplyPhase(phase: 'saving' | 'finishing'): void
   /** Publish the current snapshot; `force` bypasses the throttle window. */
   publish(force: boolean): void
 }
@@ -71,7 +73,7 @@ export function createTurnStreamPublisher(params: {
    * When non-null the snapshot carries reasoning + sender/assistant ids
    * (rooms: viewers fold the reasoning tail through the sender's reducer
    * and render the right avatar). Null = the bare `{text, activity}`
-   * snapshot the personal reconnect stream expects.
+   * snapshot the personal reconnect stream expects, plus its reply phase.
    */
   attribution?: () => TurnStreamAttribution | null
   now?: () => number
@@ -81,6 +83,7 @@ export function createTurnStreamPublisher(params: {
   let pendingAnswerReset = false
   let activity: string | null = null
   let reasoning = ''
+  let replyPhase: 'generating' | 'saving' | 'finishing' = 'generating'
   let lastPublishAt = 0
 
   const publish = (force: boolean): void => {
@@ -95,6 +98,7 @@ export function createTurnStreamPublisher(params: {
       payload: {
         text: pendingAnswerReset ? '' : text.slice(-STREAM_TEXT_CAP),
         activity,
+        replyPhase,
         ...(attribution
           ? {
               reasoning: reasoning.slice(-STREAM_REASONING_CAP),
@@ -108,6 +112,7 @@ export function createTurnStreamPublisher(params: {
 
   return {
     onTextDelta(delta: string): void {
+      replyPhase = 'generating'
       if (pendingAnswerReset) text = ''
       pendingAnswerReset = false
       text += delta
@@ -119,6 +124,7 @@ export function createTurnStreamPublisher(params: {
       publish(false)
     },
     onToolStart(name: string): void {
+      replyPhase = 'generating'
       pendingAnswerReset = true
       if (!text) {
         activity = name
@@ -126,8 +132,14 @@ export function createTurnStreamPublisher(params: {
       }
     },
     resetAnswer(): void {
+      replyPhase = 'generating'
       text = ''
       pendingAnswerReset = false
+      publish(true)
+    },
+    setReplyPhase(phase): void {
+      replyPhase = phase
+      activity = null
       publish(true)
     },
     publish,

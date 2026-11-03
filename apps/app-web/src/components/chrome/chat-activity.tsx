@@ -352,6 +352,7 @@ export function ChatActivityFeed({
   events,
   tools,
   replyStreaming,
+  replyPhase = "generating",
   researchPhase,
   startedAt,
   defaultExpanded = false,
@@ -362,6 +363,8 @@ export function ChatActivityFeed({
   tools: ToolUsed[];
   /** Reply text has started streaming — auto-collapse to the header. */
   replyStreaming: boolean;
+  /** Text completion does not release foreground turn ownership. */
+  replyPhase?: "generating" | "saving" | "finishing";
   researchPhase?: ResearchPhase | null;
   /** Epoch ms when the turn started; drives the elapsed readout. */
   startedAt: number | null;
@@ -376,7 +379,7 @@ export function ChatActivityFeed({
   );
   // Live rows open to their Input / Output like receipt rows do.
   const [openSteps, setOpenSteps] = useState<Set<string>>(() => new Set());
-  const elapsed = useElapsed(startedAt);
+  const elapsed = useElapsed(replyPhase === "generating" ? startedAt : null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
   const toolById = new Map(tools.map((tool) => [tool.id, tool]));
@@ -407,6 +410,13 @@ export function ChatActivityFeed({
     if (el) el.scrollTop = el.scrollHeight;
   }, [events.length, expanded]);
 
+  // Saving and session bookkeeping are not another user-visible work phase.
+  // Keep the finished answer's receipt while the transport still owns the run.
+  if (replyPhase !== "generating") {
+    return <ChatActivitySummary tools={tools}
+      reasoning={events.filter(event => event.kind === "reasoning").map(event => event.text).join("\n")}
+      defaultExpanded={defaultExpanded} />;
+  }
   // Pure-text turn with the reply already streaming: nothing to show.
   if (replyStreaming && !hasActivity) return null;
 
@@ -433,7 +443,7 @@ export function ChatActivityFeed({
         aria-label={expanded ? t.chat.activity.hide : t.chat.activity.show}
         className="group flex w-full min-w-0 items-center gap-2 py-0.5 text-left"
       >
-        <span className="chat-shimmer-text min-w-0 truncate text-xs font-medium">
+        <span className={cn("min-w-0 truncate text-xs font-medium", replyPhase === "generating" ? "chat-shimmer-text" : "text-muted-foreground")}>
           {headerLabel}
         </span>
         {elapsed ? (

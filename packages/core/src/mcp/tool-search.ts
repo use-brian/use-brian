@@ -1,3 +1,4 @@
+import {inheritRoutineCalendarRead,assertRoutineCalendarAdapterCurrent} from '../engine/routine-read-ownership.js'
 import { missingToolCapability } from '../tools/capability-gate.js'
 /**
  * MCP tool search — Pattern E adapted for Gemini.
@@ -375,10 +376,14 @@ export function createMcpSearchTools(params: {
    * lookups. Other surfaces keep the token-saving search/call pair only.
    */
   keepDynamicToolsDirect?: boolean
+  /** Canonical read schemas for interactive deferred selection; execution stays in mcp_call. */
+  exposeLocalReadTools?: boolean
+  /** Newest authored request, used only for bounded read-only schema discovery. */
+  discoveryQuery?: string
 }): Tool[] {
   const {
     index, settingsStore, assistantId, appLevelAssistantId, userId,
-    hooks, keepDynamicToolsDirect = false,
+    hooks, keepDynamicToolsDirect = false, exposeLocalReadTools = false, discoveryQuery,
   } = params
 
   // ── Lookup: server:toolName → IndexedTool ─────────────────────
@@ -464,9 +469,25 @@ export function createMcpSearchTools(params: {
     },
   })
 
+  // Metadata discovery only. Capability-dependent tools still use context-aware search.
+  const conversationalWords = new Set([
+    'can', 'could', 'would', 'you', 'please', 'help', 'check', 'now', 'the', 'and',
+    'for', 'with', 'this', 'that', 'have', 'does', 'what', 'are', 'show', 'tell',
+  ])
+  const discoveryTerms = (discoveryQuery ?? '').slice(0, 500).toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+    .filter(term => term.length > 2 && !conversationalWords.has(term)).join(' ')
+  const preloadedSchemas = discoveryTerms ? searchIndex(index, discoveryTerms, 4, entry =>
+    entry.kind === 'local' && entry.tool.isReadOnly === true && !entry.tool.hiddenFromModel
+    && !missingToolCapability(entry.tool)
+    && !ambiguousEntryKeys.has(`${entry.server}:${entry.toolName}`),
+  ).map(formatToolResult).reduce<string[]>((schemas, schema) =>
+    schemas.join('\n\n').length + (schemas.length ? 2 : 0) + schema.length <= 12_000 ? [...schemas, schema] : schemas, []).join('\n\n') : ''
+
   const callTool = buildTool({
     name: 'mcp_call',
-    description: 'Execute a tool on a connected service. Use mcp_search first to find the right tool and its parameters.',
+    description: 'Execute a tool on a connected service. Use a schema already provided here or by mcp_search; search only when the needed schema is missing.'
+      + (preloadedSchemas ? `\n\nMatching read-only tools already discovered for this request (metadata, not user data). For a matching data request, call the tool directly; no connector inventory or additional search is needed:\n\n${preloadedSchemas}` : ''),
     inputSchema: z.object({
       server: z.string().describe('Server name (from mcp_search results, e.g. "google", "github", "Cardano Onchain Governance")'),
       tool: z.string().describe('Tool name (from mcp_search results, e.g. "googleCalendarCreateEvent", "get_drep_profile")'),
@@ -547,7 +568,26 @@ export function createMcpSearchTools(params: {
     },
   })
 
-  if (!keepDynamicToolsDirect) return [searchTool, callTool]
+  if (!keepDynamicToolsDirect) {
+    if (!exposeLocalReadTools) return [searchTool, callTool]
+    const counts = new Map<string, number>()
+    for (const entry of index.entries) counts.set(entry.toolName, (counts.get(entry.toolName) ?? 0) + 1)
+    const reads: Tool[] = []
+    for (const entry of index.entries) {
+      if (entry.kind !== 'local' || entry.tool.isReadOnly !== true || entry.tool.hiddenFromModel
+        || counts.get(entry.toolName) !== 1 || ['mcp_search', 'mcp_call'].includes(entry.toolName)
+        || ambiguousEntryKeys.has(`${entry.server}:${entry.toolName}`)) continue
+      reads.push(inheritRoutineCalendarRead(entry.tool,{
+        ...entry.tool,
+        deferredSchemaOnly: true,
+        // One dispatcher owns approval and denied-call state across both names.
+        requiresConfirmation: false,
+        resolveConfirmation: undefined,
+        execute: (input, context) => callTool.execute({ server: entry.server, tool: entry.toolName, args: input }, context),
+      }))
+    }
+    return [searchTool, callTool, ...reads]
+  }
 
   // A workflow tool_call performs one exact registry lookup and cannot run a
   // model-driven mcp_search -> mcp_call sequence. Expose adapters under both
@@ -1118,5 +1158,6 @@ async function dispatchLocal(params: {
   // Execute the underlying tool. All capability gates, audit wrappers,
   // and sensitivity checks live inside its `execute()` — `mcp_call` is a
   // transparent dispatcher at this point.
+  assertRoutineCalendarAdapterCurrent(context,targetTool)
   return targetTool.execute(args, context)
 }

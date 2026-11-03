@@ -89,6 +89,10 @@ export function recordingInteractionRoutes(
   router.get(
     "/jobs",
     route(async (r, u) => ({
+      ...(r.query.captureIds === undefined ? {} : { processing: await service.processing(
+        u, uuid.parse(r.query.workspaceId), uuid.parse(r.query.chatSessionId),
+        z.string().transform(value => value.split(",")).pipe(z.array(uuid).min(1).max(100)).parse(r.query.captureIds),
+      ) }),
       captureErrors: await service.captureErrors(
         u,
         uuid.parse(r.query.workspaceId),

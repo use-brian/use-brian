@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg'
 import type { ResourceDestination } from '@use-brian/shared'
-import { readAdmissionPolicy } from './admission-policy-read.js'
+import { readAdmissionPolicy, usesClassicModeAdmission } from './admission-policy-read.js'
 import { admitWorkspaceResource } from './resource-admission.js'
 import { WorkspaceAccessError } from './policy.js'
 
@@ -43,7 +43,28 @@ export async function admitOfficeShell<T extends OfficeShellAdmissionInput>(
   if (options?.expectedPolicyRevision !== undefined && options.expectedPolicyRevision !== policy?.revision) {
     throw new WorkspaceAccessError('access_policy_conflict', 409)
   }
-  if (!policy || policy.setupState === 'legacy') {
+  if (policy?.departmentReadV2) {
+    // An empty v2 draft is not a derived publication. Its actual sources are
+    // still checked by each Office producer; a selected template already sets
+    // a non-removable floor here. No source-free provenance is manufactured.
+    const {readOfficeGenerationEvidence}=await import('../office/generation-evidence.js')
+    const source = await readOfficeGenerationEvidence(client,input.workspaceId,{templateId:input.templateVersionId})
+    const visibilityUserIds = source.private ? [input.userId] : input.visibilityUserIds ?? []
+    const admitted = await admitWorkspaceResource(client,input.workspaceId,input.userId,{
+      expectedPolicyRevision:options?.expectedPolicyRevision,
+      visibility:visibilityUserIds.length?'private':'workspace',sensitivity:input.sensitivity,
+      destination:options?.destination,
+      inherited:source.sources.length?{...source.scope,visibility:source.private?'private':'workspace'}:undefined,
+      inheritedAuthority:'read',
+      requestedLabels:{compartments:input.requiredCompartments,projectIds:input.projectIds},
+    })
+    const allowed = await client.query<{allowed:boolean}>(`SELECT office_labels_scope_allows($1,$2,$3::text[],$4::uuid[],$5::uuid[],'{}'::uuid[],true) AS allowed`,
+      [input.workspaceId,admitted.envelope.sensitivity,admitted.envelope.compartments,admitted.envelope.projectIds,visibilityUserIds])
+    if (!allowed.rows[0]?.allowed) throw new WorkspaceAccessError('context_not_available',404)
+    return {...input,sensitivity:admitted.envelope.sensitivity,requiredCompartments:admitted.envelope.compartments,
+      projectIds:admitted.envelope.projectIds,visibilityUserIds}
+  }
+  if (!usesClassicModeAdmission(policy)) {
     if(options?.destination) throw new WorkspaceAccessError('access_mode_setup_required',409)
     return input
   }

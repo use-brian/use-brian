@@ -424,3 +424,19 @@ export async function validateFeishuCredentials(
     botName: response.bot.app_name?.trim() || 'Feishu bot',
   }
 }
+
+/** Explicit outbound application notification; provider rejection and uncertainty are distinct. */
+export async function sendFeishuNotification(credentials: FeishuAppCredentialsInput,
+  input: { id: string; openId: string; text: string }, factory: FeishuChannelFactory = defaultFactory): Promise<{
+    status: 'delivered' | 'failed' | 'uncertain'; messageId?: string; errorCode?: string
+  }> {
+  try {
+    const response = await makeChannel(credentials, factory).rawClient.request({
+      method: 'POST', url: '/open-apis/im/v1/messages?receive_id_type=open_id',
+      data: { receive_id: input.openId, msg_type: 'text', content: JSON.stringify({ text: input.text }), uuid: input.id },
+    }) as { code?: number; data?: { message_id?: string } }
+    if (typeof response.code === 'number' && response.code !== 0) return { status: 'failed', errorCode: `feishu_${response.code}` }
+    if (response.code === 0 && response.data?.message_id) return { status: 'delivered', messageId: response.data.message_id }
+    return { status: 'uncertain', errorCode: 'provider_invalid_receipt' }
+  } catch { return { status: 'uncertain', errorCode: 'provider_uncertain' } }
+}

@@ -4,6 +4,14 @@ import { createLlmDecisionProvider } from '../adapters/llm.js'
 import { decisionRequest, llmProviderWithJson } from './fixtures.js'
 
 describe('[COMP:decisions/llm] constrained LLM adapter', () => {
+  it.each(['fixture', 'gemini'])('keeps a bounded answer budget with reasoning space for %s', async name => {
+    const calls: ProviderRequest[] = []
+    const llm = llmProviderWithJson({ answers: { intent: { value: 'ordinary' } } }, calls)
+    llm.name = name
+    await createLlmDecisionProvider({ provider: llm }).evaluate(decisionRequest())
+    expect(calls[0]!.maxTokens).toBe(name === 'gemini' ? 1024 : 256)
+    expect(calls[0]!.thinkingLevel).toBe(name === 'gemini' ? 'low' : undefined)
+  })
   it('preserves a provider authority refusal without transport reclassification', async () => {
     const refusal = Object.assign(new Error('Synthetic provider authority refusal'), { reason: 'authority_changed', retrySafe: false })
     const llm = llmProviderWithJson({})

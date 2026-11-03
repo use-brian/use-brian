@@ -23,12 +23,16 @@
  */
 
 import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
+import { isTrivialChatMessage } from '../classification/trivial-chat.js'
 import { DerivedScopeError } from '../security/derived-scope.js'
-import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
+import { assertInputAuthority, assertProviderInputPreparation, captureInputAdmissionProvider, isInputAuthorityError } from '../providers/input-authority.js'
 import type { SessionContextAuthority } from './session-state-types.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
 import type { DecisionAnswer, DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
+import { DecisionProviderError } from '../decisions/types.js'
+import { decisionCompletionInput } from '../decisions/invocation.js'
+import { captureClassifierDecisionRuntime, assertClassifierBookkeeping } from '../decisions/authority-ownership.js'
 
 export type TopicState = 'continue' | 'shift' | 'resume' | 'cross-topic'
 
@@ -76,6 +80,8 @@ export type TopicClassifierOptions = {
   /** Host-only canonical invocation; the complete options object must be privately bound. */
   authority?: SessionContextAuthority
   /** Rechecks local, field and independent source rights, including provider retries. */
+  /** False when host input includes attachments, non-text blocks or an explicit reply. */
+  allowTrivialShortcut?: boolean
   assertInputAuthority?: () => Promise<void>
   /** Cancels classifier transports with the containing turn. */
   signal?: AbortSignal
@@ -177,16 +183,18 @@ async function classifyTopicWithLlm(
 ): Promise<TopicClassification> {
   let usage: TokenUsage | null = null
   let servedModel = opts.model
+  const provider = captureInputAdmissionProvider(opts.provider)
   try {
-    await assertInputAuthority(opts.assertInputAuthority)
+    const messages = [{ role: 'user' as const, content: buildClassifierPrompt(opts) }]
+    await assertProviderInputPreparation(provider, { model: opts.model, messages }, opts.assertInputAuthority)
     opts.signal.throwIfAborted()
     const response = await collectStream(
-      opts.provider.stream({
+      provider.stream({
         model: opts.model,
         assertInputAuthority: opts.assertInputAuthority,
         signal: opts.signal,
         systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: buildClassifierPrompt(opts) }],
+        messages,
         // Keep room for complete JSON on providers with mandatory reasoning,
         // while requesting their smallest reasoning budget for this task.
         maxTokens: 2000,
@@ -388,7 +396,7 @@ async function classifyTopicCurrent(
             provider: context.llm.provider,
             model: context.llm.modelId,
             decisionRuntime: undefined,
-            signal: context.signal,
+            ...decisionCompletionInput(context, opts),
             deadlineAt: Math.min(opts.deadlineAt, context.deadlineAt ?? opts.deadlineAt),
           })
           return {
@@ -405,29 +413,40 @@ async function classifyTopicCurrent(
         },
       },
     })
-    await assertInputAuthority(opts.assertInputAuthority)
+    await assertClassifierBookkeeping(opts.assertInputAuthority)
     if (cascade.failureKind === 'timeout') {
       console.warn('[topic-classifier] decision deadline exceeded; using uncategorized fallback')
     }
     return cascade.result
   } catch (error) {
     if (isInputAuthorityError(error)) throw error
-    await assertInputAuthority(opts.assertInputAuthority)
+    await assertClassifierBookkeeping(opts.assertInputAuthority)
+    if (error instanceof DecisionProviderError && error.kind === 'timeout') {
+      console.warn('[topic-classifier] decision deadline exceeded; using uncategorized fallback')
+    }
     return { ...FALLBACK }
   }
 }
 
 /** Current, complete input evidence survives every classifier decision and fallback. */
-export async function classifyTopic(opts: TopicClassifierOptions): Promise<TopicClassification> {
-  const inputs = boundScopeSources(opts)
-  if (opts.authority) {
+export async function classifyTopic(incoming: TopicClassifierOptions): Promise<TopicClassification> {
+  const opts = { ...incoming }
+  const inputs = boundScopeSources(incoming), authority = opts.authority
+  const execution = authority?.execution, accumulator = authority?.accumulator
+  const assertCurrent = execution?.security.authority.assertCurrent.bind(execution.security.authority)
+  const lifecycleSignal = execution?.lifecycle.abortSignal
+  if (authority) {
     if (inputs.length === 0 || typeof opts.assertInputAuthority !== 'function') {
       throw new DerivedScopeError('scope_evidence_missing')
     }
-    opts.authority.accumulator.note({ sources: inputs })
+    accumulator!.note({ sources: inputs })
   } else if (inputs.length > 0) {
     throw new DerivedScopeError('scope_evidence_missing')
   }
+  // Capture bytes and host callbacks before any awaited lease or route lookup.
+  const input = structuredClone({ recentUserTurns: opts.recentUserTurns, replyToText: opts.replyToText,
+    currentMessage: opts.currentMessage, knownTopicsThisSession: opts.knownTopicsThisSession })
+  const observed = accumulator ? structuredClone(accumulator.evidence.sources ?? []) : inputs
   // Recovery may not turn an earlier refusal into success if a later probe
   // happens to pass. One invocation has one continuous authority window.
   let refusal: unknown
@@ -442,9 +461,9 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
     if (refusal) throw refusal
     if (pending) return pending
     pending = (async () => {
-      if (opts.authority) {
-        await assertInputAuthority(() => opts.authority!.execution.security.authority.assertCurrent())
-        if (opts.authority.execution.lifecycle.abortSignal.aborted) {
+      if (assertCurrent) {
+        await assertInputAuthority(assertCurrent)
+        if (lifecycleSignal!.aborted) {
           throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
         }
       }
@@ -452,17 +471,37 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
     })().catch(error => { refusal = error; throw error })
     try { await pending } finally { pending = undefined }
   }
-  await check()
-  // Snapshot only after admission. Every later prompt/decision/fallback uses
-  // this same data, rather than mutable options across asynchronous providers.
-  const input = structuredClone({ recentUserTurns: opts.recentUserTurns, replyToText: opts.replyToText,
-    currentMessage: opts.currentMessage, knownTopicsThisSession: opts.knownTopicsThisSession })
-  const observed = opts.authority ? structuredClone(opts.authority.accumulator.evidence.sources ?? []) : inputs
+  const active = async () => {
+    if (closed) throw closedError
+    if (refusal) throw refusal
+    if (pending) await pending
+    opts.signal?.throwIfAborted()
+    try {
+      if (assertCurrent) {
+        await assertInputAuthority(assertCurrent)
+        if (lifecycleSignal!.aborted) {
+          throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+        }
+      }
+    } catch (error) { refusal = error; throw error }
+    opts.signal?.throwIfAborted()
+    if (refusal) throw refusal
+  }
+  const decisionRuntime = captureClassifierDecisionRuntime(opts.decisionRuntime, check, active)
+  await assertClassifierBookkeeping(check)
+  if (opts.allowTrivialShortcut !== false && !input.replyToText && isTrivialChatMessage(input.currentMessage)) {
+    const prior = [...input.recentUserTurns].reverse().find(turn => turn.topicLabel)?.topicLabel
+    const finalCheck = check()
+    closed = true
+    await finalCheck
+    return bindScopeSources({ ...FALLBACK, topic_label: prior ? normalizeLabel(prior) || FALLBACK.topic_label : FALLBACK.topic_label,
+      usage: null }, observed)
+  }
   const controller = new AbortController()
   const signal = AbortSignal.any([
     controller.signal,
     ...(opts.signal ? [opts.signal] : []),
-    ...(opts.authority ? [opts.authority.execution.lifecycle.abortSignal] : []),
+    ...(lifecycleSignal ? [lifecycleSignal] : []),
   ])
   const deadlineAt = Date.now() + TOPIC_CLASSIFIER_TIMEOUT_MS
   const timeoutError = new Error('topic classifier deadline exceeded')
@@ -474,21 +513,19 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
     }, TOPIC_CLASSIFIER_TIMEOUT_MS)
   })
   let result: TopicClassification
+  let timedOut = false
   try {
     try {
       result = await Promise.race([
-        classifyTopicCurrent({ ...opts, ...input, assertInputAuthority: check, signal, deadlineAt }),
+        classifyTopicCurrent({ ...opts, ...input, decisionRuntime, assertInputAuthority: check, signal, deadlineAt }),
         deadline,
       ])
     } catch (error) {
       if (isInputAuthorityError(error)) throw error
       if (error !== timeoutError) throw error
-      // A deadline may interrupt an authority check. Await that same check;
-      // never admit the fallback through a second, independently healthy probe.
-      await check()
-      console.warn('[topic-classifier] deadline exceeded; using uncategorized fallback', {
-        timeoutMs: TOPIC_CLASSIFIER_TIMEOUT_MS,
-      })
+      // The final admission below joins any pending check and preserves a
+      // sticky refusal. Do not finish it here and immediately start it again.
+      timedOut = true
       result = { ...FALLBACK }
     }
     // Start (or join) the last check, then close new callback entries before
@@ -497,6 +534,9 @@ export async function classifyTopic(opts: TopicClassifierOptions): Promise<Topic
     const finalCheck = check()
     closed = true
     await finalCheck
+    if (timedOut) console.warn('[topic-classifier] deadline exceeded; using uncategorized fallback', {
+      timeoutMs: TOPIC_CLASSIFIER_TIMEOUT_MS,
+    })
     return bindScopeSources(result, observed)
   } finally {
     closed = true

@@ -10,6 +10,7 @@ import {
   deleteCalendarEvent,
   listCalendarEventColors,
   listCalendarList,
+  listCalendarEvents,
   queryCalendarFreeBusy,
   updateCalendarEvent,
 } from '../client.js'
@@ -28,6 +29,33 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe('[COMP:tools/google-calendar] event-list completion transport', () => {
+  it('preserves a continuation token even on an empty page', async () => {
+    mockFetch.mockResolvedValueOnce(ok({ items: [], nextPageToken: 'next-page' }))
+    expect(await listCalendarEvents('tok', { calendarId: 'calendar@example.com',
+      timeMin: '2026-08-01T00:00:00Z', timeMax: '2026-08-08T00:00:00Z', pageToken: 'previous-page' }))
+      .toEqual({ items: [], nextPageToken: 'next-page' })
+    const url = new URL(mockFetch.mock.calls[0][0])
+    expect(url.pathname).toContain('calendar%40example.com')
+    expect(url.searchParams.get('pageToken')).toBe('previous-page')
+    expect(url.searchParams.get('timeMin')).toBe('2026-08-01T00:00:00Z')
+    expect(url.searchParams.get('timeMax')).toBe('2026-08-08T00:00:00Z')
+  })
+
+  it('retains explicit absence of further pages without inventing an upper bound', async () => {
+    mockFetch.mockResolvedValueOnce(ok({ items: [{ id: 'event-1' }] }))
+    expect(await listCalendarEvents('tok', {})).toEqual({ items: [{ id: 'event-1' }] })
+    expect(new URL(mockFetch.mock.calls[0][0]).searchParams.has('timeMax')).toBe(false)
+  })
+
+  it.each([{ items: {} }, { items: [], nextPageToken: 123 }, { nextPageToken: '' }, null])(
+    'rejects malformed pagination rather than certifying an empty result: %j', async (data) => {
+      mockFetch.mockResolvedValueOnce(ok(data))
+      await expect(listCalendarEvents('tok', {})).rejects.toThrow('Invalid Google Calendar event-list response')
+    },
+  )
 })
 
 describe('[COMP:tools/google-calendar] createCalendarEvent transport', () => {

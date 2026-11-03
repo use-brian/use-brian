@@ -30,7 +30,11 @@ describe("[COMP:app-web/connector-authorization] pending connector checkpoint", 
     );
 
     expect(html).toContain("Connect Google Calendar");
-    expect(html).toContain("Authorize Google Calendar");
+    expect(html).toContain(en.chat.pendingQuestion.connectHelp.replace("{connector}", "Google Calendar"));
+    expect(html).toContain('src="/connectors/google-calendar.svg"');
+    expect(html).not.toContain("lucide-calendar-days");
+    expect(html).toContain(en.chat.pendingQuestion.connectAction);
+    expect(html).not.toContain(en.chat.pendingQuestion.heading);
     expect(html).not.toContain("<textarea");
     expect(html).not.toContain(en.chat.pendingQuestion.submit);
     expect(html).toContain(en.chat.pendingQuestion.cancel);

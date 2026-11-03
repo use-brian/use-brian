@@ -1,4 +1,4 @@
-import { intersectScopeGrants,type DepartmentReadGrant,type Tool } from '@use-brian/core'
+import { withRoutineCalendarContext,intersectScopeGrants,type DepartmentReadGrant,type Tool } from '@use-brian/core'
 import { runWithAgentAccess, currentAgentAccess } from '../db/client.js'
 import { executeWithCurrentAuthority } from './authority-lease.js'
 
@@ -39,10 +39,10 @@ export function bindToolsToAgentAccess(
             access.visibilityAssistantIds ?? null, context.visibilityAssistantIds ?? null,
             context.assistantKind === 'primary' ? null : [context.assistantId],
           ),
-        }, () => executeWithCurrentAuthority(() => execute(input, {
-          ...context,
-          mutationCompartments: currentAgentAccess()?.mutationCompartments,
-        })))
+        }, () => executeWithCurrentAuthority(() => {
+          const derived={...context,mutationCompartments:currentAgentAccess()?.mutationCompartments}
+          return withRoutineCalendarContext(context,derived,()=>execute(input,derived))
+        }))
         return canonical
           ? context.executionContext!.security.authority.execute(() => runWithAgentAccess(canonical, invoke))
           : invoke()

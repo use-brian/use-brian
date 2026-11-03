@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ChatTurnRefusal, chatTurnErrorEvent, customModelMediaRefusal, resolveWorkspaceTurnLlm } from '../chat.js'
+import { readFileSync } from 'node:fs'
+import ts from 'typescript'
+import { ChatTurnRefusal, chatTurnErrorEvent, customModelMediaRefusal, resolveWorkspaceTurnLlm, routineCalendarReadDeclineReason } from '../chat.js'
+import type { DecisionRouteConfig, DecisionRuntimeAttempt } from '../../decision-runtime.js'
 import { CUSTOM_MODEL_IMAGE_REJECTION } from '../_channel-error-text.js'
 import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
 import { DeliveryAudienceUnverifiedError } from '../../context-scope/delivery-authority.js'
@@ -122,5 +125,256 @@ describe('[COMP:api/chat-route] post-SSE turn refusals', () => {
     ]) {
       expect(message).not.toContain('—')
     }
+  })
+})
+
+
+describe('[COMP:api/chat-route] detached failure outcome', () => {
+  // Exercise the actual catch publisher payload without starting unrelated
+  // provider work or duplicating its outcome logic in the fixture.
+  const source = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
+  const tree = ts.createSourceFile('chat.ts', source, ts.ScriptTarget.Latest, true)
+  let payload: ts.Expression | undefined
+  function visit(node: ts.Node) {
+    if (ts.isCallExpression(node) && node.expression.getText(tree) === 'publishSessionEvent') {
+      const event = node.arguments[0]
+      if (event && ts.isObjectLiteralExpression(event) && event.properties.some(property =>
+        ts.isPropertyAssignment(property) && property.name.getText(tree) === 'sessionId'
+        && property.initializer.getText(tree) === 'sessionIdForError')) {
+        const property = event.properties.find(property => ts.isPropertyAssignment(property)
+          && property.name.getText(tree) === 'payload') as ts.PropertyAssignment
+        payload = property.initializer
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  if (!payload) throw new Error('Missing chat catch completion publisher')
+  const evaluate = new Function('userIdForError', 'postReplyNotice', 'recoveryDelivered',
+    ts.transpileModule(`return (${payload.getText(tree)});`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)
+
+  it('publishes only a failed outcome, never exception details or a success', () => {
+    expect(evaluate('actor', null, false)).toEqual({ senderUserId: 'actor', reason: 'failed' })
+  })
+
+  it.each([[null, true], [{ code: 'post_reply_authority_changed' }, false], [{ code: 'post_reply_authority_changed' }, true]])(
+    'keeps delivered recovery and completed-reply notices as ordinary completion', (notice, recovered) => {
+      expect(evaluate('actor', notice, recovered)).toEqual({ senderUserId: 'actor' })
+    },
+  )
+})
+
+
+describe('[COMP:api/chat-route] routine read model-route eligibility', () => {
+  const tool = { name: 'googleCalendarListEvents' } as import('@use-brian/core').Tool
+  const tools = new Map([[tool.name, tool]])
+  const eligible = {
+    nativeOutput: true, nativeTranscript: true, decisionRuntime: true,
+    research: false, coordinator: false, site: false, document: false,
+    modelRoute: null, calendarTools: tools, preparedTools: tools,
+  }
+  it('retains a resolved managed registry route rather than treating its runtime object as custom', async () => {
+    const provider = { name: 'managed-fixture' } as import('@use-brian/core').LLMProvider
+    const runtime = { provider, selector: 'gemini-3.6-flash-standard', profileId: null,
+      modelTier: 'standard', providerKeySource: 'platform', routeKind: 'managed', inputTokenLimit: 1_048_576, maxTokens: 8192 } as import('../../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm
+    const resolved = await resolveWorkspaceTurnLlm({ workspaceId: 'fictional-workspace', requestedTier: 'standard', platformProvider: provider,
+      resolveWorkspaceCustomLlm: vi.fn(async () => runtime), resolveLegacyByoKey: null, buildLegacyByoProvider: null })
+    expect(resolved.customRuntime).toBe(runtime)
+    expect(routineCalendarReadDeclineReason({ ...eligible, modelRoute: resolved.customRuntime })).toBeNull()
+    expect(routineCalendarReadDeclineReason(eligible)).toBeNull()
+  })
+  it('keeps custom and unknown route kinds conservative', () => {
+    expect(routineCalendarReadDeclineReason({ ...eligible, modelRoute: { routeKind: 'custom' } })).toBe('custom_model')
+    expect(routineCalendarReadDeclineReason({ ...eligible, modelRoute: {} as never })).toBe('custom_model')
+  })
+  it.each(['nativeOutput', 'nativeTranscript', 'decisionRuntime'] as const)('still requires %s', key => {
+    expect(routineCalendarReadDeclineReason({ ...eligible, [key]: false })).not.toBeNull()
+  })
+  it.each(['research', 'coordinator', 'site', 'document'] as const)('keeps the %s profile on its existing path', key => {
+    expect(routineCalendarReadDeclineReason({ ...eligible, [key]: true })).toBe('specialized_mode')
+  })
+  it('requires exact bound tool identity independently of advisory schema selection', () => {
+    expect(routineCalendarReadDeclineReason({ ...eligible, calendarTools: new Map() })).toBe('calendar_tools')
+    expect(routineCalendarReadDeclineReason({ ...eligible, preparedTools: new Map([[tool.name, { ...tool }]]) })).toBe('tool_identity')
+  })
+})
+
+// Exercise the real runtime and physical provider adapters, including the
+// private routine planner, without contacting a provider or Calendar.
+describe('[COMP:api/chat-route] routine completion admission', () => {
+  async function fixture(mode: 'llm_only' | 'fallback' | 'primary', refuseAt?: number, customHook = false, extra: { large?: boolean; patch?: (config: DecisionRouteConfig) => DecisionRouteConfig; adapter?: 'unknown' | 'overridden' | 'primitive' } = {}) {
+    const { createDecisionRuntime, createDecisionAttemptUsageRecorder } = await import('../../decision-runtime.js')
+    const { createGeminiProvider, createGoogleCalendarTools, ContextScopeAccumulator, registerDecisionMetadataSink, DecisionAdapterRegistry, createTypeSafeDecisionProvider, TYPESAFE_JEV_CAPABILITIES } = await import('@use-brian/core')
+    const { planRoutineCalendarRead } = await import('../../../../core/dist/engine/routine-read.js')
+    const full = vi.fn(async () => {
+      if (full.mock.calls.length === refuseAt) throw Object.assign(new Error('Fictional source withdrawn'), { reason: 'authority_changed', retrySafe: false })
+    })
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/routine', headers: async () => ({}) })
+    const calendarRead = vi.fn(async () => ({ items: [] }))
+    const calendar = createGoogleCalendarTools({ listEvents: calendarRead } as never).find(tool => tool.name === 'googleCalendarListEvents')!
+    const tools = new Map([[calendar.name, calendar]])
+    const lease = vi.fn(async () => {}), controller = new AbortController(), authority = { assertCurrent: lease, execute: async <T>(fn: () => Promise<T>) => fn() }
+    const execution = { security: { authority, ceiling: { clearance: 'public' }, provenance: {} }, lifecycle: { abortSignal: controller.signal } }
+    const metered = vi.fn(async () => {})
+    const meter = createDecisionAttemptUsageRecorder({ recordUsage: metered } as never)
+    const events: unknown[] = [], outcomes: unknown[] = [], sent: Array<{ state: { systemPrompt: string; messages: unknown[] }; questions: unknown[] }> = []
+    const systemPrompt = extra.large ? 'Fictional governing instruction.\n'.repeat(4500) : 'Check the requested calendar scope.'
+    const messages = [{ role: 'user' as const, content: 'Check my calendar today.' }]
+    const runtime = createDecisionRuntime({ llmProvider: provider, defaultLlmModel: 'gemini-2.5-flash', typesafeApiKey: 'fictional-key',
+      ...(extra.adapter ? { adapters: new DecisionAdapterRegistry().register('typesafe', () => createTypeSafeDecisionProvider({ apiKey: 'fictional-key',
+        ...(extra.adapter === 'unknown' ? { transport: vi.fn() } : { capabilities: { ...TYPESAFE_JEV_CAPABILITIES, ...(extra.adapter === 'primitive' ? { primitives: ['score'] as const } : {}) } }) })) } : {}),
+      onAttempt: customHook ? async () => {} : registerDecisionMetadataSink(async (event: DecisionRuntimeAttempt) => { events.push(event); await meter(event) }),
+      onOutcome: registerDecisionMetadataSink(async (outcome: import('../../decision-runtime.js').DecisionRuntimeOutcome) => { outcomes.push(outcome) }),
+      resolveRoute: context => { const config: DecisionRouteConfig = mode === 'llm_only' ? { mode: 'llm_only' } : { mode: 'hybrid', primaryModelId: 'typesafe-jev-1.13', allowSyntheticProfile: true,
+        profile: { id: 'fictional-routine', version: '1', mode: 'hybrid', operationId: context.operation.id,
+          operationVersion: context.operation.version, stateVersion: context.operation.stateVersion, questionVersion: context.operation.questionVersion,
+          modelCatalogId: 'typesafe-jev-1.13', modelWireId: 'jev-1.13.0', evaluationSegment: 'global', status: 'approved', evidence: 'synthetic',
+          totalTimeoutMs: 30_000, primaryTimeoutMs: 10_000, maxAttempts: 2 } }; return extra.patch ? extra.patch(config) : config },
+    })
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      if (String(url).includes('typesafe.ai')) {
+        if (mode !== 'primary') return new Response('{}', { status: 503 })
+        const request = JSON.parse(init!.body as string)
+        const answers = Object.fromEntries(Object.entries(request.questions).map(([id, value]) => {
+          const question = value as { type: string; criteria?: Record<string, unknown> }
+          if (question.type === 'noul') return [id, { type: 'noul', noul: 1 }]
+          const choice = id === 'routine' ? 'calendar' : request.state.ranges[0].id
+          return [id, { type: 'choice', choice, probabilities: Object.fromEntries(Object.keys(question.criteria!).map(key => [key, key === choice ? 1 : 0])) }]
+        }))
+        return new Response(JSON.stringify({ model: 'jev-1.13.0', answers, usage: { input_tokens: 9, output_tokens: 0 } }), { status: 200 })
+      }
+      const body = JSON.parse(init!.body as string)
+      const request = JSON.parse(body.contents[0].parts[0].text)
+      sent.push(request)
+      const answers = Object.fromEntries(request.questions.map((question: { id: string; kind: string }) => [question.id,
+        { value: question.id === 'routine' ? 'calendar' : question.id === 'range' ? request.state.ranges[0].id : true }]))
+      const packet = { candidates: [{ content: { parts: [{ text: JSON.stringify({ answers }) }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } }
+      return new Response('data: ' + JSON.stringify(packet) + '\n\n', { headers: { 'content-type': 'text/event-stream' } })
+    })
+    const run = () => planRoutineCalendarRead({ runtime, llm: { provider, modelId: 'gemini-2.5-flash' }, workspaceId: 'fictional-workspace',
+      systemPrompt, messages, tools, calendarTools: tools,
+      assertInputAuthority: full, now: Date.parse('2031-06-02T00:00:00Z'),
+      context: { userId: 'fictional-user', assistantId: 'fictional-assistant', sessionId: 'fictional-session', appId: 'fixture', channelType: 'web', channelId: 'fixture',
+        abortSignal: controller.signal, authority, executionContext: execution as never, scopeAccumulator: new ContextScopeAccumulator(), assertModelInputAuthority: full },
+    })
+    return { run, full, fetch, calendarRead, sent, events, outcomes, systemPrompt, messages, metered, provider, lease, controller }
+  }
+
+  it('keeps primary Jev usage solely in central platform metering', async () => {
+    const f = await fixture('primary')
+    try {
+      const result = await f.run()
+      expect(result.plan).not.toBeNull()
+      expect(result.usage).toBeNull()
+      expect(f.fetch).toHaveBeenCalledOnce()
+      expect(f.metered).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ providerKeySource: 'platform', inputTokens: 9, model: 'jev-1.13.0' }))
+    } finally { f.fetch.mockRestore() }
+  })
+
+  it('defers the complete large routine input without inference or a source-proof tax', async () => {
+    const f = await fixture('fallback', undefined, false, { large: true })
+    try {
+      const result = await f.run()
+      expect(result).toMatchObject({ plan: null, path: 'capacity_deferred', usage: null, model: null })
+      expect(f.fetch).not.toHaveBeenCalled()
+      expect(f.full).not.toHaveBeenCalled()
+      expect(f.lease).toHaveBeenCalled()
+      expect(f.sent).toEqual([])
+      expect(f.events).toEqual([])
+      expect(f.metered).not.toHaveBeenCalled()
+      expect(f.outcomes).toEqual([expect.objectContaining({ configuredMode: 'hybrid', effectiveMode: 'hybrid', routingReason: 'estimated_context_capacity', path: 'capacity_deferred', attempts: 0 })])
+      expect(f.calendarRead).not.toHaveBeenCalled()
+      expect(f.messages).toEqual([{ role: 'user', content: 'Check my calendar today.' }])
+      expect(f.systemPrompt).toBe('Fictional governing instruction.\n'.repeat(4500))
+    } finally { f.fetch.mockRestore() }
+  })
+
+  it('pins explicit override dispatch and key attribution across a pending source proof', async () => {
+    const { createGeminiProvider } = await import('@use-brian/core')
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/override', headers: async () => ({}) })
+    const selected = { provider, modelId: 'gemini-2.5-flash' }
+    const f = await fixture('llm_only', undefined, false, {
+      patch: config => ({ ...config, llm: selected }) })
+    f.full.mockImplementationOnce(async () => { await Promise.resolve(); selected.provider = f.provider })
+    try {
+      const result = await f.run()
+      expect(result.plan).not.toBeNull()
+      expect(result.usedRequestedLlm).toBe(false)
+      expect(f.fetch).toHaveBeenCalledOnce()
+      expect(String(f.fetch.mock.calls[0]![0])).toContain('/override')
+      expect(f.full).toHaveBeenCalledTimes(2)
+    } finally { f.fetch.mockRestore() }
+  })
+
+  it.each(['llm_denied', 'no_failover', 'unapproved', 'mismatch', 'malformed', 'unknown', 'overridden', 'primitive', 'custom_hook'] as const)('never uses capacity to bypass %s', async defect => {
+    const f = await fixture('fallback', undefined, defect === 'custom_hook', { large: true,
+      ...(['unknown', 'overridden', 'primitive'].includes(defect) ? { adapter: defect as 'unknown' | 'overridden' | 'primitive' } : {}),
+      patch: config => defect === 'llm_denied' ? { ...config, llm: null } : defect === 'no_failover' ? { ...config, allowOperationalFailover: false }
+        : defect === 'unapproved' ? { ...config, profile: { ...config.profile!, status: 'evaluation' } }
+        : defect === 'mismatch' ? { ...config, profile: { ...config.profile!, operationVersion: 'different' } }
+        : defect === 'malformed' ? { ...config, profile: { ...config.profile!, maxAttempts: 3 as 2 } } : config,
+    })
+    try { expect((await f.run()).plan).toBeNull(); expect(f.fetch).not.toHaveBeenCalled(); expect(f.calendarRead).not.toHaveBeenCalled() }
+    finally { f.fetch.mockRestore() }
+  })
+
+  it('retains a sticky lease refusal after minting the local capacity deferral', async () => {
+    const f = await fixture('fallback', undefined, false, { large: true })
+    f.lease.mockImplementation(async () => { if (f.outcomes.length) throw Object.assign(new Error('Fictional lease revoked'), { reason: 'authority_changed' }) })
+    try {
+      await expect(f.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+      expect(f.outcomes).toHaveLength(1)
+      expect(f.full).not.toHaveBeenCalled()
+      expect(f.fetch).not.toHaveBeenCalled()
+    } finally { f.fetch.mockRestore() }
+  })
+
+  it('keeps the original absolute profile deadline while capacity admission is pending', async () => {
+    const f = await fixture('fallback', undefined, false, { large: true,
+      patch: config => ({ ...config, profile: { ...config.profile!, totalTimeoutMs: 30, primaryTimeoutMs: 10 } }) })
+    vi.useFakeTimers()
+    let release!: () => void
+    const proof = new Promise<void>(resolve => { release = resolve })
+    f.lease.mockImplementationOnce(async () => {}).mockImplementationOnce(() => proof)
+    try {
+      const work = f.run().then(result => result, error => error)
+      await vi.advanceTimersByTimeAsync(50)
+      expect(f.fetch).not.toHaveBeenCalled()
+      release()
+      await vi.advanceTimersByTimeAsync(50)
+      const result = await work
+      expect(result?.plan ?? null).toBeNull()
+      expect(f.fetch).not.toHaveBeenCalled()
+      expect(f.calendarRead).not.toHaveBeenCalled()
+    } finally { release(); vi.useRealTimers(); f.fetch.mockRestore() }
+  })
+
+  it.each(['llm_only', 'fallback'] as const)('keeps fresh physical and final checks for owned %s planning', async mode => {
+    const f = await fixture(mode)
+    try {
+      expect((await f.run()).plan).not.toBeNull()
+      expect(f.full).toHaveBeenCalledTimes(mode === 'fallback' ? 3 : 2)
+      expect(f.fetch).toHaveBeenCalledTimes(mode === 'fallback' ? 2 : 1)
+      expect(f.calendarRead).not.toHaveBeenCalled()
+    } finally { f.fetch.mockRestore() }
+  })
+
+  it.each([1, 2, 3])('refuses the plan when source admission %s fails', async refuseAt => {
+    const f = await fixture('fallback', refuseAt)
+    try {
+      await expect(f.run()).rejects.toMatchObject({ reason: 'authority_changed' })
+      expect(f.fetch).toHaveBeenCalledTimes(refuseAt - 1)
+      expect(f.calendarRead).not.toHaveBeenCalled()
+    } finally { f.fetch.mockRestore() }
+  })
+
+  it('retains conservative checks with an arbitrary metadata hook', async () => {
+    const f = await fixture('llm_only', undefined, true)
+    try {
+      expect((await f.run()).plan).not.toBeNull()
+      expect(f.full.mock.calls.length).toBeGreaterThan(2)
+      expect(f.calendarRead).not.toHaveBeenCalled()
+    } finally { f.fetch.mockRestore() }
   })
 })

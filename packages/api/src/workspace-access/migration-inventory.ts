@@ -197,3 +197,57 @@ export async function getMigrationInventory(w:string,u:string,p:string,input:unk
       families:MIGRATION_INVENTORY_FAMILIES.map(f=>({family:f,coverageBlocker:!queries[f]?'inventory_family_unavailable':checkpoints.find(cp=>cp.family===f)?.coverage_blocker??(!checkpoints.some(cp=>cp.family===f)?'inventory_family_uninspected':!checkpoints.find(cp=>cp.family===f)?.quiet_at?'inventory_family_reconciliation_pending':null)}))}
   })
 }
+
+/** Fixed-table barrier for the short finalization transaction. A per-family
+ * quiet page never calls this or claims global closure. Permission tables and
+ * source lineage join the canonical manifest's concrete storage tables. */
+export async function lockOrganizationCutoverInventory(c:PoolClient) {
+  await c.query('LOCK TABLE public.workspaces IN EXCLUSIVE MODE')
+  const names=new Set(['workspaces','workspace_access_policies','workspace_members','assistants','users','auth_sessions',
+    'workspace_groups','workspace_group_members','workspace_group_assistants','workspace_group_compartment_grants',
+    'workspace_access_grants','workspace_access_requests','department_edges','department_owners',
+    'scope_derivation_sources','scope_derivation_outputs','resource_scope_dependencies','scope_review_states','workspace_scope_reviews'])
+  for(const sql of Object.values(queries)) for(const match of sql.matchAll(/\b(?:FROM|JOIN)\s+([a-z_][a-z_0-9]*)/gi))names.add(match[1]!)
+  const tables=(await c.query<{name:string}>(`SELECT quote_ident(n.nspname)||'.'||quote_ident(t.relname) AS name
+    FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace
+    WHERE n.nspname='public' AND t.relkind IN ('r','p') AND t.relname=ANY($1::text[]) ORDER BY t.relname`,[[...names]])).rows
+  if(!tables.length)fail('cutover_inventory_schema_missing')
+  await c.query(`LOCK TABLE ${tables.map(row=>row.name).join(',')} IN SHARE ROW EXCLUSIVE MODE`)
+}
+
+/** One globally frozen, content-free inventory. The caller owns the barrier and
+ * transaction until the audited policy transition and receipt both commit. */
+export async function organizationCutoverInventory(c:PoolClient,w:string) {
+  const missing=MIGRATION_INVENTORY_FAMILIES.filter(family=>!queries[family])
+  if(missing.length)fail('cutover_inventory_family_unavailable')
+  const deadline=performance.now()+10_000
+  const families:Array<{family:string;count:string;fingerprint:string}>=[]
+  const checkBudget=()=>{if(performance.now()>deadline)fail('cutover_busy')}
+  for(const family of [...MIGRATION_INVENTORY_FAMILIES].sort()) {
+    checkBudget()
+    // The caller holds the writer barrier and owns the transaction. A cursor
+    // bounds API memory without discarding provenance after an arbitrary count.
+    // Keep exactly the previous string_agg encoding for existing review hashes.
+    await c.query(`DECLARE organization_cutover_records NO SCROLL CURSOR FOR
+      SELECT id||':'||row_version||':'||metadata::text AS record
+      FROM (${queries[family]}) records ORDER BY id`,[w])
+    const hash=createHash('sha256')
+    let count=0n
+    while(true) {
+      checkBudget()
+      const {rows}=await c.query<{record:string}>('FETCH FORWARD 500 FROM organization_cutover_records')
+      checkBudget()
+      for(const row of rows) {
+        if(count>0n)hash.update('\n')
+        hash.update(row.record)
+        count++
+      }
+      if(rows.length<500)break
+    }
+    await c.query('CLOSE organization_cutover_records')
+    checkBudget()
+    families.push({family,count:count.toString(),fingerprint:hash.digest('hex')})
+  }
+  return {manifestVersion:MIGRATION_INVENTORY_MANIFEST,families,
+    fingerprint:createHash('sha256').update(JSON.stringify(families)).digest('hex')}
+}

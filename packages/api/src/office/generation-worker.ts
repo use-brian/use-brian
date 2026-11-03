@@ -1,5 +1,6 @@
 /** Lease/checkpoint runner for Office generation jobs.
  * [COMP:api/office-generation] */
+import { withDepartmentOfficeGeneration } from './generation-evidence.js'
 import { validateOfficeInternalCandidateRendering } from './render-validation.js'
 import { randomUUID } from 'node:crypto'
 import { runOfficeGenerationPipeline, type OfficeGenerationEvent, type OfficeGenerationPipelineDeps } from '@use-brian/core'
@@ -75,14 +76,18 @@ export function createOfficeGenerationWorker(deps: OfficeGenerationWorkerDeps) {
           return 'failed'
         }
       }
+      const atomicDepartment=binding?.protocol==='office_department_v2'
       let checkpointVersion = job.checkpointVersion
       const controls = {
         async checkpoint(value: Parameters<OfficeGenerationPipelineDeps['checkpoint']>[0]) {
+          if(atomicDepartment && value.stage==='completed') return
           const advanced = await deps.store.checkpoint({ userId: deps.workerUserId, jobId: job.id, leaseToken, stage: value.stage, expectedVersion: checkpointVersion, checkpoint: value })
           if (!advanced) throw new Error('Office generation checkpoint lease/version conflict')
           checkpointVersion += 1
         },
         async emit(event: OfficeGenerationEvent) {
+          if(atomicDepartment && (event.code==='office.job.completed' || event.code==='office.job.failed')
+            && (await deps.store.get?.(deps.workerUserId,job.id))?.status==='completed') return
           await deps.store.appendEvent({ userId: deps.workerUserId, jobId: job.id, workspaceId: job.workspaceId, code: event.code, values: event.params, actorType: 'system', safeNarration: safeNarration[event.code] })
         },
         async drainSteering(_stage: string) {
@@ -92,9 +97,12 @@ export function createOfficeGenerationWorker(deps: OfficeGenerationWorkerDeps) {
       const configured = deps.buildPipelineDeps(job, controls)
       const pipelineDeps: OfficeGenerationPipelineDeps = {
         ...configured, ...controls,
+        commit: (snapshot,params) => withDepartmentOfficeGeneration(job,()=>configured.commit(snapshot,params)),
         renderValidation: configured.renderValidation ?? (async (snapshot, params) => (await validateOfficeInternalCandidateRendering({ snapshot, ...params })).receipt),
       }
-      const outcome = await runOfficeGenerationPipeline(job.brief, pipelineDeps)
+      const outcome = await withDepartmentOfficeGeneration(job,()=>runOfficeGenerationPipeline(job.brief, pipelineDeps)).catch(() => ({status:'failed' as const,code:'office_generation_authority_changed',message:'Generation inputs or permissions changed.'}))
+      // Publication owns the terminal state; also resolves a lost COMMIT ACK.
+      if(atomicDepartment && (await deps.store.get?.(deps.workerUserId,job.id))?.status==='completed') return 'completed'
       const status = outcome.status
       if (status === 'completed') await deps.store.finish({ userId: deps.workerUserId, jobId: job.id, leaseToken, status: 'completed', stage: 'completed' })
       else if (status === 'cancelled') await deps.store.finish({ userId: deps.workerUserId, jobId: job.id, leaseToken, status: 'cancelled', stage: 'cancelled' })

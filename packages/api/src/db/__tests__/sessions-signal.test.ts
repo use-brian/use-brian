@@ -119,7 +119,7 @@ describe('[COMP:api/session-signal] store-seam emission', () => {
     expect(mockNotify).toHaveBeenCalledWith(WS, 'session', 'update', other)
   })
 
-  it('a READ never signals (findSessionById refreshes recency, not liveness)', async () => {
+  it('a READ never signals or refreshes recency', async () => {
     mockQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
     await findSessionById(SID)
     await flushSignals()

@@ -381,6 +381,11 @@ export function chatArchivedSessionsCacheKey(workspaceId: string, audience: "per
   return `${audience === "personal" ? chatSessionsCacheKey(workspaceId) : chatSharedSessionsCacheKey(workspaceId)}:archived`;
 }
 
+/** One short-lived intent read per viewer, consumed by chat selection. */
+export function chatTranscriptIntentCacheKey(): string {
+  return `chat-transcript-intent${viewerSuffix()}`;
+}
+
 /**
  * A session's transcript, keyed per SESSION (session ids are global): a
  * thread switch paints the last transcript of the same session and never the
@@ -1126,6 +1131,9 @@ export function workspaceAccessModeCacheKey(workspaceId:string,userId:string):st
 
 export function workspaceAccessMigrationCacheKey(workspaceId:string,userId:string,kind:'list'|'plan',cursor=''):string {
   return `${workspaceAccessCacheKey(workspaceId,userId)}:migration:${kind}:${cursor}`;
+}
+export function workspaceKnowledgeBindingCacheKey(workspaceId:string,userId:string):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:knowledge-bindings`;
 }
 
 export function workspaceCreationContextCacheKey(workspaceId:string,userId:string):string {return `${workspaceAccessCacheKey(workspaceId,userId)}:creation-context`;}

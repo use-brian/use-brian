@@ -1,4 +1,5 @@
 import { publishNativeSessionMessage } from './session-message-publication.js'
+import { hostObservationReplay } from '@use-brian/shared'
 import { readSessionContextRevisions, writeSessionContextRevision, type SessionContextRevision } from './session-context-revisions.js'
 import { classifySession, sessionKindSql } from '../session-kind.js'
 import type pg from 'pg'
@@ -97,6 +98,8 @@ export type Session = {
    */
   appOrigin: string | null
   status: string
+  /** Current lease's start, unchanged by heartbeat or reconnect reads. */
+  turnStartedAt?: Date | null
   /** Deprecated scalar slot; semantic reads require readCompactSummary. Always null in native DTOs. */
   compactSummary: string | null
   compactionCount: number
@@ -676,7 +679,7 @@ export async function readSessionById(id: string): Promise<Session | null> {
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             channel_type as "channelType", channel_id as "channelId",
-            app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
+            app_id as "appId", app_origin as "appOrigin", status, turn_started_at as "turnStartedAt", NULL::text as "compactSummary",
             compaction_count as "compactionCount",
             compact_boundary_sequence as "compactBoundarySequence", NULL::text AS title,
             downgrade_notice_sent as "downgradeNoticeSent",
@@ -695,24 +698,10 @@ export async function readSessionById(id: string): Promise<Session | null> {
 }
 
 export async function findSessionById(id: string): Promise<Session | null> {
-  const session = await readSessionById(id)
-  if (!session) return null
-  // Touch last_active_at.
-  //
-  // NOTE: this is a *read* that writes the recency column, and that is
-  // deliberate — `last_active_at` orders the session rail, where "someone
-  // looked at it" counts as activity. It is also exactly why turn liveness
-  // must NOT live here: a client polling an open room refreshes this column
-  // forever, which is how the 2026-08-08 stuck room defeated the 6-minute
-  // sweeper for ~31 minutes. Liveness has its own column that only the
-  // running turn writes (`turn_heartbeat_at`, migration 424). Never move the
-  // sweep predicate back onto `last_active_at`.
-  // A source/history reader can pin this row on another connection. Recency
-  // must not queue behind it (or make an authorization read wait for itself).
-  // Turn liveness and scope mutations keep their own mandatory write protocol.
-  await query(`UPDATE sessions SET last_active_at = now()
-    WHERE id IN (SELECT id FROM sessions WHERE id = $1 FOR NO KEY UPDATE SKIP LOCKED)`, [id])
-  return session
+  // Polls and authority checks are readers, not conversation activity. Writes
+  // at admission/publication/turn completion own recency; the turn heartbeat
+  // separately owns liveness. An open old chat must not reorder the rail.
+  return readSessionById(id)
 }
 
 /** Read-only session identity/binding snapshot for per-boundary authority renewal. */
@@ -862,17 +851,18 @@ export async function takeTurnSlot(sessionId: string): Promise<void> {
  * turn rather than the session's binding. Omitted (NULL) means the bound
  * assistant answers.
  */
-export async function startTurnLease(sessionId: string, assistantId: string | null = null): Promise<string> {
+export async function startTurnLease(sessionId: string, assistantId: string | null = null, startedAt: Date | null = null): Promise<string> {
   const result = await query<{ turn_lease_token: string }>(
     `UPDATE sessions
         SET turn_lease_token = gen_random_uuid(),
+            turn_started_at = COALESCE($3::timestamptz, now()),
             turn_heartbeat_at = now(),
             cancel_requested_at = NULL,
             turn_end_reason = NULL,
             turn_assistant_id = $2
       WHERE id = $1
       RETURNING turn_lease_token`,
-    [sessionId, assistantId],
+    [sessionId, assistantId, startedAt],
   )
   const token = result.rows[0]?.turn_lease_token
   if (!token) throw new Error(`startTurnLease: session ${sessionId} not found`)
@@ -1452,6 +1442,14 @@ export function toStampedMessages(
   },
 ): Array<{ role: 'user' | 'assistant' | 'system'; content: unknown }> {
   return dbMessages.map((m) => {
+    const observation = Array.isArray(m.content) && m.content.some(block => block?.type === 'host_observation') ? hostObservationReplay(m.content, {recordedAt:m.createdAt.toISOString(),timeZone:timezone||'UTC',
+      assistant:m.senderAssistantId && assistantVoices
+        ? assistantVoices.names.get(m.senderAssistantId) ?? (m.senderAssistantId===assistantVoices.currentAssistantId?'current assistant':'another assistant')
+        : 'unspecified assistant'}) : null
+    if (observation) {
+      if (m.role !== 'assistant') throw new Error('Host observations require an assistant-owned transcript row')
+      return observation
+    }
     const base = {
       role: m.role as 'user' | 'assistant' | 'system',
       content: m.content,
@@ -1644,6 +1642,7 @@ export async function addSessionMessage(params: {
   if (params.scope && params.derivation || params.derivationTarget && (!params.derivation || params.scope)) {
     throw new Error('session_message_scope_conflict')
   }
+  if(Array.isArray(params.content)&&params.content.some(block=>block?.type==='host_observation'))throw new Error('Host observations require the native executor batch publisher')
   if(params.authority&&params.derivation)return publishNativeSessionMessage({...params,derivation:params.derivation,authority:params.authority},client)
   const sql =
     `INSERT INTO session_messages
@@ -1779,7 +1778,17 @@ export async function readSessionMessageScopeSource(
     [workspaceId, messageId],
   )
   const source = result.rows[0]?.source as (ScopeSource & { held?: boolean }) | null | undefined
-  return source && source.held !== true ? source : null
+  if (!source || source.held === true) return null
+  // Lifecycle flags belong to the snapshot check, never the retained descriptor.
+  // Native publication compares this exact canonical tuple with current evidence.
+  const {
+    workspaceId: sourceWorkspace, userId, assistantId, sensitivity,
+    compartments, projectIds, resourceKind, resourceId, version,
+  } = source
+  return {
+    workspaceId: sourceWorkspace, userId, assistantId, sensitivity,
+    compartments, projectIds, resourceKind, resourceId, version,
+  }
 }
 
 /**

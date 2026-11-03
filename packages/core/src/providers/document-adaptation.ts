@@ -1,3 +1,4 @@
+import { registerInputAdmissionOwner, ownsInputAdmission, assertProviderInputPreparation, captureInputAdmissionProvider } from './input-authority.js'
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 /**
  * Document adaptation — the one seam where inline media becomes readable text
@@ -269,6 +270,7 @@ export function wrapDocumentAdaptation(
   options: DocumentAdaptationOptions,
 ): LLMProvider {
   if (options.nativePdf && options.vision && !options.distill) return provider
+  provider = captureInputAdmissionProvider(provider)
 
   async function adapt(messages: readonly Message[], progress?: ProviderProgress): Promise<Message[]> {
     if (!hasUnsupportedMedia(messages, options)) return messages as Message[]
@@ -286,7 +288,7 @@ export function wrapDocumentAdaptation(
     }
   }
 
-  return {
+  return registerInputAdmissionOwner({
     name: provider.name,
     models: provider.models,
 
@@ -296,21 +298,25 @@ export function wrapDocumentAdaptation(
       return (async function* () {
         const messages = await adapt(request.messages, request.progress)
         debugDocumentFlow('document_adaptation', { model: request.model, before: request.messages, messages })
-        yield* provider.stream(messages === request.messages ? request : { ...request, messages })
+        const actual = messages === request.messages ? request : { ...request, messages }
+        await assertProviderInputPreparation(provider, actual, request.assertInputAuthority)
+        yield* provider.stream(actual)
       })()
     },
 
     createSession(sessionOptions: SessionOptions): ProviderSession {
-      const inner = provider.createSession(sessionOptions)
+      let inner: ProviderSession | undefined
       return {
         send(messages: Message[], opts?: SendOptions): AsyncIterable<StreamChunk> {
           return (async function* () {
             const adapted = await adapt(messages, opts?.progress)
             debugDocumentFlow('document_adaptation', { model: sessionOptions.model, before: messages, messages: adapted })
+            await assertProviderInputPreparation(provider, { ...sessionOptions, messages: adapted }, opts?.assertInputAuthority ?? sessionOptions.assertInputAuthority)
+            inner ??= provider.createSession(sessionOptions)
             yield* inner.send(adapted, opts)
           })()
         },
       }
     },
-  }
+  }, input => !hasUnsupportedMedia(input.messages, options) && ownsInputAdmission(provider, input))
 }

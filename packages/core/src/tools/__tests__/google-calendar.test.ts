@@ -589,6 +589,76 @@ describe('[COMP:tools/google-calendar] Google Calendar tools', () => {
     expect(deleteTool.requiresConfirmation).toBe(true)
   })
 
+  it('attests only a complete first page with the exact executed scope', async () => {
+    const api = mockApi({ listEvents: vi.fn().mockResolvedValue({ items: [] }) })
+    const tool = createGoogleCalendarTools(api).find(t => t.name === 'googleCalendarListEvents')!
+    const result = await tool.execute({ timeMin: '2026-08-01T00:00:00Z', timeMax: '2026-08-08T00:00:00Z',
+      calendarId: 'calendar@example.com', query: 'meeting' }, ctx)
+    expect(result.data).toEqual([])
+    expect(result.meta).toEqual({ calendarReadComplete: true, calendarReadCalendarId: 'calendar@example.com',
+      calendarReadTimeMin: '2026-08-01T00:00:00Z', calendarReadTimeMax: '2026-08-08T00:00:00Z', calendarReadQuery: 'meeting' })
+  })
+
+  it('exposes a partial empty page and its effective scope for continuation', async () => {
+    const api = mockApi({ listEvents: vi.fn().mockResolvedValue({ items: [], nextPageToken: 'next-page' }) })
+    const tool = createGoogleCalendarTools(api).find(t => t.name === 'googleCalendarListEvents')!
+    const result = await tool.execute({ timeMin: '2026-08-01T00:00:00Z' }, ctx)
+    expect(result.data).toEqual({ events: [], complete: false, nextPageToken: 'next-page',
+      calendarId: 'primary', timeMin: '2026-08-01T00:00:00Z' })
+    expect(result.meta).toMatchObject({ calendarReadComplete: false, calendarReadPartialReason: 'pagination' })
+  })
+
+  it('binds completion metadata to the parameters executed before an awaited adapter', async () => {
+    let finish!: (result: unknown) => void
+    const api = mockApi({ listEvents: vi.fn().mockImplementation(() => new Promise(resolve => { finish = resolve })) })
+    const tool = createGoogleCalendarTools(api).find(t => t.name === 'googleCalendarListEvents')!
+    const input = { timeMin: '2026-08-01T00:00:00Z', timeMax: '2026-08-08T00:00:00Z',
+      calendarId: 'original@example.com', query: 'original', pageToken: 'original-page' }
+    const resultPromise = tool.execute(input, ctx)
+    Object.assign(input, { timeMin: '2026-09-01T00:00:00Z', timeMax: '2026-09-08T00:00:00Z',
+      calendarId: 'changed@example.com', query: 'changed', pageToken: undefined })
+    finish({ items: [] })
+    const result = await resultPromise
+    expect(result.meta).toMatchObject({ calendarReadComplete: false,
+      calendarReadCalendarId: 'original@example.com', calendarReadTimeMin: '2026-08-01T00:00:00Z',
+      calendarReadTimeMax: '2026-08-08T00:00:00Z', calendarReadQuery: 'original', calendarReadPageToken: 'original-page' })
+    expect(result.data).toMatchObject({ complete: false, calendarId: 'original@example.com',
+      timeMin: '2026-08-01T00:00:00Z', timeMax: '2026-08-08T00:00:00Z', query: 'original' })
+  })
+
+  it('does not attest whole-query completeness from the last continuation page', async () => {
+    const api = mockApi({ listEvents: vi.fn().mockResolvedValue({ items: [] }) })
+    const tool = createGoogleCalendarTools(api).find(t => t.name === 'googleCalendarListEvents')!
+    const result = await tool.execute({ timeMin: '2026-08-01T00:00:00Z', pageToken: 'last-page' }, ctx)
+    expect(result.meta).toMatchObject({ calendarReadComplete: false, calendarReadPageToken: 'last-page',
+      calendarReadPartialReason: 'continuation_page' })
+    expect(api.listEvents).toHaveBeenCalledWith(expect.objectContaining({ pageToken: 'last-page' }))
+    expect(result.data).toMatchObject({ events: [], complete: false })
+  })
+
+  it('refuses continuation with a newly defaulted lower bound', async () => {
+    const api = mockApi()
+    const tool = createGoogleCalendarTools(api).find(t => t.name === 'googleCalendarListEvents')!
+    expect((await tool.execute({ pageToken: 'next-page' }, ctx)).isError).toBe(true)
+    expect(api.listEvents).not.toHaveBeenCalled()
+  })
+
+  it('keeps legacy arrays compatible without claiming completeness', async () => {
+    const tool = createGoogleCalendarTools(mockApi({ listEvents: vi.fn().mockResolvedValue([]) }))
+      .find(t => t.name === 'googleCalendarListEvents')!
+    const result = await tool.execute({}, ctx)
+    expect(result.data).toEqual([])
+    expect(result.meta).toMatchObject({ calendarReadComplete: false, calendarReadPartialReason: 'unverified_adapter' })
+  })
+
+  it('rejects an invalid page envelope instead of a complete empty result', async () => {
+    const tool = createGoogleCalendarTools(mockApi({ listEvents: vi.fn().mockResolvedValue({ items: [], nextPageToken: 123 }) }))
+      .find(t => t.name === 'googleCalendarListEvents')!
+    const result = await tool.execute({}, ctx)
+    expect(result.isError).toBe(true)
+    expect(result.meta).toBeUndefined()
+  })
+
   // ── Timezone passthrough ──────────────────────────────────────
 
   it('passes userTimezone to listEvents API call', async () => {

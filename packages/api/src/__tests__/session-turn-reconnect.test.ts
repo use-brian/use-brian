@@ -16,14 +16,13 @@
  *                                      included)
  *   - `turn_completed` -> `turn_completed` + `done`, and finalize
  *   - every other kind -> nothing
- *   - the 5s DB backstop sends the same terminal pair with an empty
- *     completion
+ *   - the 5s DB backstop preserves abnormal status in its terminal pair
  *
  * Spec: docs/architecture/features/doc-comments.md → "Live turn reconnect".
  */
 
 import { describe, it, expect } from 'vitest'
-import { RECONNECT_BACKSTOP_FRAMES, reconnectRelayFrames } from '../routes/sessions.js'
+import { reconnectBackstopFrames, reconnectRelayFrames } from '../routes/sessions.js'
 import type { SessionEvent } from '../session-event-port.js'
 
 describe('[COMP:api/session-turn-reconnect] reconnect relay frames', () => {
@@ -97,6 +96,21 @@ describe('[COMP:api/session-turn-reconnect] reconnect relay frames', () => {
     expect(relay.frames[1]).toEqual({ event: 'done', data: {} })
   })
 
+  it('relays a sanitized failed outcome to a returning viewer', () => {
+    const payload = { senderUserId: 'user-1', reason: 'failed' as const }
+    expect(reconnectRelayFrames({ kind: 'turn_completed', sessionId: 'sess-1', payload })).toEqual({
+      frames: [{ event: 'turn_completed', data: payload }, { event: 'done', data: {} }],
+      finalize: true,
+    })
+  })
+
+  it.each(['timeout', 'failed'])('backstop preserves abnormal %s status after a missed event', status => {
+    expect(reconnectBackstopFrames(status)).toEqual([
+      { event: 'turn_completed', data: { reason: status } }, { event: 'done', data: {} },
+    ])
+    expect(reconnectBackstopFrames('idle')).toEqual(reconnectBackstopFrames())
+  })
+
   it('ignores bus kinds that are not part of a personal turn', () => {
     const unrelated: SessionEvent[] = [
       {
@@ -130,7 +144,7 @@ describe('[COMP:api/session-turn-reconnect] reconnect relay frames', () => {
   })
 
   it('backstop: the DB-status poll sends the same terminal pair with an empty completion', () => {
-    expect(RECONNECT_BACKSTOP_FRAMES).toEqual([
+    expect(reconnectBackstopFrames()).toEqual([
       { event: 'turn_completed', data: {} },
       { event: 'done', data: {} },
     ])
@@ -140,6 +154,6 @@ describe('[COMP:api/session-turn-reconnect] reconnect relay frames', () => {
       sessionId: 'sess-1',
       payload: { senderUserId: 'user-1' },
     })
-    expect(RECONNECT_BACKSTOP_FRAMES.map((f) => f.event)).toEqual(viaBus.frames.map((f) => f.event))
+    expect(reconnectBackstopFrames().map((f) => f.event)).toEqual(viaBus.frames.map((f) => f.event))
   })
 })

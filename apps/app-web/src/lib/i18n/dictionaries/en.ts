@@ -279,7 +279,8 @@ export const en = {
     "noMatch": "No question matched.",
     "saved": "Saved. Changes apply to subsequent speech.",
     "unavailable": "Live transcription interaction is unavailable. Durable recording still works.",
-    "error": "Interaction failed or speech was missed. Durable recording continues.",
+    "error": "Voice interaction is unavailable. You can type your question in chat.",
+    "actionError": "Could not update this recording question. Try again.",
     "recording": "Recording",
     "queued": "Queued",
     "running": "Answering",
@@ -596,6 +597,27 @@ export const en = {
     "migration": "Administrators can inspect saved migration plans and ask Brian to prepare an explicit proposal. Applied batches do not activate a mode."
 },
   accessMigration: {
+    organization_cutover_target_changed: "This plan targets a different workspace mode. Review or cancel it; completed setup is unchanged.",
+    cutoverActiveWork: "Wait for active work to finish, then retry.",
+    cutoverAssistants: "Review assistant home departments.",
+    cutoverSources: "Review data source destinations.",
+    cutoverRecords: "Review record destinations and permissions.",
+
+    finishSetup: "Finish setup",
+    cutoverReview: "Review the final transition to Departments. Retained records and permissions stay unchanged.",
+    cutoverBlocked: "Setup needs attention before it can finish. Review the listed records, then try again.",
+    cutoverInventoryAck: "Inventory revision to acknowledge",
+    knowledgeBindingsTitle: "Knowledge sources needing a binding",
+    knowledgeBindingAction: "Bind source to department",
+    knowledgeBindingReview: "Future syncs will use your current authority and the selected department. Existing entries, source location and checkpoints are preserved. No permissions are added.",
+    knowledgeBindingAccess: "Sign in as an admin with read access to this department to configure its continuing sync.",
+    knowledgeBindingBlocked: "Review the source and its existing entries before configuring this binding.",
+    knowledgeBindingEntries: "Entries preserved",
+    knowledgeBindingActor: "Configuring account",
+    cutoverPreserved: "No records will be deleted and no permissions will be added.",
+    cutoverSchedules: "Schedules to convert",
+    cutoverFamilies: "Inventory families reviewed",
+
     "title": "Access mode and migration",
     "simple": "Simple",
     "departments": "Departments",
@@ -615,7 +637,7 @@ export const en = {
     "scope_review_impact_missing": "Frozen impact evidence is missing. Prepare a fresh review before applying.",
     "scope_review_impact_too_large": "The resource impact exceeds the supported review size. Use a smaller supported proposal.",
     "scope_review_conflict": "The resource review no longer matches current authority or plan state. Refresh and prepare a new review.",
-    "limitation": "Bounded plans can change people, assistants and supported resources, not workspace mode. Mode activation and migration completion remain unavailable. Create explicit proposals with Brian; no assignments are inferred here.",
+    "limitation": "Plans organize reviewed changes to people, assistants and resources. Finishing workspace setup requires a separate owner review.",
     "plans": "Migration plans",
     "empty": "No saved plans",
     "inspect": "Inspect",
@@ -632,6 +654,8 @@ export const en = {
     "full_inventory_required": "Full inventory review is required.",
     "intake_certification_required": "Intake certification is required.",
     "mode_finalizer_unavailable": "Mode finalization is not available.",
+    "organization_cutover_review_required": "Ask the workspace owner to review and finish setup.",
+    "completed": "Completed",
     "migration_busy": "Another migration operation is running. Refresh and try again.",
     "migration_not_active": "This plan is not active. Refresh its status.",
     "migration_item_applied": "This item has already been applied. Refresh progress.",
@@ -3111,7 +3135,17 @@ export const en = {
       cancelConfirmKeep: "Keep waiting",
       resuming: "Working on it…",
       connect: "Connect {connector}",
-      connectHelp: "Authorize {connector} in the provider window. I’ll continue this task automatically when it is connected.",
+      connectPrompt: "Connect your account",
+      connectAction: "Connect",
+      connectHelp: "Your chat resumes automatically.",
+      connectWaiting: "Waiting for authorization in the provider window…",
+      connectRetry: "Open again",
+      connectBlocked: "Allow pop-ups for this site, then try again.",
+      connectClosed: "Connection closed. Open it again when you’re ready.",
+      connectFailed: "Couldn’t finish connecting. Please try again.",
+      connectUnavailable: "Google connection is not configured for this deployment. Ask your administrator to enable it.",
+      connectComplete: "Connected. Continuing your chat.",
+      connectReturn: "You can close this window and return to your chat.",
     },
     // Tool timeline labels — mirrors apps/web's toolNarration map. Kept
     // wide so unfamiliar tools surfacing in app-web still get a
@@ -3308,6 +3342,8 @@ export const en = {
     // See docs/architecture/engine/live-streaming.md → "Chat: the activity feed".
     activity: {
       writing: "Writing reply…",
+      savingReply: "Saving reply…",
+      finishingReply: "Finishing…",
       // Receipt header, summarized by kind (activity-receipt.ts →
       // summarizeActivity): "Searched once and ran 9 Shopify calls · 48s".
       receipt: "{summary} · {duration}",
@@ -9202,6 +9238,8 @@ export const en = {
     channelChats: "Channels",
     personalProjectsFailed: "Could not load project names. Your chats are still available.",
     generalChats: "General",
+    folderChatSummaryOne: "{count} chat · {unread} unread · {active} active",
+    folderChatSummary: "{count} chats · {unread} unread · {active} active",
     newChatInProject: "New chat in {name}",
     projectChatsFailed: "Could not load Project chats.",
     moreChats: "Show more",
@@ -9380,6 +9418,7 @@ export const en = {
     liveWorkNoProgress: "No progress for {minutes}m",
     turnStoppedBy: "{name} stopped this turn.",
     turnStoppedByYou: "You stopped this turn.",
+    turnFailed: "This reply could not be completed. Check the conversation before trying again.",
     turnReconnecting:
       "Connection dropped. Your assistant is still working; the reply will appear here when it finishes.",
     turnReclaimed:

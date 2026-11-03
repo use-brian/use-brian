@@ -7,12 +7,14 @@ import { createMemory } from './memories.js'
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import {
-  ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope, intersectAccessCeilings, RANK, scopeGrantContains,
+  ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope, intersectAccessCeilings, accessCeilingContains, pinAccessCeiling, RANK, scopeGrantContains,
   type DerivedWriteEvidence, type ScopeEvidence, type ExecutionContext, type ResourceScope, type ScopeSource, type SessionContextAuthority,
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from './client.js'
 import { recordDerivedResource, validateDerivedWriteInputs } from './derived-scope-store.js'
-import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
+import { validateCallerScopeEvidence,readValidatedNativeTitleGroup,readValidatedNativeSessionQuery,readValidatedNativePublicationCohorts } from '../context-scope/caller-evidence.js'
+import type {NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
+import {readOriginalNativeSessionQueryCaptures,nativeSessionQueryCaptureSources,type NativeSessionQuerySelection,type NativeSessionQueryCaptures} from '../application-platform/native-session-query-evidence.js'
 import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
 import { readApplicationFieldAncestors } from '../application-platform/field-evidence.js'
 import { getSharedRetainedSourceAuthority } from '../application-platform/source-runtime.js'
@@ -26,6 +28,7 @@ export type SessionContextRevision = {
   userId: string; assistantId: string; createdAt: Date; lastAccessedAt: Date; accessCount: number; survivalCount: number
 }
 type Prepare = (execution: ExecutionContext, sources: readonly ScopeSource[], action: 'context' | 'retain') => Promise<PreparedExternalSourceAuthority>
+type PublicationMeasure=<T>(counter:string,run:()=>Promise<T>)=>Promise<T>
 const retainedHosts = new WeakMap<ExecutionContext, Prepare>()
 /** R4 supplies its real invocation's prepared operation; no service/creator impersonation. */
 export function bindSessionContextRetainedAuthority(execution: ExecutionContext, prepare: Prepare): void {
@@ -47,9 +50,11 @@ function nativeDelegatedSessionPublication(execution:ExecutionContext):boolean{
   &&!getApplicationExecutionBinding(execution)
 }
 async function transaction<T>(authority: SessionContextAuthority, sources: readonly ScopeSource[], action: 'context' | 'retain',
-  owner: boolean, run: (client: PoolClient, checked:ScopeEvidence) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string, activeTurnToken?:string,nativeMutation=false,
-  scalarFloor?:Pick<ScopeEvidence,'sensitivity'|'compartments'|'projectIds'>): Promise<T> {
+  owner: boolean, run: (client: PoolClient, checked:ScopeEvidence,annotationChecked?:ScopeEvidence) => Promise<T>, writeSessionId?: string, stoppedTurnToken?:string, activeTurnToken?:string,nativeMutation=false,
+  scalarFloor?:Pick<ScopeEvidence,'sensitivity'|'compartments'|'projectIds'>,measure?:PublicationMeasure,annotationFloor?:ScopeEvidence): Promise<T> {
+  const time:PublicationMeasure=measure??((_counter,run)=>run())
   const floor=scalarFloor===undefined?{}:structuredClone({sensitivity:scalarFloor.sensitivity,compartments:scalarFloor.compartments,projectIds:scalarFloor.projectIds})
+  const pendingFloor=annotationFloor===undefined?undefined:structuredClone(annotationFloor)
   let publicationAttempted=false
   try {
     const { execution, accumulator } = requireAuthority(authority), before = JSON.stringify(accumulator.evidence)
@@ -57,16 +62,21 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
     const finalizing=!!stoppedTurnToken&&!owner&&action==='retain'&&!!writeSessionId
       &&execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'
     if (execution.lifecycle.abortSignal.aborted&&!finalizing || sources.some(source => source.workspaceId !== execution.security.access.workspaceId)) changed()
-    const external = sources.some(source => source.resourceKind === 'external_source')
-      || (await readExternalSourceAncestors(execution.security.access.workspaceId, sources)).length > 0
+    const hasDirectExternal=sources.some(source=>source.resourceKind==='external_source')
+    const ancestry=await Promise.allSettled([
+      hasDirectExternal?Promise.resolve([]):time('publication_external_ancestry',()=>readExternalSourceAncestors(execution.security.access.workspaceId,sources)),
+      time('publication_field_ancestry',()=>readApplicationFieldAncestors(execution.security.access.workspaceId,sources)),
+    ])
+    for(const result of ancestry)if(result.status==='rejected')throw result.reason
+    const [externalAncestors,fields]=ancestry.map(result=>result.status==='fulfilled'?result.value:[])
+    const external = hasDirectExternal || externalAncestors.length > 0
     const wiring = getSharedRetainedSourceAuthority(), host = retainedHosts.get(execution)
     const prepare = host ?? (wiring ? (e: ExecutionContext, s: readonly ScopeSource[], a: 'context' | 'retain') => wiring.coordinator.prepare(e,s,a) : undefined)
-    const fields = await readApplicationFieldAncestors(execution.security.access.workspaceId, sources)
-    const cohort = fields.length ? await nativeSessionQueryContextSources(execution, sources, prepare) : { sources, independent: false }
+    const cohort = fields.length ? await time('publication_query_context',()=>nativeSessionQueryContextSources(execution, sources, prepare)) : { sources, independent: false }
     if ((external || cohort.independent) && !prepare) changed()
     let contextProof: PreparedExternalSourceAuthority | undefined
     let prepared: PreparedExternalSourceAuthority | undefined
-    const client = await (owner ? getPool() : getAppPool()).connect()
+    const client = await time('publication_pool_wait',()=>(owner ? getPool() : getAppPool()).connect())
     let result: T
     try {
       result = await runWithAgentAccess(execution.security.access, async () => {
@@ -89,7 +99,7 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         // while waiting for promotion's workspace lock otherwise forms a cycle.
         // NO KEY UPDATE permits the trusted source pin's separate FK insert;
         // createMemory upgrades only after those pin inserts have committed.
-        if(writeSessionId&&!owner)await client.query('SELECT lock_native_session_context_publication($1,$2)',[execution.security.access.workspaceId,writeSessionId])
+        if(writeSessionId&&!owner)await time('publication_lock',()=>client.query('SELECT lock_native_session_context_publication($1,$2)',[execution.security.access.workspaceId,writeSessionId]))
         else {
           const locked=await client.query(owner||nativeMutation
             ? 'SELECT id FROM workspaces WHERE id=$1 FOR NO KEY UPDATE'
@@ -109,15 +119,21 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         // waits and immediately before the boundary that consumes it.
         contextProof = external || cohort.independent ? await prepare!(execution, cohort.sources, 'context') : undefined
         if (contextProof) await pinPreparedExternalSourceAuthority(client, execution, contextProof)
-        const checked=await validateCallerScopeEvidence({...floor,sources:[...sources]},execution.security.ceiling,client)
+        const validation=await time('publication_validate',async()=>{
+          const evidence={...floor,sources:[...sources]}
+          const cohorts=pendingFloor&&!owner&&!external&&!cohort.independent
+            ?await readValidatedNativePublicationCohorts([evidence,pendingFloor],execution.security.ceiling,client):null
+          return cohorts??[await validateCallerScopeEvidence(evidence,execution.security.ceiling,client)]
+        })
+        const [checked,annotationChecked]=validation
         prepared = external && action==='retain' ? await prepare!(execution, sources, 'retain') : undefined
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
-        const value = await run(client,checked)
+        const value = await time('publication_write',()=>run(client,checked,annotationChecked))
         await execution.security.authority.assertCurrent()
         if (execution.lifecycle.abortSignal.aborted&&!finalizing || JSON.stringify(accumulator.evidence) !== before
           || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()
         if(nativeMutation)publicationAttempted=true
-        await client.query('COMMIT')
+        await time('publication_commit',()=>client.query('COMMIT'))
         return value
       })
     } finally { releaseApplicationTransactionBinding(client); await rollbackAndRelease(client) }
@@ -150,6 +166,24 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
 export function readRetainedContextFrame<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
  capture:(client:PoolClient)=>Promise<T>):Promise<T>{
  return transaction(authority,structuredClone(sources),'context',false,capture)
+}
+
+/** Optional identity-only native acquisition. Its SQL reader proves the whole
+ * closed source set before selecting payloads; the original caller validator
+ * checks that same proof inside this frame. Null leaves the full retained path
+ * responsible for independent-source preparation and ordinary fallback. */
+export function readNativeTitleGroupFrame(authority:SessionContextAuthority,heads:readonly NativeTitleHead[],
+ sources:readonly ScopeSource[]):Promise<unknown[]|null>{
+ const {execution}=requireAuthority(authority)
+ // SQL admits payload before the host inspects its proof packet. An access
+ // context broader than the original caller ceiling must therefore retain
+ // the original pre-payload caller-validation path, not this consolidation.
+ if(!accessCeilingContains(execution.security.ceiling,pinAccessCeiling(execution.security.access)))return Promise.resolve(null)
+ const identities=structuredClone(heads),evidence={sources:structuredClone([...sources])}
+ return transaction(authority,[],'context',false,async client=>{
+  const captured=await readValidatedNativeTitleGroup(identities,evidence,authority.execution.security.ceiling,client)
+  return captured?.titles??null
+ })
 }
 
 /** Native durable publication uses the original retained operation and non-owner connection. */
@@ -229,6 +263,24 @@ async function pinNativeSessionQueryFloor(authority:SessionContextAuthority,clie
 /** Internal current-reader frame for original session queries, including empty collections. */
 export async function readSessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:readonly ScopeSource[],
  capture:(client:PoolClient)=>Promise<{value:T;sources:readonly ScopeSource[]}>):Promise<T> {
+ return sessionQueryFrame(authority,rawRoots,capture)
+}
+
+/** Only canonical selector identities enter the optional joint acquisition.
+ * The ordinary query frame and its complete fallback remain private here. */
+export function readJointSessionQueryFrame(authority:SessionContextAuthority,roots:readonly ScopeSource[],
+ selection:NativeSessionQuerySelection):Promise<NativeSessionQueryCaptures>{
+ const selector=structuredClone(selection),{execution}=requireAuthority(authority)
+ if(selector.sessionId!==execution.lifecycle.sessionId||execution.lifecycle.sessionPersisted===false
+  ||![selector.throughSequence,selector.topicThroughSequence].every(value=>Number.isSafeInteger(value)&&value>=0&&value<=2147483647))missing()
+ return sessionQueryFrame(authority,roots,async client=>{
+  const value=await readOriginalNativeSessionQueryCaptures(client,execution.security.access.workspaceId,selector)
+  return{value,sources:nativeSessionQueryCaptureSources(value,execution.security.access.workspaceId)}
+ },selector)
+}
+
+async function sessionQueryFrame<T>(authority:SessionContextAuthority,rawRoots:readonly ScopeSource[],
+ capture:(client:PoolClient)=>Promise<{value:T;sources:readonly ScopeSource[]}>,joint?:NativeSessionQuerySelection):Promise<T>{
  try{
  const {execution}=requireAuthority(authority),roots=structuredClone(rawRoots)
  await execution.security.authority.assertCurrent()
@@ -237,8 +289,15 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
  // Discover immutable metadata only. Native-only reads need no additional
  // floor transaction; their acquisition frame applies it before any payload.
  const externalRoots:ScopeSource[]=[]
- for(const root of roots){
-  if(root.workspaceId!==execution.security.access.workspaceId)changed()
+ if(roots.some(root=>root.workspaceId!==execution.security.access.workspaceId))changed()
+ let hasExternal=true
+ if(!roots.some(root=>root.resourceKind==='external_source')){
+  try{hasExternal=(await readExternalSourceAncestors(execution.security.access.workspaceId,roots)).length>0}
+  // Conflicting historical observations across different roots, or an
+  // unavailable batch, keep the original independent per-root decisions.
+  catch{hasExternal=true}
+ }
+ if(hasExternal)for(const root of roots){
   if(root.resourceKind==='external_source'||(await readExternalSourceAncestors(root.workspaceId,[root])).length)externalRoots.push(root)
  }
  const floor=externalRoots.length?await transaction(authority,[],'context',false,client=>pinNativeSessionQueryFloor(authority,client)):null
@@ -260,8 +319,12 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
   proof=admittedRoots.length?await prepare!(execution,admittedRoots,'context'):undefined
   assertWiring()
   if(proof)await pinPreparedExternalSourceAuthority(client,execution,proof)
-  const result=await capture(client)
-  await validateCallerScopeEvidence({sources:[...result.sources]},execution.security.ceiling,client)
+  // Optional SQL selects payload only when its access is no broader than the
+  // original caller ceiling. The private validator consumes its fresh proof.
+  const acquired=joint&&accessCeilingContains(execution.security.ceiling,pinAccessCeiling(execution.security.access))
+   ?await readValidatedNativeSessionQuery(joint,execution.security.ceiling,client):null
+  const result=acquired?{value:acquired.captures as T,sources:acquired.sources}:await capture(client)
+  if(!acquired)await validateCallerScopeEvidence({sources:[...result.sources]},execution.security.ceiling,client)
   assertWiring()
   return result
  })
@@ -297,18 +360,33 @@ export async function readSessionQueryFrame<T>(authority:SessionContextAuthority
 }
 
 const messagePublications=new WeakMap<object,{authority:SessionContextAuthority}>()
+const pendingContextRevisions=new WeakMap<object,{
+ authority:SessionContextAuthority;execution:ExecutionContext;sessionId:string;kind:SessionContextKind;sources:readonly ScopeSource[];floor:ScopeEvidence;
+ write:(client:PoolClient,checked:ScopeEvidence)=>Promise<SessionContextRevision|null>;
+}>()
 /** Atomic native transcript batch; the callback never receives an owner connection. */
 export async function withSessionMessagePublication<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
- run:(client:PoolClient)=>Promise<T>,options?:{turnToken?:string;stoppedTurnToken?:string}):Promise<T>{
+ run:(client:PoolClient)=>Promise<T>,options?:{turnToken?:string;stoppedTurnToken?:string;measure?:PublicationMeasure;pendingAnnotation?:object}):Promise<T>{
  const {execution}=requireAuthority(authority)
+ const pending=options?.pendingAnnotation?pendingContextRevisions.get(options.pendingAnnotation):undefined
+ if(options?.pendingAnnotation&&(!pending||pending.kind!=='message_annotation'||pending.execution!==execution||pending.sessionId!==execution.lifecycle.sessionId))missing()
+ const combined=new ContextScopeAccumulator({sources:structuredClone([...sources])})
+ if(pending)combined.note({sources:structuredClone([...pending.sources])})
  const turnToken=options?.turnToken,stoppedTurnToken=options?.stoppedTurnToken
+ const time:PublicationMeasure=options?.measure??((_counter,run)=>run())
  if(turnToken&&stoppedTurnToken)changed()
  if(execution.lifecycle.sessionPersisted===false||!(execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member')
   &&!nativeDelegatedSessionPublication(execution))changed()
- return transaction(authority,structuredClone(sources),'retain',false,async client=>{
+ return transaction(authority,combined.evidence.sources??[],'retain',false,async(client,_checked,annotationChecked)=>{
   messagePublications.set(client,{authority})
-  try{return await run(client)}finally{messagePublications.delete(client)}
- },execution.lifecycle.sessionId,stoppedTurnToken,turnToken)
+  try{
+   if(pending){
+    const checked=annotationChecked??await time('publication_annotation_validate',()=>validateCallerScopeEvidence(pending.floor,execution.security.ceiling,client))
+    if(!await time('publication_annotation_write',()=>pending.write(client,checked)))changed()
+   }
+   return await run(client)
+  }finally{messagePublications.delete(client)}
+ },execution.lifecycle.sessionId,stoppedTurnToken,turnToken,false,undefined,options?.measure,pending?.floor)
 }
 /** A JSON descriptor, owner transaction or retained callback cannot mint a live frame. */
 export function assertSessionMessagePublicationFrame(client:object,authority:SessionContextAuthority):void{
@@ -344,7 +422,7 @@ export async function readSessionContextRevisions(sessionId: string, kind: Sessi
     try {
       const content = await transaction(authority,[source],'context',false,async client =>
         (await client.query<{ content: Record<string,unknown> | null }>(kind === 'session_title'
-          ? 'SELECT read_session_title_revision($1,$2,$3) AS content' : 'SELECT read_session_context_revision($1,$2) AS content',
+          ? 'SELECT read_native_empty_query_session_title_revision($1,$2,$3) AS content' : 'SELECT read_session_context_revision($1,$2) AS content',
           kind === 'session_title' ? [workspaceId,sessionId,candidate.id] : [workspaceId,candidate.id])).rows[0]?.content)
       if (content) rows.push(bindScopeSource({ ...candidate, source, content }, source))
     } catch (error) {
@@ -363,12 +441,13 @@ export async function sessionContextGeneration(sessionId: string): Promise<strin
   return value
 }
 
-/** Canonical semantic write; pointer/CAS/receipt and payload commit together. */
-export async function writeSessionContextRevision(input: {
+type SessionContextRevisionInput = {
   sessionId: string; parentId?: string; kind: SessionContextKind; content: Record<string, unknown>
   authority?: SessionContextAuthority; derivation?: DerivedWriteEvidence; expectedRevision?: string
   expectedCursor?: number | null; expectedGeneration?: string
-}): Promise<SessionContextRevision | null> {
+}
+/** Snapshot a semantic command, never an authorization or a publication receipt. */
+export async function prepareSessionContextRevision(input:SessionContextRevisionInput):Promise<object> {
   const authority = requireAuthority(input.authority), { execution } = authority
   // Snapshot semantic inputs before the first await. The original live
   // authority is not serializable and must remain the canonical instance.
@@ -402,7 +481,7 @@ export async function writeSessionContextRevision(input: {
   preparedEvidence.note({ sources: await readExternalSourceAncestors(execution.security.access.workspaceId,evidence.sources) })
   const preparedSources = preparedEvidence.evidence.sources ?? []
   const payload = structuredClone(command.content), parentId = command.parentId ?? randomUUID(), id = randomUUID()
-  const stored = await transaction(authority,preparedSources,'retain',false,async (client,checked) => {
+  const write = async (client:PoolClient,checked:ScopeEvidence):Promise<SessionContextRevision|null> => {
     const publicationSources = checked.sources ?? []
     const result=(await client.query<{value:{source:ScopeSource;createdAt:string;userId:string;assistantId:string}|null}>(
       'SELECT publish_native_session_context_revision($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) AS value',
@@ -418,7 +497,18 @@ export async function writeSessionContextRevision(input: {
     const createdAt=new Date(result.createdAt)
     return bindScopeSource({id,parentId:(command.kind==='compact_summary'||command.kind==='session_title')?command.sessionId:parentId,sessionId:command.sessionId,source,content:payload,
       userId:result.userId,assistantId:result.assistantId,createdAt,lastAccessedAt:createdAt,accessCount:0,survivalCount:0},source)
-  },command.sessionId,undefined,undefined,false,preparedEvidence.evidence)
+  }
+  const pending=Object.freeze({})
+  pendingContextRevisions.set(pending,{authority,execution,sessionId:command.sessionId,kind:command.kind,sources:preparedSources,floor:preparedEvidence.evidence,write})
+  return pending
+}
+
+/** Canonical semantic write; pointer/CAS/receipt and payload commit together. */
+export async function writeSessionContextRevision(input:SessionContextRevisionInput):Promise<SessionContextRevision|null> {
+  const token=await prepareSessionContextRevision(input),pending=pendingContextRevisions.get(token)!
+  const {authority}=pending
+  if(authority.execution!==pending.execution)missing()
+  const stored=await transaction(authority,pending.sources,'retain',false,pending.write,pending.sessionId,undefined,undefined,false,pending.floor)
   if (stored) authority.accumulator.note({ sources: boundScopeSources(stored) })
   return stored
 }

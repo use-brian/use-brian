@@ -5,6 +5,39 @@ import { join } from 'node:path'
 import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
 
 const migrationRuns = new WeakMap<PGlite, Promise<void>>()
+
+/** Restricted role bootstrap for embedded product boot. [COMP:api/migration-owner-role] */
+export async function preparePgliteRuntimeRole(db: PGlite): Promise<void> {
+  await db.transaction(async tx => {
+    await tx.exec(`DO $bootstrap$
+      DECLARE empty_chain boolean:=true; runtime_id oid;
+      BEGIN
+        IF to_regclass('public._migrations') IS NOT NULL THEN
+          SELECT NOT EXISTS(SELECT FROM public._migrations) INTO empty_chain;
+        END IF;
+        SELECT oid INTO runtime_id FROM pg_roles WHERE rolname='app_user';
+        IF runtime_id IS NULL AND NOT empty_chain THEN
+          RAISE EXCEPTION 'Embedded brain has applied migrations but no app_user role. Preserve this database and restore into a newly initialized brain before retrying.';
+        END IF;
+        IF runtime_id IS NOT NULL AND (
+          EXISTS(SELECT FROM pg_roles WHERE oid=runtime_id AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolinherit OR rolbypassrls))
+          OR EXISTS(SELECT FROM pg_auth_members WHERE roleid=runtime_id OR member=runtime_id)
+          OR EXISTS(SELECT FROM pg_class WHERE relowner=runtime_id)
+          OR EXISTS(SELECT FROM pg_proc WHERE proowner=runtime_id)
+        ) THEN
+          RAISE EXCEPTION 'Embedded app_user role has unsafe privileges, membership or object ownership. Preserve this database before recovery.';
+        END IF;
+        IF empty_chain THEN
+          IF runtime_id IS NULL THEN
+            CREATE ROLE app_user NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+          END IF;
+          GRANT USAGE ON SCHEMA public TO app_user;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO app_user;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE,SELECT ON SEQUENCES TO app_user;
+        END IF;
+      END $bootstrap$;`)
+  })
+}
 const OSS_CHANNELS_330 = '330_oss_channels.sql'
 const OSS_CHANNELS_330_SHA256 = '64aeddde4c05bd186b638be0b0c02f477dd16afb20358c00446b2e9d0d739c1e'
 // The chat archive migrations were exercised locally before their feature
@@ -12,6 +45,10 @@ const OSS_CHANNELS_330_SHA256 = '64aeddde4c05bd186b638be0b0c02f477dd16afb20358c0
 // their sequence prefixes. Preserve those existing local brains by recording
 // the final filename when the exact pre-rebase filename is already applied.
 const LEGACY_MIGRATION_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  '8171_department_mode_admission.sql': ['8148_department_mode_admission.sql'],
+  '8172_organization_cutover.sql': ['8149_organization_cutover.sql'],
+  '8173_department_office_publication.sql': ['8150_department_office_publication.sql'],
+  '8174_reviewed_legacy_knowledge_binding.sql': ['8151_reviewed_legacy_knowledge_binding.sql'],
   '552_association_order_financial_evidence.sql': ['537_association_order_financial_evidence.sql'],
   '405_chat_message_archive.sql': ['395_chat_message_archive.sql', '393_chat_message_archive.sql'],
   '406_local_chat_archive_sink.sql': ['396_local_chat_archive_sink.sql', '394_local_chat_archive_sink.sql'],

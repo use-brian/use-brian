@@ -92,6 +92,93 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     return { tools, callMcpTool, index }
   }
 
+  it('preloads matching read schemas without executing tools and retains guarded dispatch', async () => {
+    const execute = vi.fn(async () => ({ data: { items: [] } }))
+    const read = buildTool({ name: 'calendarListEvents', description: 'List calendar events',
+      inputSchema: z.object({ from: z.string() }), isReadOnly: true, requiresConfirmation: false, execute })
+    const write = buildTool({ ...read, name: 'calendarCreateEvent', isReadOnly: false })
+    const gated = buildTool({ ...read, name: 'calendarRestricted', requiresCapability: 'fictional' })
+    const hidden = buildTool({ ...read, name: 'calendarHidden', hiddenFromModel: true })
+    const index = buildToolIndex([{ kind: 'local', serverName: 'calendar', tools: [read, write, gated, hidden] }])
+    const [, call] = createMcpSearchTools({ index, settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1',
+      discoveryQuery: 'can you check my calendar now?' })
+    expect(call.description).toContain('[calendar] calendarListEvents')
+    expect(call.description).toContain('from: string')
+    expect(call.description).not.toContain('calendarCreateEvent')
+    expect(call.description).not.toContain('calendarRestricted')
+    expect(call.description).not.toContain('calendarHidden')
+    expect(execute).not.toHaveBeenCalled()
+    await call.execute({ server: 'calendar', tool: 'calendarListEvents', args: { from: '2030-01-01' } }, ctx)
+    expect(execute).toHaveBeenCalledOnce()
+  })
+
+  it('keeps empty, unrelated, oversized and ambiguous preloads bounded', () => {
+    const read = buildTool({ name: 'calendarRead', description: 'Read calendar events',
+      inputSchema: z.object({}), isReadOnly: true, requiresConfirmation: false,
+      execute: async () => ({ data: [] }) })
+    const describe = (query: string, entries = [read]) => createMcpSearchTools({
+      index: buildToolIndex([{ kind: 'local', serverName: 'calendar', tools: entries }]),
+      settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1', discoveryQuery: query,
+    })[1].description
+    for (const query of ['', 'can you please help now', 'unrelatedquux', ' '.repeat(500) + 'calendar']) {
+      expect(describe(query)).not.toContain('already discovered')
+    }
+    expect(describe('calendar', [read, read])).not.toContain('already discovered')
+    expect(describe('calendar', [buildTool({ ...read, description: 'calendar ' + 'x'.repeat(12_000) })])).not.toContain('already discovered')
+  })
+
+  it('exposes only unique visible local read schemas and preserves capability and input guards', async () => {
+    const execute = vi.fn(async () => ({ data: [] }))
+    const read = buildTool({ name: 'calendarRead', description: 'Read events', inputSchema: z.object({ from: z.string() }),
+      isReadOnly: true, requiresConfirmation: false, execute })
+    const tools = createMcpSearchTools({ index: buildToolIndex([
+      { kind: 'local', serverName: 'calendar', tools: [read,
+        buildTool({ ...read, name: 'calendarWrite', isReadOnly: false }),
+        buildTool({ ...read, name: 'calendarHidden', hiddenFromModel: true }),
+        buildTool({ ...read, name: 'calendarRestricted', requiresCapability: 'fictional' }),
+        buildTool({ ...read, name: 'duplicate' })] },
+      { kind: 'local', serverName: 'other', tools: [buildTool({ ...read, name: 'duplicate' })] },
+      { kind: 'remote', server: notionServer, serverUrl: notionServer.url, callMcpTool: async () => ({}) },
+    ]), settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1', exposeLocalReadTools: true })
+    expect(tools.map(tool => tool.name)).toEqual(['mcp_search', 'mcp_call', 'calendarRead', 'calendarRestricted'])
+    const direct = tools.find(tool => tool.name === 'calendarRead')!
+    expect(direct.inputSchema).toBe(read.inputSchema)
+    expect((await direct.execute({}, ctx)).isError).toBe(true)
+    const gated = tools.find(tool => tool.name === 'calendarRestricted')!
+    expect(gated.requiresCapability).toBe('fictional')
+    expect((await gated.execute({ from: '2030-01-01' }, ctx)).isError).toBe(true)
+    expect(execute).not.toHaveBeenCalled()
+    await direct.execute({ from: '2030-01-01' }, ctx)
+    expect(execute).toHaveBeenCalledOnce()
+  })
+
+  it.each(['direct', 'generic'] as const)('shares denial and timeout state when %s is called first', async first => {
+    for (const decision of ['deny', 'timeout']) {
+      const execute = vi.fn(async () => ({ data: [] })), notify = vi.fn()
+      const waitForDecision = vi.fn(async () => {
+        if (decision === 'timeout') throw new Error('Timed out')
+        return { decision: 'deny' as const }
+      })
+      const read = buildTool({ name: 'calendarRead', description: 'Read events', inputSchema: z.object({}),
+        isReadOnly: true, requiresConfirmation: true, resolveConfirmation: async () => true, execute })
+      const tools = createMcpSearchTools({ index: buildToolIndex([{ kind: 'local', serverName: 'calendar', tools: [read] }]),
+        settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1', exposeLocalReadTools: true })
+      const direct = tools.find(tool => tool.name === 'calendarRead')!, generic = tools[1]
+      expect(direct.requiresConfirmation).toBe(false)
+      expect(direct.resolveConfirmation).toBeUndefined()
+      const context = { ...ctx, confirmationResolver: { waitForDecision }, notifyConfirmationRequired: notify } as never
+      const calls = {
+        direct: () => direct.execute({}, context),
+        generic: () => generic.execute({ server: 'calendar', tool: 'calendarRead', args: {} }, context),
+      }
+      expect((await calls[first]()).isError).toBe(true)
+      expect((await calls[first === 'direct' ? 'generic' : 'direct']()).isError).toBe(true)
+      expect(notify).toHaveBeenCalledOnce()
+      expect(waitForDecision).toHaveBeenCalledOnce()
+      expect(execute).not.toHaveBeenCalled()
+    }
+  })
+
   it('creates exactly 2 tools: mcp_search and mcp_call', () => {
     const { tools } = makeSearchTools()
     expect(tools).toHaveLength(2)

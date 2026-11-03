@@ -24,6 +24,22 @@ export function bindScopeSources<T extends object>(value: T, observed: readonly 
   return value
 }
 
+/** Explicitly propagate trusted evidence without copying its private snapshot. */
+export function inheritScopeSources<T extends object>(value: T, original: object): T {
+  const inherited = sources.get(original)
+  if (!inherited?.length || value === original) return value
+  const existing = sources.get(value)
+  if (!existing?.length) sources.set(value, inherited)
+  else {
+    const all = new Map<string, ScopeSource>()
+    for (const source of [...existing, ...inherited]) {
+      all.set(JSON.stringify([source.workspaceId, source.resourceKind, source.resourceId, source.version, resourceScopeKey(source)]), source)
+    }
+    sources.set(value, [...all.values()])
+  }
+  return value
+}
+
 /** A single-source reader must not silently truncate a multi-source binding. */
 export function boundScopeSource(value: object): ScopeSource | undefined {
   const observed = sources.get(value)

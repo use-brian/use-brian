@@ -1,6 +1,15 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
+import React from "react";
+import { renderToString } from "react-dom/server";
+import { I18nProvider } from "@/lib/i18n/client";
+import { en } from "@/lib/i18n/dictionaries/en";
+import { ja } from "@/lib/i18n/dictionaries/ja";
+import { zh } from "@/lib/i18n/dictionaries/zh";
+import { zhCN } from "@/lib/i18n/dictionaries/zh-cn";
+import { ChatActivityFeed } from "@/components/chrome/chat-activity";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createChatControllerCoordinator } from "@/lib/chat/use-chat-controller";
 import { isAuthoritativeRosterDenial } from "@/lib/chat-surface-data";
 
 /**
@@ -33,7 +42,7 @@ function handler(name: string) {
 }
 function evaluate<T = (...args: any[]) => any>(expression: string, scope: Record<string, unknown>): T {
   const code = ts.transpileModule(`return (${expression});`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None, jsx: ts.JsxEmit.React },
   }).outputText;
   return new Function(...Object.keys(scope), code)(...Object.values(scope)) as T;
 }
@@ -51,6 +60,7 @@ function base() {
     isCurrent: vi.fn(() => true),
     adoptSession: vi.fn(() => true),
     presentInteraction: vi.fn(() => true),
+    begin: vi.fn(),
     beginResponse: vi.fn(() => true),
     responseFailed: vi.fn(() => true),
     resolveInteraction: vi.fn(() => true),
@@ -66,6 +76,16 @@ function base() {
   };
   return {
     sessionIdRef, sessionEpochRef, chatController, isAuthoritativeRosterDenial,
+    stream: { inFlight: () => false },
+    transcriptRequestRef: { current: 0 }, transcriptAbortRef: { current: null as AbortController | null },
+    setTranscriptCold: vi.fn(),
+    workspaceId: "fictional-workspace",
+    createChatStreamObserver: () => ({ observe: vi.fn(), release: vi.fn() }),
+    directObserver: { observe: vi.fn(), release: vi.fn() },
+    localSend: { adopt: vi.fn(), release: vi.fn(), complete: vi.fn() },
+    rollbackRecency: vi.fn(),
+    beginChatSendFeedback: () => ({ adopt: vi.fn(), release: vi.fn() }),
+    followObserver: { observe: vi.fn(), release: vi.fn() },
     setHistoryRecoverySessionId: vi.fn(), isSessionHistoryUnavailable: () => false,
     switchTo(id: string | null) { sessionEpochRef.current++; sessionIdRef.current = id; },
   };
@@ -73,10 +93,57 @@ function base() {
 afterEach(() => vi.useRealTimers());
 
 describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
+  it.each(["rows", "failure"])("a new send supersedes a slow same-chat history read (%s)", async outcome => {
+    const pending = deferred<unknown[]>();
+    const scope = {
+      ...base(),
+      fetchChatTranscript: vi.fn((_id: string, _options: { signal: AbortSignal }) => pending.promise),
+      mapTranscriptRows: (rows: unknown) => rows,
+      writeTranscriptCache: vi.fn(), evictTranscriptCache: vi.fn(),
+      chat: { loadMessages: vi.fn() }, setError: vi.fn(),
+      t: { errorGeneric: "Try again", historyUnavailable: "Unavailable" },
+    };
+    const coordinator = createChatControllerCoordinator(() => scope.sessionIdRef.current);
+    const load = evaluate(callback("loadTranscript"), { ...scope, chatController: coordinator });
+    const read = load("A");
+    coordinator.begin("A"); // The accepted-send ownership transition.
+    expect(scope.fetchChatTranscript.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(scope.setTranscriptCold).toHaveBeenCalledWith(false);
+    // A transport may still resolve after abort (e.g. headers already read).
+    if (outcome === "rows") pending.resolve(["old prompt", "old answer"]);
+    else pending.reject(new Error("chat_history_failed: 403"));
+    await read;
+    expect(scope.chat.loadMessages).not.toHaveBeenCalled();
+    expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
+    expect(scope.evictTranscriptCache).not.toHaveBeenCalled();
+    expect(scope.setError).not.toHaveBeenCalled();
+    scope.fetchChatTranscript.mockResolvedValue(["old prompt", "old answer", "new prompt", "new answer"]);
+    await load("A", { force: true });
+    expect(scope.chat.loadMessages).toHaveBeenCalledExactlyOnceWith(["old prompt", "old answer", "new prompt", "new answer"]);
+  });
+
+  it("defers history replacement while the direct reply owns the transcript", async () => {
+    const scope = { ...base(), stream: { inFlight: () => true }, fetchChatTranscript: vi.fn() };
+    await evaluate(callback("loadTranscript"), scope)("A", { force: true });
+    expect(scope.fetchChatTranscript).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("reconciles personal history after a saved send only while it still owns the pane (%s)", async current => {
+    const settle = find(node => ts.isIfStatement(node)
+      && node.thenStatement.getText(tree).includes("await loadTranscript(owningSessionId, { force: true })"));
+    const scope = {
+      ownsSend: () => current, sourceMessageId: "saved-input", owningSessionId: "A",
+      panePolicy: { post: false }, targets: [{ id: "assistant" }], loadTranscript: vi.fn(),
+    };
+    await evaluate(`async () => { ${settle.getText(tree)} }`, scope)();
+    expect(scope.loadTranscript).toHaveBeenCalledTimes(current ? 1 : 0);
+    if (current) expect(scope.loadTranscript).toHaveBeenCalledWith("A", { force: true });
+  });
+
   it.each([401, 403, 404])("evicts protected history on an authoritative denial (%s)", async (status) => {
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
-      fetchSessionMessages: vi.fn().mockRejectedValue(new Error(`chat_history_failed: ${status}`)),
+      fetchChatTranscript: vi.fn().mockRejectedValue(new Error(`chat_history_failed: ${status}`)),
       mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), evictTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
       setError: vi.fn(), t: { errorGeneric: "Try again", historyUnavailable: "History unavailable. Start a new chat." },
@@ -92,7 +159,7 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     const response = deferred<unknown>();
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
-      fetchSessionMessages: vi.fn().mockReturnValue(response.promise), mapTranscriptRows: (rows: unknown) => rows,
+      fetchChatTranscript: vi.fn().mockReturnValue(response.promise), mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), evictTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
       isSessionHistoryUnavailable: () => true, setError: vi.fn(),
       t: { errorGeneric: "Try again", historyUnavailable: "History unavailable" },
@@ -109,7 +176,7 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     const response = deferred<string[]>();
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
-      fetchSessionMessages: vi.fn().mockReturnValue(response.promise),
+      fetchChatTranscript: vi.fn().mockReturnValue(response.promise),
       mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
       setError: vi.fn(), t: { errorGeneric: "History unavailable" },
@@ -119,7 +186,7 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     if (switched) scope.switchTo("B");
     response.reject(new Error("forbidden"));
     await loading;
-    expect(scope.fetchSessionMessages).toHaveBeenCalledWith("A", { strict: true });
+    expect(scope.fetchChatTranscript).toHaveBeenCalledWith("A", { signal: expect.any(AbortSignal) });
     expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
     expect(scope.chat.loadMessages).not.toHaveBeenCalled();
     expect(scope.setError).toHaveBeenCalledTimes(switched ? 0 : 1);
@@ -128,11 +195,11 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
   it.each([false, true])("drops late transcript responses after a switch (round trip: %s), including cache writes", async (roundTrip) => {
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
-      fetchSessionMessages: vi.fn(), mapTranscriptRows: (rows: unknown) => rows,
+      fetchChatTranscript: vi.fn(), mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
     };
     const response = deferred<string[]>();
-    scope.fetchSessionMessages.mockReturnValue(response.promise);
+    scope.fetchChatTranscript.mockReturnValue(response.promise);
     const load = evaluate(callback("loadTranscript"), scope);
     const loading = load("A");
     scope.switchTo("B");
@@ -148,15 +215,18 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     const fresh = deferred<string[]>();
     const scope = {
       ...base(), transcriptRequestRef: { current: 0 },
-      fetchSessionMessages: vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise),
+      fetchChatTranscript: vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise),
       mapTranscriptRows: (rows: unknown) => rows,
       writeTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
     };
     const load = evaluate(callback("loadTranscript"), scope);
     const first = load("A");
     const second = load("A", { force: true });
+    expect(scope.fetchChatTranscript.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(scope.setTranscriptCold).not.toHaveBeenCalled();
     fresh.resolve(["new turn"]);
     await second;
+    expect(scope.setTranscriptCold).toHaveBeenCalledExactlyOnceWith(false);
     old.resolve(["before turn"]);
     await first;
     expect(scope.chat.loadMessages.mock.calls).toEqual([[["new turn"]]]);
@@ -231,9 +301,10 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
   });
 });
 
-function directStream(initialSession: string | null = "A") {
+function directStream(initialSession: string | null = "A", realController = false) {
   const owner = base();
   owner.sessionIdRef.current = initialSession;
+  if (realController) Object.assign(owner.chatController, createChatControllerCoordinator(() => owner.sessionIdRef.current));
   const scope = {
     ...owner, coercePayload: (data: unknown) => data,
     hydratedRef: { current: initialSession }, directTurnSessionRef: { current: initialSession },
@@ -255,12 +326,13 @@ function directStream(initialSession: string | null = "A") {
   const handlers = evaluate<Record<string, (...args: any[]) => any>>(`(() => {
     const sendEpoch = sessionEpochRef.current;
     let owningSessionId = sessionIdRef.current;
-    const controllerRun = chatController.capture();
+    let controllerRun = chatController.capture();
     const ownsSend = ${declaration("ownsSend").initializer!.getText(tree)};
     let turnFailed = false;
     let turnDisconnected = false;
+    let inputSaved = false;
     return {
-      onEvent: ${handler("onEvent")}, onDone: ${handler("onDone")},
+      ownsSend, onEvent: ${handler("onEvent")}, onDone: ${handler("onDone")},
       onError: ${handler("onError")}, onDisconnect: ${handler("onDisconnect")}
     };
   })()`, scope);
@@ -268,6 +340,67 @@ function directStream(initialSession: string | null = "A") {
 }
 
 describe("[COMP:app-web/chat-sessions-cache] stream completion ownership", () => {
+  it("retains send ownership and clears creation busy state for a fresh workspace chat", async () => {
+    const owner = base();
+    owner.sessionIdRef.current = null;
+    const scope = {
+      ...owner, view: "workspace", startingShared: false, setStartingShared: vi.fn(),
+      chatController: createChatControllerCoordinator(() => owner.sessionIdRef.current),
+      creationContext: { snapshot: () => ({}), isCurrent: () => true, fail: vi.fn() },
+      createWorkspaceSession: vi.fn().mockResolvedValue({ id: "minted" }),
+      workspaceId: "workspace", interlocutor: { id: "assistant" },
+      hydratedRef: { current: null }, cacheCreatedChatSession: vi.fn(),
+      sessionAssistantRef: { current: new Map() }, chat: { setSession: vi.fn() },
+      selectSession: vi.fn(), dispatchChatSessionsRefresh: vi.fn(),
+      setError: vi.fn(), t: { newWorkspaceChatFailed: "Failed" },
+    };
+    const creation = find(node => ts.isIfStatement(node) &&
+      node.expression.getText(tree) === 'view === "workspace" && !sessionIdRef.current').getText(tree);
+    const continues = await evaluate(`async () => {
+      const sendEpoch = sessionEpochRef.current;
+      let owningSessionId = sessionIdRef.current;
+      let controllerRun = chatController.begin(owningSessionId);
+      const ownsSend = ${declaration("ownsSend").initializer!.getText(tree)};
+      ${creation}
+      return ownsSend();
+    }`, scope)();
+    expect(continues).toBe(true);
+    expect(scope.setStartingShared.mock.calls).toEqual([[true], [false]]);
+    expect(scope.selectSession).toHaveBeenCalledWith("minted", "workspace");
+  });
+
+  it("keeps the real controller generation when a fresh session is adopted", () => {
+    const { scope, handlers } = directStream(null, true);
+    handlers.onEvent({ event: "session", data: { sessionId: "minted" } });
+    expect(handlers.ownsSend()).toBe(true);
+    handlers.onDone();
+    expect(scope.chat.dispatch).toHaveBeenCalled();
+    scope.chatController.begin("minted");
+    expect(handlers.ownsSend()).toBe(false);
+  });
+
+  it("rejects a settled stream's callbacks and continuation after a same-session successor starts", async () => {
+    const { scope, handlers } = directStream();
+    handlers.onDone(); // reply_complete arrives while metadata is still pending
+    const metadata = deferred<void>();
+    const continueOldSend = vi.fn();
+    const pending = metadata.promise.then(() => {
+      if (handlers.ownsSend()) continueOldSend();
+    });
+    vi.clearAllMocks();
+    scope.chatController.isCurrent.mockReturnValue(false); // a new controller generation, same visit/session
+    metadata.resolve();
+    await pending;
+    handlers.onEvent({ event: "title_update", data: { sessionId: "A" } });
+    handlers.onDone();
+    handlers.onError(new Error("metadata closed"));
+    expect(continueOldSend).not.toHaveBeenCalled();
+    expect(scope.chat.dispatch).not.toHaveBeenCalled();
+    expect(scope.resetTurnActivity).not.toHaveBeenCalled();
+    expect(scope.dispatchChatSessionsRefresh).not.toHaveBeenCalled();
+    expect(scope.flushQueuedInputs).not.toHaveBeenCalled();
+  });
+
   it.each(["onDone", "onError", "onDisconnect"])("%s cannot mutate a different session or a new visit to the same session", (name) => {
     const { scope, handlers } = directStream();
     scope.switchTo("B");
@@ -323,7 +456,7 @@ describe("[COMP:app-web/chat-sessions-cache] stream completion ownership", () =>
     const response = deferred<void>();
     const scope = {
       ...base(), responseGroupAbortRef: { current: false }, directTurnSessionRef: { current: "A" },
-      stream: { abort: vi.fn() }, chat: { dispatch: vi.fn() }, turnTextRef: { current: "" },
+      stream: { abort: vi.fn(), inFlight: () => false }, chat: { dispatch: vi.fn() }, turnTextRef: { current: "" },
       resetTurnActivity: vi.fn(), stopTurn: vi.fn().mockReturnValue(response.promise),
       flushQueuedInputs: vi.fn(), setError: vi.fn(), t: { stopTurnFailed: "stop failed" },
     };
@@ -433,13 +566,45 @@ function hydrationEffect() {
 }
 
 describe("[COMP:app-web/chat-sessions-cache] selection before paint", () => {
+  it.each([false, true])("finishes cold loading after effect replay (unmount cleanup: %s)", async replayUnmount => {
+    const pending = deferred<string[]>();
+    const scope = {
+      ...base(), activeSessionId: "B", hydratedRef: { current: "A" as string | null },
+      setPendingQuestion: vi.fn(), setStartingShared: vi.fn(), responseGroupAbortRef: { current: false },
+      directTurnSessionRef: { current: "A" }, stream: { abort: vi.fn(), inFlight: () => false },
+      chat: { setSession: vi.fn(), loadMessages: vi.fn(), dispatch: vi.fn() },
+      resetTurnActivity: vi.fn(), att: { clear: vi.fn() }, setError: vi.fn(), setReplyTo: vi.fn(), setSelectionQuote: vi.fn(),
+      freshChannelIdRef: { current: null }, panePolicy: { presence: false }, setReconnectSessionId: vi.fn(),
+      readCachedTranscript: () => undefined, writeTranscriptCache: vi.fn(),
+      fetchChatTranscript: vi.fn(() => pending.promise), mapTranscriptRows: (rows: unknown) => rows,
+      loadTranscript: null as unknown as (id: string) => Promise<unknown>,
+    };
+    scope.loadTranscript = evaluate(callback("loadTranscript"), scope);
+    const hydrate = evaluate(hydrationEffect(), scope);
+    hydrate();
+    if (replayUnmount) {
+      const lifecycle = (find(node => ts.isCallExpression(node) && node.expression.getText(tree) === "useLayoutEffect" &&
+        node.arguments[0]?.getText(tree).includes("hydratedRef.current = null")) as ts.CallExpression).arguments[0].getText(tree);
+      evaluate(lifecycle, scope)()();
+      expect(scope.transcriptAbortRef.current?.signal.aborted).toBe(true);
+    }
+    hydrate();
+    expect(scope.fetchChatTranscript).toHaveBeenCalledTimes(replayUnmount ? 2 : 1);
+    pending.resolve(["Selected chat"]);
+    await pending.promise;
+    await Promise.resolve();
+    expect(scope.chat.loadMessages).toHaveBeenLastCalledWith(["Selected chat"]);
+    expect(scope.setTranscriptCold).toHaveBeenLastCalledWith(false);
+    expect(scope.writeTranscriptCache).toHaveBeenCalledExactlyOnceWith("B", ["Selected chat"]);
+  });
+
   it.each([true, false])("installs only the selected transcript synchronously while its read is pending (cached: %s)", cached => {
     const oldMessages = [{ id: "old-message", text: "Previous chat" }];
     const selectedMessages = [{ id: "selected-message", text: "Selected chat" }];
     const scope = {
       ...base(), activeSessionId: "B", hydratedRef: { current: "A" },
       setPendingQuestion: vi.fn(), setStartingShared: vi.fn(), responseGroupAbortRef: { current: false },
-      directTurnSessionRef: { current: "A" }, stream: { abort: vi.fn() },
+      directTurnSessionRef: { current: "A" }, stream: { abort: vi.fn(), inFlight: () => false },
       chat: { state: {sessionId: "A", messages: oldMessages}, setSession: vi.fn(), loadMessages: vi.fn(), dispatch: vi.fn() },
       resetTurnActivity: vi.fn(), att: { clear: vi.fn() }, setError: vi.fn(), setReplyTo: vi.fn(), setSelectionQuote: vi.fn(),
       freshChannelIdRef: {current: null}, panePolicy: {presence: false}, setReconnectSessionId: vi.fn(),
@@ -462,6 +627,191 @@ describe("[COMP:app-web/chat-sessions-cache] selection before paint", () => {
     scope.chat.state = {sessionId: "B", messages: selectedMessages};
     evaluate(write, scope)();
     expect(scope.writeTranscriptCache).toHaveBeenCalledWith("B", selectedMessages);
-    cleanup();
+    expect(cleanup).toBeUndefined();
+  });
+});
+
+
+function followedTurn(direct = false) {
+  const scope = {
+    ...base(), sessionId: "A", cancelled: false, epoch: 1,
+    shouldAcceptRoomMirror: () => !direct, meId: "viewer",
+    directTurnSessionRef: { current: direct ? "A" : null }, stream: { inFlight: () => direct },
+    workspaceId: "workspace", dispatchChatSessionActivity: vi.fn(),
+    setTurnEndNotice: vi.fn(), t: { turnFailed: "Failed safely", turnReclaimed: "Reset stalled turn" },
+    setRemoteActive: vi.fn(), setRemoteStartedAt: vi.fn(), setReconnectNotice: vi.fn(),
+    setRemoteReplyPhase: vi.fn(), setRemoteText: vi.fn(), setRemoteAssistantId: vi.fn(),
+    chat: { dispatch: vi.fn() }, resetTurnActivity: vi.fn(), resetRemoteTurn: vi.fn(),
+    setRemoteConfirmation: vi.fn(), setQueuedNotice: vi.fn(), loadTranscript: vi.fn(),
+    reloadShared: vi.fn(), dispatchChatSessionsRefresh: vi.fn(), panePolicy: { post: false },
+    refreshPendingInput: vi.fn(),
+  };
+  const onEvent = evaluate(`(() => {
+    const ownsFollow = ${declaration("ownsFollow").initializer!.getText(tree)};
+    const reconnectWanted = true;
+    const controllerRun = chatController.capture();
+    let sawRunning = false;
+    let sawTurnCompleted = false;
+    return ${declaration("handleRoomEvent").initializer!.getText(tree)};
+  })()`, scope);
+  return { scope, onEvent };
+}
+
+describe("[COMP:app-web/turn-reconnect] returning sender outcomes", () => {
+  it("restores elapsed time after navigating away and mounting a fresh chat", () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-01-01T00:00:00Z");
+    vi.setSystemTime(start + 45_000);
+    const { scope, onEvent } = followedTurn();
+    let startedAt: number | null = null;
+    scope.setRemoteStartedAt.mockImplementation(value => {
+      startedAt = typeof value === "function" ? value(startedAt) : value;
+    });
+    onEvent("status", { status: "running", startedAt: start });
+    expect(startedAt).toBe(start);
+    const html = renderToString(React.createElement(I18nProvider, { locale: "en", dict: en,
+      children: React.createElement(ChatActivityFeed, { events: [], tools: [], startedAt, replyStreaming: false }),
+    }));
+    expect(html).toContain("45s");
+    vi.advanceTimersByTime(10_000);
+    onEvent("snapshot", { text: "" });
+    onEvent("status", { status: "running", startedAt: start });
+    expect(startedAt).toBe(start);
+    // The next turn, unlike a re-subscription, starts a new clock.
+    onEvent("turn_started", {});
+    expect(startedAt).toBe(start + 55_000);
+  });
+
+  it.each([undefined, null, "invalid", -1, NaN])("falls back safely for missing/invalid start time %s", startedAt => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    const { scope, onEvent } = followedTurn();
+    onEvent("status", { status: "running", startedAt });
+    const update = scope.setRemoteStartedAt.mock.calls[0][0];
+    expect(update(null)).toBe(100_000);
+    expect(update(50_000)).toBe(50_000);
+  });
+
+  it("preserves an earlier direct start and ignores an idle turn's old timestamp", () => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("status", { status: "running", startedAt: 60_000 });
+    expect(scope.setRemoteStartedAt.mock.calls[0][0](50_000)).toBe(50_000);
+    scope.setRemoteStartedAt.mockClear();
+    onEvent("status", { status: "idle", startedAt: 60_000 });
+    expect(scope.setRemoteStartedAt).not.toHaveBeenCalled();
+  });
+
+  it("restores text completion on reconnect without treating it as turn completion", () => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("snapshot", { text: "Hello", replyPhase: "saving" });
+    expect(scope.setRemoteReplyPhase).toHaveBeenCalledWith("saving");
+    expect(scope.setRemoteActive).toHaveBeenCalledWith(true);
+    onEvent("activity", { event: "assistant_message_saved", id: "saved" });
+    expect(scope.setRemoteReplyPhase).toHaveBeenLastCalledWith("finishing");
+    expect(scope.resetRemoteTurn).not.toHaveBeenCalled();
+    scope.switchTo("B");
+    onEvent("snapshot", { text: "Old", replyPhase: "generating" });
+    expect(scope.setRemoteReplyPhase).toHaveBeenCalledTimes(2);
+  });
+
+  it("reattaches to a running turn and explains its failed outcome", () => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("status", { status: "running" });
+    expect(scope.setRemoteActive).toHaveBeenCalledWith(true);
+    onEvent("turn_completed", { reason: "failed", senderUserId: "viewer" });
+    expect(scope.setTurnEndNotice).toHaveBeenCalledWith("Failed safely");
+    expect(scope.resetRemoteTurn).toHaveBeenCalledOnce();
+    expect(scope.loadTranscript).toHaveBeenCalledWith("A", { force: true });
+  });
+
+  it.each(["timeout", "failed"])("explains initial %s status when the terminal event was missed", status => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("status", { status });
+    expect(scope.setTurnEndNotice).toHaveBeenCalledWith(status === "timeout" ? "Reset stalled turn" : "Failed safely");
+    expect(scope.setRemoteActive).not.toHaveBeenCalled();
+  });
+
+  it("explains a DB backstop timeout as recovery rather than success", () => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("turn_completed", { reason: "timeout" });
+    expect(scope.setTurnEndNotice).toHaveBeenCalledWith("Reset stalled turn");
+    expect(scope.resetRemoteTurn).toHaveBeenCalledOnce();
+  });
+
+  it("leaves the direct stream's existing error handling in control", () => {
+    const { scope, onEvent } = followedTurn(true);
+    onEvent("turn_completed", { reason: "failed", senderUserId: "viewer" });
+    expect(scope.setTurnEndNotice).not.toHaveBeenCalled();
+    expect(scope.chat.dispatch).not.toHaveBeenCalled();
+    expect(scope.resetRemoteTurn).not.toHaveBeenCalled();
+  });
+
+  it("does not invent a failure on ordinary completion or accept a stale terminal event", () => {
+    const { scope, onEvent } = followedTurn();
+    onEvent("turn_completed", {});
+    expect(scope.setTurnEndNotice).not.toHaveBeenCalled();
+    scope.switchTo("B");
+    scope.switchTo("A");
+    onEvent("turn_completed", { reason: "failed" });
+    expect(scope.setTurnEndNotice).not.toHaveBeenCalled();
+  });
+
+  it.each([["en", en], ["ja", ja], ["zh", zh], ["zh-CN", zhCN]] as const)(
+    "uses the ordinary localized activity feed after returning (%s)", (locale, dict) => {
+      const expression = find(node => ts.isBinaryExpression(node) &&
+        node.left.getText(tree) === "remoteActive && !chat.state.isStreaming").getText(tree);
+      const node = evaluate<React.ReactNode>(expression, {
+        React, remoteActive: true, chat: { state: { isStreaming: false } },
+        avatarFor: () => null, remoteAssistantId: null, ChatActivityFeed,
+        remoteEvents: [], remoteTools: [], remoteText: "", remoteResearchPhase: null, remoteReplyPhase: "generating", remoteStartedAt: null,
+      });
+      const html = renderToString(React.createElement(I18nProvider, { locale, dict, children: node }));
+      expect(html).toContain(dict.chat.thinking);
+      expect(html).not.toContain(dict.chatApp.teammateWorking.replaceAll("'", "&#x27;"));
+    },
+  );
+});
+
+
+describe("[COMP:app-web/chat-activity] reply finalization display", () => {
+  it.each(["saving", "finishing"] as const)("restores Send and accepts a queued follow-up during %s", (replyPhase) => {
+    const composer = find(node => ts.isJsxSelfClosingElement(node) && node.tagName.getText(tree) === "ChatComposer"
+      && node.attributes.properties.some(prop => ts.isJsxAttribute(prop) && prop.name.getText(tree) === "sendButtonTone")) as ts.JsxSelfClosingElement;
+    const prop = (name: string) => {
+      const attribute = composer.attributes.properties.find(node => ts.isJsxAttribute(node) && node.name.getText(tree) === name) as ts.JsxAttribute;
+      return (attribute.initializer as ts.JsxExpression).expression!.getText(tree);
+    };
+    const state = { isStreaming: true, replyPhase };
+    const sendDuringTurn = vi.fn(() => true), send = vi.fn(), setInput = vi.fn();
+    const scope = { chat: { state }, canQueueMidTurn: true, mirrorStopAvailable: false,
+      sendDuringTurn, send, setInput };
+    expect(evaluate(prop("sendButtonTone"), scope)).toBe("primary");
+    expect(evaluate(prop("slotPostInput"), scope)).toBeNull();
+    evaluate<() => void>(prop("onSend"), scope)();
+    expect(sendDuringTurn).toHaveBeenCalledExactlyOnceWith(false);
+    expect(setInput).toHaveBeenCalledExactlyOnceWith("");
+    expect(send).not.toHaveBeenCalled();
+    expect(state.isStreaming).toBe(true);
+  });
+
+  it.each(["generating", "saving", "finishing"] as const)("renders the actual active reply in phase %s without ending its foreground state", (replyPhase) => {
+    const expression = find(node => ts.isBinaryExpression(node) && node.left.getText(tree) === "chat.state.isStreaming"
+      && node.right.getText(tree).includes("data-brian-chat-answer")).getText(tree);
+    const state = { isStreaming: true, streamingText: "Hello.", replyPhase };
+    const node = evaluate<React.ReactNode>(expression, {
+      React, chat: { state }, avatarFor: () => null, turnAssistantRef: { current: "assistant" },
+      ChatActivityFeed, streamingEvents: [], toolTimeline: [], researchPhase: null, turnStartedAt: null,
+      MARKDOWN_CLS: "answer", ChatMarkdown: ({ text }: { text: string }) => React.createElement("p", null, text),
+      CHAT_MARKDOWN_COMPONENTS: {}, REMARK_PLUGINS: [], citations: [],
+    });
+    const html = renderToString(React.createElement(I18nProvider, { locale: "en", dict: en, children: node }));
+    expect(html).toContain("Hello.");
+    expect(html.includes("animate-pulse")).toBe(replyPhase === "generating");
+    if (replyPhase !== "generating") {
+      expect(html).not.toContain("chat-shimmer-text");
+      expect(html).not.toContain(en.chat.activity.savingReply);
+      expect(html).not.toContain(en.chat.activity.finishingReply);
+    }
+    expect(state.isStreaming).toBe(true);
   });
 });

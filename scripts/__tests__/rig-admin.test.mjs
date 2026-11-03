@@ -163,12 +163,14 @@ describe('[COMP:platform/local-rig] persistent runtime process ownership',()=>{
 
 describe('[COMP:platform/local-rig] canonical runtime verification',()=>{
  function installer(){const rig=readFileSync(new URL('../rig-up.sh',import.meta.url),'utf8');return rig.match(/verify_admin_role\(\) \{([\s\S]*?)\n\}/)[0]+'\nverify_admin_role'}
- it('uses read-only canonical verification for warm administrative passes only',async()=>{
+ it('uses read-only canonical verification for both normal and administrative warm passes',async()=>{
   const {writeFileSync,chmodSync,existsSync}=await import('node:fs'),dir=mkdtempSync(join(tmpdir(),'role-installer-'))
   try{
    const trace=join(dir,'argv'),sql=join(dir,'sql'),docker=join(dir,'docker');writeFileSync(docker,'#!/bin/sh\nprintf "%s\\n" "$@" >"$TRACE"\ncat >"$SQL_TRACE"\n');chmodSync(docker,0o700)
    const env={PATH:`${dir}:${process.env.PATH}`,ROOT:root,TRACE:trace,SQL_TRACE:sql,CONTAINER:'fixture-container',RIG_DB_USER:'fixture-owner',RIG_DB_NAME:'fixture-db'}
-   let run=spawnSync('/bin/bash',['-c',installer()],{env:{...env,ADMIN_ONLY:'0'},encoding:'utf8'});assert.equal(run.status,0,run.stderr);assert.equal(existsSync(trace),false)
+   let run=spawnSync('/bin/bash',['-c',installer()],{env:{...env,ADMIN_ONLY:'0'},encoding:'utf8'});assert.equal(run.status,0,run.stderr);assert.equal(existsSync(trace),true)
+   assert.match(readFileSync(sql,'utf8'),/Canonical runtime LOGIN missing/)
+   assert.doesNotMatch(readFileSync(sql,'utf8'),/GRANT|REVOKE|ALTER ROLE/)
    run=spawnSync('/bin/bash',['-c',installer()],{env:{...env,ADMIN_ONLY:'1'},encoding:'utf8'});assert.equal(run.status,0,run.stderr)
    assert.deepEqual(readFileSync(trace,'utf8').trim().split('\n'),['exec','-i','fixture-container','psql','-U','fixture-owner','-d','fixture-db','-v','ON_ERROR_STOP=1','-q'])
    assert.match(readFileSync(sql,'utf8'),/Canonical runtime LOGIN missing/)

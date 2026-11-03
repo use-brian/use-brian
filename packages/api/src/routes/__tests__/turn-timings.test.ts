@@ -7,6 +7,20 @@ function clock(start = 1_000) {
 }
 
 describe('[COMP:api/turn-timings] per-phase turn accounting', () => {
+  it('retains the first delivery milestone without moving phase boundaries', () => {
+    const c = clock()
+    const timing = createTurnTiming(c.now)
+    timing.observe('loop_started')
+    c.tick(200); timing.observe('first_thinking')
+    c.tick(300); timing.observe('first_text')
+    c.tick(800); timing.observe('first_text')
+    timing.mark('loop')
+    expect(timing.snapshot()).toEqual({
+      total_ms: 1300, loop_ms: 1300, loop_started_at_ms: 0,
+      first_thinking_at_ms: 200, first_text_at_ms: 500,
+    })
+  })
+
   it('closes contiguous phases at each mark and totals the request', () => {
     const c = clock()
     const timing = createTurnTiming(c.now)

@@ -10,6 +10,27 @@ const userMessage = (id: string, text: string): Message => ({
 })
 
 describe('[COMP:chat-ui/chat-reducer] chat reducer', () => {
+  it('separates finished text and saved text from foreground completion', () => {
+    const started = chatReducer(initialChatState, { type: 'stream/start' })
+    const writing = chatReducer(started, { type: 'stream/append', text: 'Hello.' })
+    const saving = chatReducer(writing, { type: 'stream/text-complete' })
+    expect(saving).toMatchObject({ isStreaming: true, streamingText: 'Hello.', replyPhase: 'saving', messages: [] })
+    const finishing = chatReducer(saving, { type: 'stream/saved' })
+    expect(finishing).toMatchObject({ isStreaming: true, streamingText: 'Hello.', replyPhase: 'finishing', messages: [] })
+    expect(chatReducer(finishing, { type: 'stream/text-complete' })).toBe(finishing)
+    const done = chatReducer(finishing, { type: 'stream/finalize', finalMessage: { ...userMessage('answer', 'Hello.'), role: 'assistant' } })
+    expect(done).toMatchObject({ isStreaming: false, streamingText: '', replyPhase: 'generating' })
+    expect(done.messages).toHaveLength(1)
+    expect(chatReducer(done, { type: 'stream/saved' })).toBe(done)
+  })
+
+  it('resets completion display for recovery text, new turns, resets and aborts', () => {
+    const finishing = chatReducer(chatReducer(initialChatState, { type: 'stream/start' }), { type: 'stream/saved' })
+    for (const action of [{ type: 'stream/start' }, { type: 'stream/reset' }, { type: 'stream/append', text: 'Recovery' }, { type: 'stream/abort' }] as const) {
+      expect(chatReducer(finishing, action).replyPhase).toBe('generating')
+    }
+  })
+
   it('starts in the initial state', () => {
     expect(initialChatState.sessionId).toBeNull()
     expect(initialChatState.messages).toEqual([])

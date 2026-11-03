@@ -1,3 +1,4 @@
+import {assertHostObservationPublication} from '@use-brian/core'
 /** Actual native transcript publication. [COMP:api/application-persistence] */
 import {z} from 'zod'
 import type pg from 'pg'
@@ -22,6 +23,8 @@ function transcriptJson(value:unknown):unknown {
 }
 export async function publishNativeSessionMessage(input:NativeSessionMessageInput,client?:Pick<pg.ClientBase,'query'>):Promise<SessionMessage>{
  const {authority,sessionId}=input,{execution}=authority
+ assertHostObservationPublication(input.content,execution)
+ if(input.role!=='assistant' && Array.isArray(input.content)&&input.content.some(block=>block?.type==='host_observation'))throw new Error('Host observations require assistant-owned publication')
  if(execution.lifecycle.sessionId!==sessionId||execution.lifecycle.sessionPersisted===false
   ||input.senderAssistantId!=null&&input.senderAssistantId!==execution.assistant.id
   ||[input.replyToText,input.topicLabel,input.topicConfidence].some(value=>value!==undefined&&value!==null))throw new DerivedScopeError('scope_evidence_missing')
@@ -51,8 +54,14 @@ export async function publishNativeSessionMessage(input:NativeSessionMessageInpu
 export async function publishNativeSessionMessageBatch(input: {
  sessionId:string;messages:readonly Pick<NativeSessionMessageInput,'role'|'content'|'channelMessageId'|'senderUserId'|'senderAssistantId'|'attachments'>[];
  derivation:DerivedWriteEvidence;derivationTarget?:ResourceScope;authority:SessionContextAuthority;
+ measure?:<T>(counter:string,run:()=>Promise<T>)=>Promise<T>;
 },client?:Pick<pg.ClientBase,'query'>):Promise<SessionMessage[]>{
  const {authority,sessionId}=input,{execution}=authority
+ for(const row of input.messages){
+  assertHostObservationPublication(row.content,execution)
+  if(row.role!=='assistant' && Array.isArray(row.content)&&row.content.some(block=>block?.type==='host_observation'))throw new Error('Host observations require assistant-owned publication')
+ }
+ const time=input.measure??(<T>(_counter:string,run:()=>Promise<T>)=>run())
  if(execution.lifecycle.sessionId!==sessionId||execution.lifecycle.sessionPersisted===false||input.messages.length<1||input.messages.length>512
   ||input.messages.some(row=>row.senderAssistantId!=null&&row.senderAssistantId!==execution.assistant.id
    ||Object.keys(row).some(key=>!['role','content','channelMessageId','senderUserId','senderAssistantId','attachments'].includes(key))))throw new DerivedScopeError('scope_evidence_missing')
@@ -60,10 +69,11 @@ export async function publishNativeSessionMessageBatch(input: {
  const values=input.messages.map(row=>payload.parse({role:row.role,content:transcriptJson(row.content),channelMessageId:row.channelMessageId??null,
   senderUserId:row.senderUserId??null,senderAssistantId:row.senderAssistantId??null,attachments:row.attachments??[]}))
  const write=async(db:Pick<pg.ClientBase,'query'>)=>{
-  assertSessionMessagePublicationFrame(db,authority);await execution.security.authority.assertCurrent()
+  assertSessionMessagePublicationFrame(db,authority)
+  await time('publication_batch_lease_before',()=>execution.security.authority.assertCurrent())
   let result:unknown
-  try{result=(await db.query<{value:unknown}>('SELECT publish_native_session_message_batch($1,$2,$3,$4,$5,$6) AS value',
-   [execution.security.access.workspaceId,sessionId,JSON.stringify(values),evidence.producer,JSON.stringify(evidence.sources),target])).rows[0]?.value}
+  try{result=(await time('publication_batch_sql',()=>db.query<{value:unknown}>('SELECT publish_native_session_message_batch($1,$2,$3,$4,$5,$6) AS value',
+   [execution.security.access.workspaceId,sessionId,JSON.stringify(values),evidence.producer,JSON.stringify(evidence.sources),target]))).rows[0]?.value}
   catch(error){
    const sql=error as {code?:unknown;message?:unknown}
    if(sql.code==='P0001'&&sql.message==='scope_source_changed'||sql.code==='42501'&&['scope_source_changed','scope_ancestry_unavailable','scope_operation_denied'].includes(String(sql.message))||sql.code==='22023'&&sql.message==='scope_ancestry_unavailable')throw Object.assign(new DerivedScopeError('scope_source_changed'),{cause:error})
@@ -77,7 +87,7 @@ export async function publishNativeSessionMessageBatch(input: {
     ||row.message.role!==values[index].role||index>0&&row.message.sequenceNum!==stored[index-1].message.sequenceNum+1)throw new DerivedScopeError('scope_source_changed')
    return bindScopeSource({...row.message,createdAt:new Date(row.message.createdAt)},row.source)
   })
-  await execution.security.authority.assertCurrent()
+  await time('publication_batch_lease_after',()=>execution.security.authority.assertCurrent())
   return rows
  }
  return client?write(client):withSessionMessagePublication(authority,evidence.sources,write)

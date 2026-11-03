@@ -163,10 +163,10 @@ describe.sequential('[COMP:api/application-persistence] actual transcript persis
         WHERE pronamespace='public'::regnamespace AND (proname LIKE 'session_context_%' OR proname LIKE 'guard_session_context_%'
          OR proname=ANY($1::text[]))`,[['scope_source_table','hold_scope_descendants','read_scope_source','purge_session_context_parent',
           'session_personal_audience','session_workspace_audience','session_project_audience','read_admitted_native_scope_snapshot',
-          'read_entity_derivation_source','read_session_context_revision','validate_session_context_revision_pair','guard_episodic_promotion',
+          'read_entity_derivation_source','read_session_context_revision','read_session_context_file_revision','read_native_file_session_title_revision','validate_session_context_revision_pair','guard_episodic_promotion',
           'guard_session_message_annotation_head','purge_session_message_annotations','read_admitted_session_context_dependencies',
           'application_memory_field_ancestry_allows','application_memory_unproven_ancestry_allows']])).rows
-      expect(configurations).toHaveLength(25)
+      expect(configurations).toHaveLength(28)
       for(const configuration of configurations)expect(configuration.proconfig,configuration.proname).toContain('search_path=pg_catalog, public, pg_temp')
       await client.query('CREATE TEMP TABLE session_context_scope_revisions AS SELECT * FROM public.session_context_scope_revisions WITH NO DATA')
       await client.query('CREATE TEMP TABLE session_context_revision_contents AS SELECT * FROM public.session_context_revision_contents WITH NO DATA')

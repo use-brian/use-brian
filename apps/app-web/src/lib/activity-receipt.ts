@@ -14,6 +14,7 @@
  */
 
 import type { ActivityNote, ToolUsed } from "@use-brian/chat-ui";
+import { parseHostObservation } from "@use-brian/shared";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { format } from "@/lib/i18n/format";
 import { describeToolFromInput, type NarrationDict } from "@/lib/tool-narration";
@@ -57,8 +58,10 @@ export function collectToolResults(
   for (const row of rows) {
     if (!Array.isArray(row.content)) continue;
     for (const block of row.content) {
-      if (!isRecord(block) || block.type !== "tool_result") continue;
-      const id = typeof block.toolUseId === "string" ? block.toolUseId : "";
+      if (!isRecord(block)) continue;
+      const observation = parseHostObservation(block);
+      if (block.type !== "tool_result" && !observation) continue;
+      const id = observation?.id ?? (typeof block.toolUseId === "string" ? block.toolUseId : "");
       if (!id) continue;
       const content = typeof block.content === "string" ? block.content : "";
       const flat = content.replace(/\s+/g, " ").trim();
@@ -110,7 +113,7 @@ export function restoreAssistantActivity(
       if (text) pendingText.push(text);
       continue;
     }
-    if (block.type !== "tool_use" || typeof block.name !== "string") continue;
+    if ((block.type !== "tool_use" && !parseHostObservation(block)) || typeof block.name !== "string") continue;
     const id = typeof block.id === "string" ? block.id : `${rowId}_tool_${toolIndex}`;
     const input = isRecord(block.input) ? block.input : {};
     const described = describeToolFromInput(block.name, input, narration);

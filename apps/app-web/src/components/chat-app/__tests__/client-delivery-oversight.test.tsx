@@ -88,11 +88,18 @@ describe('[COMP:app-web/client-delivery-oversight] quiet scoped Chat pickup',()=
   expect(host.querySelector(`[aria-label="${en.clientDelivery.loading}"]`)).toBeTruthy();
   await act(async()=>settle(protect({commitments:[],nextCursor:null})));expect(host.childElementCount).toBe(0);
  })
- it('keeps errors and retry visible for the optional transcript insert',async()=>{
+ it('keeps failed background reads absent and recovers on foreground return',async()=>{
   f.list.mockRejectedValueOnce(new Error('offline'));await view(vi.fn(),{kind:'personal'},en,true);
-  expect(host.querySelector('[role="alert"]')).toBeTruthy();expect(text()).not.toContain(en.clientDelivery.empty);
-  f.list.mockImplementation(async()=>protect({commitments:[],nextCursor:null}));await click(en.clientDelivery.retry);
   expect(host.childElementCount).toBe(0);
+  f.list.mockImplementation(async()=>protect({commitments:[commitment],nextCursor:null}));
+  await act(async()=>window.dispatchEvent(new Event('focus')));
+  expect(text()).toContain(commitment.outcome);expect(host.querySelector('[role="alert"]')).toBeNull();
+ })
+ it('retains recovery for an explicitly opened delivery view',async()=>{
+  f.list.mockRejectedValueOnce(new Error('offline'));await view();
+  expect(host.querySelector('[role="alert"]')).toBeTruthy();
+  f.list.mockImplementation(async()=>protect({commitments:[],nextCursor:null}));await click(en.clientDelivery.retry);
+  expect(text()).toContain(en.clientDelivery.empty);
  })
  it('CO03/CO11 elapsed date and unobserved work stay quiet; update is draft-only without a recipient',async()=>{
   const onDraft=vi.fn();await view(onDraft);await open();

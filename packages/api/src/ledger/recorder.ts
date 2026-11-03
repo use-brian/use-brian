@@ -250,6 +250,19 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
       }
     }
 
+    hostRead(info:{observations:import('@use-brian/shared').HostObservation[]}):void {
+      for(const observation of structuredClone(info.observations)){
+        const ordinal=this.ordinal++
+        enqueue(async()=>{
+          const inputRef=await ctx.payloads.put({workspaceId:ctx.workspaceId,content:JSON.stringify(observation.input),sensitivity:ctx.sensitivity})
+          const resultRef=await ctx.payloads.put({workspaceId:ctx.workspaceId,content:observation.content,mediaType:'text/plain',sensitivity:ctx.sensitivity})
+          await insertTurnEvent({workspaceId:ctx.workspaceId,assistantId:ctx.assistantId,sessionId:ctx.sessionId,assistantMessageId:this.traceId,
+            stepOrdinal:ordinal,actor:this.actor,kind:'tool_call',metadata:{origin:'host',name:observation.name,toolUseId:observation.id,isError:observation.isError,hasResult:true},
+            payloadRefs:[inputRef,resultRef],sensitivity:ctx.sensitivity})
+        })
+      }
+    }
+
     retrieval(info: TurnRetrievalProvenance): void {
       // Pointer-only by design — ids in metadata, no payloads. Over the
       // immutable substrate, id + timestamp dereferences to exact content.

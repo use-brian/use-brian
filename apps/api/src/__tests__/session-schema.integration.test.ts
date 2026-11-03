@@ -18,6 +18,7 @@ import { PGlite } from '@electric-sql/pglite'
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm'
 import { vector } from '@electric-sql/pglite-pgvector'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { after, before, describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { migratePglite } from '../migrate-pglite.js'
@@ -25,6 +26,7 @@ import { migratePglite } from '../migrate-pglite.js'
 const migrationsDir = fileURLToPath(
   new URL('../../../../packages/api/migrations', import.meta.url),
 )
+const { runtimeRoleSql } = await import(new URL('../../../../scripts/crm/runtime-role.mjs', import.meta.url).href)
 
 const W = '00000000-0000-4000-8000-00000000a001'
 const ASSISTANT = '00000000-0000-4000-8000-00000000a002'
@@ -44,6 +46,8 @@ let db: PGlite
 async function openAsOwner(): Promise<PGlite> {
   const pg = new PGlite({ extensions: { vector, pg_trgm } })
   await pg.waitReady
+  // Match the maintained rig's administrative prepare-before-migrate phase.
+  await pg.exec(await runtimeRoleSql('prepare'))
   await pg.exec(`
     CREATE EXTENSION IF NOT EXISTS vector;
     CREATE ROLE migration_owner NOSUPERUSER NOBYPASSRLS;
@@ -54,6 +58,8 @@ async function openAsOwner(): Promise<PGlite> {
     GRANT CREATE ON DATABASE postgres TO migration_owner;
     SET ROLE migration_owner;
   `)
+  // Defaults belong to the role creating the objects, not the bootstrap admin.
+  await pg.exec(await runtimeRoleSql('prepare'))
   return pg
 }
 
@@ -108,6 +114,23 @@ const SHAPES: Shape[] = [
 
 const ids = new Map<string, string>()
 let sequence = 1
+
+it('[COMP:api/session-title-jobs] creates the isolated queue before an optional runtime role exists', async () => {
+  const pg = new PGlite()
+  await pg.waitReady
+  try {
+    await pg.exec(`CREATE ROLE migration_owner NOSUPERUSER NOBYPASSRLS;
+      ALTER SCHEMA public OWNER TO migration_owner; SET ROLE migration_owner;
+      CREATE TABLE sessions(id uuid PRIMARY KEY); CREATE TABLE workspaces(id uuid PRIMARY KEY);
+      CREATE TABLE assistants(id uuid PRIMARY KEY); CREATE TABLE users(id uuid PRIMARY KEY);`)
+    await pg.exec(await readFile(new URL('../../../../packages/api/migrations/8153_session_title_jobs.sql', import.meta.url),'utf8'))
+    assert.deepEqual((await pg.query("SELECT rolname FROM pg_roles WHERE rolname='app_user'")).rows, [])
+    assert.deepEqual((await pg.query("SELECT relrowsecurity FROM pg_class WHERE oid='session_title_jobs'::regclass")).rows,
+      [{relrowsecurity:true}])
+    assert.deepEqual((await pg.query(`SELECT privilege_type FROM pg_class c,LATERAL aclexplode(c.relacl) a
+      WHERE c.oid='session_title_jobs'::regclass AND a.grantee=0`)).rows, [])
+  } finally { await pg.close() }
+})
 
 describe('[COMP:api/session-schema] Unified session schema', () => {
   before(async () => {
@@ -168,6 +191,24 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
   })
 
   after(async () => { await db?.close() })
+
+  it('keeps the title queue private from a role granted broad DML after migration', async () => {
+    assert.deepEqual((await db.query("SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname='app_user'")).rows,
+      [{rolsuper:false,rolbypassrls:false}])
+    assert.deepEqual((await db.query("SELECT relrowsecurity FROM pg_class WHERE oid='session_title_jobs'::regclass")).rows,
+      [{ relrowsecurity: true }])
+    const sessionId = ids.get('personal web chat')!
+    await db.query(`INSERT INTO session_title_jobs(session_id,workspace_id,assistant_id,actor_user_id,auth_claims,authoring_authority)
+      VALUES($1,$2,$3,$4,'{}','{}')`, [sessionId,W,ASSISTANT,MEMBER])
+    try {
+      // app_rls was provisioned after migration with broad table DML grants.
+      assert.deepEqual(await asUser(MEMBER,'SELECT session_id FROM session_title_jobs'), [])
+      assert.deepEqual(await asUser(MEMBER,"UPDATE session_title_jobs SET status='failed' RETURNING session_id"), [])
+      assert.deepEqual(await asUser(MEMBER,'DELETE FROM session_title_jobs RETURNING session_id'), [])
+      await assert.rejects(asUser(MEMBER,`INSERT INTO session_title_jobs(session_id,workspace_id,assistant_id,actor_user_id,auth_claims,authoring_authority)
+        VALUES($1,$2,$3,$4,'{}','{}')`,[ids.get('doc dock'),W,ASSISTANT,MEMBER]),{code:'42501'})
+    } finally { await db.query('DELETE FROM session_title_jobs WHERE session_id=$1',[sessionId]) }
+  })
 
   it('returns a newly inserted personal chat under app-role RLS while preserving legacy holds', async () => {
     const rows = await asUser<{ id: string; recording_privacy_held: boolean }>(MEMBER,
@@ -256,7 +297,8 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
     /sessions_channel_room_key/)
   })
 
-  it('requires a creation receipt for a workspace session in a ready workspace', async () => {
+  it('requires a creation receipt for a workspace session on the classic ready model', async () => {
+    await db.query('UPDATE workspaces SET department_read_v2=false WHERE id=$1',[W])
     await db.query(
       `INSERT INTO workspace_access_policies (workspace_id, setup_state, access_mode) VALUES ($1, 'ready', 'departments')
        ON CONFLICT (workspace_id) DO UPDATE SET setup_state = 'ready', access_mode = 'departments'`, [W])
@@ -297,6 +339,7 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
          VALUES ($1, $2, $3, 'telegram', '999')`, [ASSISTANT, W, MEMBER])
     } finally {
       await db.query("UPDATE workspace_access_policies SET setup_state = 'legacy' WHERE workspace_id = $1", [W])
+      await db.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[W])
     }
   })
 })

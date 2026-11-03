@@ -182,6 +182,19 @@ describe("[COMP:app-web/chat-activity] Live feed", () => {
     expect(html).toBe("");
   });
 
+  it.each(["saving", "finishing"] as const)("does not hold a plain reply behind a %s status", (replyPhase) => {
+    const html = wrap(<ChatActivityFeed events={[]} tools={[]} replyStreaming replyPhase={replyPhase} startedAt={null} />);
+    expect(html).toBe("");
+  });
+
+  it.each(["saving", "finishing"] as const)("keeps the completed tool receipt during %s without a busy status", (replyPhase) => {
+    const html = wrap(<ChatActivityFeed events={[step("t1", "Searching")]} tools={[tool("t1")]}
+      replyStreaming replyPhase={replyPhase} startedAt={Date.now() - 5000} />);
+    expect(html).toContain("Searched");
+    for (const waiting of ["chat-shimmer-text", 'role="status"', dict.chat.activity.writing,
+      dict.chat.activity.savingReply, dict.chat.activity.finishingReply]) expect(html).not.toContain(waiting);
+  });
+
   it("exposes a polite live region", () => {
     const html = wrap(
       <ChatActivityFeed events={[]} tools={[]} replyStreaming={false} startedAt={null} />,

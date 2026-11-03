@@ -1,3 +1,10 @@
+import { feishuNotificationRoutes } from './routes/feishu-notifications.js'
+import { enqueueNativeSessionStateJob } from './db/session-state-jobs.js'
+import { createSessionStateWorker } from './workers/session-state-worker.js'
+import { enqueueNativeSessionTitleJob } from './db/session-title-jobs.js'
+import { recordOverheadUsage } from './routes/_overhead-usage.js'
+import { createSessionTitleWorker } from './workers/session-title-worker.js'
+import { bindDepartmentOfficeKnowledge } from './office/generation-evidence.js'
 import { resolveRetainedTaskGoalAuthority } from './workspace-access/goal-source-admission.js'
 import { assertSourceModelOutputAuthority } from './application-platform/model-source-authority.js'
 import { executionToolContext } from '@use-brian/core'
@@ -34,7 +41,7 @@ import { resolveDepartmentReadGrant } from './context-scope/department-resolver.
 import { createTemplateImportRecovery } from './office/template-import-recovery.js'
 import { triageTaskForGoal } from './db/goal-task-triage.js'
 import { createProgrammaticEpisodeTerminal } from './ingest/programmatic-terminal.js'
-import { checkPromptOnlyAuthority, executePromptOnlyGeneration } from './office/generation-publication.js'
+import { checkPromptOnlyAuthority, executePromptOnlyGeneration, publishDepartmentOfficeSnapshot } from './office/generation-publication.js'
 import { resumeOfficeGeneration } from './office/generation-recovery.js'
 import { withOfficeClassificationActor } from './office/classification.js'
 import { createBrowserFileBridge } from './sandbox/browser-files.js'
@@ -897,6 +904,7 @@ export interface OpenApiEnv {
   /** Both values are required to activate the audited deployment-wide decision override. */
   DECISION_DEFAULT_MODE?: string
   DECISION_DEFAULT_MODEL?: string
+  DECISION_DEFAULT_OPERATIONS?: string
   // Vertex AI backing for the `gemini` provider. When VERTEX_PROJECT_ID is set,
   // boot builds the gemini transport against Vertex (regional host + OAuth)
   // instead of AI Studio. Credentials come from the metadata server (ADC)
@@ -2248,6 +2256,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const operatorDecisionDefault = parseOperatorDecisionDefault(
     env.DECISION_DEFAULT_MODE,
     env.DECISION_DEFAULT_MODEL,
+    env.DECISION_DEFAULT_OPERATIONS,
   )
   let decisionRuntime!: DecisionRuntime
   const workspaceDecisionRouteResolver = createWorkspaceDecisionRouteResolver({
@@ -2270,10 +2279,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     typesafeApiKey: env.TYPESAFE_API_KEY,
     configureAdapters: ports.configureDecisionAdapters,
     resolveRoute: workspaceDecisionRouteResolver,
-    onAttempt: async (attempt) => {
+    onAttempt: ports.recordDecisionAttempt ? async (attempt) => {
       await recordDecisionUsage(attempt)
       await ports.recordDecisionAttempt?.(attempt)
-    },
+    } : recordDecisionUsage,
     onOutcome: ports.recordDecisionOutcome,
   })
   if (operatorDecisionDefault) {
@@ -2291,6 +2300,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       mode: operatorDecisionDefault.mode,
       modelAlias: operatorDecisionDefault.modelAlias,
       scope: 'workspaces_without_explicit_setting',
+      operations: operatorDecisionDefault.operationIds ?? 'all',
       llmFailover: true,
     })
   }
@@ -5643,6 +5653,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const feedGeneration = createFeedGenerationService(createFeedGenerationPort(createFeedEditorialModelResolver({ provider, configuredProviders, resolveWorkspaceCustomLlm, usageStore, checkCreditBudget: ports.checkCreditBudget, triggerKey: 'feed_generation' }), { transport: geminiTransport, resolveWorkspaceKey: resolveWorkspaceByoGeminiKey, files: filesApi ?? undefined, usageStore, codex: codexProviderManager?.images ?? ports.feedImage?.codex,
       config: ports.feedImage?.config, billing: ports.feedImage?.billing }), feedReviewContext)
   app.use('/api/chat', optionalAuth(env.JWT_SECRET), chatRoutes({
+    enqueueSessionTitleJob: enqueueNativeSessionTitleJob,
+    enqueueSessionStateJob: enqueueNativeSessionStateJob,
     feedGeneration,
     feedReviewContext,
     provider,
@@ -7455,6 +7467,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     finish: officeGenerationStore.finish,
   }) : null
   const commitGeneratedOfficeSnapshot = async (params: { job: import('./db/office-generation.js').OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; expectedSeq?: number; kind: 'generation' | 'revision'; authority?: import('@use-brian/core').OfficeAuthorityProjection }) => {
+    if(params.kind==='generation' && (params.job.authorityProjection as {creationBinding?:{protocol?:string}})?.creationBinding?.protocol==='office_department_v2') {
+      if(!filesResolver || !params.job.leaseToken) throw new Error('Office storage or lease unavailable')
+      return publishDepartmentOfficeSnapshot({job:params.job,leaseToken:params.job.leaseToken,snapshot:params.snapshot,resolver:filesResolver,
+        storageLimitBytes:ports.storageLimitBytesFor?await ports.storageLimitBytesFor(params.job.workspaceId):Number.POSITIVE_INFINITY})
+    }
     if (!filesApi) throw new Error('Office file storage is unavailable')
     if (params.snapshot.family === 'pdf') {
       if (params.kind !== 'revision' || params.expectedSeq === undefined || !pdfSessionService) throw new Error('PDF session revision runtime is unavailable')
@@ -7609,13 +7626,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             Promise.all(terms.map((term) => knowledgeStore.search(context, term, 4).catch(() => []))),
           ])
           const entries = new Map([...explicit.filter((entry) => entry !== null), ...searched.flat()].map((entry) => [entry.id, entry]))
-          return [...entries.values()].slice(0, 12).map((entry) => ({
+          const evidence = [...entries.values()].slice(0, 12).map((entry) => ({
             handle: `knowledge:${entry.id}`,
             excerpt: [entry.title, entry.summary, entry.content].filter(Boolean).join('\n').slice(0, 4_000),
             sensitivity: entry.sensitivity,
             compartments: entry.compartments,
             projectIds: entry.projectIds,
           }))
+          await bindDepartmentOfficeKnowledge(job,evidence)
+          return evidence
         },
         async inspectUrl(url) {
           const response = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { 'User-Agent': 'UseBrian-Office/1.0' } })
@@ -8527,6 +8546,40 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) pollWorker.start()
   if (runWorkers) runQueueWorker.start()
+
+  const sessionTitleWorker = createSessionTitleWorker({
+    isPlaceholderTitle, getTitleChannelPrefix,
+    async resolveRuntime(workspaceId) {
+      const runtime = await resolveWorkspaceCustomLlm({ workspaceId, requestedTier: 'standard', allowDefault: true, allowAnyDefault: true })
+      return { provider: runtime?.provider ?? provider, model: runtime?.selector ?? backgroundModelFor(configuredProviders),
+        providerKeySource: runtime?.providerKeySource ?? 'platform' }
+    },
+    async recordUsage(job, result, runtime) {
+      await recordOverheadUsage({ usageStore, userId: job.actorUserId, assistantId: job.assistantId,
+        sessionId: job.sessionId, userMessageId: job.userMessageId ?? undefined,
+        model: result.model, usage: result.usage, source: 'overhead:title', triggerKey: 'session_title',
+        modelTier: 'standard', providerKeySource: runtime.providerKeySource })
+    },
+  })
+  if (runWorkers) sessionTitleWorker.start()
+
+  const sessionStateWorker = createSessionStateWorker({
+    async resolveRuntime(workspaceId) {
+      const runtime = await resolveWorkspaceCustomLlm({ workspaceId, requestedTier: 'standard', allowDefault: true, allowAnyDefault: true })
+      return { provider: runtime?.provider ?? provider, model: runtime?.selector ?? backgroundModelFor(configuredProviders),
+        providerKeySource: runtime?.providerKeySource ?? 'platform' }
+    },
+    async recordResult(job, result, runtime) {
+      analytics?.logEvent({ userId: job.actorUserId, assistantId: job.assistantId, sessionId: job.sessionId,
+        eventName: result.errorMessage ? 'session_state_diff_failed' : 'session_state_diff_pass', channelType: 'web',
+        metadata: { upserts: result.upserts, resolves: result.resolves, failed: Boolean(result.errorMessage), background: true } })
+      await recordOverheadUsage({ usageStore, userId: job.actorUserId, assistantId: job.assistantId,
+        sessionId: job.sessionId, userMessageId: job.userMessageId,
+        model: result.model, usage: result.usage, source: 'overhead:session-state-diff', triggerKey: 'session_state_diff',
+        modelTier: 'standard', providerKeySource: runtime.providerKeySource })
+    },
+  })
+  if (runWorkers) sessionStateWorker.start()
 
   const cleanupWorker = createCleanupWorker({ jobStore })
   if (runWorkers) cleanupWorker.start()
@@ -10021,6 +10074,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           archiveMedia: chatArchiveLiveMedia,
           }))
       }
+      app.use('/internal/notifications/feishu', feishuNotificationRoutes({ pool: getPool(), integrations: integrationStore }))
       if (env.FEISHU_CONNECTOR_SECRET) {
         app.use('/internal/feishu', feishuRoutes({
           backgroundModel,
@@ -10121,6 +10175,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     await officeSearchProjector.stop()
     await stopWatchCleanup?.() // Watch boot lifecycle: stop and drain retention work.
     console.log('Shutting down — flushing analytics...')
+    await sessionTitleWorker.stop()
+    await sessionStateWorker.stop()
     consolidationWorker.stop()
     skillReviewWorker.stop()
     playbookReflectionWorker.stop()

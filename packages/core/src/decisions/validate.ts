@@ -10,6 +10,7 @@ import type {
   UncertaintyEvidence,
 } from './types.js'
 import { DecisionProviderError } from './types.js'
+import { estimateStringTokens } from '../compaction/compact.js'
 
 const DISTRIBUTION_EPSILON = 0.01
 
@@ -92,7 +93,7 @@ export function estimateDecisionInputTokens(request: DecisionRequest): number {
   return Math.ceil(JSON.stringify({ state: request.state, questions: request.questions }).length / 4)
 }
 
-export function assertDecisionCapabilities(
+export function assertDecisionNonCapacityCapabilities(
   request: DecisionRequest,
   capabilities: DecisionCapabilities,
 ): void {
@@ -102,9 +103,6 @@ export function assertDecisionCapabilities(
   }
   if (request.questions.length > capabilities.maxQuestions) {
     throw new DecisionProviderError('unsupported_capability', 'question count exceeds provider capability')
-  }
-  if (estimateDecisionInputTokens(request) > capabilities.maxInputTokens) {
-    throw new DecisionProviderError('unsupported_capability', 'decision input exceeds provider token capability')
   }
   for (const question of request.questions) {
     if (!capabilities.primitives.includes(question.kind)) {
@@ -116,6 +114,26 @@ export function assertDecisionCapabilities(
     if (question.kind === 'score' && question.rubric.length > capabilities.maxRubricLevels) {
       throw new DecisionProviderError('unsupported_capability', `score '${question.id}' exceeds rubric capability`)
     }
+  }
+}
+
+/** A conservative admission estimate, not a vendor tokenizer. No bytes are removed. */
+export function estimateDecisionInputCapacity(request: DecisionRequest) {
+  const estimate = (value: unknown) => Math.ceil(estimateStringTokens(JSON.stringify(value)) * 1.1) + 256
+  return { whole: estimate({ state: request.state, questions: request.questions }),
+    perQuestion: Math.max(0, ...request.questions.map(question => estimate({ state: request.state, questions: [question] }))) }
+}
+
+export function decisionInputCapacityExceeded(request: DecisionRequest, capabilities: DecisionCapabilities): boolean {
+  if (capabilities.maxQuestionInputTokens === undefined) return estimateDecisionInputTokens(request) > capabilities.maxInputTokens
+  const estimate = estimateDecisionInputCapacity(request)
+  return estimate.whole > capabilities.maxInputTokens || estimate.perQuestion > capabilities.maxQuestionInputTokens
+}
+
+export function assertDecisionCapabilities(request: DecisionRequest, capabilities: DecisionCapabilities): void {
+  assertDecisionNonCapacityCapabilities(request, capabilities)
+  if (decisionInputCapacityExceeded(request, capabilities)) {
+    throw new DecisionProviderError('unsupported_capability', 'decision input exceeds provider token capability')
   }
 }
 

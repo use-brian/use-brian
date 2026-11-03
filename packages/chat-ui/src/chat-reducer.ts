@@ -5,6 +5,8 @@ export type ChatState = {
   messages: Message[]
   streamingText: string
   isStreaming: boolean
+  /** Display phase only; foreground ownership remains in isStreaming. */
+  replyPhase: 'generating' | 'saving' | 'finishing'
   pendingConfirmations: PendingConfirmation[]
   replyTo: ReplyTo | null
 }
@@ -14,6 +16,7 @@ export const initialChatState: ChatState = {
   messages: [],
   streamingText: '',
   isStreaming: false,
+  replyPhase: 'generating',
   pendingConfirmations: [],
   replyTo: null,
 }
@@ -40,6 +43,8 @@ export type ChatAction =
   | { type: 'stream/start' }
   | { type: 'stream/append'; text: string }
   | { type: 'stream/reset' }
+  | { type: 'stream/text-complete' }
+  | { type: 'stream/saved' }
   | { type: 'stream/finalize'; finalMessage: Message }
   | { type: 'stream/abort' }
   | { type: 'reply/set'; replyTo: ReplyTo | null }
@@ -109,10 +114,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }
 
     case 'stream/start':
-      return { ...state, isStreaming: true, streamingText: '' }
+      return { ...state, isStreaming: true, streamingText: '', replyPhase: 'generating' }
 
     case 'stream/append':
-      return { ...state, streamingText: state.streamingText + action.text }
+      return { ...state, streamingText: state.streamingText + action.text, replyPhase: 'generating' }
 
     // Clear the live stream buffer WITHOUT ending the stream — used to drop an
     // intermediate text segment (step narration the model emitted alongside a
@@ -120,18 +125,26 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     // `stream/start` this leaves `isStreaming` untouched. See the chat consumer's
     // `pendingAnswerResetRef` (segment-aware answer accumulation).
     case 'stream/reset':
-      return { ...state, streamingText: '' }
+      return { ...state, streamingText: '', replyPhase: 'generating' }
+
+    case 'stream/text-complete':
+      return state.isStreaming && state.replyPhase === 'generating'
+        ? { ...state, replyPhase: 'saving' } : state
+
+    case 'stream/saved':
+      return state.isStreaming ? { ...state, replyPhase: 'finishing' } : state
 
     case 'stream/finalize':
       return {
         ...state,
         isStreaming: false,
+        replyPhase: 'generating',
         streamingText: '',
         messages: [...state.messages, action.finalMessage],
       }
 
     case 'stream/abort':
-      return { ...state, isStreaming: false, streamingText: '' }
+      return { ...state, isStreaming: false, streamingText: '', replyPhase: 'generating' }
 
     case 'reply/set':
       return { ...state, replyTo: action.replyTo }

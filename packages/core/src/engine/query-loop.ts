@@ -2,15 +2,18 @@ import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow, withDocumentFlowDebug } from './document-flow-debug.js'
 import { askQuestionSchema } from '../tools/base/ask-question.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
+import { selectInitialToolSchemas, type ToolSelectionOptions } from './tool-selection.js'
+import { createToolDiscovery } from './tool-discovery.js'
 import { getHeapStatistics } from 'node:v8'
 import { renderSystemContext } from '../providers/system-context.js'
-import { isInputAuthorityError } from '../providers/input-authority.js'
+import { isInputAuthorityError, ownsInputAdmission, captureInputAdmissionProvider } from '../providers/input-authority.js'
 import type { LLMProvider, Message, ContentBlock, TokenUsage, AssistantResponse, SendOptions, ThinkingLevel, ToolDefinition, ToolParameter } from '../providers/types.js'
 import type { Tool, ToolContext, ToolResultMeta } from '../tools/types.js'
 import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
 import { createAccumulator } from '../providers/accumulator.js'
 import { createStallWatchdog, withStallSignal, type StallWatchdog } from './stall-watchdog.js'
 import { createToolExecutor } from './tool-executor.js'
+import {executeRoutineCalendarRead,type RoutineReadOptions,type HostReadReceipt} from './routine-read.js'
 import { safeTrace, type TurnLedger, type TurnTrace } from './turn-ledger.js'
 import { createLoopDetector, DEFAULT_HARD_LIMIT } from './loop-detector.js'
 import {
@@ -71,24 +74,37 @@ const invalidModelContexts = new WeakSet<object>()
 async function assertModelInputAuthority(context: ToolContext): Promise<void> {
   return assertModelAuthority(context, 'input')
 }
-/** The final host sink uses the same sticky boundary as streamed loop events. */
-export async function assertModelOutputAuthority(context: ToolContext): Promise<void> {
-  return assertModelAuthority(context, 'output')
+/** Keep sticky refusal and live leases during preparation. An audited provider
+ * owns the unchanged complete source check at dispatch, not an earlier receipt. */
+async function assertModelInputPreparation(context: ToolContext, provider: QueryLoopOptions['provider'],
+  model: string, messages: Message[]): Promise<void> {
+  return assertModelAuthority(context, 'input', ownsInputAdmission(provider, { model, messages }) ? async () => true : undefined)
 }
-async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'output'): Promise<void> {
+/** The final host sink uses the same sticky boundary as streamed loop events. */
+export async function assertModelOutputAuthority(context: ToolContext, tryBoundary?: () => Promise<boolean>, assertBoundaryCurrent?: () => void): Promise<void> {
+  return assertModelAuthority(context, 'output', tryBoundary, assertBoundaryCurrent)
+}
+async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'output',tryBoundary?:()=>Promise<boolean>,assertBoundaryCurrent?:()=>void): Promise<void> {
   const check = boundary === 'input' ? context.assertModelInputAuthority : context.assertModelOutputAuthority
-  if (!check && !context.authority) return
+  if (!check && !context.authority && !tryBoundary) return
   const identity = context.executionContext ?? context
   if (invalidModelContexts.has(identity)) {
     throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed' as const,retrySafe: false })
   }
   try {
     await context.authority?.assertCurrent()
-    await check?.(context)
+    const combined=tryBoundary?await tryBoundary():false
+    if(!combined)await check?.(context)
+    if(combined)await context.authority?.assertCurrent()
+    assertBoundaryCurrent?.()
+    // A concurrent/nested denial during the awaited operation is sticky too.
+    if(invalidModelContexts.has(identity))throw Object.assign(new Error('The model context is unavailable.'),{
+      reason:'authority_changed' as const,retrySafe:false,
+    })
   }
   catch (error) {
     invalidModelContexts.add(identity)
-    if (isAuthorityBoundaryError(error)) throw error
+    if (isAuthorityBoundaryError(error)||tryBoundary&&(error as {reason?:unknown})?.reason==='delivery_audience_unverified') throw error
     throw Object.assign(new Error('The model context is unavailable.', { cause: error }), {
       reason: 'authority_changed' as const, retrySafe: false,
     })
@@ -131,7 +147,7 @@ export type QueryEvent =
    * side channel — never serialized to the model, never persisted to
    * session_messages. Consumers can merge it into analytics event metadata.
    */
-  | { type: 'tool_result'; id: string; results: ContentBlock[]; metaByToolUseId?: Record<string, ToolResultMeta> }
+  | { type: 'tool_result'; id: string; results: ContentBlock[]; metaByToolUseId?: Record<string, ToolResultMeta>; hostRead?:HostReadReceipt }
   /**
    * Retraction of a tool call the engine already streamed `tool_start`
    * (and possibly `tool_result`) for, but then dropped from the persisted
@@ -252,6 +268,10 @@ export type QueryEvent =
 // ── Query loop options ─────────────────────────────────────────
 
 export type QueryLoopOptions = {
+  /** Host-owned outer invocation boundary. Never copied onto ToolContext, so
+   * nested loops retain their own source checks. True requires a complete
+   * current caller+recipient operation; false runs the unchanged output hook. */
+  tryAssertOutputBoundary?: (context:ToolContext,event:QueryEvent)=>Promise<boolean>
   provider: LLMProvider
   model: string
   /** Provider output cap. Custom endpoint profiles supply this explicitly. */
@@ -263,6 +283,11 @@ export type QueryLoopOptions = {
   runtimeSystemContext?: string
   messages: Message[]
   tools: Map<string, Tool>
+  /** Host opt-in only for adapters that re-read the session tool array on every send. */
+  deferToolSchemas?: boolean
+  toolSelection?: ToolSelectionOptions
+  /** Canonical host-owned read adapters; late planning sees the entire prepared context. */
+  routineCalendarRead?: RoutineReadOptions
   context: ToolContext
   /**
    * Turn-ledger recorder — REQUIRED, deliberately not optional (an optional
@@ -637,7 +662,8 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
       queryLoopCore({ ...options, tools: filteredTools, context: toolContext, stallWatchdog: watchdog ?? undefined }),
     )
     for await (const event of events) {
-      await assertModelOutputAuthority(toolContext)
+      await assertModelAuthority(toolContext,'output',options.tryAssertOutputBoundary
+        ?()=>options.tryAssertOutputBoundary!(toolContext,event):undefined)
       yield event
     }
   } finally {
@@ -666,18 +692,20 @@ async function* queryLoopCore(
   options: QueryLoopOptions & { stallWatchdog?: StallWatchdog },
 ): AsyncGenerator<QueryEvent> {
   const {
-    provider,
+    provider: originalProvider,
     model,
     systemPrompt,
     runtimeSystemContext,
-    tools,
+    tools: admittedTools,
     context,
     maxTurns = DEFAULT_MAX_TURNS,
     maxToolCalls = DEFAULT_HARD_LIMIT,
     stallWatchdog,
   } = options
+  const provider = captureInputAdmissionProvider(originalProvider)
   // Every event the loop hands its consumer is progress; so is every
   // provider chunk (below) and every tool start / end (tool-executor).
+  const tools = new Map(admittedTools)
   const progress = context.progress
 
   const loopDetector = createLoopDetector({ hardLimit: maxToolCalls })
@@ -715,7 +743,8 @@ async function* queryLoopCore(
   }
 
   // Build tool definitions for the LLM
-  const toolDefinitions: ToolDefinition[] = Array.from(tools.values()).map((t) => ({
+  let toolDefinitions: ToolDefinition[] = Array.from(tools.values())
+    .filter(t => !t.hiddenFromModel && (!t.deferredSchemaOnly || options.deferToolSchemas)).map((t) => ({
     name: t.name,
     description: t.description,
     parameters: t.inputSchema._def
@@ -723,13 +752,34 @@ async function* queryLoopCore(
       : { type: 'object' as const, properties: {} as Record<string, ToolParameter> },
   }))
 
+  if (options.deferToolSchemas && toolDefinitions.length > 0) {
+    const selected = options.toolSelection?.preselected !== undefined
+      ? { names: [...options.toolSelection.preselected].filter(name => toolDefinitions.some(tool => tool.name === name)),
+          model: null, usage: null, path: 'preparation', durationMs: 0 }
+      : options.toolSelection ? await selectInitialToolSchemas({
+      ...options.toolSelection, definitions: toolDefinitions, messages: options.toolSelection.input?.messages ?? options.messages,
+      runId: `chat-tools-${context.sessionId}-${Date.now()}`, signal: context.abortSignal,
+      assertInputAuthority: options.toolSelection.input?.assertInputAuthority ?? (() => assertModelInputAuthority(context)),
+    }) : undefined
+    if (selected) await options.toolSelection?.onResult?.(selected)
+    const discovery = createToolDiscovery(toolDefinitions, selected?.names)
+    tools.set(discovery.tool.name, discovery.tool)
+    toolDefinitions = discovery.definitions
+    toolDefinitions.push({ name: discovery.tool.name, description: discovery.tool.description,
+      parameters: jsonSchemaFromZod(discovery.tool.inputSchema) })
+  }
+
   // In stateless mode, use provider.stream() each turn (no rawHistory accumulation).
   // In stateful mode, use a persistent session that preserves thought signatures.
   // `context.abortSignal` rides through to the provider's underlying `fetch`
   // so a client disconnect actually cancels in-flight HTTP, instead of being
   // a no-op while we wait for Cloud Run's 300s cap.
-  await assertModelInputAuthority(context)
-  const session = options.stateless ? null : provider.createSession({
+
+
+  // Preserve the ordinary admission/constructor order before recording input.
+  // Routine reads delay construction until their real observations are ready.
+  await assertModelInputPreparation(context, provider, model, options.messages)
+  const createPreparedSession = () => provider.createSession({
     assertInputAuthority: () => assertModelInputAuthority(context),
     model,
     systemPrompt,
@@ -739,6 +789,7 @@ async function* queryLoopCore(
     inputTokenLimit: options.inputTokenLimit,
     signal: context.abortSignal,
   })
+  let session = !options.routineCalendarRead && !options.stateless ? createPreparedSession() : null
 
   // Turn-ledger trace for this invocation. Fire-and-forget by contract; a
   // recorder failure must never fail the turn (safeTrace + the recorder's
@@ -828,6 +879,20 @@ async function* queryLoopCore(
       type: 'status',
       message: `Resuming session from approval ${rc.approvalId} (tool=${rc.suspendedToolName}, step=${rc.loopStepIndex})`,
     }
+  }
+
+  const routine = yield* executeRoutineCalendarRead({options,tools,loopDetector,deniedTools,ledger:ledgerTrace,
+    assertInputAuthority:()=>assertModelInputAuthority(context)})
+  loopStepIndex+=routine.calls
+  for(const observation of routine.records){
+    if(!observation.isError && observation.content.trim())terminalEvidence.push({tool:observation.name,input:serializeTerminalToolInput(observation.input),result:observation.content.slice(0,MAX_TERMINAL_EVIDENCE_CHARS)})
+  }
+  if(terminalEvidence.length>MAX_TERMINAL_EVIDENCE)terminalEvidence.splice(0,terminalEvidence.length-MAX_TERMINAL_EVIDENCE)
+  if(routine.messages.length){nextMessages.push(...routine.messages);if(options.stateless)statelessHistory.push(...routine.messages)}
+  if(routine.complete){toolDefinitions.length=0;tools.clear()}
+  if(options.routineCalendarRead){
+    await assertModelInputPreparation(context, provider, model, nextMessages)
+    session=options.stateless?null:createPreparedSession()
   }
 
   for (let turn = 0; turn < maxTurns; turn++) {
@@ -928,7 +993,7 @@ async function* queryLoopCore(
 
     try {
       await context.authority?.assertCurrent()
-      await assertModelInputAuthority(context)
+      await assertModelInputPreparation(context, provider, model, session ? nextMessages : statelessHistory)
       // Stateless: send full history via provider.stream() (no rawHistory accumulation).
       // Stateful: send only new messages via session.send() (preserves thought signatures).
       const sendOpts: SendOptions = {
@@ -1114,7 +1179,7 @@ async function* queryLoopCore(
       debugDocumentFlow('stream_error', { sessionId: context.sessionId, model, turn, error: true, providerError: stallWatchdog?.error ?? err, timeout: !!stallWatchdog?.error, aborted: context.abortSignal?.aborted })
       if (isAuthorityBoundaryError(err)) throw err
       // Layer 4: reactive compact on context overflow — compact and retry once
-      if (isContextOverflowError(err) && !hasAttemptedReactiveCompact && options.compactModel) {
+      if (isContextOverflowError(err) && !routine.complete && !hasAttemptedReactiveCompact && options.compactModel) {
         hasAttemptedReactiveCompact = true
         yield { type: 'status', message: 'Context too large, compacting...' }
         try {
@@ -1443,6 +1508,8 @@ async function* queryLoopCore(
     appendTerminalEvidence(response.content, allToolResults, terminalEvidence)
 
     // ── Phase 3b: Per-turn assistant record ────────────────────
+    if(response.content.some(block=>(block as {type:string}).type==='host_observation'))throw new Error('Provider output cannot author host observations')
+
     // Emit the completed turn (assistant content + its matched tool_results)
     // for consumers that persist transcripts. This fires for EVERY turn
     // including intermediate tool-use turns — unlike `turn_complete` which

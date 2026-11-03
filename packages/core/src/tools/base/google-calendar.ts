@@ -1,3 +1,4 @@
+import {registerCanonicalCalendarRead,assertRoutineCalendarDispatch} from '../../engine/routine-read-ownership.js'
 /**
  * Google Calendar tools — lazy-discovered through mcp_search in normal chat.
  *
@@ -150,6 +151,7 @@ export type GoogleCalendarApi = {
     maxResults?: number
     query?: string
     timeZone?: string
+    pageToken?: string
   }): Promise<unknown>
 
   getEvent(eventId: string, calendarId?: string): Promise<unknown>
@@ -414,33 +416,58 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
     name: 'googleCalendarListEvents',
     description:
       'List Google Calendar events. Returns series identity, event type, local times, location, attendees, availability, visibility, and links. ' +
-      'Use calendarId for a non-primary calendar. Each event includes localStart/localEnd already converted to the user timezone.',
+      'Use calendarId for a non-primary calendar. Each event includes localStart/localEnd already converted to the user timezone. ' +
+      'A partial page returns events, complete:false and nextPageToken. Continue with pageToken and the same calendar, timeMin, timeMax and query; never infer completeness from the number of events.',
     inputSchema: z.object({
       timeMin: z.string().optional().describe('Start of time range (RFC 3339). Defaults to now.'),
-      timeMax: z.string().optional().describe('End of time range (RFC 3339). Defaults to 7 days from now.'),
+      timeMax: z.string().optional().describe('End of time range (RFC 3339). No upper bound when omitted.'),
       query: z.string().optional().describe('Free-text event search.'),
       maxResults: z.number().int().min(1).max(2500).optional().describe('Maximum events to return; default 20.'),
       calendarId: z.string().optional().describe('Calendar ID; defaults to primary.'),
+      pageToken: z.string().min(1).optional().describe('Continuation token from a partial page; keep the same calendar, timeMin, timeMax and query.'),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 10_000,
-    async execute(input) {
+    async execute(input, context) {
+      const { timeMin: requestedMin, timeMax, query, maxResults, calendarId, pageToken } = input
+      const dispatch = assertRoutineCalendarDispatch(listEvents, context)
+      const assertDispatchCurrent = dispatch ? await dispatch : undefined
+      assertDispatchCurrent?.()
       try {
-        const data = await api.listEvents({
-          timeMin: input.timeMin ?? new Date().toISOString(),
-          timeMax: input.timeMax,
-          query: input.query,
-          maxResults: input.maxResults,
-          calendarId: input.calendarId,
-          timeZone: userTimezone,
-        })
-        return { data: enrichEventsWithLocalTime(data, userTimezone ?? 'UTC') }
+        if (pageToken && !requestedMin) throw new Error('Calendar continuation requires the original timeMin')
+        const timeMin = requestedMin ?? new Date().toISOString()
+        const scope = { calendarId: calendarId ?? 'primary', timeMin,
+          ...(timeMax !== undefined ? { timeMax } : {}),
+          ...(query !== undefined ? { query } : {}) }
+        const meta = { calendarReadCalendarId: scope.calendarId, calendarReadTimeMin: timeMin,
+          ...(timeMax !== undefined ? { calendarReadTimeMax: timeMax } : {}),
+          ...(query !== undefined ? { calendarReadQuery: query } : {}),
+          ...(pageToken !== undefined ? { calendarReadPageToken: pageToken } : {}) }
+        const data = await api.listEvents({ timeMin, timeMax, query, maxResults, calendarId,
+          timeZone: userTimezone, pageToken })
+        // Legacy injected adapters remain compatible, but an array cannot prove
+        // that the provider has no omitted result page.
+        if (Array.isArray(data)) return { data: enrichEventsWithLocalTime(data, userTimezone ?? 'UTC'),
+          meta: { ...meta, calendarReadComplete: false, calendarReadPartialReason: 'unverified_adapter' } }
+        const page = data as { items?: unknown; nextPageToken?: unknown } | null
+        if (!page || typeof page !== 'object' || !Array.isArray(page.items)
+          || page.nextPageToken !== undefined && (typeof page.nextPageToken !== 'string' || !page.nextPageToken)) {
+          throw new Error('Invalid Google Calendar event-list response')
+        }
+        const events = enrichEventsWithLocalTime(page.items, userTimezone ?? 'UTC')
+        const complete = page.nextPageToken === undefined && pageToken === undefined
+        return { data: complete ? events : { events, complete: false, ...scope,
+          ...(page.nextPageToken ? { nextPageToken: page.nextPageToken } : {}) },
+          meta: { ...meta, calendarReadComplete: complete,
+            ...(!complete ? { calendarReadPartialReason: page.nextPageToken ? 'pagination' : 'continuation_page' } : {}) } }
       } catch (err) {
         return googleFailure(err, { tool: 'googleCalendarListEvents', product: 'Calendar', target: onCalendar(input.calendarId), discoveryTool: 'googleCalendarListCalendars' })
       }
     },
   })
+
+  registerCanonicalCalendarRead(listEvents)
 
   const getEvent = buildTool({
     name: 'googleCalendarGetEvent',

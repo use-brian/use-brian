@@ -413,6 +413,14 @@ export function createLiveInteractionService(deps: LiveInteractionDeps) {
       for (const error of errors) await getCapture(userId, error.captureId);
       return errors;
     },
+    async processing(userId: string, workspace: string, chat: string, captureIds: string[]) {
+      for (const id of captureIds) {
+        const capture = await getCapture(userId, id);
+        if (capture.workspaceId !== workspace || capture.chatSessionId !== chat)
+          throw new InteractionError(403, "Capture does not belong to this chat");
+      }
+      return store.isProcessing(userId, workspace, chat, captureIds);
+    },
     async jobs(userId: string, workspace: string, chat: string) {
       const jobs = await store.listJobs(userId, workspace, chat);
       const captures = new Map<string, Capture>();

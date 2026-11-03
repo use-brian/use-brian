@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DecisionProviderError } from '../types.js'
 import {
-  assertDecisionCapabilities,
+  assertDecisionCapabilities, estimateDecisionInputCapacity,
   isJsonValue,
   validateDecisionRequest,
   validateDecisionResponse,
@@ -68,6 +68,19 @@ describe('[COMP:decisions/contract] request and response validation', () => {
     })
     expect(accepted.answers[0]!.evidence.probabilities).toBeUndefined()
     expect(accepted.answers[0]!.evidence.confidence).toBeUndefined()
+  })
+
+  it('checks both complete-state capacities at their exact estimated boundaries', () => {
+    const request = { ...decisionRequest(), state: { text: '完整上下文'.repeat(500) },
+      questions: [...decisionRequest().questions, { ...decisionRequest().questions[0]!, id: 'second', prompt: 'Longer question '.repeat(30) }] }
+    const size = estimateDecisionInputCapacity(request)
+    const capabilities = { primitives: ['choice'] as const, batch: true, maxOptions: 255, maxQuestions: 64,
+      maxRubricLevels: 10, maxInputTokens: size.whole, maxQuestionInputTokens: size.perQuestion, uncertainty: ['unavailable'] as const }
+    expect(size.whole).toBeGreaterThan(size.perQuestion)
+    expect(() => assertDecisionCapabilities(request, capabilities)).not.toThrow()
+    expect(() => assertDecisionCapabilities(request, { ...capabilities, maxInputTokens: size.whole - 1 })).toThrow(/token capability/)
+    expect(() => assertDecisionCapabilities(request, { ...capabilities, maxQuestionInputTokens: size.perQuestion - 1 })).toThrow(/token capability/)
+    expect(() => assertDecisionCapabilities(request, { ...capabilities, maxQuestions: 1, maxQuestionInputTokens: 1 })).toThrow(/question count/)
   })
 
   it('rejects narrower capabilities without truncating or fanning out', () => {

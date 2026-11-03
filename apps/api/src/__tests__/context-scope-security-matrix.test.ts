@@ -19,7 +19,7 @@ import {
   buildAccessPredicate,
   type AccessContext,
 } from '../../../../packages/api/src/db/access-predicate.js'
-import { migratePglite } from '../migrate-pglite.js'
+import { migratePglite, preparePgliteRuntimeRole } from '../migrate-pglite.js'
 
 const WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 const USER_ID = '00000000-0000-4000-8000-000000000002'
@@ -188,6 +188,7 @@ async function rollupIds(scope: MatrixScope): Promise<string[]> {
 before(async () => {
   db = new PGlite({ extensions: { vector, pg_trgm } })
   await db.waitReady
+  await preparePgliteRuntimeRole(db)
   const migrationsDir = fileURLToPath(
     new URL('../../../../packages/api/migrations', import.meta.url),
   )
@@ -261,6 +262,7 @@ describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', 
       const previous=new PGlite({extensions:{vector,pg_trgm}})
       try{
         await previous.waitReady
+        await preparePgliteRuntimeRole(previous)
         await migratePglite(previous,directory,{through})
         const workspace='71000000-0000-4000-8000-00000000000'+last
         const owner='72000000-0000-4000-8000-00000000000'+last
@@ -318,6 +320,32 @@ describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', 
     } finally {
       await db.query('INSERT INTO public._migrations (name) VALUES ($1) ON CONFLICT DO NOTHING', [currentName])
       await db.query('DELETE FROM public._migrations WHERE name = $1', [previousName])
+    }
+  })
+
+  it('preserves released cutover migration names without replaying their DDL', async () => {
+    const renames = [
+      ['8148_department_mode_admission.sql', '8171_department_mode_admission.sql'],
+      ['8149_organization_cutover.sql', '8172_organization_cutover.sql'],
+      ['8150_department_office_publication.sql', '8173_department_office_publication.sql'],
+      ['8151_reviewed_legacy_knowledge_binding.sql', '8174_reviewed_legacy_knowledge_binding.sql'],
+    ] as const
+    const migrationsDir = fileURLToPath(new URL('../../../../packages/api/migrations', import.meta.url))
+    for (const [previous, current] of renames) {
+      await db.query('UPDATE public._migrations SET name=$1 WHERE name=$2', [previous, current])
+    }
+    try {
+      assert.equal(await migratePglite(db, migrationsDir), renames.length)
+      assert.equal(await migratePglite(db, migrationsDir), 0)
+      const names = renames.flatMap(([previous, current]) => [previous, current]).sort()
+      const ledger = await db.query<{ name: string }>(
+        'SELECT name FROM public._migrations WHERE name=ANY($1::text[]) ORDER BY name', [names])
+      assert.deepEqual(ledger.rows.map(row => row.name), names)
+    } finally {
+      for (const [previous, current] of renames) {
+        await db.query('INSERT INTO public._migrations(name) VALUES($1) ON CONFLICT DO NOTHING', [current])
+        await db.query('DELETE FROM public._migrations WHERE name=$1', [previous])
+      }
     }
   })
 

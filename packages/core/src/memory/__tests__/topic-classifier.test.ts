@@ -44,6 +44,44 @@ function slowProvider(onAbort: (signal: AbortSignal) => void): LLMProvider {
 }
 
 describe('[COMP:memory/topic-classifier] classifyTopic', () => {
+  it.each(['yes', 'no', 'sure', 'okay'])('classifies contextual confirmation %s normally', async currentMessage => {
+    const provider = mockProvider(JSON.stringify({topic_label:'planning',state:'continue',confidence:0.9}))
+    const stream = vi.spyOn(provider, 'stream')
+    await classifyTopic({provider,model:'mock',currentMessage,recentUserTurns:[],replyToText:null,knownTopicsThisSession:[]})
+    expect(stream).toHaveBeenCalledOnce()
+  })
+  it('honors host exclusion for a greeting with non-text context', async () => {
+    const provider = mockProvider(JSON.stringify({topic_label:'planning',state:'continue',confidence:0.9}))
+    const stream = vi.spyOn(provider, 'stream')
+    await classifyTopic({provider,model:'mock',currentMessage:'hi',recentUserTurns:[],replyToText:null,
+      knownTopicsThisSession:[],allowTrivialShortcut:false})
+    expect(stream).toHaveBeenCalledOnce()
+  })
+
+  it('continues an admitted topic for a connectivity probe without a provider call', async () => {
+    const provider = mockProvider('unused'), stream = vi.spyOn(provider, 'stream'), check = vi.fn(async () => {})
+    const result = await classifyTopic({provider,model:'mock',recentUserTurns:[{text:'Fictional topic',topicLabel:'planning'}],
+      replyToText:null,currentMessage:'test',knownTopicsThisSession:['planning'],assertInputAuthority:check})
+    expect(result).toMatchObject({topic_label:'planning',state:'continue',confidence:0,usage:null})
+    expect(stream).not.toHaveBeenCalled()
+    expect(check).toHaveBeenCalledTimes(2)
+  })
+
+  it('still refuses a trivial result when the final authority check fails', async () => {
+    let checks = 0
+    const provider = mockProvider('unused'), stream = vi.spyOn(provider, 'stream')
+    await expect(classifyTopic({provider,model:'mock',recentUserTurns:[],replyToText:null,currentMessage:'ping',knownTopicsThisSession:[],
+      assertInputAuthority:async()=>{if(++checks===2)throw Object.assign(new Error('revoked'),{reason:'authority_changed',retrySafe:false})}}))
+      .rejects.toMatchObject({reason:'authority_changed'})
+    expect(stream).not.toHaveBeenCalled()
+  })
+
+  it('keeps the provider path for an explicit reply target even with a short acknowledgment', async () => {
+    const provider = mockProvider('{"topic_label":"other","state":"continue","confidence":0.8}'), stream = vi.spyOn(provider,'stream')
+    await classifyTopic({provider,model:'mock',recentUserTurns:[],replyToText:'Fictional distinct subject',currentMessage:'yes',knownTopicsThisSession:[]})
+    expect(stream).toHaveBeenCalledOnce()
+  })
+
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
@@ -130,6 +168,31 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
 
     expect(activeChecksAtReturn).toBe(0)
     expect(assertInputAuthority).toHaveBeenCalledTimes(checksAtReturn)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('uses one slow final admission for timeout recovery instead of checking twice', async () => {
+    vi.useFakeTimers()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const provider = mockProvider('unused')
+    const decisionRuntime = executionFixture({ mode: 'llm_only', llm: provider })
+    decisionRuntime.run = () => new Promise(() => {})
+    const check = vi.fn(async () => {
+      if (check.mock.calls.length > 1) await new Promise(resolve => setTimeout(resolve, 5_000))
+    })
+    const returned = vi.fn()
+    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], decisionRuntime, assertInputAuthority: check })
+    void classification.then(returned)
+
+    await vi.advanceTimersByTimeAsync(6_999)
+    expect(returned).not.toHaveBeenCalled()
+    expect(warning).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(returned).toHaveBeenCalledWith(expect.objectContaining({ topic_label: '(uncategorized)', confidence: 0 }))
+    expect(check).toHaveBeenCalledTimes(2) // Initial admission plus one fresh final check.
+    expect(warning).toHaveBeenCalledOnce()
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -347,7 +410,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       model: 'mock',
       recentUserTurns: [],
       replyToText: null,
-      currentMessage: 'hi',
+      currentMessage: 'Fictional classification request',
       knownTopicsThisSession: [],
     })
     expect(result.topic_label).toBe('brian cheng research')
@@ -359,7 +422,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       model: 'mock',
       recentUserTurns: [],
       replyToText: null,
-      currentMessage: 'hi',
+      currentMessage: 'Fictional classification request',
       knownTopicsThisSession: [],
     })
     expect(result.topic_label).toBe('x')
@@ -372,7 +435,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       model: 'mock',
       recentUserTurns: [],
       replyToText: null,
-      currentMessage: 'hi',
+      currentMessage: 'Fictional classification request',
       knownTopicsThisSession: [],
     })
     expect(result.topic_label).toBe('(uncategorized)')
@@ -386,7 +449,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       model: 'mock',
       recentUserTurns: [],
       replyToText: null,
-      currentMessage: 'hi',
+      currentMessage: 'Fictional classification request',
       knownTopicsThisSession: [],
     })
     expect(result.confidence).toBe(1)
@@ -398,7 +461,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       model: 'mock',
       recentUserTurns: [],
       replyToText: null,
-      currentMessage: 'hi',
+      currentMessage: 'Fictional classification request',
       knownTopicsThisSession: [],
     })
     expect(result.state).toBe('continue')
@@ -419,7 +482,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       model: 'mock',
       recentUserTurns: [],
       replyToText: null,
-      currentMessage: 'hi',
+      currentMessage: 'Fictional classification request',
       knownTopicsThisSession: [],
     })
     expect(result.confidence).toBe(0)

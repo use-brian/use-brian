@@ -5,6 +5,7 @@ import { buildTool, type ToolContext } from '../../tools/types.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
 import { queryLoop, assertModelOutputAuthority, type QueryEvent, type QueryLoopOptions } from '../query-loop.js'
 import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
+import { registerInputAdmissionOwner } from '../../providers/input-authority.js'
 vi.mock('../../compaction/compact.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../compaction/compact.js')>(),compactConversation: vi.fn(),
 }))
@@ -54,6 +55,24 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     expect(hook.mock.calls.every(([current]) => current.scopeAccumulator === ctx.scopeAccumulator)).toBe(true)
     expect(p.send).toHaveBeenCalledTimes(1)
     expect(events.some(event => event.type === 'text_delta')).toBe(true)
+  })
+  it.each([false,true])('delegates owned preparation but preserves dispatch and output checks (%s)', async stateless => {
+    const p = provider()
+    const input = vi.fn(async () => {})
+    const output = vi.fn(async () => {})
+    const owned = registerInputAdmissionOwner({ ...p.value,
+      async *stream(request) {
+        await request.assertInputAuthority?.()
+        yield* (p.value as LLMProvider).stream(request)
+      },
+      createSession(options) {
+        return { send: (messages, opts) => this.stream({ ...options, messages,
+          assertInputAuthority: opts?.assertInputAuthority ?? options.assertInputAuthority }) }
+      },
+    })
+    await run(owned, { ...context(input), assertModelOutputAuthority: output }, { stateless })
+    expect(input).toHaveBeenCalledTimes(1)
+    expect(output).toHaveBeenCalled()
   })
   it('carries the native lease to physical dispatch even without source facts', async () => {
     const p = provider(); let revoked = false
@@ -163,4 +182,82 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     await expect(run(p.value,ctx)).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
     expect(p.createSession).toHaveBeenCalledTimes(1);expect(p.send).toHaveBeenCalledTimes(1)
   })
+  it('runs a new combined final proof through both lease checks',async()=>{
+    const output=vi.fn(async()=>{}),lease=vi.fn(async()=>{}),combined=vi.fn(async()=>true)
+    const ctx={...context(async()=>{}),assertModelOutputAuthority:output,
+      authority:{assertCurrent:lease,execute:async<T>(operation:()=>Promise<T>)=>operation()}}
+    await assertModelOutputAuthority(ctx,combined)
+    expect(combined).toHaveBeenCalledTimes(1);expect(lease).toHaveBeenCalledTimes(2)
+    expect(output).not.toHaveBeenCalled()
+    await assertModelOutputAuthority(ctx,async()=>false)
+    expect(output).toHaveBeenCalledTimes(1)
+  })
+  it('cannot use a combined final proof to revive a prior refusal',async()=>{
+    const combined=vi.fn(async()=>true),ctx={...context(async()=>{}),
+      assertModelOutputAuthority:async()=>{throw new Error('Fictional final refusal')}}
+    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({reason:'authority_changed'})
+    await expect(assertModelOutputAuthority(ctx,combined)).rejects.toMatchObject({reason:'authority_changed'})
+    expect(combined).not.toHaveBeenCalled()
+  })
+  it('refuses final output if the lease changes during the combined proof',async()=>{
+    let revoked=false
+    const ctx={...context(async()=>{}),authority:{assertCurrent:async()=>{if(revoked)throw new Error('Fictional revoked lease')},execute:async<T>(operation:()=>Promise<T>)=>operation()}}
+    await expect(assertModelOutputAuthority(ctx,async()=>{revoked=true;return true})).rejects.toMatchObject({reason:'authority_changed'})
+  })
+  it('latches a final evidence-fence refusal even after its transient mutation is gone',async()=>{
+    const output=vi.fn(async()=>{}),ctx={...context(async()=>{}),assertModelOutputAuthority:output}
+    await expect(assertModelOutputAuthority(ctx,async()=>true,()=>{throw new Error('Fictional final evidence mutation')}))
+      .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+    expect(output).not.toHaveBeenCalled()
+  })
+  it('uses an invocation-local combined boundary for every event without skipping input checks',async()=>{
+    const p=provider(),input=vi.fn(async()=>{}),output=vi.fn(async()=>{}),combined=vi.fn(async()=>true)
+    const events=await run(p.value,{...context(input),assertModelOutputAuthority:output},{tryAssertOutputBoundary:combined})
+    expect(events.length).toBeGreaterThan(0);expect(combined).toHaveBeenCalledTimes(events.length)
+    expect(output).not.toHaveBeenCalled();expect(input).toHaveBeenCalledTimes(2)
+    expect(combined.mock.calls.length).toBe(events.length)
+  })
+  it('retains the original output hook when the optional outer boundary declines',async()=>{
+    const p=provider(),output=vi.fn(async()=>{}),combined=vi.fn(async()=>false)
+    const events=await run(p.value,{...context(async()=>{}),assertModelOutputAuthority:output},{tryAssertOutputBoundary:combined})
+    expect(output).toHaveBeenCalledTimes(events.length)
+  })
+  it('does not inherit the combined outer boundary into a nested loop',async()=>{
+    const p=provider({tool:true}),child=provider(),combined=vi.fn(async()=>true),childScope=new ContextScopeAccumulator()
+    const output=vi.fn(async(current:ToolContext)=>{if(current.scopeAccumulator===childScope)throw new Error('Fictional child denial')})
+    const observe=buildTool({name:'observe',description:'Run a fictional child',inputSchema:z.object({}).strict(),isReadOnly:true,isConcurrencySafe:true,
+      execute:async(_input,current)=>{
+        expect('tryAssertOutputBoundary' in current).toBe(false)
+        await run(child.value,{...current,scopeAccumulator:childScope})
+        return{data:{value:'Unreachable child output'}}
+      }})
+    await expect(run(p.value,{...context(async()=>{}),assertModelOutputAuthority:output},{tools:new Map([['observe',observe]]),tryAssertOutputBoundary:combined}))
+      .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
+    expect(output.mock.calls.some(([current])=>current.scopeAccumulator===childScope)).toBe(true)
+  })
+  it('refuses an optional combined operation after a prior sticky denial',async()=>{
+    const p=provider(),combined=vi.fn(async()=>true),ctx={...context(async()=>{}),executionContext:{} as NonNullable<ToolContext['executionContext']>,
+      assertModelOutputAuthority:async()=>{throw new Error('Fictional prior refusal')}}
+    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({reason:'authority_changed'})
+    await expect(run(p.value,ctx,{tryAssertOutputBoundary:combined})).rejects.toMatchObject({reason:'authority_changed'})
+    expect(combined).not.toHaveBeenCalled();expect(p.send).not.toHaveBeenCalled()
+  })
+  it('observes a sticky denial arising during the awaited combined operation',async()=>{
+    const p=provider(),ctx={...context(async()=>{}),executionContext:{} as NonNullable<ToolContext['executionContext']>}
+    const combined=vi.fn(async(current:ToolContext)=>{
+      await expect(assertModelOutputAuthority({...current,assertModelOutputAuthority:async()=>{throw new Error('Fictional concurrent refusal')}}))
+        .rejects.toMatchObject({reason:'authority_changed'})
+      return true
+    })
+    await expect(run(p.value,ctx,{tryAssertOutputBoundary:combined})).rejects.toMatchObject({reason:'authority_changed'})
+    expect(combined).toHaveBeenCalledTimes(1)
+  })
+
+  it('rechecks the live lease after a combined operation before releasing its event',async()=>{
+    const p=provider();let revoked=false
+    const ctx={...context(async()=>{}),authority:{assertCurrent:async()=>{if(revoked)throw new Error('Fictional lease revoked')},execute:async<T>(run:()=>Promise<T>)=>run()}}
+    await expect(run(p.value,ctx,{tryAssertOutputBoundary:async()=>{revoked=true;return true}})).rejects.toMatchObject({reason:'authority_changed'})
+  })
+
 })

@@ -61,6 +61,19 @@ describe("[COMP:recordings/live-interaction] durable interaction store", () => {
     ruleVersion: 1,
     state: "listening",
   });
+  it("tracks only owned captures while recording or final speech detection remains", async () => {
+    const c = makeCapture(); await store.create(c);
+    expect(await store.isProcessing(owner, workspace, chat, [c.id])).toBe(true);
+    expect(await store.isProcessing(other, workspace, chat, [c.id])).toBe(false);
+    expect(await store.isProcessing(owner, randomUUID(), chat, [c.id])).toBe(false);
+    expect(await store.isProcessing(owner, workspace, randomUUID(), [c.id])).toBe(false);
+    expect(await store.isProcessing(owner, workspace, chat, [randomUUID()])).toBe(false);
+    await store.ingest(c.id, { id: randomUUID(), source: "microphone", text: "Hey Brian what time is it?", startMs: 0, endMs: 1000 });
+    await store.stop(c.id);
+    expect(await store.isProcessing(owner, workspace, chat, [c.id])).toBe(true);
+    await pool.query("UPDATE live_interaction_utterances SET processed=true WHERE capture_id=$1", [c.id]);
+    expect(await store.isProcessing(owner, workspace, chat, [c.id])).toBe(false);
+  });
   beforeAll(async () => {
     await db.exec(
       "CREATE TABLE users(id uuid PRIMARY KEY); CREATE TABLE workspaces(id uuid PRIMARY KEY); CREATE TABLE saved_views(id uuid PRIMARY KEY); CREATE TABLE sessions(id uuid PRIMARY KEY); CREATE TABLE assistants(id uuid PRIMARY KEY);",

@@ -970,7 +970,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           .slice(0, 8)
           .map((im) => ({ type: 'image', mimeType: im.mimeType || 'image/jpeg', data: im.data }))
       }
-      t.meta = result.meta
+      t.meta = { ...result.meta, outputTruncated: debugTruncated }
       t.status = 'completed'
       // Feed the consecutive-failure breaker with this real outcome (a tool may
       // signal a soft failure via result.isError without throwing).
@@ -1100,6 +1100,11 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         if (results.blocks.length > 0 || hasPendingEvents?.()) {
           yield results
         }
+
+        // A refusal/result may settle while the consumer handles a yielded
+        // confirmation. Never mistake that completed task for an idle queue.
+        if (fatalError) throw fatalError
+        if (tracked.find((t) => t.status !== 'yielded')?.status === 'completed') continue
 
         // Check if all done
         const allDone = tracked.every((t) => t.status === 'yielded')

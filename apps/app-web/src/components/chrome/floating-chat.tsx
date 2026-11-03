@@ -1253,6 +1253,7 @@ export function FloatingChat({
   const isStreaming = session.state.isStreaming;
   const streamingText = session.state.streamingText;
   const activity = useMemo<ChatActivity>(() => {
+    const replyGenerating = isStreaming && session.state.replyPhase === "generating";
     const requiresAction =
       Boolean(pendingQuestion) ||
       session.state.pendingConfirmations.some(
@@ -1260,12 +1261,12 @@ export function FloatingChat({
           confirmation.status === "pending" || confirmation.status === "approving",
       );
     const phase = companionChatPhase({
-      isStreaming,
+      isStreaming: replyGenerating,
       hasStreamingText: Boolean(streamingText),
       requiresAction,
       isLoading: resumePolling,
     });
-    if (!isStreaming) {
+    if (!replyGenerating) {
       return { isStreaming: false, streamingText: "", phase, activeTool: null };
     }
     const running = toolTimeline.find((t) => t.status === "running");
@@ -1286,7 +1287,7 @@ export function FloatingChat({
           }
         : null,
     };
-  }, [isStreaming, pendingQuestion, resumePolling, session.state.pendingConfirmations, streamingText, toolTimeline]);
+  }, [isStreaming, session.state.replyPhase, pendingQuestion, resumePolling, session.state.pendingConfirmations, streamingText, toolTimeline]);
 
   const onActivityChangeRef = useRef(onActivityChange);
   useEffect(() => {
@@ -2031,6 +2032,10 @@ export function FloatingChat({
               if (notice) setAcceptedGoal(notice);
               break;
             }
+            case "reply_text_complete": {
+              session.dispatch({ type: "stream/text-complete" });
+              break;
+            }
             case "text_delta": {
               const delta = typeof payload.text === "string" ? payload.text : "";
               if (delta) {
@@ -2617,7 +2622,10 @@ export function FloatingChat({
             }
             case "assistant_message_saved": {
               const id = typeof payload.id === "string" ? payload.id : null;
-              if (id) assistantIdRef.current = id;
+              if (id) {
+                assistantIdRef.current = id;
+                session.dispatch({ type: "stream/saved" });
+              }
               break;
             }
             case "attachments": {
@@ -3547,6 +3555,8 @@ export function FloatingChat({
             </div>
           )}
           <LiveInteractionJobs
+            recordingSessionId={recorder.interactionCaptureId ? recorder.interactionChatSessionId : null}
+            recordingCaptureId={recorder.interactionCaptureId}
             workspaceId={workspaceId}
             sessionId={session.state.sessionId}
             messageIds={new Set(messages.map((message) => message.id))}
@@ -3628,6 +3638,7 @@ export function FloatingChat({
                   events={streamingEvents}
                   tools={toolTimeline}
                   replyStreaming={streamingText.length > 0}
+                  replyPhase={session.state.replyPhase}
                   researchPhase={researchPhase}
                   startedAt={turnStartedAt}
                 />
@@ -3638,10 +3649,12 @@ export function FloatingChat({
                       workspaceId={workspaceId}
                       onOpenPage={handleOpenInDoc}
                     />
-                    <span
-                      aria-hidden
-                      className="ml-0.5 inline-block h-[16px] w-[2px] align-text-bottom rounded-full bg-primary animate-pulse shadow-[0_0_8px_var(--primary)]"
-                    />
+                    {session.state.replyPhase === "generating" && (
+                      <span
+                        aria-hidden
+                        className="ml-0.5 inline-block h-[16px] w-[2px] align-text-bottom rounded-full bg-foreground animate-pulse"
+                      />
+                    )}
                   </div>
                 ) : null}
                 {citations.length > 0 ? (
@@ -3847,7 +3860,7 @@ export function FloatingChat({
                 ? t.pendingQuestion.composerDisabled
                 : idlePlaceholder
             }
-            sendLabel={isStreaming ? t.queue.send : t.send}
+            sendLabel={isStreaming && session.state.replyPhase === "generating" ? t.queue.send : t.send}
             slotAttachments={
               <>
                 {acceptedGoal?.sessionId === session.state.sessionId ? (
@@ -3945,12 +3958,12 @@ export function FloatingChat({
             sendButtonClassName={cn(
               "shrink-0 rounded-md px-3 py-2 text-xs font-medium transition-colors",
               "disabled:opacity-50 disabled:pointer-events-none",
-              isStreaming
+              isStreaming && session.state.replyPhase === "generating"
                 ? "bg-muted text-foreground/80 hover:bg-muted/80"
                 : "bg-action text-action-foreground hover:bg-action/90",
             )}
             slotPostInput={
-              isStreaming ? (
+              isStreaming && session.state.replyPhase === "generating" ? (
                 <button
                   type="button"
                   onClick={handleAbort}

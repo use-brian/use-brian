@@ -100,7 +100,6 @@ import {
   type ToolUsed,
 } from "@use-brian/chat-ui";
 import remarkGfm from "remark-gfm";
-import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { navigateChatLocation } from "@/lib/chat-last-location";
 import { ChatRecoveryAction } from "./chat-recovery";
@@ -178,14 +177,18 @@ import {
   restoreAssistantActivity,
 } from "@/lib/activity-receipt";
 import { authFetch } from "@/lib/auth-fetch";
+import { beginChatSendFeedback } from "@/lib/chat-send-feedback";
+import { createChatStreamObserver } from "@/lib/chat-stream-observation";
 import { useT, useLocale, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/skeleton";
 import { listWorkspaceAssistants, type WorkspaceAssistantSummary } from "@/lib/api/views";
 import {
   patchSharedChatSessions,
+  promoteChatSession,
   cacheCreatedChatSession,
   readCachedTranscript,
+  fetchChatTranscript,
   evictTranscriptCache,
   isAuthoritativeRosterDenial,
   useChatSessionsData,
@@ -203,7 +206,6 @@ import {
   rebindWorkspaceSessionAssistant,
   extractMessageText,
   extractPresentedDocuments,
-  fetchSessionMessages,
   isSessionHistoryUnavailable,
   parseMessageAttachments,
   parsePresentedDocumentPayload,
@@ -806,6 +808,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // every navigation, before aborting streams (abort can run callbacks).
   const sessionEpochRef = useRef(0);
   const transcriptRequestRef = useRef(0);
+  const transcriptAbortRef = useRef<AbortController | null>(null);
+  useLayoutEffect(() => () => {
+    transcriptRequestRef.current += 1;
+    transcriptAbortRef.current?.abort();
+    // Strict Mode's effect replay must hydrate again after cancelling its read.
+    hydratedRef.current = null;
+  }, []);
   const pendingInputRequestRef = useRef(0);
   // Upload and first send share this identity until the server ID is adopted.
   const freshChannelIdRef = useRef<string | null>(null);
@@ -1363,27 +1372,45 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  so a settle read cannot join an older hydrate request. A failed fetch
    *  leaves the already-painted cache and reducer alone. */
   const loadTranscript = useCallback(
-    async (sessionId: string, _options?: { force?: boolean }) => {
+    async (sessionId: string, options?: { force?: boolean }) => {
       const epoch = sessionEpochRef.current;
-      if (sessionIdRef.current !== sessionId) return;
+      if (sessionIdRef.current !== sessionId || stream.inFlight()) return;
+      const controllerRun = chatController.capture();
       const request = ++transcriptRequestRef.current;
+      transcriptAbortRef.current?.abort();
+      const controller = new AbortController();
+      transcriptAbortRef.current = controller;
+      // A send can supersede history without changing the selected session.
+      // Release the cold placeholder immediately and cancel the old read;
+      // even a transport that resolves after abort must not erase the prompt.
+      const unregisterRead = chatController.registerCleanup(controllerRun, () => {
+        controller.abort();
+        if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId
+          && transcriptRequestRef.current === request) {
+          transcriptAbortRef.current = null;
+          setTranscriptCold(false);
+        }
+      });
       // Fetch outside the cache loader: it publishes before returning, which
       // would let a superseded force refresh overwrite a newer cached turn.
       // Publish to the shared cache only after both ownership checks pass.
       try {
-        const rows = mapTranscriptRows(await fetchSessionMessages(sessionId, { strict: true }));
+        const persisted = await fetchChatTranscript(sessionId, { ...options, signal: controller.signal });
         if (
           sessionEpochRef.current !== epoch ||
           sessionIdRef.current !== sessionId ||
-          transcriptRequestRef.current !== request
+          transcriptRequestRef.current !== request || controller.signal.aborted ||
+          !chatController.isCurrent(controllerRun)
         ) return;
+        const rows = mapTranscriptRows(persisted);
         writeTranscriptCache(sessionId, rows);
         chat.loadMessages(rows);
         setHistoryRecoverySessionId(null);
         return rows;
       } catch (error) {
         if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId
-          && transcriptRequestRef.current === request) {
+          && transcriptRequestRef.current === request && !controller.signal.aborted
+          && chatController.isCurrent(controllerRun)) {
           // Transient failures preserve the painted history. Actual access
           // denial must clear protected content instead of retaining it.
           const denied = isAuthoritativeRosterDenial(error);
@@ -1395,11 +1422,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           setHistoryRecoverySessionId(isSessionHistoryUnavailable(error) ? sessionId : null);
         }
         return undefined;
+      } finally {
+        unregisterRead();
+        if (sessionEpochRef.current === epoch && sessionIdRef.current === sessionId
+          && transcriptRequestRef.current === request && !controller.signal.aborted) {
+          transcriptAbortRef.current = null;
+          setTranscriptCold(false);
+        }
       }
     },
     // `chat.loadMessages` is a stable useCallback from the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mapTranscriptRows, t.errorGeneric, t.historyUnavailable],
+    [chatController, stream.inFlight, mapTranscriptRows, t.errorGeneric, t.historyUnavailable],
   );
 
   /** True from a switch onto a session with NO cached transcript until its
@@ -1421,6 +1455,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   useLayoutEffect(() => {
     if (activeSessionId === hydratedRef.current) return;
+    transcriptRequestRef.current += 1;
+    transcriptAbortRef.current?.abort();
+    transcriptAbortRef.current = null;
     sessionEpochRef.current += 1;
     setPendingQuestion(null);
     setStartingShared(false);
@@ -1469,14 +1506,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const cached = readCachedTranscript<SurfaceMessage>(activeSessionId);
     chat.loadMessages(cached ?? []);
     setTranscriptCold(!cached);
-    let cancelled = false;
-    void loadTranscript(activeSessionId).then(() => {
-      if (cancelled) return;
-      setTranscriptCold(false);
-    });
-    return () => {
-      cancelled = true;
-    };
+    // The request owns cold-state completion. An effect dependency update
+    // must not cancel that completion while keeping the same selected chat.
+    void loadTranscript(activeSessionId);
     // `chat.*` and `stream.abort` are stable callbacks from their hooks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId, loadTranscript, resetTurnActivity]);
@@ -1495,6 +1527,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  snapshot mirror) — viewers render the right avatar live. */
   const [remoteAssistantId, setRemoteAssistantId] = useState<string | null>(null);
   const [remoteText, setRemoteText] = useState("");
+  const [remoteReplyPhase, setRemoteReplyPhase] = useState<"generating" | "saving" | "finishing">("generating");
   const [remoteEvents, setRemoteEvents] = useState<BuildEvent[]>([]);
   const [remoteTools, setRemoteTools] = useState<ToolUsed[]>([]);
   const [remoteResearchPhase, setRemoteResearchPhase] =
@@ -1604,6 +1637,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     remoteWorkerDescriptionsRef.current.clear();
     setRemoteActive(false);
     setRemoteText("");
+    setRemoteReplyPhase("generating");
     setRemoteEvents([]);
     setRemoteTools([]);
     setRemoteResearchPhase(null);
@@ -1698,9 +1732,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const controllerRun = chatController.capture();
     if (reconnectWanted) chatController.reconnect(controllerRun);
     const epoch = sessionEpochRef.current;
+    const followObserver = createChatStreamObserver(workspaceId);
     const unregisterControllerCleanup = chatController.registerCleanup(
       controllerRun,
       () => {
+        followObserver.release();
         cancelled = true;
         controller.abort();
       },
@@ -1734,6 +1770,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       switch (event) {
         case "status": {
           const working = payload.status === "running";
+          if (!ownsDirectStream && payload.status === "timeout") setTurnEndNotice(t.turnReclaimed);
+          if (!ownsDirectStream && payload.status === "failed") setTurnEndNotice(t.turnFailed);
           if (working) sawRunning = true;
           if (reconnectWanted && working) chatController.connected(controllerRun);
           // A GET opened just before this page's POST may carry a stale `idle`
@@ -1745,7 +1783,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           }
           if (working && acceptsMirror) {
             setRemoteActive(true);
-            setRemoteStartedAt((current) => current ?? Date.now());
+            // Re-entry mounts a new surface, not a new turn. Restore the
+            // lease's start rather than timing from this subscription.
+            const startedAt = typeof payload.startedAt === "number" &&
+              Number.isFinite(payload.startedAt) && payload.startedAt > 0
+              ? Math.min(payload.startedAt, Date.now()) : null;
+            setRemoteStartedAt((current) => startedAt === null
+              ? current ?? Date.now()
+              : Math.min(current ?? startedAt, startedAt));
           }
           break;
         }
@@ -1776,6 +1821,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             setRemoteAssistantId(payload.assistantId);
           }
           setRemoteText(typeof payload.text === "string" ? payload.text : "");
+          if (payload.replyPhase === "generating" || payload.replyPhase === "saving" || payload.replyPhase === "finishing") setRemoteReplyPhase(payload.replyPhase);
           const reasoning =
             typeof payload.reasoning === "string" ? payload.reasoning : "";
           if (reasoning) {
@@ -1795,7 +1841,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           const kind = typeof payload.event === "string" ? payload.event : "";
           const id = typeof payload.id === "string" ? payload.id : "";
           const name = typeof payload.name === "string" ? payload.name : "";
-          if (kind === "status") {
+          if (kind === "reply_text_complete") {
+            setRemoteReplyPhase(current => current === "generating" ? "saving" : current);
+          } else if (kind === "assistant_message_saved") {
+            setRemoteReplyPhase("finishing");
+          } else if (kind === "status") {
             const phase = typeof payload.phase === "string" ? payload.phase : "";
             if (phase === "research_detected") setRemoteResearchPhase("detected");
             else if (phase === "research_starting") setRemoteResearchPhase("starting");
@@ -1815,6 +1865,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               setRemoteTools(remoteToolsRef.current);
             }
           } else if (kind === "tool_start" && id && name) {
+            setRemoteReplyPhase("generating");
             if (remoteToolsRef.current.some((tool) => tool.id === id)) break;
             const seeded = describeToolFromInput(name, {}, tChat.toolNarration);
             const workerId =
@@ -1977,8 +2028,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // sender of the stalled turn is exactly who most needs to be told.
           const endReason =
             typeof payload.reason === "string" ? payload.reason : null;
-          if (endReason === "stalled_reclaimed") {
+          if (endReason === "stalled_reclaimed" || endReason === "timeout") {
             setTurnEndNotice(t.turnReclaimed);
+          } else if (endReason === "failed" && !ownsDirectStream) {
+            setTurnEndNotice(t.turnFailed);
           } else if (endReason === "stopped_by_user") {
             const by =
               typeof payload.stoppedByName === "string"
@@ -1988,7 +2041,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               by ? format(t.turnStoppedBy, { name: by }) : t.turnStoppedByYou,
             );
           }
-          if (endReason) {
+          if (endReason && (endReason !== "failed" || !ownsDirectStream)) {
             // The stalled turn's own sender still owns a dead POST stream.
             // Tear it down or the composer stays dimmed behind a turn that
             // the server has already given up on.
@@ -2016,6 +2069,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // turn is over, or was never running) and never reopens it. A
           // room's follow stream has no `done`.
           if (panePolicy.presence) break;
+          followObserver.release();
           sawDone = true;
           if (reconnectWanted) chatController.complete(controllerRun);
           setReconnectSessionId(null);
@@ -2071,6 +2125,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           }
           return;
         }
+        followObserver.observe(sessionId);
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         const buf = createSSEBuffer();
@@ -2084,6 +2139,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       } catch {
         // Transport error / abort — reconnect below (or unmount).
       } finally {
+        followObserver.release();
         // Follow mode never closes server-side on idle, so a room close means
         // a deploy / restart / network blip: re-open after a beat. A
         // personal session's reconnect stream reopens only when the body
@@ -2100,6 +2156,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       }
     })();
     return () => {
+      followObserver.release();
       unregisterControllerCleanup();
       cancelled = true;
       controller.abort();
@@ -2463,6 +2520,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       if (usesComposerTray) att.detach();
       setError(null);
       markRoomSeen(workspaceId, targetId);
+      const rollbackRecency = promoteChatSession(workspaceId, targetId, activeContextSession?.contextProjectId);
       try {
         const posted = await postRoomMessage(
           targetId,
@@ -2474,11 +2532,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           setUnreachableNote(posted.unreachableMentions);
         }
       } catch {
+        rollbackRecency();
         if (ownsPost()) setError(t.postFailed);
       }
       return true;
     },
-    [att.detach, chat, setReplyTo, t.postFailed, workspaceId],
+    [activeContextSession?.contextProjectId, att.detach, chat, setReplyTo, t.postFailed, workspaceId],
   );
   // Resolves TRUE once the message was dispatched (turn started / room post
   // landed), FALSE when a disqualifier dropped it — the dock's `sendMessage`
@@ -2505,7 +2564,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const sendEpoch = sessionEpochRef.current;
     let owningSessionId = sessionIdRef.current;
     const ownsSend = () =>
-      sessionEpochRef.current === sendEpoch && sessionIdRef.current === owningSessionId;
+      sessionEpochRef.current === sendEpoch && sessionIdRef.current === owningSessionId &&
+      chatController.isCurrent(controllerRun);
     const trimmed = (override?.text ?? input).trim();
     const usesComposerTray = override?.fileIds === undefined;
     const turnFileIds = override?.fileIds ?? att.fileIds();
@@ -2532,7 +2592,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     ) {
       return false;
     }
-    const controllerRun = chatController.begin(owningSessionId);
+    let controllerRun = chatController.begin(owningSessionId);
 
     // The address decision (multiplayer chat D1/T3, chat-parity D2): in a
     // conversation that posts and has more than one human, send = POST unless
@@ -2609,6 +2669,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     if (view === "workspace" && !sessionIdRef.current) {
       if (startingShared) return false;
       setStartingShared(true);
+      const creatingFeedback = beginChatSendFeedback(workspaceId, null);
+      const unregisterCreatingFeedback = chatController.registerCleanup(controllerRun, creatingFeedback.release);
       try {
         // Bind the room to the hero's picked interlocutor (default primary).
         const admitted=creationContext.snapshot();
@@ -2620,6 +2682,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         });
         if (!ownsSend()||!creationContext.isCurrent()) return false;
         owningSessionId = created.id;
+        if (chatController.adoptSession(controllerRun, created.id)) {
+          controllerRun = { ...controllerRun, sessionId: created.id };
+        }
         sessionIdRef.current = created.id;
         hydratedRef.current = created.id;
         cacheCreatedChatSession(workspaceId, created, "workspace");
@@ -2632,6 +2697,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         if (ownsSend()) setError(t.newWorkspaceChatFailed);
         return false;
       } finally {
+        creatingFeedback.release();
+        unregisterCreatingFeedback();
         if (ownsSend()) setStartingShared(false);
       }
     }
@@ -2720,6 +2787,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       /** The body closed with no terminal event: the turn is still running
        *  server-side and the session stream has taken over painting it. */
       let turnDisconnected = false;
+      const localSend = beginChatSendFeedback(workspaceId, directSessionId);
+      const rollbackRecency = directSessionId ? promoteChatSession(workspaceId, directSessionId, activeContextSession?.contextProjectId) : () => {};
+      let inputSaved = targetIndex > 0;
+      const directObserver = createChatStreamObserver(workspaceId);
+      const unregisterDirectObserver = chatController.registerCleanup(controllerRun, () => {
+        directObserver.release();
+        localSend.release();
+      });
+      try {
       await stream.start({
       url: `${API_URL}/api/chat`,
       authFetch: (url, init) => authFetch(String(url), init),
@@ -2780,6 +2856,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       onEvent: (event) => {
         const payload = coercePayload(event.data);
         if (!ownsSend()) {
+          directObserver.release();
           // A taken input is durable even if its stream no longer owns the
           // pane. Acknowledge it without splicing into a different visit.
           if (event.event === "input_applied" && owningSessionId && typeof payload.inputId === "string") {
@@ -2787,12 +2864,23 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           }
           return;
         }
+        if (owningSessionId) directObserver.observe(owningSessionId);
         switch (event.event) {
+          case "title_update": {
+            // Titles may arrive after the durable reply has settled. Read the
+            // authorized rail projection instead of trusting title bytes here.
+            if (payload.sessionId === owningSessionId) dispatchChatSessionsRefresh(workspaceId);
+            break;
+          }
           case "session": {
             const id = typeof payload.sessionId === "string" ? payload.sessionId : null;
             if (id && !owningSessionId) {
               owningSessionId = id;
-              chatController.adoptSession(controllerRun, id);
+              localSend.adopt(id);
+              directObserver.observe(id);
+              if (chatController.adoptSession(controllerRun, id)) {
+                controllerRun = { ...controllerRun, sessionId: id };
+              }
               // Adopt BEFORE the URL write: `hydratedRef` is what stops the
               // hydrate effect from re-fetching this thread and wiping the
               // reply that is streaming into it right now.
@@ -2836,6 +2924,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           case "user_message_saved": {
             const id = typeof payload.id === "string" ? payload.id : null;
             if (id) {
+              inputSaved = true;
               sourceMessageId ??= id;
               // Rekey only. Rebuilding this row would drop the optimistic
               // attachment previews that now belong to the transcript.
@@ -2859,6 +2948,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 ? payload.messageId
                 : `queued-${inputId}`;
             if (owningSessionId) applyQueuedInput(inputId, messageId, owningSessionId);
+            break;
+          }
+          case "assistant_message_saved": {
+            if (typeof payload.id === "string") chat.dispatch({ type: "stream/saved" });
+            break;
+          }
+          case "reply_text_complete": {
+            chat.dispatch({ type: "stream/text-complete" });
             break;
           }
           case "text_delta": {
@@ -3245,6 +3342,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             break;
           }
           case "error": {
+            localSend.release();
+            if (!inputSaved) rollbackRecency();
             turnFailed = true;
             if (payload.code === "research_quota_exhausted") {
               setResearchExhausted(true);
@@ -3311,6 +3410,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
       },
       onDone: () => {
+        directObserver.release();
+        localSend.complete();
         if (!ownsSend()) return;
         chatController.complete(controllerRun);
         const settledSessionId = owningSessionId;
@@ -3350,6 +3451,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         dispatchChatSessionsRefresh(workspaceId);
       },
       onDisconnect: () => {
+        directObserver.release();
+        localSend.release();
         if (!ownsSend()) return;
         chatController.disconnect(controllerRun);
         // The transport closed with no `done` / `error`: a request-timeout
@@ -3392,6 +3495,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         setReconnectNotice(true);
       },
       onError: () => {
+        directObserver.release();
+        localSend.release();
+        if (!inputSaved) rollbackRecency();
         if (!ownsSend()) return;
         chatController.fail(controllerRun, t.errorGeneric);
         turnFailed = true;
@@ -3409,6 +3515,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         dispatchChatSessionsRefresh(workspaceId);
       },
       });
+      } finally {
+        directObserver.release();
+        localSend.release();
+        unregisterDirectObserver();
+      }
       if (!ownsSend()) return false;
       if (
         turnFailed ||
@@ -3422,14 +3533,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // Reconcile once after the whole serialized group, not after each member:
     // this makes persisted sender attribution authoritative without letting
     // an earlier fetch erase a later assistant's live/final row. It also
-    // catches teammate posts that arrived while this direct stream owned the
-    // room mirror and viewer identity had not hydrated yet.
-    if (ownsSend() && (panePolicy.post || targets.length > 1) && sourceMessageId && owningSessionId) {
+    // catches teammate posts and restores older history when this send
+    // superseded a cold read, including in a personal chat.
+    if (ownsSend() && sourceMessageId && owningSessionId) {
       await loadTranscript(owningSessionId, { force: true });
     }
     return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [creationContext, input, activeAssistant, activeSessionId, panePolicy, paneHumanCount, remoteActive, postToRoom, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
+  }, [creationContext, input, activeAssistant, activeSessionId, activeContextSession?.contextProjectId, panePolicy, paneHumanCount, remoteActive, postToRoom, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
 
   // While this full-page surface is mounted it IS the visible chat, so a
   // short capture's voice turn must land in the open thread here — never in
@@ -4357,7 +4468,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       </details>}
       <ChatComposer
         appearance="app"
-        sendButtonTone={canQueueMidTurn ? "secondary" : "primary"}
+        sendButtonTone={canQueueMidTurn && chat.state.replyPhase === "generating" ? "secondary" : "primary"}
         value={input}
         onChange={setInput}
         onKeyDown={(event) => {
@@ -4626,15 +4737,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           "col-start-3 row-start-2 inline-flex size-11 shrink-0 items-center justify-center rounded-full @[560px]/chat-reading:size-9",
           "transition-colors focus-visible:shadow-none",
           styles.actionTarget,
-          canQueueMidTurn ? styles.secondaryAction : styles.primaryAction,
+          canQueueMidTurn && chat.state.replyPhase === "generating" ? styles.secondaryAction : styles.primaryAction,
           "disabled:opacity-40 disabled:pointer-events-none",
-          canQueueMidTurn
+          canQueueMidTurn && chat.state.replyPhase === "generating"
             ? "bg-muted text-foreground/80 hover:bg-muted/80"
             : "bg-foreground text-background hover:bg-foreground/85",
           chat.state.isStreaming && !canQueueMidTurn && "hidden",
         )}
         slotPostInput={
-          chat.state.isStreaming || mirrorStopAvailable ? (
+          (chat.state.isStreaming && (chat.state.replyPhase === "generating" || !canQueueMidTurn))
+            || (mirrorStopAvailable && remoteReplyPhase === "generating") ? (
             <button
               type="button"
               data-brian-chat-action="stop"
@@ -4710,7 +4822,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         <section data-chat-welcome className="chat-welcome flex min-h-0 min-w-0 flex-1 flex-col items-center overflow-y-auto px-3 @[560px]/chat-reading:px-6">
           <div data-chat-welcome-layout className={cn("flex w-full max-w-[52rem] flex-col", styles.welcomeLayout)}>
             <div data-chat-greeting className={cn("flex flex-col items-center text-center", styles.welcomeGreeting)}>
-              <Image data-chat-welcome-icon src="/icon.png" alt="" aria-hidden="true" width={64} height={64} className={styles.welcomeIcon} />
+              <svg data-chat-welcome-icon aria-hidden="true" focusable="false" viewBox="0 0 56 56" width={76} height={76} className={styles.welcomeIcon}>
+                {/* Preserve Brian's seven-column pixel silhouette. */}
+                <g fill="currentColor">
+                  {[[2, 3, 4], [1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5, 6], [0, 1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5], [2, 4]].flatMap((columns, row) =>
+                    columns.map((column) => <rect key={`${row}-${column}`} x={column * 8 + 0.25} y={row * 8 + 4.25} width="7.5" height="7.5" />),
+                  )}
+                </g>
+                <g className={styles.welcomeFace}>
+                  <g className={styles.welcomeEyes}>
+                    <rect x="18" y="21" width="4" height="4" />
+                    <rect x="34" y="21" width="4" height="4" />
+                  </g>
+                </g>
+              </svg>
               <h2 className="max-w-[22rem] text-balance text-[24px] font-medium leading-[1.3] tracking-tight text-foreground md:max-w-xl md:text-[28px]">
                 {view === "workspace" ? t.workspaceHeroTitle : t.heroTitle}
               </h2>
@@ -4769,6 +4894,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               </div>
             )}
             {voiceInteractionHere && <LiveInteractionJobs
+              recordingSessionId={dockRecorder?.interactionCaptureId ? dockRecorder.interactionChatSessionId : null}
+              recordingCaptureId={dockRecorder?.interactionCaptureId}
               workspaceId={workspaceId}
               sessionId={activeSessionId}
               messageIds={new Set(chat.state.messages.map((message) => message.id))}
@@ -5079,6 +5206,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                     events={streamingEvents}
                     tools={toolTimeline}
                     replyStreaming={chat.state.streamingText.length > 0}
+                    replyPhase={chat.state.replyPhase}
                     researchPhase={researchPhase}
                     startedAt={turnStartedAt}
                   />
@@ -5089,10 +5217,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                         components={CHAT_MARKDOWN_COMPONENTS}
                         remarkPlugins={REMARK_PLUGINS}
                       />
-                      <span
-                        aria-hidden
-                        className="ml-0.5 inline-block h-[16px] w-[2px] rounded-full bg-primary align-text-bottom shadow-[0_0_8px_var(--primary)] animate-pulse"
-                      />
+                      {chat.state.replyPhase === "generating" && (
+                        <span
+                          aria-hidden
+                          className="ml-0.5 inline-block h-[16px] w-[2px] rounded-full bg-foreground align-text-bottom animate-pulse"
+                        />
+                      )}
                     </div>
                   ) : null}
                   {citations.length > 0 ? (
@@ -5111,7 +5241,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               dict={tChat.queue}
               onSteer={midTurn.steer}
             />
-            {/* A teammate's turn, relayed off the per-session event bus
+            {/* A followed turn, including our own after returning to Chat,
+                relayed off the per-session event bus
                 through the SAME feed pipeline the sender uses (T13): the
                 shimmer feed (reasoning + tool steps) above the live snapshot
                 text. When the turn settles the PERSISTED transcript is
@@ -5120,24 +5251,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               <div className="flex gap-2.5">
                 {avatarFor(remoteAssistantId)}
                 <div className="min-w-0 flex-1 space-y-2 pt-0.5">
-                  {remoteEvents.length > 0 ||
-                  remoteTools.length > 0 ||
-                  remoteResearchPhase ? (
-                    <ChatActivityFeed
-                      events={remoteEvents}
-                      tools={remoteTools}
-                      replyStreaming={remoteText.length > 0}
-                      researchPhase={remoteResearchPhase}
-                      startedAt={remoteStartedAt}
-                    />
-                  ) : remoteText ? null : (
-                    <span
-                      role="status"
-                      className="chat-shimmer-text text-xs font-medium"
-                    >
-                      {t.teammateWorking}
-                    </span>
-                  )}
+                  <ChatActivityFeed
+                    events={remoteEvents}
+                    tools={remoteTools}
+                    replyStreaming={remoteText.length > 0}
+                    replyPhase={remoteReplyPhase}
+                    researchPhase={remoteResearchPhase}
+                    startedAt={remoteStartedAt}
+                  />
                   {remoteText ? (
                     <div data-brian-chat-answer className={MARKDOWN_CLS}>
                       <ChatMarkdown

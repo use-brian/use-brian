@@ -117,7 +117,6 @@ const RecordingDetailPage = lazy(() => import("@/app/w/[workspaceId]/recordings/
 const OfficeArtifactPage = lazy(() => import("@/app/w/[workspaceId]/office/[artifactId]/page"));
 const OfficeTemplatesPage = lazy(() => import("@/app/w/[workspaceId]/office/templates/page"));
 const OfficeTemplatePage = lazy(() => import("@/app/w/[workspaceId]/office/templates/[templateId]/page"));
-const CrmRecordPage = lazy(() => import("@/app/w/[workspaceId]/crm/[kind]/[recordId]/page"));
 const ChatPage = lazy(() => import("@/app/w/[workspaceId]/chat/page"));
 const ShopifyPage = lazy(() => import("@/app/w/[workspaceId]/shopify/page"));
 const AssociationPage = lazy(() => import("@/app/w/[workspaceId]/association/page"));
@@ -133,8 +132,8 @@ const RedeemForm = lazy(async () => ({
 const TasksSurface = lazy(async () => ({
   default: (await import("@/components/tasks/tasks-surface")).TasksSurface,
 }));
-const CrmSurface = lazy(async () => ({
-  default: (await import("@/components/crm/crm-surface")).CrmSurface,
+const CrmWorkspace = lazy(async () => ({
+  default: (await import("@/components/crm/crm-workspace")).CrmWorkspace,
 }));
 const BrowserProfilesSection = lazy(async () => ({
   default: (await import("@/components/computer/browser-profiles-section")).BrowserProfilesSection,
@@ -199,9 +198,9 @@ const OPERATOR_ROUTE_ELEMENTS: Record<OperatorAppKey, ReactNode> = {
   ),
   tasks: <Route key="tasks" path="tasks" element={<TasksRoute />} />,
   crm: (
-    <Route key="crm" path="crm" element={<Outlet />}>
-      <Route index element={<CrmRoute />} />
-      <Route path=":kind/:recordId" element={<CrmRecordPage />} />
+    <Route key="crm" path="crm" element={<CrmWorkspace />}>
+      <Route index element={null} />
+      <Route path=":kind/:recordId" element={null} />
     </Route>
   ),
   feed: (
@@ -676,12 +675,6 @@ function DocSurface() {
 function TasksRoute() {
   const { workspaceId = "" } = useParams<{ workspaceId: string }>();
   return <TasksSurface workspaceId={workspaceId} />;
-}
-
-/** CRM operator surface — the SPA analogue of `crm/page.tsx`. */
-function CrmRoute() {
-  const { workspaceId = "" } = useParams<{ workspaceId: string }>();
-  return <CrmSurface workspaceId={workspaceId} />;
 }
 
 /** Browsers route family — mirrors `computer/layout.tsx` around local leaves. */

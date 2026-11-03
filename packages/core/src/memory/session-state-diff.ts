@@ -1,3 +1,4 @@
+import { isTrivialChatMessage } from '../classification/trivial-chat.js'
 import { boundScopeSources } from '../security/source-evidence.js'
 import { DerivedScopeError } from '../security/derived-scope.js'
 import { assertInputAuthority, isInputAuthorityError } from '../providers/input-authority.js'
@@ -12,10 +13,10 @@ import { assertInputAuthority, isInputAuthorityError } from '../providers/input-
  *   { "upserts": [{ "key", "summary", "detail"? }, ...],
  *     "resolves": [{ "key" }, ...] }
  *
- * Actual persistent hosts await this inside the current turn lease after the
- * primary loop, so commitments missed by `trackCommitment` are caught before
- * the next turn starts. Deduped against `openCommitments` so
- * unchanged rows don't get re-upserted.
+ * Native web conversations run this in a durable, freshly authorized background
+ * worker; other persistent hosts retain the in-turn path. Background writes
+ * carry a pre-inference generation fence. Deduped against `openCommitments`
+ * so unchanged rows do not get re-upserted.
  *
  * On any failure (provider error, non-JSON output, schema mismatch) the
  * function returns zero counts and the caller logs `session_state_diff_failed`.
@@ -70,7 +71,11 @@ export type RunSessionStateDiffOptions = {
    */
   activeJobIds?: string[]
   authority?: SessionContextAuthority
+  /** Host veto when omitted turns or attachments make the visible pair incomplete. */
+  allowTrivialShortcut?: boolean
   assertInputAuthority?: () => Promise<void>
+  /** Host-owned publication barrier. No state writes may precede it. */
+  beforePersist?: () => Promise<void>
 }
 
 /**
@@ -154,6 +159,12 @@ export async function runSessionStateDiff(
     opts.authority.accumulator.note({ sources: [...opts.openCommitments, ...opts.recentTurns].flatMap(row => boundScopeSources(row)) })
   }
   await assertInputAuthority(opts.assertInputAuthority)
+  if (opts.allowTrivialShortcut !== false && opts.openCommitments.length === 0 && opts.recentTurns.every(turn => {
+    if (turn.role !== 'user' && turn.role !== 'assistant') return false
+    if (typeof turn.content !== 'string' && !turn.content.every(block => block.type === 'text')) return false
+    const text=typeof turn.content==='string'?turn.content:turn.content.map(block=>block.type==='text'?block.text:'').join('\n')
+    return isTrivialChatMessage(text)||turn.role==='assistant'&&/^(?:here|received)[\s!?.,。！？，]*$/iu.test(text.trim())
+  })) return { upserts: 0, resolves: 0, usage: null, model: null }
   const derivation = opts.authority ? structuredClone({ producer: 'session_state:diff-pass',
     sources: opts.authority.accumulator.evidence.sources ?? [] }) : undefined
 
@@ -239,6 +250,9 @@ export async function runSessionStateDiff(
   }
   const parsed = result.parsed
   const errorMessage = result.errorMessage
+
+  await opts.beforePersist?.()
+  await assertInputAuthority(opts.assertInputAuthority)
 
   if (!parsed) {
     return {

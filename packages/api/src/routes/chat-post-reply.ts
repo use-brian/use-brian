@@ -7,15 +7,26 @@ export function createChatPostReplyBoundary() {
   let finalizing = false
   let published = false
   let signal: AbortSignal | undefined
+  let textComplete = false
   return {
+    /** Presentation only; an early terminal event must not certify publication. */
+    announceTextCompletion(announce: () => void) {
+      if (textComplete) return
+      textComplete = true
+      announce()
+    },
     beginFinalization(result: TurnLoopResult, providerFailed: boolean, abortSignal: AbortSignal) {
       signal = abortSignal
       finalizing = result.selection.kind === 'text' && !result.aborted && !providerFailed
+      return finalizing && !abortSignal.aborted
     },
     /** Call only for the last row, after publication, authority checks and notification. */
     recordPublishedReply(content: ContentBlock[]) {
       published = finalizing && !content.some(block => block.type === 'tool_use')
         && content.some(block => block.type === 'text' && block.text.trim().length > 0)
+    },
+    isPublishedReply() {
+      return published && !signal?.aborted
     },
     notice(error: unknown): { code: string; message: string } | null {
       if (!published || signal?.aborted || !isAuthorityChangedError(error)
@@ -26,4 +37,12 @@ export function createChatPostReplyBoundary() {
       }
     },
   }
+}
+/** Source proof reads also lock rows; start them only after publication commits. */
+export async function afterReplyPublication<T>(
+  publish: () => Promise<void>,
+  followUp: () => Promise<T>,
+): Promise<T> {
+  await publish()
+  return followUp()
 }

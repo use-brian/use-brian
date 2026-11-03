@@ -84,6 +84,21 @@ describe('[COMP:providers/fallback] extractStatus', () => {
 // ── Happy paths ────────────────────────────────────────────────
 
 describe('[COMP:providers/fallback] wrapFallback — primary succeeds', () => {
+  it('carries discovered declarations into a later fallback session', async () => {
+    const behavior: FakeBehavior = {}
+    const primary = makeProvider('primary', behavior)
+    const fallback = makeProvider('fallback')
+    const created = vi.spyOn(fallback, 'createSession')
+    const tools: NonNullable<SessionOptions['tools']> = []
+    const session = wrapFallback(primary, fallback).createSession({ model: 'primary-model', systemPrompt: 'sys', tools })
+    await collectStream(session.send([{ role: 'user', content: 'Find a record' }]))
+    tools.push({ name: 'findRecord', description: 'Find a record', parameters: { type: 'object', properties: {} } })
+    behavior.throwError = { status: 503 }
+    await collectStream(session.send([{ role: 'user', content: 'Continue' }]))
+    expect(created.mock.calls[0][0].tools).toBe(tools)
+    expect(created.mock.calls[0][0].tools?.map(tool => tool.name)).toEqual(['findRecord'])
+  })
+
   it('does NOT call fallback when primary succeeds (stream)', async () => {
     const primary = makeProvider('primary')
     const fallback = makeProvider('fallback')

@@ -1,3 +1,5 @@
+import { decisionTransportBudget, registerDecisionTransportOwner } from '../transport-budget.js'
+import { assertDecisionResponseAuthority } from '../authority-ownership.js'
 import { assertInputAuthority, isInputAuthorityError } from '../../providers/input-authority.js'
 /** TypeSafe System One / Jev decision adapter. [COMP:decisions/typesafe] */
 
@@ -14,15 +16,16 @@ import { assertDecisionCapabilities, validateDecisionResponse } from '../validat
 
 const DEFAULT_ENDPOINT = 'https://api.typesafe.ai/v1/systemone'
 
-export const TYPESAFE_JEV_CAPABILITIES: DecisionCapabilities = {
-  primitives: ['choice', 'boolean', 'score'],
+export const TYPESAFE_JEV_CAPABILITIES: DecisionCapabilities = Object.freeze({
+  primitives: Object.freeze(['choice', 'boolean', 'score'] as const),
   batch: true,
   maxOptions: 255,
   maxQuestions: 64,
   maxRubricLevels: 10,
   maxInputTokens: 64_000,
-  uncertainty: ['native_distribution'],
-}
+  maxQuestionInputTokens: 32_000,
+  uncertainty: Object.freeze(['native_distribution'] as const),
+})
 
 export type TypeSafeTransportRequest = {
   url: string
@@ -207,7 +210,7 @@ export function createTypeSafeDecisionProvider(options: {
   const transport = options.transport ?? createFetchTypeSafeTransport()
   const capabilities = options.capabilities ?? TYPESAFE_JEV_CAPABILITIES
 
-  return {
+  const provider: DecisionProvider = {
     id: 'typesafe',
     capabilities,
     async evaluate(request): Promise<DecisionResponse> {
@@ -223,9 +226,14 @@ export function createTypeSafeDecisionProvider(options: {
       const timeout = request.deadlineAt === undefined
         ? undefined
         : setTimeout(() => controller.abort(new Error('decision deadline exhausted')), Math.max(0, request.deadlineAt - Date.now()))
+      const transportBudget = decisionTransportBudget(request)
+      let transportTimer: ReturnType<typeof setTimeout> | undefined
       try {
         let wire: TypeSafeTransportResponse
         try {
+          if (transportBudget !== undefined) {
+            transportTimer = setTimeout(() => controller.abort(new Error('decision transport deadline exhausted')), transportBudget)
+          }
           wire = await transport({
             url: options.endpoint ?? DEFAULT_ENDPOINT,
             headers: {
@@ -246,8 +254,15 @@ export function createTypeSafeDecisionProvider(options: {
             throw new DecisionProviderError(kind, kind === 'cancelled' ? 'decision call cancelled' : 'decision deadline exhausted', { dispatched: true, cause: error })
           }
           throw new DecisionProviderError('transport', 'TypeSafe transport failed', { dispatched: true, cause: error })
+        } finally {
+          if (transportTimer !== undefined) clearTimeout(transportTimer)
         }
-        await assertInputAuthority(request.assertInputAuthority)
+        // Response acquisition ends the transport budget, never total authority.
+        if (controller.signal.aborted) throw new DecisionProviderError(request.signal?.aborted ? 'cancelled' : 'timeout', 'decision deadline exhausted', { dispatched: true })
+        await assertDecisionResponseAuthority(request)
+        if (controller.signal.aborted || request.deadlineAt !== undefined && request.deadlineAt <= Date.now()) {
+          throw new DecisionProviderError(request.signal?.aborted ? 'cancelled' : 'timeout', 'decision deadline exhausted', { dispatched: true })
+        }
         if (wire.status < 200 || wire.status >= 300) throw statusFailure(wire)
         const body = asRecord(wire.body, 'response')
         const model = typeof body.model === 'string' ? body.model : request.model.wireId
@@ -264,9 +279,11 @@ export function createTypeSafeDecisionProvider(options: {
         }
         return validateDecisionResponse(request, response)
       } finally {
+        if (transportTimer !== undefined) clearTimeout(transportTimer)
         if (timeout !== undefined) clearTimeout(timeout)
         request.signal?.removeEventListener('abort', onAbort)
       }
     },
   }
+  return options.transport ? provider : registerDecisionTransportOwner(provider, options.capabilities === undefined)
 }

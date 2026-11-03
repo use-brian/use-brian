@@ -1,8 +1,22 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createTypeSafeDecisionProvider, type TypeSafeTransportRequest } from '../adapters/typesafe.js'
+import { createTypeSafeDecisionProvider, TYPESAFE_JEV_CAPABILITIES, type TypeSafeTransportRequest } from '../adapters/typesafe.js'
 import { decisionRequest } from './fixtures.js'
+import { ownsDecisionInputCapacity } from '../transport-budget.js'
 
 describe('[COMP:decisions/typesafe] Jev HTTP adapter', () => {
+  it('pins complete default capacity metadata and rejects unknown or overridden capacity ownership', () => {
+    const provider = createTypeSafeDecisionProvider({ apiKey: 'fixture-key' })
+    expect(ownsDecisionInputCapacity(provider)).toBe(true)
+    expect(provider.capabilities).toMatchObject({ maxInputTokens: 64_000, maxQuestionInputTokens: 32_000 })
+    expect(Object.isFrozen(provider.capabilities)).toBe(true)
+    expect(Object.isFrozen(provider.capabilities.primitives)).toBe(true)
+    expect(ownsDecisionInputCapacity({ ...provider })).toBe(false)
+    expect(ownsDecisionInputCapacity(createTypeSafeDecisionProvider({ apiKey: 'fixture-key', capabilities: { ...TYPESAFE_JEV_CAPABILITIES } }))).toBe(false)
+    expect(ownsDecisionInputCapacity(createTypeSafeDecisionProvider({ apiKey: 'fixture-key', transport: vi.fn() }))).toBe(false)
+    provider.evaluate = vi.fn()
+    expect(ownsDecisionInputCapacity(provider)).toBe(false)
+  })
+
   it('preserves a transport authority refusal without operational retry', async () => {
     const refusal = Object.assign(new Error('Synthetic provider authority refusal'), { reason: 'authority_changed', retrySafe: false })
     const transport = vi.fn(async () => { throw refusal })
