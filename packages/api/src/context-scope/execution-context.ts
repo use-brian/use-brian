@@ -19,6 +19,7 @@ import {
   type SessionAuthoritySnapshot,
 } from './authority-lease.js'
 import { pinPolicyEpoch } from './policy-epoch.js'
+import { roomAudienceCeiling } from '../routes/_room-binding.js'
 import { findAssistantById } from '../db/users.js'
 import {authSessionStore} from '../db/auth-session-store.js'
 import {
@@ -32,6 +33,8 @@ import {
 } from './resolve-turn-scope.js'
 
 export type ResolveExecutionContextInput = ResolveTurnScopeInput & {
+  session?: ResolveTurnScopeInput['session'] & Partial<Pick<SessionAuthoritySnapshot,
+    'effectiveClearance' | 'contextCompartments'>> & { anchorKind?: string | null }
   identity: CreateExecutionContextInput['identity']
   ownership: CreateExecutionContextInput['ownership']
   lifecycle: CreateExecutionContextInput['lifecycle']
@@ -152,13 +155,30 @@ export async function resolveExecutionContextSystem(
     resolveReadCeilings: deps.resolveReadCeilings,
     resolveWorkspaceRole: deps.resolveWorkspaceRole,
   }
-  const bounded = boundTurnScope(await resolveScope(input, scopeDeps), input.maximumAccess)
-  // A shared Project room reads only what its whole audience may read.
-  const room = input.sharedAudience
-    ? input.session as { contextCompartments?: string[] | null; effectiveClearance?: string | null } | undefined
+  let bounded = boundTurnScope(await resolveScope(input, scopeDeps), input.maximumAccess)
+  // Stored web-room audiences constrain inputs, not just output delivery. Provider
+  // groups have separate approved maxima. Anchored Office/feed threads use their
+  // anchor's audience, not the session's usually empty Team/Project labels.
+  const anchored = input.session?.anchorKind && input.session.anchorKind !== 'none'
+  const room = input.sharedAudience && input.lifecycle.channelType === 'web' && !anchored
+    && (input.session || input.sessionAuthority)
+    ? { ...input.session, ...input.sessionAuthority }
     : undefined
+  if (room) {
+    bounded = boundTurnScope(bounded, {
+      ...roomAudienceCeiling(bounded.access.workspaceId, {
+        effectiveClearance: room.effectiveClearance ?? null,
+        contextCompartments: room.contextCompartments ?? [],
+        contextProjectId: room.contextProjectId ?? null,
+      }),
+      // The audience helper uses an anonymous recipient; execution keeps its actor.
+      userId: bounded.access.userId,
+    })
+    // Project rooms additionally exclude Department sources under v2.
+    bounded = { ...bounded, access: projectRoomAudienceCeiling(bounded.access, room) }
+  }
   const turnScope = input.sharedAudience
-    ? { ...bounded, access: { ...projectRoomAudienceCeiling(bounded.access, room), sharedAudience: true } }
+    ? { ...bounded, access: { ...bounded.access, sharedAudience: true } }
     : bounded
   const access: ResolvedExecutionAccess = {
     ...turnScope.access,
@@ -222,7 +242,12 @@ export async function resolveExecutionContextSystem(
       ownership: input.ownership,
       access,
       writeDefaults: input.pinnedWriteDefaults
-        ? { compartments: [...input.pinnedWriteDefaults.compartments], projectIds: [...input.pinnedWriteDefaults.projectIds] }
+        ? {
+            compartments: input.pinnedWriteDefaults.compartments.filter(value =>
+              !room || scopeGrantContains(access.mutationCompartments, [value])),
+            projectIds: input.pinnedWriteDefaults.projectIds.filter(value =>
+              !room || scopeGrantContains(access.projectIds, [value])),
+          }
         : { compartments: turnScope.writeCompartments, projectIds: turnScope.writeProjectIds },
       provenance: input.provenance,
       authority,
