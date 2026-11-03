@@ -66,6 +66,21 @@ describe('[COMP:api/migration-order] Migration file ordering', () => {
     ])
   })
 
+  it('places the dependency-guard rebake before native turn shared publication', () => {
+    const ordered = orderMigrationFiles([{ dir: '/open', files: [
+      '8188_native_turn_shared_publication.sql',
+      '8184_native_query_policy_compilation.sql',
+      '81850_legacy_dependency_guard_rebake.sql',
+      '8183_native_turn_requirements.sql',
+    ] }])
+    expect(ordered.map(({ file }) => file)).toEqual([
+      '8183_native_turn_requirements.sql',
+      '8184_native_query_policy_compilation.sql',
+      '81850_legacy_dependency_guard_rebake.sql',
+      '8188_native_turn_shared_publication.sql',
+    ])
+  })
+
   it('ignores non-sql files', () => {
     const ordered = orderMigrationFiles([
       { dir: '/open', files: ['001_a.sql', 'README.md', '.DS_Store'] },
