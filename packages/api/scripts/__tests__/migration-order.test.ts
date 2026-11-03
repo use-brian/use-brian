@@ -96,6 +96,24 @@ describe('[COMP:api/migration-order] Migration file ordering', () => {
     ])
   })
 
+  it('places the publication privilege repair after the released queue repair and before 8195', () => {
+    const files = [
+      '8195_native_publication_invalidation_contract.sql',
+      '81941_legacy_publication_privileges.sql',
+      '81940_legacy_queue_privileges.sql',
+      '8190_native_turn_query_contract.sql',
+    ]
+    expect(orderMigrationFiles([{ dir: '/open', files }]).map(({ file }) => file)).toEqual([
+      '8190_native_turn_query_contract.sql',
+      '81940_legacy_queue_privileges.sql',
+      '81941_legacy_publication_privileges.sql',
+      '8195_native_publication_invalidation_contract.sql',
+    ])
+    // This is a new repair, not a rename or rewrite of the applied queue repair.
+    const sql = readFileSync(new URL('../../migrations/81941_legacy_publication_privileges.sql', import.meta.url), 'utf8')
+    expect(sql).toContain("name='8195_native_publication_invalidation_contract.sql'")
+  })
+
   it('ignores non-sql files', () => {
     const ordered = orderMigrationFiles([
       { dir: '/open', files: ['001_a.sql', 'README.md', '.DS_Store'] },
