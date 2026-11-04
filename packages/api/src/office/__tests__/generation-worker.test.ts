@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import * as brandStore from '../../db/brand-store.js'
 import {documentSnapshot,completePresentationSnapshot,resolveFixtureResource,id} from '../../../../core/src/office/__tests__/fixtures.js'
-import { exportOfficePresentation, type Message } from '@use-brian/core'
+import { exportOfficePresentation, type Message, type ProviderRequest } from '@use-brian/core'
 import type { DocumentSnapshot, PresentationSnapshot, SpreadsheetSnapshot } from '@use-brian/office-model'
 import { createOfficeGenerationWorker } from '../generation-worker.js'
 import { createOfficeImportWorker } from '../import-worker.js'
@@ -63,8 +63,8 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     }
     const template = { id: uid(21), workspaceId: uid(2), family: 'document' as const, version: 1, status: 'admitted' as const, name: 'Invoice', description: 'Use for customer invoices', tags: ['invoice'], locales: ['en-US'], whenToUse: ['invoices'], whenNotToUse: ['letters'], exampleRequests: ['Create an invoice'], fields: [], slideRecipes: [], snapshot, resources: [], lockedObjectIds: [], allowedRepeatTargetIds: [], requiredEvidence: [], sensitivity: 'internal' as const, visibilityUserIds: [], capabilityVersion: 1, sourceHash: 'e'.repeat(64) }
     const payload = JSON.stringify({ title: 'Invoice INV-2026-001', values: { CUSTOMER_NAME: 'Northstar Studio Ltd.', INVOICE_NUMBER: 'INV-2026-001', OPTIONAL_NOTE: '', TOTAL: 'USD 11,000.00' } })
-    const requests: Array<{ systemPrompt?: string; messages?: Message[] }> = []
-    const provider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { requests.push(request); yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+    const requests: ProviderRequest[] = []
+    const provider = { async *stream(request: ProviderRequest) { requests.push(request); yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
 
     const generated = await generateDocumentFromTemplate({ provider: provider as never, model: 'test', artifactId: uid(20), workspaceId: uid(2), templateVersionId: uid(21), outcome: 'Create the supplied invoice', audience: 'Accounts payable', template })
 
@@ -75,10 +75,18 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(JSON.stringify(generated)).not.toContain('{{')
     expect(generated.sections[0]?.nodes[0]).toMatchObject({ kind: 'table', columnWidthsPt: [80, 160], widthPt: 240, layout: 'fixed', margins: { leftPt: 4 }, borders: { bottom: { color: '#34D3FF', widthPt: 1.125, style: 'solid' } } })
     expect(requests[0]?.systemPrompt).toContain('every supplied placeholder key exactly once')
-    expect(requests[0]).toMatchObject({ responseFormat: 'json', maxTokens: 6000,
-      responseSchema: { type: 'object', required: ['title', 'values'],
-        properties: { values: { required: ['CUSTOMER_NAME', 'INVOICE_NUMBER', 'OPTIONAL_NOTE', 'TOTAL'] } } } })
-    expect(JSON.stringify(requests[0])).not.toContain('additionalProperties')
+    expect(requests[0]).toMatchObject({ responseFormat: 'json', maxTokens: 6000 })
+    expect(requests[0]?.responseSchema).toEqual({
+      type: 'object', additionalProperties: false, required: ['title', 'values'],
+      properties: {
+        title: { type: 'string' },
+        values: {
+          type: 'object', additionalProperties: false,
+          properties: { CUSTOMER_NAME: { type: 'string' }, INVOICE_NUMBER: { type: 'string' }, OPTIONAL_NOTE: { type: 'string' }, TOTAL: { type: 'string' } },
+          required: ['CUSTOMER_NAME', 'INVOICE_NUMBER', 'OPTIONAL_NOTE', 'TOTAL'],
+        },
+      },
+    })
     expect(JSON.stringify(requests[0]?.messages)).toContain('CUSTOMER_NAME')
   })
 

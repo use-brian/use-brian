@@ -29,6 +29,14 @@ rows and paragraphs at their authored positions.
 
 ## Verification
 
+Generic document construction sends a closed JSON Schema to the provider. The
+root object permits exactly `title` and `values`; the nested `values` object
+permits exactly the template's discovered placeholder names. Both objects set
+`additionalProperties: false`, and every discovered name is listed in `required`.
+An optional value remains an empty string rather than an omitted key. This
+keeps the Office request compatible with strict structured-output providers and
+the constructor's existing exact-field validation.
+
 Regression fixtures exercise mixed page sizes, distinct and inherited footers,
 empty final sections, and native XML after removing the canonical custom part.
 For template acceptance, export through Office, render every PDF page, compare

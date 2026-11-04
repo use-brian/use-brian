@@ -220,9 +220,10 @@ export async function generateDocumentFromTemplate(params: {
     responseFormat: 'json',
     ...(!isLetter ? { responseSchema: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         title: { type: 'string' },
-        values: { type: 'object', properties: Object.fromEntries(placeholders.map((key) => [key, { type: 'string' }])), required: placeholders },
+        values: { type: 'object', additionalProperties: false, properties: Object.fromEntries(placeholders.map((key) => [key, { type: 'string' }])), required: placeholders },
       },
       required: ['title', 'values'],
     } } : {}),
