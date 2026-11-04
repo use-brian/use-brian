@@ -3,7 +3,7 @@
 | COMP tag | doc path | source path | test path |
 |---|---|---|---|
 | office/document-pdf | docs/architecture/office-template-fidelity.md | packages/core/src/office/docx/pdf.ts | packages/core/src/office/__tests__/document-pdf.test.ts |
-| app-web/office-document-editor | docs/architecture/office-template-fidelity.md | apps/app-web/src/components/office/document/editor-schema.ts | apps/app-web/src/components/office/__tests__/document-editor-keyboard.test.ts |
+| app-web/office-document-editor | docs/architecture/office-template-fidelity.md | apps/app-web/src/components/office/document/editor-schema.ts | apps/app-web/src/components/office/__tests__/document-editor-keyboard.test.ts; apps/app-web/src/components/office/__tests__/document-run-preservation.test.ts |
 | api/office-generation | docs/architecture/office-template-fidelity.md | packages/api/src/office/document-generation.ts; packages/api/src/office/generation-worker.ts | packages/api/src/office/__tests__/generation-worker.test.ts; packages/api/src/office/__tests__/template-fields.test.ts; packages/api/src/office/__tests__/generation-render-gate.test.ts |
 | api/session-publication-completion | docs/architecture/session-publication-completion.md | packages/api/src/db/session-context-revisions.ts | packages/api/src/db/__tests__/session-publication-completion.test.ts; packages/api/src/application-platform/__tests__/session-publication-completion.integration.test.ts |
 | office/docx-engine | docs/architecture/office-template-fidelity.md | packages/core/src/office/docx/index.ts; packages/office-model/src/model.ts; packages/office-renderer/src/layout.ts | packages/core/src/office/__tests__/docx-roundtrip.test.ts; packages/core/src/office/__tests__/docx-sections.test.ts |

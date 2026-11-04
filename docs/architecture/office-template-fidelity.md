@@ -34,6 +34,14 @@ it must not promote the pasted lines into body paragraphs after the table.
 
 ## Verification
 
+Local Document editing preserves a canonical run through cell paragraph splits,
+full-cell deletion, and Find/Replace to an empty value. A split keeps the source
+typography on empty paragraphs and restores a fresh `officeRun` stored mark after
+changing paragraph attributes. An emptied local text block retains an empty run
+as its style anchor. Native typing into an empty Office block consumes that
+anchor and creates a fresh marked run. Existing unmarked saved or remote text is
+never repaired by this editor behavior; the persistence decoder remains strict.
+
 Generic document construction sends a closed JSON Schema to the provider. The
 root object permits exactly `title` and `values`; the nested `values` object
 permits exactly the template's discovered placeholder names. Both objects set
