@@ -6,7 +6,11 @@ import {goalsRoutes} from '../../routes/goals.js'
 import {createWorkspaceStore} from '../../db/workspace-store.js'
 import {afterAll,describe,expect,it} from 'vitest'
 import {createTaskTools,ContextScopeAccumulator,boundScopeSources,type TaskRecord} from '@use-brian/core'
-import {getPool,getAppPool} from '../../db/client.js'
+import {getPool,getAppPool,applyRLSGucs,runWithAgentAccess} from '../../db/client.js'
+import {readRetainedContextFrame} from '../../db/session-context-revisions.js'
+import {nativeQueryDataCeiling} from '../../db/crm-reader.js'
+import {captureLegacyCanonicalTaskCandidates} from '../../db/task-reader.js'
+import {listTasks} from '../../db/tasks.js'
 import {createTask,getTaskByIdSystem,findTasksByExternalRefSystem} from '../../db/tasks.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {addSessionMessage} from '../../db/sessions.js'
@@ -26,6 +30,76 @@ await assertLocalFixture()
 
 describe.sequential('[COMP:api/application-persistence] [COMP:tasks/tools] original native Task source ancestry',()=>{
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
+ it('lists a task retaining empty Memory query evidence under its independent native task selector',async()=>{
+  const x=await sourceModeFixture(),current=await originalMemoryAuthority(x)
+  const store=createDbTaskStore(),tools=createTaskTools(store)
+  try{
+   // Use the actual canonical Memory query port with its stable selected
+   // vocabulary; unrelated Memory UI fields are not part of this regression.
+   const captured=await readRetainedContextFrame(current,[],async client=>(await client.query(
+    'SELECT value FROM read_native_memory_query_projection($1,$2,true)',[x.f.workspaceId,['summary']])).rows.map(row=>row.value))
+   expect(captured).toHaveLength(1);expect(captured[0].row).toBeNull()
+   const sources=captured.flatMap(row=>row.sources)
+   expect(sources.some(source=>source.resourceKind==='application_field')).toBe(true)
+   current.accumulator.note({sources})
+   const saved=await tools.saveTask.execute({title:'Fictional task retaining an empty Memory observation'},current.context)
+   expect(saved.isError,JSON.stringify(saved)).not.toBe(true)
+   const id=String(saved.data).match(/\[([a-f0-9-]{36})\]/)?.[1]
+   expect(id).toBeTruthy()
+   const access=current.execution.security.access
+   const rows=await listTasks(access,{limit:500})
+   expect(rows.map(row=>row.id)).toContain(id)
+   const client=await getAppPool().connect()
+   try{
+    await runWithAgentAccess(access,async()=>{
+     await client.query('BEGIN');await applyRLSGucs(client,x.f.ownerId)
+     expect(await captureLegacyCanonicalTaskCandidates(access,['title'],client,[crypto.randomUUID()])).toEqual([])
+     expect((await captureLegacyCanonicalTaskCandidates(access,['title'],client,[id!])).map(row=>row.id)).toEqual([id])
+    })
+   }finally{await client.query('ROLLBACK');client.release()}
+   // A changed original memory domain remains a refusal, never a widened read.
+   await x.f.pool.query(`INSERT INTO memories(workspace_id,user_id,summary,sensitivity,source,created_by_user_id)
+    VALUES($1,$2,'Fictional later Memory outside the retained empty domain','internal','user',$2)`,[x.f.workspaceId,x.f.ownerId])
+   await expect(listTasks(access,{limit:500})).rejects.toMatchObject({code:'access_unavailable'})
+  }finally{await x.cleanup()}
+ },60_000)
+ it('keeps malformed and unsupported selectors denied in ordinary and optimized Memory admission',async()=>{
+  const x=await sourceModeFixture(),current=await originalMemoryAuthority(x)
+  const name='memory_selector_fixture_'+crypto.randomUUID().replaceAll('-','')
+  const access=current.execution.security.access
+  await x.f.pool.query(`CREATE FUNCTION ${name}(w uuid) RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
+   SELECT jsonb_build_object('ordinary',application_memory_query_context(w) IS NOT NULL,'optimized',native_turn_empty_memory_context(w) IS NOT NULL)
+   $$;REVOKE ALL ON FUNCTION ${name}(uuid) FROM PUBLIC;GRANT EXECUTE ON FUNCTION ${name}(uuid) TO app_user`)
+  const client=await getAppPool().connect()
+  try{
+   await runWithAgentAccess(access,async()=>{
+    await client.query('BEGIN');await applyRLSGucs(client,x.f.ownerId)
+    const ceiling=nativeQueryDataCeiling(access,'task',undefined)
+    const inspect=async(stack:unknown)=>{
+     await client.query("SELECT set_config('app.native_query_data_ceilings',$1,true)",[JSON.stringify(stack)])
+     return(await client.query(`SELECT ${name}($1) AS value`,[x.f.workspaceId])).rows[0].value
+    }
+    for(const typeKey of ['task','company','person','deal']){
+     expect(await inspect([{...ceiling,typeKey}])).toEqual({ordinary:true,optimized:true})
+    }
+    expect(await inspect(Array.from({length:16},()=>ceiling))).toEqual({ordinary:true,optimized:true})
+    expect(await inspect([{...ceiling,workspaceId:crypto.randomUUID(),ids:Array.from({length:100},()=>crypto.randomUUID()),assistants:Array.from({length:256},()=>crypto.randomUUID())}])).toEqual({ordinary:true,optimized:true})
+    for(const stack of [null,{},Array.from({length:17},()=>ceiling),[null],[{}],
+     [{...ceiling,typeKey:'memory'}],[{...ceiling,typeKey:'unknown'}],
+     [{...ceiling,workspaceId:'not-a-uuid'}],[{...ceiling,tier:4}],
+     [{...ceiling,ids:['not-a-uuid']}],[{...ceiling,assistants:[false]}],
+     [{...ceiling,ids:Array.from({length:101},()=>crypto.randomUUID())}],
+     [{...ceiling,assistants:Array.from({length:257},()=>crypto.randomUUID())}],
+     [{...ceiling,compartments:[false]}],[{...ceiling,projectIds:['not-a-uuid']}],
+     [{...ceiling,departmentRead:{}}],[{...ceiling,extra:true}]]){
+     expect(await inspect(stack),JSON.stringify(stack)).toEqual({ordinary:false,optimized:false})
+    }
+   })
+  }finally{
+   await client.query('ROLLBACK');client.release()
+   await x.f.pool.query(`DROP FUNCTION ${name}(uuid)`);await x.cleanup()
+  }
+ },60_000)
  it('independent source read flows through actual Task callback into a Goal and Brian confirmation; source withdrawal holds later read',async()=>{
   const x=await sourceModeFixture()
   configureConnectorSourceRuntimeFactory(x.factory,{instances:x.instances})
