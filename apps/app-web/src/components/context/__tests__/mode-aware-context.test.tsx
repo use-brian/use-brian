@@ -5,7 +5,7 @@ import {beforeEach,afterEach,describe,it,expect,vi} from 'vitest';
 import {useCreationContext,ModeAwareCreationContext,type CreationContext,type CreationIntent} from '../mode-aware-context';
 import {visibleOrganizationSections} from '@/lib/organization-navigation';
 import {protectProjection} from '@/lib/use-protected-projection';
-import {invalidateSurfaceCache} from '@/lib/surface-cache';
+import {invalidateSurfaceCache,SurfaceCacheEvictionError} from '@/lib/surface-cache';
 import {I18nProvider} from '@/lib/i18n/client';
 import {en} from '@/lib/i18n/dictionaries/en';
 const mocks=vi.hoisted(()=>({mode:vi.fn(),choices:vi.fn(),viewer:{workspaceId:'w',me:{id:'u'}}}));
@@ -20,7 +20,7 @@ const projection=<T extends object>(value:T)=>protectProjection({...value,validF
 function Probe({intent,compact}:{intent:CreationIntent;compact?:boolean}){context=useCreationContext(intent);return <ModeAwareCreationContext context={context} compact={compact}/>;}
 async function render(intent:CreationIntent='new-shared',compact=false){await act(async()=>root.render(<I18nProvider locale="en" dict={en}><Probe intent={intent} compact={compact}/></I18nProvider>));}
 beforeEach(()=>{mode={mode:'simple',setupState:'ready',policyRevision:'1',defaultDepartmentId:'team',canAdminister:false};mocks.viewer.me.id='u';mocks.mode.mockImplementation(async()=>projection(mode));mocks.choices.mockImplementation(async()=>projection({policyRevision:mode.policyRevision,teams:[{id:'team',name:'Shared',status:'active'}],projects:[{id:'project',name:'Project A',status:'active'}]}));invalidateSurfaceCache('workspace-access:');host=document.createElement('div');document.body.append(host);root=createRoot(host);});
-afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('workspace-access:');vi.clearAllMocks();});
+afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('workspace-access:');vi.clearAllMocks();vi.useRealTimers();});
 describe('[COMP:app-web/mode-aware-context] explicit creation intent',()=>{
  it.each([false,true])('keeps a pending creation read quiet (compact=%s) without admitting a send',async(compact)=>{
   let resolveChoices!:(value:ReturnType<typeof projection>)=>void;
@@ -35,18 +35,55 @@ describe('[COMP:app-web/mode-aware-context] explicit creation intent',()=>{
   expect(context.ready).toBe(true);
   expect(host.querySelector(`[aria-label="${en.contextScope.project}"]`)).not.toBeNull();
  });
- it('shows recovery only after a failed context read and restores admission after retry',async()=>{
-  mocks.choices.mockRejectedValueOnce(new Error('context_unavailable'));
+ it.each(['mode','choices'] as const)('shows a load failure, not changed permissions, after a failed %s read and restores admission after retry',async resource=>{
+  mocks[resource].mockRejectedValueOnce(new TypeError('Failed to fetch'));
   await render('private',true);
   expect(context.ready).toBe(false);
   expect(context.snapshot()).toBeNull();
   expect(host.querySelector('[data-skeleton]')).toBeNull();
-  expect(host.querySelector('[role="alert"]')?.textContent).toBe(en.modeContext.stale);
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe(en.modeContext.unavailable);
+  expect(host.textContent).not.toContain(en.modeContext.stale);
   const retry=host.querySelector('button')!;
   expect(retry.textContent).toBe(en.workspaceAccess.reload);
   await act(async()=>retry.click());
   expect(context.ready).toBe(true);
   expect(host.querySelector('[role="alert"]')).toBeNull();
+ });
+ it.each(['mode','choices'] as const)('keeps a live selection on a transient %s refresh failure without extending its deadline',async resource=>{
+  await render();
+  await act(async()=>context.selectProject('project'));
+  const deadline=(resource==='choices'?context.choices!:context.mode.data!).projectionDeadline;
+  mocks[resource].mockRejectedValueOnce(new TypeError('Failed to fetch'));
+  await act(async()=>context.refresh());
+  expect(context.ready).toBe(true);
+  expect(context.projectId).toBe('project');
+  expect(context.reviewNeeded).toBe(false);
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect((resource==='choices'?context.choices!:context.mode.data!).projectionDeadline).toBe(deadline);
+  await act(async()=>context.refresh());
+  expect(context.ready).toBe(true);
+  expect(context.projectId).toBe('project');
+  expect(context.reviewNeeded).toBe(false);
+ });
+ it.each(['mode','choices'] as const)('blocks creation once the %s deadline passes during a network outage',async resource=>{
+  vi.useFakeTimers();
+  await render();
+  await act(async()=>context.selectProject('project'));
+  mocks[resource].mockImplementation(async()=>{throw new TypeError('Failed to fetch');});
+  await act(async()=>context.refresh());
+  expect(context.ready).toBe(true);
+  await act(async()=>{await vi.advanceTimersByTimeAsync(31_000);});
+  expect(context.ready).toBe(false);
+  expect(context.snapshot()).toBeNull();
+ });
+ it.each(['mode','choices'] as const)('still blocks creation when a %s refresh explicitly denies access',async resource=>{
+  await render();
+  await act(async()=>context.selectProject('project'));
+  mocks[resource].mockRejectedValueOnce(new SurfaceCacheEvictionError(new Error('forbidden')));
+  await act(async()=>context.refresh());
+  expect(context.ready).toBe(false);
+  expect(context.snapshot()).toBeNull();
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe(en.modeContext.unavailable);
  });
  it('admits a fresh shared Simple default, hides only department selection and keeps Project control',async()=>{await render();expect(context.ready).toBe(true);expect(context.snapshot()).toEqual({contextGroupId:'team',contextProjectId:null,expectedPolicyRevision:'1'});expect(host.textContent).toContain(en.modeContext.shared);expect(host.querySelector(`[aria-label="${en.contextScope.team}"]`)).toBeNull();expect(host.querySelector(`[aria-label="${en.contextScope.project}"]`)).not.toBeNull();});
  it('does not default or rebind existing intent',async()=>{await render('existing');expect(context.snapshot()).toBeNull();expect(mocks.choices).not.toHaveBeenCalled();expect(host.textContent).not.toContain(en.modeContext.shared);});

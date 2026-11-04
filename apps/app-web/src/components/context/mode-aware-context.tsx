@@ -17,7 +17,9 @@ export type CreationIntent='new-shared'|'private'|'existing';
 export function useWorkspaceAccessMode(){
  const {workspaceId,me}=useWorkspaceContext();
  const key=workspaceAccessModeCacheKey(workspaceId,me.id),resource=useCachedResource(key,()=>fetchWorkspaceAccessMode(workspaceId));
- const data=useProtectedProjection(key,resource.error?undefined:resource.data,()=>{},resource.refresh);
+ // Ordinary refresh failures do not revoke a still-live projection. Denials
+ // evict it in the cache; useProtectedProjection still enforces its deadline.
+ const data=useProtectedProjection(key,resource.data,()=>{},resource.refresh);
  return {data,error:resource.error,refresh:resource.refresh,readySimple:data?.mode==='simple'&&data.setupState==='ready'};
 }
 /**
@@ -41,7 +43,7 @@ export function useCreationContext(intent:CreationIntent,held?:HeldCreationChoic
  // Only a dropped explicit selection needs review: with nothing picked, the
  // fresh projection's defaults are already current, so there is nothing to confirm.
  const purge=()=>{if(choiceRef.current===null)return;choiceRef.current=null;setReviewNeeded(true);setChoice(null);};
- const choices=useProtectedProjection(creates?key:null,resource.error?undefined:resource.data,purge,resource.refresh);
+ const choices=useProtectedProjection(creates?key:null,resource.data,purge,resource.refresh);
  const stamp=mode.data?`${identity}:${mode.data.policyRevision}:${mode.data.mode}:${mode.data.setupState}:${mode.data.defaultDepartmentId}:${mode.data.canAdminister}`:null;
  const liveStamp=useRef(stamp);liveStamp.current=stamp;
  const changed=previous.current!==null&&previous.current!==stamp;
@@ -80,7 +82,7 @@ export function ModeAwareCreationContext({disabled=false,context,compact=false}:
  if(context.intent==='existing')return <p className="text-sm">{t.existing}</p>;
  // Creation choices are small controls, not an Organization list. Keep the
  // composer quiet while authority loads; a retry belongs only to a failure.
- if(!context.mode.data||!context.choices)return <div aria-busy={!context.error||undefined} className="min-h-8 max-sm:min-h-11 text-sm">{context.error?<><p role="alert">{t.stale}</p><Button type="button" className="max-sm:min-h-11" onClick={()=>void context.refresh()}>{a.reload}</Button></>:null}</div>;
+ if(!context.mode.data||!context.choices)return <div aria-busy={!context.error||undefined} className="min-h-8 max-sm:min-h-11 text-sm">{context.error?<><p role="alert">{t.unavailable}</p><Button type="button" className="max-sm:min-h-11" onClick={()=>void context.refresh()}>{a.reload}</Button></>:null}</div>;
  return <section className={compact?"space-y-1 text-sm":"space-y-3 text-sm"}>{compact?null:<p>{context.intent==='private'?t.private:context.mode.readySimple?t.shared:t.destination}</p>}
   <ContextScopePicker teams={context.choices.teams} projects={context.choices.projects} teamId={context.teamId} projectId={context.projectId} onTeamChange={context.selectTeam} onProjectChange={context.selectProject} disabled={disabled} hideTeam={context.intent==='new-shared'&&context.mode.readySimple} showProjectHint={!compact} inline={compact}/>
   {compact?null:<p>{t.boundaries}</p>}{!compact&&!context.mode.readySimple&&!context.legacy&&!context.ready&&!context.reviewNeeded?<p>{t.choose}</p>:null}
@@ -89,6 +91,6 @@ export function ModeAwareCreationContext({disabled=false,context,compact=false}:
 }
 export function WorkspaceModeSummary(){
  const {workspaceId}=useWorkspaceContext(),mode=useWorkspaceAccessMode(),t=useT().accessMigration,m=useT().modeContext;
- if(!mode.data)return mode.error?<div role="alert"><p>{m.stale}</p><Button className="max-sm:min-h-11" onClick={()=>void mode.refresh()}>{m.review}</Button></div>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
+ if(!mode.data)return mode.error?<div role="alert"><p>{m.unavailable}</p><Button className="max-sm:min-h-11" onClick={()=>void mode.refresh()}>{m.review}</Button></div>:<SurfaceSkeletonFor surface="organization" chrome={false}/>;
  return <section className="space-y-2 rounded-lg border border-border p-3 text-sm"><h3 className="font-semibold">{t.title}</h3><p>{t.current}: {t[mode.data.mode]} · {t.setup}: {t[mode.data.setupState]}</p><p>{mode.readySimple?m.shared:m.setup}</p><p>{m.boundaries}</p>{mode.data.canAdminister?<><p>{m.migration}</p><Link className="inline-flex min-h-8 max-sm:min-h-11 items-center underline" href={organizationHref(workspaceId,'access')}>{t.plans}</Link></>:null}</section>;
 }
