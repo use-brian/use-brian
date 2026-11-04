@@ -638,12 +638,13 @@ function clearStepReferencesTo(step: WorkflowStep, removedId: string): WorkflowS
     const { page: _dropped, ...rest } = next;
     next = rest;
   }
-  const deliver = next.deliver as
-    | { thread?: { fromStep?: string } }
-    | undefined;
-  if (deliver?.thread?.fromStep === removedId) {
-    const { thread: _dropped, ...restDeliver } = deliver;
-    next = { ...next, deliver: restDeliver as typeof next.deliver };
+  if (next.type === "tool_call" && next.deliver?.thread?.fromStep === removedId) {
+    const { thread: _dropped, ...deliver } = next.deliver;
+    return { ...next, deliver };
+  }
+  if (next.type === "assistant_call" && next.deliver && "thread" in next.deliver && next.deliver.thread?.fromStep === removedId) {
+    const { thread: _dropped, ...deliver } = next.deliver;
+    return { ...next, deliver };
   }
   return next;
 }
