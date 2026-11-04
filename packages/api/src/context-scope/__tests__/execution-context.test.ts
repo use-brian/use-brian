@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { executionToolContext } from '@use-brian/core'
 import { readFile } from 'node:fs/promises'
 import { resolveExecutionContextSystem as resolveContext } from '../execution-context.js'
 import type { ResolvedTurnScope } from '../resolve-turn-scope.js'
@@ -263,4 +264,176 @@ it('[COMP:api/execution-context] caps a higher bot to the shared room before exp
       compartments: null, mutationCompartments: null, projectIds: null } }), createLease: () => authority })
   expect(result.executionContext.security.ceiling).toMatchObject({ clearance: 'internal', compartments: [], projectIds: [] })
   expect(result.executionContext.security.access.sharedAudience).toBe(true)
+})
+
+
+describe('[COMP:api/execution-context] stored shared web room audience', () => {
+  const room = {
+    effectiveClearance: 'public',
+    contextCompartments: ['team:finance', 'project:forecast'],
+    contextProjectId: 'legacy-forecast',
+  }
+  function broadScope(v2 = false): ResolvedTurnScope {
+    return {
+      ...scope,
+      access: {
+        ...scope.access,
+        clearance: 'confidential',
+        compartments: null,
+        mutationCompartments: null,
+        projectIds: null,
+        ...(v2 ? { departmentRead: {
+          workspaceId: 'workspace-1', userId: 'actor-1', assistantId: 'assistant-1',
+          base: 'confidential' as const,
+          departments: { finance: 'confidential' as const, hr: 'internal' as const },
+          projects: { forecast: 'member' as const, secret: 'member' as const },
+          contextDepartment: null, binding: null, cap: null,
+        } } : {}),
+      },
+      effectiveCompartments: null,
+      effectiveProjectIds: null,
+      writeCompartments: ['team:finance', 'team:hr', 'project:forecast', 'project:secret'],
+      writeProjectIds: ['legacy-forecast', 'legacy-secret'],
+    }
+  }
+
+  it('bounds legacy room clearance, labels, project ids and write defaults before prompt/tool projection', async () => {
+    const createLease = vi.fn(() => authority)
+    const result = await resolveExecutionContextSystem({
+      ...base(), sharedAudience: true, session: room,
+    }, { resolveScope: async () => broadScope(), createLease })
+    const expected = {
+      userId: 'actor-1', clearance: 'public',
+      compartments: ['project:forecast', 'team:finance'],
+      mutationCompartments: ['project:forecast', 'team:finance'],
+      projectIds: ['legacy-forecast'],
+    }
+    expect(result.turnScope.access).toMatchObject(expected)
+    expect(result.turnScope).toMatchObject({
+      effectiveCompartments: expected.compartments,
+      effectiveProjectIds: expected.projectIds,
+      writeCompartments: ['team:finance', 'project:forecast'],
+      writeProjectIds: expected.projectIds,
+    })
+    expect(result.executionContext.security.access).toMatchObject({ ...expected, sharedAudience: true })
+    expect(result.executionContext.security.ceiling).toMatchObject(expected)
+    expect(createLease).toHaveBeenCalledWith(expect.objectContaining(expected), expect.any(Function), expect.any(Function))
+    const projected = executionToolContext(result.executionContext, { appId: 'app-1' })
+    expect(projected).toMatchObject(expected)
+    expect(projected.assistantDefaultCompartments).toEqual(expected.compartments)
+    expect(projected.assistantDefaultProjectIds).toEqual(expected.projectIds)
+  })
+
+  it('caps general v2 rooms using trusted session authority metadata, including Department and Project admissions', async () => {
+    const createSessionLease = vi.fn(() => authority)
+    const result = await resolveExecutionContextSystem({
+      ...base(), sharedAudience: true,
+      sessionAuthority: {
+        id: 'session-1', assistantId: 'assistant-1', userId: 'room-owner',
+        contextGroupId: null, contextProjectId: null, contextLockedAt: null,
+        effectiveClearance: 'public', contextCompartments: ['team:finance'],
+      },
+    }, { resolveScope: async () => broadScope(true), createSessionLease })
+    expect(result.turnScope.access.departmentRead).toMatchObject({
+      userId: 'actor-1', base: 'public', departments: { finance: 'public' }, projects: {},
+    })
+    expect(result.executionContext.security.ceiling).toMatchObject({
+      userId: 'actor-1', clearance: 'public', compartments: ['team:finance'], projectIds: [],
+      departmentRead: { base: 'public', departments: { finance: 'public' }, projects: {} },
+    })
+    expect(result.turnScope.writeCompartments).toEqual(['team:finance'])
+    expect(result.turnScope.writeProjectIds).toEqual([])
+    expect(createSessionLease).toHaveBeenCalledWith(expect.objectContaining({
+      starting: expect.objectContaining({ userId: 'actor-1', clearance: 'public' }),
+      durableSessionSource: false,
+    }))
+  })
+
+  it('preserves the additional Project-room v2 exclusion of Departments', async () => {
+    const result = await resolveExecutionContextSystem({
+      ...base(), sharedAudience: true, session: room,
+      pinnedWriteDefaults: {
+        compartments: ['team:hr', 'project:forecast'], projectIds: ['legacy-secret', 'legacy-forecast'],
+      },
+    }, { resolveScope: async () => broadScope(true), createLease: () => authority })
+    expect(result.turnScope.access.departmentRead).toMatchObject({
+      base: 'public', departments: {}, projects: { forecast: 'member' },
+    })
+    expect(result.executionContext.security.writeDefaults).toEqual({
+      compartments: ['project:forecast'], projectIds: ['legacy-forecast'],
+    })
+  })
+
+  it('cannot widen a narrower actor grant or maximumAccess', async () => {
+    const result = await resolveExecutionContextSystem({
+      ...base(), sharedAudience: true, session: room,
+      maximumAccess: {
+        workspaceId: 'workspace-1', userId: 'actor-1', clearance: 'internal',
+        compartments: ['team:finance'], mutationCompartments: [], projectIds: [], visibilityAssistantIds: null,
+      },
+    }, { resolveScope: async () => broadScope(true), createLease: () => authority })
+    expect(executionToolContext(result.executionContext, { appId: 'app-1' })).toMatchObject({
+      clearance: 'public', compartments: ['team:finance'], mutationCompartments: [], projectIds: [],
+      assistantDefaultCompartments: [], assistantDefaultProjectIds: [],
+    })
+    const finite = await resolveExecutionContextSystem({
+      ...base(), sharedAudience: true, session: room,
+    }, { resolveScope: async () => scope, createLease: () => authority })
+    expect(finite.executionContext.security.ceiling).toMatchObject({
+      clearance: 'public', compartments: [], mutationCompartments: [], projectIds: [],
+    })
+  })
+
+  it('leaves private web sessions unchanged even with stored room-like metadata', async () => {
+    const original = broadScope(true)
+    const result = await resolveExecutionContextSystem({
+      ...base(), sharedAudience: false, session: room,
+    }, { resolveScope: async () => original, createLease: () => authority })
+    expect(result.turnScope).toBe(original)
+    expect(result.executionContext.security.ceiling).toMatchObject({
+      clearance: 'confidential', compartments: null, projectIds: null,
+      departmentRead: original.access.departmentRead,
+    })
+  })
+
+  it.each(['office_file', 'feed_draft', 'feed_thread'])('keeps the anchor audience for %s instead of empty session labels', async anchorKind => {
+    const maximumAccess = {
+      workspaceId: 'workspace-1', userId: 'actor-1', clearance: 'internal' as const,
+      compartments: ['team:finance'], mutationCompartments: ['team:finance'],
+      projectIds: ['anchor-project'], visibilityAssistantIds: null,
+    }
+    const result = await resolveExecutionContextSystem({
+      ...base(), sharedAudience: true,
+      session: { anchorKind, effectiveClearance: 'internal', contextCompartments: [], contextProjectId: null },
+      maximumAccess,
+      pinnedWriteDefaults: { compartments: ['team:finance'], projectIds: ['anchor-project'] },
+    }, { resolveScope: async () => broadScope(true), createLease: () => authority })
+    expect(result.executionContext.security.ceiling).toMatchObject({
+      clearance: 'internal', compartments: ['team:finance'], projectIds: ['anchor-project'],
+      departmentRead: { departments: { finance: 'internal' } },
+    })
+    expect(result.executionContext.security.writeDefaults).toEqual({
+      compartments: ['team:finance'], projectIds: ['anchor-project'],
+    })
+    expect(result.executionContext.security.access.sharedAudience).toBe(true)
+  })
+
+  it('does not apply web-room semantics to external provider groups', async () => {
+    const original = broadScope(true)
+    const result = await resolveExecutionContextSystem({
+      ...base(), sharedAudience: true, session: room, ignoreSessionBinding: true,
+      lifecycle: { ...base().lifecycle, channelType: 'slack' },
+      maximumAccess: {
+        workspaceId: 'workspace-1', userId: 'actor-1', clearance: 'internal',
+        compartments: ['team:hr', 'project:secret'], mutationCompartments: ['team:hr'],
+        projectIds: ['provider-project'], visibilityAssistantIds: null,
+      },
+    }, { resolveScope: async () => original, createLease: () => authority })
+    expect(result.executionContext.security.ceiling).toMatchObject({
+      clearance: 'internal', compartments: ['project:secret', 'team:hr'],
+      mutationCompartments: ['team:hr'], projectIds: ['provider-project'],
+      departmentRead: { departments: { hr: 'internal' }, projects: { secret: 'member' } },
+    })
+    expect(result.executionContext.security.access.sharedAudience).toBe(true)
+  })
 })

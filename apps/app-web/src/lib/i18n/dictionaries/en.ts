@@ -592,6 +592,7 @@ export const en = {
     "choose": "Choose a department or explicitly choose General before creating.",
     "boundaries": "Private ownership, Projects and sensitivity restrictions still apply. Sharing does not grant administrative or public access.",
     "stale": "Access context changed or expired. Refresh and review the destination before creating. Your draft has not been submitted.",
+    "unavailable": "Cannot load the destination and access settings. Check your connection and retry. Your draft has not been submitted.",
     "review": "Review refreshed destination",
     "setup": "Workspace setup remains unchanged. Access mode activation is not available here.",
     "migration": "Administrators can inspect saved migration plans and ask Brian to prepare an explicit proposal. Applied batches do not activate a mode."

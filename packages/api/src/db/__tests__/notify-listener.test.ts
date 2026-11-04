@@ -77,6 +77,7 @@ import {
   _shutdownNotifyListener,
   registerNotifyChannel,
   startNotifyListener,
+  subscribeNotifyLifecycle,
   unregisterNotifyChannel,
 } from '../notify-listener.js'
 
@@ -148,7 +149,7 @@ describe('[COMP:platform/notify-listener] shared LISTEN connection', () => {
     expect(brain).toEqual([])
   })
 
-  it('ignores notifications for unregistered channels and empty payloads', async () => {
+  it('ignores unregistered channels but delivers empty payloads for fail-closed parsing', async () => {
     const brain: string[] = []
     registerNotifyChannel('brain_events', (p) => brain.push(p))
     startNotifyListener()
@@ -157,7 +158,7 @@ describe('[COMP:platform/notify-listener] shared LISTEN connection', () => {
     clients[0]!.fire('notification', { channel: 'nobody_listening', payload: 'x' })
     clients[0]!.fire('notification', { channel: 'brain_events', payload: undefined })
 
-    expect(brain).toEqual([])
+    expect(brain).toEqual([''])
   })
 
   it('a throwing handler does not stop the other channels', async () => {
@@ -271,5 +272,91 @@ describe('[COMP:platform/notify-listener] shared LISTEN connection', () => {
     )
     expect(() => registerNotifyChannel('Brain-Events', () => {})).toThrow(/identifier/i)
     expect(_getNotifyChannels()).toEqual([])
+  })
+})
+
+describe('channel lifecycle', () => {
+  it('reports initial unavailable, ready only after LISTEN, disconnect and reconnect', async () => {
+    vi.useFakeTimers()
+    const states: unknown[] = []
+    const off = subscribeNotifyLifecycle('permission_invalidation', state => states.push(state))
+    expect(states).toEqual([{ ready: false, reason: 'initial' }])
+    registerNotifyChannel('permission_invalidation', () => {})
+    startNotifyListener()
+    await vi.waitFor(() => expect(states).toHaveLength(2))
+    expect(states[1]).toEqual({ ready: true, reason: 'ready' })
+    clients[0]!.fire('end')
+    expect(states[2]).toEqual({ ready: false, reason: 'disconnected' })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(states[3]).toEqual({ ready: true, reason: 'ready' })
+    expect(clients).toHaveLength(2)
+    off()
+  })
+
+  it('late channel readiness waits for its own LISTEN, and observers can unsubscribe', async () => {
+    registerNotifyChannel('brain_events', () => {})
+    startNotifyListener()
+    await vi.waitFor(() => expect(listens()).toHaveLength(1))
+    let finish!: () => void
+    clients[0]!.query.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+    registerNotifyChannel('permission_invalidation', () => {})
+    const states: unknown[] = []
+    const off = subscribeNotifyLifecycle('permission_invalidation', state => states.push(state))
+    expect(states).toEqual([{ ready: false, reason: 'initial' }])
+    finish()
+    await vi.waitFor(() => expect(states).toHaveLength(2))
+    const initial = vi.fn()
+    const offInitial = subscribeNotifyLifecycle('permission_invalidation', initial)
+    expect(initial).toHaveBeenCalledWith({ ready: true, reason: 'initial' })
+    off()
+    offInitial()
+    await unregisterNotifyChannel('permission_invalidation')
+    expect(states).toHaveLength(2)
+  })
+
+  it('restores existing observers when a still-subscribed channel is re-registered', async () => {
+    registerNotifyChannel('brain_events', () => {})
+    registerNotifyChannel('permission_invalidation', () => {})
+    const states: { ready: boolean }[] = []
+    const off = subscribeNotifyLifecycle('permission_invalidation', state => states.push(state))
+    startNotifyListener()
+    await vi.waitFor(() => expect(states.at(-1)?.ready).toBe(true))
+    await unregisterNotifyChannel('permission_invalidation')
+    expect(states.at(-1)?.ready).toBe(false)
+    const before = listens().length
+    registerNotifyChannel('permission_invalidation', () => {})
+    expect(states.at(-1)?.ready).toBe(true)
+    expect(listens()).toHaveLength(before)
+    expect(clients).toHaveLength(1)
+    off()
+  })
+
+  it('never reports ready after LISTEN failure', async () => {
+    failListen = true
+    const states: { ready: boolean }[] = []
+    const off = subscribeNotifyLifecycle('permission_invalidation', state => states.push(state))
+    registerNotifyChannel('permission_invalidation', () => {})
+    startNotifyListener()
+    await vi.waitFor(() => expect(states).toHaveLength(2))
+    expect(states.every(state => !state.ready)).toBe(true)
+    off()
+  })
+
+  it('ignores a retired client completing LISTEN after disconnect', async () => {
+    vi.useFakeTimers()
+    const states: { ready: boolean }[] = []
+    const off = subscribeNotifyLifecycle('permission_invalidation', state => states.push(state))
+    registerNotifyChannel('permission_invalidation', () => {})
+    startNotifyListener()
+    let finish!: () => void
+    clients[0]!.query.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    clients[0]!.fire('error', new Error('lost during LISTEN'))
+    finish()
+    await Promise.resolve()
+    expect(states.every(state => !state.ready)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(states.at(-1)?.ready).toBe(true)
+    off()
   })
 })

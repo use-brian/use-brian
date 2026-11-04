@@ -99,7 +99,7 @@ describe('[COMP:api/chat-route] personal-only session admission', () => {
     const gate = source.indexOf("requestedSessionAudience === 'personal' && !mayUsePersonalChatSession(session, user.id)")
     expect(gate).toBeGreaterThan(source.indexOf('session = await findSessionById(requestedSessionId)'))
     expect(gate).toBeGreaterThan(source.indexOf('session = await findSessionByChannel({'))
-    expect(gate).toBeLessThan(source.indexOf('const resolvedExecution = await resolveExecutionContextSystem({'))
+    expect(gate).toBeLessThan(source.indexOf('const resolvedExecution = await resolveExecutionContextSystem('))
     expect(source.slice(0, gate)).toContain("const appOrigin = requestedSessionAudience === 'personal' ? 'chat'")
     const validation = source.slice(source.indexOf("if (requestedSessionAudience !== undefined"), source.indexOf('let requestedRoomResponseGroup:'))
     expect(validation).toContain("requestedSessionAudience !== 'personal'")
