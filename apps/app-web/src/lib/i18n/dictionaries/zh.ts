@@ -5695,6 +5695,7 @@ export const zh: Dictionary = {
       "此檔案無法預覽。上傳檔案僅保留 7 天，可能已過期。重新上傳即可再次預覽。",
   },
   approvalsPage: {
+    externalActionNotice: "這是對外部代理的一次性人工決定。記錄決定並不代表代理已收到。",
     loadFailed: "無法載入待審批項目。請重試以查看等待處理的決定。",
     retryLoad: "重試",
     title: "核准",
@@ -5716,6 +5717,7 @@ export const zh: Dictionary = {
       browser_skill_send: "瀏覽器送出",
       department_access: "存取申請",
       email_sender: "新的郵件寄件者",
+      external_action: "外部操作",
     },
     refinement: {
       step: "步驟 {step}",

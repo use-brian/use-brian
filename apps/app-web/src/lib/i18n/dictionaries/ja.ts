@@ -5709,6 +5709,7 @@ export const ja: Dictionary = {
       "このファイルのプレビューは利用できません。アップロードの保存期間は 7 日間のため、期限切れの可能性があります。再度アップロードするとプレビューできます。",
   },
   approvalsPage: {
+    externalActionNotice: "外部エージェントへの一度限りの人間の判断です。判断の記録は、エージェントによる受信を保証しません。",
     loadFailed: "承認待ちの項目を読み込めませんでした。再試行して確認してください。",
     retryLoad: "再試行",
     title: "承認",
@@ -5730,6 +5731,7 @@ export const ja: Dictionary = {
       browser_skill_send: "ブラウザ送信",
       department_access: "アクセス申請",
       email_sender: "新しいメール送信者",
+      external_action: "外部アクション",
     },
     refinement: {
       step: "ステップ {step}",

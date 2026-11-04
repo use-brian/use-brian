@@ -65,6 +65,7 @@ function makeRow(partial: Partial<PendingApprovalRow> = {}): PendingApprovalRow 
 describe("[COMP:app-web/approvals] isActionable", () => {
   it("treats the in-place kinds as actionable, including the skill kinds", () => {
     const inPlace: ApprovalKind[] = [
+      "external_action",
       "workflow_step",
       "tool_invocation",
       "staged_write",
@@ -89,10 +90,11 @@ describe("[COMP:app-web/approvals] isActionable", () => {
     }
   });
 
-  it("ACTIONABLE_KINDS holds exactly the nine in-place kinds", () => {
+  it("ACTIONABLE_KINDS holds exactly the ten in-place kinds", () => {
     expect([...ACTIONABLE_KINDS].sort()).toEqual(
       [
         "browser_skill_send",
+        "external_action",
         "email_sender",
       "department_access",
         "staged_skill_creation",

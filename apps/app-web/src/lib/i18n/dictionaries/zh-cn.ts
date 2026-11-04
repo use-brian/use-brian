@@ -5648,6 +5648,7 @@ export const zhCN: Dictionary = {
       "此文件无法预览。上传文件仅保留 7 天，可能已过期。重新上传即可再次预览。",
   },
   approvalsPage: {
+    externalActionNotice: "这是对外部代理的一次性人工决定。记录决定并不代表代理已收到。",
     loadFailed: "无法加载待审批项目。请重试以查看等待处理的决定。",
     retryLoad: "重试",
     title: "核准",
@@ -5668,6 +5669,7 @@ export const zhCN: Dictionary = {
       browser_skill_send: "浏览器送出",
       department_access: "访问申请",
       email_sender: "新的邮件寄件者",
+      external_action: "外部操作",
     },
     refinement: {
       step: "步骤 {step}",

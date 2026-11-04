@@ -5920,6 +5920,7 @@ export const en = {
       "Preview isn't available for this file. It may have expired: uploads are kept for 7 days. Re-upload the file to preview it again.",
   },
   approvalsPage: {
+    externalActionNotice: "One-time human decision for an external agent. Recording your decision does not confirm that the agent received it.",
     loadFailed: "Could not load approvals. Retry to check which decisions are waiting.",
     retryLoad: "Retry",
     title: "Approvals",
@@ -5941,6 +5942,7 @@ export const en = {
       browser_skill_send: "Browser send",
       department_access: "Access requests",
       email_sender: "New email sender",
+      external_action: "External action",
     },
     refinement: {
       step: "Step {step}",
