@@ -8,6 +8,10 @@ import { findSessionById } from './db/sessions.js'
 import { classifySession } from './session-kind.js'
 import { createSessionPinTools } from './session-pin-tools.js'
 import { createWorkspaceMcpProfile } from './workspace-mcp/profile.js'
+import { parseExternalApprovalSources } from './external-approvals/contracts.js'
+import { ExternalApprovalService, configureExternalApprovals } from './external-approvals/service.js'
+import { createExternalApprovalSqlStore } from './external-approvals/sql-store.js'
+import { externalApprovalRoutes } from './external-approvals/routes.js'
 import { createRecoverRecordingTool, resolveCurrentRecordingId } from './recordings/recovery.js'
 import { feishuNotificationRoutes } from './routes/feishu-notifications.js'
 import { enqueueNativeSessionStateJob } from './db/session-state-jobs.js'
@@ -932,6 +936,7 @@ export interface OpenApiEnv {
   VERTEX_PROJECT_ID?: string
   VERTEX_LOCATION?: string
   VERTEX_SERVICE_ACCOUNT_JSON?: string
+  BRIAN_EXTERNAL_APPROVAL_SOURCES?: string
   JWT_SECRET: string
   /** Keyed digest secret for Association promotion-code lookup. */
   ASSOCIATION_PROMOTION_HMAC_KEY?: string
@@ -3782,6 +3787,21 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     webBaseUrl: env.APP_URL,
     telegramBotToken: env.TELEGRAM_BOT_TOKEN,
   })
+
+  const externalApprovalService = new ExternalApprovalService(
+    parseExternalApprovalSources(env.BRIAN_EXTERNAL_APPROVAL_SOURCES), createExternalApprovalSqlStore(),
+    async (source, state) => {
+      await approvalDeliveries({ approvalId: state.approvalId, workspaceId: source.workspaceId,
+        workflowName: '', stepId: '', toolName: '', arguments: {}, approverUserId: source.approverUserId, externalAction: true,
+        deliveryChannelType: source.channelType, deliveryChannelId: source.channelId, assistantId: source.assistantId,
+        ...(source.channelType !== 'web' ? { recentTarget: { channelType: source.channelType, channelId: source.channelId,
+          channelIntegrationId: source.channelIntegrationId } } : {}),
+      })
+    },
+  )
+  configureExternalApprovals(externalApprovalService)
+  // Dedicated source authentication; before user-authenticated /api routers.
+  app.use('/internal/external-approvals', externalApprovalRoutes(externalApprovalService))
 
   const approvalBridgeDeps: ApprovalBridgeDeps = {
     resolveRecentChannel: resolveRecentApprovalChannel,

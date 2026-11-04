@@ -25,6 +25,10 @@ import { captureHumanDecisionSupport } from '../approval-review/patterns.js'
 /** Approval projections retain the current authority of every persisted parent. */
 async function canReadApprovalSource(userId: string, approval: PendingApproval): Promise<boolean> {
   if ((approval.approvalPayload.workspaceMcpOperation === true || typeof approval.approvalPayload.workspaceMcpRunId === 'string') && approval.approverUserId !== userId) return false
+  if (approval.kind === 'external_action') {
+    const { canReadExternalApproval } = await import('../external-approvals/sql-store.js')
+    return approval.approverUserId === userId && await canReadExternalApproval(userId, approval.id)
+  }
   if (approval.workflowRunId) {
     if (!approval.workflowStepRunId) return false
     const parent = await queryWithRLS(userId,
@@ -123,6 +127,7 @@ export type ApprovalDeliveryChannel = 'web' | (typeof PROACTIVE_DELIVERY_TRANSPO
  * without a migration. This union is the canonical source.
  */
 export type ApprovalKind =
+  | 'external_action'
   | 'department_access'
   | 'workflow_step'
   | 'tool_invocation'
@@ -1518,7 +1523,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
                responded_by = $3,
                reject_reason = $4,
                resolution_origin = 'human'
-           WHERE id = $1 AND status = 'pending' AND kind NOT IN ('department_access', 'browser_skill_send')
+           WHERE id = $1 AND status = 'pending' AND kind NOT IN ('department_access', 'browser_skill_send', 'external_action')
            RETURNING ${COLS}`,
           [id, decision, responderUserId, rejectReason ?? null],
         )

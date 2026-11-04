@@ -1,3 +1,4 @@
+import { externalApprovals, ExternalApprovalError } from '../external-approvals/service.js'
 /**
  * Unified approval queue routes (company-brain — `approvals.md`).
  *
@@ -127,6 +128,7 @@ const PdfSignatureArguments = z.object({
 
 /** Where a non-workflow approval kind is actually resolved. */
 const NATIVE_SURFACE: Record<Exclude<ApprovalKind, 'workflow_step'>, string> = {
+  external_action: 'web',
   department_access: 'workspace-access',
   tool_invocation: 'chat',
   distribution_draft: 'feed',
@@ -352,6 +354,16 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
     }
     if (approval.approverUserId !== userId) {
       res.status(403).json({ error: 'Only the assigned approver can respond' })
+      return
+    }
+    if (approval.kind === 'external_action') {
+      try {
+        const state = await externalApprovals().resolve(id, decision, { userId, human: true, origin: 'ui', grantAlways: body.grantAlways })
+        res.json({ kind: 'external_action', ...state })
+      } catch (error) {
+        if (error instanceof ExternalApprovalError) res.status(error.status).json({ error: error.message })
+        else throw error
+      }
       return
     }
     if (approval.kind === 'department_access') {

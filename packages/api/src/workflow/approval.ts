@@ -55,6 +55,8 @@ export type ApprovalDeliveryDispatcher = (params: {
   deliveryChannelId: string | null
   recentTarget?: RecentApprovalTarget
   assistantId?: string
+  /** External requests use the same human reply path, never workflow resume. */
+  externalAction?: boolean
 }) => Promise<void>
 
 export type ApprovalBridgeDeps = {

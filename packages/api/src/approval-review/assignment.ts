@@ -61,6 +61,7 @@ async function delegationRight(actor: ReviewActor, workspaceId: string, scopeKin
   if (scopeKind === 'request') {
     const approval = await createPendingApprovalsStore().getById(actor.userId, scopeId)
     if (!approval || approval.workspaceId !== workspaceId) throw notFound()
+    if (approval.kind === 'external_action') throw new ApprovalReviewError('human_intent_required', 403, 'External actions cannot be delegated.')
     if (approval.approverUserId !== actor.userId) throw new ApprovalReviewError('delegation_not_yours', 403, 'Only the approver of this request can delegate it.')
     if (approval.status !== 'pending') throw new ApprovalReviewError('request_not_pending', 409, `This request is already ${approval.status}.`)
     const facts = await loadRequestFacts(approval)
