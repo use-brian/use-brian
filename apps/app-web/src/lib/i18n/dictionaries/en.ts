@@ -14160,6 +14160,12 @@ export const en = {
     clearFinished: "Clear finished",
   },
   recordings: {
+    processTranscribe: "Transcribe",
+    processRetry: "Retry transcription",
+    processPreparing: "Preparing…",
+    processQueued: "Transcription queued. You can keep working while it processes.",
+    processActionFailed: "Could not start transcription. Refresh the page and check that you still have access to the original audio.",
+    recoveryBody: "Recover this recording from the saved audio. No download or upload is needed.",
     panelTitle: "Recordings",
     panelSearchPlaceholder: "Search recordings",
     panelFilterLabel: "Filter by status",

@@ -13842,6 +13842,12 @@ export const zh: Dictionary = {
     clearFinished: "清除已完成",
   },
   recordings: {
+    processTranscribe: "轉錄",
+    processRetry: "重試轉錄",
+    processPreparing: "正在準備…",
+    processQueued: "轉錄已排隊。處理期間你可以繼續工作。",
+    processActionFailed: "無法開始轉錄。請重新整理頁面，並確認你仍可存取原始音訊。",
+    recoveryBody: "使用已儲存的音訊復原錄音，無需下載或重新上傳。",
     panelTitle: "錄音",
     panelSearchPlaceholder: "搜尋錄音",
     panelFilterLabel: "依狀態篩選",

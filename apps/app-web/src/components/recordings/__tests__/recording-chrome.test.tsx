@@ -7,6 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+vi.mock("@/lib/recordings/confirm-and-process", () => ({ confirmAndProcessRecording: vi.fn() }));
 const getRecording = vi.fn();
 vi.mock("@/lib/api/recordings", () => ({
   getRecording: (...args: unknown[]) => getRecording(...args),
@@ -24,6 +25,7 @@ vi.mock("@/lib/i18n/client", () => ({
   useT: () => ({
     recordings: {
       actionItemsTitle: "Action items",
+      processTranscribe: "Transcribe", processRetry: "Retry transcription",
       detailTranscript: "Transcript",
       chromeOpenRecording: "Open recording",
       citationCardClose: "Close",
@@ -97,6 +99,8 @@ describe("[COMP:app-web/recording-chrome] participant refresh", () => {
       expect(container!.querySelector('[data-testid="player"]')).not.toBeNull();
       expect(container!.querySelector('[data-testid="action-items"]')).toBeNull();
       expect(container!.querySelector('[data-testid="transcript"]')).toBeNull();
+      const action = [...container!.querySelectorAll("button")].find(button => /^(Transcribe|Retry transcription)$/.test(button.textContent ?? ""));
+      expect(Boolean(action)).toBe(status === "awaiting_upload" || status === "failed");
       if (status === "awaiting_upload") {
         expect(container!.textContent).toContain("The upload is complete.");
       }

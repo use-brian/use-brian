@@ -13973,6 +13973,12 @@ export const zhCN: Dictionary = {
     clearFinished: "清除已完成",
   },
   recordings: {
+    processTranscribe: "转录",
+    processRetry: "重试转录",
+    processPreparing: "正在准备…",
+    processQueued: "转录已排队。处理期间你可以继续工作。",
+    processActionFailed: "无法开始转录。请刷新页面，并确认你仍可访问原始音频。",
+    recoveryBody: "使用已保存的音频恢复录音，无需下载或重新上传。",
     panelTitle: "录音",
     panelSearchPlaceholder: "搜索录音",
     panelFilterLabel: "依状态筛选",

@@ -1,3 +1,4 @@
+import { recordingRecovery, resolveCurrentRecordingId } from '../../recordings/recovery.js'
 import request from 'supertest'
 import { openRecordingsRoutes } from '../../routes/recordings.js'
 import { createTestApp } from '../../routes/__tests__/helpers.js'
@@ -438,5 +439,114 @@ describe('HTTP queue actor and canonical parent delivery', () => {
     await pool.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
       SELECT workspace_id,id,'workspace_file',$1,$2 FROM scope_derivations WHERE resource_kind='workspace_file' AND resource_id=$1`, [transcript.id, transcript.version])
     expect((await queryWithRLS(f.userId, 'SELECT id FROM workspace_files WHERE id=$1', [transcript.id])).rows).toEqual([])
+  })
+})
+
+
+describe('[COMP:recordings/recovery] stored-source recovery', () => {
+  async function failedRecording() {
+    const f = await fixture()
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.workspaceId])
+    const adopted = await resolveRecordingForFile(f.file, f.userId, {}, { kind: 'meeting' })
+    if (adopted.status !== 'ok') throw new Error('adoption failed')
+    const recordingId = adopted.recordingId
+    // Reproduce the legacy lifecycle write that invalidated the child.
+    await pool.query("UPDATE episodes SET source_ref=source_ref||'{\"status\":\"queued\"}'::jsonb WHERE id=$1", [recordingId])
+    await updateRecording(recordingId, { status: 'failed', lastError: 'recording_intake_source_unavailable' })
+    return { ...f, recordingId }
+  }
+  it('reuses stored bytes, preserves held history, serializes repeated preparation and queues the fresh recording', async () => {
+    const f = await failedRecording()
+    const before = (await pool.query('SELECT to_jsonb(r) AS value FROM recordings r WHERE id=$1', [f.recordingId])).rows[0].value
+    expect(before.scope_held).toBe(true)
+    expect(await recordingRecovery(f.authority, f.workspaceId, f.recordingId)).toMatchObject({ replacementId: null, title: f.file.name })
+    const attempts = await Promise.all(Array.from({ length: 12 }, () =>
+      recordingRecovery(f.authority, f.workspaceId, f.recordingId, true)))
+    const [first, retry] = attempts
+    expect(new Set(attempts.map(result => result.replacementId)).size).toBe(1)
+    expect(first.replacementId).toBeTruthy()
+    expect(retry.replacementId).toBe(first.replacementId)
+    expect(await resolveCurrentRecordingId(f.authority, f.workspaceId, f.recordingId)).toBe(first.replacementId)
+    expect((await pool.query('SELECT to_jsonb(r) AS value FROM recordings r WHERE id=$1', [f.recordingId])).rows[0].value).toEqual(before)
+    const provenance = await captureRecordingSegmentProvenance(f.authority, f.workspaceId, first.replacementId!)
+    expect(provenance.parent.resourceId).toBe(f.file.id)
+    expect((await pool.query('SELECT kind,media_file_id,scope_held FROM recordings WHERE id=$1', [first.replacementId])).rows[0]).toEqual({ kind: 'meeting', media_file_id: f.file.id, scope_held: false })
+    expect((await pool.query('SELECT id FROM workspace_files WHERE workspace_id=$1', [f.workspaceId])).rows).toHaveLength(1)
+    expect((await pool.query('SELECT id FROM recording_jobs WHERE workspace_id=$1', [f.workspaceId])).rows).toHaveLength(0)
+    await expect(enqueueRecordingJob({ recordingId: f.recordingId, workspaceId: f.workspaceId, actingUserId: f.userId })).rejects.toThrow('recording_superseded')
+    expect(await enqueueRecordingJob({ recordingId: first.replacementId!, workspaceId: f.workspaceId, actingUserId: f.userId })).toMatchObject({ enqueued: true })
+    const storage = { signedReadUrl: async () => 'https://fixture.invalid/media' }
+    const result = await processOpenRecording({ recordingId: first.replacementId!, actingUserId: f.userId }, {
+      filesResolver: { forUri: async () => storage } as never, fallbackStorage: storage as never,
+      transcriber: { transcribe: async () => ({ utterances: [{ startMs: 0, endMs: 1000, speaker: null, text: 'Recovered transcript' }] }) } as never,
+      brainIngestor: (async () => ({})) as never, probe: async () => 1000,
+      extract: async () => ({ buffer: Buffer.from('audio'), mime: 'audio/wav' }) as never,
+    })
+    expect(result.segmentsInserted).toBe(1)
+  })
+  it.each(['private', 'membership', 'changed', 'held', 'retracted', 'active', 'completed', 'audience', 'review', 'transcript'] as const)('refuses %s without releasing history or creating a replacement', async change => {
+    const f = await failedRecording()
+    let authority = f.authority
+    if (change === 'private') authority = { actorUserId: f.otherId }
+    if (change === 'membership') await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId, f.userId])
+    if (change === 'changed') await pool.query("UPDATE workspace_files SET storage_uri='gs://fixture/changed' WHERE id=$1", [f.file.id])
+    if (change === 'held') await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1', [f.file.id])
+    if (change === 'retracted') await pool.query('UPDATE recordings SET retracted_at=now() WHERE id=$1', [f.recordingId])
+    if (change === 'audience') await pool.query("UPDATE recordings SET sensitivity='internal' WHERE id=$1", [f.recordingId])
+    if (change === 'transcript') await pool.query('UPDATE recordings SET transcript_file_id=$2 WHERE id=$1', [f.recordingId, f.file.id])
+    if (change === 'review') await pool.query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
+      SELECT $1,'recording',$2,read_scope_review_source($1,'recording',$2)->>'version','held',1,'source_changed'`, [f.workspaceId, f.recordingId])
+    if (change === 'active' || change === 'completed') {
+      const job = await enqueueRecordingJob({ recordingId: f.recordingId, workspaceId: f.workspaceId, actingUserId: f.userId })
+      if (change === 'completed') await markRecordingJobDone(job.jobId!)
+    }
+    await expect(recordingRecovery(authority, f.workspaceId, f.recordingId, true)).rejects.toThrow()
+    expect((await pool.query('SELECT id FROM recordings WHERE workspace_id=$1', [f.workspaceId])).rows).toHaveLength(1)
+    expect((await pool.query('SELECT scope_held FROM recordings WHERE id=$1', [f.recordingId])).rows[0].scope_held).toBe(true)
+  })
+  it.each(['private', 'nonmember', 'held'] as const)('rejects direct app-role SQL recovery for %s sources', async condition => {
+    const f = await failedRecording()
+    const parent = await f.capture()
+    let actor = f.otherId
+    if (condition === 'nonmember') await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId, actor])
+    if (condition === 'held') { actor = f.userId; await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1', [f.file.id]) }
+    await expect(queryWithRLS(actor, 'SELECT * FROM read_recording_recovery_source($1,$2)', [f.workspaceId, f.recordingId])).rejects.toThrow()
+    await expect(queryWithRLS(actor, 'SELECT recover_file_recording($1::jsonb,$2,$3)', [JSON.stringify(parent), f.recordingId, randomUUID()])).rejects.toThrow()
+    expect((await pool.query('SELECT id FROM recordings WHERE workspace_id=$1', [f.workspaceId])).rows).toHaveLength(1)
+  })
+  it('enforces current Department membership and the agent Project ceiling', async () => {
+    const f = await fixture()
+    const groups = createDbWorkspaceGroupStore()
+    const team = await groups.createTeam(f.userId, f.workspaceId, { name: 'Restricted', key: 'restricted' })
+    await groups.addMember(f.userId, team.id, f.userId)
+    const projectId = randomUUID()
+    await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,'Review','review',$3)", [projectId, f.workspaceId, f.userId])
+    await pool.query('UPDATE workspace_files SET user_id=NULL,assistant_id=$2,compartments=$3,project_ids=$4 WHERE id=$1', [f.file.id, f.primaryAssistantId, [team.compartmentKey], [projectId]])
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.workspaceId])
+    // Legacy setup materializes owner grants. Remove this reader's actual
+    // Department edge; merely omitting a group membership is not a denial.
+    await pool.query('DELETE FROM department_edges WHERE workspace_id=$1 AND user_id=$2', [f.workspaceId, f.otherId])
+    expect((await queryWithRLS(f.otherId, 'SELECT id FROM workspace_files WHERE id=$1', [f.file.id])).rows).toEqual([])
+    const adopted = await resolveRecordingForFile(f.file, f.userId)
+    if (adopted.status !== 'ok') throw new Error('not adopted')
+    await pool.query("UPDATE episodes SET source_ref=source_ref||'{\"status\":\"queued\"}'::jsonb WHERE id=$1", [adopted.recordingId])
+    await updateRecording(adopted.recordingId, { status: 'failed' })
+    await expect(recordingRecovery({ actorUserId: f.otherId }, f.workspaceId, adopted.recordingId, true)).rejects.toThrow()
+    const { runWithAgentAccess } = await import('../client.js')
+    await expect(runWithAgentAccess({ workspaceId: f.workspaceId, userId: f.userId, clearance: 'confidential', compartments: [team.compartmentKey!], mutationCompartments: [], projectIds: [], visibilityAssistantIds: [f.primaryAssistantId] }, () => recordingRecovery(f.authority, f.workspaceId, adopted.recordingId, true))).rejects.toThrow()
+    expect((await pool.query('SELECT id FROM recordings WHERE workspace_id=$1', [f.workspaceId])).rows).toHaveLength(1)
+  })
+  it('allows replacement erasure without resurrecting the historical binding', async () => {
+    const f = await failedRecording()
+    const prepared = await recordingRecovery(f.authority, f.workspaceId, f.recordingId, true)
+    await pool.query('DELETE FROM episodes WHERE id=$1', [prepared.replacementId])
+    expect((await pool.query('SELECT superseded_by FROM recording_intake_bindings WHERE recording_id=$1', [f.recordingId])).rows[0].superseded_by).toBe(prepared.replacementId)
+    await expect(recordingRecovery(f.authority, f.workspaceId, f.recordingId, true)).rejects.toThrow()
+  })
+  it('rechecks source authority on a repeated request after preparation', async () => {
+    const f = await failedRecording()
+    await recordingRecovery(f.authority, f.workspaceId, f.recordingId, true)
+    await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1', [f.file.id])
+    await expect(recordingRecovery(f.authority, f.workspaceId, f.recordingId, true)).rejects.toThrow()
   })
 })

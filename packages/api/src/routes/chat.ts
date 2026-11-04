@@ -1,3 +1,4 @@
+import { resolveCurrentRecordingId } from '../recordings/recovery.js'
 import { memoryActivityFromText } from '@use-brian/core'
 import {consumeHostReadObservation,combineHostReadObservations,inheritRoutineCalendarRead,type RoutineCalendarCall} from '@use-brian/core'
 import {parseHostObservation,type HostObservation} from '@use-brian/shared'
@@ -5305,8 +5306,9 @@ export function chatRoutes(options: WebChatOptions): Router {
                 const activeRecordingId = pageMeta
                   ? recordingIdFromAnchorKey(pageMeta.anchorKey) ?? pageMeta.linkedRecordingId
                   : null
-                if (activeRecordingId) {
-                  activeRecordingBlock = `\n\n${buildActiveRecordingInstruction(activeRecordingId)}`
+                if (activeRecordingId && pageMeta) {
+                  const currentRecordingId = await resolveCurrentRecordingId({ actorUserId: user.id }, pageMeta.workspaceId, activeRecordingId)
+                  if (currentRecordingId) activeRecordingBlock = `\n\n${buildActiveRecordingInstruction(currentRecordingId)}`
                 }
               } catch (err) {
                 console.error('[chat] active recording context failed:', err)

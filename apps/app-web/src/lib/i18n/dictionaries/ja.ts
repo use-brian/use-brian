@@ -13908,6 +13908,12 @@ export const ja: Dictionary = {
     clearFinished: "完了分をクリア",
   },
   recordings: {
+    processTranscribe: "文字起こし",
+    processRetry: "文字起こしを再試行",
+    processPreparing: "準備中…",
+    processQueued: "文字起こしを開始しました。処理中も作業を続けられます。",
+    processActionFailed: "文字起こしを開始できませんでした。ページを更新し、元の音声にアクセスできるか確認してください。",
+    recoveryBody: "保存済みの音声から録音を復元します。ダウンロードやアップロードは不要です。",
     panelTitle: "録音",
     panelSearchPlaceholder: "録音を検索",
     panelFilterLabel: "ステータスで絞り込む",

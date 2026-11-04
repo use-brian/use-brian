@@ -1,3 +1,4 @@
+import { createRecoverRecordingTool, resolveCurrentRecordingId } from './recordings/recovery.js'
 import { feishuNotificationRoutes } from './routes/feishu-notifications.js'
 import { enqueueNativeSessionStateJob } from './db/session-state-jobs.js'
 import { createSessionStateWorker } from './workers/session-state-worker.js'
@@ -579,6 +580,7 @@ import { createS3FilesClient } from './files/s3-client.js'
 import { s3OptionsFromEnv } from './files/s3-env.js'
 import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
+import { recordingRecoveryRoutes } from './recordings/recovery-routes.js'
 import { createMeetingTagsTool } from './recordings/meeting-tags-tool.js'
 import { recordingLiveRoutes } from './routes/recording-live.js'
 import { watchRecordingRoutes } from './routes/watch-recording.js'
@@ -2908,7 +2910,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           const page = await savedViewStore.getById(actorUserId, pageId)
           if (!page) return null
           const recordingId = recordingIdFromAnchorKey(page.anchorKey) ?? page.linkedRecordingId
-          return recordingId ? { recordingId, workspaceId: page.workspaceId } : null
+          const currentId = recordingId ? await resolveCurrentRecordingId({ actorUserId }, page.workspaceId, recordingId) : null
+          return currentId ? { recordingId: currentId, workspaceId: page.workspaceId } : null
         },
         getContact: (ctx, contactId) => crmStore.getContactById(ctx, contactId),
         getSelf: async (userId) => {
@@ -2988,6 +2991,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         enqueue: enqueueFileIngestJob,
       }),
     )
+    tools.set('recoverRecording', createRecoverRecordingTool())
     tools.set(
       'reprocessRecording',
       createReprocessRecordingTool({
@@ -6288,6 +6292,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (liveInteraction) {
     app.use('/api/recordings/interaction', requireAuth(env.JWT_SECRET), recordingInteractionRoutes({ service: liveInteraction }))
     if (runWorkers) liveInteraction.start()
+  }
+
+  // Recovery is a shared OSS capability in both editions; hosted keeps its
+  // processing overlay but uses the same authorized preparation operation.
+  if (filesResolver && filesBlobClient) {
+    app.use('/api/recordings', requireAuth(env.JWT_SECRET), recordingRecoveryRoutes())
   }
 
   if (usesOpenStandaloneRoutes(profile) && filesResolver && filesBlobClient) {
