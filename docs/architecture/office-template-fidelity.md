@@ -18,6 +18,15 @@ pages. Legacy snapshots without edge distances keep the existing export defaults
 The canonical model renders sections on separate pages. Other DOCX section-break
 types are diagnosed as normalized rather than silently claimed to be preserved.
 
+## Table row heights
+
+Fixed DOCX row heights retain an explicit `heightRule: exact` alongside the
+existing `minHeightPt` numeric height. Missing rules keep legacy minimum-height
+behavior. Native export writes the corresponding Word height rule. Layout uses
+the fixed height without expanding it for text, and previews clip overflowing
+cell contents in rows whose full span has fixed heights. This keeps following
+rows and paragraphs at their authored positions.
+
 ## Verification
 
 Regression fixtures exercise mixed page sizes, distinct and inherited footers,

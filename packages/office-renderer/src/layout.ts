@@ -142,6 +142,7 @@ function documentTableRowHeights(table: OfficeTable, availableWidthPt: number): 
   const widths = officeTableResolvedColumnWidthsPt(table, availableWidthPt)
   const placements = officeTableCellPlacements(table)
   return table.rows.map((row, rowIndex) => {
+    if (row.heightRule === 'exact' && row.minHeightPt !== undefined) return row.minHeightPt
     const contentHeight = placements.filter((placement) => placement.rowIndex === rowIndex).reduce((height, placement) => {
       const margins = placement.cell.margins ?? table.margins
       const horizontalMargins = (margins?.leftPt ?? 2) + (margins?.rightPt ?? 2)
@@ -171,7 +172,7 @@ function textInkBounds(object: Extract<PresentationObject, { kind: 'text' }>): O
 function documentNodeHeight(node: DocumentFlowNode, widthPt: number): number {
   if (node.kind === 'paragraph' || node.kind === 'heading') return (node.spacingBeforePt ?? 0) + textHeight(node.runs, widthPt, node) + (node.spacingAfterPt ?? 8)
   if (node.kind === 'list') return node.items.reduce((height, item) => height + textHeight(item.runs, widthPt - 24), 0) + 8
-  if (node.kind === 'table') return Math.max(12, documentTableRowHeights(node, widthPt).reduce((sum, height) => sum + height, 0))
+  if (node.kind === 'table') return documentTableRowHeights(node, widthPt).reduce((sum, height) => sum + height, 0)
   if (node.kind === 'image') return node.heightPt
   if (node.kind === 'chart') return 240
   if (node.kind === 'video') return 270
@@ -492,10 +493,16 @@ function renderTableHtml(primitive: OfficeDisplayPrimitive): string {
     const widths = officeTableResolvedColumnWidthsPt(table, primitive.widthPt)
     const totalWidth = widths.reduce((sum, width) => sum + width, 0)
     const cellStyles = officeDocumentCellStyles(table)
+    const rowHeights = documentTableRowHeights(table, primitive.widthPt)
     const columns = widths.map((width) => `<col style="width:${totalWidth > 0 ? width / totalWidth * 100 : 100 / widths.length}%"/>`).join('')
     const body = table.rows.map((row, rowIndex) => `<tr style="${row.minHeightPt ? `height:${row.minHeightPt}px` : ''}">${row.cells.map((cell) => {
       const style = cellStyles.get(cell.id)
-      return `<td data-office-table-cell="${escapeXml(cell.id)}" rowspan="${cell.rowSpan}" colspan="${cell.colSpan}" style="${style}">${officeCellParagraphs(cell).map(({ format, runs }) => `<p style="margin:0;${officeParagraphCss(format, 'px', Math.max(1, ...runs.map((run) => run.style.fontSizePt)))}">${numberMarkerHtml(format, runs, primitive.numberLabels?.[runs[0]?.paragraphStart?.id ?? cell.id])}${richTextHtml(runs, '') || '<br/>'}</p>`).join('')}</td>`
+      const span = table.rows.slice(rowIndex, rowIndex + cell.rowSpan)
+      const fixed = span.every(part => part.heightRule === 'exact' && part.minHeightPt !== undefined)
+      const margins = cell.margins ?? table.margins
+      const contentHeight = Math.max(0, rowHeights.slice(rowIndex, rowIndex + cell.rowSpan).reduce((sum, height) => sum + height, 0) - (margins?.topPt ?? 2) - (margins?.bottomPt ?? 2))
+      const paragraphs = officeCellParagraphs(cell).map(({ format, runs }) => `<p style="margin:0;${officeParagraphCss(format, 'px', Math.max(1, ...runs.map((run) => run.style.fontSizePt)))}">${numberMarkerHtml(format, runs, primitive.numberLabels?.[runs[0]?.paragraphStart?.id ?? cell.id])}${richTextHtml(runs, '') || '<br/>'}</p>`).join('')
+      return `<td data-office-table-cell="${escapeXml(cell.id)}" rowspan="${cell.rowSpan}" colspan="${cell.colSpan}" style="${style}">${fixed ? `<div style="max-height:${contentHeight}px;overflow:hidden">${paragraphs}</div>` : paragraphs}</td>`
     }).join('')}</tr>`).join('')
     return `<table xmlns="http://www.w3.org/1999/xhtml" style="box-sizing:border-box;width:100%;height:100%;border-collapse:collapse;table-layout:${table.layout === 'autofit' && !table.columnWidthsPt ? 'auto' : 'fixed'};font-family:Arial,sans-serif;font-size:10px;line-height:1.15;color:#0f172a"><colgroup>${columns}</colgroup><tbody>${body}</tbody></table>`
   }

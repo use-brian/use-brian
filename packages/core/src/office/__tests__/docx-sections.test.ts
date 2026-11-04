@@ -1,12 +1,48 @@
 import JSZip from 'jszip'
 import { describe, expect, it } from 'vitest'
-import { layoutOfficeArtifact } from '@use-brian/office-renderer'
+import { layoutOfficeArtifact, renderOfficePreviewSvg } from '@use-brian/office-renderer'
 import { exportOfficeDocument, importOfficeDocument } from '../docx/index.js'
 import { id } from './fixtures.js'
 
 const context = { artifactId: id(60), workspaceId: id(2), templateVersionId: null, locale: 'en-US', defaultLanguage: 'en-US', title: 'Mixed sections' }
 
 describe('[COMP:office/docx-engine] DOCX sections', () => {
+  it('keeps exact row heights and clips preview overflow without moving following content', async () => {
+    const zip = new JSZip()
+    zip.file('[Content_Types].xml', '<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+    zip.file('word/document.xml', `<w:document xmlns:w="w"><w:body>
+      <w:tbl><w:tblPr><w:tblCellMar><w:top w:w="40"/><w:bottom w:w="40"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>
+      <w:tr><w:trPr><w:trHeight w:val="360" w:hRule="exact"/></w:trPr><w:tc><w:p><w:r><w:t>${'Long value '.repeat(40)}</w:t></w:r></w:p></w:tc></w:tr>
+      <w:tr><w:trPr><w:trHeight w:val="360"/></w:trPr><w:tc><w:p/></w:tc></w:tr></w:tbl>
+      <w:p><w:r><w:t>Following content</w:t></w:r></w:p>
+      <w:sectPr><w:pgSz w:w="11900" w:h="16840"/><w:pgMar w:top="400" w:right="400" w:bottom="400" w:left="400"/></w:sectPr>
+    </w:body></w:document>`)
+    const result = await importOfficeDocument(await zip.generateAsync({ type: 'nodebuffer' }), context)
+    expect(result.ok, JSON.stringify(result.diagnostics)).toBe(true)
+    if (result.snapshot?.family !== 'document') throw new Error('document required')
+    const snapshot = result.snapshot
+    const table = snapshot.sections[0].nodes[0]
+    if (table.kind !== 'table') throw new Error('table required')
+    expect(table.rows[0]).toMatchObject({ minHeightPt: 18, heightRule: 'exact' })
+    expect(table.rows[1].heightRule).toBeUndefined()
+    expect(result.diagnostics.some(item => item.code === 'docx.formatting.exact_row_height')).toBe(false)
+    const page = layoutOfficeArtifact(snapshot).pages[0]
+    expect(page.primitives[0].heightPt).toBe(36)
+    expect(page.primitives[1].yPt).toBe(56)
+    expect(renderOfficePreviewSvg(page)).toContain('max-height:14px;overflow:hidden')
+    const native = await JSZip.loadAsync((await exportOfficeDocument(snapshot)).bytes)
+    const heightTag = (await native.file('word/document.xml')!.async('string')).match(/<w:trHeight\b[^>]*>/)![0]
+    expect(heightTag).toContain('w:hRule="exact"')
+    expect(heightTag).toContain('w:val="360"')
+    native.remove('customXml/brian-office.json')
+    const reopened = await importOfficeDocument(await native.generateAsync({ type: 'nodebuffer' }), context)
+    expect(reopened.ok).toBe(true)
+    if (reopened.snapshot?.family !== 'document') throw new Error('document required')
+    expect(layoutOfficeArtifact(reopened.snapshot).pages[0].primitives[1].yPt).toBe(56)
+    table.rows[0].heightRule = undefined
+    expect(layoutOfficeArtifact(snapshot).pages[0].primitives[1].yPt).toBeGreaterThan(56)
+  })
+
   it('retains mixed pages, inherited and cleared footers, and an empty final section in native XML', async () => {
     const zip = new JSZip()
     zip.file('[Content_Types].xml', '<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')

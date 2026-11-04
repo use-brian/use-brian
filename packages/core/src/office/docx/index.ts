@@ -169,7 +169,7 @@ function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>, conte
     borders: docxTableBorders(node.borders ?? (node.rows.some((row) => row.cells.some((cell) => cell.borders)) ? {} : undefined)),
     rows: node.rows.map((row, rowIndex) => new TableRow({
       tableHeader: rowIndex < node.headerRows,
-      height: row.minHeightPt === undefined ? undefined : { value: Math.round(row.minHeightPt * 20), rule: HeightRule.ATLEAST },
+      height: row.minHeightPt === undefined ? undefined : { value: Math.round(row.minHeightPt * 20), rule: row.heightRule === 'exact' ? HeightRule.EXACT : HeightRule.ATLEAST },
       children: row.cells.map((cell) => new TableCell({
         columnSpan: cell.colSpan,
         rowSpan: cell.rowSpan,
@@ -695,10 +695,12 @@ function parseWordTable(fragment: string, id: string, styles: WordStyles, number
       column += colSpan
     }
     activeVerticalMerges = nextVerticalMerges
-    const height = Number(xmlValue(wordContainer(rowFragment, 'trPr'), 'w:trHeight')) / 20
+    const rowProperties = wordContainer(rowFragment, 'trPr')
+    const height = Number(xmlValue(rowProperties, 'w:trHeight')) / 20
     return {
       id: stableOfficeUuid(`${id}:row:${rowIndex}`),
       minHeightPt: Number.isFinite(height) && height > 0 ? height : undefined,
+      heightRule: Number.isFinite(height) && height > 0 && xmlValue(rowProperties, 'w:trHeight', 'w:hRule') === 'exact' ? 'exact' as const : undefined,
       cells,
     }
   })
@@ -773,7 +775,6 @@ function formattingDiagnostics(xml: string, stylesXml: string): OfficePreflightD
     [/<w:tabs\b/, 'tab_stops', 'Custom tab stops are not supported; tab characters are retained.'],
     [/<w:tblStylePr\b/, 'conditional_table_style', 'Conditional table style regions are not supported; base table properties are retained.'],
     [/w:(?:asciiTheme|hAnsiTheme|eastAsiaTheme|cstheme)=/, 'theme_font', 'Theme font references are not resolved; explicit font names are retained.'],
-    [/<w:trHeight\b[^>]*w:hRule="exact"/, 'exact_row_height', 'Exact row heights are rendered as minimum heights.'],
     [/<w:rFonts\b[^>]*w:eastAsia=/, 'east_asian_shaping', 'East Asian font names are retained; browser font availability and shaping may differ from Word.'],
   ]
   const diagnostics: OfficePreflightDiagnostic[] = checks.filter(([pattern]) => pattern.test(source)).map(([, code, message]) => ({ severity: 'warning', code: `docx.formatting.${code}`, path: 'word/document.xml', message }))

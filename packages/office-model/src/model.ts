@@ -180,6 +180,7 @@ export const OfficeTableSchema = NodeBaseSchema.extend({
     z.object({
       id: OfficeUuidSchema,
       minHeightPt: z.number().min(0).max(2_000).optional(),
+      heightRule: z.enum(['exact', 'atLeast']).optional(),
       cells: z.array(OfficeTableCellSchema).max(100),
     }).strict(),
   ).min(1).max(5_000),
