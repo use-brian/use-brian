@@ -104,10 +104,20 @@ const OfficeTable = Node.create({
       ["colgroup", {}, ...widths.map((width) => ["col", { style: `width:${width / total * 100}%` }])], ["tbody", {}, 0]];
   },
 });
-const OfficeTableRow = Node.create({ name: "officeTableRow", content: "officeTableCell*", addAttributes: () => attrs("id", "minHeightPt"), parseHTML: () => [{ tag: "tr" }], renderHTML: ({ HTMLAttributes }) => ["tr", mergeAttributes(HTMLAttributes, { style: typeof HTMLAttributes.minHeightPt === "number" ? `height:${HTMLAttributes.minHeightPt}pt` : undefined }), 0] });
+const OfficeTableRow = Node.create({ name: "officeTableRow", content: "officeTableCell*", addAttributes: () => attrs("id", "minHeightPt", "heightRule"), parseHTML: () => [{ tag: "tr" }], renderHTML: ({ HTMLAttributes }) => ["tr", mergeAttributes(HTMLAttributes, { style: typeof HTMLAttributes.minHeightPt === "number" ? `height:${HTMLAttributes.minHeightPt}pt` : undefined }), 0] });
 const OfficeTableCell = Node.create({ name: "officeTableCell", content: "officeTableCellText+", isolating: true, addAttributes: () => attrs("id", "rowSpan", "colSpan", "fill", "alignment", "verticalAlignment", "margins", "borders", "wrapText"), parseHTML: () => [{ tag: "td" }, { tag: "th" }], renderHTML: ({ HTMLAttributes }) => ["td", mergeAttributes(withoutObjectAttributes(HTMLAttributes, ["margins", "borders"]), { rowspan: HTMLAttributes.rowSpan, colspan: HTMLAttributes.colSpan }), 0] });
 const OfficeTableCellText = Node.create({
   priority: 1000,
+  addProseMirrorPlugins() {
+    return [new Plugin({ props: { handlePaste(view, event) {
+      const { $from, $to } = view.state.selection;
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      if ($from.parent.type.name !== "officeTableCellText" || !$from.sameParent($to) || !/[\r\n]/.test(text)) return false;
+      event.preventDefault();
+      view.dispatch(view.state.tr.insertText(text.replace(/\r\n?/g, "\n")).scrollIntoView());
+      return true;
+    } } })];
+  },
   addKeyboardShortcuts() {
     return { Enter: () => {
       if (!this.editor.isActive("officeTableCellText")) return false;

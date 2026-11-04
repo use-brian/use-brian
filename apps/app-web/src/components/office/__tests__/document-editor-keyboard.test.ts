@@ -10,6 +10,34 @@ import { officeDocumentEditorExtensions } from "../document/editor-schema";
 import { applyDocumentRunFormatting, clearDocumentRunFormatting, convertDocumentList, currentDocumentSectionAttributes, documentProductivity, findDocumentText, insertDocumentBreak, insertDocumentImage, insertDocumentTable, moveDocumentTableCell, replaceDocumentText, runDocumentTableAction, setDocumentBlockAttributes, setDocumentBlockStyle, setDocumentSectionAttributes } from "../document/editor-actions";
 
 describe("[COMP:app-web/office-document-editor] Document productivity and keyboard actions", () => {
+  it("keeps multiline pasted values inside their cell and retains exact row heights", () => {
+    const snapshot = documentFixture();
+    const table = snapshot.sections[0].nodes.find(node => node.kind === "table")!;
+    if (table.kind !== "table") throw new Error("table required");
+    table.rows[0].minHeightPt = 18;
+    table.rows[0].heightRule = "exact";
+    const cell = table.rows[0].cells[0];
+    cell.runs[0].style.bold = true;
+    const originalNodeIds = snapshot.sections[0].nodes.map(node => node.id);
+    const doc = snapshotToYDoc(snapshot);
+    const editor = new Editor({ extensions: [...officeDocumentEditorExtensions(), Collaboration.configure({ fragment: getDocumentFragment(doc) })] });
+    let start = 0;
+    editor.state.doc.descendants((node, position) => { if (node.type.name === "officeTableCellText" && node.attrs.id === cell.id) start = position + 1; });
+    editor.commands.setTextSelection({ from: start, to: start + cell.runs[0].text.length });
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { getData: (type: string) => type === "text/plain" ? "Venue A /\r\nVenue B /\nVenue C" : "", types: ["text/plain"], files: [] } });
+    editor.view.dom.dispatchEvent(paste);
+    const result = yDocToSnapshot(doc);
+    if (result.family !== "document") throw new Error("document required");
+    expect(result.sections[0].nodes.map(node => node.id)).toEqual(originalNodeIds);
+    const edited = result.sections[0].nodes.find(node => node.id === table.id);
+    if (edited?.kind !== "table") throw new Error("table required");
+    expect(edited.rows[0]).toMatchObject({ minHeightPt: 18, heightRule: "exact" });
+    expect(edited.rows[0].cells[0].runs.map(run => run.text).join("")).toBe("Venue A /\nVenue B /\nVenue C");
+    expect(edited.rows[0].cells[0].runs[0].style.bold).toBe(true);
+    editor.destroy(); doc.destroy();
+  });
+
   it("promotes legacy cell formatting to a distinct paragraph ID before split and range edits", () => {
     const snapshot = documentFixture();
     const table = snapshot.sections[0].nodes.find((node) => node.kind === "table")!;

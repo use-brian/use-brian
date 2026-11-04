@@ -27,6 +27,11 @@ the fixed height without expanding it for text, and previews clip overflowing
 cell contents in rows whose full span has fixed heights. This keeps following
 rows and paragraphs at their authored positions.
 
+The live document editor retains the row height rule in its collaborative
+schema. Pasting multiline plain text into one table-cell paragraph inserts
+literal line breaks in that paragraph, preserving its marks and cell boundary;
+it must not promote the pasted lines into body paragraphs after the table.
+
 ## Verification
 
 Generic document construction sends a closed JSON Schema to the provider. The
