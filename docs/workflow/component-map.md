@@ -2,6 +2,7 @@
 
 | COMP tag | doc path | source path | test path |
 |---|---|---|---|
+| api/file-derived-admission | docs/plans/complete-organization-cutover.md (source-derived file inheritance) | packages/api/src/workspace-access/file-derived-admission.ts; packages/api/src/db/workspace-files.ts | packages/api/src/db/__tests__/workspace-files-mode-admission.integration.test.ts |
 | api/files-route | docs/chat-reply-delivery.md (authenticated staging uploads) | packages/api/src/routes/files.ts | packages/api/src/routes/__tests__/files.test.ts |
 | engine/model-input-authority | docs/chat-reply-delivery.md (delivery refusals at the model boundary) | packages/core/src/engine/query-loop.ts | packages/core/src/engine/__tests__/query-loop.model-input-authority.test.ts |
 | api/organization-cutover | docs/plans/complete-organization-cutover.md | packages/api/src/workspace-access/organization-cutover.ts; packages/api/src/workspace-access/migration-inventory.ts; packages/core/src/scheduling/poll-worker.ts; apps/app-web/src/components/workspace-access/migration-progress.tsx; packages/api/src/office/generation-evidence.ts; packages/api/src/office/generation-publication.ts | packages/api/src/workspace-access/__tests__/organization-cutover.integration.test.ts; packages/api/src/workspace-access/__tests__/organization-cutover-inventory.test.ts; packages/core/src/scheduling/__tests__/poll-worker.test.ts; apps/app-web/src/components/workspace-access/__tests__/migration-progress.test.tsx; packages/api/src/office/__tests__/generation-evidence.integration.test.ts |

@@ -65,5 +65,8 @@ export async function admitDerivedFile(client: PoolClient, actor: string, input:
     inherited: { ...floor, visibility: floor.userId ? 'private' : 'workspace' }, inheritedAuthority: 'read',
     requestedLabels: { compartments: input.compartments?.length ? input.compartments : undefined, projectIds: input.projectIds },
   })
+  // This is a canonical inherited destination, including General. The root
+  // home-Department trigger must not add a new floor after these checks.
+  if (policy?.departmentReadV2 === true) await client.query("SELECT set_config('app.explicit_general','true',true)")
   return { ...input, ...scope }
 }

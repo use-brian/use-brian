@@ -58,6 +58,14 @@ all of their resource-specific authorization and classification. Source/template
 selection must still be authorized, and generated output must inherit all
 material read. No source-derived content receives a source-free proof.
 
+Canonical source-derived workspace files keep their validated inherited envelope
+through insertion. An inherited General scope is an explicit destination, so the
+root-file home Department fallback must not append a Department after admission.
+Set that transaction-local choice only after canonical source revalidation and
+the read/mutation checks; preserve private ownership, assistant partition,
+sensitivity, Department and Project floors and lineage. Ordinary root-file home
+defaults and classic mode admission remain unchanged.
+
 The SQL backstop for the superseded creation-receipt protocol must select the
 same model as the TypeScript writer. Existing v2 department stamping, row
 policies and derivation guards stay enabled. Tests must show both successful
