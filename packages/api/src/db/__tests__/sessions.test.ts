@@ -99,6 +99,10 @@ describe('[COMP:api/sessions-route] findOrCreateSession', () => {
     const [sql, params] = mockQuery.mock.calls[0]
     expect(sql).toContain('INSERT INTO sessions')
     expect(sql).toContain('ON CONFLICT (assistant_id, user_id, channel_type, channel_id, app_id)')
+    // Personal resume fills a legacy NULL sessions.workspace_id from the
+    // proposed assistant workspace; it never overwrites a non-NULL value.
+    expect(sql).toContain('workspace_id = COALESCE(sessions.workspace_id, EXCLUDED.workspace_id)')
+    expect(sql).toContain('workspace_id as "workspaceId"')
     // app_origin (migration 187) is the 6th INSERT param; defaults to null
     // when the caller omits it. visibility (migration 223) is the 7th
     // (defaults to 'owner'), workspace_id the 8th (defaults to null), and
