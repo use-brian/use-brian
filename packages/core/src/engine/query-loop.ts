@@ -104,7 +104,10 @@ async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'o
   }
   catch (error) {
     invalidModelContexts.add(identity)
-    if (isAuthorityBoundaryError(error)||tryBoundary&&(error as {reason?:unknown})?.reason==='delivery_audience_unverified') throw error
+    // Keep the destination refusal for the host's safe error mapping while
+    // retaining the sticky denial above. Input failures stay generic.
+    if (isAuthorityBoundaryError(error)
+      || (boundary === 'output' && (error as { reason?: unknown })?.reason === 'delivery_audience_unverified')) throw error
     throw Object.assign(new Error('The model context is unavailable.', { cause: error }), {
       reason: 'authority_changed' as const, retrySafe: false,
     })
