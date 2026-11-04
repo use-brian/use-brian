@@ -279,7 +279,7 @@ export type DocumentFlowNode = z.infer<typeof DocumentFlowNodeSchema>
 export const DocumentSectionSchema = z
   .object({
     id: OfficeUuidSchema,
-    page: z.object({ widthPt: z.number().min(144).max(2_000), heightPt: z.number().min(144).max(2_000), marginTopPt: z.number().min(0).max(500), marginRightPt: z.number().min(0).max(500), marginBottomPt: z.number().min(0).max(500), marginLeftPt: z.number().min(0).max(500), orientation: z.enum(['portrait', 'landscape']) }).strict(),
+    page: z.object({ widthPt: z.number().min(144).max(2_000), heightPt: z.number().min(144).max(2_000), marginTopPt: z.number().min(0).max(500), marginRightPt: z.number().min(0).max(500), marginBottomPt: z.number().min(0).max(500), marginLeftPt: z.number().min(0).max(500), headerDistancePt: z.number().min(0).max(500).optional(), footerDistancePt: z.number().min(0).max(500).optional(), orientation: z.enum(['portrait', 'landscape']) }).strict(),
     header: z.array(OfficeRichTextRunSchema).max(1_000),
     footer: z.array(OfficeRichTextRunSchema).max(1_000),
     headerImage: z.object({

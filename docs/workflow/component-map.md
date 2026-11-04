@@ -2,6 +2,7 @@
 
 | COMP tag | doc path | source path | test path |
 |---|---|---|---|
+| office/docx-engine | docs/architecture/office-template-fidelity.md | packages/core/src/office/docx/index.ts; packages/office-model/src/model.ts; packages/office-renderer/src/layout.ts | packages/core/src/office/__tests__/docx-roundtrip.test.ts; packages/core/src/office/__tests__/docx-sections.test.ts |
 | files/tools | docs/workspace-file-scope.md | packages/core/src/workspace-files/tools.ts; packages/core/src/workspace-files/tool-helpers.ts | packages/core/src/workspace-files/__tests__/tools.test.ts; packages/api/src/db/__tests__/workspace-files-mode-admission.integration.test.ts |
 | retrieval/provenance | docs/provenance-lookup.md | packages/api/src/db/provenance-store.ts | packages/api/src/db/__tests__/provenance-store.test.ts; packages/api/src/db/__tests__/workspace-files-mode-admission.integration.test.ts |
 | api/file-derived-admission | docs/plans/complete-organization-cutover.md (source-derived file inheritance) | packages/api/src/workspace-access/file-derived-admission.ts; packages/api/src/db/workspace-files.ts | packages/api/src/db/__tests__/workspace-files-mode-admission.integration.test.ts |
