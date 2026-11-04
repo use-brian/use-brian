@@ -751,7 +751,7 @@ export function WorkflowBoard({
             className={cn(
               "inline-flex h-11 md:h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-medium",
               layoutEditing
-                ? "border-primary bg-primary/10 text-primary"
+                ? "border-interaction bg-interaction/10 text-foreground"
                 : "border-border bg-card text-muted-foreground",
             )}
           >
@@ -819,9 +819,9 @@ export function WorkflowBoard({
               edge.source === "trigger" && redundantTrigger.has(edge.key);
             const deadEdge = unreachable.has(edge.from) || redundantWire;
             const stroke = insertTarget
-              ? "var(--primary)"
+              ? "var(--interaction)"
               : isSelected
-                ? "var(--primary)"
+                ? "var(--interaction)"
                 : activeEdge
                   ? "var(--primary)"
                   : doneEdge && edge.tone === "default"
@@ -896,7 +896,7 @@ export function WorkflowBoard({
             <path
               d={bezierPath(wireDrag.sx, wireDrag.sy, wireDrag.x, wireDrag.y)}
               fill="none"
-              stroke="var(--primary)"
+              stroke="var(--interaction)"
               strokeWidth={2}
               strokeDasharray="6 6"
               strokeOpacity={0.85}
@@ -948,8 +948,8 @@ export function WorkflowBoard({
               <span
                 className={cn(
                   "pointer-events-none absolute z-30 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap",
-                  "rounded-full border border-primary/50 bg-primary/10 px-2 py-0.5",
-                  "text-[10px] font-medium text-primary shadow-sm backdrop-blur",
+                  "rounded-full border border-interaction/50 bg-interaction/10 px-2 py-0.5",
+                  "text-[10px] font-medium text-foreground shadow-sm backdrop-blur",
                 )}
                 style={{ left: mid.x, top: mid.y }}
               >
@@ -1075,9 +1075,9 @@ export function WorkflowBoard({
                   orphan && "border-dashed opacity-75 hover:opacity-100",
                   nodeDrag?.key === node.key && nodeDrag.moved && "z-30 shadow-lg opacity-100",
                   dropTarget
-                    ? "border-primary ring-2 ring-primary/40"
+                    ? "border-interaction ring-2 ring-interaction/40"
                     : selected
-                      ? "border-primary ring-2 ring-primary/30"
+                      ? "border-interaction ring-2 ring-interaction/30"
                       : liveState
                         ? LIVE_NODE_RING[liveState]
                         : "border-border",

@@ -7,12 +7,18 @@ import { Skeleton } from "@/components/skeleton";
 import { useT } from "@/lib/i18n/client";
 import type { WorkflowFull } from "@/lib/api/workflow";
 import { approveWorkflowPublicationConsent, getWorkflowPublicationConsents, revokeWorkflowPublicationConsent } from "@/lib/api/workflow-publication-consent";
-import { invalidateSurfaceCache, seedSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, markSurfaceCacheStale, seedSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { workflowPublicationConsentCacheKey } from "@/lib/surface-prefetch";
 import { WORKFLOW_REFRESH_EVENT, type WorkflowRefreshDetail } from "@/lib/workflow-events";
 
 /** [COMP:app-web/workflow-publication-consent] Metadata only, never editable workflow JSON. */
-export function WorkflowPublicationConsent({ workflow, dirty }: { workflow: WorkflowFull; dirty: boolean }) {
+export function WorkflowPublicationConsent({ workflow, dirty, mode = "settings", stepId, onReview }: {
+  workflow: WorkflowFull;
+  dirty: boolean;
+  mode?: "settings" | "summary";
+  stepId?: string;
+  onReview?: (stepId: string) => void;
+}) {
   const c = useT().workflowPublicationConsent;
   const key = workflowPublicationConsentCacheKey(workflow.workspaceId, workflow.id);
   const resource = useCachedResource(key, () => getWorkflowPublicationConsents(workflow.id));
@@ -33,7 +39,7 @@ export function WorkflowPublicationConsent({ workflow, dirty }: { workflow: Work
     const invalidate = () => {
       generation.current++;
       pending.current?.abort();
-      invalidateSurfaceCache(key);
+      markSurfaceCacheStale(key);
     };
     const onRefresh = (event: Event) => {
       const detail = (event as CustomEvent<WorkflowRefreshDetail>).detail;
@@ -96,31 +102,51 @@ export function WorkflowPublicationConsent({ workflow, dirty }: { workflow: Work
     }
   }
 
-  const stepIds = [...new Set([...(data?.eligibleStepIds ?? []), ...(data?.consents.map(row => row.stepId) ?? [])])];
+  const stepIds = [...new Set([...(data?.eligibleStepIds ?? []), ...(data?.consents.map(row => row.stepId) ?? [])])]
+    .filter(id => stepId === undefined || id === stepId);
+  const needsReview = stepIds.filter(id => data?.eligibleStepIds.includes(id) && !data.consents.some(row =>
+    row.stepId === id && row.active && versionMatches && Date.parse(row.expiresAt) > now));
+  const retry = <Button className="max-sm:min-h-11 shrink-0" variant="outline" disabled={busy || resource.revalidating}
+    onClick={() => { setFailed(false); void resource.refresh(); }}>{c.retry}</Button>;
+
+  // A confirmed empty result is irrelevant here. A missing/failed read is not empty.
+  if (data && !resource.error && !failed && versionMatches && stepIds.length === 0) return null;
+  if (mode === "summary") {
+    if (resource.error || failed) return <div role="status" className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm">
+      <span>{c.unavailableSummary}</span>{retry}
+    </div>;
+    if (data && !versionMatches) return <div role="status" className="flex items-center justify-between gap-2 text-sm"><span>{c.version}</span>{retry}</div>;
+    if (!data || resource.revalidating) return <div role="status" className="text-xs text-muted-foreground">{c.checking}</div>;
+    if (needsReview.length === 0) return null;
+    return <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm">
+      <span>{c.reviewSummary}</span>
+      <Button variant="outline" className="max-sm:min-h-11" onClick={() => onReview?.(needsReview[0])}>{c.review}</Button>
+    </div>;
+  }
   return (
     <section className="space-y-3 rounded-xl border border-border p-4 min-w-0" aria-label={c.title}>
       <h2 className="text-sm font-semibold">{c.title}</h2>
       <p className="text-sm text-muted-foreground">{c.intro}</p>
-      <p className="text-sm text-muted-foreground">{c.warning}</p>
+      <details className="text-sm text-muted-foreground"><summary className="cursor-pointer py-2">{c.sharingDetails}</summary><p>{c.warning}</p></details>
       {resource.loading && <div aria-hidden="true" className="space-y-2"><Skeleton className="h-5 w-full" /><Skeleton className="h-11 w-full" /></div>}
       {(resource.error || failed) ? <p role="alert" className="text-sm text-destructive">{c.error}</p> : null}
       {data && !data.canManage && <p className="text-sm">{c.permission}</p>}
       {dirty && <p className="text-sm">{c.dirty}</p>}
       {data && !versionMatches && <p className="text-sm">{c.version}</p>}
-      {data && stepIds.length === 0 && <p className="text-sm text-muted-foreground">{c.empty}</p>}
+
       {stepIds.map(stepId => {
         const consent = data?.consents.find(row => row.stepId === stepId);
         const step = workflow.definition.steps.find(row => row.id === stepId);
         const delivery = step?.type === "assistant_call" ? step.deliver : undefined;
         const fixed = delivery && "channelId" in delivery ? delivery : undefined;
         const eligible = !!data?.eligibleStepIds.includes(stepId) && !!fixed;
-        const active = consent?.active && versionMatches && Date.parse(consent.expiresAt) > now;
+        const active = !unavailable && !failed && consent?.active && versionMatches && Date.parse(consent.expiresAt) > now;
         return <div key={stepId} className="space-y-2 border-t border-border pt-3 text-sm break-all">
-          <p className="font-medium">{c.step}: {stepId}</p>
+          <p className="font-medium">{c.step}: {step?.description || stepId}</p>
           <p>{c.destination}: {fixed?.channelId ?? consent?.channelId}</p>
           <p>{c.integration}: {fixed?.channelIntegrationId ?? consent?.channelIntegrationId}</p>
           {consent && <>
-            <p>{active ? c.active : c.inactive}</p>
+            <p>{unavailable ? c.checking : active ? c.active : c.inactive}</p>
             <p>{c.approvedAt}: {consent.approvedAt}</p>
             <p>{c.expiresAt}: {consent.expiresAt}</p>
           </>}
@@ -130,7 +156,7 @@ export function WorkflowPublicationConsent({ workflow, dirty }: { workflow: Work
           </div>}
         </div>;
       })}
-      <Button className="max-sm:min-h-11" variant="outline" disabled={busy || resource.revalidating} onClick={() => { setFailed(false); void resource.refresh(); }}>{c.refresh}</Button>
+      {(resource.error || failed || (data && !versionMatches)) && retry}
     </section>
   );
 }

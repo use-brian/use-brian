@@ -7,13 +7,14 @@
  * consolidation §5a). Board-centric, single-mode surface: there is no
  * edit/view split. The centerpiece is the WorkflowBoard, an n8n-style
  * illustration of the trigger + step chain; clicking a board node opens
- * that node's editor below and scrolls to it. The name + description are
+ * that node's contextual inspector. Flow is the default tab; Runs and
+ * Settings keep history and configuration out of the canvas. Name + description are
  * view-styled text that edit in place (`InlineEditableText` — pencil
- * affordance, borderless field on click). "Save changes" is always in the
- * header and stays disabled until the draft actually differs from the
- * saved workflow (there is no Cancel — the draft is the page). "Run now"
+ * affordance, borderless field on click). "Save changes" appears in the
+ * header when the draft differs from the saved workflow; the draft is the page.
+ * "Run now"
  * kicks off a manual run via POST /api/workflows/:id/run, and recent runs
- * stay visible below in a compact list even while editing.
+ * live in the Runs tab, with a compact latest-run summary on Flow.
  *
  * app-web is single-workspace-per-route — assistants + destinations scope
  * to the route workspace (`activeId` from the `useWorkspaces()` adapter,
@@ -40,6 +41,8 @@
 import { use, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Pencil } from "lucide-react";
+import { Tabs } from "@base-ui/react/tabs";
+import { Dialog } from "@base-ui/react/dialog";
 import { BackButton } from "@/components/ui/back-button";
 import { Button } from "@/components/ui/button";
 import { leaseSurfaceContent, surfaceContentRemaining, useSurfaceContentRenewal } from "@/lib/offline/surface-content-cache";
@@ -185,6 +188,13 @@ export default function WorkflowDetailPage({
     () => skills.filter((s) => s.learnedFromWorkflowId === id),
     [skills, id],
   );
+  const [mobileCanvas, setMobileCanvas] = useState(false);
+  const [view, setViewState] = useState<"flow" | "runs" | "settings">("flow");
+  const [settingsOpened, setSettingsOpened] = useState(false);
+  const setView = (next: typeof view) => {
+    setViewState(next);
+    if (next === "settings") setSettingsOpened(true);
+  };
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
@@ -341,20 +351,6 @@ export default function WorkflowDetailPage({
       cancelled = true;
     };
   }, [activeId]);
-
-  // When a board node selects a target, scroll its editor into view once
-  // the editor panel has mounted.
-  useEffect(() => {
-    if (!selectedKey) return;
-    const domId =
-      selectedKey === "trigger" ? "wf-trigger-editor" : `wf-step-${selectedKey}`;
-    const tid = window.setTimeout(() => {
-      document
-        .getElementById(domId)
-        ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    }, 60);
-    return () => window.clearTimeout(tid);
-  }, [selectedKey]);
 
   const refresh = detail.refresh;
 
@@ -682,6 +678,7 @@ export default function WorkflowDetailPage({
       if (first) {
         const target = locateIssueTarget(first, draft.definition.steps);
         if (target === "trigger" || typeof target === "string") {
+          setView("flow");
           setSelectedKey(target);
         }
         // Header errors (name/description) don't change focus — they're
@@ -841,7 +838,7 @@ export default function WorkflowDetailPage({
     // board vanishes. Pinning children to their natural height makes the page
     // scroll as one document, with everything reachable. pb-28 then keeps the
     // footer clear of the fixed "Ask anything" chat dock floated bottom-right.
-    <div className="w-full h-full overflow-y-auto px-4 md:px-6 pt-4 md:pt-6 pb-28 flex flex-col gap-6 [&>*]:shrink-0">
+    <div className="w-full h-full overflow-y-auto px-4 md:px-6 pt-4 md:pt-6 pb-28 flex flex-col gap-4 [&>*]:shrink-0">
       <BackButton href={listHref} label={t.workflowPage.detail.backToList} />
 
       <header className="flex flex-col gap-3">
@@ -871,7 +868,7 @@ export default function WorkflowDetailPage({
                 </span>
               )}
               {workflow.pinned && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary uppercase tracking-wide">
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-foreground uppercase tracking-wide">
                   {t.workflowPage.lifecycle.pinnedBadge}
                 </span>
               )}
@@ -905,38 +902,14 @@ export default function WorkflowDetailPage({
               // 16px below `md` so the in-place field does not zoom iOS (M4);
               // the view-mode copy shares the class so nothing jumps on edit.
               textClassName="text-[16px] md:text-sm text-muted-foreground"
-              className="mt-1"
+              className="mt-1 [&>span:first-child]:line-clamp-1"
             />
             {descriptionIssues.length > 0 && (
               <p className="mt-1 text-xs text-red-600 dark:text-red-400">
                 {descriptionIssues.map((i) => i.message).join("; ")}
               </p>
             )}
-            {/* Origin-aware induction: skills the curator distilled from
-                this workflow's runs (`learned_from` edge, skill → workflow).
-                Each links into the skill editor; the step editor's Skills
-                field below is where one gets attached. */}
-            {learnedSkills.length > 0 && (
-              <div className="mt-2 flex flex-col gap-1">
-                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {t.workflowPage.detail.learnedSkillsTitle}
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {learnedSkills.map((s) => (
-                    <Link
-                      key={s.rowId}
-                      href={`/w/${workspaceId}/brain/skills/${s.rowId}`}
-                      className="text-xs px-2 py-0.5 rounded border border-border hover:bg-muted truncate max-w-[16rem]"
-                    >
-                      {s.name}
-                    </Link>
-                  ))}
-                </div>
-                <span className="text-[11px] text-muted-foreground">
-                  {t.workflowPage.detail.learnedSkillsHint}
-                </span>
-              </div>
-            )}
+
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             {/* Enabled switch (C 9): the one on/off control, in the header
@@ -975,7 +948,7 @@ export default function WorkflowDetailPage({
               className={cn(
                 "inline-flex size-11 sm:size-8 items-center justify-center rounded-md border text-sm disabled:opacity-50 transition-colors",
                 workflow.pinned
-                  ? "border-primary/50 bg-primary/10 text-primary"
+                  ? "border-foreground/30 bg-muted text-foreground"
                   : "border-border text-muted-foreground hover:bg-muted",
               )}
             >
@@ -1002,20 +975,18 @@ export default function WorkflowDetailPage({
             >
               {running ? t.workflowPage.builder.running : t.workflowPage.builder.runNowBtn}
             </button>
-            <button
-              type="button"
-              onClick={onSave}
-              disabled={saving || !dirty}
-              className="inline-flex h-11 sm:h-8 items-center px-3 rounded-md bg-action text-action-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
-            >
-              {saving ? t.workflowPage.builder.saving : t.workflowPage.builder.saveChanges}
-            </button>
+            {dirty || saving ? (
+              <Button type="button" onClick={onSave} disabled={saving}>
+                {saving ? t.workflowPage.builder.saving : t.workflowPage.builder.saveChanges}
+              </Button>
+            ) : <span className="text-xs text-muted-foreground px-2" role="status">{t.workflowPage.detail.saved}</span>}
+
           </div>
         </div>
 
         {dirty && !saving && (
           <div className="text-xs text-amber-600 dark:text-amber-400">
-            {t.workflowPage.builder.unsavedChanges}
+            {t.workflowPage.builder.unsavedChanges}{" · "}{t.workflowPage.detail.runsSavedVersion}
           </div>
         )}
         {runMessage && !liveView && (
@@ -1057,190 +1028,277 @@ export default function WorkflowDetailPage({
         )}
       </header>
 
-      <section className="rounded-xl border border-border bg-card p-4">
-        <div className="mb-3">
-          <h2 className="text-sm font-semibold">{t.contextScope.workflowContextTitle}</h2>
-          <p className="text-xs text-muted-foreground">{t.contextScope.workflowContextDescription}</p>
-        </div>
-        <ContextScopePicker
-          teams={contextTeams}
-          projects={contextProjects}
-          teamId={draft.contextGroupId ?? null}
-          projectId={draft.contextProjectId ?? null}
-          onTeamChange={(contextGroupId) => updateDraft({ contextGroupId })}
-          onProjectChange={(contextProjectId) => updateDraft({ contextProjectId })}
-          disabled={Boolean(draft.managedBy)}
-        />
-      </section>
-
-      {/* Live activity — visible whenever a run is in flight (Run now,
+      <button type="button" onClick={() => setView("settings")}
+        className="-mt-2 flex min-h-11 md:min-h-7 w-fit max-w-full items-center gap-2 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted"
+        aria-label={t.workflowPage.detail.editContext}>
+        <span className="truncate">{draft.contextGroupId ? contextTeams.find(team => team.id === draft.contextGroupId)?.name ?? t.contextScope.team : t.contextScope.general}</span>
+        <span aria-hidden="true">·</span>
+        <span className="truncate">{draft.contextProjectId ? contextProjects.find(project => project.id === draft.contextProjectId)?.name ?? t.contextScope.project : t.contextScope.noProject}</span>
+        <Pencil className="size-3 shrink-0" aria-hidden="true" />
+      </button>
+      <Tabs.Root value={view} onValueChange={value => setView(value as typeof view)} className="flex min-w-0 flex-col gap-4">
+        <Tabs.List className="flex gap-1 border-b border-border" aria-label={t.workflowPage.detail.navigation}>
+          {(["flow", "runs", "settings"] as const).map(tab => (
+            <Tabs.Tab key={tab} value={tab} className="min-h-11 md:min-h-9 px-4 text-sm text-muted-foreground border-b-2 border-transparent hover:bg-muted data-[active]:border-foreground data-[active]:text-foreground data-[active]:font-medium">
+              {t.workflowPage.detail[tab]}
+            </Tabs.Tab>
+          ))}
+        </Tabs.List>
+        <WorkflowPublicationConsent workflow={workflow} dirty={dirty || saving} mode="summary" onReview={stepId => { setView("flow"); setSelectedKey(stepId); }} />
+        <Tabs.Panel value="flow" className="flex min-w-0 flex-col gap-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+            <button type="button" onClick={() => setView("runs")} className="min-h-11 md:min-h-8 rounded-md px-2 text-left hover:bg-muted">
+              {runs === null ? t.workflowPage.detail.runStatusUnknown : runs.length === 0 ? t.workflowPage.builder.noRunsYet : <>
+                {t.workflowPage.detail.latestRun}{": "}<span className="font-medium text-foreground">{t.workflowPage.builder.runStatus[runs[0].status]}</span>{" · "}
+                <time dateTime={runs[0].startedAt}>{new Date(runs[0].startedAt).toLocaleString()}</time>
+              </>}
+            </button>
+            {!draft.managedBy && !draft.definition.taskIntake && <Button type="button" variant="outline" onClick={addStep}>{t.workflowPage.builder.addStepBtn}</Button>}
+          </div>
+          {draft.definition.taskIntake && <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3 text-sm">
+            <span>{t.workflowPage.detail.routineHandoff}</span>
+            <Button type="button" variant="outline" onClick={() => setView("settings")}>{t.workflowPage.detail.configureRoutine}</Button>
+          </div>}
+          {/* Live activity — visible whenever a run is in flight (Run now,
           schedule, webhook or event), so the user sees which step the
           assistant is working on instead of a silent board. A run paused on
           an approval resolves right here (Approve / Reject in the banner). */}
-      {liveView && (
-        <LiveRunBanner
-          workspaceId={workspaceId}
-          workflowId={workflow.id}
-          view={liveView}
-          definition={workflow.definition}
-          assistants={assistants}
-          onApprovalResolved={pollNow}
-        />
-      )}
+          {liveView && (
+            <LiveRunBanner
+              workspaceId={workspaceId}
+              workflowId={workflow.id}
+              view={liveView}
+              definition={workflow.definition}
+              assistants={assistants}
+              onApprovalResolved={pollNow}
+            />
+          )}
 
-      <WorkflowPublicationConsent workflow={workflow} dirty={dirty || saving} />
-      {!workflow.managedBy && (draft.trigger.kind==='event' || !!draft.definition.taskIntake) && <RoutineIntakeEditor workflow={workflow} draft={draft}
-        executorChoices={(assistantRows ?? []).map(a=>({value:`assistant:${a.id}`,label:a.name}))}
-        onChange={definition=>updateDraft({definition})}
-        onApplied={()=>{void getWorkflowFull(workflow.id).then(saved=>{if(saved) adoptServerRow(saved);});}} />}
+          {/* Phones start with a readable step list; the complete graph remains reachable. */}
+          <div className="md:hidden space-y-2">
+            <div className="overflow-hidden rounded-xl border border-border divide-y divide-border">
+              <button type="button" data-workflow-mobile-step="trigger" onClick={selectTrigger} className="flex min-h-11 md:min-h-8 w-full items-center gap-3 p-3 text-left text-sm hover:bg-muted">
+                <span className="text-xs text-muted-foreground">{t.workflowPage.board.triggerLabel}</span>
+                <span>{t.workflowPage.triggerShort[draft.trigger.kind]}</span>
+              </button>
+              {draft.definition.steps.map(step => <button key={step.id} type="button" data-workflow-mobile-step={step.id}
+                onClick={() => selectStep(step.id)} className="flex min-h-11 md:min-h-8 w-full items-center justify-between gap-3 p-3 text-left text-sm hover:bg-muted">
+                <span className="min-w-0 break-words">{step.description || step.id}</span>
+                <Pencil className="size-3 shrink-0 text-muted-foreground" aria-hidden="true" />
+              </button>)}
+            </div>
+            <Button type="button" variant="ghost" aria-expanded={mobileCanvas} onClick={() => setMobileCanvas(value => !value)}>
+              {mobileCanvas ? t.workflowPage.detail.hideCanvas : t.workflowPage.detail.showCanvas}
+            </Button>
+          </div>
+          <div className={cn("min-w-0", !mobileCanvas && "hidden md:block")}>
+            <WorkflowBoard
+              definition={draft.definition}
+              trigger={draft.trigger}
+              assistants={assistants}
+              pages={pages}
+              selectedKey={selectedKey}
+              live={liveView}
+              onSelectStep={selectStep}
+              onSelectTrigger={selectTrigger}
+              onRemoveStep={commitStepRemoval}
+              onDefinitionChange={updateDefinition}
+              editable={!draft.managedBy}
+            />
 
-      {/* Board — the n8n-style illustration. Always visible; reflects the
-          live draft. Clicking a node opens its editor. */}
-      <WorkflowBoard
-        definition={draft.definition}
-        trigger={draft.trigger}
-        assistants={assistants}
-        pages={pages}
-        selectedKey={selectedKey}
-        live={liveView}
-        onSelectStep={selectStep}
-        onSelectTrigger={selectTrigger}
-        onRemoveStep={commitStepRemoval}
-        onDefinitionChange={updateDefinition}
-        editable={!draft.managedBy}
-      />
+          </div>
+        </Tabs.Panel>
+        <Tabs.Panel value="runs" className="min-w-0">
+          {/* Full history is separate from the flow and its editable draft. */}
+          <RunHistory
+            workspaceId={workspaceId}
+            workflowId={workflow.id}
+            runs={runs}
+          />
 
-      {/* Reality check — the ACTUAL scheduled-trigger rows firing this
+        </Tabs.Panel>
+        <Tabs.Panel value="settings" keepMounted className="flex min-w-0 flex-col gap-5 max-w-4xl">
+          {settingsOpened && <>
+            <section className="rounded-xl border border-border bg-card p-4">
+              <div className="mb-3">
+                <h2 className="text-sm font-semibold">{t.contextScope.workflowContextTitle}</h2>
+                <p className="text-xs text-muted-foreground">{t.contextScope.workflowContextDescription}</p>
+              </div>
+              <ContextScopePicker
+                teams={contextTeams}
+                projects={contextProjects}
+                teamId={draft.contextGroupId ?? null}
+                projectId={draft.contextProjectId ?? null}
+                onTeamChange={(contextGroupId) => updateDraft({ contextGroupId })}
+                onProjectChange={(contextProjectId) => updateDraft({ contextProjectId })}
+                disabled={Boolean(draft.managedBy)}
+              />
+            </section>
+
+            <WorkflowPublicationConsent workflow={workflow} dirty={dirty || saving} />
+            {!workflow.managedBy && (draft.trigger.kind === 'event' || !!draft.definition.taskIntake) && <RoutineIntakeEditor workflow={workflow} draft={draft}
+              executorChoices={(assistantRows ?? []).map(a => ({ value: `assistant:${a.id}`, label: a.name }))}
+              onChange={definition => updateDraft({ definition })}
+              onApplied={() => { void getWorkflowFull(workflow.id).then(saved => { if (saved) adoptServerRow(saved); }); }} />}
+
+            {/* Explicit approval reviewer default (approval-review.md): an
+          assignment the person makes, never a definition field. */}
+            <WorkflowReviewerSetting workspaceId={workspaceId} workflowId={workflow.id} />
+
+            {/* Origin-aware induction: skills the curator distilled from
+                this workflow's runs (`learned_from` edge, skill → workflow).
+                Each links into the skill editor; the step editor's Skills
+                field below is where one gets attached. */}
+            {learnedSkills.length > 0 && (
+              <div className="mt-2 flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {t.workflowPage.detail.learnedSkillsTitle}
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {learnedSkills.map((s) => (
+                    <Link
+                      key={s.rowId}
+                      href={`/w/${workspaceId}/brain/skills/${s.rowId}`}
+                      className="text-xs px-2 py-0.5 rounded border border-border hover:bg-muted truncate max-w-[16rem]"
+                    >
+                      {s.name}
+                    </Link>
+                  ))}
+                </div>
+                <span className="text-[11px] text-muted-foreground">
+                  {t.workflowPage.detail.learnedSkillsHint}
+                </span>
+              </div>
+            )}
+            {/* Footer actions. Enable / Disable moved into the header switch. */}
+            <div className="flex items-center justify-end pt-2 border-t border-border">
+              <button
+                type="button"
+                onClick={onDelete}
+                className="inline-flex h-11 md:h-7 items-center px-2 text-xs text-red-600 dark:text-red-400 hover:underline"
+              >
+                {t.workflowPage.builder.deleteBtn}
+              </button>
+            </div>
+          </>}
+        </Tabs.Panel>
+      </Tabs.Root>
+      <Dialog.Root open={selectedKey !== null} onOpenChange={open => { if (!open) setSelectedKey(null); }}>
+        <Dialog.Portal>
+          <Dialog.Backdrop className="fixed inset-0 z-50 bg-black/25" />
+          <Dialog.Popup className="fixed inset-y-0 right-0 z-50 flex h-dvh w-full max-w-[min(960px,100vw)] flex-col border-l border-border bg-background shadow-xl" aria-describedby={undefined}>
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
+              <Dialog.Title className="text-sm font-semibold">{selectedKey === "trigger" ? t.workflowPage.board.triggerLabel : t.workflowPage.detail.stepDetails}</Dialog.Title>
+              <div className="flex items-center gap-2">
+                {dirty && <Button type="button" onClick={onSave} disabled={saving}>{saving ? t.workflowPage.builder.saving : t.workflowPage.builder.saveChanges}</Button>}
+                <Dialog.Close render={<Button type="button" variant="outline" />}>{t.workflowPage.detail.closeInspector}</Dialog.Close>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-6 space-y-4">
+              {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+              {selectedKey && (
+                <>
+                  {selectedKey === "trigger" && (
+                    <div
+                      id="wf-trigger-editor"
+                      className={cn(
+                        triggerIssues.length > 0 &&
+                        "rounded-md ring-1 ring-red-500/60 ring-offset-2 ring-offset-background",
+                      )}
+                    >
+                      {triggerIssues.length > 0 && (
+                        <ul className="mb-2 text-xs text-red-600 dark:text-red-400 list-disc pl-5 space-y-0.5">
+                          {triggerIssues.map((i, idx) => (
+                            <li key={idx}>{i.message}</li>
+                          ))}
+                        </ul>
+                      )}
+                      <TriggerEditor
+                        workflowId={workflow.id}
+                        workspaceId={workflow.workspaceId}
+                        trigger={draft.trigger}
+                        webhookSlug={draft.webhookSlug}
+                        webhookSecret={draft.webhookSecret}
+                        onChange={onSaveTrigger}
+                        onRotateWebhook={onRotateWebhook}
+                        disabled={saving || Boolean(draft.managedBy)}
+                      />
+                    </div>
+                  )}
+
+                  {selectedStep && (
+                    <div
+                      key={selectedStep.id}
+                      id={`wf-step-${selectedStep.id}`}
+                      className={cn(
+                        selectedStepIssues.length > 0 &&
+                        "rounded-md ring-1 ring-red-500/60 ring-offset-2 ring-offset-background",
+                      )}
+                    >
+                      {selectedStepIssues.length > 0 && (
+                        <ul className="mb-2 text-xs text-red-600 dark:text-red-400 list-disc pl-5 space-y-0.5">
+                          {selectedStepIssues.map((i, idx) => (
+                            <li key={idx}>
+                              <span className="font-mono text-[10px] text-red-500/80 mr-1">
+                                {i.path.slice(3).join(".") || "step"}
+                              </span>
+                              {i.message}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <StepEditor
+                        index={selectedStepIdx}
+                        total={draft.definition.steps.length}
+                        step={selectedStep}
+                        assistants={assistants}
+                        destinations={destinations}
+                        channelOptions={channelOptions}
+                        slackChannels={slackChannels}
+                        pages={pages}
+                        blueprints={blueprints}
+                        skills={skills}
+                        toolGroups={toolGroups}
+                        steps={draft.definition.steps}
+                        onChange={(next) => updateStep(selectedStepIdx, next)}
+                        onMoveUp={() => moveStep(selectedStepIdx, -1)}
+                        onMoveDown={() => moveStep(selectedStepIdx, 1)}
+                        onRemove={() => removeStepById(selectedStep.id)}
+                        onConnect={
+                          draft.managedBy
+                            ? undefined
+                            : (target, port) => connectStep(selectedStep.id, target, port)
+                        }
+                        disabled={saving || Boolean(draft.managedBy)}
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+              {selectedKey === "trigger" && <>
+                {/* Reality check — the ACTUAL scheduled-trigger rows firing this
           workflow (any member's), with a drift warning when they disagree
           with the configured trigger. Compares against the SAVED trigger,
           not the in-edit draft. */}
-      {workflow.triggerJobs && workflow.triggerJobs.length > 0 && (
-        <TriggerJobsList trigger={workflow.trigger} jobs={workflow.triggerJobs} />
-      )}
+                {workflow.triggerJobs && workflow.triggerJobs.length > 0 && (
+                  <TriggerJobsList trigger={workflow.trigger} jobs={workflow.triggerJobs} />
+                )}
 
-      {/* Page-action buttons that fire this workflow (mig 321) — the second
+                {/* Page-action buttons that fire this workflow (mig 321) — the second
           honesty block: "shows Manual but runs from a button" must be
           visible here, same discipline as the trigger-jobs reality check. */}
-      {workflow.buttonBindings && workflow.buttonBindings.length > 0 && (
-        <ButtonBindingsList bindings={workflow.buttonBindings} />
-      )}
+                {workflow.buttonBindings && workflow.buttonBindings.length > 0 && (
+                  <ButtonBindingsList bindings={workflow.buttonBindings} />
+                )}
 
-      {/* Explicit approval reviewer default (approval-review.md): an
-          assignment the person makes, never a definition field. */}
-      <WorkflowReviewerSetting workspaceId={workspaceId} workflowId={workflow.id} />
-
-      {/* Editor panel — always live (no edit mode). Shows only the editor
-          for the node focused on the board (the trigger or a single step);
-          nothing selected keeps the page at board + runs. */}
-      <div className="flex flex-col gap-3">
-        <div className="flex justify-end">
-          <button
-            type="button"
-            onClick={addStep}
-            className="inline-flex h-11 sm:h-7 items-center px-3 text-xs rounded border border-border hover:bg-muted"
-          >
-            {t.workflowPage.builder.addStepBtn}
-          </button>
-        </div>
-
-        {selectedKey && (
-          <>
-          {selectedKey === "trigger" && (
-            <div
-              id="wf-trigger-editor"
-              className={cn(
-                triggerIssues.length > 0 &&
-                  "rounded-md ring-1 ring-red-500/60 ring-offset-2 ring-offset-background",
-              )}
-            >
-              {triggerIssues.length > 0 && (
-                <ul className="mb-2 text-xs text-red-600 dark:text-red-400 list-disc pl-5 space-y-0.5">
-                  {triggerIssues.map((i, idx) => (
-                    <li key={idx}>{i.message}</li>
-                  ))}
-                </ul>
-              )}
-              <TriggerEditor
-                workflowId={workflow.id}
-                workspaceId={workflow.workspaceId}
-                trigger={draft.trigger}
-                webhookSlug={draft.webhookSlug}
-                webhookSecret={draft.webhookSecret}
-                onChange={onSaveTrigger}
-                onRotateWebhook={onRotateWebhook}
-                disabled={saving}
-              />
+                {!workflow.managedBy && (draft.trigger.kind === "event" || !!draft.definition.taskIntake) && <Button type="button" variant="outline" onClick={() => { setSelectedKey(null); setView("settings"); }}>{t.workflowPage.detail.configureRoutine}</Button>}
+              </>}
+              {selectedStep && <WorkflowPublicationConsent workflow={workflow} dirty={dirty || saving} stepId={selectedStep.id} />}
             </div>
-          )}
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog.Root>
 
-          {selectedStep && (
-            <div
-              key={selectedStep.id}
-              id={`wf-step-${selectedStep.id}`}
-              className={cn(
-                selectedStepIssues.length > 0 &&
-                  "rounded-md ring-1 ring-red-500/60 ring-offset-2 ring-offset-background",
-              )}
-            >
-              {selectedStepIssues.length > 0 && (
-                <ul className="mb-2 text-xs text-red-600 dark:text-red-400 list-disc pl-5 space-y-0.5">
-                  {selectedStepIssues.map((i, idx) => (
-                    <li key={idx}>
-                      <span className="font-mono text-[10px] text-red-500/80 mr-1">
-                        {i.path.slice(3).join(".") || "step"}
-                      </span>
-                      {i.message}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <StepEditor
-                index={selectedStepIdx}
-                total={draft.definition.steps.length}
-                step={selectedStep}
-                assistants={assistants}
-                destinations={destinations}
-                channelOptions={channelOptions}
-                slackChannels={slackChannels}
-                pages={pages}
-                blueprints={blueprints}
-                skills={skills}
-                toolGroups={toolGroups}
-                steps={draft.definition.steps}
-                onChange={(next) => updateStep(selectedStepIdx, next)}
-                onMoveUp={() => moveStep(selectedStepIdx, -1)}
-                onMoveDown={() => moveStep(selectedStepIdx, 1)}
-                onRemove={() => removeStepById(selectedStep.id)}
-                onConnect={
-                  draft.managedBy
-                    ? undefined
-                    : (target, port) => connectStep(selectedStep.id, target, port)
-                }
-                disabled={saving}
-              />
-            </div>
-          )}
-          </>
-        )}
-      </div>
-
-      {/* Recent runs — always visible (compact), even mid-edit. */}
-      <RunHistory
-        workspaceId={workspaceId}
-        workflowId={workflow.id}
-        runs={runs}
-      />
-
-      {/* Footer actions. Enable / Disable moved into the header switch. */}
-      <div className="flex items-center justify-end pt-2 border-t border-border">
-        <button
-          type="button"
-          onClick={onDelete}
-          className="inline-flex h-11 sm:h-7 items-center px-2 text-xs text-red-600 dark:text-red-400 hover:underline"
-        >
-          {t.workflowPage.builder.deleteBtn}
-        </button>
-      </div>
     </div>
   );
 }
@@ -1265,7 +1323,7 @@ function WorkflowDetailEntrySkeleton({
 }) {
   return (
     <div
-      className="w-full h-full overflow-y-auto px-4 md:px-6 pt-4 md:pt-6 pb-28 flex flex-col gap-6 [&>*]:shrink-0 animate-fade-in"
+      className="w-full h-full overflow-y-auto px-4 md:px-6 pt-4 md:pt-6 pb-28 flex flex-col gap-4 [&>*]:shrink-0 animate-fade-in"
       data-testid="workflow-detail-entry"
     >
       <BackButton href={listHref} label={backLabel} />
@@ -1431,7 +1489,7 @@ function InlineEditableText({
       type="button"
       onClick={() => setEditing(true)}
       aria-label={editLabel}
-      title={editLabel}
+      title={multiline && value ? value : editLabel}
       className={cn(
         "group flex gap-1.5 min-w-0 max-w-full text-left rounded-sm",
         multiline ? "items-start" : "items-center",

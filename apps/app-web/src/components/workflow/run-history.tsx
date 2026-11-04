@@ -4,8 +4,8 @@
  * Recent runs of a workflow (app-web) — compact table with clickable
  * rows that drill into the run-detail page for a step-by-step trail.
  * Deliberately dense (small rows, capped height with internal scroll):
- * since the detail page went single-mode the history is ALWAYS on screen,
- * sharing it with the board and an open step editor.
+ * the detail page presents history in its Runs tab, with a compact
+ * latest-run summary on Flow.
  *
  * Ported from `apps/web/src/components/workflow/run-history.tsx` (app
  * consolidation §5a). app-web is workspace-scoped at `/w/[workspaceId]/…`,
@@ -22,6 +22,7 @@ import type { Dictionary } from "@/lib/i18n";
 import type { WorkflowRunSummary } from "@/lib/api/workflow";
 import { elapsedLabel, isTerminalRunStatus } from "@/lib/workflow-live-run";
 import { cn } from "@/lib/utils";
+import { Skeleton } from "@/components/skeleton";
 import { RunIdCopyButton } from "./run-id-copy-button";
 
 type Props = {
@@ -38,7 +39,7 @@ export function RunHistory({ workspaceId, workflowId, runs }: Props) {
         {t.workflowPage.builder.runsHeading}
       </div>
       {runs === null ? (
-        <div className="px-3 py-2 text-xs text-muted-foreground">…</div>
+        <div className="p-3"><Skeleton className="h-5 w-full" /></div>
       ) : runs.length === 0 ? (
         <div className="px-3 py-2 text-xs text-muted-foreground">
           {t.workflowPage.builder.noRunsYet}
@@ -57,7 +58,7 @@ export function RunHistory({ workspaceId, workflowId, runs }: Props) {
             >
               <Link
                 href={`/w/${workspaceId}/workflow/${workflowId}/runs/${r.id}`}
-                className="flex-1 min-w-0 px-3 py-1.5 flex items-center gap-2.5 text-xs"
+                className="flex-1 min-w-0 min-h-11 md:min-h-0 px-3 py-1.5 flex items-center gap-2.5 text-xs"
                 aria-label={t.workflowPage.builder.runsOpenRun}
               >
                 <StatusPill status={r.status} t={t} />

@@ -1,14 +1,28 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { approveWorkflowPublicationConsent, getWorkflowPublicationConsents, revokeWorkflowPublicationConsent } from "../api/workflow-publication-consent";
 const fetcher = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: fetcher }));
 vi.mock("@/lib/runtime-public-config", () => ({ publicRuntimeConfig: () => ({ apiUrl: "https://api.example" }) }));
 const metadata = { canManage: true, workflowUpdatedAt: "version", consentVersion: "12", eligibleStepIds: ["step"], consents: [] };
 beforeEach(() => { fetcher.mockReset(); fetcher.mockResolvedValue({ ok: true, json: async () => metadata }); });
+afterEach(() => vi.useRealTimers());
 describe("[COMP:app-web/workflow-publication-consent] API contract", () => {
   it("reads permissions from the dedicated endpoint", async () => {
     expect(await getWorkflowPublicationConsents("wf/a")).toEqual(metadata);
-    expect(fetcher).toHaveBeenCalledWith("https://api.example/api/workflows/wf%2Fa/publication-consents", undefined);
+    expect(fetcher).toHaveBeenCalledWith("https://api.example/api/workflows/wf%2Fa/publication-consents", { signal: expect.any(AbortSignal) });
+  });
+  it.each(["request", "body"])("bounds a stalled %s read and allows a fresh retry", async stage => {
+    vi.useFakeTimers();
+    const never = new Promise<never>(() => {});
+    fetcher.mockImplementation(() => stage === "request" ? never : Promise.resolve({ ok: true, json: () => never }));
+    const first = getWorkflowPublicationConsents("wf");
+    const rejected = expect(first).rejects.toThrow("publication_consent_failed");
+    await vi.advanceTimersByTimeAsync(12_000);
+    await rejected;
+    expect(fetcher.mock.calls[0][1].signal.aborted).toBe(true);
+    fetcher.mockResolvedValue({ ok: true, json: async () => metadata });
+    expect(await getWorkflowPublicationConsents("wf")).toEqual(metadata);
+    expect(vi.getTimerCount()).toBe(0);
   });
   it("posts only acknowledgment and the saved workflow and consent versions, never definition or private context", async () => {
     expect(await approveWorkflowPublicationConsent("wf/a", "step/b", "version", "12")).toEqual(metadata);

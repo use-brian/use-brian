@@ -64,6 +64,7 @@ vi.mock("@/contexts/workspace-context", () => ({
 // Publication authority has its own component tests; keep this cache test offline.
 vi.mock("@/components/workflow/publication-consent", () => ({ WorkflowPublicationConsent: () => null }));
 
+vi.mock("@/components/workflow/workflow-reviewer-setting", () => ({ WorkflowReviewerSetting: () => <div data-testid="reviewer-setting" /> }));
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: vi.fn() }));
 vi.mock("@/components/context/context-scope-picker", () => ({
   ContextScopePicker: () => <div data-testid="context-scope" />,
@@ -196,6 +197,43 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/workflow-detail-cache] detail page", () => {
+  it("opens on Flow, moves configuration into Settings, and preserves a draft across tabs", async () => {
+    await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);
+    api.getWorkflowFull.mockImplementation(pending);
+    await render();
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe(en.workflowPage.detail.flow);
+    expect(container.querySelector('[data-node-key="__trigger"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="context-scope"]')).toBeNull();
+    expect(container.querySelector('[data-testid="reviewer-setting"]')).toBeNull();
+    expect(container.textContent).toContain(en.workflowPage.detail.saved);
+    const name = await typeName("Draft name");
+    await act(async () => name.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+    const tab = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(node => node.textContent === label)!;
+    await act(async () => tab(en.workflowPage.detail.settings).click());
+    expect(container.querySelector('[data-testid="context-scope"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="reviewer-setting"]')).not.toBeNull();
+    expect(container.querySelector('[data-node-key="__trigger"]')).toBeNull();
+    await act(async () => tab(en.workflowPage.detail.runs).click());
+    expect(container.textContent).toContain(en.workflowPage.builder.runsHeading);
+    await act(async () => tab(en.workflowPage.detail.flow).click());
+    expect(container.textContent).toContain("Draft name");
+    expect(container.textContent).toContain(en.workflowPage.detail.runsSavedVersion);
+    expect(api.updateWorkflow).not.toHaveBeenCalled();
+  });
+  it("opens a contextual trigger inspector and closes it without saving", async () => {
+    await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);
+    api.getWorkflowFull.mockImplementation(pending);
+    await render();
+    await act(async () => container.querySelector<HTMLElement>('[data-node-key="__trigger"]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await settle();
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.querySelector('#wf-trigger-editor')).not.toBeNull();
+    const close = [...dialog!.querySelectorAll<HTMLButtonElement>('button')].find(node => node.textContent === en.workflowPage.detail.closeInspector)!;
+    await act(async () => close.click());
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(api.updateWorkflow).not.toHaveBeenCalled();
+  });
   it("warns to check history without retrying when a completed result loses access", async () => {
     await loadSurfaceCache(workflowDetailCacheKey("w1", "wf-1"), async () => WF);
     api.getWorkflowFull.mockImplementation(pending);
