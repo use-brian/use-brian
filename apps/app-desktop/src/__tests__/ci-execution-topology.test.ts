@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -17,7 +18,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       workflow.jobs['app-web-tests'],
       workflow.jobs['heavyweight-tests'],
       workflow.jobs['remaining-tests'],
-      workflow.jobs['embedded-database-tests'],
+      workflow.jobs['ci-scope'],
       workflow.jobs['department-isolation-shards'],
       workflow.jobs['department-isolation'],
     ];
@@ -71,18 +72,25 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(nodeTests.run).toContain('scripts/testing/embedded-database-tests.mjs ${{ matrix.shard }}');
     expect(embedded.steps.find((step: { name?: string }) => step.name === 'Runtime unit tests').if).toBe('matrix.shard == 3');
     const acceptance = workflow.jobs['department-isolation-shards'];
-    expect(acceptance.strategy.matrix.shard).toEqual([1, 2, 3, 4]);
+    expect(acceptance.strategy.matrix.shard).toContain('fromJSON(needs.ci-scope.outputs.shards)');
+    expect(workflow.jobs['embedded-current-tests'].if).toBe("needs.ci-scope.outputs.historical == 'false'");
+    expect(embedded.if).toBe("needs.ci-scope.outputs.historical == 'true'");
+    expect(workflow.on.schedule).toHaveLength(1);
+    expect(workflow.on).toHaveProperty('workflow_dispatch');
+    expect(workflow.concurrency.group).toContain('nightly');
     expect(acceptance.strategy['fail-fast']).toBe(false);
     expect(acceptance.steps.find((step: { name?: string }) => step.name === 'Run no-credential acceptance').run)
-      .toContain('--shard ${{ matrix.shard }}/4');
+      .toContain('--shard ${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }}');
     expect(acceptance.steps.find((step: { uses?: string }) => step.uses === 'actions/upload-artifact@v4').with.name)
       .toContain('${{ matrix.shard }}');
     const aggregate = workflow.jobs['department-isolation'];
-    expect(aggregate.needs).toEqual(['department-isolation-shards']);
+    expect(aggregate.needs).toEqual(['ci-scope', 'department-isolation-shards']);
     expect(aggregate.if).toContain('always()');
     expect(aggregate.steps.find((step: { name?: string }) => step.name === 'Verify complete acceptance evidence').run)
       .toContain('--merge');
     expect(workflow.jobs['build-test'].needs).toEqual([
+      'ci-scope',
+      'embedded-current-tests',
       'build-typecheck',
       'api-tests',
       'app-web-tests',
@@ -92,6 +100,24 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       'department-isolation',
     ]);
     expect(workflow.jobs['build-test'].if).toContain('always()');
+  });
+
+  it('fails the aggregate for every unsuccessful selected lane and unknown selection', () => {
+    const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
+    const script = workflow.jobs['build-test'].steps[0].run;
+    const base = Object.fromEntries(Object.keys(workflow.jobs['build-test'].steps[0].env).map(key => [key, 'success']));
+    for (const historical of ['true', 'false']) {
+      const env: Record<string, string | undefined> = { ...process.env, ...base, HISTORICAL: historical,
+        EMBEDDED_CURRENT_RESULT: historical === 'true' ? 'skipped' : 'success',
+        EMBEDDED_DATABASE_TESTS_RESULT: historical === 'true' ? 'success' : 'skipped' };
+      expect(spawnSync('bash', ['-c', script], { env }).status).toBe(0);
+      for (const key of Object.keys(base).filter(key => key !== 'HISTORICAL' && env[key] === 'success')) {
+        for (const result of ['failure', 'cancelled', 'skipped', '']) {
+          expect(spawnSync('bash', ['-c', script], { env: { ...env, [key]: result } }).status).not.toBe(0);
+        }
+      }
+      expect(spawnSync('bash', ['-c', script], { env: { ...env, HISTORICAL: '' } }).status).not.toBe(0);
+    }
   });
 
   it('bounds internal Vitest fan-out for subprocess and socket-heavy suites', () => {

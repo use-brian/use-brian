@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
+import { tmpdir } from 'node:os'
 import { isDeepStrictEqual } from 'node:util'
 import { createAcceptanceReport, mergeAcceptanceReports, parseShard, suitesForShard } from './testing/department-isolation-report.mjs'
 import {
@@ -19,15 +20,18 @@ let pgBin = process.env.BRIAN_TEST_PG_BIN
 let foundation = false
 let reportPath
 let shard = null
+let profile = 'full'
 let mergeDirectory
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--foundation') foundation = true
+  if (args[i] === '--profile' && args[i + 1]) profile = args[++i]
+  else if (args[i] === '--foundation') foundation = true
   else if (args[i] === '--shard' && args[i + 1]) shard = parseShard(args[++i])
   else if (args[i] === '--merge' && args[i + 1]) mergeDirectory = args[++i]
   else if (args[i] === '--pg-bin' && args[i + 1]) pgBin = args[++i]
   else if (args[i] === '--report' && args[i + 1]) reportPath = args[++i]
   else throw new Error(`Unknown or incomplete option: ${args[i]}`)
 }
+suitesForShard(shard, profile)
 if ((foundation && (shard || mergeDirectory)) || (shard && mergeDirectory)) throw new Error('--foundation, --shard and --merge are mutually exclusive')
 if (reportPath && !isAbsolute(reportPath)) throw new Error('--report must be an absolute JSON path')
 if (!foundation && !reportPath) throw new Error('Full mode requires --report <absolute-json-path>')
@@ -37,6 +41,8 @@ const relTest = (suite, testFile) => join(suite.packageDir, testFile)
 const relevantPaths = new Set([
   'scripts/test-department-isolation.mjs',
   'scripts/testing/department-isolation-report.mjs',
+  'scripts/crm/local-fixture.mjs',
+  'apps/api/src/__tests__/prepared-pglite.ts',
   'packages/shared/src/department-isolation-coverage.ts',
   ...DEPARTMENT_ISOLATION_BOUNDARIES.flatMap(boundary => boundary.sourcePaths),
   ...DEPARTMENT_ISOLATION_SUITES.flatMap(suite => suite.testFiles.map(file => relTest(suite,file))),
@@ -93,6 +99,10 @@ function flattenNodeAssertions(report,suite) {
 
 
 async function migrationRevision(url) {
+  if (!url) {
+    const rows = (await readdir(join(root, 'packages/api/migrations'))).filter(name => name.endsWith('.sql')).sort()
+    return { latest: rows.at(-1), count: rows.length, ledgerHash: sha256(rows.join('\n')) }
+  }
   const client=new pg.Client({connectionString:url})
   await client.connect()
   try {
@@ -102,9 +112,11 @@ async function migrationRevision(url) {
 }
 
 async function currentMetadata(env) {
+  const migrations = (await readdir(join(root, 'packages/api/migrations')))
+    .filter(name => name.endsWith('.sql')).map(name => `packages/api/migrations/${name}`)
   return {
     revision: (await runCommand('git', ['rev-parse', 'HEAD'], { cwd: root, env })).trim(),
-    sourceHashes: await hashes(relevantPaths), dirtySourceHashes: await dirtySourceHashes(env),
+    sourceHashes: await hashes(new Set([...relevantPaths, ...migrations])), dirtySourceHashes: await dirtySourceHashes(env),
   }
 }
 
@@ -116,7 +128,7 @@ async function saveReport(report) {
     await mkdir(dirname(reportPath), { recursive: true })
     await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 })
   }
-  console.log(JSON.stringify({ mode: report.mode, revision: report.revision, report: reportPath ?? null,
+  console.log(JSON.stringify({ mode: report.mode, profile: report.profile, profileAccepted: report.profileAccepted, revision: report.revision, report: reportPath ?? null,
     ...report.counts, fullMatrixAccepted: report.fullMatrixAccepted }))
 }
 
@@ -128,24 +140,29 @@ async function run() {
   if (mergeDirectory) {
     const paths = (await readdir(mergeDirectory)).filter(path => /^department-isolation-\d+\.json$/.test(path)).sort()
     const reports = await Promise.all(paths.map(async path => JSON.parse(await readFile(join(mergeDirectory, path), 'utf8'))))
-    const report = mergeAcceptanceReports(reports, metadata)
+    const report = mergeAcceptanceReports(reports, metadata, profile)
     await saveReport(report)
-    if (!report.fullMatrixAccepted) throw new Error(`Department isolation acceptance failed; report: ${reportPath}`)
+    if (!report.profileAccepted) throw new Error(`Department isolation acceptance failed; report: ${reportPath}`)
     return
   }
-  const fixture = await createLocalFixture({ pgBin })
+  const selectedSuites=foundation
+    ? DEPARTMENT_ISOLATION_SUITES.filter(suite=>!['review-lifecycle','ui','compatibility'].includes(suite.id))
+    : suitesForShard(shard, profile)
+  const native = selectedSuites.some(suite => suite.packageDir !== 'apps/api')
+  const fixture = native ? await createLocalFixture({ pgBin, prepareTemplate: true }) : {
+    directory: await mkdtemp(join(tmpdir(), 'brian-isolation-report-')), env: {},
+    async dispose() { await rm(this.directory, { recursive: true, force: true }) },
+  }
   try {
     if(reportPath&&resolve(reportPath).startsWith(`${resolve(fixture.directory)}/`))throw new Error('--report must be outside the disposable fixture')
     const reports = join(fixture.directory, 'reports')
     await mkdir(reports)
     const runtime=cleanRuntimeEnvironment(process.env)
     const env = {
-      ...runtime,...fixture.env,CONTEXT_SCOPE_TEST_DATABASE_URL:fixture.adminUrl,
+      ...runtime,...fixture.env,...(fixture.adminUrl ? { CONTEXT_SCOPE_TEST_DATABASE_URL:fixture.adminUrl } : {}),
       CI:'true',GEMINI_API_KEY:'',OPENAI_API_KEY:'',ANTHROPIC_API_KEY:'',BRIAN_TEST_NO_PAID:'1',
     }
-    const selectedSuites=foundation
-      ? DEPARTMENT_ISOLATION_SUITES.filter(suite=>!['review-lifecycle','ui','compatibility'].includes(suite.id))
-      : suitesForShard(shard)
+    if (native) await runCommand('node', ['--test', 'scripts/__tests__/prepared-fixture.integration.test.mjs'], { cwd: root, env, inherit: true })
     const suiteResults=[]
     const assertions=[]
     for (const suite of selectedSuites) {
@@ -204,10 +221,10 @@ async function run() {
     if (!isDeepStrictEqual(metadata, await currentMetadata(env))) throw new Error('Source changed during acceptance execution')
     const finalReport = createAcceptanceReport({
       metadata: { ...metadata, migration: await migrationRevision(fixture.adminUrl) },
-      suites: suiteResults, assertions, foundation, shard,
+      suites: suiteResults, assertions, foundation, shard, profile,
     })
     await saveReport(finalReport)
-    if (!finalReport.suitesPassed || (!foundation && !shard && !finalReport.fullMatrixAccepted)) {
+    if (!finalReport.suitesPassed || (!foundation && !shard && !finalReport.profileAccepted)) {
       throw new Error(`Department isolation acceptance failed; report: ${reportPath}`)
     }
   } finally { await fixture.dispose() }

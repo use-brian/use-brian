@@ -12,6 +12,7 @@
  * [COMP:api/migration-owner-role]
  */
 
+import { preparedIdentity, savePreparedPglite } from './prepared-pglite.js'
 import { PGlite } from '@electric-sql/pglite'
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm'
 import { vector } from '@electric-sql/pglite-pgvector'
@@ -544,6 +545,8 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
   })
 
   it('replays the whole chain from empty without a superuser', async () => {
+    const snapshot = process.env.BRIAN_TEST_PGLITE_SNAPSHOT
+    const identity = snapshot ? await preparedIdentity() : undefined
     const db = await openAsOwner({ prepareRuntime: true })
     try {
       // One connection for every file, so the baseline's row_security = off
@@ -552,6 +555,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       assert.equal(await migratePglite(db, migrationsDir), 0)
       await assertOrdinaryOwner(db)
       await assertNothingLeftBypassed(db)
+      if (snapshot && identity) await savePreparedPglite(db, snapshot, identity)
     } finally {
       await db.close()
     }

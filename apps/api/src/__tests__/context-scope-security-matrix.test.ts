@@ -9,6 +9,7 @@
  * [COMP:api/context-scope-security-matrix]
  */
 
+import { loadPreparedPglite } from './prepared-pglite.js'
 import { PGlite } from '@electric-sql/pglite'
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm'
 import { vector } from '@electric-sql/pglite-pgvector'
@@ -21,6 +22,7 @@ import {
 } from '../../../../packages/api/src/db/access-predicate.js'
 import { migratePglite, preparePgliteRuntimeRole } from '../migrate-pglite.js'
 
+const historical = process.env.BRIAN_TEST_HISTORY !== '0'
 const WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 const USER_ID = '00000000-0000-4000-8000-000000000002'
 const ASSISTANT_ID = '00000000-0000-4000-8000-000000000003'
@@ -186,13 +188,14 @@ async function rollupIds(scope: MatrixScope): Promise<string[]> {
 }
 
 before(async () => {
-  db = new PGlite({ extensions: { vector, pg_trgm } })
-  await db.waitReady
-  await preparePgliteRuntimeRole(db)
-  const migrationsDir = fileURLToPath(
-    new URL('../../../../packages/api/migrations', import.meta.url),
-  )
-  await migratePglite(db, migrationsDir)
+  if (process.env.BRIAN_TEST_PGLITE_SNAPSHOT) {
+    db = await loadPreparedPglite(process.env.BRIAN_TEST_PGLITE_SNAPSHOT)
+  } else {
+    db = new PGlite({ extensions: { vector, pg_trgm } })
+    await db.waitReady
+    await preparePgliteRuntimeRole(db)
+    await migratePglite(db, fileURLToPath(new URL('../../../../packages/api/migrations', import.meta.url)))
+  }
   await db.exec(`
     CREATE TABLE context_matrix_rows (
       id uuid PRIMARY KEY,
@@ -254,7 +257,7 @@ describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', 
     assert.equal((await db.query<{ttl:number}>('SELECT department_media_valid_for_ms($1) AS ttl',[WORKSPACE_ID])).rows[0].ttl,0)
   })
 
-  it('fresh, 591 and predecessor migration lifecycles preserve data and enforce completion guards',async()=>{
+  if (historical) it('fresh, 591 and predecessor migration lifecycles preserve data and enforce completion guards',async()=>{
     const directory=fileURLToPath(new URL('../../../../packages/api/migrations',import.meta.url))
     assert.equal((await db.query<{name:string}>("SELECT name FROM public._migrations WHERE name='603_complete_scope_inventory.sql'")).rows[0].name,'603_complete_scope_inventory.sql')
     assert.equal((await db.query<{revision:number}>('SELECT scope_review_registry_revision()::int AS revision')).rows[0].revision,2)
@@ -374,7 +377,7 @@ describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', 
   })
 })
 
-describe('[COMP:tasks/project-context] legacy Project-tag backfill', () => {
+if (historical) describe('[COMP:tasks/project-context] legacy Project-tag backfill', () => {
   it('creates stable Projects, consumes one tag, and is idempotent', async () => {
     const legacyDb = new PGlite({ extensions: { vector, pg_trgm } })
     await legacyDb.waitReady
@@ -461,7 +464,7 @@ describe('[COMP:tasks/project-context] legacy Project-tag backfill', () => {
 })
 
 
-describe('[COMP:api/context-scope-security-matrix] media lifetime upgrade',()=>{
+if (historical) describe('[COMP:api/context-scope-security-matrix] media lifetime upgrade',()=>{
   it('upgrades the preceding open schema through the real migrator and preserves existing membership',async()=>{
     const previous=new PGlite({extensions:{vector,pg_trgm}})
     const directory=fileURLToPath(new URL('../../../../packages/api/migrations',import.meta.url))
@@ -482,7 +485,7 @@ describe('[COMP:api/context-scope-security-matrix] media lifetime upgrade',()=>{
   })
 })
 
-describe('[COMP:api/context-scope-security-matrix] temporary preview upgrade',()=>{
+if (historical) describe('[COMP:api/context-scope-security-matrix] temporary preview upgrade',()=>{
   it('upgrades 594 cache rows through 595 and enforces current app-role membership and holding',async()=>{
     const previous=new PGlite({extensions:{vector,pg_trgm}})
     const directory=fileURLToPath(new URL('../../../../packages/api/migrations',import.meta.url))

@@ -63,7 +63,7 @@ async function availablePort() {
 }
 
 /** Creates only a new cluster. No caller-supplied database or data directory. */
-export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false, beforeApply, beforeApplyFile, runtimeRole = 'app_user' } = {}) {
+export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false, beforeApply, beforeApplyFile, runtimeRole = 'app_user', prepareTemplate = false } = {}) {
   validateAmbientDatabase(env)
   if (runtimeRole !== 'app_user') throw new Error('Unsupported fixture runtime role')
   if ((beforeApply === undefined) !== (beforeApplyFile === undefined) || (beforeApply !== undefined && (typeof beforeApply !== 'function' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.sql$/.test(beforeApplyFile)))) throw new Error('Upgrade callback requires one explicit pending migration filename')
@@ -153,6 +153,14 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
       }
       await activateRuntimeRole(connection, { password: appPassword })
     } finally { await connection.end() }
+    if (prepareTemplate) {
+      const admin = new pg.Client({ connectionString: makeUrl('assurance_owner', password, 'postgres') })
+      await admin.connect()
+      try { await admin.query('CREATE DATABASE brian_assurance_template TEMPLATE brian_assurance') }
+      finally { await admin.end() }
+      fixtureEnv.BRIAN_ASSURANCE_TEMPLATE = 'brian_assurance_template'
+      await writeFile(marker, JSON.stringify({ token, port, database: 'brian_assurance', directory, template: 'brian_assurance_template' }), { mode: 0o600 })
+    }
     return { directory, env: fixtureEnv, adminUrl, appUrl, dispose }
   } catch (error) {
     // Keep failure diagnostics outside the owned cluster before cleanup.
@@ -174,9 +182,48 @@ export async function assertLocalFixture(env = process.env) {
   if (marker.token !== env.BRIAN_ASSURANCE_TOKEN) throw new Error('Fixture token mismatch')
   for (const key of ['DATABASE_URL', 'DATABASE_URL_APP']) {
     const url = new URL(env[key])
-    if (url.hostname !== '127.0.0.1' || Number(url.port) !== marker.port || url.pathname !== '/brian_assurance') throw new Error('Database URL is outside the owned fixture')
+    if (!/^brian_assurance(?:_[a-f0-9]+)?$/.test(marker.database)
+      || url.hostname !== '127.0.0.1' || Number(url.port) !== marker.port || url.pathname !== `/${marker.database}`) throw new Error('Database URL is outside the owned fixture')
   }
   return marker
+}
+
+/** Clone only a pristine template created by this disposable fixture owner. */
+export async function cloneLocalFixture(env = process.env) {
+  const parent = await assertLocalFixture(env)
+  if (parent.template !== 'brian_assurance_template' || env.BRIAN_ASSURANCE_TEMPLATE !== parent.template) {
+    throw new Error('Owned fixture has no prepared template')
+  }
+  const database = `brian_assurance_${randomUUID().replaceAll('-', '')}`
+  const token = randomUUID(), marker = join(parent.directory, `${database}.json`)
+  const withDatabase = value => { const url = new URL(value); url.pathname = `/${database}`; return url.href }
+  const adminUrl = withDatabase(env.DATABASE_URL), appUrl = withDatabase(env.DATABASE_URL_APP)
+  const maintenanceUrl = new URL(env.DATABASE_URL); maintenanceUrl.pathname = '/postgres'
+  const admin = new pg.Client({ connectionString: maintenanceUrl.href })
+  await admin.connect()
+  let created = false
+  try {
+    await admin.query(`CREATE DATABASE "${database}" TEMPLATE brian_assurance_template`)
+    created = true
+    await writeFile(marker, JSON.stringify({ token, port: parent.port, database, directory: parent.directory }), { mode: 0o600 })
+  } catch (error) {
+    if (created) await admin.query(`DROP DATABASE "${database}" WITH (FORCE)`)
+    throw error
+  } finally { await admin.end() }
+  let disposed = false
+  const cloneEnv = { ...env, DATABASE_URL: adminUrl, DATABASE_URL_APP: appUrl, APP_DATABASE_URL: appUrl,
+    PGDATABASE: database, BRIAN_ASSURANCE_FIXTURE: marker, BRIAN_ASSURANCE_TOKEN: token }
+  delete cloneEnv.BRIAN_ASSURANCE_TEMPLATE
+  return { directory: parent.directory, adminUrl, appUrl, env: cloneEnv, async dispose() {
+    if (disposed) return
+    await assertLocalFixture(cloneEnv)
+    const connection = new pg.Client({ connectionString: maintenanceUrl.href })
+    await connection.connect()
+    try { await connection.query(`DROP DATABASE "${database}" WITH (FORCE)`) }
+    finally { await connection.end() }
+    await rm(marker)
+    disposed = true
+  } }
 }
 
 /** Preserve ordinary migrations; marked synthetic runs must validate before skipping dotenv. */

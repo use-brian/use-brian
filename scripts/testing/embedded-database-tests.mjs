@@ -1,5 +1,7 @@
 import { spawnSync } from 'node:child_process'
-import { readdirSync, realpathSync } from 'node:fs'
+import { mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DEPARTMENT_ISOLATION_SUITES } from '../../packages/shared/src/department-isolation-coverage.ts'
 
@@ -27,6 +29,22 @@ export function embeddedTestFiles(files, shard) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const cwd = fileURLToPath(new URL('../../apps/api/', import.meta.url))
+  if (process.argv[2] === 'current') {
+    const directory = mkdtempSync(join(tmpdir(), 'brian-pglite-ci-'))
+    const env = { ...process.env, BRIAN_TEST_PGLITE_SNAPSHOT: join(directory, 'prepared.tar'), BRIAN_TEST_HISTORY: '0' }
+    const execute = (args, environment = process.env) => {
+      const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', '--test-concurrency=1', ...args], { cwd, env: environment, stdio: 'inherit' })
+      if (result.error || result.status !== 0) throw result.error ?? new Error('Current embedded database tests failed')
+    }
+    try {
+      execute(['--test-name-pattern=replays the whole chain from empty without a superuser', 'src/__tests__/migration-owner-role.test.ts'], env)
+      execute(['src/__tests__/context-scope-security-matrix.test.ts'], env)
+      const files = embeddedTestFiles(readdirSync(new URL('../../apps/api/src/__tests__/', import.meta.url)), 3)
+        .filter(file => file !== 'migration-publication-privileges.test.ts')
+      execute(files.map(file => `src/__tests__/${file}`))
+    } finally { rmSync(directory, { recursive: true, force: true }) }
+    process.exit(0)
+  }
   const files = embeddedTestFiles(readdirSync(new URL('../../apps/api/src/__tests__/', import.meta.url)), Number(process.argv[2]))
   if (!files.length) throw new Error('Embedded database shard has no tests')
   console.log(`Embedded database shard ${process.argv[2]}/3: ${files.join(', ')}`)

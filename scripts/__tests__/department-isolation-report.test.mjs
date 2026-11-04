@@ -10,10 +10,11 @@ import { createAcceptanceReport, mergeAcceptanceReports, parseShard, suitesForSh
 const metadata = { revision: 'fixture-revision', sourceHashes: { 'fixture.ts': 'hash' }, dirtySourceHashes: {},
   migration: { latest: 'fixture.sql', count: 1, ledgerHash: 'fixture-ledger' } }
 
-function receipts() {
-  return [1, 2, 3, 4].map(index => {
-    const shard = parseShard(`${index}/4`)
-    const suites = suitesForShard(shard).map(suite => ({ id: suite.id, testFiles: [...suite.testFiles], executionError: null }))
+function receipts(profile = 'full') {
+  const total = profile === 'current' ? 3 : 4
+  return Array.from({ length: total }, (_, index) => index + 1).map(index => {
+    const shard = parseShard(`${index}/${total}`)
+    const suites = suitesForShard(shard, profile).map(suite => ({ id: suite.id, testFiles: [...suite.testFiles], executionError: null }))
     const assertions = suites.flatMap(suite => suite.testFiles.map(testFile => ({
       suiteId: suite.id, testFile, fullName: 'fixture coverage', status: 'passed', durationMs: 1,
     })))
@@ -25,7 +26,7 @@ function receipts() {
         ...selector, fullName: selector.titleIncludes, status: 'passed', durationMs: 1,
       })
     }
-    return createAcceptanceReport({ metadata, suites, assertions, shard })
+    return createAcceptanceReport({ metadata, suites, assertions, shard, profile })
   })
 }
 
@@ -61,6 +62,21 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     assert.equal(merged.mode, 'full')
     assert.equal(merged.cases.length, 18)
     assert.equal(merged.boundaries.length, DEPARTMENT_ISOLATION_BOUNDARIES.length)
+  })
+
+  it('accepts current scope explicitly without certifying deferred historical coverage', () => {
+    const parts = receipts('current')
+    assert.deepEqual(parts.flatMap(part => part.suites.map(suite => suite.id)).sort(),
+      DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.id !== 'migration-lifecycle').map(suite => suite.id).sort())
+    const merged = mergeAcceptanceReports(parts, metadata, 'current')
+    assert.equal(merged.profileAccepted, true)
+    assert.equal(merged.fullMatrixAccepted, false)
+    assert.ok(merged.cases.some(entry => entry.deferred.length > 0))
+    assert.throws(() => mergeAcceptanceReports(parts, metadata, 'full'), /partial acceptance/)
+    assert.throws(() => mergeAcceptanceReports(parts.slice(1), metadata, 'current'), /Missing/)
+    parts[0].assertions[0].status = 'failed'
+    assert.throws(() => mergeAcceptanceReports(parts, metadata, 'current'), /incomplete or failed/)
+    assert.throws(() => suitesForShard(parseShard('1/4'), 'current'), /three shards/)
   })
 
   it('rejects missing, duplicate, stale and mixed-migration receipts', () => {
