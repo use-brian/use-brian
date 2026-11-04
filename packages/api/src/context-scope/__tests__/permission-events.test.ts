@@ -120,7 +120,7 @@ describe('permission invalidation transport', () => {
 it('migration installs transactional epoch triggers (SQL harness, not PGLite transport coverage)', async () => {
   const { PGlite } = await import('@electric-sql/pglite')
   const { readFile } = await import('node:fs/promises')
-  const sql = await readFile(new URL('../../../migrations/8203_permission_snapshot_events.sql', import.meta.url), 'utf8')
+  const sql = await readFile(new URL('../../../migrations/8208_permission_snapshot_events.sql', import.meta.url), 'utf8')
   const db = new PGlite()
   try {
     await db.exec(`

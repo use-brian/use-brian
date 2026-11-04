@@ -56,7 +56,7 @@ side effects. Delivery authorization stays separate.
   `response-permission-snapshot.ts` provides compatibility aliases only.
 - `packages/api/src/context-scope/permission-events.ts` routes workspace and
   global invalidations through the existing shared PostgreSQL listener.
-- Migration `8203_permission_snapshot_events.sql` emits a dedicated notification
+- Migration `8208_permission_snapshot_events.sql` emits a dedicated notification
   when existing workspace or contract policy epoch rows change. It uses those
   tables as change-notification seams; the cache does not compare revisions.
 
