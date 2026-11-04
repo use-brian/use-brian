@@ -250,7 +250,8 @@ export function createFileTools(
     requiresConfirmation: true,
     resolveConfirmation: confirm('fileWrite'),
     description:
-      'Create or overwrite a workspace file. Files are workspace-shared — every workspace member can read them. Use for shared artifacts (drafts, notes, reports), not personal scratch (use saveMemory). ' +
+      'Create a new workspace file. Canonical source-derived files inherit private ownership and all required sensitivity, Department and Project restrictions; they are not automatically shared with every workspace member. The backend revalidates that source evidence before saving. ' +
+      'Source-free files may be workspace-visible. This tool has no private-visibility argument: retain verified private source scope when required, and report a refusal rather than using a shared fallback or changing access. A Personal chat label alone is not source evidence. ' +
 'Use this to author NEW text content (you provide the body). To save an UPLOADED file the user attached (an image, PDF, document), use saveFileToBrain instead — it preserves the original bytes; fileWrite would only store text. ' +
       'Path is required and must be unique in the workspace; an overwrite of an existing path returns a conflict error — pass the existing id to fileSetMeta or call fileDelete first. ' +
       'Title and summary are optional but improve discovery — they appear in the # Workspace Files L1 block. The agent should call fileSetMeta later if it learns enough to label a file it wrote without one. ' +
@@ -262,7 +263,7 @@ export function createFileTools(
       title: z.string().min(1).max(256).optional().describe('Display label for L1 surface and search. Distinct from filename.'),
       summary: z.string().min(1).max(512).optional().describe('One-line description visible in the L1 # Workspace Files block.'),
       tags: tagShape.optional(),
-      sensitivity: sensitivityEnum.optional().describe('Defaults to internal. public is visible to all workspace members; confidential is reserved for high-sensitivity material.'),
+      sensitivity: sensitivityEnum.optional().describe('Defaults to internal. Sensitivity is a clearance label, not a sharing setting; required source restrictions cannot be lowered.'),
       links: explicitLinksField,
     }),
     async execute(input, context) {

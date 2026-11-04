@@ -2,6 +2,7 @@
 
 | COMP tag | doc path | source path | test path |
 |---|---|---|---|
+| files/tools | docs/workspace-file-scope.md | packages/core/src/workspace-files/tools.ts; packages/core/src/workspace-files/tool-helpers.ts | packages/core/src/workspace-files/__tests__/tools.test.ts; packages/api/src/db/__tests__/workspace-files-mode-admission.integration.test.ts |
 | retrieval/provenance | docs/provenance-lookup.md | packages/api/src/db/provenance-store.ts | packages/api/src/db/__tests__/provenance-store.test.ts; packages/api/src/db/__tests__/workspace-files-mode-admission.integration.test.ts |
 | api/file-derived-admission | docs/plans/complete-organization-cutover.md (source-derived file inheritance) | packages/api/src/workspace-access/file-derived-admission.ts; packages/api/src/db/workspace-files.ts | packages/api/src/db/__tests__/workspace-files-mode-admission.integration.test.ts |
 | api/files-route | docs/chat-reply-delivery.md (authenticated staging uploads) | packages/api/src/routes/files.ts | packages/api/src/routes/__tests__/files.test.ts |
