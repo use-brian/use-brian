@@ -89,6 +89,20 @@ describe("[COMP:app-web/office-document-editor] canonical run preservation", () 
     } finally { editor.destroy(); doc.destroy(); }
   });
 
+  it.each(["Pasted replacement", "First line\nSecond line"])("keeps direct plain-text paste in its selected cell (%s)", value => {
+    const { editor, doc, cell, start } = setup();
+    try {
+      editor.commands.setTextSelection({ from: start, to: start + cell.runs[0].text.length });
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", { value: { getData: (type: string) => type === "text/plain" ? value : "", types: ["text/plain"], files: [] } });
+      editor.view.dom.dispatchEvent(paste);
+      const result = peerSnapshot(doc);
+      const table = result.family === "document" ? result.sections[0].nodes.find(node => node.kind === "table") : undefined;
+      expect(table?.kind === "table" && table.rows[0].cells[0].runs.map(run => run.text).join("")).toBe(value);
+      expect(table?.kind === "table" && table.rows[0].cells[0].runs[0].style).toEqual(cell.runs[0].style);
+    } finally { editor.destroy(); doc.destroy(); }
+  });
+
   it("persists DOM composition input into an emptied cell with its original typography", async () => {
     const { editor, doc, cell, start } = setup();
     // jsdom has no range geometry; input and DOM parsing remain real.

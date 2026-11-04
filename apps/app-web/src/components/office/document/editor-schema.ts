@@ -172,7 +172,10 @@ const OfficeTableCellText = Node.create({
     return [new Plugin({ props: { handlePaste(view, event) {
       const { $from, $to } = view.state.selection;
       const text = event.clipboardData?.getData("text/plain") ?? "";
-      if ($from.parent.type.name !== "officeTableCellText" || !$from.sameParent($to) || !/[\r\n]/.test(text)) return false;
+      // The generic clipboard parser creates body paragraphs for plain text.
+      // Even one line must use the existing cell and canonical run marks.
+      if ($from.parent.type.name !== "officeTableCellText" || !$from.sameParent($to) || !text
+        || (!/[\r\n]/.test(text) && event.clipboardData?.getData("text/html"))) return false;
       event.preventDefault();
       const normalized = text.replace(/\r\n?/g, "\n");
       if (!insertEmptyOfficeBlockText(view, $from.pos, $to.pos, normalized)) view.dispatch(view.state.tr.insertText(normalized).scrollIntoView());

@@ -28,8 +28,9 @@ cell contents in rows whose full span has fixed heights. This keeps following
 rows and paragraphs at their authored positions.
 
 The live document editor retains the row height rule in its collaborative
-schema. Pasting multiline plain text into one table-cell paragraph inserts
-literal line breaks in that paragraph, preserving its marks and cell boundary;
+schema. Pasting plain text into one table-cell paragraph replaces text directly in
+that paragraph, preserving its marks and cell boundary. Multiline text inserts
+literal line breaks;
 it must not promote the pasted lines into body paragraphs after the table.
 
 ## Verification
