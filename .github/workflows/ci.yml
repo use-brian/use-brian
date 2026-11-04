@@ -51,10 +51,10 @@ jobs:
         run: pnpm smoke
 
       - name: Test release-evidence checks
-        run: node --test scripts/__tests__/test-evidence.test.mjs
+        run: node --test scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs
 
       # Discovery is report-only until complete journeys qualify ten candidates.
-      # Keep the existing build-test dependency graph and unit lanes unchanged.
+      # The required build-test gate still depends on complete test coverage.
       - name: Inventory selected test files (report-only)
         continue-on-error: true
         run: node scripts/testing/inventory.mjs --report "$RUNNER_TEMP/test-inventory.json"
@@ -184,15 +184,48 @@ jobs:
           --filter='!@use-brian/core'
           --filter='!app-web'
           --filter='!@use-brian/app-desktop'
+          --filter='!@use-brian/api-open'
           --concurrency=4
 
-  department-isolation:
+  embedded-database-tests:
     if: >-
       github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
       github.event.pull_request.head.repo.full_name != github.repository
-    name: Department isolation acceptance
+    name: Embedded database tests (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build test dependencies
+        run: pnpm exec turbo run build --filter="@use-brian/api-open^..."
+      - name: Embedded database tests
+        run: node scripts/testing/embedded-database-tests.mjs ${{ matrix.shard }}
+      - name: Runtime unit tests
+        if: matrix.shard == 3
+        run: pnpm --filter @use-brian/api-open exec vitest run src/runtime.test.ts
+
+  department-isolation-shards:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.head_ref != 'develop' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    name: Department isolation (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -227,8 +260,45 @@ jobs:
         run: >-
           node scripts/test-department-isolation.mjs
           --pg-bin /usr/lib/postgresql/18/bin
-          --report /tmp/department-isolation-report.json
+          --shard ${{ matrix.shard }}/4
+          --report /tmp/department-isolation-${{ matrix.shard }}.json
 
+      - name: Upload acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: department-isolation-shard-${{ matrix.shard }}
+          path: /tmp/department-isolation-${{ matrix.shard }}.json
+          if-no-files-found: error
+
+  department-isolation:
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+      github.head_ref != 'develop' ||
+      github.event.pull_request.head.repo.full_name != github.repository)
+    name: Department isolation acceptance
+    needs: [department-isolation-shards]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: department-isolation-shard-*
+          path: ${{ runner.temp }}/department-isolation
+          merge-multiple: true
+      - name: Verify complete acceptance evidence
+        run: >-
+          node scripts/test-department-isolation.mjs
+          --merge "${{ runner.temp }}/department-isolation"
+          --report /tmp/department-isolation-report.json
       - name: Upload acceptance report
         if: always()
         uses: actions/upload-artifact@v4
@@ -236,6 +306,11 @@ jobs:
           name: department-isolation-report
           path: /tmp/department-isolation-report.json
           if-no-files-found: error
+      - name: Require every acceptance shard
+        if: always()
+        env:
+          SHARD_RESULT: ${{ needs.department-isolation-shards.result }}
+        run: test "$SHARD_RESULT" = success
 
   # Preserve the historical required-check context while making it depend on
   # every parallel lane. `always()` turns a failed dependency into a red
@@ -246,7 +321,7 @@ jobs:
       (github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
       github.event.pull_request.head.repo.full_name != github.repository)
-    needs: [build-typecheck, api-tests, app-web-tests, heavyweight-tests, remaining-tests, department-isolation]
+    needs: [build-typecheck, api-tests, app-web-tests, heavyweight-tests, remaining-tests, embedded-database-tests, department-isolation]
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane
@@ -256,6 +331,7 @@ jobs:
           APP_WEB_TESTS_RESULT: ${{ needs.app-web-tests.result }}
           HEAVYWEIGHT_TESTS_RESULT: ${{ needs.heavyweight-tests.result }}
           REMAINING_TESTS_RESULT: ${{ needs.remaining-tests.result }}
+          EMBEDDED_DATABASE_TESTS_RESULT: ${{ needs.embedded-database-tests.result }}
           DEPARTMENT_ISOLATION_RESULT: ${{ needs.department-isolation.result }}
         run: |
           if [[ "$BUILD_TYPECHECK_RESULT" != "success" ||
@@ -263,7 +339,8 @@ jobs:
                 "$APP_WEB_TESTS_RESULT" != "success" ||
                 "$HEAVYWEIGHT_TESTS_RESULT" != "success" ||
                 "$REMAINING_TESTS_RESULT" != "success" ||
+                "$EMBEDDED_DATABASE_TESTS_RESULT" != "success" ||
                 "$DEPARTMENT_ISOLATION_RESULT" != "success" ]]; then
-            echo "CI lane failure: build=$BUILD_TYPECHECK_RESULT api=$API_TESTS_RESULT app_web=$APP_WEB_TESTS_RESULT heavy=$HEAVYWEIGHT_TESTS_RESULT remaining=$REMAINING_TESTS_RESULT isolation=$DEPARTMENT_ISOLATION_RESULT"
+            echo "CI lane failure: build=$BUILD_TYPECHECK_RESULT api=$API_TESTS_RESULT app_web=$APP_WEB_TESTS_RESULT heavy=$HEAVYWEIGHT_TESTS_RESULT remaining=$REMAINING_TESTS_RESULT embedded=$EMBEDDED_DATABASE_TESTS_RESULT isolation=$DEPARTMENT_ISOLATION_RESULT"
             exit 1
           fi

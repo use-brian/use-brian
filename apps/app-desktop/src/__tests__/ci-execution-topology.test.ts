@@ -17,6 +17,8 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       workflow.jobs['app-web-tests'],
       workflow.jobs['heavyweight-tests'],
       workflow.jobs['remaining-tests'],
+      workflow.jobs['embedded-database-tests'],
+      workflow.jobs['department-isolation-shards'],
       workflow.jobs['department-isolation'],
     ];
     for (const job of executionJobs) {
@@ -60,13 +62,33 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(remainingCommand).toContain("--filter='!@use-brian/core'");
     expect(remainingCommand).toContain("--filter='!app-web'");
     expect(remainingCommand).toContain("--filter='!@use-brian/app-desktop'");
+    expect(remainingCommand).toContain("--filter='!@use-brian/api-open'");
     expect(remainingCommand).toContain('--concurrency=4');
+    const embedded = workflow.jobs['embedded-database-tests'];
+    expect(embedded.strategy.matrix.shard).toEqual([1, 2, 3]);
+    expect(embedded.strategy['fail-fast']).toBe(false);
+    const nodeTests = embedded.steps.find((step: { name?: string }) => step.name === 'Embedded database tests');
+    expect(nodeTests.run).toContain('scripts/testing/embedded-database-tests.mjs ${{ matrix.shard }}');
+    expect(embedded.steps.find((step: { name?: string }) => step.name === 'Runtime unit tests').if).toBe('matrix.shard == 3');
+    const acceptance = workflow.jobs['department-isolation-shards'];
+    expect(acceptance.strategy.matrix.shard).toEqual([1, 2, 3, 4]);
+    expect(acceptance.strategy['fail-fast']).toBe(false);
+    expect(acceptance.steps.find((step: { name?: string }) => step.name === 'Run no-credential acceptance').run)
+      .toContain('--shard ${{ matrix.shard }}/4');
+    expect(acceptance.steps.find((step: { uses?: string }) => step.uses === 'actions/upload-artifact@v4').with.name)
+      .toContain('${{ matrix.shard }}');
+    const aggregate = workflow.jobs['department-isolation'];
+    expect(aggregate.needs).toEqual(['department-isolation-shards']);
+    expect(aggregate.if).toContain('always()');
+    expect(aggregate.steps.find((step: { name?: string }) => step.name === 'Verify complete acceptance evidence').run)
+      .toContain('--merge');
     expect(workflow.jobs['build-test'].needs).toEqual([
       'build-typecheck',
       'api-tests',
       'app-web-tests',
       'heavyweight-tests',
       'remaining-tests',
+      'embedded-database-tests',
       'department-isolation',
     ]);
     expect(workflow.jobs['build-test'].if).toContain('always()');

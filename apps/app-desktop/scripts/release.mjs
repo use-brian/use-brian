@@ -3,9 +3,10 @@
 // No signing credentials or release token are needed for planning/verification.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const repository = 'use-brian/use-brian';
@@ -47,15 +48,38 @@ function checkSha(sha) {
   requireThat(git('rev-parse', 'HEAD') === sha, 'Checkout does not match the tested source SHA');
 }
 
-function checkProduction(sha) {
+function checkProductionHead(sha) {
   checkSha(sha);
   requireThat(api('git/ref/heads/main').object.sha === sha, 'Production moved; retry after the current main commit passes CI');
+}
+
+function productionCi(sha) {
+  checkProductionHead(sha);
   const runs = api(`actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=${sha}&per_page=100`).workflow_runs;
-  const latest = runs.filter((r) => r.head_sha === sha && r.head_branch === 'main' &&
+  return runs.filter((r) => r.head_sha === sha && r.head_branch === 'main' &&
     r.event === 'push' && r.head_repository?.full_name === repository)
     .sort((a, b) => b.run_number - a.run_number || b.run_attempt - a.run_attempt)[0];
+}
+
+function checkProduction(sha) {
+  const latest = productionCi(sha);
   requireThat(latest?.status === 'completed' && latest.conclusion === 'success',
     'The current production SHA must have a successful push CI run');
+}
+
+// Tests inject the observation/clock; the CLI always reads trusted production CI.
+export async function waitForProductionCi(sha, { inspect = productionCi, pause = () => delay(15_000), log = console.log } = {}) {
+  let previous;
+  for (;;) {
+    const latest = inspect(sha);
+    const state = latest ? `${latest.status}:${latest.conclusion ?? 'pending'}` : 'waiting-for-run';
+    if (state !== previous) { log(`Production CI for ${sha}: ${state}`); previous = state; }
+    if (latest?.status === 'completed') {
+      requireThat(latest.conclusion === 'success', `Production CI did not succeed: ${latest.conclusion}`);
+      return;
+    }
+    await pause();
+  }
 }
 
 function allReleases() {
@@ -89,8 +113,9 @@ function outputPlan(value) {
   console.log(JSON.stringify(value));
 }
 
-function plan(sha) {
-  checkProduction(sha);
+function plan(sha, buildWhileCiRuns = false) {
+  if (buildWhileCiRuns) checkProductionHead(sha);
+  else checkProduction(sha);
   const releases = allReleases();
   const published = releases.filter((r) => !r.draft && !r.prerelease && stableTagVersion(r.tag_name) &&
     r.assets.some((a) => a.name === 'latest-mac.yml'))
@@ -270,15 +295,17 @@ function publish(version, sha) {
   console.log(`Published https://github.com/${repository}/releases/tag/${tag}`);
 }
 
-try {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) try {
   const [command, value, sha] = process.argv.slice(2);
   if (command === 'plan') plan(value);
+  else if (command === 'plan-build') plan(value, true);
+  else if (command === 'wait-ci') await waitForProductionCi(value);
   else if (command === 'stamp') stamp(value, sha);
   else if (command === 'prepare') await prepareMac(value, sha);
   else if (command === 'prepare-windows') await prepareWindows(value, sha);
   else if (command === 'verify') verifyArtifacts(value, sha);
   else if (command === 'publish') publish(value, sha);
-  else throw new Error('Usage: release.mjs plan SHA | stamp VERSION SHA | prepare VERSION SHA | prepare-windows VERSION SHA | verify VERSION SHA | publish VERSION SHA');
+  else throw new Error('Usage: release.mjs plan SHA | plan-build SHA | wait-ci SHA | stamp VERSION SHA | prepare VERSION SHA | prepare-windows VERSION SHA | verify VERSION SHA | publish VERSION SHA');
 } catch (error) {
   // Do not dump child-process buffers: external programs can echo credentials.
   console.error(error?.status !== undefined ? 'Release command failed; no further publication attempted.' : error.message);
