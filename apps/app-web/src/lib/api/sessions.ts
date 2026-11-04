@@ -873,6 +873,24 @@ export function isSessionHistoryUnavailable(error: unknown): boolean {
   return error instanceof SessionHistoryError && error.status === 403 && error.code === "session_history_unavailable";
 }
 
+const privateHistoryPage = z.object({
+  sessionId: z.string().uuid(), workspaceId: z.string().uuid(), mode: z.literal("private_legacy_history"),
+  rows: z.array(z.object({ id: z.string().uuid(), sequence: z.number().int(), role: z.enum(["user", "assistant"]),
+    timestamp: z.string(), text: z.string().nullable(), available: z.boolean() })),
+  nextSequence: z.number().int().positive().nullable(),
+});
+export type PrivateChatHistory = z.infer<typeof privateHistoryPage>;
+/** Display-only DTO: never insert into the ordinary transcript cache or model state. */
+export async function readPrivateChatHistory(sessionId: string, workspaceId: string, afterSequence: number, signal?: AbortSignal): Promise<PrivateChatHistory> {
+  const response = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/legacy-history?${new URLSearchParams({ workspaceId, afterSequence: String(afterSequence) })}`, { signal });
+  if (!response.ok) throw new Error(`private_history_failed:${response.status}`);
+  const page = privateHistoryPage.parse(await response.json());
+  if (page.sessionId !== sessionId || page.workspaceId !== workspaceId
+    || page.rows.some(row => row.sequence <= afterSequence)
+    || page.nextSequence !== null && page.nextSequence <= afterSequence) throw new Error("private_history_mismatch");
+  return page;
+}
+
 const recoveryPreview = z.object({
   sessionId: z.string().uuid(), workspaceId: z.string().uuid(), revision: z.string().regex(/^[a-f0-9]{64}$/),
   status: z.enum(["available", "busy"]), continuationSessionId: z.string().uuid().nullable(),

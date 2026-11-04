@@ -9201,8 +9201,18 @@ export const en = {
     "noProjects": "No available Projects"
 },
   chatApp: {
+    legacyHistory: {
+      "title": "Private chat history",
+      "notice": "Your earlier messages are available here. Start a fresh chat to continue; this history will not be sent to the assistant.",
+      "you": "You",
+      "assistant": "Brian",
+      "unavailableMessage": "This message is unavailable with your current access.",
+      "more": "Show more messages",
+      "loading": "Opening your private history",
+      "retry": "Retry"
+},
     recovery: {
-      "action": "Recover chat",
+      "action": "Continue in new chat",
       "working": "Preparing recovery",
       "title": "Open a fresh private chat?",
       "description": "A new private chat will use this conversation's assistant, department and project selection. Earlier messages, files and pending actions stay in the original chat and will not be copied or retried.",

@@ -1,5 +1,6 @@
 import {pinSessionTitleClaims,sessionTitleProjection,sessionTitleProjections,renameCurrentSessionTitle,resolveSessionTitleAuthority} from './session-title-authority.js'
 import {sessionRecoveryRoutes} from './session-recovery.js'
+import {sessionLegacyHistoryRoutes} from './session-legacy-history.js'
 import {DerivedScopeError,executionToolContext} from '@use-brian/core'
 import {readAttendedSessionHistory} from './attended-session-context.js'
 import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
@@ -207,6 +208,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   const getSessionPresence = opts.getSessionPresence ?? emptySessionPresence
   const router = Router()
   router.use('/:id/recovery',sessionRecoveryRoutes())
+  router.use('/:id/legacy-history',sessionLegacyHistoryRoutes())
 
   // Register before /:id routes. Explicit JWT required; no local default user.
   router.get('/incoming-event-sources', webChatSourcesHandler({

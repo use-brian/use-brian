@@ -8799,8 +8799,18 @@ export const zhCN: Dictionary = {
     "noProjects": "没有可用的项目"
 },
   chatApp: {
+    legacyHistory: {
+      "title": "私人聊天记录",
+      "notice": "你可以在这里查看之前的消息。开启新聊天以继续；这些记录不会发送给助手。",
+      "you": "你",
+      "assistant": "Brian",
+      "unavailableMessage": "当前的访问权限无法显示此消息。",
+      "more": "显示更多消息",
+      "loading": "正在打开你的私人记录",
+      "retry": "重试"
+},
     recovery: {
-      "action": "恢复聊天",
+      "action": "在新聊天中继续",
       "working": "正在准备恢复",
       "title": "打开新的私人聊天？",
       "description": "新私人聊天会使用此对话的助手、部门和项目选择。之前的消息、文件和待处理操作会保留在原聊天，不会复制或重新执行。",
