@@ -1399,9 +1399,13 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       })
     : null
   const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
+  // Native history/parent admission keys on sessions.workspace_id. A projected
+  // null (legacy personal resume before backfill) must not take that path.
+  // Readers that omit the field keep the ownership-only gate.
   const nativeTranscriptAuthority = !privateRecording && executionContext.ownership.kind === 'workspace'
     && executionContext.identity.kind === 'attended'
     && executionContext.identity.principal.kind === 'workspace_member'
+    && (session.workspaceId === undefined || session.workspaceId === executionContext.ownership.workspaceId)
     ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
   const currentTurnWrite = () => ({
     ...turnOutputWrite({

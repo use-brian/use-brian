@@ -3042,9 +3042,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         userId: user.id,
         sharedAudience: !policyFor(session).context.personalMemory,
       })
+      // Native history/parent admission keys on sessions.workspace_id. A projected
+      // null (legacy personal resume before backfill) must not take that path.
+      // Readers that omit the field keep the ownership-only gate.
       const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
         && executionContext.identity.kind === 'attended'
         && executionContext.identity.principal.kind === 'workspace_member'
+        && (session.workspaceId === undefined || session.workspaceId === executionContext.ownership.workspaceId)
         ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
       const nativeOutputBoundary=nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
         &&!executionContext.security.access.sharedAudience&&classifySession(session).surface==='chat'?createNativeAttendedOutputBoundary(executionContext,scopeAccumulator,{
