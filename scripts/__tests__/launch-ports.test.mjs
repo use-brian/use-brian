@@ -39,6 +39,9 @@ describe('[COMP:platform/local-rig] Alternate API port', () => {
     }
     assert.match(launch, /api: resolveApiPort\(process.env.USEBRIAN_API_PORT\)/)
     assert.match(launch, /PORT: String\(PORTS.api\)/)
+    // Runtime browser config must use the same-origin proxy, not the visiting
+    // machine's localhost. An explicit public deployment URL still wins.
+    assert.match(launch, /PUBLIC_API_URL: process\.env\.PUBLIC_API_URL \?\? ''/)
     const up = source('rig-up.sh')
     assert.match(up, /USEBRIAN_API_PORT="\$API_PORT"/)
     assert.match(up, /http:\/\/127.0.0.1:\$API_PORT\/auth\/local-session/)

@@ -12,6 +12,8 @@ vi.mock('../../db/sessions.js', () => ({
   TURN_HEARTBEAT_INTERVAL_MS: 5,
 }))
 
+let simulateModelBoundaries = false
+let loopBeforeEvent: ((index: number) => void) | null = null
 let loopEvents: unknown[] = []
 let loopThrows: Error | null = null
 let loopCleanup: (() => Promise<void>) | null = null
@@ -22,13 +24,34 @@ vi.mock('@use-brian/core', async (importOriginal) => {
     ...actual,
     queryLoop: vi.fn(async function* (options: Record<string, unknown>) {
       loopOptions.push(options)
-      for (const event of loopEvents) yield event
+      const context = options.context as import('@use-brian/core').ToolContext
+      if (simulateModelBoundaries) await context.assertModelInputAuthority?.(context)
+      for (const [index, event] of loopEvents.entries()) {
+        loopBeforeEvent?.(index)
+        if (simulateModelBoundaries) await actual.assertModelOutputAuthority(context)
+        yield event
+      }
       await loopCleanup?.()
       if (loopThrows) throw loopThrows
     }),
   }
 })
 
+// Keep the module's host-boundary exports available to the real kernel; only the
+// live source checks are replaced with probes in this unit-test module.
+vi.mock('../../application-platform/model-source-authority.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../application-platform/model-source-authority.js')>()
+  return { ...actual, assertSourceModelInputAuthority: vi.fn(async () => {}), assertSourceModelOutputAuthority: vi.fn(async () => {}) }
+})
+vi.mock('../../context-scope/attended-audience.js', () => ({
+  validateAttendedAudienceEvidence: vi.fn(), createAttendedDeliveryAudienceAuthorizer: vi.fn(),
+}))
+
+import { ContextScopeAccumulator, createExecutionContext, executionToolContext, type ScopeSource, type ToolContext } from '@use-brian/core'
+import type { Session } from '../../db/sessions.js'
+import { createRequestPermissionContext } from '../../context-scope/request-permission-context.js'
+import { validateAttendedAudienceEvidence, createAttendedDeliveryAudienceAuthorizer } from '../../context-scope/attended-audience.js'
+import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority } from '../../application-platform/model-source-authority.js'
 import { runAssistantTurn, TurnRefusal, servedTurnModel, turnUsageIdentity, type TurnSinkKind } from '../kernel.js'
 import { resolveTurnBilling } from '../billing.js'
 import { isTurnLeaseLive, releaseTurnLease } from '../../db/sessions.js'
@@ -55,6 +78,12 @@ function params(sink: TurnSinkKind, over: Partial<Parameters<typeof runAssistant
 beforeEach(() => {
   vi.clearAllMocks()
   leaseCalls.length = 0
+  simulateModelBoundaries = false
+  loopBeforeEvent = null
+  vi.mocked(assertSourceModelInputAuthority).mockReset().mockResolvedValue(undefined)
+  vi.mocked(assertSourceModelOutputAuthority).mockReset().mockResolvedValue(undefined)
+  vi.mocked(validateAttendedAudienceEvidence).mockReset().mockImplementation(async (_execution, evidence) => evidence)
+  vi.mocked(createAttendedDeliveryAudienceAuthorizer).mockReset().mockReturnValue(vi.fn(async () => { throw new Error('Unexpected independent-source fallback') }))
   loopEvents = []
   loopThrows = null
   loopCleanup = null
@@ -250,6 +279,196 @@ describe('[COMP:api/turn-kernel] runAssistantTurn', () => {
     expect(servedTurnModel(custom)).toBe('custom:abc')
     const platform = { provider: {} as never, model: 'gemini-flash', configuredProviders: undefined, customLlm: null }
     expect(servedTurnModel(platform)).toBe('gemini-flash')
+  })
+})
+
+function snapshotTurnFixture() {
+  const controller = new AbortController()
+  const authority = { assertCurrent: vi.fn(async () => {}), execute: async <T,>(operation: () => Promise<T>) => operation() }
+  const execution = createExecutionContext({
+    identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: 'actor', authenticationKind: 'native_session' } },
+    ownership: { kind: 'workspace', workspaceId: 'workspace' },
+    access: { workspaceId: 'workspace', userId: 'actor', assistantId: 'assistant', assistantKind: 'standard',
+      clearance: 'confidential', compartments: null, mutationCompartments: null, projectIds: null, visibilityAssistantIds: ['assistant'] },
+    writeDefaults: { compartments: [], projectIds: [] }, authority,
+    lifecycle: { sessionId: 's-1', channelType: 'web', channelId: 'channel', abortSignal: controller.signal },
+  })
+  const initial: ScopeSource = { resourceKind: 'memory', resourceId: 'initial', version: '1', workspaceId: 'workspace',
+    userId: 'actor', assistantId: null, sensitivity: 'internal', compartments: ['finance'], projectIds: [] }
+  const accumulator = new ContextScopeAccumulator({ sources: [initial] })
+  const context: ToolContext = { ...executionToolContext(execution, { appId: 'chat' }), scopeAccumulator: accumulator }
+  const session = { id: 's-1', userId: 'actor', channelType: 'web', channelId: 'channel',
+    visibility: 'personal', anchorKind: 'none', appOrigin: 'chat' } as Session
+  const snapshot = createRequestPermissionContext({ executionContext: execution, turnScope: {
+    access: execution.security.access, activeGroupId: null, activeProjectId: null,
+    effectiveCompartments: [], effectiveProjectIds: [], writeCompartments: [], writeProjectIds: [],
+    activeTeam: null, activeProject: null,
+  } }, accumulator, session)!
+  expect(snapshot).toBeDefined()
+  const options = params('sse', { abortController: controller,
+    loop: { ...params('sse').loop, context },
+    sink: { kind: 'sse', permissionContext: snapshot, assertOutputAuthority: snapshot.authorizeDelivery },
+  })
+  return { execution, authority, initial, accumulator, context, snapshot, options }
+}
+
+describe('[COMP:api/turn-kernel] response permission snapshot integration', () => {
+  it('keeps model-input admission live while amortizing snapshot output across engine hooks, streamed events, and finalization', async () => {
+    const f = snapshotTurnFixture(), routeInput = vi.fn(async () => {}), routeOutput = vi.fn(async () => {})
+    f.context.assertModelInputAuthority = routeInput
+    f.context.assertModelOutputAuthority = routeOutput
+    simulateModelBoundaries = true
+    loopEvents = Array.from({ length: 20 }, (_, index) => textTurn(`chunk ${index}`))
+    const seen = vi.fn()
+    f.options.sink.onEvent = seen
+    await runAssistantTurn(f.options)
+    expect(seen).toHaveBeenCalledTimes(20)
+    expect(routeInput).toHaveBeenCalledTimes(1)
+    expect(assertSourceModelInputAuthority).toHaveBeenCalledTimes(1)
+    expect(routeOutput).toHaveBeenCalledTimes(21) // engine per event plus final core boundary
+    expect(validateAttendedAudienceEvidence).toHaveBeenCalledTimes(1)
+    expect(validateAttendedAudienceEvidence).toHaveBeenCalledWith(f.execution, f.accumulator.evidence,
+      expect.objectContaining({ userId: 'actor' }), { directHumanSource: true })
+    expect(assertSourceModelOutputAuthority).not.toHaveBeenCalled()
+    expect(f.authority.assertCurrent).toHaveBeenCalled()
+    // The exact hook handed to core remains a live input guard after a receipt exists.
+    const coreContext = loopOptions[0].context as ToolContext
+    await coreContext.assertModelInputAuthority!(coreContext)
+    expect(assertSourceModelInputAuthority).toHaveBeenCalledTimes(2)
+    vi.mocked(assertSourceModelInputAuthority).mockRejectedValueOnce(new Error('input source revoked'))
+    await expect(coreContext.assertModelInputAuthority!(coreContext)).rejects.toThrow('input source revoked')
+    expect(validateAttendedAudienceEvidence).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps live execution authority current even when unchanged output already has a snapshot receipt', async () => {
+    const f = snapshotTurnFixture(), afterLoop = vi.fn()
+    simulateModelBoundaries = true
+    loopEvents = [textTurn('allowed'), textTurn('revoked')]
+    const seen = vi.fn(() => {
+      f.authority.assertCurrent.mockRejectedValue(new AuthorityChangedError())
+    })
+    f.options.sink.onEvent = seen
+    f.options.sink.afterLoop = afterLoop
+    await expect(runAssistantTurn(f.options)).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(seen).toHaveBeenCalledTimes(1)
+    expect(validateAttendedAudienceEvidence).toHaveBeenCalledTimes(1)
+    expect(afterLoop).not.toHaveBeenCalled()
+    expect(leaseCalls.at(-1)).toBe('release')
+  })
+
+  it('admits only newly observed tool evidence, with the full label floor, before rendering subsequent output', async () => {
+    const f = snapshotTurnFixture()
+    const toolSource: ScopeSource = { ...f.initial, resourceKind: 'workspace_file', resourceId: 'tool-result',
+      sensitivity: 'confidential', compartments: ['legal'], projectIds: ['project'] }
+    simulateModelBoundaries = true
+    loopEvents = [textTurn('before tool'), textTurn('after tool'), textTurn('unchanged')]
+    loopBeforeEvent = index => { if (index === 1) f.accumulator.note({ sources: [toolSource] }) }
+    const counts: number[] = []
+    f.options.sink.onEvent = () => { counts.push(vi.mocked(validateAttendedAudienceEvidence).mock.calls.length) }
+    await runAssistantTurn(f.options)
+    expect(counts).toEqual([1, 2, 2])
+    expect(validateAttendedAudienceEvidence).toHaveBeenNthCalledWith(2, f.execution,
+      { sources: [toolSource], sensitivity: 'confidential', compartments: ['finance', 'legal'], projectIds: ['project'] },
+      expect.anything(), { directHumanSource: true })
+    expect(assertSourceModelInputAuthority).toHaveBeenCalledTimes(1)
+    expect(assertSourceModelOutputAuthority).not.toHaveBeenCalled()
+  })
+
+  it('does not render new tool evidence when snapshot admission refuses it', async () => {
+    const f = snapshotTurnFixture(), seen = vi.fn(), afterLoop = vi.fn()
+    simulateModelBoundaries = true
+    loopEvents = [textTurn('safe'), textTurn('must not render')]
+    loopBeforeEvent = index => {
+      if (index !== 1) return
+      f.accumulator.note({ sources: [{ ...f.initial, resourceId: 'new-tool-source' }] })
+      vi.mocked(validateAttendedAudienceEvidence).mockRejectedValueOnce(new AuthorityChangedError())
+    }
+    f.options.sink.onEvent = seen
+    f.options.sink.afterLoop = afterLoop
+    await expect(runAssistantTurn(f.options)).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(seen).toHaveBeenCalledTimes(1)
+    expect(afterLoop).not.toHaveBeenCalled()
+    expect(validateAttendedAudienceEvidence).toHaveBeenCalledTimes(2)
+    expect(leaseCalls.at(-1)).toBe('release')
+  })
+
+  it.each(['sse', 'adapter', 'json', 'return', 'none'] as const)('retains full live checks without a snapshot on the %s sink', async kind => {
+    const f = snapshotTurnFixture()
+    f.options.sink = { kind }
+    simulateModelBoundaries = true
+    loopEvents = [textTurn('one'), textTurn('two')]
+    await runAssistantTurn(f.options)
+    // One model-input call, two engine output calls, and final output admission.
+    expect(assertSourceModelInputAuthority).toHaveBeenCalledTimes(4)
+    expect(assertSourceModelOutputAuthority).toHaveBeenCalledTimes(['sse', 'adapter', 'json'].includes(kind) ? 3 : 0)
+    expect(validateAttendedAudienceEvidence).not.toHaveBeenCalled()
+  })
+
+  it('retains both source input and custom recipient checks for an unbranded SSE callback', async () => {
+    const f = snapshotTurnFixture(), recipient = vi.fn(async () => {})
+    f.options.sink = { kind: 'sse', assertOutputAuthority: recipient }
+    simulateModelBoundaries = true
+    loopEvents = [textTurn('one'), textTurn('two')]
+    await runAssistantTurn(f.options)
+    expect(assertSourceModelInputAuthority).toHaveBeenCalledTimes(4)
+    expect(recipient).toHaveBeenCalledTimes(3)
+    expect(validateAttendedAudienceEvidence).not.toHaveBeenCalled()
+  })
+
+  it.each(['forged snapshot', 'changed callback', 'foreign execution', 'foreign accumulator', 'replaced snapshot', 'non-SSE sink'] as const)(
+    'rejects %s before rendering or publication', async kind => {
+      const f = snapshotTurnFixture(), seen = vi.fn(), afterLoop = vi.fn(), counterfeit = vi.fn(async () => {})
+      if (kind === 'forged snapshot') {
+        f.options.sink.permissionContext = { ...f.snapshot, authorizeDelivery: counterfeit }
+        f.options.sink.assertOutputAuthority = counterfeit
+      } else if (kind === 'changed callback') f.options.sink.assertOutputAuthority = counterfeit
+      else if (kind === 'foreign execution') f.options.loop.context = snapshotTurnFixture().context
+      else if (kind === 'foreign accumulator') f.context.scopeAccumulator = new ContextScopeAccumulator()
+      else if (kind === 'non-SSE sink') f.options.sink.kind = 'adapter'
+      else {
+        // Replacement after the kernel has captured its response-bound capability.
+        loopBeforeEvent = () => { f.options.sink.permissionContext = snapshotTurnFixture().snapshot }
+      }
+      simulateModelBoundaries = true
+      loopEvents = [textTurn('not authorized')]
+      f.options.sink.onEvent = seen
+      f.options.sink.afterLoop = afterLoop
+      await expect(runAssistantTurn(f.options)).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+      expect(seen).not.toHaveBeenCalled()
+      expect(afterLoop).not.toHaveBeenCalled()
+      expect(counterfeit).not.toHaveBeenCalled()
+      expect(validateAttendedAudienceEvidence).not.toHaveBeenCalled()
+      expect(leaseCalls.at(-1)).toBe('release')
+    },
+  )
+
+  it('refuses nested ceiling grant mutation before rendering another event', async () => {
+    const f = snapshotTurnFixture(), afterLoop = vi.fn()
+    const seen = vi.fn(() => {
+      (f.execution.security.ceiling.visibilityAssistantIds as string[]).push('another-assistant')
+    })
+    simulateModelBoundaries = true
+    loopEvents = [textTurn('allowed'), textTurn('must not render')]
+    f.options.sink.onEvent = seen
+    f.options.sink.afterLoop = afterLoop
+    await expect(runAssistantTurn(f.options)).rejects.toThrow()
+    expect(seen).toHaveBeenCalledTimes(1)
+    expect(afterLoop).not.toHaveBeenCalled()
+    expect(validateAttendedAudienceEvidence).toHaveBeenCalledTimes(1)
+    expect(leaseCalls.at(-1)).toBe('release')
+  })
+
+  it('rechecks callback identity after a rendered event rather than reusing its receipt', async () => {
+    const f = snapshotTurnFixture(), replacement = vi.fn(async () => {}), seen = vi.fn(() => {
+      f.options.sink.assertOutputAuthority = replacement
+    })
+    simulateModelBoundaries = true
+    loopEvents = [textTurn('allowed'), textTurn('not allowed')]
+    f.options.sink.onEvent = seen
+    await expect(runAssistantTurn(f.options)).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(seen).toHaveBeenCalledTimes(1)
+    expect(replacement).not.toHaveBeenCalled()
+    expect(validateAttendedAudienceEvidence).toHaveBeenCalledTimes(1)
   })
 })
 
