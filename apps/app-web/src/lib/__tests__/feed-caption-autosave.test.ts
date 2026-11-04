@@ -1,46 +1,77 @@
-/**
- * [COMP:app-web/caption-editor] Autosave baseline rule.
- *
- * The caption editor is a CONTROLLED input, so `value` changes for two very
- * different reasons: the operator typed (our own `onChange` echoing back), or
- * the host swapped the version. Only the second should re-baseline and cancel
- * a pending write.
- *
- * Conflating them is not hypothetical - it shipped, and nothing ever saved:
- * every keystroke re-baselined, so the debounced flush always found "no net
- * change" and returned early. This pins the discriminator the component uses.
- *
- * The component itself needs a DOM; app-web's vitest is node-only, so the rule
- * is extracted here as the predicate both sides agree on.
- */
+// @vitest-environment jsdom
+import { act, createElement, useState } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CaptionEditor } from "@/components/feed/caption-editor";
+import { I18nProvider } from "@/lib/i18n/client";
+import { en } from "@/lib/i18n/dictionaries/en";
 
-import { describe, expect, it } from "vitest";
+let root: Root;
+let host: HTMLDivElement;
+let replaceDraft: (value: string) => void;
+const save = vi.fn(async (_text: string) => true);
 
-/**
- * Should an incoming `value` re-baseline the editor (cancelling any pending
- * save)? Only when it did NOT come from this editor's own last emission.
- */
-function shouldRebaseline(incoming: string, lastEmitted: string): boolean {
-  return incoming !== lastEmitted;
+function ControlledEditor() {
+  const [value, setValue] = useState("Saved draft");
+  replaceDraft = setValue;
+  return createElement(I18nProvider, {
+    locale: "en",
+    dict: en,
+    children: createElement(CaptionEditor, {
+      value, platform: "threads", onChange: setValue, onSave: save,
+    }),
+  });
 }
 
-describe("[COMP:app-web/caption-editor] autosave baseline", () => {
-  it("does not re-baseline on the editor's own echo", () => {
-    // The operator typed "abc"; React re-renders with value="abc".
-    expect(shouldRebaseline("abc", "abc")).toBe(false);
+async function type(value: string) {
+  const area = host.querySelector("textarea")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, value);
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+beforeEach(async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  save.mockClear();
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => root.render(createElement(ControlledEditor)));
+});
+
+afterEach(async () => {
+  await act(async () => root.unmount());
+  host.remove();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+describe("[COMP:app-web/caption-editor] mounted autosave", () => {
+  it("saves controlled edits after the idle window, including clearing the caption", async () => {
+    await act(async () => vi.advanceTimersByTimeAsync(900));
+    expect(save).not.toHaveBeenCalled();
+    await type("Updated draft");
+    await act(async () => vi.advanceTimersByTimeAsync(899));
+    expect(save).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(save.mock.calls).toEqual([["Updated draft"]]);
+
+    await type("");
+    await act(async () => vi.advanceTimersByTimeAsync(900));
+    expect(save.mock.calls).toEqual([["Updated draft"], [""]]);
   });
 
-  it("re-baselines when the host swaps the version", () => {
-    // Operator had typed "abc"; a version chip loads a different text.
-    expect(shouldRebaseline("a different draft", "abc")).toBe(true);
-  });
+  it("cancels a pending edit when the host replaces the draft and saves subsequent typing", async () => {
+    await type("Abandoned edit");
+    await act(async () => replaceDraft("Another saved draft"));
+    await act(async () => vi.advanceTimersByTimeAsync(900));
+    expect(host.querySelector("textarea")?.value).toBe("Another saved draft");
+    expect(save).not.toHaveBeenCalled();
 
-  it("re-baselines on the initial load of saved copy", () => {
-    expect(shouldRebaseline("saved copy", "")).toBe(true);
-  });
-
-  it("treats an emptied editor as an edit, not a swap", () => {
-    // Selecting all and deleting emits "", which must still be saveable.
-    expect(shouldRebaseline("", "")).toBe(false);
+    await type("Edited replacement");
+    await act(async () => vi.advanceTimersByTimeAsync(900));
+    expect(save.mock.calls).toEqual([["Edited replacement"]]);
   });
 });

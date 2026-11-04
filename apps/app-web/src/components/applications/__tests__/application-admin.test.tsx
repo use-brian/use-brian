@@ -17,6 +17,7 @@ import type {ApplicationManagementOverview} from '@use-brian/shared';
 const mocks=vi.hoisted(()=>({fetch:vi.fn(),viewer:{workspaceId:'workspace-fixture',me:{id:'viewer-fixture'}}}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:mocks.fetch}));
 vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>mocks.viewer}));
+vi.mock('@/contexts/workspace-context',()=>({useWorkspaces:()=>({activeId:mocks.viewer.workspaceId})}));
 let host:HTMLDivElement,root:Root;
 function fixture():ApplicationManagementOverview{return {workspaceId:'workspace-fixture',actor:{userId:'viewer-fixture',assistantId:'assistant-fixture'},validForMs:30_000,readiness:{qualified:false,reason:'consumer_qualification_incomplete',canActivate:false},modules:['records'],clients:[{id:'application-fixture',workspaceId:'workspace-fixture',moduleKey:'records',name:'Fictional app',mode:'api_client',origins:[],redirectUris:[],homeAppId:null,executingAssistantId:'assistant-fixture',status:'active',revision:'1'}],selectedAppId:'application-fixture',grants:[],credentials:[],schemas:{state:'available',items:[]},sources:{state:'unavailable',items:[]},links:{miniApps:'/mini-apps',connectors:'/connectors',programmaticAccess:'/programmatic-access',access:'/access'}};}
 const response=(body:unknown,status=200)=>({ok:status>=200&&status<300,status,json:async()=>body});

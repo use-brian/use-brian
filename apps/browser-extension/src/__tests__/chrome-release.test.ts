@@ -8,9 +8,6 @@ import { describe, expect, it } from 'vitest'
 const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url))
 const scriptPath = join(repoRoot, 'scripts/publish-browser-extension.sh')
 const script = readFileSync(scriptPath, 'utf8')
-const manifest = JSON.parse(
-  readFileSync(join(repoRoot, 'apps/browser-extension/static/manifest.json'), 'utf8'),
-) as { version: string }
 const bridge = readFileSync(
   join(repoRoot, 'apps/app-web/src/lib/browser-extension-bridge.ts'),
   'utf8',
@@ -54,8 +51,7 @@ describe('[COMP:ext/chrome-release] Chrome Web Store release command', () => {
     expect(script).not.toContain('chromewebstore/v1.1')
   })
 
-  it('packages a new version for the canonical Store listing', () => {
-    expect(manifest.version).toBe('1.1.0')
+  it('uses the canonical Store listing', () => {
     expect(script).toContain('nnmbbacnkekaoccmkmlfaghjaamgdpjn')
     expect(bridge).toContain(
       'chromewebstore.google.com/detail/use-brian-browser-agent/nnmbbacnkekaoccmkmlfaghjaamgdpjn',

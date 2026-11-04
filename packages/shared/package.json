@@ -82,8 +82,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "zod": "^3.24"

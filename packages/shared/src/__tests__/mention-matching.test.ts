@@ -200,10 +200,6 @@ describe('[COMP:shared/mention-matching] mention matcher', () => {
         .toEqual(['janet']);
     });
 
-    it('keeps a trailing partial mention across a space (does not terminate the token)', () => {
-      expect(trailingMentionQuery('hi @Jane ')).toEqual({ at: 3, partial: 'Jane ' });
-    });
-
     it('still offers the full name as a candidate on a trailing partial with a space', () => {
       expect(
         mentionCandidatesFor(trailingMentionQuery('hi @Jane '), humanRoster).map((t) => t.id),

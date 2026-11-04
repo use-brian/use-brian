@@ -50,6 +50,23 @@ jobs:
       - name: Smoke
         run: pnpm smoke
 
+      - name: Test release-evidence checks
+        run: node --test scripts/__tests__/test-evidence.test.mjs
+
+      # Discovery is report-only until complete journeys qualify ten candidates.
+      # Keep the existing build-test dependency graph and unit lanes unchanged.
+      - name: Inventory selected test files (report-only)
+        continue-on-error: true
+        run: node scripts/testing/inventory.mjs --report "$RUNNER_TEMP/test-inventory.json"
+
+      - name: Retain test inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-file-inventory
+          path: ${{ runner.temp }}/test-inventory.json
+          if-no-files-found: warn
+
   api-tests:
     if: >-
       github.event_name != 'pull_request' ||

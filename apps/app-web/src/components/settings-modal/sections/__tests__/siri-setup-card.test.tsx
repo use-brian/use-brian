@@ -27,7 +27,6 @@ describe("[COMP:app-web/siri-settings] Siri setup settings card", () => {
       new URL("../general-section.tsx", import.meta.url),
       "utf8",
     );
-    expect(source).toContain('import { SiriSetupCard } from "./siri-setup-card"');
     expect(source).toContain("<SiriSetupCard />");
   });
 

@@ -73,13 +73,9 @@ describe("[COMP:app-web/turn-reconnect] personal-session stream open / reopen", 
     expect(shouldReopenSessionStream({ isRoom: true, sawDone: true, cancelled: false })).toBe(true);
   });
 
-  it("never reopens a non-room stream after the immediate not-running done", () => {
-    // status { idle } -> done {} -> end: the route answered "nothing to attach to".
-    expect(shouldReopenSessionStream({ isRoom: false, sawDone: true, cancelled: false })).toBe(false);
-  });
-
-  it("never reopens a non-room stream after the post-turn_completed done", () => {
-    // ... turn_completed {} -> done {} -> end: the turn is over; the transcript was refetched.
+  it("never reopens a non-room stream after done", () => {
+    // Both idle and completed responses reach this helper as sawDone: true.
+    // This checks the reopen decision, not the preceding event sequence.
     expect(shouldReopenSessionStream({ isRoom: false, sawDone: true, cancelled: false })).toBe(false);
   });
 

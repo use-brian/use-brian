@@ -310,8 +310,8 @@ describe("[COMP:app-web/page-comments] posting hands the comment to the thread b
       fileIds: [],
       model: "standard",
       researchMode: false,
-      // AI reply on by default → the body runs the /api/chat turn.
-      aiReply: true,
+      // Default comments stay teammate-only.
+      aiReply: false,
     });
 
     // onPick is for opening EXISTING threads (preview rows / the nudge); a fresh
@@ -319,7 +319,7 @@ describe("[COMP:app-web/page-comments] posting hands the comment to the thread b
     expect(onPick).not.toHaveBeenCalled();
   });
 
-  it("with AI reply toggled off, seeds a teammate comment (aiReply false, research forced off)", async () => {
+  it("with AI reply explicitly enabled, seeds an assistant turn", async () => {
     const onSubmitted = vi.fn();
     mount(
       <PageComments
@@ -333,8 +333,7 @@ describe("[COMP:app-web/page-comments] posting hands the comment to the thread b
       />,
     );
 
-    // Flip the AI-reply toggle off (aria-label switches to the "Team only" copy
-    // once pressed — assert via the on-label before clicking).
+    // Opt into AI for this comment.
     const aiToggle = container!.querySelector<HTMLButtonElement>(
       `[aria-label="${dict.comments.aiReply}"]`,
     )!;
@@ -356,11 +355,10 @@ describe("[COMP:app-web/page-comments] posting hands the comment to the thread b
 
     expect(onSubmitted).toHaveBeenCalledTimes(1);
     const [, seed] = onSubmitted.mock.calls[0];
-    // The seed tells the thread body to post a plain comment, no AI turn —
-    // research is forced off on the no-AI path (it only shapes an AI turn).
+    // Only the explicit opt-in asks the thread body to run an AI turn.
     expect(seed).toMatchObject({
       message: "FYI for the team",
-      aiReply: false,
+      aiReply: true,
       researchMode: false,
     });
   });
@@ -372,6 +370,7 @@ describe("[COMP:app-web/page-comments] posting hands the comment to the thread b
       mount(<PageComments pageId="p1" workspaceId="ws1" assistantId="a1" threads={[]} onPick={noop} onSubmitted={onSubmitted} />);
       const textarea = container!.querySelector<HTMLTextAreaElement>("textarea")!;
       act(() => typeInto(textarea, "Keep this comment unsent"));
+      act(() => container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.comments.aiReply}"]`)!.click());
       const trigger = container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.chat.modelLabel}"]`)!;
       await act(async () => trigger.click());
       const pro = [...document.querySelectorAll<HTMLElement>("[role=option]")].find(item => item.textContent?.includes(dict.chat.modelProDesc))!;

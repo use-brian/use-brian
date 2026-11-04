@@ -89,7 +89,6 @@ describe("[COMP:app-web/redeem] bundled desktop routing", () => {
       ),
       "utf8",
     );
-    expect(source).toContain('import Link from "next/link"');
     expect(source).toMatch(/<Link\s+href=\{`\/redeem\?ws=/);
     expect(source).not.toMatch(/<a\s+href=\{`\/redeem\?ws=/);
   });

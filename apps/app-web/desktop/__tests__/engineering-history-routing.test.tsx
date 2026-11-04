@@ -83,3 +83,13 @@ describe("[COMP:app-web/studio-application-management] desktop entry routing",()
   expect(host.querySelector("[data-page]")).toBeNull();
  });
 });
+
+vi.mock("@/app/w/[workspaceId]/studio/programmatic-access/capture/page",()=>({default:()=> <h1>Capture fixture</h1>}));
+describe("[COMP:app-web/studio-programmatic-access] desktop capture routing",()=>{
+ it.each(["oss","hosted"] as const)("opens Capture directly in %s",async edition=>{
+  await mount(edition,"/w/workspace-one/studio/programmatic-access/capture");
+  expect(window.location.hash).toBe("#/w/workspace-one/studio/programmatic-access/capture");
+  expect(host.querySelector("h1")?.textContent).toBe("Capture fixture");
+  expect(host.querySelector("[data-page]")).toBeNull();
+ });
+});

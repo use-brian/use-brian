@@ -329,8 +329,8 @@ function CollabEditorInner({
   // A not-yet-committed comment: the floating-toolbar "Comment" action opens
   // this PURELY in the UI (a local draft highlight + the composer) — nothing
   // touches the backend or the Yjs doc until the first message is sent. `el` is
-  // the painted draft-highlight span the composer anchors to (resolved a frame
-  // after the decoration paints). See `new-comment-popover.tsx`.
+  // the painted draft-highlight span or a stable editor DOM fallback.
+  // See `new-comment-popover.tsx`.
   const [draftComment, setDraftComment] = useState<{
     quote: string;
     anchorBlockId?: string;
@@ -945,15 +945,20 @@ function CollabEditorInner({
     syncCommentDraft(editor.view, { from, to });
     editor.commands.setTextSelection(to);
     setActiveThread(null);
-    setDraftComment({ quote, anchorBlockId, el: null });
-    // Anchor the composer to the painted highlight span once it lands.
-    window.setTimeout(() => {
-      const el = document.querySelector("[data-comment-draft]") as HTMLElement | null;
-      setDraftComment((d) => (d ? { ...d, el: el ?? editorWrapRef.current } : d));
-    }, 0);
+    // Open with an anchor in the same update as the draft. React node-views
+    // (including toggle summaries) may still be painting their decoration, so
+    // keep the block/editor as a usable fallback instead of gating the composer
+    // on a later timer. Scope the lookup to this editor, never another page.
+    const el = editor.view.dom.querySelector<HTMLElement>("[data-comment-draft]")
+      ?? editor.view.nodeDOM($from.before(1));
+    setDraftComment({
+      quote,
+      anchorBlockId,
+      el: el instanceof HTMLElement ? el : editor.view.dom,
+    });
   }, [editor, assistantId, viewId]);
 
-  // Block-action "Comment for AI" for an ATOM block (chart / diagram / data /
+  // Block-action "Comment" for an ATOM block (chart / diagram / data /
   // image / file / bookmark / …). Atoms carry no inner text, so the range-based
   // `onComment` can't mark them — open a WHOLE-block draft instead: no draft
   // highlight, the composer anchored to the block's own DOM. On commit this

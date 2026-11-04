@@ -150,6 +150,9 @@ describe("[COMP:app-web/comment-thread-body] presentation preserves reply state"
       const textarea = container!.querySelector<HTMLTextAreaElement>("textarea")!;
       const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!;
       act(() => { setter.call(textarea, "Keep this reply unsent"); textarea.dispatchEvent(new Event("input", { bubbles: true })); });
+      const aiToggle = container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.comments.aiReply}"]`)!;
+      expect(aiToggle.getAttribute("aria-pressed")).toBe("false");
+      act(() => aiToggle.click());
       const trigger = container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.chat.modelLabel}"]`)!;
       await act(async () => trigger.click());
       const pro = [...document.querySelectorAll<HTMLElement>("[role=option]")].find(item => item.textContent?.includes(dict.chat.modelProDesc))!;

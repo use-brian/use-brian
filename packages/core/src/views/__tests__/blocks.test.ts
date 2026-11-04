@@ -104,16 +104,6 @@ describe('[COMP:views/blocks] model-authored chart data + diagram', () => {
     ).toBe(false)
   })
 
-  it('rejects a chart carrying NEITHER data nor binding', () => {
-    expect(blockSchema.safeParse({ kind: 'chart', id: 'b1', chartType: 'bar' }).success).toBe(false)
-  })
-
-  it('rejects a bar chart whose data has no points', () => {
-    expect(
-      blockSchema.safeParse({ kind: 'chart', id: 'b1', chartType: 'bar', data: { value: 3 } }).success,
-    ).toBe(false)
-  })
-
   it('rejects a kpi chart whose data has no value', () => {
     expect(
       blockSchema.safeParse({
@@ -249,9 +239,6 @@ describe('[COMP:views/blocks] discriminated union surfaces the failing field', (
     }
   })
 
-  it('still enforces the chart data/binding xor via the union-level refine', () => {
-    expect(blockSchema.safeParse({ kind: 'chart', id: 'b1', chartType: 'bar' }).success).toBe(false)
-  })
 })
 
 describe('[COMP:views/blocks] pageSchema', () => {

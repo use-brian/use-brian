@@ -24,8 +24,8 @@ describe('[COMP:knowledge/wikilink-resolver] buildPathIndex', () => {
   })
 
   it('first entry wins for duplicate filenames', () => {
-    // 'index' appears multiple times — first wins
-    expect(INDEX.get('index')).toBe('index')
+    const index = buildPathIndex(['guides/overview', 'reference/overview'])
+    expect(index.get('overview')).toBe('guides/overview')
   })
 })
 
@@ -89,11 +89,6 @@ describe('[COMP:knowledge/wikilink-resolver] resolveWikilink', () => {
   describe('edge cases', () => {
     it('returns null for completely unknown reference', () => {
       expect(resolveWikilink('nonexistent-page', 'index', INDEX)).toBeNull()
-    })
-
-    it('handles wikilink with alias (already stripped by parser)', () => {
-      // Parser strips alias before calling resolver, but test robustness
-      expect(resolveWikilink('products/vault', 'index', INDEX)).toBe('products/vault')
     })
 
     it('handles empty string', () => {

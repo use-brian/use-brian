@@ -2549,6 +2549,7 @@ export const en = {
     back: "Back",
   },
   contextScope: {
+    selectDepartment: "Select a department",
     sharedProjects: {
       "linkedUnchanged": "{count} linked items keep their current access.",
       "assistantNotParticipant": "This assistant is not a participant of the project. Add it on the Access panel below, or choose an assistant that is.",
@@ -3977,7 +3978,7 @@ export const en = {
       copied: "Link copied",
       duplicate: "Duplicate",
       delete: "Delete",
-      comment: "Comment for AI",
+      comment: "Comment",
       colorText: "Text",
       colorBackground: "Background",
       colorClear: "Reset color",
@@ -5807,7 +5808,7 @@ export const en = {
     fallbackDesc: "Off by default. When on, a message this endpoint cannot answer is answered by the built-in model for that tier, the reply says it happened, and the turn is billed as normal Brian usage.",
   },
   comments: {
-    toolbarButton: "Comment for AI",
+    toolbarButton: "Comment",
     toolbarButtonAria: "Add a comment on the selection",
     badgeAria: "{count} comments",
     popoverTitle: "Comments",
@@ -5845,7 +5846,7 @@ export const en = {
     aiReply: "AI reply",
     aiReplyOff: "Team only",
     aiReplyHintOn: "The assistant will reply to this comment",
-    aiReplyHintOff: "Comment for your team — the assistant won't reply",
+    aiReplyHintOff: "Comment for your team. Enable AI reply to ask the assistant.",
     quoteSelectionAria: "Reply to the selected text",
     clearQuote: "Remove quote",
     history: {
@@ -13502,19 +13503,35 @@ export const en = {
     "cancel": "Cancel",
     "close": "Close original",
     "busy": "Saving",
-    "scopeHint": "Readiness is checked for the actual key and capture assistant before delivery. Assign this profile through the existing key override or assistant default controls.",
+    "scopeHint": "Create the profile, then open Connections to assign it to a key or connected app. You can also set an assistant default below.",
     "detail": "Read original",
     "none": "Not reported",
     "delivery": "Delivery",
     "archived": "Archived"
 },
   programmaticAccess: {
+    navigation: {
+      connections: "Connections",
+      capture: "Capture",
+      applications: "Applications",
+      description: "Connect external tools to your workspace.",
+      endpoint: "MCP endpoint",
+      instructions: "Connection instructions",
+      captureHint: "Manage how connected tools save messages to your workspace.",
+      captureAdminOnly: "Only workspace admins can manage capture profiles.",
+      archive: "Engineering archive",
+      archiveHint: "Save prompts and final replies as engineering history without extracting memories.",
+      extractHint: "Extract memories from captured messages using rules you choose.",
+      manage: "Manage",
+      enabled: "Enabled",
+      disabled: "Disabled",
+    },
     createBlockedEnforcement:
       "This installation has not finished setting up department isolation, so keys cannot be limited to a department yet. Ask whoever runs Use Brian for you to update it, or create the key without a department.",
     createContextUnavailable:
       "That department or project is no longer active. Choose another one, or create the key without one.",
-    newKey: "New key",
-    keysTitle: "Keys",
+    newKey: "Create key",
+    keysTitle: "API keys",
     lastUsedLabel: "Last used",
     createdLabel: "Created",
     endpointLabel: "Connect a client",
@@ -13591,7 +13608,7 @@ export const en = {
     capture: {
       title: "Capture profiles",
       description:
-        "Route message-level MCP ingestion through ordered rules. Scheduled matches pool messages and make one extraction call per window.",
+        "Choose what to save from connected tools and how to process it.",
       poolingHint:
         "Profiles are reusable. Each assistant chooses a default, while each key or connected app can override it.",
       profileNamePlaceholder: "Writer workflow",
@@ -13601,7 +13618,7 @@ export const en = {
       partitionSession: "By session",
       partitionSubject: "By subject",
       createProfile: "Create profile",
-      empty: "No capture profiles yet. Create one, add an ordered rule, then assign it to an assistant.",
+      empty: "No capture profiles yet. Create one, then assign it to a connection or assistant.",
       profileMeta: "{partition} · {count} rules",
       enable: "Enable",
       disable: "Disable",
@@ -14174,6 +14191,7 @@ export const en = {
     processQueued: "Transcription queued. You can keep working while it processes.",
     processActionFailed: "Could not start transcription. Refresh the page and check that you still have access to the original audio.",
     recoveryBody: "Recover this recording from the saved audio. No download or upload is needed.",
+
     panelTitle: "Recordings",
     panelSearchPlaceholder: "Search recordings",
     panelFilterLabel: "Filter by status",

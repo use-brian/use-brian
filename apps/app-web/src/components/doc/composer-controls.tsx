@@ -24,7 +24,7 @@
  */
 
 import { useCallback, useState } from "react";
-import { Bot, UserRound } from "lucide-react";
+import { Bot } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import {
@@ -139,30 +139,22 @@ export function ComposerControls({
   return (
     <div className={cn("flex items-center gap-1.5", phoneTargets && "min-w-0 flex-wrap md:flex-nowrap", className)}>
       {showAiToggle ? (
-        // Subtle icon-only toggle (label rides the tooltip + aria-label). Both
-        // glyphs are horizontally symmetric — `Bot` and the single-figure
-        // `UserRound` — so the icon reads as centered in the square button
-        // (lucide's two-figure `Users` is optically left-weighted and looked
-        // off-center). `justify-center` pins it dead-center either way.
         <button
           type="button"
           onClick={() => onAiReplyChange?.(!aiOn)}
           aria-pressed={aiOn}
-          aria-label={aiOn ? tc.aiReply : tc.aiReplyOff}
+          aria-label={tc.aiReply}
           title={aiOn ? tc.aiReplyHintOn : tc.aiReplyHintOff}
           className={cn(
-            "inline-flex shrink-0 items-center justify-center rounded-lg transition-colors",
-            phoneTargets ? "size-11 md:size-7" : "size-7",
+            "inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg px-2 text-xs transition-colors",
+            phoneTargets ? "h-11 md:h-7" : "h-7",
             aiOn
               ? "bg-interaction/15 text-foreground hover:bg-interaction/20"
               : "text-muted-foreground hover:bg-muted hover:text-foreground",
           )}
         >
-          {aiOn ? (
-            <Bot className="size-4" aria-hidden />
-          ) : (
-            <UserRound className="size-4" aria-hidden />
-          )}
+          <Bot className="size-4" aria-hidden />
+          <span>{tc.aiReply}</span>
         </button>
       ) : null}
       <div className="flex-1" />

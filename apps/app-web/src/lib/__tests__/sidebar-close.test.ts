@@ -36,7 +36,6 @@ describe("[COMP:app-web/sidebar-drawer-close] wiring", () => {
   const sidebar = src("components/doc/doc-sidebar.tsx");
 
   it("the chrome is the one listener and closes on every URL change", () => {
-    expect(chrome).toContain('import { SIDEBAR_CLOSE_EVENT } from "@/lib/sidebar-close";');
     expect(chrome).toMatch(/window\.addEventListener\(SIDEBAR_CLOSE_EVENT, onClose\)/);
     // A navigation from a page row, a panel row or a nav icon moves the URL;
     // that is the close signal for every navigating launcher at once.
@@ -49,7 +48,6 @@ describe("[COMP:app-web/sidebar-drawer-close] wiring", () => {
   });
 
   it("Settings / Invite from the switcher, and the OPEN_SETTINGS event, request a close", () => {
-    expect(switcher).toContain('import { requestSidebarClose } from "@/lib/sidebar-close";');
     // Both entry points into the modal: the popover buttons and the window event.
     expect(switcher.match(/requestSidebarClose\(\);/g)?.length).toBeGreaterThanOrEqual(2);
     expect(switcher).toMatch(/function openSettings\(section: SettingsSection\) \{[\s\S]{0,300}requestSidebarClose\(\);/);

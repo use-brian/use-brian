@@ -14,9 +14,9 @@
  *
  * Deliberately leaner than the thread body: no message list, no "No comments
  * yet" empty state, and no composer avatar — just the quoted anchor text and a
- * single auto-focused input. A subtle **AI-reply toggle** (in
- * `<ComposerControls>`) lets the user post a plain comment for teammates with
- * no assistant reply; when off, the research + model controls disable and
+ * single auto-focused input. The **AI reply** toggle (in
+ * `<ComposerControls>`) explicitly requests an assistant response; comments
+ * default to teammates only; when off, the research + model controls disable and
  * attachments hide (they only shape an AI turn).
  *
  * Positioning + the outside-click/Escape shell mirror `comment-thread-popover`
@@ -94,11 +94,11 @@ export function NewCommentPopover({
   // Pass the panel element so an inside-the-panel scroll (e.g. the model picker's
   // own scroll) doesn't trigger a reposition — see `scrollMovesAnchor`.
   const pos = useAnchoredPosition(anchorEl, open, panelRef);
+  const positioned = pos !== null;
 
   const controls = useComposerControls(workspaceId);
-  // Teammate-only when there's no assistant to reply; otherwise default to an
-  // AI reply (the assistant acts on the comment, matching the existing flow).
-  const [aiReply, setAiReply] = React.useState(hasAssistant);
+  // Comments start teammate-only; the user explicitly enables an AI reply.
+  const [aiReply, setAiReply] = React.useState(false);
   const [draft, setDraft] = React.useState("");
   const [mentionIds, setMentionIds] = React.useState<string[]>([]);
   const [busy, setBusy] = React.useState(false);
@@ -136,10 +136,10 @@ export function NewCommentPopover({
   // portal has painted) — the user clicked "Comment" to type, so don't make
   // them click again.
   React.useEffect(() => {
-    if (!open) return;
+    if (!open || !positioned) return;
     const id = window.requestAnimationFrame(() => composerRef.current?.focus());
     return () => window.cancelAnimationFrame(id);
-  }, [open]);
+  }, [open, positioned]);
 
   // Outside-click + Escape dismiss. Attached next tick so the opening click
   // can't immediately close it (mirrors the thread popover). The model picker's
@@ -276,6 +276,7 @@ export function NewCommentPopover({
               </button>
             ) : null}
             <ComposerControls
+              phoneTargets
               model={controls.model}
               onModelChange={controls.setModel}
               plan={controls.plan}
