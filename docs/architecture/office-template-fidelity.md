@@ -62,3 +62,9 @@ The member-facing receipt contains only Brian's existing failure code and safe
 message. The shared renderer already bounds vendor stderr to its final 2000
 characters; retaining that cause makes service-only startup failures diagnosable
 without exposing vendor output in the document UI.
+
+Native PDF export restores canonical page dimensions when LibreOffice rounds or
+snaps a custom size by at most half a point. The correction changes page boxes
+only and retains the original upper-left content origin, fonts, vectors, and
+annotation coordinates. It never rescales page content. Larger size differences,
+rotated pages, and deliberately cropped pages are outside this rounding repair.
