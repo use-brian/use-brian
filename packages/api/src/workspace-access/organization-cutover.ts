@@ -1,4 +1,4 @@
-/** Authenticated, owner-reviewed organization cutover. [COMP:api/organization-cutover] */
+/** Atomic organization cutover: background maintenance and attended compatibility. [COMP:api/organization-cutover] */
 import {randomUUID} from 'node:crypto'
 import type {PoolClient} from 'pg'
 import {z} from 'zod'
@@ -17,9 +17,10 @@ export const cutoverApplySchema=z.object({reviewId:z.string().uuid(),payloadHash
 export type CutoverPrincipal={userId:string;authSessionId:string}
 type Schedule={id:string;workflowId:string;oldFingerprint:string;sourceFingerprint:string;retainedFingerprint:string;alreadyPinned:boolean;enabled:boolean}
 type Blocker={code:string;kind?:string;id?:string}
-type Review={id:string;workspace_id:string;actor_user_id:string;auth_session_id:string;target_department_id:string;
+type CutoverRequest=Omit<z.infer<typeof cutoverPrepareSchema>,'targetDepartmentId'>&{targetDepartmentId:string|null}
+type Review={id:string;workspace_id:string;actor_user_id:string|null;auth_session_id:string|null;target_department_id:string|null;
   policy_revision:string;payload_hash:string;evidence:Evidence;status:string;expires_at:Date;result:unknown}
-type Evidence={request:z.infer<typeof cutoverPrepareSchema>;policyRevision:string;inventory:Awaited<ReturnType<typeof organizationCutoverInventory>>;
+type Evidence={request:CutoverRequest;policyRevision:string;inventory:Awaited<ReturnType<typeof organizationCutoverInventory>>;
   schedules:Schedule[];blockers:Blocker[];readinessVersion:number;readiness:ContextReadiness;retained:Record<string,string>}
 const fail=(code:string,status=409):never=>{throw new WorkspaceAccessError(code,status)}
 
@@ -56,11 +57,11 @@ async function owner(c:PoolClient,w:string,principal:CutoverPrincipal,lock=true)
  return row
 }
 
-async function inspect(c:PoolClient,w:string,request:z.infer<typeof cutoverPrepareSchema>):Promise<Evidence> {
+async function inspect(c:PoolClient,w:string,request:CutoverRequest,automatic=false):Promise<Evidence> {
  const policy=(await c.query<{revision:string}>('SELECT revision::text FROM workspace_access_policies WHERE workspace_id=$1',[w])).rows[0]
  const target=(await c.query(`SELECT id FROM workspace_groups WHERE id=$2 AND workspace_id=$1 AND kind='team' AND status='active'
    AND compartment_key='team:'||id::text`,[w,request.targetDepartmentId])).rows[0]
- if(!target)fail('cutover_department_unavailable',404)
+ if(!target&&(!automatic||request.targetDepartmentId!==null))fail('cutover_department_unavailable',404)
  const inventory=await organizationCutoverInventory(c,w)
  const readiness=await getContextReadinessSystem(w,(sql,values)=>c.query(sql,values),{legacyInventory:false,reviewScopeInventory:true})
  // The owner is reviewing this actual complete coverage now. Only the absent
@@ -85,7 +86,9 @@ async function inspect(c:PoolClient,w:string,request:z.infer<typeof cutoverPrepa
  }
  const assistants=(await c.query<{id:string}>(`SELECT id FROM assistants WHERE workspace_id=$1 AND
    (home_department_id IS DISTINCT FROM $2 OR default_workspace_group_id IS DISTINCT FROM $2 OR context_binding_origin='legacy') ORDER BY id`,[w,request.targetDepartmentId])).rows
- blockers.push(...assistants.map(row=>({code:'cutover_assistant_binding_required',kind:'assistant',id:row.id})))
+ // V2 already governs each assistant's existing home. Background maintenance
+ // preserves heterogeneous homes instead of requiring relocation to one team.
+ if(!automatic)blockers.push(...assistants.map(row=>({code:'cutover_assistant_binding_required',kind:'assistant',id:row.id})))
  const sources=(await c.query<{id:string}>(`SELECT id FROM workspace_knowledge_sources WHERE workspace_id=$1 AND
    (configured_by_user_id IS NULL OR binding_held OR binding_compartments IS NULL OR binding_project_ids IS NULL
     OR (sync_run_id IS NOT NULL AND sync_lease_until>clock_timestamp())) ORDER BY id`,[w])).rows
@@ -199,6 +202,11 @@ export async function applyOrganizationCutover(w:string,principal:CutoverPrincip
   if(review.policy_revision!==policy.revision)fail('access_policy_conflict')
   const current=await inspect(c,w,review.evidence.request)
   if(current.blockers.length||hashCommandReviewIntent(current)!==hashCommandReviewIntent(review.evidence))fail('cutover_review_changed')
+  return completeCutover(c,w,review,current,()=>owner(c,w,principal))
+ })
+}
+
+async function completeCutover(c:PoolClient,w:string,review:Review,current:Evidence,revalidate:()=>Promise<unknown>) {
   const scopeInventory=current.readiness.scopeInventory
   if(!scopeInventory?.canAcknowledge)return fail('cutover_inventory_review_required')
   await c.query("UPDATE workspace_organization_cutover_reviews SET status='applying' WHERE id=$1",[review.id])
@@ -224,7 +232,7 @@ export async function applyOrganizationCutover(w:string,principal:CutoverPrincip
   const updated=(await c.query<{revision:string}>(`UPDATE workspace_access_policies SET setup_state='ready',access_mode='departments',
     default_department_id=$2,completed_cutover_id=$3,reviewed_inventory_revision=$4
     WHERE workspace_id=$1 RETURNING revision::text`,[w,review.target_department_id,review.id,scopeInventory.coverage.registryRevision])).rows[0]
-  await owner(c,w,principal)
+  await revalidate()
   const postReadiness=await getContextReadinessSystem(w,(sql,values)=>c.query(sql,values),{legacyInventory:false})
   if(!postReadiness.readyForActivation)fail('cutover_post_readiness_failed')
   const retained=await organizationCutoverInventory(c,w)
@@ -244,7 +252,50 @@ export async function applyOrganizationCutover(w:string,principal:CutoverPrincip
       AND EXISTS(SELECT 1 FROM workspace_access_migration_items i WHERE i.plan_id=p.id)
       AND NOT EXISTS(SELECT 1 FROM workspace_access_migration_items i WHERE i.plan_id=p.id AND i.status<>'applied')`,[w])
   await c.query(`INSERT INTO workspace_access_events(workspace_id,actor_user_id,kind,subject_id,policy_revision,changes)
-   VALUES($1,$2,'workspace.organization_cutover.completed',$3,$4,$5)`,[w,principal.userId,review.id,updated.revision,JSON.stringify(receipt)])
+   VALUES($1,$2,'workspace.organization_cutover.completed',$3,$4,$5)`,[w,review.actor_user_id,review.id,updated.revision,JSON.stringify(receipt)])
   return receipt
+}
+
+/** Backend-only maintenance entry point. It accepts no caller-supplied actor,
+ * destination, approval or scope changes. Never expose this as an agent tool. */
+export async function completeOrganizationUpgrade(workspaceId:string) {
+ // Most retry candidates have an unresolved binding or active work. Inspect
+ // those without the global writer barrier; only a viable candidate freezes
+ // writers, then repeats every check under that barrier before committing.
+ const preflight=await transaction(async c=>{
+  if(!(await c.query<{locked:boolean}>("SELECT pg_try_advisory_xact_lock(hashtextextended('organization-upgrade:'||$1,0)) AS locked",[workspaceId])).rows[0].locked)return {status:'busy' as const}
+  const row=(await c.query<{v2:boolean;mode:string|null;setup:string|null;departmentId:string|null;receiptId:string|null}>(`SELECT w.department_read_v2 AS v2,p.access_mode AS mode,p.setup_state AS setup,
+    p.default_department_id AS "departmentId",p.completed_cutover_id AS "receiptId" FROM workspaces w LEFT JOIN workspace_access_policies p ON p.workspace_id=w.id WHERE w.id=$1`,[workspaceId])).rows[0]
+  if(!row?.v2||row.mode&&row.mode!=='departments')return {status:'ineligible' as const}
+  if(row.setup==='ready')return {status:'already_ready' as const,receiptId:row.receiptId}
+  if(row.setup===null)return null
+  await c.query("SELECT set_config('app.current_user_id','',true)")
+  const evidence=await inspect(c,workspaceId,{targetDepartmentId:row.departmentId,idempotencyKey:randomUUID(),requireNoGeneral:false},true)
+  return evidence.blockers.length?{status:'blocked' as const,blockers:evidence.blockers}:null
+ })
+ if(preflight)return preflight
+ return transaction(async c=>{
+  if(!(await c.query<{locked:boolean}>("SELECT pg_try_advisory_xact_lock(hashtextextended('organization-upgrade:'||$1,0)) AS locked",[workspaceId])).rows[0].locked)return {status:'busy' as const}
+  await c.query("SET LOCAL lock_timeout='100ms'")
+  await lockOrganizationCutoverInventory(c)
+  const workspace=(await c.query<{v2:boolean}>('SELECT department_read_v2 AS v2 FROM workspaces WHERE id=$1 FOR UPDATE',[workspaceId])).rows[0]
+  if(!workspace?.v2)return {status:'ineligible' as const}
+  await c.query('INSERT INTO workspace_access_policies(workspace_id) VALUES($1) ON CONFLICT(workspace_id) DO NOTHING',[workspaceId])
+  const policy=(await c.query<{mode:string;setup:string;departmentId:string|null;receiptId:string|null}>(`SELECT access_mode AS mode,setup_state AS setup,
+   default_department_id AS "departmentId",completed_cutover_id AS "receiptId" FROM workspace_access_policies WHERE workspace_id=$1 FOR UPDATE`,[workspaceId])).rows[0]
+  if(policy.setup==='ready')return {status:'already_ready' as const,receiptId:policy.receiptId}
+  if(policy.mode!=='departments')return {status:'ineligible' as const}
+  // System attribution is explicit. No owner session or consent is manufactured.
+  await c.query("SELECT set_config('app.current_user_id','',true)")
+  const evidence=await inspect(c,workspaceId,{targetDepartmentId:policy.departmentId,idempotencyKey:randomUUID(),requireNoGeneral:false},true)
+  if(evidence.blockers.length)return {status:'blocked' as const,blockers:evidence.blockers}
+  const id=randomUUID(),expiresAt=new Date(Date.now()+60_000).toISOString()
+  const payloadHash=hashCommandReviewIntent({id,workspaceId,executionKind:'background',expiresAt,evidence})
+  const review=(await c.query<Review>(`INSERT INTO workspace_organization_cutover_reviews(id,workspace_id,execution_kind,
+    actor_user_id,auth_session_id,target_department_id,policy_revision,idempotency_key,payload_hash,evidence,expires_at)
+    VALUES($1,$2,'background',NULL,NULL,$3,$4,$5,$6,$7,$8) RETURNING *,policy_revision::text`,
+    [id,workspaceId,policy.departmentId,evidence.policyRevision,evidence.request.idempotencyKey,payloadHash,JSON.stringify(evidence),expiresAt])).rows[0]
+  const receipt=await completeCutover(c,workspaceId,review,evidence,async()=>{})
+  return {status:'applied' as const,receipt}
  })
 }

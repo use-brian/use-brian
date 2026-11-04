@@ -3,7 +3,7 @@
 /** One navigation home for the directory and access administration. Section
  * navigation lives in the sidebar panel and the top bar, never in the page.
  * [COMP:app-web/organization-chart] */
-import {useWorkspaceAccessMode,WorkspaceModeSummary} from '@/components/context/mode-aware-context';
+import {useWorkspaceAccessMode} from '@/components/context/mode-aware-context';
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useT } from '@/lib/i18n/client';
@@ -25,6 +25,7 @@ export function OrganizationHub() {
   const params = useSearchParams();
   const router = useRouter();
   const t = useT().organization;
+  const sharedLabel = useT().modeContext.shared;
   const section = organizationSection(params.get('section'));
   const memberId = section === 'people' ? params.get('member') : null;
   const [actionSlot, setActionSlot] = useState<HTMLElement | null>(null);
@@ -41,7 +42,7 @@ export function OrganizationHub() {
       {/* pb-28 clears the floating "Ask anything" chat dock, as in Studio. */}
       <div key={`${workspaceId}:${me.id}:${section}`} className="min-h-0 min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full min-w-0 max-w-7xl px-4 pb-28 pt-5 md:px-8">
-          {mode.readySimple&&!mode.data?.canAdminister&&(section==='access'||section==='departments')?<WorkspaceModeSummary/>:section === 'structure' ? <OrganizationChartView /> : section === 'access' ? <WorkspaceAccessView selection={{kind:'requests'}} /> :
+          {mode.readySimple&&!mode.data?.canAdminister&&(section==='access'||section==='departments')?<p className="text-sm text-muted-foreground">{sharedLabel}</p>:section === 'structure' ? <OrganizationChartView /> : section === 'access' ? <WorkspaceAccessView selection={{kind:'requests'}} /> :
             section === 'departments' ? <div className="space-y-6"><TeamsContextSection home={{summary:<HomeDepartmentSummary />,panel:<HomeDepartmentControls embedded />}} renderAccessSettings={(id,panel)=>panel==='readers'?<DepartmentAccessPanel departmentId={id} />:<WorkspaceAccessView embedded selection={{kind:'department',id}}/>} /><DepartmentAssistantGroups /></div> :
             <WorkspaceMembersSection
                 memberTarget={memberId ? { workspaceId, memberId } : undefined}

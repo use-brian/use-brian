@@ -15,13 +15,33 @@ vi.mock('@/lib/surface-prefetch',()=>({workspaceAccessModeCacheKey:(w:string,u:s
 vi.mock('@/components/chrome/surface-skeleton',()=>({SurfaceSkeletonFor:()=> <div data-skeleton/>}));
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 let host:HTMLDivElement,root:Root,context:CreationContext;
-let mode={mode:'simple',setupState:'ready',policyRevision:'1',defaultDepartmentId:'team',canAdminister:false};
+let mode:{mode:string;setupState:string;policyRevision:string;defaultDepartmentId:string|null;canAdminister:boolean;departmentReadV2?:boolean}={mode:'simple',setupState:'ready',policyRevision:'1',defaultDepartmentId:'team',canAdminister:false};
 const projection=<T extends object>(value:T)=>protectProjection({...value,validForMs:30000},performance.now());
 function Probe({intent,compact}:{intent:CreationIntent;compact?:boolean}){context=useCreationContext(intent);return <ModeAwareCreationContext context={context} compact={compact}/>;}
 async function render(intent:CreationIntent='new-shared',compact=false){await act(async()=>root.render(<I18nProvider locale="en" dict={en}><Probe intent={intent} compact={compact}/></I18nProvider>));}
 beforeEach(()=>{mode={mode:'simple',setupState:'ready',policyRevision:'1',defaultDepartmentId:'team',canAdminister:false};mocks.viewer.me.id='u';mocks.mode.mockImplementation(async()=>projection(mode));mocks.choices.mockImplementation(async()=>projection({policyRevision:mode.policyRevision,teams:[{id:'team',name:'Shared',status:'active'}],projects:[{id:'project',name:'Project A',status:'active'}]}));invalidateSurfaceCache('workspace-access:');host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('workspace-access:');vi.clearAllMocks();vi.useRealTimers();});
 describe('[COMP:app-web/mode-aware-context] explicit creation intent',()=>{
+ it('revalidates a v2 draft across background completion without discarding its destination or asking for confirmation',async()=>{
+  mode={...mode,mode:'departments',setupState:'legacy',departmentReadV2:true};
+  await render();await act(async()=>context.selectTeam('team'));await act(async()=>context.selectProject('project'));
+  mode={...mode,setupState:'ready',policyRevision:'2'};
+  await act(async()=>{window.dispatchEvent(new CustomEvent('brian:organization-changed',{detail:{workspaceId:'w'}}));});
+  await act(async()=>context.refresh());
+  expect(context.ready).toBe(true);expect(context.reviewNeeded).toBe(false);
+  expect(context.snapshot()).toEqual({contextGroupId:'team',contextProjectId:'project',expectedPolicyRevision:'2'});
+  mocks.choices.mockImplementation(async()=>projection({policyRevision:'3',teams:[],projects:[]}));
+  mode={...mode,policyRevision:'3'};await act(async()=>context.refresh());
+  expect(context.ready).toBe(false);expect(context.snapshot()).toBeNull();
+ });
+ it('keeps General available without a new selection chore after a v2 background upgrade',async()=>{
+  mode={...mode,mode:'departments',setupState:'ready',defaultDepartmentId:null,departmentReadV2:true};
+  await render();
+  expect(context.ready).toBe(true);
+  expect(context.snapshot()?.contextGroupId).toBeNull();
+  expect(host.textContent).not.toContain(en.modeContext.choose);
+ });
+
  it.each([false,true])('keeps a pending creation read quiet (compact=%s) without admitting a send',async(compact)=>{
   let resolveChoices!:(value:ReturnType<typeof projection>)=>void;
   mocks.choices.mockImplementation(()=>new Promise(resolve=>{resolveChoices=resolve;}));

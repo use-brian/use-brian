@@ -3,6 +3,8 @@ export type WorkspaceAccessMode = 'simple' | 'departments'
 export type WorkspaceAccessModeState = {
   workspaceId: string
   mode: WorkspaceAccessMode
+  /** Current permission engine; setup completion does not change its defaults. */
+  departmentReadV2?: boolean
   setupState: 'legacy' | 'ready'
   /** Durable server-side cutover proof; absent on historical mode projections. */
   cutoverReceiptId?: string | null

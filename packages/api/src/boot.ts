@@ -856,6 +856,7 @@ import { oauthAuthorizationsRoutes } from './routes/oauth-authorizations.js'
 import { createJobExecutor } from './scheduling/executor.js'
 import { createStuckSessionSweeper } from './scheduling/stuck-session-sweeper.js'
 import { createViewsPruneWorker } from './scheduling/views-prune-worker.js'
+import {createOrganizationUpgradeWorker} from './workspace-access/organization-upgrade-worker.js'
 import { createCleanupWorker } from './scheduling/cleanup-worker.js'
 import { createCalleeExecutor } from './inter-assistant/executor.js'
 import { deliverToChannel } from './inter-assistant/deliver.js'
@@ -8604,6 +8605,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) sessionStateWorker.start()
 
+  const organizationUpgradeWorker = createOrganizationUpgradeWorker()
+  if (runWorkers) organizationUpgradeWorker.start()
+
   const cleanupWorker = createCleanupWorker({ jobStore })
   if (runWorkers) cleanupWorker.start()
 
@@ -10195,6 +10199,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   async function shutdown(): Promise<void> {
+    await organizationUpgradeWorker.stop()
     await officeSearchProjector.stop()
     await stopWatchCleanup?.() // Watch boot lifecycle: stop and drain retention work.
     console.log('Shutting down — flushing analytics...')
