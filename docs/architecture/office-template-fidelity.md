@@ -47,3 +47,9 @@ empty final sections, and native XML after removing the canonical custom part.
 For template acceptance, export through Office, render every PDF page, compare
 against the reference at a fixed resolution, and adjust the editable template or
 existing generator. Semantic round-trip success alone is not visual equality.
+
+Document PDF failures keep their underlying renderer cause in server diagnostics.
+The member-facing receipt contains only Brian's existing failure code and safe
+message. The shared renderer already bounds vendor stderr to its final 2000
+characters; retaining that cause makes service-only startup failures diagnosable
+without exposing vendor output in the document UI.

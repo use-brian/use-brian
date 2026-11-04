@@ -1,9 +1,25 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { layoutOfficeArtifact } from '@use-brian/office-renderer'
-import { exportOfficeDocumentPdf } from '../docx/pdf.js'
+import { convertDocumentDocxToPdf, exportOfficeDocumentPdf } from '../docx/pdf.js'
+import { LibreOfficeError } from '../../files/libreoffice.js'
 import { documentSnapshot, resolveFixtureResource } from './fixtures.js'
 
 describe('[COMP:office/document-pdf] Document PDF release', () => {
+  it('retains the renderer cause for server diagnostics while keeping the receipt safe', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const vendor = new LibreOfficeError('converter_unavailable', { cause: 'renderer exit 77: private vendor detail' })
+    try {
+      const result = await exportOfficeDocumentPdf(documentSnapshot(), resolveFixtureResource, {
+        convert: input => convertDocumentDocxToPdf(input, async () => { throw vendor }),
+        pageCount: async () => { throw new Error('unreachable') },
+      })
+      expect(result.bytes).toBeUndefined()
+      expect(result.receipt.issues).toEqual([{ severity: 'error', code: 'converter_unavailable', message: 'Document PDF conversion is unavailable.' }])
+      expect(JSON.stringify(result)).not.toContain('private vendor detail')
+      expect(log).toHaveBeenCalledWith('[office/document-pdf] conversion failed', { code: 'converter_unavailable', error: expect.objectContaining({ cause: vendor }) })
+    } finally { log.mockRestore() }
+  })
+
   it('converts the canonical DOCX and validates its page count', async () => {
     const snapshot = documentSnapshot()
     const pdf = new Uint8Array([37, 80, 68, 70])

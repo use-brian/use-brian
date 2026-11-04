@@ -31,7 +31,7 @@ export type DocumentPdfPort = {
 }
 
 class DocumentPdfFailure extends Error {
-  constructor(readonly code: DocumentPdfIssueCode) { super(code) }
+  constructor(readonly code: DocumentPdfIssueCode, options?: ErrorOptions) { super(code, options) }
 }
 
 /** DOCX bytes → PDF bytes through the shared isolated LibreOffice runner.
@@ -43,7 +43,7 @@ export async function convertDocumentDocxToPdf(
   try {
     return await convertToPdfWithLibreOffice(input, { inputName: 'document.docx', run, tempPrefix: 'brian-document-pdf-' })
   } catch (error) {
-    if (error instanceof LibreOfficeError) throw new DocumentPdfFailure(error.code)
+    if (error instanceof LibreOfficeError) throw new DocumentPdfFailure(error.code, { cause: error })
     throw error
   }
 }
@@ -83,6 +83,7 @@ export async function exportOfficeDocumentPdf(
     return { bytes, mime: 'application/pdf', receipt: { ...base, actualPageCount } }
   } catch (error) {
     const code: DocumentPdfIssueCode = error instanceof DocumentPdfFailure ? error.code : libreOfficeFailureCode(error)
+    console.error('[office/document-pdf] conversion failed', { code, error })
     return { mime: 'application/pdf', receipt: { ...base, issues: [{ severity: 'error', code, message: MESSAGES[code] }] } }
   }
 }
