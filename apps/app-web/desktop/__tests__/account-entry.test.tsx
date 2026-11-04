@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+vi.mock("next/navigation", async () => await import("../shims/next-navigation"));
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,7 +10,7 @@ import { App } from "../app";
 // Exercise the real HashRouter and route table. Network-loaded workspace
 // chrome and page contents are boundaries; no routing or edition logic is mocked.
 const auth = vi.hoisted(() => ({ token: vi.fn(), fetch: vi.fn() }));
-vi.mock("@/lib/auth-fetch", () => ({ getValidAccessToken: auth.token, authFetch: auth.fetch }));
+vi.mock("@/lib/auth-fetch", () => ({ getAccessToken: () => null, getValidAccessToken: auth.token, authFetch: auth.fetch }));
 vi.mock("@/lib/offline/idb", () => ({
   idbGet: async () => [{ id: "cached-workspace", name: "Private cached workspace" }], idbSet: async () => {},
 }));
@@ -70,10 +71,11 @@ describe("[COMP:app-web/desktop-spa] main app account entry", () => {
     await act(async () => button(en.workspaceSwitcher.addAccountDialog.cloud).click());
     expect(addAccount).toHaveBeenCalledOnce();
   });
-  it("opens the same Cloud/Self-hosted dialog from anonymous entry", async () => {
+  it("opens server address entry directly without starting Cloud sign-in", async () => {
     await mount();
-    await act(async () => button(en.workspaceSwitcher.addAccountDialog.title).click());
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(en.workspaceSwitcher.addAccountDialog.selfHosted);
+    await act(async () => button(en.desktopSession.connectServer).click());
+    expect(document.querySelector('[role="dialog"] input')).not.toBeNull();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(en.workspaceSwitcher.addAccountDialog.serverAddress);
     expect(addAccount).not.toHaveBeenCalled();
   });
   it.each([

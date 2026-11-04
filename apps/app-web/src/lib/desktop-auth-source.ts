@@ -1,3 +1,4 @@
+import { notifySessionLogout } from "@/lib/session-events";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Desktop auth source — the Bearer-token half of the auth seam.
@@ -102,7 +103,14 @@ export type DesktopUpdateStatus =
   | { phase: "downloading"; version: string; percent: number }
   | { phase: "ready"; version: string };
 
+export type DesktopSignInState = { phase: "idle" | "browser" | "exchanging" | "error"; appUrl?: string };
 export interface DesktopBridge {
+  onSessionRestored?: (callback: () => void) => () => void;
+  onSessionCleared?: (callback: (reason: "logout" | "expired") => void) => () => void;
+  getSignInState?: () => Promise<DesktopSignInState>;
+  onSignInState?: (callback: (state: DesktopSignInState) => void) => () => void;
+  reopenSignIn?: () => void;
+  cancelSignIn?: () => void;
   /** Show the main app account controls after session rejection, without starting OAuth. */
   showAccounts?: () => void;
   /** Pair resolves successfully only once the embedded browser relay is ready. */
@@ -152,7 +160,7 @@ export interface DesktopBridge {
    * (null = revert to the primary-display default).
    */
   setCaptureSource?: (id: string | null) => void;
-  signIn: () => void;
+  signIn: (options?: { userId?: string }) => void;
   /**
    * Shell self-update status for the footer chip. Absent in browsers and in
    * shells older than the chip; null when there is nothing to show.
@@ -380,6 +388,7 @@ export function desktopSignOut(): boolean {
   const signOut =
     desktopBridge()?.signOut;
   if (typeof signOut !== "function") return false;
+  notifySessionLogout();
   signOut();
   return true;
 }

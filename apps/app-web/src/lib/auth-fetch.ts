@@ -1,3 +1,4 @@
+import { notifySessionRequired, sessionIdentity } from "@/lib/session-events";
 /**
  * Authenticated fetch wrapper with transparent JWT refresh. Cloned from
  * apps/web/src/lib/auth-fetch.ts.
@@ -130,6 +131,9 @@ async function tryRefreshToken(): Promise<RefreshOutcome> {
       }
       const refreshUrl = new URL("/api/auth/refresh-and-return", primary);
       refreshUrl.searchParams.set("next", window.location.href);
+      const failure = new URL("/accounts", window.location.origin);
+      failure.searchParams.set("next", window.location.pathname + window.location.search + window.location.hash);
+      refreshUrl.searchParams.set("failureNext", failure.href);
       authRedirectInFlight = true;
       window.location.href = refreshUrl.toString();
       return { kind: "redirecting" };
@@ -228,7 +232,8 @@ function withAuthHeader(
  * a refresh token in production; this helper handles the no-cookie
  * case, and the no-refresh-after-401 case.
  */
-function redirectToLogin(): void {
+function redirectToLogin(identity?: string | null): void {
+  if (notifySessionRequired(identity)) return;
   if (typeof window === "undefined") return;
   // Bundled desktop app: "login" is the system-browser PKCE flow, not a
   // same-origin redirect. Dormant on web + thin shell.
@@ -259,6 +264,10 @@ function redirectToLogin(): void {
   window.location.href = "/login";
 }
 
+/** Refresh availability is not evidence that the session was rejected. */
+export class AuthRefreshUnavailableError extends TypeError {
+  constructor() { super("Session refresh is temporarily unavailable"); }
+}
 export async function authFetch(
   rawUrl: string,
   init: RequestInit = {},
@@ -268,6 +277,7 @@ export async function authFetch(
     ? withConnectWorkspace(rawUrl, workspaceIdFromPath(window.location.pathname))
     : rawUrl;
   let token = getAccessToken();
+  const requestIdentity = sessionIdentity(token);
   if (!token) {
     const outcome = await tryRefreshToken();
     if (outcome.kind === "ok") {
@@ -276,10 +286,10 @@ export async function authFetch(
       // Offline / transient: surface a network error like any failed fetch
       // (`fetch(url)` below throws the same way when offline with a live token).
       // The session stays intact and callers degrade + retry — never a logout.
-      throw new TypeError("authFetch: network unavailable (offline)");
+      throw new AuthRefreshUnavailableError();
     } else {
       // `unauthenticated` → send to login; `redirecting` → page is unloading.
-      if (outcome.kind === "unauthenticated") redirectToLogin();
+      if (outcome.kind === "unauthenticated") redirectToLogin(requestIdentity);
       return new Response(null, { status: 401 });
     }
   }
@@ -292,11 +302,13 @@ export async function authFetch(
   if (outcome.kind === "ok") {
     const retryHeaders = withAuthHeader(init.headers, outcome.token);
     response = await fetch(url, { ...init, headers: retryHeaders, credentials });
+    if (response.status === 401) redirectToLogin(requestIdentity);
     return response;
   }
-  // transient → keep the session and return the 401 we already have (no logout);
+  if (outcome.kind === "transient") throw new AuthRefreshUnavailableError();
+  // Keep the session while the browser refresh redirect is in progress;
   // redirecting → page is unloading; unauthenticated → the session is dead.
-  if (outcome.kind === "unauthenticated") redirectToLogin();
+  if (outcome.kind === "unauthenticated") redirectToLogin(requestIdentity);
   return response;
 }
 

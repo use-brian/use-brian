@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+vi.mock("next/navigation", async () => await import("../shims/next-navigation"));
 /**
  * [COMP:app-web/redeem] The packaged desktop renderer keeps the billing CTA
  * inside its HashRouter and supplies the shared redeem form with the same
@@ -144,3 +145,13 @@ describe("[COMP:app-web/dock-recorder] bundled overlay route", () => {
     }
   });
 });
+
+// These tests exercise route families; admission is covered by the shared gate suite.
+vi.mock("@/components/app-session", () => ({
+  AppSessionProvider: ({ children }: { children: ReactNode }) => children,
+  SessionRouteBoundary: ({ children }: { children: ReactNode }) => children,
+  useAppSession: () => ({ state: { session: "authenticated", workspaces: [{id: "workspace-one", name: "Example workspace"}], admissions: new Proxy({}, {
+    get: (_target, id) => ({kind: "allowed", value: {workspaceId: id, name: "Example workspace", role: "owner", me: {id: "user-one"}}}),
+  }) } }),
+}));
+vi.mock("@/components/account-entry", () => ({ AccountSignInDialog: () => null, AccountEntry: () => null }));

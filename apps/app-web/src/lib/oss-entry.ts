@@ -30,10 +30,13 @@ const LOCAL_SESSION_PATH = "/api/auth/local-session";
  * open redirect outright — both collapse to the app root.
  */
 export function sanitizeNext(raw: string | null | undefined): string {
-  if (!raw) return "/";
+  if (!raw || raw.length > 4096 || /[\\\u0000-\u0020]/.test(raw)) return "/";
   if (!raw.startsWith("/")) return "/";
   if (raw.startsWith("//")) return "/";
-  return raw;
+  try {
+    const base = "https://app.example"; const url = new URL(raw, base);
+    return url.origin === base ? url.pathname + url.search + url.hash : "/";
+  } catch { return "/"; }
 }
 
 /**

@@ -1,3 +1,7 @@
+import { headers } from "next/headers";
+import { freshestAccessTokenSub } from "@/lib/user";
+import { AppSessionProvider, SessionRouteBoundary } from "@/components/app-session";
+import { AccountSignInDialog } from "@/components/account-entry";
 import type { Metadata } from "next";
 import { JetBrains_Mono } from "next/font/google";
 import { ThemeProvider, THEME_PREPAINT_SCRIPT } from "@/lib/theme";
@@ -111,6 +115,7 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   const { locale, dict } = await getServerDictionary();
+  const serverUserId = freshestAccessTokenSub((await headers()).get("cookie") ?? "") ?? undefined;
   const publicConfigScript = runtimePublicConfigScript(
     serverRuntimePublicConfig(),
   );
@@ -146,7 +151,7 @@ export default async function RootLayout({
             surface. See docs/architecture/features/doc.md → "Navigation progress". */}
         <RouteProgress />
         <I18nProvider locale={locale} dict={dict}>
-          <ThemeProvider>{children}</ThemeProvider>
+          <ThemeProvider><AppSessionProvider serverUserId={serverUserId}><SessionRouteBoundary>{children}</SessionRouteBoundary><AccountSignInDialog /></AppSessionProvider></ThemeProvider>
           <ConfirmDialogProvider />
           <PromptDialogProvider />
           <KindPickerDialogProvider />

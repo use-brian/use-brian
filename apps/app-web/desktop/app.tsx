@@ -43,17 +43,16 @@ import {
   useSearchParams,
 } from "react-router-dom";
 
-import { authFetch, getValidAccessToken } from "@/lib/auth-fetch";
-import { desktopBridge } from "@/lib/desktop-auth-source";
-import { idbGet, idbSet } from "@/lib/offline/idb";
+import { authFetch } from "@/lib/auth-fetch";
 import { ThemeProvider } from "@/lib/theme";
 import { useT, I18nProvider } from "@/lib/i18n/client";
+import { isLocale, matchLocale, type Locale } from "@/lib/i18n/config";
 import { getDictionary } from "@/lib/i18n/dictionaries";
 import { ConfirmDialogProvider } from "@/components/ui/confirm-dialog";
 import { PromptDialogProvider } from "@/components/ui/prompt-dialog";
 import { KindPickerDialogProvider } from "@/components/ui/kind-picker-dialog";
 import { DesktopLinkRecovery } from "@/components/desktop-link-recovery";
-import { WorkspaceContextProvider, type WorkspaceContextValue } from "@/lib/workspace-context";
+import { WorkspaceContextProvider } from "@/lib/workspace-context";
 import { CustomThemesProvider } from "@/lib/custom-themes";
 import {
   DocSidebarDataProvider,
@@ -63,22 +62,15 @@ import { BrainSurfaceProvider } from "@/contexts/brain-surface-context";
 import { PrimaryAssistantProvider } from "@/contexts/primary-assistant";
 import { WorkspaceChrome } from "@/components/doc/workspace-chrome";
 import { DesktopChatWindow } from "@/components/chrome/desktop-chat-window";
-import { DesktopAccounts } from "@/components/desktop-accounts";
-import { openDesktopAddAccount } from "@/components/desktop-add-account";
 import { Button } from "@/components/ui/button";
+import { AppSessionProvider, SessionRouteBoundary, useAppSession } from "@/components/app-session";
+import { AccountEntry, AccountSignInDialog } from "@/components/account-entry";
 import { WorkspacePicker } from "@/components/workspace-picker";
-import type { WorkspacePickerItem } from "@/lib/workspace-picker";
 import {
   OPERATOR_APP_KEYS,
   defaultHomePath,
   type OperatorAppKey,
 } from "@/lib/operator-apps";
-import {
-  DESKTOP_WORKSPACES_CACHE_KEY,
-  desktopWorkspaceCacheKey,
-  parseDesktopWorkspaceContext,
-  resolveDesktopWorkspaceBootstrap,
-} from "./offline-bootstrap";
 import { resolveRedeemWorkspace } from "@/app/redeem/resolve-workspace";
 
 import { isFeedPlatform } from "@/lib/feed-nav";
@@ -249,13 +241,23 @@ const OPERATOR_ROUTE_ELEMENTS: Record<OperatorAppKey, ReactNode> = {
 };
 
 export function App() {
-  // No SSR locale negotiation on file://; default to English (a stored pref can
-  // drive this later). All three dictionaries are bundled.
-  const dict = getDictionary("en");
+  const [locale, setLocale] = useState<Locale>(() => {
+    try { const saved = localStorage.getItem("doc:locale"); if (isLocale(saved)) return saved; } catch {}
+    return matchLocale(navigator.languages?.join(",") || navigator.language);
+  });
+  useEffect(() => {
+    const change = (event: Event) => { if (event instanceof CustomEvent && isLocale(event.detail)) setLocale(event.detail); };
+    window.addEventListener("brian:locale", change);
+    document.documentElement.lang = locale;
+    return () => window.removeEventListener("brian:locale", change);
+  }, [locale]);
+  const dict = getDictionary(locale);
   return (
     <ThemeProvider>
-      <I18nProvider locale="en" dict={dict}>
+      <I18nProvider locale={locale} dict={dict}>
         <HashRouter>
+          <AppSessionProvider>
+          <SessionRouteBoundary>
           <Routes>
             <Route path="/recorder-overlay" element={<Suspense fallback={null}><RecorderOverlay /></Suspense>} />
             <Route path="/" element={<Boot />} />
@@ -266,6 +268,7 @@ export function App() {
                 create-workspace affordance yet — that gap is desktop-wide,
                 not introduced by this alias. */}
             <Route path="/teams" element={<Boot />} />
+            <Route path="/accounts" element={<AccountEntry />} />
             <Route path="/redeem" element={<DesktopRedeemRoute />} />
             <Route path="/desktop/chat/:workspaceId" element={<DesktopChatRoute />} />
             {/* Layout route: WorkspaceShell (providers + persistent chrome)
@@ -362,6 +365,9 @@ export function App() {
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </SessionRouteBoundary>
+          <AccountSignInDialog />
+          </AppSessionProvider>
         </HashRouter>
         {/* Global dialog roots the doc components call into (confirmDialog /
             promptDialog / kind picker) — mounted as siblings, mirroring the Next
@@ -450,135 +456,24 @@ function DesktopChatRoute() {
 
 // ── Boot / workspace picker ────────────────────────────────────
 
-type WorkspaceRow = WorkspacePickerItem;
-
 function Boot() {
-  const t = useT();
-  const entry = new URLSearchParams(window.location.search).get("accountEntry");
-  const recovery = entry && entry !== "signed-out";
   const navigate = useNavigate();
-  const useBrianSignal = new URLSearchParams(window.location.search).get(
-    "useBrian",
-  );
-  const useBrianRouteSuffix = useBrianSuffix(useBrianSignal);
-  const [state, setState] = useState<
-    | { k: "boot" }
-    | { k: "anon" }
-    | { k: "ready"; workspaces: WorkspaceRow[] }
-    | { k: "error"; detail: string }
-  >(entry ? { k: "anon" } : { k: "boot" });
-
+  const { state } = useAppSession();
+  const t = useT();
+  const useBrianSignal = new URLSearchParams(window.location.search).get("useBrian");
+  const suffix = useBrianSuffix(useBrianSignal);
   useEffect(() => {
-    if (entry) return; // Native recovery must remain usable without authenticating.
-    let cancelled = false;
-    const presentWorkspaces = (workspaces: WorkspaceRow[]) => {
-      if (cancelled) return;
-      // Match the web root's one-workspace fast path. This is especially
-      // important offline: cached identity can enter the local shell directly
-      // instead of adding a picker click to every cold start.
-      if (workspaces.length === 1) {
-        navigate(
-          useBrianWorkspacePath(workspaces[0].id, useBrianSignal) ??
-            `/w/${workspaces[0].id}`,
-          { replace: true },
-        );
-        return;
-      }
-      setState({ k: "ready", workspaces });
-    };
-    (async () => {
-      // Read cache and validate/refresh in parallel, but do not enter an
-      // interactive cached workspace until the authenticated live probe has
-      // settled. Cache is an offline fallback, never proof of a usable token.
-      const tokenPromise = getValidAccessToken();
-      const cached = await idbGet<unknown>(DESKTOP_WORKSPACES_CACHE_KEY);
-      const bridge = desktopBridge();
-      const result = await resolveDesktopWorkspaceBootstrap({
-        cached,
-        // Read through the preload cache each time. `authFetch` clears it
-        // synchronously only when `/auth/refresh` definitively rejects the
-        // session; transient failures leave the refresh credential in place.
-        hasStoredSession: () => Boolean(
-          bridge?.getAccessToken?.() || bridge?.getRefreshToken?.(),
-        ),
-        authenticate: () => tokenPromise,
-        loadLive: async () => {
-          const res = await authFetch(`${apiBase()}/api/workspaces`);
-          return {
-            status: res.status,
-            ...(res.ok ? { data: await res.json() as unknown } : {}),
-          };
-        },
-      });
-      if (cancelled) return;
-      if (result.kind === "unauthenticated") {
-        // Definitive rejection already clears credentials through refresh.
-        // Stay in the app; calling native sign-out here would reload forever
-        // when there is no session. Cached workspaces must remain inaccessible.
-        setState({ k: "anon" });
-        return;
-      }
-      if (result.kind === "error") {
-        setState({ k: "error", detail: result.detail });
-        return;
-      }
-      presentWorkspaces(result.workspaces);
-      if (result.source === "live") {
-        void idbSet(DESKTOP_WORKSPACES_CACHE_KEY, result.workspaces);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [navigate, useBrianSignal, entry]);
-
-  const connectionMessage = entry === "auth"
-    ? t.workspaceSwitcher.addAccountDialog.authError
-    : entry === "access" || entry === "gateway-auth"
-      ? t.workspaceSwitcher.addAccountDialog.approvalError
-      : t.workspaceSwitcher.addAccountDialog.unreachable;
-
-  return (
-    <main className="flex min-h-dvh items-center justify-center bg-background px-4 py-12 text-foreground">
-      <div className="w-full max-w-lg space-y-6">
-        <h1 className="text-2xl font-semibold">{t.desktopSession.title}</h1>
-        {state.k === "boot" && <div aria-busy="true" className="h-40 animate-pulse rounded-xl bg-muted" />}
-        {state.k === "anon" && (
-          <>
-            <p className="text-sm text-muted-foreground" role={recovery ? "alert" : undefined}>
-              {recovery ? connectionMessage : t.desktopSession.description}
-            </p>
-            <DesktopAccounts variant="standalone" />
-            <div className="flex flex-wrap gap-3">
-              <Button onClick={() => {
-                const bridge = desktopBridge();
-                if (bridge?.addAccount) bridge.addAccount();
-                else bridge?.signIn?.();
-              }}>{t.workspaceSwitcher.addAccountDialog.cloud}</Button>
-              <Button variant="outline" onClick={() => openDesktopAddAccount()}>
-                {t.workspaceSwitcher.addAccountDialog.title}
-              </Button>
-              {recovery && <Button variant="ghost" onClick={() => desktopBridge()?.retry?.()}>{t.desktopSession.retry}</Button>}
-            </div>
-          </>
-        )}
-        {state.k === "error" && (
-          <>
-            <p role="alert" className="text-sm text-muted-foreground">{t.workspaceSwitcher.loadError}</p>
-            <Button variant="outline" onClick={() => desktopBridge()?.retry?.()}>{t.desktopSession.retry}</Button>
-            <Button variant="ghost" onClick={() => openDesktopAddAccount()}>{t.workspaceSwitcher.addAccountDialog.title}</Button>
-          </>
-        )}
-        {state.k === "ready" && (
-          <WorkspacePicker
-            initialWorkspaces={state.workspaces}
-            next={useBrianRouteSuffix}
-            apiUrl={apiBase()}
-          />
-        )}
-      </div>
-    </main>
-  );
+    if (state.workspaces.length === 1) navigate(
+      useBrianWorkspacePath(state.workspaces[0].id, useBrianSignal) ?? `/w/${state.workspaces[0].id}`,
+      { replace: true },
+    );
+  }, [navigate, state.workspaces, useBrianSignal]);
+  return <main className="flex min-h-dvh items-center justify-center bg-background px-4 py-12 text-foreground">
+    <div className="w-full max-w-lg space-y-6"><h1 className="text-2xl font-semibold">{t.teams.title}</h1>
+      <WorkspacePicker initialWorkspaces={state.workspaces} next={suffix} apiUrl={apiBase()} />
+      <Button className="max-md:min-h-11" variant="outline" onClick={() => navigate("/accounts")}>{t.desktopSession.switchAccount}</Button>
+    </div>
+  </main>;
 }
 
 // ── Workspace shell + surface routes ──────────────────────────
@@ -608,46 +503,10 @@ function SurfaceFallback() {
  */
 function WorkspaceShell() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
-  const [ctx, setCtx] = useState<
-    | { k: "loading" }
-    | { k: "ready"; value: WorkspaceContextValue }
-    | { k: "error"; detail: string }
-  >({ k: "loading" });
-
-  useEffect(() => {
-    if (!workspaceId) return;
-    let cancelled = false;
-    (async () => {
-      const cached = parseDesktopWorkspaceContext(
-        workspaceId,
-        await idbGet<unknown>(desktopWorkspaceCacheKey(workspaceId)),
-      );
-      if (!cancelled && cached) {
-        setCtx({ k: "ready", value: cached });
-      }
-      try {
-        const res = await authFetch(`${apiBase()}/api/workspaces/${workspaceId}`);
-        if (!res.ok) throw new Error(`workspace HTTP ${res.status}`);
-        const team = await res.json() as unknown;
-        const value = parseDesktopWorkspaceContext(workspaceId, team);
-        if (!value) throw new Error("workspace response invalid");
-        if (cancelled) return;
-        setCtx({ k: "ready", value });
-        void idbSet(desktopWorkspaceCacheKey(workspaceId), value);
-      } catch (e) {
-        if (!cancelled && !cached) {
-          setCtx({ k: "error", detail: e instanceof Error ? e.message : String(e) });
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId]);
-
-  if (!workspaceId) return <Navigate to="/" replace />;
-  if (ctx.k === "loading") return <div style={shell}><p style={dim}>Loading workspace…</p></div>;
-  if (ctx.k === "error") return <div style={shell}><p style={dim}>Error: {ctx.detail}</p></div>;
+  const { state } = useAppSession();
+  const admission = workspaceId ? state.admissions[workspaceId] : undefined;
+  if (!workspaceId || admission?.kind !== "allowed") return null;
+  const ctx = { value: admission.value };
 
   // Mirrors the Next layouts: w/[id]/layout (providers + WorkspaceChrome) wrapping
   // the active surface (the Outlet) — the doc page shell on `/p`, or a folded-in
@@ -655,7 +514,7 @@ function WorkspaceShell() {
   return (
     <WorkspaceContextProvider value={ctx.value} apiUrl={apiBase()}>
       <CustomThemesProvider workspaceId={workspaceId}>
-        <div className="flex h-screen w-full overflow-hidden bg-background">
+        <div className="flex h-dvh w-full overflow-hidden bg-background">
           {/* Mirrors the Next workspace layout: one primary-assistant
               resolution shared by the chat dock and the doc surface. */}
           <PrimaryAssistantProvider workspaceId={workspaceId}>
@@ -891,17 +750,6 @@ function DocLegacyRedirect() {
     />
   );
 }
-
-const shell: React.CSSProperties = {
-  minHeight: "100vh",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
-  background: "var(--background)",
-  color: "var(--foreground)",
-};
-const dim: React.CSSProperties = { opacity: 0.6, fontSize: 13 };
 
 function ProjectDetailRoute() {
   const { workspaceId = "", projectId = "" } = useParams();

@@ -82,3 +82,29 @@ describe('[COMP:app/outpost-auth] refresh return origin boundary', () => {
     expect(response.headers.get('location')).toBeNull()
   })
 })
+
+
+describe('[COMP:app/outpost-auth] main app account recovery', () => {
+  const request = (failure: string) => {
+    const base = refreshRequest('https://app.brian.example.com/w/one/chat');
+    const url = new URL(base.url); url.searchParams.set('failureNext', failure);
+    return new Request(url, { headers: base.headers });
+  };
+  it('returns an expired session to the configured app account view', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 401 }));
+    const failure = 'https://app.brian.example.com/accounts?next=%2Fw%2Fone%2Fchat';
+    expect((await GET(request(failure))).headers.get('location')).toBe(failure);
+  });
+  it.each(['https://outside.example/accounts', 'https://auth.brian.example.com/accounts', 'https://app.brian.example.com/other'])(
+    'does not accept a different authority or route: %s', async failure => {
+      fetchMock.mockResolvedValue(new Response('{}', { status: 401 }));
+      expect(new URL((await GET(request(failure))).headers.get('location')!).pathname).toBe('/login');
+    },
+  );
+  it('keeps the failure return in transient retry links', async () => {
+    fetchMock.mockResolvedValue(new Response('{}', { status: 503 }));
+    const response = await GET(request('https://app.brian.example.com/accounts?next=%2Fw%2Fone'));
+    expect(await response.text()).toContain('failureNext=');
+    expect(response.headers.get('set-cookie')).toBeNull();
+  });
+});

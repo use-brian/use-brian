@@ -36,7 +36,7 @@ export default async function HomePage(props: {
   const jar = await cookies();
   const accessToken = jar.get("access_token")?.value;
   if (!accessToken) {
-    redirect(ossSignedOutRedirect() ?? "/login");
+    redirect(ossSignedOutRedirect() ?? "/accounts");
   }
 
   // Desktop quick-capture (`?capture=1`) and record (`?record=1`, the
