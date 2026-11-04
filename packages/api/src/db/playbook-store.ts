@@ -1,3 +1,4 @@
+import { countDecisionEvidence } from '@use-brian/core'
 /**
  * Assistant playbook rules - the admission-gated learned layer of the
  * growth loop (docs/plans/assistant-growth-loop.md §3 Phase 3, migration
@@ -323,70 +324,26 @@ function decisionEvidenceSourceKeys(rows: readonly DecisionEvidenceRow[]): {
   eventCount: number
   distinctSources: number
 } {
-  // Approval ids in one revision chain form one normalized example even when
-  // the model cites every event id in that chain.
-  const parent = new Map<string, string>()
-  const find = (value: string): string => {
-    const current = parent.get(value)
-    if (!current || current === value) return value
-    const root = find(current)
-    parent.set(value, root)
-    return root
-  }
-  const union = (left: string, right: string) => {
-    if (!parent.has(left)) parent.set(left, left)
-    if (!parent.has(right)) parent.set(right, right)
-    const leftRoot = find(left)
-    const rightRoot = find(right)
-    if (leftRoot !== rightRoot) {
-      const root = leftRoot < rightRoot ? leftRoot : rightRoot
-      parent.set(leftRoot, root)
-      parent.set(rightRoot, root)
-    }
-  }
-  for (const row of rows) {
-    if (row.eventKind !== 'email.draft_revised') continue
-    const previous = typeof row.payload.previousApprovalId === 'string'
-      ? row.payload.previousApprovalId
-      : null
-    const replacement = typeof row.payload.replacementApprovalId === 'string'
-      ? row.payload.replacementApprovalId
-      : null
-    if (previous && replacement) union(previous, replacement)
-  }
-  const normalizedEvents = new Set<string>()
-  const sources = new Set<string>()
-  for (const row of rows) {
+  return countDecisionEvidence(rows.map(row => {
     if (row.eventKind.startsWith('feed.')) {
       const key = `feed:${row.feedSessionId}`
-      normalizedEvents.add(key); sources.add(key); continue
+      return { eventKey:key,sourceKey:key }
     }
     if (row.eventKind === 'email.draft_revised') {
-      const previous = typeof row.payload.previousApprovalId === 'string'
-        ? row.payload.previousApprovalId
-        : row.sourceId
-      const key = `email:${find(previous)}`
-      normalizedEvents.add(key)
-      sources.add(key)
-      continue
+      const previous = typeof row.payload.previousApprovalId === 'string' ? row.payload.previousApprovalId : row.sourceId
+      const replacement = typeof row.payload.replacementApprovalId === 'string' ? row.payload.replacementApprovalId : null
+      const key = `email:${previous}`
+      return { eventKey:key,sourceKey:key,eventIsSource:true,
+        aliases: typeof row.payload.previousApprovalId === 'string' && replacement ? [`email:${replacement}`] : [] }
     }
     if (isReviewedEmailEvidence(row)) {
-      const approvalId = typeof row.payload.approvalId === 'string'
-        ? row.payload.approvalId
-        : row.sourceId
-      normalizedEvents.add(`email-decision:${row.id}`)
-      sources.add(`email:${find(approvalId)}`)
-      continue
+      const approval = typeof row.payload.approvalId === 'string' ? row.payload.approvalId : row.sourceId
+      return { eventKey:`email-decision:${row.id}`,sourceKey:`email:${approval}` }
     }
-    const approvalId = typeof row.payload.approvalId === 'string'
-      ? row.payload.approvalId
-      : typeof row.payload.toolCallId === 'string'
-        ? row.payload.toolCallId
-        : row.sourceId
-    normalizedEvents.add(`tool-event:${row.id}`)
-    sources.add(`tool:${approvalId}`)
-  }
-  return { eventCount: normalizedEvents.size, distinctSources: sources.size }
+    const approval = typeof row.payload.approvalId === 'string' ? row.payload.approvalId
+      : typeof row.payload.toolCallId === 'string' ? row.payload.toolCallId : row.sourceId
+    return { eventKey:`tool-event:${row.id}`,sourceKey:`tool:${approval}` }
+  }))
 }
 
 function proposalMatchesApplicability(

@@ -111,6 +111,19 @@ export function createMemoryEvolutionWorker(
   let running = false
 
   async function tickInner(): Promise<void> {
+    // Reuse this worker for bounded expiry; receipts survive retirement to prevent replay.
+    await query(`WITH unsupported AS (
+      UPDATE memories SET learning=learning||jsonb_build_object('state','candidate',
+        'candidateUntil',coalesce((learning->>'lastSupportedAt')::timestamptz,created_at)+interval '30 days'),updated_at=now()
+      WHERE id IN(SELECT id FROM memories WHERE valid_to IS NULL AND NOT scope_held
+        AND learning->>'state'='established' AND learning->>'origin'='inferred'
+        AND learning->>'confirmed'='false' AND NOT memory_learning_evidence_allows(learning)
+        LIMIT 200 FOR UPDATE SKIP LOCKED) RETURNING id
+      ), expired AS (SELECT id FROM memories WHERE valid_to IS NULL
+      AND learning->>'state'='candidate' AND (learning->>'candidateUntil')::timestamptz<=now()
+      ORDER BY created_at LIMIT 200 FOR UPDATE SKIP LOCKED)
+      UPDATE memories SET learning=jsonb_set(learning,'{state}','"retired"'),updated_at=now()
+      WHERE id IN (SELECT id FROM expired)`)
     const windowEnd = now()
     const windowStart = new Date(
       windowEnd.getTime() - AGGREGATION_WINDOW_DAYS * 24 * 60 * 60 * 1000,

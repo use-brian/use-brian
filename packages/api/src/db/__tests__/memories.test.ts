@@ -297,6 +297,6 @@ describe('[COMP:api/memory-store] countMemories', () => {
     expect(sql).toContain('valid_to IS NULL')
     // params now lead with the AccessContext projection: workspace,
     // user, assistant, clearance.
-    expect(params).toEqual(['w_1', 'u_1', 'a_1', 'confidential'])
+    expect(params).toEqual(['w_1', 'u_1', 'a_1', 'confidential', 'w_1', 'u_1', 'a_1', 'confidential'])
   })
 })

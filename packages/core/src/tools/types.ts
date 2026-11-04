@@ -160,6 +160,8 @@ export type ToolContext = {
    * contexts (workers, scheduled jobs).
    */
   userMessageText?: string
+  /** Host-stamped original current user message, never a tool argument. */
+  userMessageId?: string
   /** Opaque ids from `<attached_file>` envelopes admitted on this exact user
    * turn. Binary-intake tools must use this set instead of accepting an old
    * file-cache id copied from history or invented by the model. */

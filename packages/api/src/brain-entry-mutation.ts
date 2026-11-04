@@ -1,3 +1,5 @@
+import { memoryLearningEditSchema, memoryLearningSchema } from '@use-brian/core'
+import { memoryLearningAdmissionEnabled } from './db/memory-learning.js'
 /**
  * Brain-entry mutation module.
  *
@@ -65,7 +67,7 @@ export const EDITABLE_FIELDS_BY_PRIMITIVE: Record<
   EditableBrainPrimitive,
   readonly string[]
 > = {
-  memory: ['summary', 'detail', 'scope', 'sensitivity'],
+  memory: ['summary', 'detail', 'scope', 'sensitivity', 'memoryLearning'],
   entity: ['display_name', 'sensitivity'],
   task: [
     'title',
@@ -282,6 +284,8 @@ export function createBrainEntryMutator(args: {
         reason?: string
       }
 
+      const learningEdit = req.body.memoryLearning === undefined ? undefined : memoryLearningEditSchema.safeParse(req.body.memoryLearning)
+      if (learningEdit && !learningEdit.success) { res.status(400).json({error:'Invalid memory applicability or validity'}); return }
       // Validate up front (mirrors memories.ts adjust) so we never mint a
       // partial audit trail before bailing on a downstream error.
       let nextScope: 'shared' | 'workspace' | undefined
@@ -347,7 +351,7 @@ export function createBrainEntryMutator(args: {
         nextScope === undefined &&
         nextSensitivity === undefined &&
         nextSummary === undefined &&
-        nextDetail === undefined
+        nextDetail === undefined && learningEdit === undefined
       ) {
         res.status(400).json({
           error:
@@ -357,7 +361,7 @@ export function createBrainEntryMutator(args: {
       }
 
       try {
-        const before = await getMemoryByIdSystem(rowId)
+        const before = await getMemoryByIdSystem(rowId, true)
         // Authz: the memory must live in the workspace the caller is a
         // member of (gated above). Replaces the per-assistant route's
         // `before.assistantId === assistantId` membership check.
@@ -421,12 +425,21 @@ export function createBrainEntryMutator(args: {
             },
           )
         }
+        if (learningEdit && !before.learning && !memoryLearningAdmissionEnabled()) { res.status(409).json({error:'Memory learning admission is not enabled'}); return }
+        const learned = learningEdit?.success ? memoryLearningSchema.safeParse({
+          version:1,...before.learning,...learningEdit.data,state:'established',origin:'explicit',confirmed:true,candidateUntil:null,evidenceGroups:[],
+        }) : undefined
+        if (learned && (!learned.success || learned.data.appliesFrom && learned.data.appliesUntil && Date.parse(learned.data.appliesFrom)>=Date.parse(learned.data.appliesUntil))) {
+          res.status(400).json({error:'Expiry must be after the start'}); return
+        }
+        if (learned?.success) verifications.push({action:'edit_applicability',modelValue:before.learning,userValue:learned.data,reason:reasonText})
         const stamped = await adjustMemoryDecision({
           memoryId: rowId,
           workspaceId: before.workspaceId,
           verifiedBy: userId,
           access: req.access,
           updates: {
+            ...(learned?.success ? {learning:learned.data} : {}),
             scope: nextScope,
             workspaceId: computedWorkspaceId,
             sensitivity: nextSensitivity,

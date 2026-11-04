@@ -7645,9 +7645,20 @@ export const ja: Dictionary = {
     // そのまま使うため、文言は `chat.*` 配下にあります。）
   },
   memoriesReview: {
+    learningExpired: "期限切れ: 回答には使用されません。",
+    learningActivity: "用途",
+    learningAnyActivity: "すべての用途",
+    learningStatusUpdate: "進捗報告",
+    learningClientReport: "顧客向けレポート",
+    learningExpiryDate: "期限 00:00 UTC",
+
     title: "メモリーを確認",
-    description:
-      "ここに並ぶ内容はすでに保存済みで、アシスタントはすでに使っています。確認は保存ではなく「正しい」という承認です。承認されたメモリーはより信頼できるものとして扱われ、優先的に参照されます。調整・編集・削除もできます。",
+    description: "アシスタントが保存した記憶を確認します。仮の記憶は、裏付けまたは確認が得られるまで使用されません。確認、編集、削除できます。",
+    learningEvidence: "{sources} 件の独立した情報源から {events} 件の観察。推測した個人の好みには、2 件の情報源から 3 件以上の観察、またはあなたの確認が必要です。",
+    learningTentative: "仮の記憶: 確認用に保存され、回答には使用されません。",
+    learningEstablished: "確立した記憶: 該当する状況で使用されます。",
+    learningRetired: "終了した記憶: 回答には使用されません。",
+    learningUntil: "適用期限: {date}",
     loading: "読み込み中…",
     loadMore: "さらに読み込む",
     loadingMore: "読み込み中…",

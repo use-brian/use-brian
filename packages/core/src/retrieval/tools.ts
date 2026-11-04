@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { memoryActivityFromText } from '../memory/learning.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { describeToolFailure } from '../tools/tool-failure.js'
 import { tolerantIsoTimestamp } from '../tools/schema-tolerance.js'
@@ -128,7 +129,11 @@ export function actorFromContext(context: ToolContext): RetrievalActor | Retriev
         'This chat is not bound to a workspace, so the company brain cannot be read here — brain rows are workspace-scoped and there is no permission boundary to evaluate. No argument change or retry will help in this session. Answer from what is already in context, or tell the user to ask from a workspace chat.',
     }
   }
+  const activity = memoryActivityFromText(context.userMessageText)
+  const memoryContext = { ...context.executionContext?.security?.access?.memoryContext,
+    ...(context.activeProjectId ? {projectId:context.activeProjectId} : {}), ...(activity ? {activity} : {}) }
   return {
+    ...(Object.keys(memoryContext).length ? {memoryContext} : {}),
     workspaceId: context.workspaceId,
     userId: context.userId,
     assistantId: context.assistantId,

@@ -7598,9 +7598,20 @@ export const zh: Dictionary = {
     // 文案改放在 `chat.*` 之下。）
   },
   memoriesReview: {
+    learningExpired: "已過期: 不再用於回覆。",
+    learningActivity: "用途",
+    learningAnyActivity: "所有用途",
+    learningStatusUpdate: "進度更新",
+    learningClientReport: "客戶報告",
+    learningExpiryDate: "到期 00:00 UTC",
+
     title: "審核記憶",
-    description:
-      "這裡的內容都已經儲存，助理也已經在使用。審核不是儲存，而是確認：確認過的記憶會被視為更可靠，優先被取用。你也可以調整、編輯或刪除。",
+    description: "審閱助理儲存的記憶。暫定記憶在獲得支持或確認之前不會使用。你可以確認、編輯或刪除。",
+    learningEvidence: "來自 {sources} 個獨立來源的 {events} 次觀察。推測的個人偏好需要至少 2 個來源的 3 次觀察，或由你確認。",
+    learningTentative: "暫定記憶: 已儲存供審閱，不用於回覆。",
+    learningEstablished: "已確立記憶: 在適用情境中使用。",
+    learningRetired: "已停用記憶: 不再用於回覆。",
+    learningUntil: "適用至 {date}",
     loading: "載入中…",
     loadMore: "載入更多",
     loadingMore: "載入中…",

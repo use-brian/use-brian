@@ -45,7 +45,7 @@ export function createMemoryToEntityPromotionStore(): MemoryToEntityPromotionPor
                 retracted_at         AS "retractedAt",
                 workspace_id         AS "workspaceId"
            FROM memories
-          WHERE id = $1`,
+          WHERE id = $1 AND memory_learning_allows(learning)`,
         [memoryId],
       )
       if (result.rows.length === 0) return null

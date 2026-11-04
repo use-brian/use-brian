@@ -1,3 +1,4 @@
+import type { MemoryLearning, MemoryLearningProposal, MemoryObservation } from './learning.js'
 /**
  * Memory store interface.
  * Injected by the API layer into the memory tools and consolidation phases.
@@ -19,6 +20,7 @@ import type { ScopeEvidence } from '../security/context-scope.js'
 import type { DerivedWriteEvidence } from '../security/derived-scope.js'
 
 export type MemoryRecord = {
+  learning?: MemoryLearning | null
   id: string
   scope: string
   summary: string
@@ -88,7 +90,12 @@ export type SoulSynthesisInput = {
 }
 
 export type MemoryStore = {
+  /** Admission capability only. Persisted eligibility is always enforced. */
+  learningEnabled?: boolean
   create(params: {
+    learningProposal?: MemoryLearningProposal
+    observation?: MemoryObservation
+    learning?: MemoryLearning | null
     assistantId: string
     userId: string | null
     scope?: string
@@ -137,6 +144,7 @@ export type MemoryStore = {
    * operate system-wide. See docs/architecture/context-engine/memory-system.md.
    */
   update(id: string, updates: {
+    learning?: MemoryLearning | null
     summary?: string
     detail?: string
     confidence?: number

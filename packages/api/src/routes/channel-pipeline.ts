@@ -2838,6 +2838,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
           userId, assistantId: assistant.id, sessionId: session.id,
           appId: 'Use Brian', channelType, channelId,
           channelSessionId: sessionChannelId,
+        userMessageId: userMessageRow.id,
+        userMessageText: messageText,
           taskAuthority,
           userTimezone,
           abortSignal: new AbortController().signal,

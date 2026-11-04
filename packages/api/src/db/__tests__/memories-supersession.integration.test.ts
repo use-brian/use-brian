@@ -35,6 +35,7 @@ async function makeWorkspace(client: pg.PoolClient, ownerUserId: string): Promis
      RETURNING id`,
     [ownerUserId],
   )
+  await client.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner') ON CONFLICT DO NOTHING",[r.rows[0].id,ownerUserId])
   return r.rows[0].id
 }
 
@@ -408,4 +409,74 @@ describeIf('[COMP:memory/authorship-stamp] createMemory writes universal-column 
       }),
     ).rejects.toThrowError(/createMemory.*createdByUserId.*WU-4\.5/)
   })
+})
+
+describe('[COMP:memory/learning] PostgreSQL eligibility and compatibility',()=>{
+  const learned={version:1,state:'established',origin:'explicit',applicability:{activity:'status_update'},appliesUntil:'2026-12-01T00:00:00Z'}
+  it('filters candidates, wrong context and expired facts with exact boundary semantics',async()=>{
+    const allowed=async(value:unknown,context:unknown={},at='2026-11-01T00:00:00Z',review=false)=>(await pool.query(
+      'SELECT memory_learning_allows($1::jsonb,$2::jsonb,$3,$4::timestamptz) AS ok',[value,context,review,at])).rows[0].ok
+    expect(await allowed(null)).toBe(true)
+    expect(await allowed({...learned,state:'candidate'},{activity:'status_update'})).toBe(false)
+    expect(await allowed(learned,{})).toBe(false)
+    expect(await allowed(learned,{activity:'status_update'})).toBe(true)
+    expect(await allowed(learned,{activity:'status_update'},learned.appliesUntil)).toBe(false)
+    expect(await allowed({...learned,state:'candidate'},{},undefined,true)).toBe(true)
+    expect(await allowed({version:1,applicability:{}})).toBe(false)
+    expect(await allowed({...learned,applicability:{unknown:'value'}})).toBe(false)
+    expect(await allowed({...learned,evidenceGroups:[['00000000-0000-4000-8000-000000000001']]},{activity:'status_update'})).toBe(false)
+  })
+  it('includes metadata in native projections without weakening pinned dependencies',async()=>{
+    const row=(await pool.query('SELECT application_memory_field_keys() AS fields, application_memory_statement_helpers_current() AS intact')).rows[0]
+    expect(row.fields).toContain('learning')
+    expect(row.intact).toBe(true)
+  })
+})
+
+
+describe('[COMP:memory/learning] source-backed evidence lifecycle',()=>{
+ it('selects an explicit narrow exception only in its matching context',async()=>{
+  const client=await pool.connect()
+  try{
+   const user=await makeUser(client),workspace=await makeWorkspace(client,user),assistant=await makeAssistant(client,user,workspace)
+   const memories=await import('../memories.js'),{memoryLearningSchema}=await import('@use-brian/core')
+   const common={assistantId:assistant,userId:user,createdByUserId:user,sensitivity:'internal' as const,source:'user'}
+   const broad=await memories.createMemory({...common,summary:'Prefers concise writing'})
+   const narrow=await memories.createMemory({...common,summary:'Prefers detailed client reports',learning:memoryLearningSchema.parse({version:1,state:'established',origin:'explicit',confirmed:true,applicability:{activity:'client_report',exceptionTo:broad.id}})})
+   const access={workspaceId:workspace,userId:user,assistantId:assistant,assistantKind:'standard' as const}
+   expect(await memories.getMemoryById(access,broad.id)).not.toBeNull()
+   expect(await memories.getMemoryById(access,narrow.id)).toBeNull()
+   expect(await memories.getMemoryById({...access,memoryContext:{activity:'client_report'}},broad.id)).toBeNull()
+   expect(await memories.getMemoryById({...access,memoryContext:{activity:'client_report'}},narrow.id)).not.toBeNull()
+   expect(await memories.getMemoryById({...access,memoryContext:{activity:'client_report'},memoryReview:true},broad.id)).not.toBeNull()
+  }finally{client.release()}
+ })
+ it('establishes from independent human observations and withholds invalidated support immediately',async()=>{
+  const prior=process.env.BRIAN_MEMORY_LEARNING_V1;process.env.BRIAN_MEMORY_LEARNING_V1='1'
+  const client=await pool.connect()
+  try {
+   const user=await makeUser(client),workspace=await makeWorkspace(client,user),assistant=await makeAssistant(client,user,workspace)
+   const sessions=(await client.query(`INSERT INTO sessions(assistant_id,user_id,channel_type,channel_id,workspace_id) VALUES($1,$2,'web',gen_random_uuid()::text,$3),($1,$2,'web',gen_random_uuid()::text,$3) RETURNING id`,[assistant,user,workspace])).rows
+   const memories=await import('../memories.js')
+   const captured=[]
+   for(let i=0;i<3;i++){
+    const session=sessions[i===2?1:0].id,text=['That brief status summary was helpful.','The shorter status format worked well today.','The compact status update is easy to scan.'][i]
+    const {addSessionMessage}=await import('../sessions.js')
+    const message=await addSessionMessage({sessionId:session,role:'user',content:text,senderUserId:user,
+      scope:{workspaceId:workspace,userId:user,assistantId:assistant,sensitivity:'internal',compartments:[],projectIds:[]}},client)
+    const memory=await memories.createMemory({assistantId:assistant,userId:user,createdByUserId:user,sensitivity:'internal',summary:'Prefers brief status updates',sourceSessionId:session,
+     observation:{userId:user,sessionId:session,messageId:message.id,text},learningProposal:{intent:'inferred',kind:'preference',quote:text,applicability:{activity:'status_update'}}})
+    captured.push({memory,message})
+    expect(memory.learning).toMatchObject({state:i===2?'established':'candidate',evidenceCount:i+1,independentSources:i===2?2:1})
+   }
+   const learning=captured[2].memory.learning
+   expect(learning).toMatchObject({evidenceCount:3,independentSources:2})
+   const eligible=async(value:unknown)=>(await client.query(`SELECT memory_learning_allows($1::jsonb,'{"activity":"status_update"}') AS ok`,[value])).rows[0].ok
+   expect(await eligible(learning)).toBe(true)
+   await client.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[captured[0].message.id])
+   expect(await eligible(learning)).toBe(false)
+   expect(await eligible({...learning,origin:'derived'})).toBe(false)
+   expect(await eligible({...learning,confirmed:true,evidenceGroups:[]})).toBe(true)
+  }finally{client.release();if(prior===undefined) delete process.env.BRIAN_MEMORY_LEARNING_V1;else process.env.BRIAN_MEMORY_LEARNING_V1=prior}
+ })
 })

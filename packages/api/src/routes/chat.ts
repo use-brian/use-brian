@@ -1,3 +1,4 @@
+import { memoryActivityFromText } from '@use-brian/core'
 import {consumeHostReadObservation,combineHostReadObservations,inheritRoutineCalendarRead,type RoutineCalendarCall} from '@use-brian/core'
 import {parseHostObservation,type HostObservation} from '@use-brian/shared'
 import {boundScopeSources} from '@use-brian/core'
@@ -4640,7 +4641,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const readClearance = turnScope.access.clearance ?? assistant.clearance
       const readCompartments = turnScope.effectiveCompartments
       // Automatic context reads only the bound shared Project (D18 relevance).
-      const viewerCtx = automaticContextAccess(turnScope.access, turnScope.activeProjectId)
+      const viewerCtx = { ...automaticContextAccess(turnScope.access, turnScope.activeProjectId), memoryContext: { ...(turnScope.activeProjectId ? {projectId:turnScope.activeProjectId} : {}), activity:memoryActivityFromText(typeof message === "string" ? message : undefined) } }
       turnTiming.mark('admission')
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
@@ -7505,6 +7506,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 : null,
             // The turn's user message — doc page-creation tools snapshot it
             // as the new page's `origin_prompt` (the History "first prompt").
+            userMessageId: storedUserMsg.id,
             userMessageText:
               typeof message === 'string' && message.trim() ? message.trim() : undefined,
             currentTurnAttachmentIds,

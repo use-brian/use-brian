@@ -646,7 +646,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
            jsonb_build_object(
-             'summary', summary, 'detail', detail,
+             'summary', summary, 'detail', detail, 'learning', learning,
              'scope', scope, 'sensitivity', sensitivity, 'tags', tags,
              'source_session_id', source_session_id,
              'source_episode_id', source_episode_id,
@@ -951,6 +951,7 @@ export async function verifyBrainInboxRow(params: {
       `UPDATE ${table}
           SET verified_by_user_id = $2,
               verified_at = now(),
+              ${params.primitive === 'memory' ? `learning = CASE WHEN learning IS NULL THEN NULL ELSE learning || '{"state":"established","origin":"explicit","confirmed":true,"candidateUntil":null,"evidenceGroups":[]}'::jsonb END,` : ''}
               updated_at = now()
         WHERE id = $1 AND valid_to IS NULL`,
       [params.rowId, params.verifiedByUserId],

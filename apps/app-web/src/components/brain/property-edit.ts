@@ -52,7 +52,7 @@ export const PRIMITIVE_DEDICATED_KEYS: Record<string, ReadonlySet<string>> = {
     "attributes",
     "assignee_id",
   ]),
-  memory: new Set(["summary", "detail", "scope", "sensitivity", "tags"]),
+  memory: new Set(["summary", "detail", "scope", "sensitivity", "tags", "learning"]),
   workspace_file: new Set(["name", "sensitivity", "tags"]),
   contact: new Set(["name", "display_name", "sensitivity", "kind"]),
   company: new Set(["name", "display_name", "sensitivity", "kind"]),
@@ -135,6 +135,9 @@ export function applyChangesToBody(
       else attrs.description = changes.description;
     }
     next.attributes = attrs;
+  }
+  if (primitive === "memory" && body.learning && typeof body.learning === "object") {
+    next.learning = { ...body.learning, ...changes.memoryLearning, state:"established",origin:"explicit",confirmed:true,candidateUntil:null,evidenceGroups:[] };
   }
   if (changes.summary !== undefined) next.summary = changes.summary;
   if (changes.detail !== undefined) next.detail = changes.detail;

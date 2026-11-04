@@ -7869,9 +7869,20 @@ export const en = {
     // see `chat.surfacePlaceholder` / `chat.surfaceTarget`.)
   },
   memoriesReview: {
+    learningExpired: "Expired: no longer used in replies.",
+    learningActivity: "Activity",
+    learningAnyActivity: "Any activity",
+    learningStatusUpdate: "Status updates",
+    learningClientReport: "Client reports",
+    learningExpiryDate: "Expiry, 00:00 UTC",
+
     title: "Review your memories",
-    description:
-      "These are already saved and your assistant is already using them. Reviewing does not save them, it confirms them: a confirmed memory is treated as more reliable and gets picked first. You can also adjust, edit, or delete.",
+    description: "Review what your assistant has saved. Tentative memories are not used until supported or confirmed. You can confirm, edit, or delete them.",
+    learningEvidence: "{events} observations from {sources} independent sources. Inferred personal preferences need at least 3 observations from 2 sources, or your confirmation.",
+    learningTentative: "Tentative: saved for review, not used in replies.",
+    learningEstablished: "Established: used when its context applies.",
+    learningRetired: "Retired: no longer used in replies.",
+    learningUntil: "Applies until {date}",
     loading: "Loading…",
     loadMore: "Load more",
     loadingMore: "Loading…",

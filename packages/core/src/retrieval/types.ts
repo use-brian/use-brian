@@ -78,6 +78,9 @@ export type RetrievalResult<T> = RetrievalEnvelope<T> | RetrievalErrorBody
  * workspace reflector sees every assistant's rows.
  */
 export type RetrievalActor = {
+  memoryContext?: import('../memory/learning.js').MemoryLearningContext
+  /** Host review surfaces only; never a model credential. */
+  memoryReview?: boolean
   /** Original live host objects, never a serialized actor credential. */
   authority?: SessionContextAuthority
   workspaceId: string
