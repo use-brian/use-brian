@@ -14,13 +14,16 @@ import { searchFileSegments, readFileSegmentRange } from '../retrieval-store.js'
 import { captureRecordingIntakeParent } from '../recording-intake-admission.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createEntity } from '../entities-store.js'
+import { createDbEntityLinksStore } from '../entity-links-store.js'
+import { createDbProvenanceStore } from '../provenance-store.js'
 import { admitFileCreate } from '../../workspace-access/file-create-admission.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
-// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
-// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
+// Root fixtures use the pre-v2 rollback model (migration 650, decision D22).
+// Source-inheritance cases explicitly enable v2 after creating their source.
 await assertLocalFixture()
 const pool = getPool()
+afterAll(async () => { await getAppPool().end(); await pool.end() })
 
 async function fixture(mode: 'simple' | 'departments' | 'legacy' = 'simple') {
   const workspaceId = randomUUID(), userId = randomUUID(), member = randomUUID(), projectId = randomUUID()
@@ -43,7 +46,6 @@ async function fixture(mode: 'simple' | 'departments' | 'legacy' = 'simple') {
 }
 
 describe('[COMP:api/file-derived-admission] canonical workspace-file admission', () => {
-  afterAll(async () => { await getAppPool().end(); await pool.end() })
 
   it('defaults omitted Simple roots through the canonical store, retaining Project and sensitivity', async () => {
     const f = await fixture()
@@ -442,6 +444,38 @@ describe('[COMP:api/file-derived-admission] canonical workspace-file admission',
     expect(row).toMatchObject({user_id:f.userId,assistant_id:assistantId,sensitivity:'confidential',compartments:[f.key],project_ids:[f.projectId]})
     expect((await pool.query("SELECT producer FROM scope_derivations WHERE resource_id=$1",[row.id])).rows).toEqual([{producer:'workspace-file-tool'}])
   })
+})
 
+describe('[COMP:retrieval/provenance] schema-safe primitive probes', () => {
+  it('returns no provenance for missing and inaccessible rows without probing nonexistent edge author columns', async () => {
+    const f = await fixture(), file = await f.create({userId:f.userId})
+    const store = createDbProvenanceStore()
+    const actor = {workspaceId:f.workspaceId,userId:f.member,assistantId:'',assistantKind:'primary' as const,clearance:'internal' as const}
+    expect(await store.provenance(actor,{row_id:randomUUID()})).toBeNull()
+    expect(await store.provenance(actor,{row_id:file.id})).toBeNull()
+    expect((await store.provenance({...actor,userId:f.userId},{row_id:file.id}))?.data.authorship.created_by_user_id).toBe(f.userId)
+    expect(await store.provenance({...actor,userId:f.userId,workspaceId:randomUUID()},{row_id:file.id})).toBeNull()
+    expect(await store.provenance({...actor,userId:f.userId,clearance:'public'},{row_id:file.id})).toBeNull()
+  })
 
+  it('enforces Department, Project and assistant bounds without ambient agent context', async () => {
+    const f = await fixture(), assistantId = randomUUID()
+    await pool.query("INSERT INTO assistants(id,workspace_id,owner_user_id,name,kind) VALUES($1,$2,$3,'Provenance fixture','standard')", [assistantId,f.workspaceId,f.userId])
+    const file = await f.create({userId:f.userId,assistantId,compartments:[f.key],projectIds:[f.projectId]})
+    const actor = {workspaceId:f.workspaceId,userId:f.userId,assistantId,assistantKind:'standard' as const,clearance:'internal' as const,compartments:[f.key],projectIds:[f.projectId]}
+    const store = createDbProvenanceStore()
+    expect((await store.provenance(actor,{row_id:file.id}))?.data.row_id).toBe(file.id)
+    expect(await store.provenance({...actor,compartments:[]},{row_id:file.id})).toBeNull()
+    expect(await store.provenance({...actor,projectIds:[]},{row_id:file.id})).toBeNull()
+    expect(await store.provenance({...actor,assistantId:randomUUID()},{row_id:file.id})).toBeNull()
+  })
+
+  it('keeps edge authorship unknown instead of inventing it from ownership', async () => {
+    const f = await fixture()
+    const source = await createEntity({workspaceId:f.workspaceId,createdByUserId:f.userId,kind:'person',displayName:'Source',source:'user'})
+    const target = await createEntity({workspaceId:f.workspaceId,createdByUserId:f.userId,kind:'company',displayName:'Target',source:'user'})
+    const link = await createDbEntityLinksStore().create({workspaceId:f.workspaceId,sourceKind:'entity',sourceId:source.id,targetKind:'entity',targetId:target.id,edgeType:'works_at',source:'user',userId:f.userId})
+    const result = await createDbProvenanceStore().provenance({workspaceId:f.workspaceId,userId:f.userId,assistantId:'',assistantKind:'primary',clearance:'confidential'}, {row_id:link.id})
+    expect(result?.data).toMatchObject({primitive:'entity_links',authorship:{created_by_user_id:'',created_by_assistant_id:null},supersession:{preceded_by:null,superseded_by:null}})
+  })
 })
