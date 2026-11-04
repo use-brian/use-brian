@@ -150,6 +150,13 @@ export type Session = {
    * check. NULL for owner-scoped sessions.
    */
   effectiveClearance: string | null
+  /**
+   * Denormalized workspace pointer. Native transcript admission keys on
+   * `sessions.workspace_id` (`session_context_parent_snapshot`). Optional on
+   * readers that do not project it; when projected, `null` means the row is
+   * still legacy-unscoped and must not take the native transcript path.
+   */
+  workspaceId?: string | null
   /** Immutable Team/Project binding for this conversation (migration 473). */
   contextGroupId: string | null
   contextProjectId: string | null
@@ -361,10 +368,12 @@ type CreateSessionParams = {
   guestAnchor?: true
   /**
    * Denormalized workspace pointer that backs the `sessions_workspace_shared`
-   * RLS policy (migration 223). Required for `visibility:'workspace'` sessions
-   * so a teammate read resolves; omit (→ NULL) for owner-scoped sessions. Set
-   * once at insert; the ON CONFLICT branch does not update it. Never read back
-   * onto the `Session` object — it exists only for the RLS gate.
+   * RLS policy (migration 223) and native transcript parent admission.
+   * Required for `visibility:'workspace'` sessions so a teammate read
+   * resolves. Personal inserts inherit `assistants.workspace_id` when omitted.
+   * The personal ON CONFLICT resume fills a NULL `workspace_id` from the
+   * proposed row (assistant workspace) but never overwrites a non-NULL value.
+   * Audience/visibility stay fixed at first insert.
    */
   workspaceId?: string | null
   /**
@@ -458,6 +467,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
+               workspace_id as "workspaceId",
                anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
                context_group_id as "contextGroupId",
                context_project_id as "contextProjectId",
@@ -492,7 +502,8 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
        LEFT JOIN workspace_groups g ON g.id = selected.context_group_id
       WHERE a.id = $1
      ON CONFLICT ${sessionKindSql.personalIdentityConflict()} DO UPDATE
-       SET last_active_at = now()
+       SET last_active_at = now(),
+           workspace_id = COALESCE(sessions.workspace_id, EXCLUDED.workspace_id)
      RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
                app_id as "appId", app_origin as "appOrigin", status, NULL::text as "compactSummary",
@@ -501,6 +512,7 @@ async function insertSession(params: CreateSessionParams, execute: typeof query,
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
+               workspace_id as "workspaceId",
                anchor_kind as "anchorKind", anchor_ref as "anchorRef", clearance_source as "clearanceSource",
                context_group_id as "contextGroupId",
                context_project_id as "contextProjectId",

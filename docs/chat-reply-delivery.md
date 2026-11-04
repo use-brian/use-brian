@@ -84,3 +84,41 @@ discovery grants no permission, and no authorization result is cached between ca
 - Admission is checked again after asynchronous response preparation.
 - Missing query floors fail closed without exposing content or crashing title
   projections, and failed browser history fetches reject.
+
+## Telegram legacy null `sessions.workspace_id`
+
+Native channel turns admit history through `session_context_parent_snapshot` /
+`application_session_query_parent`, which select
+`FROM sessions WHERE workspace_id = <assistant workspace> AND id = <session>`.
+A personal Telegram DM created before workspace denormalization can still have
+`sessions.workspace_id IS NULL` while its assistant is workspace-bound. Inbound
+user messages may persist (turn scope supplies `workspace_id`), then
+`readAttendedSessionHistory` fails with `DerivedScopeError: scope_source_changed`
+and Telegram returns the generic retry notice.
+
+Code fix: personal `findOrCreateSession` ON CONFLICT resume fills a NULL
+`workspace_id` from the proposed assistant workspace, and the channel/chat
+native transcript gates refuse a projected null session workspace.
+
+### Prod unblock before deploy (home-server Brian)
+
+One-row patch for the known broken DM (`29b60ae5-…`, assistant `736d322d-…`,
+workspace `2c9d5a3c-…`). Run against the Brian DB as an operator with write
+access; do not broaden to a mass update without review:
+
+```sql
+UPDATE sessions s
+SET workspace_id = a.workspace_id
+FROM assistants a
+WHERE s.id = '29b60ae5-cb39-41b8-a4a1-eeab4268f502'
+  AND a.id = s.assistant_id
+  AND s.workspace_id IS NULL
+  AND a.workspace_id = '2c9d5a3c-cea4-4439-baee-24934c1fb2ac'
+RETURNING s.id, s.workspace_id;
+```
+
+Legacy unscoped message rows (null `session_messages.workspace_id`) stay
+unscoped and drop out of native history scans; already-scoped turns remain.
+Web session-recovery intentionally leaves null-workspace personal web rows
+untouched and mints a new chat — Telegram personal identity is unique, so
+resume must backfill rather than mint a second DM row.
