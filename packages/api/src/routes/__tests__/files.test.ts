@@ -33,6 +33,7 @@ vi.mock('../../recordings/recording-for-file.js', async () => {
   return { ...actual, resolveRecordingForFile: vi.fn() }
 })
 vi.mock('../../db/sessions.js', () => ({
+  createPersonalWebSession: vi.fn(),
   findOrCreateSession: vi.fn(),
   findSessionById: vi.fn(),
 }))
@@ -57,7 +58,7 @@ import { resolveTurnScopeSystem } from '../../context-scope/resolve-turn-scope.j
 import { assertContextActivationReady } from '../../context-scope/context-readiness.js'
 import { fileRoutes } from '../files.js'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, findUserById, findAssistantById, getWorkspacePrimaryAssistant } from '../../db/users.js'
-import { findOrCreateSession, findSessionById } from '../../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionById } from '../../db/sessions.js'
 import { getWorkspaceFileById } from '../../db/workspace-files.js'
 import { enqueueFileIngestJob, getFileIngestJob } from '../../db/file-ingest-jobs-store.js'
 import { setFileIndexing } from '../../files/artifact-index.js'
@@ -529,7 +530,9 @@ describe('[COMP:api/files-route] upload session routing and authorization', () =
   const fileStore = { cache: vi.fn(), get: vi.fn(), getBySession: vi.fn() }
   const promoter = vi.fn()
   const upload = (fields: Record<string, string> = {}) => {
-    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, promoter), { userId: 'u_1' })
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, promoter), {
+      userId: 'u_1', authSessionId: 'auth-fixture', authVersion: 2,
+    })
     const req = request(app).post('/api/files/upload')
     for (const [key, value] of Object.entries(fields)) req.field(key, value)
     return req.attach('files', Buffer.from('hello'), { filename: 'hello.txt', contentType: 'text/plain' })
@@ -545,12 +548,13 @@ describe('[COMP:api/files-route] upload session routing and authorization', () =
     vi.mocked(getUserAssistant).mockResolvedValue(assistant as never)
     vi.mocked(getWorkspacePrimaryAssistant).mockResolvedValue(assistant as never)
     mockFindOrCreateSession.mockResolvedValue({ id: 's_team', assistantId: assistant.id } as never)
+    vi.mocked(createPersonalWebSession).mockResolvedValue({ id: 's_team', assistantId: assistant.id } as never)
     mockParseFileContent.mockResolvedValue({ text: 'hello', summary: 'Greeting' })
     fileStore.cache.mockResolvedValue({ id: 'f_1', fileName: 'hello.txt' })
   })
 
   it('upserts a stable pane channel with selected assistant, origin and validated Team/Project context', async () => {
-    mockFindOrCreateSession.mockResolvedValue({
+    vi.mocked(createPersonalWebSession).mockResolvedValue({
       id: 's_team', assistantId: assistant.id, contextGroupId: group, contextProjectId: project,
     } as never)
     const fields = {
@@ -564,18 +568,19 @@ describe('[COMP:api/files-route] upload session routing and authorization', () =
     expect(first.body.sessionId).toBe('s_team')
     expect(getUserAssistant).toHaveBeenCalledWith('u_1', assistant.id)
     expect(mockGetDefaultAssistant).not.toHaveBeenCalled()
-    expect(mockFindOrCreateSession).toHaveBeenCalledTimes(2)
-    expect(mockFindOrCreateSession).toHaveBeenCalledWith({
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    expect(createPersonalWebSession).toHaveBeenCalledTimes(2)
+    expect(createPersonalWebSession).toHaveBeenCalledWith({
       assistantId: assistant.id, userId: 'u_1', channelType: 'web', channelId: 'pane-stable',
-      appOrigin: 'chat', contextGroupId: group, contextProjectId: project,
-    })
+      workspaceId: 'ws_team', appOrigin: 'chat', contextGroupId: group, contextProjectId: project,
+    }, { actorUserId: 'u_1', authSessionId: 'auth-fixture', authVersion: 2 })
     expect(assertContextActivationReady).toHaveBeenCalledWith('ws_team')
     expect(resolveTurnScopeSystem).toHaveBeenCalledWith({
       userId: 'u_1', assistant, workspaceId: 'ws_team',
       session: { contextGroupId: group, contextProjectId: project },
     })
     expect(vi.mocked(resolveTurnScopeSystem).mock.invocationCallOrder[0])
-      .toBeLessThan(mockFindOrCreateSession.mock.invocationCallOrder[0]!)
+      .toBeLessThan(vi.mocked(createPersonalWebSession).mock.invocationCallOrder[0]!)
     expect(fileStore.cache).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 's_team', workspaceId: 'ws_team', userId: 'u_1',
     }))
@@ -607,6 +612,43 @@ describe('[COMP:api/files-route] upload session routing and authorization', () =
     expect(fields).not.toHaveProperty('contextGroupId')
     expect(fields).not.toHaveProperty('contextProjectId')
     expect(resolveTurnScopeSystem).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {},
+    { userId: 'u_1' },
+    { userId: 'u_1', authSessionId: 'auth-fixture' },
+    { userId: 'u_1', authVersion: 2 },
+  ])('requires verified auth claims before staging a personal Chat upload (%j)', async claims => {
+    mockFindOrCreateUser.mockResolvedValue({ user: { id: 'u_1' }, isNew: false } as never)
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, promoter), claims)
+    const result = await request(app).post('/api/files/upload')
+      .field('assistantId', assistant.id).field('appOrigin', 'chat')
+      .field('authSessionId', 'forged-auth').field('authVersion', '2').field('actorUserId', 'u_1')
+      .attach('files', Buffer.from('hello'), { filename: 'hello.txt', contentType: 'text/plain' })
+    expect(result.status).toBe(401)
+    expect(result.body.code).toBe('personal_session_auth_required')
+    expect(createPersonalWebSession).not.toHaveBeenCalled()
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    noWrites()
+  })
+
+  it('does not cache a file when authenticated personal-session admission fails', async () => {
+    vi.mocked(createPersonalWebSession).mockRejectedValue(new Error('Fictional admission refusal'))
+    const result = await upload({ assistantId: assistant.id, appOrigin: 'chat' })
+    expect(result.status).toBe(500)
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    noWrites()
+  })
+
+  it('keeps the existing-session read gate without creating a new personal root', async () => {
+    mockFindSessionById.mockResolvedValue({ id: 's_existing', assistantId: assistant.id } as never)
+    const result = await upload({ sessionId: 's_existing', assistantId: assistant.id, appOrigin: 'chat' })
+    expect(result.status).toBe(200)
+    expect(gateSessionRead).toHaveBeenCalledWith('u_1', expect.objectContaining({ id: 's_existing' }))
+    expect(createPersonalWebSession).not.toHaveBeenCalled()
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    expect(fileStore.cache).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 's_existing' }))
   })
 
   it('uses workspace primary without an explicit assistant and coerces unknown origin to null', async () => {
