@@ -2884,6 +2884,11 @@ export const ja: Dictionary = {
     selfHost: "またはオープンソース版をセルフホスト",
     continueBrowsing: "閲覧を続ける",
   },
+  desktopSession: {
+    title: "Use Brian",
+    description: "サインインするか、保存済みのアカウントを選んでワークスペースを開いてください。",
+    retry: "再試行",
+  },
   workspaceSwitcher: {
     addAccountDialog: {
       title: "アカウントを追加",

@@ -2900,6 +2900,11 @@ export const en = {
     selfHost: "Or self-host the open-source version",
     continueBrowsing: "Continue browsing",
   },
+  desktopSession: {
+    title: "Use Brian",
+    description: "Sign in or choose a saved account to open your workspace.",
+    retry: "Retry",
+  },
   workspaceSwitcher: {
     addAccountDialog: {
       title: "Add account",

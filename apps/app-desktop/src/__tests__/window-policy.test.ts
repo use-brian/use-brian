@@ -11,7 +11,6 @@ import {
   decideRedirectAction,
   shouldAttemptLocalMint,
   shouldMintLocalSessionBeforeLoad,
-  shouldShowSignInLandingOnLaunch,
   LOCAL_MINT_COOLDOWN_MS,
 } from "../window-policy.js";
 
@@ -44,32 +43,6 @@ describe("[COMP:app-desktop/window-policy] bundled local startup", () => {
       shouldMintLocalSessionBeforeLoad({
         bundled: true,
         targetAuth: "pkce",
-        hasStoredTokens: false,
-      }),
-    ).toBe(false);
-  });
-});
-
-describe("[COMP:app-desktop/window-policy] packaged sign-in landing", () => {
-  it("uses the native landing only for a signed-out bundled PKCE target", () => {
-    expect(
-      shouldShowSignInLandingOnLaunch({
-        bundled: true,
-        targetAuth: "pkce",
-        hasStoredTokens: false,
-      }),
-    ).toBe(true);
-    expect(
-      shouldShowSignInLandingOnLaunch({
-        bundled: true,
-        targetAuth: "pkce",
-        hasStoredTokens: true,
-      }),
-    ).toBe(false);
-    expect(
-      shouldShowSignInLandingOnLaunch({
-        bundled: true,
-        targetAuth: "local-session",
         hasStoredTokens: false,
       }),
     ).toBe(false);
@@ -231,7 +204,7 @@ describe("[COMP:app-desktop/window-policy] decideLoadFailureAction", () => {
       decideLoadFailureAction({
         errorCode: -6,
         isMainFrame: true,
-        failedUrl: "file:///app/dist/signin.html",
+        failedUrl: "file:///app/renderer/index.html",
         hasSession: false,
       }),
     ).toBe("show-window");
@@ -363,7 +336,7 @@ describe("[COMP:app-desktop/window-policy] decideLoadFailureAction (local target
       decideLoadFailureAction({
         errorCode: -6,
         isMainFrame: true,
-        failedUrl: "file:///app/dist/signin.html",
+        failedUrl: "file:///app/renderer/index.html",
         hasSession: false,
         target: "local",
       }),

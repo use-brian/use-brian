@@ -27,15 +27,6 @@ export function shouldMintLocalSessionBeforeLoad(input: {
   return input.bundled && input.targetAuth === "local-session" && !input.hasStoredTokens;
 }
 
-/** The bundled SPA's anonymous screen is not the desktop login experience. */
-export function shouldShowSignInLandingOnLaunch(input: {
-  bundled: boolean;
-  targetAuth: TargetAuth;
-  hasStoredTokens: boolean;
-}): boolean {
-  return input.bundled && input.targetAuth === "pkce" && !input.hasStoredTokens;
-}
-
 /**
  * Decide whether a navigation should load inside the app window
  * (`internal` — the canvas origin only) or be handed to the system browser

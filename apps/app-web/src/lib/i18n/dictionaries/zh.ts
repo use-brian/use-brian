@@ -2885,6 +2885,11 @@ export const zh: Dictionary = {
     selfHost: "或自行架設開源版本",
     continueBrowsing: "繼續瀏覽",
   },
+  desktopSession: {
+    title: "Use Brian",
+    description: "登入或選擇已儲存的帳戶以開啟工作區。",
+    retry: "重試",
+  },
   workspaceSwitcher: {
     addAccountDialog: {
       title: "新增帳戶",

@@ -99,15 +99,15 @@ function targetJar(target: AccountTarget) {
   return state.partitions.get(partition);
 }
 let store: DeploymentAccounts;
-async function setup(auth: AccountTarget["auth"] = "pkce", bundled = true) {
+async function setup(auth: AccountTarget["auth"] = "pkce", bundled = true, signedIn = true) {
   state.app?.removeAllListeners();
   vi.resetModules(); state.files.clear(); state.handlers.clear(); state.windows.length = 0; state.partitions.clear();
   vi.stubEnv("USEBRIAN_APP_URL", ""); vi.stubEnv("USEBRIAN_API_URL", ""); vi.stubEnv("USEBRIAN_BUNDLED", String(bundled));
-  state.files.set("/tmp/desktop-switch-test/target.json", Buffer.from(serializePersistedTarget("local", local.appUrl, local.apiUrl, auth)));
+  state.files.set("/tmp/desktop-switch-test/target.json", Buffer.from(serializePersistedTarget(signedIn ? "local" : "cloud", local.appUrl, local.apiUrl, auth)));
   store = new DeploymentAccounts({ isAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => b.toString() },
     () => state.files.get("/tmp/desktop-switch-test/deployment-accounts.bin")!,
     (blob) => { state.files.set("/tmp/desktop-switch-test/deployment-accounts.bin", blob); });
-  store.put({ ...local, auth }, tokens("local")); store.put(cloud, tokens("cloud"));
+  if (signedIn) { store.put({ ...local, auth }, tokens("local")); store.put(cloud, tokens("cloud")); }
   state.request.mockReset();
   state.refresh.mockReset().mockResolvedValue({ accessToken: "cloud-new", refreshToken: "cloud-rotated", accessTokenExpiresIn: 3600 });
   await import("../main.js");
@@ -591,11 +591,16 @@ describe("[COMP:app-desktop/main] add self-hosted account in place", () => {
     expect(win.destroyed).toBe(false);
     expect(JSON.parse(state.files.get("/tmp/desktop-switch-test/target.json")!.toString()).auth).toBe("pkce");
   });
-  it("keeps a fallback for older app views that have no dialog host", async () => {
+  it.each([true, false])("loads the main app and queues its dialog when the current view has no host (bundled: %s)", async (bundled) => {
+    await setup("pkce", bundled);
     const win = state.windows.at(-1);
     state.handlers.get("Use Brian:choose-deployment")!(sender());
-    expect(win.webContents.getURL()).toContain("signin.html");
-    expect(win.webContents.send).not.toHaveBeenCalledWith("Use Brian:choose-deployment", local.appUrl);
+    await vi.waitFor(() => expect(win.webContents.send).toHaveBeenCalledWith("Use Brian:choose-deployment", local.appUrl));
+    expect(win.webContents.getURL()).toContain("renderer/index.html");
+    expect(win.webContents.loadFile).toHaveBeenLastCalledWith(expect.stringContaining("renderer/index.html"),
+      expect.objectContaining({ query: expect.objectContaining({ accountEntry: "signed-out" }) }));
+    // The exact entry renderer remains authorized for account IPC in thin mode.
+    expect(await state.handlers.get("Use Brian:list-accounts")!(sender())).toHaveProperty("accounts");
   });
   it("does not activate a destination when the requesting page navigates away during owner auth", async () => {
     let release!: () => void;
@@ -663,5 +668,45 @@ describe("[COMP:app-desktop/main] destination gateway validation", () => {
     expect(state.files.get("/tmp/desktop-switch-test/target.json")!.toString()).toBe(persisted);
     expect(state.request).not.toHaveBeenCalled();
     expect(store.current(local)?.accessToken).toBe("local-access");
+  });
+});
+
+
+describe("[COMP:app-desktop/main] main app account entry", () => {
+  it("starts signed-out packaged launches in the installed app", async () => {
+    await setup("pkce", true, false);
+    const win = state.windows.at(-1);
+    expect(win.webContents.getURL()).toContain("renderer/index.html");
+    expect(win.webContents.loadFile).toHaveBeenCalledOnce();
+  });
+  it("returns to the app after signing out and preserves other saved accounts", async () => {
+    const win = state.windows.at(-1);
+    state.handlers.get("Use Brian:sign-out")!(sender());
+    await vi.waitFor(() => expect(store.current(local)).toBeNull());
+    await vi.waitFor(() => expect(win.webContents.loadFile).toHaveBeenCalledTimes(2));
+    expect(win.webContents.getURL()).toContain("renderer/index.html");
+    expect(store.current(cloud)?.refreshToken).toBe("cloud-refresh");
+  });
+  it("shows accounts after session rejection and ignores subframe or foreign requests", async () => {
+    const win = state.windows.at(-1);
+    const show = state.handlers.get("Use Brian:show-accounts")!;
+    const loads = win.webContents.loadFile.mock.calls.length;
+    show({ ...sender(), senderFrame: {} });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(win.webContents.loadFile).toHaveBeenCalledTimes(loads);
+    show(sender());
+    await vi.waitFor(() => expect(win.webContents.loadFile).toHaveBeenLastCalledWith(
+      expect.stringContaining("renderer/index.html"), expect.objectContaining({ query: expect.objectContaining({ accountEntry: "signed-out" }) })));
+    await win.webContents.loadURL("https://untrusted.example/");
+    show(sender());
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(win.webContents.getURL()).toBe("https://untrusted.example/");
+  });
+  it("routes an unreachable local deployment to main app recovery without minting again", async () => {
+    const win = state.windows.at(-1);
+    win.webContents.emit("did-fail-load", {}, -105, "unreachable", local.appUrl, true);
+    await vi.waitFor(() => expect(win.webContents.loadFile).toHaveBeenLastCalledWith(
+      expect.stringContaining("renderer/index.html"), expect.objectContaining({ query: expect.objectContaining({ accountEntry: "unreachable" }) })));
+    expect(state.request).not.toHaveBeenCalled();
   });
 });

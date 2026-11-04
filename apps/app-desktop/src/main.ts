@@ -117,7 +117,6 @@ import {
   decideLoadFailureAction,
   shouldAttemptLocalMint,
   shouldMintLocalSessionBeforeLoad,
-  shouldShowSignInLandingOnLaunch,
 } from "./window-policy.js";
 import {
   isAllowedGatewayNavigation,
@@ -306,9 +305,8 @@ const isDev = !app.isPackaged;
 const PRELOAD_PATH = join(__dirname, "preload.cjs");
 const PET_PRELOAD_PATH = join(__dirname, "pet-preload.cjs");
 const BRIAN_PET_PAGE = join(__dirname, "brian-pet.html");
-const SIGNIN_PAGE = join(__dirname, "signin.html");
 /**
- * The offline landing — shown (instead of the sign-in landing) when a signed-in
+ * The offline landing — shown (instead of the main app account view) when a signed-in
  * user's main-frame load fails for lack of network. Keeps the session intact and
  * auto-reconnects. See `showOffline` + "Offline resilience" in the spec.
  */
@@ -837,19 +835,9 @@ function createWindow(initialLoad: { useBrian?: boolean; route?: string; linkReq
   });
 
   if (accessReauthorizationNeeded && cfg.target === "local") {
-    void win.webContents.loadFile(SIGNIN_PAGE, {
-      query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
+    void loadApp(win, { accountEntry: "access" }).then(() => {
+      win.webContents.send("Use Brian:choose-deployment", cfg.appUrl);
     });
-  } else if (
-    shouldShowSignInLandingOnLaunch({
-      bundled: cfg.bundled,
-      targetAuth: cfg.targetAuth,
-      hasStoredTokens: readStoredTokens() !== null,
-    })
-  ) {
-    // The SPA's anonymous state is defensive only. Signed-out packaged launches
-    // use the same branded native landing as the existing desktop auth flow.
-    void win.webContents.loadFile(SIGNIN_PAGE);
   } else {
     void loadApp(win, initialLoad);
   }
@@ -879,7 +867,8 @@ function isAppPage(win: BrowserWindow): boolean {
   try {
     const current = new URL(win.webContents.getURL());
     if (current.origin === cfg.appOrigin) return true;
-    return bundledAvailable() && current.pathname === pathToFileURL(BUNDLE_INDEX).pathname;
+    return existsSync(BUNDLE_INDEX) && current.protocol === "file:" && current.host === "" &&
+      current.pathname === pathToFileURL(BUNDLE_INDEX).pathname;
   } catch {
     return false;
   }
@@ -1430,17 +1419,16 @@ async function recoverBackgroundGatewayRequest(requestUrl: string): Promise<void
   });
 }
 
-/** Show the built-in sign-in landing (never a blank window). */
+/** Show the main app account view (never a blank window). */
 function promptSignIn(): void {
   stopRetryWatchers(); // leaving the offline/brain-down state for a real sign-out
-  // A redirect handler can call this while Chromium is still cancelling the
-  // intercepted navigation. Replacing it synchronously races that cancellation
-  // and aborts this file load too, so start the landing on the next turn.
+  // Defer past Chromium's intercepted redirect cancellation so it cannot
+  // abort the replacement app load.
   setImmediate(() => {
     const win = ensureWindow();
-    void win.webContents.loadFile(SIGNIN_PAGE).then(
+    void loadApp(win, { accountEntry: "signed-out" }).then(
       () => focusWindow(win),
-      (err) => ignoreAbortedLoad("Sign-in landing", err),
+      (err) => ignoreAbortedLoad("Account entry", err),
     );
   });
 }
@@ -1448,7 +1436,7 @@ function promptSignIn(): void {
 // ── Offline landing + auto-retry ───────────────────────────────
 //
 // A signed-in user whose Mac drops off the network must never be bounced to the
-// sign-in landing (that reads as a spurious logout). Instead the shell shows a
+// main app account view (that reads as a spurious logout). Instead the shell shows a
 // branded offline landing and polls connectivity, reloading the app the moment
 // the network returns. The jar's refresh token is untouched throughout. Spec:
 // docs/architecture/features/app-desktop.md → "Offline resilience".
@@ -1922,8 +1910,7 @@ function showLocalDown(
   win: BrowserWindow,
   reason: "unreachable" | "auth" | "gateway-auth" = "unreachable",
 ): void {
-  void win.webContents
-    .loadFile(SIGNIN_PAGE, { query: { mode: "local-down", target: cfg.appUrl, reason } })
+  void loadApp(win, { accountEntry: reason })
     .then(() => focusWindow(win));
   stopRetryWatchers();
   if (reason === "gateway-auth") return;
@@ -1936,8 +1923,8 @@ function showLocalDown(
 
 /**
  * The menu/tray "Switch to ..." action. Cloud → local ALWAYS opens the
- * in-app Add account dialog when its renderer is ready; first launch and
- * older thin renderers use the `local-choose` fallback. In either view:
+ * in-app Add account dialog when its renderer is ready; otherwise it loads
+ * the shared renderer and queues the same dialog request. In either view:
  * the user confirms or edits the URL, and Connect probes + switches. Never
  * silently adopt whatever answers on the default port — a dev running the
  * hosted-edition stack there gets the wrong brain with familiar data, which
@@ -1952,9 +1939,10 @@ function chooseOwnDeployment(): void {
     focusWindow(win);
     return;
   }
-  void win.webContents
-    .loadFile(SIGNIN_PAGE, { query: { mode: "local-choose", url: rememberedLocalAppUrl() } })
-    .then(() => focusWindow(win));
+  void loadApp(win, { accountEntry: "signed-out" }).then(() => {
+    win.webContents.send("Use Brian:choose-deployment", rememberedLocalAppUrl());
+    focusWindow(win);
+  });
 }
 
 function switchTargetFromMenu(): void {
@@ -1965,8 +1953,7 @@ function switchTargetFromMenu(): void {
 function isCurrentAccountSender(id: number): boolean {
   return [mainWindow, desktopChatWindow].some((win) =>
     win && !win.isDestroyed() && win.webContents.id === id &&
-    (isAppPage(win) || win.webContents.getURL().startsWith(pathToFileURL(SIGNIN_PAGE).href) ||
-      ["", "about:blank"].includes(win.webContents.getURL())));
+    (isAppPage(win) || ["", "about:blank"].includes(win.webContents.getURL())));
 }
 
 function isTrustedLinkSender(event: IpcMainInvokeEvent): boolean {
@@ -2026,13 +2013,19 @@ async function loadApp(
     route?: string;
     useBrian?: boolean;
     linkRequestId?: string;
+    accountEntry?: "signed-out" | "unreachable" | "auth" | "gateway-auth" | "access";
   } = {},
 ): Promise<void> {
   return targetOperations.run(async () => {
     const hasUseBrianPrompt =
       opts.useBrian === true || pendingUseBrianPrompt !== null;
-    if (bundledAvailable()) {
-      if (!(await ensureBundledLocalSession(win))) return;
+    if (opts.accountEntry || bundledAvailable()) {
+      if (!existsSync(BUNDLE_INDEX)) {
+        dialog.showErrorBox("Account view unavailable", "Build the desktop renderer before opening account controls.");
+        win.show();
+        return;
+      }
+      if (!opts.accountEntry && !(await ensureBundledLocalSession(win))) return;
       // The bundled renderer loads from file://, so it has no env: hand it the API
       // base (and the capture/record intent) via the query string. The client reads
       // `?api=` for Bearer requests and `?app=` for shareable web page links.
@@ -2041,6 +2034,7 @@ async function loadApp(
         api: cfg.apiUrl,
         publicConfig: JSON.stringify(cfg.publicConfig),
       };
+      if (opts.accountEntry) query.accountEntry = opts.accountEntry;
       if (opts.capture) query.capture = "1";
       if (opts.record) query.record = "1";
       if (hasUseBrianPrompt) query.useBrian = "1";
@@ -2863,13 +2857,12 @@ function installAccessRequestHook(): void {
 function showAccessReauthorization(): void {
   if (!mainWindow || mainWindow.isDestroyed() || cfg.target !== "local") return;
   const win = mainWindow;
-  void win.webContents
-    .loadFile(SIGNIN_PAGE, {
-      query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
-    })
-    .then(() => {
-      if (!win.isDestroyed()) focusWindow(win);
-    });
+  void loadApp(win, { accountEntry: "access" }).then(() => {
+    if (!win.isDestroyed()) {
+      win.webContents.send("Use Brian:choose-deployment", cfg.appUrl);
+      focusWindow(win);
+    }
+  });
 }
 
 function startAccessGrantKeepalive(): void {
@@ -3323,8 +3316,7 @@ async function signOutImpl(): Promise<void> {
       // Remove only this account; other deployments remain available.
       clearStoredTokens();
       const win = ensureWindow();
-      if (cfg.targetAuth === "local-session") await loadApp(win);
-      else await win.webContents.loadFile(SIGNIN_PAGE);
+      await loadApp(win);
       focusWindow(win);
       return;
     }
@@ -3436,7 +3428,7 @@ function currentTrustedAppUrl(win: BrowserWindow): string | null {
  * A `/login` redirect is not proof that the user signed out. If the durable
  * refresh credential still exists, join the shell's single-flight refresh and
  * resume the document that was visible before the redirect. Only an absent or
- * definitively rejected credential reaches the sign-in landing.
+ * definitively rejected credential reaches the main app account view.
  */
 async function recoverCloudSessionOrSignIn(resumeUrl: string | null): Promise<void> {
   return targetOperations.run(async () => {
@@ -3673,7 +3665,7 @@ function startSessionKeepalive(): Promise<void> {
         // local target reloads the app instead: its /login bounce re-mints the
         // local-owner session (see mintLocalSession).
         if (cfg.targetAuth === "local-session") void loadApp(mainWindow);
-        else void mainWindow.webContents.loadFile(SIGNIN_PAGE);
+        else void loadApp(mainWindow, { accountEntry: "signed-out" });
       }
     } catch (err) {
       console.warn("Session keep-alive tick failed:", err);
@@ -4146,7 +4138,10 @@ if (!gotLock) {
     else pendingUrl = url;
   });
 
-  // The sign-in landing's button asks the main process to start the flow.
+  // The main app account view's button asks the main process to start the flow.
+  ipcMain.on("Use Brian:show-accounts", (event) => {
+    if (!changingTarget && isCurrentAccountSender(event.sender.id) && event.senderFrame === event.sender.mainFrame) promptSignIn();
+  });
   ipcMain.on("Use Brian:sign-in", (event) => {
     if (!changingTarget && isCurrentAccountSender(event.sender.id)) startSignIn();
   });

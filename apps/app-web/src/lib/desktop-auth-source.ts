@@ -103,6 +103,8 @@ export type DesktopUpdateStatus =
   | { phase: "ready"; version: string };
 
 export interface DesktopBridge {
+  /** Show the main app account controls after session rejection, without starting OAuth. */
+  showAccounts?: () => void;
   /** Pair resolves successfully only once the embedded browser relay is ready. */
   browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; controlEpoch?: number; hasControl?: boolean; connected?: boolean; automaticBlocked?: boolean; browserProfileId?: string; workspaceId?: string }>;
   /** Host OS reported by Electron (`darwin`, `win32`, or `linux`). */
@@ -361,8 +363,8 @@ export function isDesktopAuth(): boolean {
 /**
  * When running inside the Electron desktop shell (thin OR bundled), route logout
  * through the shell: it clears its own session in place (cookie jar in the thin
- * shell, the safeStorage token in bundled mode) and reloads to the sign-in
- * landing. Returns `true` when the shell handled it, so the web logout handlers
+ * shell, the safeStorage token in bundled mode) and reloads the main app
+ * account view. Returns `true` when the shell handled it, so the web logout handlers
  * can skip the browser/primary-auth path entirely.
  *
  * This MUST take precedence over `buildPrimaryAuthUrl(...)`: in Electron the
@@ -490,6 +492,8 @@ export const desktopAuthSource: AuthSource = {
   },
 
   redirectToLogin() {
-    desktopBridge()?.signIn?.();
+    const bridge = desktopBridge();
+    if (bridge?.showAccounts) bridge.showAccounts();
+    else bridge?.signIn?.();
   },
 };

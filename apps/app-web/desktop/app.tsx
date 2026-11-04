@@ -44,10 +44,10 @@ import {
 } from "react-router-dom";
 
 import { authFetch, getValidAccessToken } from "@/lib/auth-fetch";
-import { desktopBridge, desktopSignOut } from "@/lib/desktop-auth-source";
+import { desktopBridge } from "@/lib/desktop-auth-source";
 import { idbGet, idbSet } from "@/lib/offline/idb";
 import { ThemeProvider } from "@/lib/theme";
-import { I18nProvider } from "@/lib/i18n/client";
+import { useT, I18nProvider } from "@/lib/i18n/client";
 import { getDictionary } from "@/lib/i18n/dictionaries";
 import { ConfirmDialogProvider } from "@/components/ui/confirm-dialog";
 import { PromptDialogProvider } from "@/components/ui/prompt-dialog";
@@ -63,6 +63,9 @@ import { BrainSurfaceProvider } from "@/contexts/brain-surface-context";
 import { PrimaryAssistantProvider } from "@/contexts/primary-assistant";
 import { WorkspaceChrome } from "@/components/doc/workspace-chrome";
 import { DesktopChatWindow } from "@/components/chrome/desktop-chat-window";
+import { DesktopAccounts } from "@/components/desktop-accounts";
+import { openDesktopAddAccount } from "@/components/desktop-add-account";
+import { Button } from "@/components/ui/button";
 import { WorkspacePicker } from "@/components/workspace-picker";
 import type { WorkspacePickerItem } from "@/lib/workspace-picker";
 import {
@@ -450,6 +453,9 @@ function DesktopChatRoute() {
 type WorkspaceRow = WorkspacePickerItem;
 
 function Boot() {
+  const t = useT();
+  const entry = new URLSearchParams(window.location.search).get("accountEntry");
+  const recovery = entry && entry !== "signed-out";
   const navigate = useNavigate();
   const useBrianSignal = new URLSearchParams(window.location.search).get(
     "useBrian",
@@ -460,9 +466,10 @@ function Boot() {
     | { k: "anon" }
     | { k: "ready"; workspaces: WorkspaceRow[] }
     | { k: "error"; detail: string }
-  >({ k: "boot" });
+  >(entry ? { k: "anon" } : { k: "boot" });
 
   useEffect(() => {
+    if (entry) return; // Native recovery must remain usable without authenticating.
     let cancelled = false;
     const presentWorkspaces = (workspaces: WorkspaceRow[]) => {
       if (cancelled) return;
@@ -505,10 +512,9 @@ function Boot() {
       });
       if (cancelled) return;
       if (result.kind === "unauthenticated") {
-        // A stale safeStorage session can pass the shell's synchronous startup
-        // check but fail refresh or the live probe. Clear it through the native
-        // path before any cached workspace action becomes interactive.
-        if (desktopSignOut()) return;
+        // Definitive rejection already clears credentials through refresh.
+        // Stay in the app; calling native sign-out here would reload forever
+        // when there is no session. Cached workspaces must remain inaccessible.
         setState({ k: "anon" });
         return;
       }
@@ -524,19 +530,45 @@ function Boot() {
     return () => {
       cancelled = true;
     };
-  }, [navigate, useBrianSignal]);
+  }, [navigate, useBrianSignal, entry]);
+
+  const connectionMessage = entry === "auth"
+    ? t.workspaceSwitcher.addAccountDialog.authError
+    : entry === "access" || entry === "gateway-auth"
+      ? t.workspaceSwitcher.addAccountDialog.approvalError
+      : t.workspaceSwitcher.addAccountDialog.unreachable;
 
   return (
-    <div style={shell}>
-      <div style={{ width: 520, padding: 32 }}>
-        <h1 style={{ fontSize: 18, margin: "0 0 16px" }}>Use Brian</h1>
-        {state.k === "boot" && <p style={dim}>Loading…</p>}
+    <main className="flex min-h-dvh items-center justify-center bg-background px-4 py-12 text-foreground">
+      <div className="w-full max-w-lg space-y-6">
+        <h1 className="text-2xl font-semibold">{t.desktopSession.title}</h1>
+        {state.k === "boot" && <div aria-busy="true" className="h-40 animate-pulse rounded-xl bg-muted" />}
         {state.k === "anon" && (
-          <button type="button" style={button} onClick={() => window.sidanclawDesktop?.signIn?.()}>
-            Sign In
-          </button>
+          <>
+            <p className="text-sm text-muted-foreground" role={recovery ? "alert" : undefined}>
+              {recovery ? connectionMessage : t.desktopSession.description}
+            </p>
+            <DesktopAccounts variant="standalone" />
+            <div className="flex flex-wrap gap-3">
+              <Button onClick={() => {
+                const bridge = desktopBridge();
+                if (bridge?.addAccount) bridge.addAccount();
+                else bridge?.signIn?.();
+              }}>{t.workspaceSwitcher.addAccountDialog.cloud}</Button>
+              <Button variant="outline" onClick={() => openDesktopAddAccount()}>
+                {t.workspaceSwitcher.addAccountDialog.title}
+              </Button>
+              {recovery && <Button variant="ghost" onClick={() => desktopBridge()?.retry?.()}>{t.desktopSession.retry}</Button>}
+            </div>
+          </>
         )}
-        {state.k === "error" && <p style={dim}>Error: {state.detail}</p>}
+        {state.k === "error" && (
+          <>
+            <p role="alert" className="text-sm text-muted-foreground">{t.workspaceSwitcher.loadError}</p>
+            <Button variant="outline" onClick={() => desktopBridge()?.retry?.()}>{t.desktopSession.retry}</Button>
+            <Button variant="ghost" onClick={() => openDesktopAddAccount()}>{t.workspaceSwitcher.addAccountDialog.title}</Button>
+          </>
+        )}
         {state.k === "ready" && (
           <WorkspacePicker
             initialWorkspaces={state.workspaces}
@@ -545,7 +577,7 @@ function Boot() {
           />
         )}
       </div>
-    </div>
+    </main>
   );
 }
 
@@ -870,22 +902,6 @@ const shell: React.CSSProperties = {
   color: "var(--foreground)",
 };
 const dim: React.CSSProperties = { opacity: 0.6, fontSize: 13 };
-const button: React.CSSProperties = {
-  font: "inherit",
-  fontWeight: 600,
-  letterSpacing: "0.01em",
-  // Fancy primary treatment matching signin.html's landing CTA: cyan-family
-  // gradient + glassy inset sheen + layered cyan glow (the app's --btn-image /
-  // --btn-glow recipe), not a flat Notion-blue fill.
-  color: "#04131c",
-  background: "linear-gradient(135deg, #5fe2ff 0%, #34d3ff 48%, #17bdec 100%)",
-  border: 0,
-  borderRadius: 12,
-  padding: "12px 30px",
-  cursor: "pointer",
-  boxShadow:
-    "inset 0 1px 0 rgba(255,255,255,0.45), 0 1px 2px rgba(4,19,28,0.18), 0 8px 20px -8px rgba(52,211,255,0.55), 0 16px 40px -16px rgba(52,211,255,0.45)",
-};
 
 function ProjectDetailRoute() {
   const { workspaceId = "", projectId = "" } = useParams();
