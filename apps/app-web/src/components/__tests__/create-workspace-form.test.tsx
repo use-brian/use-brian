@@ -62,7 +62,7 @@ async function fail(request: ReturnType<typeof deferred>) {
 }
 
 describe("[COMP:app-web/create-workspace-form] validation and request recovery", () => {
-  it("associates stable unique labels and the minimum-purpose hint with each field", async () => {
+  it("associates stable unique labels and the optional-purpose hint with each field", async () => {
     await act(async () => root.render(<><CreateWorkspaceForm onCreated={onCreated} /><CreateWorkspaceForm onCreated={onCreated} /></>));
     const inputs = [...host.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")];
     expect(new Set(inputs.map(node => node.id)).size).toBe(4);
@@ -79,23 +79,24 @@ describe("[COMP:app-web/create-workspace-form] validation and request recovery",
     expect([...host.querySelectorAll("input, textarea")].map(node => node.id)).toEqual(ids);
   });
 
-  it("gates empty, whitespace and short values without a request, then submits trimmed valid data once", async () => {
+  it.each(["", "   ", " Plan ", " Shared project decisions "])("creates with optional purpose %j and trims inputs", async (purpose) => {
     await mount();
     expect(button(t.submit).disabled).toBe(true);
-    await enter(fields().name, "  "); await enter(fields().purpose, "1234567890");
-    expect(button(t.submit).disabled).toBe(true);
-    await enter(fields().name, " Fictional team "); await enter(fields().purpose, "123456789");
+    await enter(fields().name, "  ");
+    await enter(fields().purpose, purpose);
     expect(button(t.submit).disabled).toBe(true);
     button(t.submit).click(); expect(mocks.authFetch).not.toHaveBeenCalled();
-    const request = deferred();
-    await enter(fields().purpose, " 1234567890 ");
+    await enter(fields().name, " Fictional team ");
     expect(button(t.submit).disabled).toBe(false);
+    const created = { id: "workspace-fictional", name: "Fictional team", iconSeed: null };
+    const request = deferred();
     const submitting = await submit();
     expect(submitting.disabled).toBe(true);
     submitting.click();
     expect(mocks.authFetch).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(mocks.authFetch.mock.calls[0][1].body)).toEqual({ name: "Fictional team", purpose: "1234567890" });
-    await fail(request);
+    expect(JSON.parse(mocks.authFetch.mock.calls[0][1].body)).toEqual({ name: "Fictional team", purpose: purpose.trim() });
+    await act(async () => request.resolve({ ok: true, json: async () => created }));
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith(created);
   });
 
   it("keeps phone opening from raising the text keyboard while retaining desktop autofocus", async () => {

@@ -80,12 +80,12 @@ export function CreateWorkspaceForm({
     }
   }, [error]);
 
-  const canSubmit = name.trim().length > 0 && purpose.trim().length >= 10;
+  const canSubmit = name.trim().length > 0 && purpose.length <= 500;
 
   async function handleCreate() {
     const n = name.trim();
     const p = purpose.trim();
-    if (!n || p.length < 10 || creating) return;
+    if (!n || purpose.length > 500 || creating) return;
     requestFocus.current = {
       pending: true,
       recover: document.activeElement === document.body || document.activeElement === submitRef.current,

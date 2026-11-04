@@ -387,7 +387,7 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
       setPurposeError("");
       return;
     }
-    if (next.length < 10 || next.length > 500) {
+    if (next.length > 500) {
       setPurposeError(t.workspaceDetailInline.purposeMinHint);
       return;
     }
@@ -862,7 +862,7 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
                 </button>
                 <button
                   onClick={savePurpose}
-                  disabled={purposeSaving || purposeInput.trim().length < 10}
+                  disabled={purposeSaving || purposeInput.length > 500}
                   className="text-xs font-medium text-primary hover:underline disabled:opacity-50"
                 >
                   {purposeSaving
