@@ -30,7 +30,7 @@ describe('common workflow interception', () => {
     const params = { ...fixture(), text: 'approve abc123' }
     expect(await maybeHandleChannelWorkflowReply(params)).not.toBeNull()
     expect(maybeHandleApprovalReply).toHaveBeenCalledWith(params.approvals, 'user', params.text,
-      { workspaceId: 'ws', assistantId: 'asst', authorized: params.authorized })
+      { workspaceId: 'ws', assistantId: 'asst', channelId: 'peer', channelIntegrationId: 'integration', authorized: params.authorized })
     expect(handleChannelQuestionReply).not.toHaveBeenCalled()
   })
   it('never lets missing approval deps or approval errors fall into chat', async () => {

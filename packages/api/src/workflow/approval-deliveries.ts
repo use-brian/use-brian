@@ -102,9 +102,9 @@ function composeMessage(
   // destination is chosen by recency, not by who may read that scope. They
   // stay on the authorized web page this message links to.
   return [
-    '🔐 A workflow action needs your approval.',
+    params.externalAction ? '🔐 An external agent action needs your approval. Review the exact request on the web before deciding.' : '🔐 A workflow action needs your approval.',
     ``,
-    ...(params.recentTarget ? [`Approve or reject on the web: ${deepLink}`] : [
+    ...(params.recentTarget && !params.externalAction ? [`Approve or reject on the web: ${deepLink}`] : [
       `Reply with \`approve ${params.approvalId.slice(0, 8)}\` or \`reject ${params.approvalId.slice(0, 8)}\`,`,
       `or open: ${deepLink}`,
     ]),

@@ -71,7 +71,7 @@ describe('[COMP:channels/approval-replies] maybeHandleApprovalReply', () => {
     expect(sql).toContain("status = 'pending'")
     expect(sql).toContain('approver_user_id = $1')
     expect(params).toEqual(['u-1', 'abc123de', null, null])
-    expect(sql).toContain("kind = 'workflow_step'")
+    expect(sql).toContain("kind IN ('workflow_step', 'external_action')")
     expect(sql).toContain('expires_at > now()')
   })
 
