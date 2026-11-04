@@ -1,37 +1,14 @@
 "use client";
 
 /**
- * Recording upload flow hook (recording-to-brain). It exposes two boundaries:
- * `stage` drives pick file → signed storage upload → server estimate and stops;
- * `run` continues through confirm-dialog preview → process
- * (ENQUEUE: the worker service transcribes + segments + ingests + charges in
- * the background, so terminal success here means "queued", never
- * "transcribed"). Returns inline status + message (app-web has no global
- * toast; feedback renders inline). All strings come from `useT()`.
- *
- * The confirm dialog carries BOTH halves of the pre-flight-confirm invariant
- * (docs/architecture/engine/preflight-confirmation.md): the cost quote AND the
- * blueprint picker. Every surface that routes a recording here (the Studio
- * upload button, the chat dock, the new-page landing) gets the same dialog —
- * a surface that made an explicit pick seeds the picker with it; one that
- * didn't seeds from the workspace default (else UNSET, prompting a choice).
- * The blueprint roster + workspace default are fetched in parallel with the
- * upload so the dialog never waits on them.
- *
- * The dialog also carries the brief's DESTINATION (migration 353) — which page
- * it is filed under. Saved pages are fetched alongside the roster; the row only
- * renders once a blueprint is picked, since ingest-only authors no page. The
- * choice rides `recording_jobs.parent_page_id` to the worker and lands as the
- * brief page's `nest_parent_id`; the root sentinel submits null. Before this,
- * every brief was created at the workspace root with no way to say otherwise.
- *
- * When the roster is EMPTY the picker also offers the meeting starter
- * (`RECORDING_INSTALL_STARTER`): otherwise a workspace that has authored no
- * blueprint can only pick ingest-only, and the recording lands with no brief
- * page — no citations, no player. The starter installs on confirm, at the one
- * moment the user has demonstrated intent, so no workspace accumulates an
- * unowned default nobody edits. See structural-synthesis.md → "Starter
- * blueprints".
+ * Recording-to-brain intake: `stage` uploads and estimates a chat attachment;
+ * `run` also queues transcription. Recorder Stop / recovery Save sets
+ * `automatic` to queue without another cost/blueprint/destination popup.
+ * Other run callers use the shared confirmation picker. A live meeting page
+ * pins ingest-only output; automatic captures otherwise use the workspace
+ * default blueprint or ingest-only. Success here means queued, not transcribed.
+ * Upload, estimate and queue failures remain localized inline, and the recorder
+ * retains its local spool until the queue hand-off succeeds.
  */
 
 import { useState, useCallback, useRef } from "react";
@@ -146,6 +123,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      * @param opts.kind Recording kind for the transcriber-ladder routing.
      *   The dock live recorder passes 'meeting'; omitted → the server's
      *   'memo' column default.
+     * @param opts.automatic Recorder Stop / recovery Save authorizes queueing without a popup.
      * @returns `queued` with the recording (`recordingId`) on success,
      *   `cancelled` when the user closed the cost confirm, `failed` with the
      *   step-aware reason otherwise. The dock recorder forks its retention +
@@ -153,7 +131,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      */
     async (
       file: File,
-      opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string; liveWindowsDone?: Promise<void> },
+      opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string; liveWindowsDone?: Promise<void>; automatic?: boolean },
     ): Promise<RecordingRunOutcome> => {
       if (operationActiveRef.current) {
         return { outcome: "failed", message: t.recordings.uploadInProgress };
@@ -222,6 +200,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           workspaceId,
           recordingId,
           t,
+          automatic: opts?.automatic,
           isVideo: recordingMimeForFile(file)?.startsWith("video/") ?? false,
           ...(opts?.existingPageId ? { pinnedPage: true } : {}),
           ...(assembled ? { assembled: true } : {}),
