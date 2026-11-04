@@ -50,6 +50,34 @@ describe("[COMP:app-web/workspace-app-rail] Chat Home and App store", () => {
   const railLink = (name: string) => container.querySelector<HTMLAnchorElement>(`a[aria-label="${name}"]`);
   async function click(element: HTMLElement) { await act(async () => element.click()); }
 
+  it.each([false, true])("always exposes Workflow after Home and keeps Brain and Live in the bottom utilities (mobile: %s)", async (mobile) => {
+    homeApps = [];
+    const close = vi.fn(); window.addEventListener("doc:sidebar-close", close);
+    try {
+      await render(mobile, "workflow");
+      const workflow = railLink(en.docPage.iconWorkflow)!;
+      const scroll = container.querySelector('[data-workspace-app-rail-scroll]')!;
+      expect([...container.querySelectorAll('a')].map(link => link.getAttribute('href'))).toEqual([
+        "/w/workspace-a/chat", "/w/workspace-a/workflow", "/w/workspace-a/brain",
+        "/w/workspace-a/live", "/w/workspace-a/projects", "/w/workspace-a/studio/connectors",
+      ]);
+      expect(scroll.contains(workflow)).toBe(true);
+      expect(workflow.getAttribute("aria-current")).toBe("page");
+      expect(scroll.contains(railLink(en.docPage.iconBrain))).toBe(false);
+      expect(scroll.contains(railLink(en.liveApp.title))).toBe(false);
+      await click(workflow);
+      expect(close).toHaveBeenCalledOnce();
+      for (const [surface, name] of [["brain", en.docPage.iconBrain], ["live", en.liveApp.title]] as const) {
+        await render(mobile, surface);
+        expect(railLink(name)?.getAttribute("aria-current")).toBe("page");
+        expect(railLink(en.docPage.iconWorkflow)?.hasAttribute("aria-current")).toBe(false);
+        await click(railLink(name)!);
+      }
+      expect(close).toHaveBeenCalledTimes(3);
+      expect(localStorage.length).toBe(0);
+    } finally { window.removeEventListener("doc:sidebar-close", close); }
+  });
+
   it.each([false, true])("keeps Live counts and navigation accessible through the capped badge (mobile: %s)", async (mobile) => {
     const close = vi.fn(); window.addEventListener("doc:sidebar-close", close);
     try {
