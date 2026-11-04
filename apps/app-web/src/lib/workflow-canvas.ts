@@ -629,15 +629,12 @@ export function removeStep(
  * `page.fromStep` (edit the page an earlier step created) and
  * `deliver.thread.fromStep` (reply under an earlier step's message).
  *
- * `thread` is read defensively: the app-web `deliver` type does not declare
- * it (the builder cannot author a thread reply), but a workflow authored in
- * chat can carry one and this editor round-trips the field, so the reference
- * is reachable here even though the type says otherwise.
+ * Both assistant and deterministic tool deliveries may reference a parent.
  */
 function clearStepReferencesTo(step: WorkflowStep, removedId: string): WorkflowStep {
-  if (step.type !== "assistant_call") return step;
+  if (step.type !== "assistant_call" && step.type !== "tool_call") return step;
   let next = step;
-  if (next.page && "fromStep" in next.page && next.page.fromStep === removedId) {
+  if (next.type === "assistant_call" && next.page && "fromStep" in next.page && next.page.fromStep === removedId) {
     const { page: _dropped, ...rest } = next;
     next = rest;
   }

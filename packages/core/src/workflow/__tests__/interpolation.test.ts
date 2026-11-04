@@ -7,6 +7,17 @@ const SCOPE = {
 }
 
 describe('[COMP:workflow/interpolation] {{vars.X}} substitution', () => {
+  it('makes bounded single-line Unicode previews without changing full values or evaluating inserted tokens', () => {
+    const scope = { vars: {}, input: {}, prev: { body: '  Hello\nworld 😀 more text  ', literal: '{{input.secret}}' } }
+    expect(interpolateString('{{prev.body | preview:14}}', scope)).toBe('Hello world 😀…')
+    expect(interpolateString('{{prev.body | preview:1000}}', scope)).toBe('Hello world 😀 more text')
+    expect(interpolateString('{{prev.body | preview:1}}', scope)).toBe('…')
+    expect(interpolateString('{{prev.body}}', scope)).toBe(scope.prev.body)
+    expect(interpolateString('{{prev.literal | preview:100}}', scope)).toBe('{{input.secret}}')
+    expect(interpolateString('{{prev.missing | preview:140}}', scope)).toBe('')
+    expect(interpolateString('{{prev.body | preview:0}}', scope)).toBe('{{prev.body | preview:0}}')
+  })
+
   it('substitutes a single token', () => {
     expect(interpolateString('hello {{vars.name}}', SCOPE)).toBe('hello Alex')
   })

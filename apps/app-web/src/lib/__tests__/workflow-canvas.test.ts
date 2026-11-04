@@ -776,6 +776,18 @@ describe("[COMP:app-web/workflow-canvas] removeStep", () => {
     expectNoDanglingRefs(r.definition);
   });
 
+  it("clears a tool delivery thread reference when its parent is removed", () => {
+    const d = def([
+      call("a", { nextStepId: "reply" }),
+      { id: "reply", type: "tool_call", toolName: "getCrmSubmission", arguments: {}, nextStepId: null,
+        deliveryText: "Full enquiry", deliver: { channelType: "slack", channelId: "C1", thread: { fromStep: "a" } } },
+    ]);
+    const r = removeStep(d, "a");
+    if (!r.ok) throw new Error("Removal failed");
+    expect(r.definition.steps[0]).toMatchObject({ id: "reply", deliver: { channelType: "slack", channelId: "C1" } });
+    expect((r.definition.steps[0] as { deliver: { thread?: unknown } }).deliver.thread).toBeUndefined();
+  });
+
   it("clears a deliver.thread.fromStep reference pointing at the removed step", () => {
     // `thread` is not in the app-web type (the builder cannot author it) but a
     // chat-authored workflow round-trips through this editor carrying it.
