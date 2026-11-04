@@ -74,6 +74,17 @@ describe('[COMP:files/ingest] createFileIngestor', () => {
     })
   })
 
+  it('reuses an analyzed upload without decomposing its content again', async () => {
+    const writeBytes = vi.fn(async () => ({ ok:true, value:{id:'existing',path:'/doc/source.pdf',sizeBytes:3,sourceEpisodeId:'episode-1'} }))
+    const distill = vi.fn(), ingest = vi.fn(), parse = vi.fn()
+    const run = createFileIngestor({filesApi:{writeBytes} as unknown as FilesApi, distill, ingest, parse})
+    const result = await run({fileName:'source.pdf',mime:'application/pdf',bytes:Buffer.from('pdf'),process:false},ctx)
+    expect(result).toMatchObject({fileId:'existing',path:'/doc/source.pdf',alreadyIngested:true})
+    expect(writeBytes).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({reusableUploadName:'source.pdf'}))
+    expect(distill).not.toHaveBeenCalled()
+    expect(ingest).not.toHaveBeenCalled()
+  })
+
   it('stores raw bytes and decomposes text through the open brain ingestor', async () => {
     const fw = fakeWriteBytes()
     const ing = fakeIngest({ entities: 2, edges: 1, memories: 3, tasks: 0 })

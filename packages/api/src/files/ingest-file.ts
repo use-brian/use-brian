@@ -90,6 +90,7 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
       mime: effectiveMime,
       title: input.fileName,
       sensitivity,
+      ...(!input.path ? { reusableUploadName: input.fileName } : {}),
     })
     if (!stored.ok) throw new FileIngestError(stored.error.kind, stored.error)
     const file = stored.value
@@ -99,14 +100,15 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
     // dropping a file on Pins IS consent to save it to the brain, 2026-08-07)
     // separately queues the stored file through the explicit stored-file
     // ingest lane (`POST /api/files/:fileId/ingest`).
-    if (input.process === false) {
+    if (input.process === false || file.sourceEpisodeId) {
       return {
         fileName: input.fileName,
         fileId: file.id,
         path: file.path,
         sizeBytes: file.sizeBytes,
         distilled: false,
-        decomposed: false,
+        decomposed: !!file.sourceEpisodeId,
+        alreadyIngested: !!file.sourceEpisodeId,
         counts: EMPTY_COUNTS,
       }
     }

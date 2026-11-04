@@ -550,3 +550,23 @@ describe('[COMP:recordings/recovery] stored-source recovery', () => {
     await expect(recordingRecovery(f.authority, f.workspaceId, f.recordingId, true)).rejects.toThrow()
   })
 })
+
+describe('[COMP:files/upload-identity] immutable recording original', () => {
+  it('retains the original file across retries and refuses alias rebinding or clearing', async () => {
+    const f=await fixture()
+    const first=await resolveRecordingForFile(f.file,f.userId)
+    const second=await resolveRecordingForFile(f.file,f.userId)
+    expect(first.status).toBe('ok')
+    expect(second).toMatchObject({recordingId:first.status==='ok'?first.recordingId:'',adopted:false})
+    if(first.status!=='ok')throw new Error('expected canonical recording')
+    expect((await pool.query('SELECT media_file_id FROM recordings WHERE id=$1',[first.recordingId])).rows[0].media_file_id).toBe(f.file.id)
+    for(const replacement of [null,randomUUID()]) {
+      await expect(pool.query('UPDATE recordings SET media_file_id=$2 WHERE id=$1',[first.recordingId,replacement])).rejects.toThrow('recording_media_identity_immutable')
+    }
+    await updateRecording(first.recordingId,{durationMs:60_000})
+    expect((await pool.query('SELECT media_file_id FROM recordings WHERE id=$1',[first.recordingId])).rows[0].media_file_id).toBe(f.file.id)
+    expect((await pool.query('SELECT id FROM workspace_files WHERE workspace_id=$1',[f.workspaceId])).rows).toHaveLength(1)
+    await pool.query('DELETE FROM workspace_files WHERE id=$1',[f.file.id])
+    expect((await pool.query('SELECT media_file_id FROM recordings WHERE id=$1',[first.recordingId])).rows[0].media_file_id).toBeNull()
+  })
+})
