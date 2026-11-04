@@ -8811,6 +8811,14 @@ export const zhCN: Dictionary = {
     "noProjects": "没有可用的项目"
 },
   chatApp: {
+    displayHistory: {
+      "label": "已保存消息",
+      "notice": "这些已保存消息仅供参考，不会发送给助手。",
+      "unavailableMessage": "你当前的访问权限无法查看这条消息。",
+      "failed": "无法检查部分已保存消息。请重试以加载完整对话。",
+      "more": "显示更多已保存消息",
+      "retry": "重试加载记录"
+    },
     legacyHistory: {
       "title": "私人聊天记录",
       "notice": "你可以在这里查看之前的消息。开启新聊天以继续；这些记录不会发送给助手。",

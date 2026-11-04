@@ -9212,6 +9212,14 @@ export const en = {
     "noProjects": "No available Projects"
 },
   chatApp: {
+    displayHistory: {
+      "label": "Saved message",
+      "notice": "These saved messages are shown for reference only. They are not sent to the assistant.",
+      "unavailableMessage": "This message is unavailable with your current access.",
+      "failed": "Some saved messages could not be checked. Retry to load the complete conversation.",
+      "more": "Show more saved messages",
+      "retry": "Retry history"
+    },
     legacyHistory: {
       "title": "Private chat history",
       "notice": "Your earlier messages are available here. Start a fresh chat to continue; this history will not be sent to the assistant.",
