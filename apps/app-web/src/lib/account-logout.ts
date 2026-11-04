@@ -1,3 +1,4 @@
+import { notifySessionLogout } from "@/lib/session-events";
 /**
  * "Log out" = sign out the **active** account only, keeping every other saved
  * account signed in.
@@ -48,6 +49,7 @@ export function signOutActiveAccount(options: { revokeCurrent?: boolean } = {}):
     // persisted for offline editing must not outlive the sign-out on a shared
     // browser. Internally time-bounded, so a hung IndexedDB can't strand the
     // user mid-sign-out.
+    notifySessionLogout();
     await clearLocalDocCaches();
     // The in-memory surface cache goes with it: its keys carry the viewer id,
     // so the next account could never READ these rows, but a shared device
@@ -74,6 +76,6 @@ export function signOutActiveAccount(options: { revokeCurrent?: boolean } = {}):
       // stranded half-signed-out.
     }
     setUserInfoCache(null);
-    window.location.href = "/login";
+    window.location.href = "/accounts";
   })();
 }

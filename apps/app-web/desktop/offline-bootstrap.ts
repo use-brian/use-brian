@@ -1,8 +1,8 @@
 /**
  * Pure normalization for the bundled desktop shell's offline bootstrap cache.
  *
- * The renderer persists only successful workspace-list and workspace-identity
- * responses. On a later cold start it runs these normalizers again before
+ * The shared session controller admits and persists only successful workspace
+ * responses. These functions normalize admitted payloads without granting access. On a later cold start it runs these normalizers again before
  * trusting the structured-clone value, so a stale/older cache shape cannot
  * crash the local shell. Network responses use the same path, keeping cache
  * and live state byte-for-byte aligned.
@@ -14,66 +14,6 @@ import type { WorkspacePickerItem } from "@/lib/workspace-picker";
 import type { WorkspaceContextValue } from "@/lib/workspace-context";
 import { normalizeHomeApps } from "@use-brian/shared/home-apps";
 
-export const DESKTOP_WORKSPACES_CACHE_KEY = "desktop:workspaces:v1";
-
-export type DesktopWorkspaceBootstrapResult =
-  | {
-      kind: "ready";
-      source: "live" | "cache";
-      workspaces: WorkspacePickerItem[];
-    }
-  | { kind: "unauthenticated" }
-  | { kind: "error"; detail: string };
-
-/**
- * Resolve the packaged app's startup workspace list without treating cached
- * identity as authentication. Prefer the live probe, but keep cached workspace
- * access while the durable desktop session survives. Only a definitive refresh
- * rejection clears that session and returns to the shell-owned sign-in flow.
- */
-export async function resolveDesktopWorkspaceBootstrap(input: {
-  cached: unknown;
-  /** Read live: a definitive refresh rejection clears the preload cache. */
-  hasStoredSession: () => boolean;
-  authenticate: () => Promise<string | null>;
-  loadLive: () => Promise<{ status: number; data?: unknown }>;
-}): Promise<DesktopWorkspaceBootstrapResult> {
-  const cached = parseDesktopWorkspaceRows(input.cached);
-  const token = await input.authenticate();
-  if (!token) {
-    if (!input.hasStoredSession()) return { kind: "unauthenticated" };
-    if (cached.length > 0) {
-      return { kind: "ready", source: "cache", workspaces: cached };
-    }
-  }
-
-  try {
-    const live = await input.loadLive();
-    if (live.status === 401 && !input.hasStoredSession()) {
-      return { kind: "unauthenticated" };
-    }
-    if (live.status < 200 || live.status >= 300) {
-      throw new Error(`HTTP ${live.status}`);
-    }
-    return {
-      kind: "ready",
-      source: "live",
-      workspaces: parseDesktopWorkspaceRows(live.data),
-    };
-  } catch (error) {
-    if (input.hasStoredSession() && cached.length > 0) {
-      return { kind: "ready", source: "cache", workspaces: cached };
-    }
-    return {
-      kind: "error",
-      detail: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
-export function desktopWorkspaceCacheKey(workspaceId: string): string {
-  return `desktop:workspace:v1:${workspaceId}`;
-}
 /** Normalize either API response shape or a previously cached list. */
 export function parseDesktopWorkspaceRows(data: unknown): WorkspacePickerItem[] {
   const rows = Array.isArray(data)

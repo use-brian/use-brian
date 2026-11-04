@@ -3,6 +3,7 @@ import { applyRLSGucs, getAppPool, rollbackAndRelease } from './client.js'
 import type { WorkspaceFilesStore, DerivedWriteEvidence, WorkspaceFileCreateInput, AccessContext, WorkspaceFile } from '@use-brian/core'
 import {
   createWorkspaceFile,
+  findReusableWorkspaceUpload,
   getWorkspaceFileById,
   getWorkspaceFileByPath,
   getWorkspaceFileHistory,
@@ -53,6 +54,7 @@ export function createDbWorkspaceFilesStore(): DerivedWorkspaceFilesStore {
     create(userId, input, access) {
       return createWorkspaceFile(userId, input, { access })
     },
+    findReusableUpload: findReusableWorkspaceUpload,
     getById(ctx, id) {
       return getWorkspaceFileById(ctx, id)
     },

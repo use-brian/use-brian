@@ -194,6 +194,53 @@ function fileSourceGuard(userId: string, access: AccessContext | undefined, star
   return { sql: `(${execution.sql}) AND (${member.sql})`, params: [...execution.params, ...member.params], nextIdx: member.nextIdx }
 }
 
+/** An upload match is a source read, not a new publication or a hash-based
+ * permission grant. The same predicate also runs under the canonical workspace
+ * lock before INSERT so concurrent requests cannot mint aliases. */
+async function readReusableUpload(client: Pick<pg.PoolClient, 'query'>, ctx: AccessContext, input: WorkspaceFileCreateInput): Promise<WorkspaceFile | null> {
+  if (!input.uploadIdentity || input.createdByUserId !== ctx.userId || input.metadata?.noIndex || input.metadata?.officeSession
+    || !/^\/(?:doc|uploads)\//.test(input.path) || input.path.startsWith('/doc/website-media/')
+    || input.sourceEpisodeId || (input.source && input.source !== 'user')) return null
+  const read = buildAccessPredicate(ctx)
+  const mutation = buildAccessPredicate(ctx, { startIdx: read.nextIdx, operation: 'mutation' })
+  const member = buildCurrentMemberSourcePredicate(ctx.userId, { alias: 'workspace_files', startIdx: mutation.nextIdx })
+  const n = member.nextIdx
+  const result = await client.query<FileRow>(`SELECT ${FULL_SELECT} FROM workspace_files
+    WHERE (${read.sql}) AND (${mutation.sql}) AND (${member.sql})
+      AND upload_identity=$${n} AND created_by_user_id=$${n+1}
+      AND mime=$${n+2} AND size_bytes=$${n+3} AND sensitivity=$${n+4}
+      AND user_id IS NOT DISTINCT FROM $${n+5}::uuid AND assistant_id IS NOT DISTINCT FROM $${n+6}::uuid
+      AND compartments @> $${n+7}::text[] AND compartments <@ $${n+7}::text[]
+      AND project_ids @> $${n+8}::uuid[] AND project_ids <@ $${n+8}::uuid[]
+      AND purpose='operational' AND valid_to IS NULL AND retracted_at IS NULL
+      AND superseded_by IS NULL AND NOT scope_held
+      AND NOT scope_review_state_held('workspace_file',id)
+      AND (path LIKE '/uploads/%' OR (path LIKE '/doc/%' AND path NOT LIKE '/doc/website-media/%'))
+      AND NOT coalesce((metadata->>'noIndex')::boolean,false)
+      AND NOT coalesce((metadata->>'officeSession')::boolean,false)
+    ORDER BY created_at,id LIMIT 1`, [...read.params,...mutation.params,...member.params,
+    input.uploadIdentity,ctx.userId,input.mime,input.sizeBytes,input.sensitivity??'internal',
+    input.userId??null,input.assistantId??null,input.compartments??[],input.projectIds??[]])
+  return result.rows[0] ? toRecord(result.rows[0]) : null
+}
+
+export async function findReusableWorkspaceUpload(ctx: AccessContext, input: WorkspaceFileCreateInput): Promise<WorkspaceFile | null> {
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client,ctx.userId)
+    // Resolve exactly the same destination/defaults as the canonical writer.
+    // No resource is published here, so discard all admission-local state.
+    const admitted = await admitFileCreate(client,ctx.userId,input)
+    assertExecutionResourceScope({workspaceId:input.workspaceId,userId:admitted.userId??null,
+      assistantId:admitted.assistantId??null,sensitivity:admitted.sensitivity??'internal',
+      compartments:admitted.compartments??[],projectIds:admitted.projectIds??[]},'mutation',ctx)
+    const file = await readReusableUpload(client,ctx,admitted)
+    await client.query('ROLLBACK')
+    return file
+  } finally { await rollbackAndRelease(client) }
+}
+
 /**
  * Create a workspace file.
  *
@@ -258,13 +305,22 @@ export async function createWorkspaceFile(
       userId: input.userId ?? null, assistantId: input.assistantId ?? null,
       sensitivity: input.sensitivity ?? 'internal', compartments: input.compartments ?? [],
       projectIds: input.projectIds ?? [] }, 'mutation', access)
+    if (input.uploadIdentity && !opts.derivation && !opts.sessionBinding && !opts.uploadId && !currentArchivePublication()) {
+      const reused = await readReusableUpload(client,access ?? { workspaceId:input.workspaceId,userId,assistantId:'',assistantKind:'primary',visibilityAssistantIds:[] },input)
+      if (reused) {
+        // No new row was published. Roll back unused admission receipts and
+        // return the existing source; its original references stay authoritative.
+        await client.query('ROLLBACK')
+        return reused
+      }
+    }
     // When the caller supplies an id (the files-api does, so the GCS key
     // and DB row share the same uuid), use it; otherwise let the DB
     // default `gen_random_uuid()` fire.
     const cols: string[] = [
       'purpose', 'workspace_id', 'path', 'parent_path', 'name', 'title', 'summary',
       'mime', 'size_bytes', 'tags', 'related_ids', 'storage_uri',
-      'sensitivity', 'metadata',
+      'sensitivity', 'metadata', 'upload_identity',
       'user_id', 'assistant_id', 'source', 'source_episode_id',
       'created_by_user_id', 'created_by_assistant_id', 'compartments', 'project_ids',
     ]
@@ -283,6 +339,7 @@ export async function createWorkspaceFile(
       input.storageUri,
       input.sensitivity ?? 'internal',
       JSON.stringify(input.metadata ?? {}),
+      input.uploadIdentity ?? null,
       input.userId ?? null,
       input.assistantId ?? null,
       input.source ?? 'user',
@@ -710,7 +767,8 @@ export async function searchWorkspaceFiles(
   // Two reserved path prefixes are durable storage but deliberately EXCLUDED
   // from `fileSearch`, so neither pollutes brain retrieval:
   //   `/doc/`  — doc-block media (packages/api/src/routes/doc-files.ts);
-  //              high-volume decorative paste/drop content.
+  //              high-volume decorative paste/drop content. Explicitly ingested
+  //              upload originals become discoverable without a duplicate row.
   //   `/apps/` — custom Home app bundles (routes/home-apps.ts); an app's HTML
   //              and JS are program text, not workspace knowledge, and a
   //              `fileSearch` that returned them would put third-party source
@@ -719,7 +777,7 @@ export async function searchWorkspaceFiles(
     ap.sql,
     "purpose='operational'",
     'valid_to IS NULL',
-    "path NOT LIKE '/doc/%'",
+    "(path NOT LIKE '/doc/%' OR (upload_identity IS NOT NULL AND source_episode_id IS NOT NULL))",
     "path NOT LIKE '/apps/%'",
     "path NOT LIKE '/office/sessions/%'",
     "NOT COALESCE((metadata->>'noIndex')::boolean, false)",
@@ -773,7 +831,7 @@ export async function listWorkspaceFilesIndexRanked(
     ctx.userId,
     `SELECT ${INDEX_SELECT} FROM workspace_files
      WHERE ${ap.sql} AND purpose='operational' AND valid_to IS NULL
-       AND path NOT LIKE '/doc/%' AND path NOT LIKE '/apps/%'
+       AND (path NOT LIKE '/doc/%' OR (upload_identity IS NOT NULL AND source_episode_id IS NOT NULL)) AND path NOT LIKE '/apps/%'
        AND path NOT LIKE '/office/sessions/%'
        AND NOT COALESCE((metadata->>'noIndex')::boolean, false)
      ORDER BY updated_at DESC

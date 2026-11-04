@@ -115,7 +115,7 @@ function parseUserCookieValue(raw: string): UserInfo | null {
  * the same way `jwtExpSeconds` is duplicated in `auth-fetch.ts` and
  * `desktop-auth.ts`. Returns null when no candidate carries a decodable JWT.
  */
-function freshestAccessTokenSub(cookie: string): string | null {
+export function freshestAccessTokenSub(cookie: string): string | null {
   const re = /(?:^|;\s*)access_token=([^;]*)/g;
   let bestSub: string | null = null;
   let bestExp = -Infinity;

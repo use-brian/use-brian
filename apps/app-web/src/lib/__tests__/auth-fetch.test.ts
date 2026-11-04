@@ -126,3 +126,37 @@ describe("[COMP:app-web/auth-fetch] deployment-gateway credentials", () => {
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ credentials: "include" });
   });
 });
+
+
+describe("[COMP:app-web/auth-fetch] shared session recovery", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+  const native = (refresh: unknown) => {
+    const token = tokenWithExp(Math.floor(Date.now() / 1000) + 3600);
+    const signIn = vi.fn(), showAccounts = vi.fn();
+    vi.stubGlobal("window", { location: { origin: "https://app.example.com", pathname: "/w/one/chat", search: "", hash: "" },
+      usebrianDesktop: { getAccessToken: () => token, getRefreshToken: () => "synthetic-refresh", refreshTokens: vi.fn().mockResolvedValue(refresh), signIn, showAccounts },
+    });
+    return { signIn, showAccounts };
+  };
+  it("joins the app recovery flow after the retry is also rejected, without starting OAuth", async () => {
+    const { subscribeSessionEvents } = await import("../session-events");
+    const bridge = native({ kind: "ok", tokens: { accessToken: tokenWithExp(Math.floor(Date.now()/1000)+3600), refreshToken: "rotated" } });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 401 })));
+    const events = vi.fn(); const stop = subscribeSessionEvents(events);
+    try {
+      expect((await authFetch("https://api.example.com/api/workspaces")).status).toBe(401);
+      expect(events).toHaveBeenCalledOnce(); expect(bridge.signIn).not.toHaveBeenCalled(); expect(bridge.showAccounts).not.toHaveBeenCalled();
+    } finally { stop(); }
+  });
+  it("does not turn transient refresh failure into a signed-out session", async () => {
+    const { subscribeSessionEvents } = await import("../session-events");
+    const { AuthRefreshUnavailableError } = await import("../auth-fetch");
+    const bridge = native({ kind: "transient" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 401 })));
+    const events = vi.fn(); const stop = subscribeSessionEvents(events);
+    try {
+      await expect(authFetch("https://api.example.com/api/workspaces")).rejects.toBeInstanceOf(AuthRefreshUnavailableError);
+      expect(events).not.toHaveBeenCalled(); expect(bridge.signIn).not.toHaveBeenCalled();
+    } finally { stop(); }
+  });
+});

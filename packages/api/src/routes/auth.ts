@@ -40,6 +40,8 @@ export type NotifyTelegramLinked = (
  * See docs/architecture/platform/auth.md → "Email magic-link flow".
  */
 export type EmailAuthDeps = {
+  /** Optional Outpost owner adoption, invoked only after native email verification. */
+  resolveVerifiedEmailUser?: (email: string) => Promise<User | null>
   magicLinkStore?: MagicLinkStore
   smtpClient?: SmtpClient
   /** Used to build the verify URL embedded in the email — e.g. `https://usebrian.ai`. */
@@ -573,6 +575,8 @@ export function authRoutes(
       consumed,
       resolveCaptureTz(req.clientTimezone, bodyTimezone),
       sessions,
+      undefined,
+      emailAuth.resolveVerifiedEmailUser,
     )
   })
 
@@ -648,6 +652,7 @@ export function authRoutes(
       resolveCaptureTz(req.clientTimezone, bodyTimezone),
       sessions,
       tgLink,
+      emailAuth.resolveVerifiedEmailUser,
     )
   })
 
@@ -1292,11 +1297,15 @@ async function respondWithEmailSession(
     linkedAccountStore: LinkedAccountStore | undefined
     notifyTelegramLinked: NotifyTelegramLinked | undefined
   },
+  resolveVerifiedEmailUser?: (email: string) => Promise<User | null>,
 ): Promise<void> {
   try {
     const onboarding = await applicationOnboardingFromNextPath(consumed.nextPath, jwtSecret)
     if (onboarding === 'invalid') { res.status(400).json({ error: 'application_signin_unavailable' }); return }
-    const { user, isNew } = await findOrCreateEmailUser(consumed.email, captureTz, onboarding)
+    const adopted = onboarding === 'application' ? null : await resolveVerifiedEmailUser?.(consumed.email)
+    const { user, isNew } = adopted
+      ? { user: adopted, isNew: false }
+      : await findOrCreateEmailUser(consumed.email, captureTz, onboarding)
 
     let linkWarning: string | undefined
     if (tgLink) {

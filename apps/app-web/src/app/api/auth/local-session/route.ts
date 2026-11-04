@@ -74,7 +74,7 @@ export async function GET(request: Request) {
     if (!backendRes.ok) {
       console.error("[/api/auth/local-session] backend rejected:", backendRes.status);
       return NextResponse.redirect(
-        new URL("/login?error=local_session_failed", appOrigin),
+        new URL(`/accounts?error=local_session_failed&next=${encodeURIComponent(nextPath)}`, appOrigin),
       );
     }
 
@@ -111,7 +111,7 @@ export async function GET(request: Request) {
   } catch (err) {
     console.error("[/api/auth/local-session] error:", err);
     return NextResponse.redirect(
-      new URL("/login?error=local_session_failed", appOrigin),
+      new URL(`/accounts?error=local_session_failed&next=${encodeURIComponent(nextPath)}`, appOrigin),
     );
   }
 }

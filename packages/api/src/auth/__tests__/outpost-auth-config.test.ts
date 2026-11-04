@@ -16,6 +16,20 @@ const oidc = {
 }
 
 describe('[COMP:app/outpost-auth] Outpost auth configuration', () => {
+  it('requires explicit paired owner adoption configuration in email-only Outpost', () => {
+    const adoption = { OUTPOST_LOCAL_OWNER_USER_ID: '10000000-0000-4000-a000-000000000001', OUTPOST_LOCAL_OWNER_EMAIL: ' Owner@Example.com ' }
+    expect(validateOutpostAuthConfig('outpost', 'production', { ...smtp, ...adoption })?.localOwner)
+      .toEqual({ userId: adoption.OUTPOST_LOCAL_OWNER_USER_ID, email: 'owner@example.com' })
+    for (const profile of ['oss', 'hosted']) expect(() => validateOutpostAuthConfig(profile, 'production', adoption)).toThrow(/Outpost owner/)
+    for (const invalid of [
+      { OUTPOST_LOCAL_OWNER_USER_ID: adoption.OUTPOST_LOCAL_OWNER_USER_ID },
+      { OUTPOST_LOCAL_OWNER_EMAIL: adoption.OUTPOST_LOCAL_OWNER_EMAIL },
+      { ...adoption, OUTPOST_LOCAL_OWNER_USER_ID: 'not-a-uuid' },
+      { ...adoption, OUTPOST_LOCAL_OWNER_EMAIL: 'owner@local' },
+      { ...adoption, OUTPOST_AUTH_EMAIL_ENABLED: false },
+      { ...adoption, OUTPOST_AUTH_OIDC_ENABLED: true, ...oidc },
+    ]) expect(() => validateOutpostAuthConfig('outpost', 'production', { ...smtp, ...invalid })).toThrow()
+  })
   const workspaceOne = '11111111-1111-4111-8111-111111111111'
   const workspaceTwo = '22222222-2222-4222-8222-222222222222'
   it('uses email-on and OIDC-off defaults in Outpost', () => {

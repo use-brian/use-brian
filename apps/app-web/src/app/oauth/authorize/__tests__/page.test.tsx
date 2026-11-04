@@ -7,7 +7,7 @@ const api=vi.hoisted(()=>({fetchApplicationConsent:vi.fn(),decideApplicationCons
 vi.mock('@/lib/api/application-consent',()=>api);vi.mock('@/lib/i18n/client',()=>({useT:()=>en}));
 vi.mock('next/navigation',()=>({useSearchParams:()=>new URLSearchParams({application:'11111111-1111-4111-8111-111111111111',req:'signed-request'})}));
 vi.mock('@/components/ui/button',()=>({Button:({variant:_variant,...props}:ButtonHTMLAttributes<HTMLButtonElement>&{variant?:string})=><button {...props}/> }));
-import {ApplicationConsent} from '../page';
+import {ApplicationConsent} from '../application-consent';
 const review={clientName:'Fictional portal',clientUri:null,scope:'read_write',workspaces:[{id:'22222222-2222-4222-8222-222222222222',name:'Fictional workspace'}],application:{id:'11111111-1111-4111-8111-111111111111',qualified:true,review:'signed-review',resources:[{typeKey:'record.fixture',selector:{kind:'ids',ids:['record-a']},actions:['read','patch'],readFields:['title'],writeFields:['state']}]}};
 describe('[COMP:app-web/application-consent] OSS application consent page',()=>{
  let container:HTMLDivElement,root:Root;

@@ -71,14 +71,18 @@ export async function enqueueFileIngestJob(input: {
   sourceLabel?: string
   /** Defaults to `silent` — the conservative, no-distill path (migration 404). */
   mode?: FileIngestJobMode
+  /** Fresh intake may not reprocess an upload completed since its source read. */
+  onlyIfUnprocessed?: boolean
 }): Promise<{ enqueued: boolean; jobId: string | null }> {
   const { rows } = await query<{ id: string }>(
     `INSERT INTO file_ingest_jobs (file_id, workspace_id, acting_user_id, assistant_id, source_label, mode)
      SELECT $1,$2,$3,$4,$5,$6
        FROM workspace_files f
       WHERE f.id=$1 AND f.workspace_id=$2 AND f.purpose='operational'
+        AND ${input.onlyIfUnprocessed ? 'f.source_episode_id IS NULL' : 'TRUE'}
         AND f.path NOT LIKE '/office/sessions/%'
         AND NOT COALESCE((f.metadata->>'noIndex')::boolean,false)
+     ${input.onlyIfUnprocessed ? 'FOR UPDATE OF f' : ''}
      ON CONFLICT DO NOTHING
      RETURNING id`,
     [

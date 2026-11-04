@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+vi.mock("next/navigation", async () => await import("../shims/next-navigation"));
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -93,3 +94,13 @@ describe("[COMP:app-web/studio-programmatic-access] desktop capture routing",()=
   expect(host.querySelector("[data-page]")).toBeNull();
  });
 });
+
+// These tests exercise route families; admission is covered by the shared gate suite.
+vi.mock("@/components/app-session", () => ({
+  AppSessionProvider: ({ children }: { children: ReactNode }) => children,
+  SessionRouteBoundary: ({ children }: { children: ReactNode }) => children,
+  useAppSession: () => ({ state: { session: "authenticated", workspaces: [{id: "workspace-one", name: "Example workspace"}], admissions: new Proxy({}, {
+    get: (_target, id) => ({kind: "allowed", value: {workspaceId: id, name: "Example workspace", role: "owner", me: {id: "user-one"}}}),
+  }) } }),
+}));
+vi.mock("@/components/account-entry", () => ({ AccountSignInDialog: () => null, AccountEntry: () => null }));

@@ -1,4 +1,4 @@
-import { cpSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -139,4 +139,24 @@ describe("[COMP:app-desktop/packaging] desktop packaging", () => {
     expect(result.status).toBe(7);
     expect(result.stdout).not.toContain("==> Done.");
   }, 30_000);
+});
+
+
+describe("[COMP:app-desktop/packaging] retired account page", () => {
+  it("removes the obsolete page from incremental builds", () => {
+    const root = mkdtempSync(join(tmpdir(), "desktop-assets-test-"));
+    dirs.push(root);
+    const desktop = fileURLToPath(new URL("../../", import.meta.url));
+    const pkg = join(root, "apps/app-desktop");
+    for (const name of ["src", "build", "scripts"]) cpSync(join(desktop, name), join(pkg, name), { recursive: true });
+    mkdirSync(join(pkg, "dist"), { recursive: true });
+    mkdirSync(join(root, "apps/app-web/public"), { recursive: true });
+    writeFileSync(join(root, "apps/app-web/public/icon.png"), "fictional icon");
+    writeFileSync(join(pkg, "dist/signin.html"), "obsolete page");
+    const result = spawnSync(process.execPath, [join(pkg, "scripts/copy-static.mjs")], { encoding: "utf8" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(join(pkg, "dist/signin.html"))).toBe(false);
+    expect(existsSync(join(desktop, "src/signin.html"))).toBe(false);
+    expect(existsSync(join(pkg, "dist/preload.cjs"))).toBe(true);
+  });
 });

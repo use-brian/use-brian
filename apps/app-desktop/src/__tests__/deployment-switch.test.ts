@@ -4,7 +4,7 @@ import { DeploymentAccounts, deploymentAccountKey, deploymentKey, type AccountTa
 import { serializePersistedTarget } from "../target-store.js";
 import type { StoredTokens } from "../desktop-token-store.js";
 
-const state = vi.hoisted(() => ({ browserOptions: undefined as undefined | ConstructorParameters<typeof import("../embedded-browser.js").EmbeddedBrowser>[0], files: new Map<string, Buffer>(), handlers: new Map<string, Function>(), windows: [] as any[], app: null as any, partitions: new Map<string, any>(), makeSession: null as null | (() => any), refresh: vi.fn(), request: vi.fn() }));
+const state = vi.hoisted(() => ({ browserOptions: undefined as undefined | ConstructorParameters<typeof import("../embedded-browser.js").EmbeddedBrowser>[0], files: new Map<string, Buffer>(), handlers: new Map<string, Function>(), windows: [] as any[], app: null as any, partitions: new Map<string, any>(), makeSession: null as null | (() => any), refresh: vi.fn(), request: vi.fn(), exchange: vi.fn(), openExternal: vi.fn(), servers: [] as any[] }));
 vi.mock("../embedded-browser.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../embedded-browser.js")>();
   return { ...original, EmbeddedBrowser: class extends original.EmbeddedBrowser {
@@ -14,8 +14,17 @@ vi.mock("../embedded-browser.js", async (importOriginal) => {
     }
   } };
 });
+vi.mock("node:http", async () => {
+  const { EventEmitter } = await import("node:events");
+  return { createServer: (handler: Function) => {
+    const server = Object.assign(new EventEmitter(), { handler, close: vi.fn(), address: () => ({ port: 32123 }),
+      listen: (_port: number, _host: string, ready: () => void) => ready(),
+    });
+    state.servers.push(server); return server;
+  } };
+});
 vi.mock("electron-updater", () => ({ default: { autoUpdater: {} } }));
-vi.mock("../desktop-auth.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../desktop-auth.js")>(), refreshSession: state.refresh }));
+vi.mock("../desktop-auth.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../desktop-auth.js")>(), refreshSession: state.refresh, exchangeCode: state.exchange }));
 vi.mock("node:fs", async (importOriginal) => ({
   ...await importOriginal<typeof import("node:fs")>(),
   readFileSync: (path: string, encoding?: string) => {
@@ -84,7 +93,7 @@ vi.mock("electron", async () => {
     session: { defaultSession: makeSession(), fromPartition: (key: string) => { if (!state.partitions.has(key)) state.partitions.set(key, makeSession()); return state.partitions.get(key); } },
     Menu: { buildFromTemplate: (template: unknown) => template, setApplicationMenu: vi.fn() },
     dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() }, net: { fetch: vi.fn(), request: state.request, isOnline: () => true },
-    powerMonitor: new EventEmitter(), powerSaveBlocker: {}, globalShortcut: {}, shell: {},
+    powerMonitor: new EventEmitter(), powerSaveBlocker: {}, globalShortcut: {}, shell: { openExternal: state.openExternal },
     screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } }) },
     systemPreferences: {}, Tray: class {}, Notification: class {}, nativeImage: {}, desktopCapturer: {},
   };
@@ -99,16 +108,17 @@ function targetJar(target: AccountTarget) {
   return state.partitions.get(partition);
 }
 let store: DeploymentAccounts;
-async function setup(auth: AccountTarget["auth"] = "pkce", bundled = true) {
+async function setup(auth: AccountTarget["auth"] = "pkce", bundled = true, signedIn = true) {
   state.app?.removeAllListeners();
   vi.resetModules(); state.files.clear(); state.handlers.clear(); state.windows.length = 0; state.partitions.clear();
   vi.stubEnv("USEBRIAN_APP_URL", ""); vi.stubEnv("USEBRIAN_API_URL", ""); vi.stubEnv("USEBRIAN_BUNDLED", String(bundled));
-  state.files.set("/tmp/desktop-switch-test/target.json", Buffer.from(serializePersistedTarget("local", local.appUrl, local.apiUrl, auth)));
+  state.files.set("/tmp/desktop-switch-test/target.json", Buffer.from(serializePersistedTarget(signedIn ? "local" : "cloud", local.appUrl, local.apiUrl, auth)));
   store = new DeploymentAccounts({ isAvailable: () => true, encryptString: (s) => Buffer.from(s), decryptString: (b) => b.toString() },
     () => state.files.get("/tmp/desktop-switch-test/deployment-accounts.bin")!,
     (blob) => { state.files.set("/tmp/desktop-switch-test/deployment-accounts.bin", blob); });
-  store.put({ ...local, auth }, tokens("local")); store.put(cloud, tokens("cloud"));
-  state.request.mockReset();
+  if (signedIn) { store.put({ ...local, auth }, tokens("local")); store.put(cloud, tokens("cloud")); }
+  state.request.mockReset(); state.openExternal.mockReset(); state.servers.length = 0;
+  state.exchange.mockReset().mockResolvedValue({ ...tokens("signed-in"), accessTokenExpiresIn: 3600 });
   state.refresh.mockReset().mockResolvedValue({ accessToken: "cloud-new", refreshToken: "cloud-rotated", accessTokenExpiresIn: 3600 });
   await import("../main.js");
   state.app.emit("second-instance", {}, []);
@@ -591,11 +601,16 @@ describe("[COMP:app-desktop/main] add self-hosted account in place", () => {
     expect(win.destroyed).toBe(false);
     expect(JSON.parse(state.files.get("/tmp/desktop-switch-test/target.json")!.toString()).auth).toBe("pkce");
   });
-  it("keeps a fallback for older app views that have no dialog host", async () => {
+  it.each([true, false])("loads the main app and queues its dialog when the current view has no host (bundled: %s)", async (bundled) => {
+    await setup("pkce", bundled);
     const win = state.windows.at(-1);
     state.handlers.get("Use Brian:choose-deployment")!(sender());
-    expect(win.webContents.getURL()).toContain("signin.html");
-    expect(win.webContents.send).not.toHaveBeenCalledWith("Use Brian:choose-deployment", local.appUrl);
+    await vi.waitFor(() => expect(win.webContents.send).toHaveBeenCalledWith("Use Brian:choose-deployment", local.appUrl));
+    expect(win.webContents.getURL()).toContain("renderer/index.html");
+    expect(win.webContents.loadFile).toHaveBeenLastCalledWith(expect.stringContaining("renderer/index.html"),
+      expect.objectContaining({ query: expect.objectContaining({ accountEntry: "signed-out" }) }));
+    // The exact entry renderer remains authorized for account IPC in thin mode.
+    expect(await state.handlers.get("Use Brian:list-accounts")!(sender())).toHaveProperty("accounts");
   });
   it("does not activate a destination when the requesting page navigates away during owner auth", async () => {
     let release!: () => void;
@@ -663,5 +678,120 @@ describe("[COMP:app-desktop/main] destination gateway validation", () => {
     expect(state.files.get("/tmp/desktop-switch-test/target.json")!.toString()).toBe(persisted);
     expect(state.request).not.toHaveBeenCalled();
     expect(store.current(local)?.accessToken).toBe("local-access");
+  });
+});
+
+
+describe("[COMP:app-desktop/main] main app account entry", () => {
+  it("starts signed-out packaged launches in the installed app", async () => {
+    await setup("pkce", true, false);
+    const win = state.windows.at(-1);
+    expect(win.webContents.getURL()).toContain("renderer/index.html");
+    expect(win.webContents.loadFile).toHaveBeenCalledOnce();
+  });
+  it("returns to the app after signing out and preserves other saved accounts", async () => {
+    const win = state.windows.at(-1);
+    state.handlers.get("Use Brian:sign-out")!(sender());
+    await vi.waitFor(() => expect(store.current(local)).toBeNull());
+    await vi.waitFor(() => expect(win.webContents.loadFile).toHaveBeenCalledTimes(2));
+    expect(win.webContents.getURL()).toContain("renderer/index.html");
+    expect(store.current(cloud)?.refreshToken).toBe("cloud-refresh");
+  });
+  it("shows accounts after session rejection and ignores subframe or foreign requests", async () => {
+    const win = state.windows.at(-1);
+    const show = state.handlers.get("Use Brian:show-accounts")!;
+    const loads = win.webContents.loadFile.mock.calls.length;
+    show({ ...sender(), senderFrame: {} });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(win.webContents.loadFile).toHaveBeenCalledTimes(loads);
+    show(sender());
+    await vi.waitFor(() => expect(win.webContents.loadFile).toHaveBeenLastCalledWith(
+      expect.stringContaining("renderer/index.html"), expect.objectContaining({ query: expect.objectContaining({ accountEntry: "signed-out" }) })));
+    await win.webContents.loadURL("https://untrusted.example/");
+    show(sender());
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(win.webContents.getURL()).toBe("https://untrusted.example/");
+  });
+  it("keeps the current destination when the shared session guard handles reauthentication", async () => {
+    const win = state.windows.at(-1);
+    await win.webContents.loadURL(win.webContents.getURL() + "#/w/workspace-one/chat?thread=two");
+    const before = win.webContents.getURL(), loads = win.webContents.loadFile.mock.calls.length;
+    state.handlers.get("Use Brian:session-guard-ready")!(sender(), true);
+    state.handlers.get("Use Brian:show-accounts")!(sender());
+    expect(win.webContents.send).toHaveBeenCalledWith("Use Brian:session-cleared", "expired");
+    expect(win.webContents.getURL()).toBe(before); expect(win.webContents.loadFile).toHaveBeenCalledTimes(loads);
+  });
+  it("routes an unreachable local deployment to main app recovery without minting again", async () => {
+    const win = state.windows.at(-1);
+    win.webContents.emit("did-fail-load", {}, -105, "unreachable", local.appUrl, true);
+    await vi.waitFor(() => expect(win.webContents.loadFile).toHaveBeenLastCalledWith(
+      expect.stringContaining("renderer/index.html"), expect.objectContaining({ query: expect.objectContaining({ accountEntry: "unreachable" }) })));
+    expect(state.request).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("[COMP:app-desktop/main] sign-in lifecycle and return intent", () => {
+  const start = (options?: { userId?: string }) => state.handlers.get("Use Brian:sign-in")!(sender(), options);
+  const phase = () => state.handlers.get("Use Brian:get-sign-in-state")!(sender()).phase;
+  const callback = (nonce?: string) => {
+    const server = state.servers.at(-1); const res = { writeHead: vi.fn(), end: vi.fn() };
+    const expected = nonce ?? new URL(state.openExternal.mock.calls.at(-1)![0]).searchParams.get("state");
+    server.handler({ url: `/cb?code=fictional-code&state=${expected}` }, res); return res;
+  };
+  it("retains a non-null nonce and reopens the same browser attempt", async () => {
+    start(); const first = state.openExternal.mock.calls[0][0];
+    expect(new URL(first).searchParams.get("state")).toBeTruthy(); expect(phase()).toBe("browser");
+    state.handlers.get("Use Brian:reopen-sign-in")!(sender());
+    expect(state.openExternal).toHaveBeenLastCalledWith(first); expect(state.servers).toHaveLength(1);
+    const rejected = callback("wrong-nonce"); expect(rejected.writeHead).toHaveBeenCalledWith(404, expect.anything());
+    expect(state.exchange).not.toHaveBeenCalled();
+  });
+  it("shows actionable failure when the system browser cannot open", async () => {
+    state.openExternal.mockRejectedValue(new Error("Browser unavailable"));
+    start(); await vi.waitFor(() => expect(phase()).toBe("error"));
+    expect(state.servers.at(-1).close).toHaveBeenCalled();
+    expect(state.files.has("/tmp/desktop-switch-test/pending-signin.json")).toBe(false);
+  });
+  it("cancels listener/verifier state and refuses a late callback", async () => {
+    start(); const server = state.servers.at(-1); state.handlers.get("Use Brian:cancel-sign-in")!(sender());
+    expect(server.close).toHaveBeenCalled(); expect(phase()).toBe("idle");
+    expect(state.files.has("/tmp/desktop-switch-test/pending-signin.json")).toBe(false);
+    callback(); await new Promise(resolve => setTimeout(resolve, 0)); expect(state.exchange).not.toHaveBeenCalled();
+  });
+  it.each([true, false])("resumes only the original identity's route (same identity: %s)", async same => {
+    const win = state.windows.at(-1);
+    await win.webContents.loadURL(win.webContents.getURL() + "#/w/workspace-one/chat?thread=two");
+    state.exchange.mockResolvedValue({ ...tokens("signed-in"), user: { id: same ? "same-user" : "different-user", name: "Example user", email: "person@example.com" }, accessTokenExpiresIn: 3600 });
+    start(); callback(); await vi.waitFor(() => expect(phase()).toBe("idle"));
+    const options = state.windows.at(-1).webContents.loadFile.mock.calls.at(-1)[1];
+    expect(options.hash).toBe(same ? "/w/workspace-one/chat?thread=two" : undefined);
+    if (same) expect(win.webContents.send).toHaveBeenCalledWith("Use Brian:session-restored");
+  });
+  it("preserves the old identity and draft window when an account-change unload is vetoed", async () => {
+    const win = state.windows.at(-1); win.preventClose = true;
+    state.exchange.mockResolvedValue({ ...tokens("new-account"), user: { id: "different-user", name: "Example user", email: "other@example.com" }, accessTokenExpiresIn: 3600 });
+    start(); callback(); await vi.waitFor(() => expect(phase()).toBe("error"));
+    expect(win.destroyed).toBe(false); expect(store.current(local)?.user?.id).toBe("same-user");
+  });
+  it("discards exchange results after cancellation", async () => {
+    let release!: (value: unknown) => void; state.exchange.mockReturnValue(new Promise(resolve => { release = resolve; }));
+    start(); callback(); await vi.waitFor(() => expect(phase()).toBe("exchanging"));
+    const signal = state.exchange.mock.calls[0][4] as AbortSignal;
+    state.handlers.get("Use Brian:cancel-sign-in")!(sender()); expect(signal.aborted).toBe(true);
+    release({ ...tokens("late-sign-in"), accessTokenExpiresIn: 3600 });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(store.current(local)?.accessToken).toBe("local-access"); expect(phase()).toBe("idle");
+  });
+  it("notifies every account renderer and refuses a late token write after logout", async () => {
+    const win = state.windows.at(-1); state.handlers.get("Use Brian:sign-out")!(sender());
+    await vi.waitFor(() => expect(store.current(local)).toBeNull());
+    expect(win.webContents.send).toHaveBeenCalledWith("Use Brian:session-cleared", "logout");
+    state.handlers.get("Use Brian:set-tokens")!(sender(), tokens("late-refresh"));
+    expect(store.current(local)).toBeNull();
+  });
+  it("ignores lifecycle commands from a child frame", () => {
+    state.handlers.get("Use Brian:sign-in")!({ ...sender(), senderFrame: {} });
+    expect(state.openExternal).not.toHaveBeenCalled();
   });
 });

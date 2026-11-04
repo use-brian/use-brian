@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, ArrowDown, ArrowUp, ArrowUpRight, Brain, CircleUserRound, FolderKanban, Home, ListOrdered, MoreHorizontal, Pin, PinOff, Puzzle, SlidersHorizontal, Store, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, ArrowUpRight, Brain, CircleUserRound, FolderKanban, Home, ListOrdered, MoreHorizontal, Pin, PinOff, Puzzle, SlidersHorizontal, Store, Workflow, X } from "lucide-react";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
@@ -76,27 +76,31 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
   function navigate() { requestSidebarClose(); }
   const destinations = [
     { name: copy.docPage.iconHome, aria: t.homeAria, icon: Home, href: `/w/${workspaceId}/chat`, active: activeSurface === "chat", shortcut: 1 },
-    { name: copy.docPage.iconBrain, icon: Brain, href: `/w/${workspaceId}/brain`, active: activeSurface === "brain", shortcut: 2 },
-    { name: copy.liveApp.title, icon: Activity, href: `/w/${workspaceId}/live`, active: activeSurface === "live", live: true },
+    { name: copy.docPage.iconWorkflow, icon: Workflow, href: `/w/${workspaceId}/workflow`, active: activeSurface === "workflow", shortcut: 4 },
+    { name: copy.docPage.iconBrain, icon: Brain, href: `/w/${workspaceId}/brain`, active: activeSurface === "brain", shortcut: 2, utility: true },
+    { name: copy.liveApp.title, icon: Activity, href: `/w/${workspaceId}/live`, active: activeSurface === "live", live: true, utility: true },
   ];
+  const renderDestination = ({ name, aria, icon: Icon, href, active, shortcut, live }: typeof destinations[number]) => (
+    <div key={href} className={mobile ? "shrink-0 w-full" : "shrink-0"}>
+      {wrap(name, <Link href={href} {...prefetch(href)} onClick={navigate} aria-label={live && liveCount > 0 ? format(copy.liveApp.activeWorkBadgeAria, { count: liveCount }) : aria ?? name} aria-current={active ? "page" : undefined} className={itemClass(active)}>
+        <Icon className="size-[19px] shrink-0" aria-hidden />{label(name)}
+        {live && <LiveActiveBadge count={liveCount} label={format(copy.liveApp.activeWorkBadgeAria, { count: liveCount })} />}
+      </Link>, shortcut)}
+    </div>
+  );
 
   return (
     <nav data-workspace-app-rail data-doc-chrome aria-label={copy.contextScope.workspaceNavigation} className={cn(
+      "overflow-y-auto overscroll-contain [scrollbar-width:none]",
       mobile ? "flex max-h-[50dvh] min-h-0 shrink-0 flex-col gap-0.5 px-2 pb-2 md:hidden" : cn(styles.rail, "hidden h-full min-h-0 w-14 shrink-0 flex-col items-center gap-2 px-2 pt-px md:flex"),
     )}>
       {/* The sibling switcher overlays this slot. Electron drag regions ignore
           its z-index, so exclude the full rail width from native window dragging. */}
       {!mobile && <div data-workspace-menu-slot data-no-drag aria-hidden className="h-16 w-14 shrink-0" />}
-      {/* Include the rail gutters in the scroll viewport so corner badges fit. */}
-      <div data-workspace-app-rail-scroll className={cn("flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain", mobile ? "-mx-1 gap-0.5 px-1" : "w-14 items-center gap-2 px-2 [scrollbar-width:none]")}>
-      {destinations.map(({ name, aria, icon: Icon, href, active, shortcut, live }) => (
-        <div key={href} className="shrink-0">
-          {wrap(name, <Link href={href} {...prefetch(href)} onClick={navigate} aria-label={live && liveCount > 0 ? format(copy.liveApp.activeWorkBadgeAria, { count: liveCount }) : aria ?? name} aria-current={active ? "page" : undefined} className={itemClass(active)}>
-            <Icon className="size-[19px] shrink-0" aria-hidden />{label(name)}
-            {live && <LiveActiveBadge count={liveCount} label={format(copy.liveApp.activeWorkBadgeAria, { count: liveCount })} />}
-          </Link>, shortcut)}
-        </div>
-      ))}
+      {/* Preserve room for the three primary actions. Short windows scroll the
+          whole rail; phones keep one scroll owner for destinations and utilities. */}
+      <div data-workspace-app-rail-scroll className={cn("flex flex-col", mobile ? "-mx-1 shrink-0 gap-0.5 px-1" : "min-h-[8.5rem] w-14 flex-1 items-center gap-2 overflow-y-auto overscroll-contain px-2 [scrollbar-width:none]")}>
+      {destinations.filter(destination => !destination.utility).map(renderDestination)}
       <WorkspaceAppCatalogue workspaceId={workspaceId} homeApps={homeApps} customApps={customApps} mobile={mobile}>
         {wrap(t.more, <PopoverTrigger aria-label={t.more} className={cn(itemClass(false), "aria-expanded:bg-sidebar-accent")}><MoreHorizontal className="size-[19px] shrink-0" aria-hidden />{label(t.more)}</PopoverTrigger>)}
       </WorkspaceAppCatalogue>
@@ -110,6 +114,7 @@ export function WorkspaceAppRail({ workspaceId, activeSurface, activeApp, homeAp
       </div>
       </div>
       <div className={cn("my-1 shrink-0 border-t border-sidebar-border", !mobile && "w-8")} />
+      {destinations.filter(destination => destination.utility).map(renderDestination)}
       {wrap(t.projectsAndOrganization, <Link data-workspace-structure-entry href={`/w/${workspaceId}/projects`} {...prefetch(`/w/${workspaceId}/projects`)} aria-label={t.projectsAndOrganization} aria-current={activeSurface === "projects" || activeSurface === "organization" ? "page" : undefined} onClick={navigate} className={itemClass(activeSurface === "projects" || activeSurface === "organization")}><FolderKanban className="size-[19px] shrink-0" aria-hidden />{label(t.projectsAndOrganization)}</Link>)}
       {wrap(copy.docPage.iconStudio, <Link href={`/w/${workspaceId}/studio/connectors`} {...prefetch(`/w/${workspaceId}/studio/connectors`)} aria-label={copy.docPage.iconStudio} aria-current={activeSurface === "studio" ? "page" : undefined} onClick={() => { onDismissStudioNudge(); navigate(); }} className={itemClass(activeSurface === "studio")}><SlidersHorizontal className="size-[19px] shrink-0" aria-hidden />{label(copy.docPage.iconStudio)}{studioNudge && <span aria-label={copy.docPage.studioSetupNudgeAria} className="absolute right-1 top-1 size-2 rounded-full bg-primary" />}</Link>, 3)}
       {wrap(t.account, <button type="button" aria-label={t.account} className={itemClass(false)} onClick={() => { openWorkspaceSettings("profile"); navigate(); }}><CircleUserRound className="size-[19px] shrink-0" aria-hidden />{label(t.account)}</button>)}

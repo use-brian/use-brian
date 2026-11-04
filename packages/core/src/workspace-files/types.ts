@@ -118,6 +118,8 @@ export type WorkspaceFileCreateInput = {
    * applies — useful for tests / sync workers that don't write blobs.
    */
   id?: string
+  /** Server-computed upload fingerprint. Never accepted from metadata or transport. */
+  uploadIdentity?: string
   workspaceId: string
   path: string
   parentPath: string
@@ -205,12 +207,16 @@ export type WorkspaceFileSupersedePatch = {
 
 export type WorkspaceFilesStore = {
   /**
-   * Insert a row. Throws pg `23505` on a collision with the CURRENT row
+   * Insert a row, or return the same authorized upload under the workspace lock
+   * when a trusted uploadIdentity is supplied. Throws pg `23505` on a collision with the CURRENT row
    * at that path (`uq_workspace_files_current_path`, mig 445) — the caller
    * decides whether to surface as overwrite (delete + create) or a clear
    * error. Historical versions at the same path never collide.
    */
   create(userId: string, input: WorkspaceFileCreateInput, access?: AccessContext): Promise<WorkspaceFile>
+
+  /** Current read/mutation-authorized upload with the exact requested envelope. */
+  findReusableUpload?(ctx: AccessContext, input: WorkspaceFileCreateInput): Promise<WorkspaceFile | null>
 
   /** Viewer-projected (WU-4.2b). Returns null when the row is hidden or non-existent. Current-version only (filters `valid_to IS NULL`). */
   getById(ctx: AccessContext, id: string): Promise<WorkspaceFile | null>

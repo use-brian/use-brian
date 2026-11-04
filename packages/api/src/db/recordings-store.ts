@@ -282,7 +282,6 @@ export async function updateRecording(
     bytes?: number | null
     durationMs?: number | null
     transcriptFileId?: string | null
-    mediaFileId?: string | null
     participants?: RecordingParticipant[]
     truncated?: boolean
     lastError?: string | null
@@ -320,7 +319,6 @@ export async function updateRecording(
   if (patch.bytes !== undefined) put('bytes', patch.bytes)
   if (patch.durationMs !== undefined) put('duration_ms', patch.durationMs)
   if (patch.transcriptFileId !== undefined) put('transcript_file_id', patch.transcriptFileId)
-  if (patch.mediaFileId !== undefined) put('media_file_id', patch.mediaFileId)
   if (patch.participants !== undefined) put('participants', JSON.stringify(patch.participants))
   if (patch.truncated !== undefined) put('truncated', patch.truncated)
   // Provider errors are machine-generated, never user content — safe to store

@@ -476,6 +476,12 @@ export function fileRoutes(
           })
           continue
         }
+        // Reusing an already analyzed upload must not extract duplicate memories.
+        // Deliberate re-analysis remains the confirmed /:fileId/ingest command.
+        if (r.alreadyIngested) {
+          results.push({ ...r, ok: true, status: 'stored' as const, alreadyIngested: true })
+          continue
+        }
         // Explicit ingest: the user asked for this file to be interpreted, so
         // the job carries `mode: 'explicit'` and the worker may distill a
         // PDF/image for it (migration 404).
@@ -486,6 +492,7 @@ export function fileRoutes(
           assistantId: ctx.assistantId,
           sourceLabel: fileName,
           mode: 'explicit',
+          onlyIfUnprocessed: true,
         })
         results.push({
           fileName,

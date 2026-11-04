@@ -386,3 +386,17 @@ describe("[COMP:app-desktop/desktop-auth] buildSessionCookies", () => {
     expect(cookies.every((c) => c.secure === false)).toBe(true);
   });
 });
+
+
+describe("[COMP:app-desktop/desktop-auth] return intent isolation", () => {
+  it("preserves a bounded destination and identity across the cold-start verifier", async () => {
+    const { parseAuthReturnIntent, serializePendingVerifier, parsePendingVerifier } = await import("../desktop-auth.js");
+    const intent = { appUrl: "https://app.example.com", apiUrl: "https://api.example.com", route: "/w/one/chat?thread=two", userId: "user-one" };
+    expect(parseAuthReturnIntent(intent)).toEqual(intent);
+    expect(parsePendingVerifier(serializePendingVerifier("verifier", 100, false, intent), 101)).toMatchObject({ intent });
+  });
+  it.each(["//outside.example/path", "/\\outside.example/path", "/login", "/accounts", "/w/one\n"])("rejects unsafe return %j", async route => {
+    const { parseAuthReturnIntent } = await import("../desktop-auth.js");
+    expect(parseAuthReturnIntent({ appUrl: "https://app.example.com", apiUrl: "https://api.example.com", route })).toBeUndefined();
+  });
+});

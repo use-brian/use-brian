@@ -7,17 +7,18 @@
 // on any Windows (CI or a build VM). `node` is cross-platform, so this works
 // identically on macOS, Linux, and Windows. Paths resolve relative to this file,
 // not the cwd, so it's robust regardless of where pnpm invokes it.
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+// Incremental builds must not keep a reachable copy of the retired account UI.
+rmSync(join(pkgRoot, "dist", "signin.html"), { force: true });
 for (const file of [
   "preload.cjs",
   "pet-preload.cjs",
   "embedded-browser-preload.cjs",
   "embedded-browser.html",
-  "signin.html",
   "offline.html",
   "brian-pet.html",
 ]) {

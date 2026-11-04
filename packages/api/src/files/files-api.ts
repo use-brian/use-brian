@@ -362,6 +362,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
       tags?: string[]
       sensitivity?: FilesWriteParams['sensitivity']
       sessionOwned?: true
+      reusableUploadName?: string
       derivation?: DerivedWriteEvidence
     },
   ): Promise<FilesResult<WorkspaceFile>> {
@@ -377,9 +378,25 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
     if (!p.derivation && !mutationAllowed(ctx, undefined, p.sensitivity ?? 'internal')) return err({ kind: 'read_only', reason: 'scope', path })
 
     const ac = accessCtx(ctx)
+    // The fingerprint is computed from trusted bytes, never editable metadata.
+    // Filename length framing prevents ambiguous concatenations.
+    const uploadIdentity = p.reusableUploadName !== undefined && !p.derivation && !p.sessionOwned && !currentArchivePublication()
+      && /^\/(?:doc|uploads)\//.test(path) && !path.startsWith('/doc/website-media/')
+      ? createHash('sha256').update(JSON.stringify(p.reusableUploadName)).update('\0').update(bytes).digest('hex') : undefined
+    const findReusable = async () => uploadIdentity && store.findReusableUpload
+      ? executeWithCurrentAuthority(() => store.findReusableUpload!(ac, {
+        workspaceId:ctx.workspaceId,path,parentPath,name,mime,sizeBytes:bytes.length,storageUri:'',uploadIdentity,
+        sensitivity:maxSensitivity(p.sensitivity??'internal',ctx.writeSensitivity??'public'),
+        compartments:ctx.writeCompartments,projectIds:ctx.writeProjectIds,
+        userId:null,assistantId:!ctx.assistantId ? ctx.scopeAssistantId??null : null,
+        createdByUserId:ctx.userId,createdByAssistantId:ctx.assistantId??null,
+      })) : null
+    const reused = await findReusable()
+    if (reused) return ok(reused)
     const existing = await store.getByPath(ac, path)
     if (existing) {
-      return err({ kind: 'conflict', path })
+      const winner = await findReusable()
+      return winner ? ok(winner) : err({ kind: 'conflict', path })
     }
 
     const { gcs, bucket, byo, uriScheme } = await resolver.forWorkspace(ctx.workspaceId)
@@ -390,6 +407,8 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
       const limitBytes = await storageLimitBytesFor(ctx.workspaceId)
       const currentBytes = await store.sumSizeBytes(ac)
       if (currentBytes + bytes.length > limitBytes) {
+        const winner = await findReusable()
+        if (winner) return ok(winner)
         return err({
           kind: 'quota_exceeded',
           currentBytes,
@@ -430,6 +449,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
         ? (userId: string, input: Parameters<WorkspaceFilesStore['create']>[1], access: AccessContext) => store.createDerived!(userId, input, p.derivation!, access)
         : store.create.bind(store))(ctx.userId, {
         id: fileId,
+        uploadIdentity,
         workspaceId: ctx.workspaceId,
         path,
         parentPath,
@@ -480,6 +500,12 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
       throw sourceRefusal ?? dbErr
     }
 
+    if (row.id !== fileId) {
+      // The serialized writer reused a concurrent winner. Only this random,
+      // unpublished staging key belongs to us; never touch row.storageUri.
+      try { await gcs.deleteBlob(storageKey) } catch { /* retention retries orphan cleanup */ }
+      return ok(row)
+    }
     logAudit(ctx, 'file.created', { id: row.id, path: row.path, mime: row.mime, sizeBytes: row.sizeBytes })
     return ok(row)
   }
@@ -512,6 +538,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
         tags: params.tags,
         sensitivity: params.sensitivity,
         sessionOwned: params.sessionOwned,
+        reusableUploadName: params.reusableUploadName,
       })
     },
 
