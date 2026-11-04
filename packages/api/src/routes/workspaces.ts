@@ -167,13 +167,12 @@ export function workspaceRoutes({
       res.status(400).json({ error: 'Name must be 100 characters or less' })
       return
     }
-    // Purpose grounds the workspace-vs-user routing decision the model
-    // makes every time it calls saveMemory on a workspace assistant.
-    if (!purpose || typeof purpose !== 'string' || purpose.trim().length < 10) {
-      res.status(400).json({ error: 'Purpose is required (min 10 characters). Describe what knowledge this workspace will share — project, infrastructure, decisions, processes.' })
+    // Optional purpose adds grounding to shared-vs-personal memory routing.
+    if (purpose !== undefined && typeof purpose !== 'string') {
+      res.status(400).json({ error: 'Purpose must be a string' })
       return
     }
-    if (purpose.length > 500) {
+    if (purpose !== undefined && purpose.length > 500) {
       res.status(400).json({ error: 'Purpose must be 500 characters or less' })
       return
     }
@@ -202,7 +201,7 @@ export function workspaceRoutes({
         }
       }
 
-      const workspace = await workspaceStore.create(userId, name.trim(), purpose.trim())
+      const workspace = await workspaceStore.create(userId, name.trim(), purpose?.trim() ?? '')
       res.status(201).json(workspace)
     } catch (err) {
       console.error('[workspaces] create failed:', err)
@@ -627,8 +626,8 @@ export function workspaceRoutes({
     }
 
     if (purpose !== undefined) {
-      if (typeof purpose !== 'string' || purpose.trim().length < 10) {
-        res.status(400).json({ error: 'Purpose must be at least 10 characters' })
+      if (typeof purpose !== 'string') {
+        res.status(400).json({ error: 'Purpose must be a string' })
         return
       }
       if (purpose.length > 500) {

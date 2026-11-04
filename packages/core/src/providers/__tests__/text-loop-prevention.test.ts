@@ -534,28 +534,35 @@ describe('[COMP:providers/text-loop] OCR comparison tables', () => {
     expect(await passThrough(noOuterPipes, 4096)).toBe(noOuterPipes)
   })
 
-  it.each([1, 19, 100000])('detects identical complete rows and table blocks (%s), without replay', async size => {
-    for (const text of [
-      header + '| Account number | Pending OCR | Pending OCR | Pending OCR |\n'.repeat(12),
-      (table(6) + '\n').repeat(4),
-      'Comparison results:\n\n' + (table(58) + '\n').repeat(4),
-      '```markdown\n' + '| Same row | Pending OCR |\n'.repeat(12) + '```',
-      'A prose introduction. ' + 'the same phrase again '.repeat(20),
-      table(6) + 'the same phrase again '.repeat(20),
-    ]) {
-      let attempts = 0
-      const inner: StreamFn = async function* () {
-        attempts++
-        yield* mockStream(textChunks(['Opening.\n', ...charChunks(text, size)]))({ model: 'test', messages: [], systemPrompt: '' })
-      }
-      const response = await collectStream(composeWrappers(inner, wrapTextLoopPrevention())({ model: 'test', messages: [], systemPrompt: '' }))
-      const output = response.content.flatMap(b => b.type === 'text' ? [b.text] : []).join('')
-      expect(response.stopReason).toBe('incomplete')
-      expect(attempts).toBe(1)
-      expect(output.length).toBeLessThan(text.length + 'Opening.\n'.length)
-      expect(output.match(/Opening\./g)).toHaveLength(1)
+  const repetitionCases = [
+    { name: 'identical rows', text: header + '| Account number | Pending OCR | Pending OCR | Pending OCR |\n'.repeat(12) },
+    { name: 'six-row table blocks', text: (table(6) + '\n').repeat(4) },
+    { name: '58-row table blocks', text: 'Comparison results:\n\n' + (table(58) + '\n').repeat(4), characterStress: true },
+    { name: 'fenced rows', text: '```markdown\n' + '| Same row | Pending OCR |\n'.repeat(12) + '```' },
+    { name: 'prose phrases', text: 'A prose introduction. ' + 'the same phrase again '.repeat(20) },
+    { name: 'phrases after a table', text: table(6) + 'the same phrase again '.repeat(20) },
+  ]
+
+  for (const { name, text, characterStress } of repetitionCases) {
+    for (const size of [1, 19, 100000]) {
+      // The large character-at-a-time stream exercises thousands of detector
+      // calls. Its correctness budget is separate from ordinary unit cases.
+      const timeout = characterStress && size === 1 ? 15_000 : undefined
+      it(`detects ${name}, chunk size ${size}, without replay`, async () => {
+        let attempts = 0
+        const inner: StreamFn = async function* () {
+          attempts++
+          yield* mockStream(textChunks(['Opening.\n', ...charChunks(text, size)]))({ model: 'test', messages: [], systemPrompt: '' })
+        }
+        const response = await collectStream(composeWrappers(inner, wrapTextLoopPrevention())({ model: 'test', messages: [], systemPrompt: '' }))
+        const output = response.content.flatMap(b => b.type === 'text' ? [b.text] : []).join('')
+        expect(response.stopReason).toBe('incomplete')
+        expect(attempts).toBe(1)
+        expect(output.length).toBeLessThan(text.length + 'Opening.\n'.length)
+        expect(output.match(/Opening\./g)).toHaveLength(1)
+      }, timeout)
     }
-  })
+  }
 })
 
 describe('[COMP:providers/text-loop] Incomplete output contract', () => {

@@ -47,6 +47,50 @@ beforeEach(() => {
 const input = { workspaceId: "ws-1", recordingId: "rec-1", t };
 
 describe("[COMP:recordings/confirm-and-process] recording pre-flight", () => {
+  it.each([null, "blueprint-1"])("automatically queues a capture with default %s without a popup", async (blueprint) => {
+    mocks.getWorkspaceDefaultBlueprint.mockResolvedValue({ defaultRecordingBlueprintId: blueprint });
+    const stages: string[] = [];
+    const out = await confirmAndProcessRecording({ ...input, automatic: true, onStage: (stage) => stages.push(stage) });
+    expect(out.outcome).toBe("queued");
+    expect(stages).toEqual(["estimate", "process"]);
+    expect(mocks.estimateRecording).toHaveBeenCalledWith("rec-1");
+    expect(mocks.processRecording).toHaveBeenCalledWith("rec-1", blueprint ?? undefined, null, undefined);
+    expect(mocks.confirmDialog).not.toHaveBeenCalled();
+    expect(mocks.listCustomPageTemplates).not.toHaveBeenCalled();
+    expect(mocks.listViews).not.toHaveBeenCalled();
+    expect(mocks.createCustomPageTemplate).not.toHaveBeenCalled();
+  });
+
+  it("automatically finalizes a pinned assembled meeting without creating a second brief", async () => {
+    mocks.getWorkspaceDefaultBlueprint.mockResolvedValue({ defaultRecordingBlueprintId: "blueprint-1" });
+    await confirmAndProcessRecording({ ...input, automatic: true, pinnedPage: true, assembled: true });
+    expect(mocks.processRecording).toHaveBeenCalledWith("rec-1", undefined, null, undefined);
+    expect(mocks.getWorkspaceDefaultBlueprint).not.toHaveBeenCalled();
+    expect(mocks.confirmDialog).not.toHaveBeenCalled();
+  });
+
+  it("transcribes without a blueprint if workspace defaults are unavailable", async () => {
+    mocks.getWorkspaceDefaultBlueprint.mockRejectedValue(new Error("unavailable"));
+    await confirmAndProcessRecording({ ...input, automatic: true });
+    expect(mocks.processRecording).toHaveBeenCalledWith("rec-1", undefined, null, undefined);
+    expect(mocks.confirmDialog).not.toHaveBeenCalled();
+  });
+
+  it("does not enqueue when automatic pre-flight fails", async () => {
+    mocks.estimateRecording.mockRejectedValueOnce(new Error("duration unavailable"));
+    await expect(confirmAndProcessRecording({ ...input, automatic: true })).rejects.toThrow("duration unavailable");
+    expect(mocks.processRecording).not.toHaveBeenCalled();
+    expect(mocks.confirmDialog).not.toHaveBeenCalled();
+  });
+
+  it("never bypasses the duplicate guard or opens a popup in automatic mode", async () => {
+    mocks.processRecording.mockRejectedValueOnce(new Error("already processed"));
+    await expect(confirmAndProcessRecording({ ...input, automatic: true, alreadyProcessed: true })).rejects.toThrow("already processed");
+    expect(mocks.processRecording).toHaveBeenCalledWith("rec-1", undefined, null, undefined);
+    expect(mocks.processRecording).toHaveBeenCalledOnce();
+    expect(mocks.confirmDialog).not.toHaveBeenCalled();
+  });
+
   it("estimates BEFORE confirming, and only processes after the user agrees", async () => {
     const out = await confirmAndProcessRecording(input);
     expect(out).toEqual({

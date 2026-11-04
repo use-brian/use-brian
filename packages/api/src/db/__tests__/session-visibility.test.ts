@@ -130,10 +130,12 @@ describe('[COMP:api/session-visibility] Session visibility dimension', () => {
     })
     const [sql] = insertCall()
     // Inspect only the DO UPDATE SET clause (between DO UPDATE and RETURNING):
-    // it touches last_active_at only — never visibility. (RETURNING does
-    // project visibility, which is why we don't slice the whole tail.)
+    // it bumps last_active_at and may fill a NULL workspace_id, never visibility.
+    // (RETURNING projects visibility, which is why we don't slice the whole tail.)
     const setClause = sql.slice(sql.indexOf('DO UPDATE'), sql.indexOf('RETURNING'))
     expect(setClause).not.toContain('visibility')
+    expect(setClause).toContain('last_active_at')
+    expect(setClause).toContain('workspace_id = COALESCE(sessions.workspace_id, EXCLUDED.workspace_id)')
   })
 
   it('findSessionById projects visibility', async () => {

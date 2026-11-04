@@ -329,6 +329,9 @@ const env = {
   API_URL: `http://localhost:${PORTS.api}`,
   APP_URL: `http://localhost:${PORTS.appWeb}`,
   NEXT_PUBLIC_API_URL: `http://localhost:${PORTS.api}`,
+  // Browsers can run on another machine. Use app-web's /api proxy by default;
+  // API_URL above remains the server-side target on this machine.
+  PUBLIC_API_URL: process.env.PUBLIC_API_URL ?? '',
   PORT: String(PORTS.api),
 }
 

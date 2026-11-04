@@ -557,3 +557,18 @@ export async function listRecordingTasks(
   const body = (await res.json()) as { tasks: RecordingTask[] };
   return body.tasks;
 }
+
+/** Recovery exposes source metadata only after current source authorization. */
+export type RecordingRecovery = { recordingId: string; replacementId: string | null; title: string; mime: string };
+export async function getRecordingRecovery(workspaceId: string, recordingId: string): Promise<RecordingRecovery> {
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/recovery?${new URLSearchParams({ workspaceId })}`);
+  if (!res.ok) throw await asError(res, "Recording recovery is unavailable");
+  return res.json();
+}
+export async function recoverRecording(workspaceId: string, recordingId: string): Promise<RecordingRecovery> {
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/recover`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ workspaceId }),
+  });
+  if (!res.ok) throw await asError(res, "Recording recovery is unavailable");
+  return res.json();
+}

@@ -1,3 +1,4 @@
+import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
 import type {
   Embedder,
   EntityInstanceSearchRow,
@@ -538,7 +539,9 @@ async function searchMemoriesScope(
   opts: FetchOpts,
 ): Promise<ScoredRow[]> {
   const values: unknown[] = []
-  const visibility = visibilityPredicate(actor, opts.asOf, values)
+  const memoryAccess = buildMemoryAccessPredicate(actor)
+  values.push(...memoryAccess.params)
+  const visibility = `${memoryAccess.sql} AND valid_to IS NULL AND retracted_at IS NULL`
   const filters = applyFlatFilters(opts.filters, values, {
     sinceColumn: 'valid_from',
     tagsColumn: 'tags',
@@ -1692,7 +1695,9 @@ async function runVectorScope(
   config: VectorScopeConfig,
 ): Promise<ScoredRow[]> {
   const values: unknown[] = []
-  const visibility = visibilityPredicate(actor, opts.asOf, values)
+  const memoryAccess = config.scope === 'memory' ? buildMemoryAccessPredicate(actor) : null
+  if (memoryAccess) values.push(...memoryAccess.params)
+  const visibility = memoryAccess ? `${memoryAccess.sql} AND valid_to IS NULL AND retracted_at IS NULL` : visibilityPredicate(actor, opts.asOf, values)
   const filters = applyFlatFilters(opts.filters, values, config.filterCols)
   values.push(queryVector)
   const vecIdx = values.length

@@ -196,7 +196,7 @@ describe('[COMP:access/reference-predicate] Automatic-context relevance (D18)', 
     expect(automaticContextAccess(access, null).departmentRead?.projects).toBeUndefined()
     expect(automaticContextAccess(access, 'not-admitted').departmentRead?.projects).toBeUndefined()
     const bare = { workspaceId: WORKSPACE, userId: PEOPLE.maya.id, assistantId: 'a', assistantKind: 'standard' as const }
-    expect(automaticContextAccess(bare, PROJECTS.atlas)).toEqual(bare)
+    expect(automaticContextAccess(bare, PROJECTS.atlas)).toEqual({...bare,memoryContext:{projectId:PROJECTS.atlas}})
   })
 
   it('a shared Project room reads only what its whole audience may read: its Project, no Department, the room floor', () => {

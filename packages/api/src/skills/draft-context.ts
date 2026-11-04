@@ -31,7 +31,7 @@ export async function getSkillDraftContext(
     queryWithRLS<{ summary: string | null; detail: string | null }>(
       userId,
       `SELECT summary, detail FROM memories
-       WHERE workspace_id = $1
+       WHERE workspace_id = $1 AND memory_learning_allows(learning) AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
        ORDER BY created_at DESC
        LIMIT ${MEMORY_LIMIT}`,
       [workspaceId],

@@ -1,3 +1,4 @@
+import { memoryLearningEditSchema } from '@use-brian/core'
 /**
  * Confirmed assistant tools for existing Brain Review entries.
  *
@@ -39,6 +40,7 @@ const updateInputSchema = z
     expectedUpdatedAt: z.string().datetime().describe(
       'Exact updated-at revision returned with the row. Never invent or omit it.',
     ),
+    memoryLearning: memoryLearningEditSchema.optional().describe("Change the contexts or dates where this memory applies; confirmation is required. This does not change who can access it."),
     summary: z.string().trim().min(1).max(500).optional(),
     detail: z.string().max(50_000).optional(),
     scope: z.enum(['personal', 'workspace_shared', 'workspace']).optional(),

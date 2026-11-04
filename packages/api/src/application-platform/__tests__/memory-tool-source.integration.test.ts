@@ -23,6 +23,41 @@ describe.sequential('[COMP:api/application-persistence] original-authority memor
  const store=createDbMemoryStore(),tools=createMemoryTools(store),historyStore=createDbRowHistoryStore(),historyTools=createRetrievalTools(historyStore as RetrievalStore)
  const authority=originalMemoryAuthority,save=saveOriginalMemory,read=readOriginalMemory
 
+ it.each([false,true])('captures explicit learning or atomically refuses stale memory-index evidence (index=%s)',async(readIndex)=>{
+  const previous=process.env.BRIAN_MEMORY_LEARNING_V1
+  process.env.BRIAN_MEMORY_LEARNING_V1='1'
+  const x=await sourceModeFixture('internal')
+  try{
+   const current=await authority(x)
+   const selectedStore=createDbMemoryStore()
+   if(readIndex){const index=await selectedStore.getIndexRanked!(current.execution.security.access,20,current);current.accumulator.note({sources:boundScopeSources(index.rows)})}
+   const {addSessionMessage}=await import('../../db/sessions.js')
+   const {sessionMessageInputScope}=await import('../../context-scope/resolve-turn-scope.js')
+   const {readAdmittedSessionQuery}=await import('../../db/session-query-reader.js')
+   const text='Remember: I prefer concise status updates.'
+   const message=await addSessionMessage({sessionId:current.session.id,role:'user',content:[{type:'text',text}],senderUserId:x.f.ownerId,
+    scope:sessionMessageInputScope({scope:current.turnScope,workspaceId:x.f.workspaceId,userId:x.f.ownerId})})
+   const query=await readAdmittedSessionQuery({sessionId:current.session.id,throughSequence:message.sequenceNum,authority:current})
+   current.accumulator.note({sources:boundScopeSources(query)})
+   const saving=createMemoryTools(selectedStore).saveMemory.execute({summary:'Prefers concise status updates',scope:'user',
+    learning:{intent:'explicit',kind:'preference',quote:text,applicability:{activity:'status_update'}}},
+    {...current.context,userMessageId:message.id,userMessageText:text})
+   if(readIndex){
+    await expect(saving).rejects.toMatchObject({code:'scope_source_changed'})
+    expect((await x.f.pool.query('SELECT id FROM memories WHERE workspace_id=$1 AND summary=$2',[x.f.workspaceId,'Prefers concise status updates'])).rows).toHaveLength(0)
+    expect((await x.f.pool.query("SELECT id FROM decision_events WHERE workspace_id=$1 AND event_kind='memory.observation_recorded'",[x.f.workspaceId])).rows).toHaveLength(0)
+    return
+   }
+   const result=await saving
+   expect(result.isError,JSON.stringify(result)).not.toBe(true)
+   const id=String(result.data).match(/\[([a-f0-9-]{36})\]/)?.[1];expect(id,JSON.stringify(result)).toBeTruthy()
+   const learning=(await x.f.pool.query('SELECT learning FROM memories WHERE id=$1',[id])).rows[0].learning
+   expect(learning).toMatchObject({state:'established',origin:'explicit',applicability:{activity:'status_update'}})
+  }finally{
+   if(previous===undefined)delete process.env.BRIAN_MEMORY_LEARNING_V1;else process.env.BRIAN_MEMORY_LEARNING_V1=previous
+   await x.cleanup()
+  }
+ })
  it('creates actual retained Memory relationship links and hides them from unframed graph readers after source withdrawal',async()=>{
   const x=await sourceModeFixture('internal'),links=createDbEntityLinksStore(),linkedTools=createMemoryTools(store,{entityLinksStore:links})
   try{

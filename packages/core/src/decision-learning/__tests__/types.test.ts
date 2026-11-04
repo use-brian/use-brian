@@ -45,6 +45,7 @@ describe('[COMP:brain/decision-event-schema] typed decision event registry', () 
 
   it('keeps the event-kind registry closed and versioned', () => {
     expect(DECISION_EVENT_KINDS).toEqual([
+      'memory.observation_recorded',
       'research.followup_recorded', 'research.feedback_corrected',
       'feed.linkedin_delivery_reconciled', 'feed.linkedin_manual_published', 'feed.draft_revised', 'feed.proposal_decided', 'feed.post_confirmed', 'feed.confirmation_revoked',
       'approval.decided',

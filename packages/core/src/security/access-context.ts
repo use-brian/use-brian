@@ -1,3 +1,4 @@
+import type { MemoryLearningContext } from '../memory/learning.js'
 import type { DepartmentReadGrant } from './department-read.js'
 import type { Sensitivity } from './sensitivity.js'
 
@@ -43,6 +44,10 @@ import type { Sensitivity } from './sensitivity.js'
  * the API package.
  */
 export type AccessContext = {
+  /** Semantic context only, never an audience grant. */
+  memoryContext?: MemoryLearningContext
+  /** Host-only explicit review; ordinary model search cannot request this. */
+  memoryReview?: boolean
   workspaceId: string
   userId: string
   assistantId: string

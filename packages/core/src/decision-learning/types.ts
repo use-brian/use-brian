@@ -244,7 +244,15 @@ const researchFeedbackCorrectedSchema = z.object({
   }).strict(),
 }).strict()
 
+const memoryObservationSchema = z.object({
+  ...baseDecisionEventShape,
+  eventKind: z.literal('memory.observation_recorded'),
+  payload: z.object({ claim: z.string().regex(/^[a-f0-9]{64}$/), root: z.string().regex(/^[a-f0-9]{64}$/),
+    messageId: z.string().uuid(), originHash: z.string().regex(/^[a-f0-9]{64}$/), intent: z.enum(['explicit', 'inferred']) }).strict(),
+}).strict()
+
 export const decisionEventWriteSchema = z.discriminatedUnion('eventKind', [
+  memoryObservationSchema,
   researchFollowupRecordedSchema, researchFeedbackCorrectedSchema,
   feedLinkedInReconciledSchema, feedLinkedInManualSchema, feedDraftRevisedSchema, feedProposalDecidedSchema, feedPostConfirmedSchema, feedConfirmationRevokedSchema,
   approvalDecidedSchema,
@@ -265,6 +273,7 @@ export type DecisionEvent = z.output<typeof decisionEventWriteSchema>
 export type DecisionEventKind = DecisionEvent['eventKind']
 
 export const DECISION_EVENT_KINDS = [
+  'memory.observation_recorded',
   'research.followup_recorded', 'research.feedback_corrected',
   'feed.linkedin_delivery_reconciled', 'feed.linkedin_manual_published', 'feed.draft_revised', 'feed.proposal_decided', 'feed.post_confirmed', 'feed.confirmation_revoked',
   'approval.decided',

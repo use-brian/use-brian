@@ -48,6 +48,8 @@ import {
   updateRecordingParticipants,
   type RecordingSummary,
 } from "@/lib/api/recordings";
+import { RecordingProcessAction } from "./recording-process-action";
+import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
 import { useRecordingSummary } from "@/lib/recordings/use-recording-summary";
 import { RecordingPlayerBar } from "./recording-player-bar";
 import { TranscriptPane } from "./transcript-pane";
@@ -151,8 +153,15 @@ type RecordingChromeProps = {
 };
 
 export function RecordingChrome(props: RecordingChromeProps) {
-  const { summary } = useRecordingSummary(props.workspaceId, props.recordingId);
-  return <RecordingChromeContent key={props.recordingId} {...props} summary={summary} />;
+  const { summary, recovery } = useRecordingSummary(props.workspaceId, props.recordingId);
+  if (recovery) return <section className="mb-6 space-y-2">
+    <p className="text-sm font-medium">{recovery.title}</p>
+    <RecordingProcessAction workspaceId={props.workspaceId} recordingId={props.recordingId} mime={recovery.mime} recovery={recovery} />
+  </section>;
+  const content = <RecordingChromeContent key={summary?.recordingId ?? props.recordingId} {...props} recordingId={summary?.recordingId ?? props.recordingId} summary={summary} />;
+  return summary && summary.recordingId !== props.recordingId
+    ? <RecordingPlayerProvider recordingId={summary.recordingId} durationMs={summary.durationMs ?? 0}>{content}</RecordingPlayerProvider>
+    : content;
 }
 
 /** One status/player/transcript surface for the page and standalone route. */
@@ -271,6 +280,9 @@ export function RecordingChromeContent({
                   : t.recordings.statusAwaitingUploadBody
                 : t.recordings.statusProcessingBody}
           </p>
+          {(status === "failed" || status === "awaiting_upload") && summary ? (
+            <RecordingProcessAction key={recordingId} workspaceId={workspaceId} recordingId={recordingId} mime={summary.mime} retry={status === "failed"} />
+          ) : null}
           {livePane}
         </section>
       ) : (

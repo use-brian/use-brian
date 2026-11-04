@@ -103,11 +103,20 @@ export async function readLegacyCanonicalTask(access:AccessContext,id:string,tra
 async function candidates(client:PoolClient,context:CanonicalGenericReadContext,access:AccessContext,fields:readonly string[],ids?:readonly string[]) {
   const prior=(await client.query<{value:string|null}>("SELECT current_setting('app.native_query_data_ceilings',true) AS value")).rows[0]?.value??''
   const stack=z.array(z.unknown()).max(15).parse(prior?JSON.parse(prior):[])
+  let failed=false
   try {
     await client.query("SELECT set_config('app.native_query_data_ceilings',$1,true)",[JSON.stringify([...stack,nativeQueryDataCeiling(access,'task',ids)])])
     const definition=await readCanonicalNativeQueryDefinition(context,'task')
     return await captureCanonicalNativeQueryCandidates(context,definition,fields)
-  } finally {await client.query("SELECT set_config('app.native_query_data_ceilings',$1,true)",[prior])}
+  } catch(error) {failed=true;throw error}
+  finally {
+    try {await client.query("SELECT set_config('app.native_query_data_ceilings',$1,true)",[prior])}
+    catch(error) {
+      // A refused SQL read aborts the transaction. Preserve that original
+      // refusal; its owner must roll back before the connection can be reused.
+      if(!failed)throw error
+    }
+  }
 }
 async function current(client:PoolClient,access:AccessContext,sources:readonly ScopeSource[]) {
   await checkScopes(client,access,sources)

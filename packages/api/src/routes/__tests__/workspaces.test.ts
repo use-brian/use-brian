@@ -116,11 +116,22 @@ describe('[COMP:api/workspaces-route] POST /', () => {
     expect((await request(app()).post('/api/workspaces').send({})).status).toBe(401)
   })
 
-  it('requires a name and a >=10 char purpose', async () => {
+  it('requires a name', async () => {
     expect((await request(app('u-1')).post('/api/workspaces').send({ purpose: LONG_PURPOSE })).status).toBe(400)
-    expect(
-      (await request(app('u-1')).post('/api/workspaces').send({ name: 'WS', purpose: 'short' })).status,
-    ).toBe(400)
+  })
+
+  it.each([undefined, '', '   ', ' Plan ', 'x'.repeat(500)])('accepts optional purpose %j', async (purpose) => {
+    process.env.USEBRIAN_EDITION = 'oss'
+    mockFindUser.mockResolvedValueOnce({ id: 'u-1' } as never)
+    workspaceStore.create.mockResolvedValueOnce({ id: 'ws-new', name: 'Workspace' })
+    const res = await request(app('u-1')).post('/api/workspaces').send({ name: 'Workspace', purpose })
+    expect(res.status).toBe(201)
+    expect(workspaceStore.create).toHaveBeenCalledWith('u-1', 'Workspace', purpose?.trim() ?? '')
+  })
+
+  it.each([null, 42, {}, [], 'x'.repeat(501)].map(purpose => [purpose]))('rejects invalid purpose %j', async (purpose) => {
+    expect((await request(app('u-1')).post('/api/workspaces').send({ name: 'Workspace', purpose })).status).toBe(400)
+    expect(workspaceStore.create).not.toHaveBeenCalled()
   })
 
   it('caps a non-paid user at 2 owned free workspaces (Personal counts)', async () => {
@@ -306,6 +317,20 @@ describe('[COMP:api/workspaces-route] requireWorkspaceRole gate', () => {
     const res = await request(app('u-1')).patch('/api/workspaces/ws-1').send({ name: 'Renamed' })
     expect(res.status).toBe(200)
     expect(res.body.name).toBe('Renamed')
+  })
+
+  it.each(['', '   ', ' Plan ', 'x'.repeat(500)])('allows admins to clear or edit purpose %j', async (purpose) => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    workspaceStore.update.mockResolvedValueOnce({ id: 'ws-1', purpose: purpose.trim() })
+    const res = await request(app('u-1')).patch('/api/workspaces/ws-1').send({ purpose })
+    expect(res.status).toBe(200)
+    expect(workspaceStore.update).toHaveBeenCalledWith('u-1', 'ws-1', { purpose: purpose.trim() })
+  })
+
+  it.each([null, 42, {}, [], 'x'.repeat(501)].map(purpose => [purpose]))('rejects invalid purpose updates %j', async (purpose) => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    expect((await request(app('u-1')).patch('/api/workspaces/ws-1').send({ purpose })).status).toBe(400)
+    expect(workspaceStore.update).not.toHaveBeenCalled()
   })
 
   it('DELETE /:workspaceId requires the owner role', async () => {

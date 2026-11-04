@@ -30,7 +30,27 @@ export function buildMemoryAccessPredicate(
   const fieldAuthority = ctx.systemRead
     ? `public.application_memory_unproven_ancestry_allows(${prefix}workspace_id,${prefix}id,${prefix}scope_version::text)`
     : `public.application_memory_field_ancestry_allows(${prefix}workspace_id,${prefix}id,${prefix}scope_version::text)`
-  const holding = `${prefix}scope_held = false AND ${fieldAuthority}`
+  let semantic = ''
+  if (options?.operation !== 'mutation' && ctx.memoryReview !== true) {
+    const context = ctx.memoryContext ? `$${ordinary.nextIdx}::jsonb` : "'{}'::jsonb"
+    if (ctx.memoryContext) { ordinary.params.push(JSON.stringify(ctx.memoryContext)); ordinary.nextIdx++ }
+    const exception = buildMemoryAccessPredicate({...ctx,memoryReview:true},{...options,alias:'learning_exception',startIdx:ordinary.nextIdx})
+    ordinary.params.push(...exception.params); ordinary.nextIdx=exception.nextIdx
+    semantic = ` AND public.memory_learning_allows(${prefix}learning,${context})
+      AND ${prefix}id::text NOT IN(SELECT learning_exception.learning#>>'{applicability,exceptionTo}' FROM memories learning_exception
+        JOIN memories learning_broad ON learning_broad.id::text=learning_exception.learning#>>'{applicability,exceptionTo}'
+          AND learning_broad.created_by_user_id=learning_exception.created_by_user_id
+          AND learning_broad.user_id IS NOT DISTINCT FROM learning_exception.user_id
+          AND learning_broad.assistant_id IS NOT DISTINCT FROM learning_exception.assistant_id
+          AND (coalesce(learning_broad.learning->'applicability','{}')-'exceptionTo') <@ ((learning_exception.learning->'applicability')-'exceptionTo')
+          AND (coalesce(learning_broad.learning->'applicability','{}')-'exceptionTo') <> ((learning_exception.learning->'applicability')-'exceptionTo')
+        WHERE learning_exception.learning#>>'{applicability,exceptionTo}' IS NOT NULL
+        AND learning_exception.learning->>'origin'='explicit' AND learning_exception.learning->>'confirmed'='true'
+        AND learning_exception.valid_to IS NULL AND learning_exception.retracted_at IS NULL AND NOT learning_exception.scope_held
+        AND public.memory_learning_allows(learning_exception.learning,${context}) AND ${exception.sql}
+        AND public.application_memory_field_ancestry_allows(learning_exception.workspace_id,learning_exception.id,learning_exception.scope_version::text))`
+  }
+  const holding = `${prefix}scope_held = false AND ${fieldAuthority}${semantic}`
   const self = ctx.clientSelfMemory
   if (!self) return { ...ordinary, sql: `(${ordinary.sql}) AND ${holding}` }
   if (!self.compartment.startsWith('client:')) {

@@ -873,6 +873,43 @@ export function isSessionHistoryUnavailable(error: unknown): boolean {
   return error instanceof SessionHistoryError && error.status === 403 && error.code === "session_history_unavailable";
 }
 
+const privateHistoryPage = z.object({
+  sessionId: z.string().uuid(), workspaceId: z.string().uuid(), mode: z.literal("private_legacy_history"),
+  rows: z.array(z.object({ id: z.string().uuid(), sequence: z.number().int(), role: z.enum(["user", "assistant"]),
+    timestamp: z.string(), text: z.string().nullable(), available: z.boolean() })),
+  nextSequence: z.number().int().positive().nullable(),
+});
+export type PrivateChatHistory = z.infer<typeof privateHistoryPage>;
+/** Display-only DTO: never insert into the ordinary transcript cache or model state. */
+export async function readPrivateChatHistory(sessionId: string, workspaceId: string, afterSequence: number, signal?: AbortSignal): Promise<PrivateChatHistory> {
+  const response = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/legacy-history?${new URLSearchParams({ workspaceId, afterSequence: String(afterSequence) })}`, { signal });
+  if (!response.ok) throw new Error(`private_history_failed:${response.status}`);
+  const page = privateHistoryPage.parse(await response.json());
+  if (page.sessionId !== sessionId || page.workspaceId !== workspaceId
+    || page.rows.some(row => row.sequence <= afterSequence)
+    || page.nextSequence !== null && page.nextSequence <= afterSequence) throw new Error("private_history_mismatch");
+  return page;
+}
+
+const personalDisplayPage = privateHistoryPage.extend({ mode: z.literal("personal_transcript_display") });
+export type PersonalDisplayHistory = z.infer<typeof personalDisplayPage>;
+/** Presentation only. Never use these rows as model history or write them to transcript caches. */
+export async function readPersonalDisplayHistory(sessionId: string, workspaceId: string, afterSequence: number, signal?: AbortSignal): Promise<PersonalDisplayHistory> {
+  const response = await authFetch(`${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/display-history?${new URLSearchParams({ workspaceId, afterSequence: String(afterSequence), limit: "100" })}`, { signal, cache: "no-store" });
+  if (!response.ok) throw new Error(`personal_display_history_failed: ${response.status}`);
+  const page = personalDisplayPage.parse(await response.json());
+  const ids = new Set<string>();
+  let previous = afterSequence;
+  if (page.sessionId !== sessionId || page.workspaceId !== workspaceId || page.rows.length > 100) throw new Error("personal_display_history_mismatch");
+  for (const row of page.rows) {
+    if (ids.has(row.id) || row.sequence <= previous || !Number.isFinite(Date.parse(row.timestamp))
+      || row.available && !row.text?.trim() || !row.available && row.text !== null) throw new Error("personal_display_history_mismatch");
+    ids.add(row.id); previous = row.sequence;
+  }
+  if (page.nextSequence !== null && (page.nextSequence <= afterSequence || page.nextSequence < previous)) throw new Error("personal_display_history_mismatch");
+  return page;
+}
+
 const recoveryPreview = z.object({
   sessionId: z.string().uuid(), workspaceId: z.string().uuid(), revision: z.string().regex(/^[a-f0-9]{64}$/),
   status: z.enum(["available", "busy"]), continuationSessionId: z.string().uuid().nullable(),

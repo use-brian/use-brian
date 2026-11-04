@@ -489,6 +489,7 @@ async function resolveDepartmentGrant(
  * Project admission, so it cannot widen anything.
  */
 export function automaticContextAccess<T extends Pick<ResolvedTurnScope, 'access'>['access']>(access: T, activeProjectId: string | null): T {
+  access = { ...access, memoryContext: { ...(access as import('@use-brian/core').AccessContext).memoryContext, ...(activeProjectId ? { projectId: activeProjectId } : {}) } }
   const grant = access.departmentRead
   if (!grant?.projects) return access
   const kept = Object.fromEntries(Object.entries(grant.projects).filter(([id]) => id === activeProjectId))

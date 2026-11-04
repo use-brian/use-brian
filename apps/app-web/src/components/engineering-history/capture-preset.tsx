@@ -11,18 +11,18 @@ import type {ContextProject,ContextTeam} from "@/lib/api/context-scopes";
 import {addCaptureRule,createCaptureProfile} from "@/lib/api/programmatic-capture";
 import {BRAIN_MCP_URL} from "@/lib/api/brain-keys";
 import {invalidateSurfaceCache} from "@/lib/surface-cache";
-export function CapturePreset({workspaceId,teams,projects,onCreated,onError}:{workspaceId:string;teams:ContextTeam[];projects:ContextProject[];onCreated:()=>Promise<void>;onError:(error:string|null)=>void}){
+export function CapturePreset({workspaceId,teams,projects,onCreated,onError,onDone}:{workspaceId:string;teams:ContextTeam[];projects:ContextProject[];onCreated:()=>Promise<void>;onError:(error:string|null)=>void;onDone?:()=>void}){
  const t=useT().engineeringHistory;
  const [name,setName]=useState(""),[team,setTeam]=useState<string|null>(null),[project,setProject]=useState<string|null>(null),[busy,setBusy]=useState(false);
  async function create(){if(!team||!name.trim())return;setBusy(true);onError(null);try{
   const profile=await createCaptureProfile(workspaceId,{name:name.trim(),partitionBy:"session",processingMode:"archive_only",enabled:true,destination:{kind:"department",departmentId:team,...(project?{projectId:project}:{})}});
   await addCaptureRule(workspaceId,profile.id,{ruleOrder:0,filterType:"role_match",filterParams:{values:["user","assistant"]},routingMode:"realtime",routingSchedule:null,routingTimezone:"UTC",episodeSensitivity:"internal",scopeBindingMode:"explicit",compartments:[`team:${team}`],projectIds:project?[project]:[]});
-  invalidateSurfaceCache(`engineering-history:${workspaceId}`);setName("");await onCreated();
+  invalidateSurfaceCache(`engineering-history:${workspaceId}`);setName("");await onCreated();onDone?.();
  }catch{onError(t.unavailable);await onCreated()}finally{setBusy(false)}}
  return <section className="rounded-xl border border-border bg-card p-4 flex flex-col gap-3">
   <h2 className="font-semibold">{t.preset}</h2><p className="text-sm text-muted-foreground">{t.presetHint}</p>
   <label className="grid gap-1 text-sm">{t.name}<input aria-label={t.name} value={name} maxLength={120} onChange={e=>setName(e.target.value)} className="min-h-8 max-sm:min-h-11 rounded-lg border border-border bg-background px-3 text-base"/></label>
-  <ContextScopePicker teams={teams} projects={projects} teamId={team} projectId={project} onTeamChange={setTeam} onProjectChange={setProject} disabled={busy}/>
+  <ContextScopePicker requireTeam teams={teams} projects={projects} teamId={team} projectId={project} onTeamChange={setTeam} onProjectChange={setProject} disabled={busy}/>
   <p className="text-sm text-muted-foreground">{team?`${t.audience}: ${teams.find(x=>x.id===team)?.name??""}${project?` / ${projects.find(x=>x.id===project)?.name??""}`:""}`:t.requiredAudience}</p>
   <Button className="min-h-8 max-sm:min-h-11 self-start" disabled={busy||!team||!name.trim()} onClick={()=>void create()}>{busy?t.busy:t.create}</Button><p className="text-sm text-muted-foreground">{t.scopeHint}</p>
  </section>

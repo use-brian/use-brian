@@ -579,6 +579,7 @@ export const ja: Dictionary = {
     "choose": "作成前に部門または全般を明示的に選択してください。",
     "boundaries": "非公開の所有権、プロジェクト、機密レベルの制約は引き続き適用されます。共有で管理権限や公開アクセスは付与されません。",
     "stale": "アクセスコンテキストが変更されたか期限切れです。更新して保存先を確認してください。下書きは送信されていません。",
+    "unavailable": "保存先とアクセス設定を読み込めません。接続を確認して再試行してください。下書きは送信されていません。",
     "review": "更新した保存先を確認",
     "setup": "ワークスペース設定は変更されません。ここではアクセスモードを有効化できません。",
     "migration": "管理者は保存済みの移行計画を確認し、Brian に明示的な提案を依頼できます。バッチの適用でモードは有効化されません。"
@@ -2536,6 +2537,7 @@ export const ja: Dictionary = {
     back: "戻る",
   },
   contextScope: {
+    selectDepartment: "部門を選択",
     sharedProjects: {
       "linkedUnchanged": "リンクされた {count} 件の項目は現在のアクセス設定のままです。",
       "assistantNotParticipant": "このアシスタントはプロジェクトの参加者ではありません。下のアクセスパネルで追加するか、参加しているアシスタントを選んでください。",
@@ -2956,9 +2958,9 @@ export const ja: Dictionary = {
       title: "ワークスペースを作成",
       back: "戻る",
       namePlaceholder: "ワークスペース名",
-      purposePlaceholder: "目的: このワークスペースで共有する知識は？",
+      purposePlaceholder: "説明（任意）: このワークスペースの用途は？",
       purposeMinHint:
-        "10 文字以上。ワークスペースと個人どちらに属する記憶かを判断する手がかりになります。",
+        "任意。Brian が共有知識と個人の記憶を区別する手がかりになります。後から設定で追加できます。",
       cancel: "キャンセル",
       submit: "作成",
       submitting: "作成中…",
@@ -3858,7 +3860,7 @@ export const ja: Dictionary = {
       copied: "リンクをコピーしました",
       duplicate: "複製",
       delete: "削除",
-      comment: "AIにコメント",
+      comment: "コメント",
       colorText: "文字色",
       colorBackground: "背景",
       colorClear: "色をリセット",
@@ -5514,7 +5516,7 @@ export const ja: Dictionary = {
       "このワークスペースが何のためにあるか。AIはこれを手がかりに、チーム共有の記憶か個人の記憶かを判断します。",
     purposeEmpty: "未設定です。",
     purposePlaceholder: "このワークスペースでは何をしますか?",
-    purposeMinHint: "10〜500 文字。",
+    purposeMinHint: "任意。500 文字以内。",
     purposeSaving: "保存中…",
     purposeSaveFailed: "目的の保存に失敗しました",
     inviteHeading: "メンバーを招待",
@@ -5596,7 +5598,7 @@ export const ja: Dictionary = {
     fallbackDesc: "既定ではオフです。オンにすると、このエンドポイントが応答できなかったメッセージは該当ティアの組み込みモデルが応答し、その旨が返信に表示され、通常の Brian 利用として課金されます。",
   },
   comments: {
-    toolbarButton: "AIにコメント",
+    toolbarButton: "コメント",
     toolbarButtonAria: "選択範囲にコメントを追加",
     badgeAria: "コメント {count} 件",
     popoverTitle: "コメント",
@@ -5634,7 +5636,7 @@ export const ja: Dictionary = {
     aiReply: "AI が返信",
     aiReplyOff: "チームのみ",
     aiReplyHintOn: "アシスタントがこのコメントに返信します",
-    aiReplyHintOff: "チーム向けのコメント — アシスタントは返信しません",
+    aiReplyHintOff: "チーム向けのコメント。AI の返信を有効にするとアシスタントが返信します。",
     quoteSelectionAria: "選択したテキストに返信",
     clearQuote: "引用を削除",
     history: {
@@ -7645,9 +7647,20 @@ export const ja: Dictionary = {
     // そのまま使うため、文言は `chat.*` 配下にあります。）
   },
   memoriesReview: {
+    learningExpired: "期限切れ: 回答には使用されません。",
+    learningActivity: "用途",
+    learningAnyActivity: "すべての用途",
+    learningStatusUpdate: "進捗報告",
+    learningClientReport: "顧客向けレポート",
+    learningExpiryDate: "期限 00:00 UTC",
+
     title: "メモリーを確認",
-    description:
-      "ここに並ぶ内容はすでに保存済みで、アシスタントはすでに使っています。確認は保存ではなく「正しい」という承認です。承認されたメモリーはより信頼できるものとして扱われ、優先的に参照されます。調整・編集・削除もできます。",
+    description: "アシスタントが保存した記憶を確認します。仮の記憶は、裏付けまたは確認が得られるまで使用されません。確認、編集、削除できます。",
+    learningEvidence: "{sources} 件の独立した情報源から {events} 件の観察。推測した個人の好みには、2 件の情報源から 3 件以上の観察、またはあなたの確認が必要です。",
+    learningTentative: "仮の記憶: 確認用に保存され、回答には使用されません。",
+    learningEstablished: "確立した記憶: 該当する状況で使用されます。",
+    learningRetired: "終了した記憶: 回答には使用されません。",
+    learningUntil: "適用期限: {date}",
     loading: "読み込み中…",
     loadMore: "さらに読み込む",
     loadingMore: "読み込み中…",
@@ -8974,8 +8987,26 @@ export const ja: Dictionary = {
     "noProjects": "利用可能なプロジェクトがありません"
 },
   chatApp: {
+    displayHistory: {
+      "label": "保存済みメッセージ",
+      "notice": "これらの保存済みメッセージは参照専用です。アシスタントには送信されません。",
+      "unavailableMessage": "現在のアクセス権ではこのメッセージを表示できません。",
+      "failed": "一部の保存済みメッセージを確認できませんでした。再試行して会話全体を読み込んでください。",
+      "more": "保存済みメッセージをさらに表示",
+      "retry": "履歴を再読み込み"
+    },
+    legacyHistory: {
+      "title": "プライベートチャットの履歴",
+      "notice": "以前のメッセージをここで確認できます。続けるには新しいチャットを開いてください。この履歴はアシスタントに送信されません。",
+      "you": "あなた",
+      "assistant": "Brian",
+      "unavailableMessage": "現在のアクセス権ではこのメッセージを表示できません。",
+      "more": "メッセージをさらに表示",
+      "loading": "プライベート履歴を開いています",
+      "retry": "再試行"
+},
     recovery: {
-      "action": "チャットを復旧",
+      "action": "新しいチャットで続ける",
       "working": "復旧を準備中",
       "title": "新しい非公開チャットを開きますか？",
       "description": "この会話と同じアシスタント、部門、プロジェクトを使う新しい非公開チャットを開きます。以前のメッセージ、ファイル、保留中の操作は元のチャットに残り、コピーや再実行はされません。",
@@ -13230,19 +13261,35 @@ export const ja: Dictionary = {
     "cancel": "キャンセル",
     "close": "元データを閉じる",
     "busy": "保存中",
-    "scopeHint": "送信前に実際のキーとキャプチャアシスタントの権限を確認します。既存のキー個別設定またはアシスタント既定値でこのプロファイルを割り当ててください。",
+    "scopeHint": "プロファイルを作成し、接続でキーまたは接続済みアプリに割り当てます。下のアシスタント既定値でも設定できます。",
     "detail": "元データを読む",
     "none": "未報告",
     "delivery": "配信",
     "archived": "保存済み"
 },
   programmaticAccess: {
+    navigation: {
+      connections: "接続",
+      capture: "キャプチャ",
+      applications: "アプリケーション",
+      description: "外部ツールをワークスペースに接続します。",
+      endpoint: "MCPエンドポイント",
+      instructions: "接続手順",
+      captureHint: "接続したツールがメッセージを保存する方法を管理します。",
+      captureAdminOnly: "キャプチャプロファイルはワークスペース管理者のみ管理できます。",
+      archive: "開発履歴アーカイブ",
+      archiveHint: "メモリを抽出せず、プロンプトと最終返信を開発履歴として保存します。",
+      extractHint: "選択したルールでキャプチャしたメッセージからメモリを抽出します。",
+      manage: "管理",
+      enabled: "有効",
+      disabled: "無効",
+    },
     createBlockedEnforcement:
       "このインストールでは部門分離の設定がまだ完了していないため、キーを部門に限定できません。Use Brian の管理者に更新を依頼するか、部門を指定せずにキーを作成してください。",
     createContextUnavailable:
       "その部門またはプロジェクトはすでに有効ではありません。別のものを選ぶか、指定せずにキーを作成してください。",
-    newKey: "新しいキー",
-    keysTitle: "キー",
+    newKey: "キーを作成",
+    keysTitle: "APIキー",
     lastUsedLabel: "最終使用",
     createdLabel: "作成日",
     endpointLabel: "クライアントを接続",
@@ -13319,7 +13366,7 @@ export const ja: Dictionary = {
     },
     capture: {
       title: "キャプチャプロファイル",
-      description: "メッセージ単位の MCP 取り込みを順序付きルールで振り分けます。スケジュール一致はメッセージをまとめ、ウィンドウごとに1回だけ抽出します。",
+      description: "接続したツールから保存する内容と処理方法を選びます。",
       poolingHint: "プロファイルは再利用できます。各アシスタントが既定値を選び、キーや連携アプリごとに上書きできます。",
       profileNamePlaceholder: "ライターのワークフロー",
       partitionLabel: "バッチ区分",
@@ -13328,7 +13375,7 @@ export const ja: Dictionary = {
       partitionSession: "セッションごと",
       partitionSubject: "対象ごと",
       createProfile: "プロファイルを作成",
-      empty: "キャプチャプロファイルはまだありません。作成してルールを追加し、アシスタントに割り当ててください。",
+      empty: "キャプチャプロファイルがありません。作成後、接続またはアシスタントに割り当ててください。",
       profileMeta: "{partition}・ルール {count} 件",
       enable: "有効化",
       disable: "無効化",
@@ -13887,6 +13934,13 @@ export const ja: Dictionary = {
     clearFinished: "完了分をクリア",
   },
   recordings: {
+    processTranscribe: "文字起こし",
+    processRetry: "文字起こしを再試行",
+    processPreparing: "準備中…",
+    processQueued: "文字起こしを開始しました。処理中も作業を続けられます。",
+    processActionFailed: "文字起こしを開始できませんでした。ページを更新し、元の音声にアクセスできるか確認してください。",
+    recoveryBody: "保存済みの音声から録音を復元します。ダウンロードやアップロードは不要です。",
+
     panelTitle: "録音",
     panelSearchPlaceholder: "録音を検索",
     panelFilterLabel: "ステータスで絞り込む",

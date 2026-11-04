@@ -124,7 +124,7 @@ export function PageComments({
   // Per-turn AI-reply toggle for the starter: on → the doc assistant answers
   // (the seed runs through /api/chat); off → a plain teammate comment, no AI
   // turn. Research + model disable while off (they only shape an AI turn).
-  const [aiReply, setAiReply] = React.useState(true);
+  const [aiReply, setAiReply] = React.useState(false);
 
   // Grow the starter composer line-by-line as the draft wraps / takes Shift+Enter
   // newlines (capped by `max-h-32`, then it scrolls) — without this the `rows={1}`

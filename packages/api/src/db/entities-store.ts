@@ -1,3 +1,4 @@
+import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
 import { admitEntityCreate, admitEntitySuccessor, beginEntityAdmission } from '../workspace-access/entity-create-admission.js'
 import type {
   AccessContext,
@@ -1705,7 +1706,7 @@ async function countMemoriesForEntity(
   entityId: string,
   opts: { asOf?: Date } = {},
 ): Promise<number> {
-  const ap = buildAccessPredicate(ctx, { alias: 'm', startIdx: 3 })
+  const ap = buildMemoryAccessPredicate(ctx, { alias: 'm', startIdx: 3 })
   const result = await queryWithRLS<{ n: string }>(
     ctx.userId,
     `SELECT COUNT(*)::text AS n
@@ -1728,7 +1729,7 @@ async function getRecentMemoriesForEntity(
   opts: { asOf?: Date; limit?: number } = {},
 ): Promise<MemoryRollupRow[]> {
   const limit = Math.min(Math.max(opts.limit ?? ROLLUP_DEFAULT_LIMIT, 1), 100)
-  const ap = buildAccessPredicate(ctx, { alias: 'm', startIdx: 3 })
+  const ap = buildMemoryAccessPredicate(ctx, { alias: 'm', startIdx: 3 })
   const limIdx = ap.nextIdx
   const result = await queryWithRLS<MemoryRollupRow>(
     ctx.userId,

@@ -11,9 +11,10 @@ import { useRecordingSummary } from "../use-recording-summary";
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
 
-const mocks = vi.hoisted(() => ({ getRecording: vi.fn() }));
+const mocks = vi.hoisted(() => ({ getRecording: vi.fn(), getRecovery: vi.fn() }));
 vi.mock("@/lib/api/recordings", () => ({
   getRecording: (...args: unknown[]) => mocks.getRecording(...args),
+  getRecordingRecovery: (...args: unknown[]) => mocks.getRecovery(...args),
 }));
 
 function summary(status: RecordingSummary["status"]): RecordingSummary {
@@ -96,4 +97,18 @@ describe("[COMP:app-web/recording-chrome] processing tracker", () => {
     expect(mocks.getRecording).toHaveBeenCalledTimes(2);
     expect(current.summary?.status).toBe("processing");
   });
+  it("offers recovery only after a not-found response and follows its authorized replacement", async () => {
+    mocks.getRecording.mockRejectedValueOnce(Object.assign(new Error("not found"), { status: 404 }));
+    mocks.getRecovery.mockResolvedValue({ recordingId: "recording-1", replacementId: null, title: "Saved memo", mime: "audio/webm" });
+    await act(async () => root.render(<Harness />));
+    expect(current.recovery?.title).toBe("Saved memo");
+    expect(current.summary).toBeNull();
+    mocks.getRecording.mockRejectedValueOnce(Object.assign(new Error("not found"), { status: 404 }))
+      .mockResolvedValueOnce({ ...summary("queued"), recordingId: "replacement" });
+    mocks.getRecovery.mockResolvedValue({ recordingId: "recording-1", replacementId: "replacement", title: "Saved memo", mime: "audio/webm" });
+    await act(async () => { await current.refresh(); });
+    expect(current.summary?.recordingId).toBe("replacement");
+    expect(current.recovery).toBeNull();
+  });
+
 });

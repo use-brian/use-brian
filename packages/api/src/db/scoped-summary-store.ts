@@ -88,6 +88,11 @@ export async function getSoulContext(
     return { content: result.rows.map(row => row.content).filter(Boolean).join('\n\n') || null,
       evidence: { sensitivity: floor.sensitivity,compartments: floor.compartments,projectIds: floor.projectIds,sources } }
   }
+  // An expired/held semantic summary must not fall back to an older unrestricted SOUL.
+  const learned = await query<{ present: boolean }>(`SELECT EXISTS(SELECT 1 FROM memory_summary_slots s
+    JOIN memories m ON m.id=s.memory_id WHERE s.workspace_id=$1 AND s.owner_user_id=$2 AND s.owner_assistant_id=$3
+    AND s.kind='soul' AND m.learning IS NOT NULL) AS present`,[access.workspaceId,access.userId,access.assistantId])
+  if (learned.rows[0]?.present) return { content: null, evidence: {} }
   // Legacy data retains its old behavior until explicitly reviewed. It does
   // not become certified General simply because the new table has no row.
   const policy = await query<{ mode: string }>('SELECT classification_mode AS mode FROM workspace_access_policies WHERE workspace_id=$1',[access.workspaceId])

@@ -39,6 +39,10 @@ import { describeMcpToolError } from './errors.js'
 import type { EngineHooks, PreToolUseDirective } from '../engine/hooks.js'
 import type { McpSettingsStore, McpServerConfig, McpToolInfo } from './types.js'
 
+// Host-only identity survives the shallow wrappers used by injection/workers.
+// A same-named first-party tool is not an adapter for this indexed source.
+const DIRECT_MCP_ENTRY = Symbol('directMcpEntry')
+
 // ── Source types ──────────────────────────────────────────────
 
 /**
@@ -445,13 +449,17 @@ export function createMcpSearchTools(params: {
 
     async execute(input, context) {
       const { query, limit } = input as { query: string; limit?: number }
+      const directOnly = context.requestTools != null && !context.requestTools.has('mcp_call')
       const results = searchIndex(
         index,
         query,
         limit,
         (entry) => {
           const key = `${entry.server}:${entry.toolName}`
+          const direct = context.requestTools?.get(entry.toolName) as
+            (Tool & { [DIRECT_MCP_ENTRY]?: IndexedTool }) | undefined
           return !blockedTools.has(key) && !ambiguousEntryKeys.has(key)
+            && (!directOnly || direct?.isReadOnly === true && direct[DIRECT_MCP_ENTRY] === entry)
             && (entry.kind !== 'local' || !missingToolCapability(entry.tool, context.activeCapabilities))
         },
       )
@@ -464,7 +472,9 @@ export function createMcpSearchTools(params: {
 
       const formatted = results.map(formatToolResult).join('\n\n')
       return {
-        data: `Found ${results.length} matching tools:\n\n${formatted}\n\nUse mcp_call with server, tool, and args to execute.`,
+        data: `Found ${results.length} matching tools:\n\n${formatted}\n\n${directOnly
+          ? 'Call the matching tool directly by its name with the listed parameters.'
+          : 'Use mcp_call with server, tool, and args to execute.'}`,
       }
     },
   })
@@ -577,14 +587,14 @@ export function createMcpSearchTools(params: {
       if (entry.kind !== 'local' || entry.tool.isReadOnly !== true || entry.tool.hiddenFromModel
         || counts.get(entry.toolName) !== 1 || ['mcp_search', 'mcp_call'].includes(entry.toolName)
         || ambiguousEntryKeys.has(`${entry.server}:${entry.toolName}`)) continue
-      reads.push(inheritRoutineCalendarRead(entry.tool,{
+      reads.push(Object.assign(inheritRoutineCalendarRead(entry.tool,{
         ...entry.tool,
         deferredSchemaOnly: true,
         // One dispatcher owns approval and denied-call state across both names.
         requiresConfirmation: false,
         resolveConfirmation: undefined,
         execute: (input, context) => callTool.execute({ server: entry.server, tool: entry.toolName, args: input }, context),
-      }))
+      }), { [DIRECT_MCP_ENTRY]: entry }))
     }
     return [searchTool, callTool, ...reads]
   }
@@ -613,7 +623,7 @@ export function createMcpSearchTools(params: {
       const toolKey = `${entry.server}:${entry.toolName}`
 
       if (entry.kind === 'local') {
-        directTools.push({
+        directTools.push(Object.assign({
           ...entry.tool,
           name,
           async execute(input, context) {
@@ -629,13 +639,13 @@ export function createMcpSearchTools(params: {
               skipConfirmation: true,
             })
           },
-        })
+        } satisfies Tool, { [DIRECT_MCP_ENTRY]: entry }))
         continue
       }
 
       const classification = classifyTool(entry.toolName, entry.description)
       const fallbackPolicy = defaultPolicy(classification)
-      directTools.push(buildTool({
+      directTools.push(Object.assign(buildTool({
         name,
         description: `[${entry.displayName ?? entry.server}] ${entry.description}`,
         inputSchema: entry.argumentSchema,
@@ -673,7 +683,7 @@ export function createMcpSearchTools(params: {
             skipConfirmation: true,
           })
         },
-      }))
+      }), { [DIRECT_MCP_ENTRY]: entry }))
     }
   }
 

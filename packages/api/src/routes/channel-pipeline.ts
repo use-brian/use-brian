@@ -1004,8 +1004,7 @@ export function buildNonMemberSenderBlock(args: {
  * Metadata mirrors the chat + executor shape exactly - `tool_name`, `success`,
  * a conditional short `error_message`, then the tool's own `ToolResultMeta` -
  * so an admin rollup can treat a channel row and a web row identically. Never
- * tool input or output content. `in_worker` is deliberately absent: that key
- * marks the chat route's sub-agent lane, and this pipeline has no worker lane.
+ * tool input or output content. Preflight calls also carry worker attribution.
  *
  * Synchronous and total: analytics logging and cost metering are both
  * fire-and-forget by construction, so a metering failure can never fail the
@@ -1034,6 +1033,7 @@ export function recordChannelToolResults(input: {
   userMessageId: string
   userPlan: string
   channelType: string
+  workerId?: string
 }): void {
   for (const block of input.results) {
     if (block.type !== 'tool_result') continue
@@ -1063,6 +1063,9 @@ export function recordChannelToolResults(input: {
           ? { error_message: sanitizeAnalytics(block.content.replace(/\s+/g, ' ').trim().slice(0, 200)) }
           : {}),
         ...extraMeta,
+        ...(input.workerId ? {
+          in_worker: true, worker_id: sanitizeAnalytics(input.workerId), phase: sanitizeAnalytics('preflight'),
+        } : {}),
       },
     })
     void recordExternalCostFromMeta({
@@ -1399,9 +1402,13 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       })
     : null
   const providerVisibleContext = room ? roomHistory : params.providerVisibleContext
+  // Native history/parent admission keys on sessions.workspace_id. A projected
+  // null (legacy personal resume before backfill) must not take that path.
+  // Readers that omit the field keep the ownership-only gate.
   const nativeTranscriptAuthority = !privateRecording && executionContext.ownership.kind === 'workspace'
     && executionContext.identity.kind === 'attended'
     && executionContext.identity.principal.kind === 'workspace_member'
+    && (session.workspaceId === undefined || session.workspaceId === executionContext.ownership.workspaceId)
     ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
   const currentTurnWrite = () => ({
     ...turnOutputWrite({
@@ -2474,6 +2481,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         workspaceToolPolicyStore,
         assistantTeamId: assistant.workspaceId ?? null,
         contextScope: turnScope,
+        exposeLocalReadTools: true,
         // Workspace-files byte layer — `gmailSendMessage` attachments on
         // channel turns (docs/architecture/integrations/gmail.md).
         filesApi,
@@ -2834,16 +2842,43 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     try {
       const preflight = await runPreflight({
         provider: backgroundProvider, model: backgroundLaneModel, message: messageText, tools: allTools,
+        // Discovery, a read (and an optional detail read), then synthesis.
+        maxWorkerTurns: 4,
         context: {
-          userId, assistantId: assistant.id, sessionId: session.id,
-          appId: 'Use Brian', channelType, channelId,
+          ...executionToolContext(executionContext, { appId: 'Use Brian' }),
           channelSessionId: sessionChannelId,
+          userMessageId: userMessageRow.id,
+          userMessageText: messageText,
           taskAuthority,
           userTimezone,
-          abortSignal: new AbortController().signal,
+          abortSignal: abortController.signal,
           requestTools: allTools,
+          activeCapabilities,
+          sensitivity: sensitivityAccumulator,
+          compartmentAccumulator,
+          scopeAccumulator,
+          activeGroupId: dataTurnScope.activeGroupId,
+          activeProjectId: dataTurnScope.activeProjectId,
+          turnLedger: createTurnLedger({
+            workspaceId: assistant.workspaceId ?? null,
+            assistantId: assistant.id,
+            sessionId: session.id,
+            payloads: getLedgerPayloadStore(),
+          }).ledger,
         },
         onStatus: () => hooks.onStatus?.('Researching...') ?? Promise.resolve(),
+        onEvent: (event, workerId) => {
+          if (event.type !== 'tool_result') return
+          recordChannelToolResults({
+            results: event.results,
+            metaByToolUseId: event.metaByToolUseId,
+            analytics, usageStore, userId, billingUserId,
+            assistantId: assistant.id, sessionId: session.id,
+            workspaceId: assistant.workspaceId,
+            userMessageId: userMessageRow.id, userPlan: workspacePlan,
+            channelType, workerId,
+          })
+        },
       })
       if (preflight.type === 'researched') {
         preflightContext = preflight.context

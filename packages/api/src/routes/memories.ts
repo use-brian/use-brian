@@ -76,7 +76,7 @@ async function resolveViewerCtx(
     userId, assistant: { ...row, id: assistantId },
     session: { contextGroupId: null, contextProjectId: null },
   })
-  return scope.access
+  return { ...scope.access, memoryReview: true }
 }
 
 /** The existing native resolver consumes verified middleware claims and the real selected assistant. */

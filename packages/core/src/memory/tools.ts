@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { memoryLearningProposalSchema, memoryActivityFromText } from './learning.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { MODEL_HIDDEN_PARAM_MARKER } from '../engine/query-loop.js'
 import { decideMemoryScope } from '../classification/rules/memory-scope/index.js'
@@ -40,8 +41,9 @@ function protectedMemoryFanout(context:ToolContext,rows:readonly unknown[]=[]):b
   .some(source=>source.resourceKind==='external_source'||source.resourceKind==='application_field')
 }
 
-function viewerCtx(context: ToolContext): AccessContext {
+function viewerCtx(context: ToolContext, review = false): AccessContext {
   return {
+    memoryReview: review,
     workspaceId: context.workspaceId ?? '',
     userId: context.userId,
     assistantId: context.assistantId,
@@ -51,6 +53,7 @@ function viewerCtx(context: ToolContext): AccessContext {
     compartments: context.compartments,
     projectIds: context.projectIds,
     clientSelfMemory: context.clientSelfMemory,
+    memoryContext: { ...context.executionContext?.security?.access?.memoryContext, ...(context.activeProjectId ? {projectId:context.activeProjectId} : {}), activity: memoryActivityFromText(context.userMessageText) },
   }
 }
 
@@ -218,6 +221,7 @@ export function createMemoryTools(
       'Do NOT save negation memories ("don\'t mention X", "user doesn\'t want Y", "avoid Z") when the thing being negated already has a structured record — call `deleteMemory` on that record instead. Saving a "don\'t do X" memory re-primes X every retrieval (pink elephant) and is the exact behavior the user told you to stop. ' +
       'When updating an existing memory to add a clarification, exception, or refinement, pass ONLY the `detail` field in the update — leave `summary` out of the tool call entirely. The existing summary is preserved automatically. Change `summary` only when the core concept of the memory shifts (e.g. "dislikes eggs" → "dislikes all dairy"); a summary that keeps accreting caveats keeps re-priming the topic every turn.',
     inputSchema: z.object({
+      ...(store.learningEnabled ? { learning: memoryLearningProposalSchema.optional().describe('Durable intent and applicability proposal. Cite the current user message exactly. Keep one-off instructions in the conversation. Inferences remain tentative until supported.') } : {}),
       id: z.string().optional().describe('Memory ID to update (full UUID returned by a prior save, or an 8-char prefix like `02eca923` from the memory index). Omit to create new.'),
       summary: z.string().optional().describe('One-line summary (shown in memory index). Required when creating a new memory; on update, omit to preserve the existing summary (only pass it when the core concept of the memory shifts).'),
       detail: z.string().max(16000, 'Memory detail too long — split into multiple memories or move long-form content to the knowledge base').optional().describe('Full detail (fetched on demand via getMemory)'),
@@ -254,6 +258,9 @@ export function createMemoryTools(
     isReadOnly: false,
 
     async execute(input, context) {
+      const learningProposal = input.learning === undefined ? undefined : memoryLearningProposalSchema.parse(input.learning)
+      if (learningProposal?.intent === 'one_off') return { data: 'This applies to the current conversation only; no durable memory was saved.', isError: false }
+      if (learningProposal && input.id) return { data: 'Learning metadata cannot be rewritten through an ordinary edit. Save a separate contextual exception or use memory review.', isError: true }
       const sharedAudience = context.sharedAudience === true
         || context.executionContext?.security.access.sharedAudience === true
       if (sharedAudience && input.scope === 'user') {
@@ -304,6 +311,10 @@ export function createMemoryTools(
 
         const existing = await store.getById(viewerCtx(context), resolvedId,...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[]))
         if (!existing) return { data: memoryNotFound(input.id), isError: true }
+        if (existing.learning && (input.summary !== undefined || input.detail !== undefined)) {
+          const path = context.requestTools?.has('updateBrainEntry') ? 'updateBrainEntry' : 'Brain review'
+          return { data:`Edit this learned memory through ${path} so the correction, confirmation and history stay together. Do not create a duplicate to bypass review.`,isError:true }
+        }
 
         // Update existing — only include defined fields, then carry the old
         // row plus this turn's high-water evidence into the successor.
@@ -591,6 +602,10 @@ export function createMemoryTools(
         tags: effectiveTags,
         summary: input.summary,
         detail: input.detail,
+        learningProposal,
+        ...(context.userMessageId && context.userMessageText ? { observation: {
+          messageId: context.userMessageId, sessionId: context.sessionId, userId: context.userId, text: context.userMessageText,
+        } } : {}),
         source: opts?.writeSource ?? 'model',
         ...(opts?.writeSourceEpisodeId ? { sourceEpisodeId: opts.writeSourceEpisodeId } : {}),
         sourceSessionId: context.sessionId,
@@ -683,7 +698,7 @@ export function createMemoryTools(
       // the model fabricating the remaining 28 chars when it decided it
       // needed the full id — observed in prod 2026-04-23 with id prefixes
       // `02eca923` → hallucinated `02eca923-3b10-4822-8789-994119d88320`.
-      return { data: `Saved memory [${memory.id}]: ${memory.summary}${formatLinksSummary(generalLinksSummary)}${protectedMemoryFanout(context,[memory])&&input.links?.some(link=>link.targetKind!=='memory'||!memoryAuthority(context))?' (unsupported relationship links were not created)':''}`, scopeEvidence: createdRowEvidence([memory]) }
+      return { data: `Saved ${memory.learning?.state === "candidate" ? "tentative memory (not used in replies)" : "memory"} [${memory.id}]: ${memory.summary}${formatLinksSummary(generalLinksSummary)}${protectedMemoryFanout(context,[memory])&&input.links?.some(link=>link.targetKind!=='memory'||!memoryAuthority(context))?' (unsupported relationship links were not created)':''}`, scopeEvidence: createdRowEvidence([memory]) }
     },
   })
 
@@ -692,6 +707,7 @@ export function createMemoryTools(
     description:
       'Fetch ONE memory\'s full detail by its id. NOT a search tool: to find memories about a topic or keyword, call `search` instead (it returns memory rows ranked alongside every other brain primitive) and come back here with the id it gives you.',
     inputSchema: z.object({
+      review: z.boolean().optional().describe("Inspect tentative, expired or context-specific memories with their status. Use only for memory review, not as established guidance."),
       id: z.string().optional().describe('Memory ID or prefix to fetch (e.g. "5794afc9" from [id:5794afc9] in the memory index)'),
       // Hidden from the model-visible schema (MODEL_HIDDEN_PARAM_MARKER prefix)
       // but kept live in the zod schema so persisted histories / internal
@@ -708,7 +724,7 @@ export function createMemoryTools(
     async execute(input, context) {
       if (input.id) {
         // Handle truncated IDs from the memory index (8-char prefix)
-        const ctx = viewerCtx(context)
+        const ctx = {...viewerCtx(context),memoryReview:input.review === true}
         let memory = await store.getById(ctx, input.id,...(memoryAuthority(context)?[memoryAuthority(context)!] as const:[])).catch(() => null)
         if (!memory && input.id.length < 36) {
           // Prefix search — the memory index shows [id:abcd1234] (8 chars)
@@ -734,6 +750,7 @@ export function createMemoryTools(
 
         return {
           data: {
+            learning: memory.learning ?? null,
             id: memory.id,
             summary: memory.summary,
             detail: memory.detail,
@@ -747,7 +764,7 @@ export function createMemoryTools(
         const queryHash = createHash('md5').update(input.query).digest('hex').slice(0, 8)
 
         // Search personal memories + team memories in parallel when team assistant
-        const ctx = viewerCtx(context)
+        const ctx = {...viewerCtx(context),memoryReview:input.review === true}
         const [personalResults, teamResults] = await Promise.all([
           store.search(ctx, {
             query: input.query,
@@ -848,7 +865,7 @@ export function createMemoryTools(
       if (strIds.length === 0) return null
 
       const resolved = await Promise.all(
-        strIds.map((id) => resolveMemoryId(id, viewerCtx(context),memoryAuthority(context))),
+        strIds.map((id) => resolveMemoryId(id, viewerCtx(context,true),memoryAuthority(context))),
       )
       return resolved.map((memory, i) =>
         memory ? `• ${memory.summary}` : `• (not found: ${strIds[i]})`,
@@ -859,7 +876,7 @@ export function createMemoryTools(
       // The confirmation gate already passed (tool-executor.ts:120-180).
       // Resolve each id, skip not-found entries, and delete the rest.
       const resolved = await Promise.all(
-        input.ids.map((id) => resolveMemoryId(id, viewerCtx(context),memoryAuthority(context))),
+        input.ids.map((id) => resolveMemoryId(id, viewerCtx(context,true),memoryAuthority(context))),
       )
 
       const deleted: string[] = []

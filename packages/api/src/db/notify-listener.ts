@@ -53,6 +53,42 @@ const handlers = new Map<string, NotifyHandler>()
  * is mid-loop be picked up exactly once.
  */
 const subscribed = new Set<string>()
+const subscribing = new Set<string>()
+
+/** Readiness is channel-specific and becomes true only after LISTEN completes. */
+export type NotifyLifecycleState = Readonly<{
+  ready: boolean
+  reason: 'initial' | 'ready' | 'disconnected'
+}>
+type LifecycleObserver = (state: NotifyLifecycleState) => void
+const lifecycleObservers = new Map<string, Set<LifecycleObserver>>()
+
+function deliverLifecycle(observer: LifecycleObserver, state: NotifyLifecycleState): void {
+  try { observer(state) } catch (err) {
+    console.warn('[notify-listener] lifecycle observer threw:', err)
+  }
+}
+
+function emitLifecycle(channel: string, ready: boolean): void {
+  for (const observer of [...(lifecycleObservers.get(channel) ?? [])]) {
+    deliverLifecycle(observer, { ready, reason: ready ? 'ready' : 'disconnected' })
+  }
+}
+
+/** Synchronously delivers initial state. Unsubscribe does not affect the channel. */
+export function subscribeNotifyLifecycle(channel: string, observer: LifecycleObserver): () => void {
+  const observers = lifecycleObservers.get(channel) ?? new Set<LifecycleObserver>()
+  lifecycleObservers.set(channel, observers)
+  observers.add(observer)
+  deliverLifecycle(observer, {
+    ready: status === 'listening' && handlers.has(channel) && subscribed.has(channel),
+    reason: 'initial',
+  })
+  return () => {
+    observers.delete(observer)
+    if (observers.size === 0) lifecycleObservers.delete(channel)
+  }
+}
 
 let client: pg.Client | null = null
 let status: 'idle' | 'connecting' | 'listening' | 'reconnecting' = 'idle'
@@ -75,28 +111,39 @@ export function registerNotifyChannel(channel: string, handler: NotifyHandler): 
         'LISTEN cannot bind the channel as a parameter, so it must match /^[a-z_][a-z0-9_]*$/',
     )
   }
+  const wasRegistered = handlers.has(channel)
   handlers.set(channel, handler)
   // A replacement handler rides the subscription that is already open; only a
   // channel this connection has not yet subscribed needs a LISTEN. `subscribed`
   // (not `handlers`) is the right guard: it is per-connection, so this stays
   // correct across reconnects and cannot double-issue against `connect()`'s
   // in-flight loop.
-  if (status === 'listening' && client && !subscribed.has(channel)) {
-    void subscribe(client, channel)
+  if (status === 'listening' && client) {
+    if (!subscribed.has(channel)) void subscribe(client, channel)
+    // Deregistration does not UNLISTEN. Restoring that handler must restore
+    // existing observers too, even though no new SQL subscription is needed.
+    else if (!wasRegistered) emitLifecycle(channel, true)
   }
 }
 
 /** Issue one `LISTEN`. Returns false if it failed and a reconnect was scheduled. */
 async function subscribe(target: pg.Client, channel: string): Promise<boolean> {
+  if (subscribed.has(channel) || subscribing.has(channel)) return true
+  subscribing.add(channel)
   try {
     await target.query(`LISTEN ${channel}`)
+    // An error/end or shutdown may have retired this client during the await.
+    if (client !== target) return false
     subscribed.add(channel)
+    if (status === 'listening' && handlers.has(channel)) emitLifecycle(channel, true)
     console.log(`[notify-listener] LISTEN ${channel} active`)
     return true
   } catch (err) {
     console.warn(`[notify-listener] failed to LISTEN ${channel}, will reconnect:`, err)
-    scheduleReconnect()
+    if (client === target) scheduleReconnect()
     return false
+  } finally {
+    if (client === target) subscribing.delete(channel)
   }
 }
 
@@ -108,11 +155,11 @@ async function connect(): Promise<void> {
   client = next
 
   next.on('notification', (msg) => {
-    if (!msg.payload) return
+    if (client !== next) return
     const handler = handlers.get(msg.channel)
     if (!handler) return
     try {
-      handler(msg.payload)
+      handler(msg.payload ?? '')
     } catch (err) {
       // One module's bad payload must not take down the shared connection —
       // that would silently kill realtime for every other channel.
@@ -133,6 +180,7 @@ async function connect(): Promise<void> {
 
   try {
     await next.connect()
+    if (client !== next) return
     for (const channel of handlers.keys()) {
       // Stop at the first failure: `subscribe` has already scheduled the
       // reconnect and ended this client, so the remaining channels would each
@@ -146,7 +194,9 @@ async function connect(): Promise<void> {
     // LISTEN retry at a flat 1s forever instead of climbing to the 30s cap —
     // a tight reconnect loop against a database that is already struggling,
     // which is the exact condition this module exists to stay clear of.
+    if (client !== next) return
     status = 'listening'
+    for (const channel of subscribed) emitLifecycle(channel, true)
     backoffMs = 1_000
     // A channel registered while the loop above was in flight saw
     // `status !== 'listening'` and skipped its immediate LISTEN. The live Map
@@ -157,13 +207,14 @@ async function connect(): Promise<void> {
     }
   } catch (err) {
     console.warn('[notify-listener] failed to connect:', err)
-    scheduleReconnect()
+    if (client === next) scheduleReconnect()
   }
 }
 
 function scheduleReconnect(): void {
   if (status === 'reconnecting') return
   status = 'reconnecting'
+  for (const channel of lifecycleObservers.keys()) emitLifecycle(channel, false)
 
   if (client) {
     client.removeAllListeners()
@@ -173,6 +224,7 @@ function scheduleReconnect(): void {
   // A new session inherits no subscriptions, so nothing is subscribed until
   // the next connect re-issues every LISTEN.
   subscribed.clear()
+  subscribing.clear()
 
   const delay = backoffMs
   backoffMs = Math.min(backoffMs * 2, 30_000)
@@ -204,6 +256,7 @@ export function startNotifyListener(): void {
  */
 export async function unregisterNotifyChannel(channel: string): Promise<void> {
   handlers.delete(channel)
+  emitLifecycle(channel, false)
   if (handlers.size === 0) await _shutdownNotifyListener()
 }
 
@@ -214,15 +267,19 @@ export function _getNotifyChannels(): string[] {
 
 /** Close the shared connection and forget every channel. Test-only teardown. */
 export async function _shutdownNotifyListener(): Promise<void> {
+  status = 'idle'
+  for (const channel of lifecycleObservers.keys()) emitLifecycle(channel, false)
   if (reconnectTimer) clearTimeout(reconnectTimer)
   reconnectTimer = null
   if (client) {
-    client.removeAllListeners()
-    await client.end().catch(() => {})
+    const previous = client
     client = null
+    previous.removeAllListeners()
+    await previous.end().catch(() => {})
   }
   status = 'idle'
   backoffMs = 1_000
   handlers.clear()
   subscribed.clear()
+  subscribing.clear()
 }

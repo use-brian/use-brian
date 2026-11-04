@@ -1,3 +1,5 @@
+import { prepareMemoryLearning, recordMemoryLearning } from './memory-learning.js'
+import { memoryLearningSchema, type MemoryLearning, type MemoryLearningProposal, type MemoryObservation } from '@use-brian/core'
 import {queryLegacyCanonicalCrmSql} from './crm-reader.js'
 import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
 import {readApplicationFieldAncestors} from '../application-platform/field-evidence.js'
@@ -38,6 +40,7 @@ export function commitmentKindTag(kind: string): string {
 }
 
 export type Memory = {
+  learning?: MemoryLearning | null
   id: string
   assistantId: string
   userId: string
@@ -90,7 +93,7 @@ export type Memory = {
 const MEMORY_SELECT = `
   id, assistant_id as "assistantId", user_id as "userId", app_id as "appId",
   workspace_id as "workspaceId",
-  scope, tags, summary, detail, confidence, sensitivity, compartments,
+  scope, tags, summary, detail, confidence, sensitivity, compartments, learning,
   project_ids as "projectIds", scope_version::text as "scopeVersion", scope_held as "scopeHeld", source,
   source_session_id as "sourceSessionId",
   recall_count as "recallCount", useful_recall_count as "usefulRecallCount",
@@ -138,6 +141,9 @@ const MEMORY_SELECT = `
  */
 export async function createMemory(
   params: {
+    learning?: MemoryLearning | null
+    learningProposal?: MemoryLearningProposal
+    observation?: MemoryObservation
     assistantId: string
     userId: string | null
     appId?: string
@@ -296,6 +302,15 @@ export async function createMemory(
   //
   // Guard: only null `assistant_id` when `user_id` is set — otherwise the
   // row would be (NULL, NULL), which `memories_visibility_check` blocks.
+  const learned = await prepareMemoryLearning(transactionClient!, { ...params,
+    userId: derived ? derived.userId : params.userId, sensitivity: derived?.sensitivity ?? params.sensitivity,
+    compartments: derived?.compartments ?? params.compartments, projectIds: derived?.projectIds ?? params.projectIds }, workspaceId)
+  if (learned.replayId) {
+    const replay = (await transactionClient!.query<Memory>(`SELECT ${MEMORY_SELECT} FROM memories WHERE id=$1 AND workspace_id=$2 AND created_by_user_id=$3 AND NOT scope_held`, [learned.replayId, workspaceId, params.createdByUserId])).rows[0]
+    if (!replay) throw new Error('memory_source_mismatch')
+    assertExecutionResourceScope({...replay,workspaceId},'read')
+    return replay
+  }
   const shadow = params.shadow
   const execute = transactionClient ? transactionClient.query.bind(transactionClient) : query
   const result = await execute<Memory>(
@@ -305,7 +320,7 @@ export async function createMemory(
        confidence, sensitivity, source, source_session_id,
        created_by_user_id, created_by_assistant_id, source_episode_id,
        original_scope, original_sensitivity, original_summary,
-       compartments, project_ids${shadow ? ', rebuild_run_id, pipeline_version' : ''}
+       compartments, project_ids, learning${shadow ? ', rebuild_run_id, pipeline_version' : ''}
      )
      VALUES (
              ${derived ? '$1::uuid' : `CASE
@@ -318,7 +333,7 @@ export async function createMemory(
              $5, $6, $7, $8,
              $9, $10, $11, $12,
              $13, $14, $15,
-             $16, $17, $18, $19, $20${shadow ? ', $21, $22' : ''})
+             $16, $17, $18, $19, $20, $21${shadow ? ', $22, $23' : ''})
      RETURNING ${MEMORY_SELECT}`,
     [
       derived ? derived.assistantId : params.assistantId, derived ? derived.userId : params.userId,
@@ -335,10 +350,12 @@ export async function createMemory(
       isModelWrite ? params.summary : null,
       derived?.compartments ?? params.compartments ?? [],
       derived?.projectIds ?? params.projectIds ?? [],
+      learned.learning,
       ...(shadow ? [shadow.rebuildRunId, shadow.pipelineVersion] : []),
     ],
   )
   const memory = result.rows[0]
+  if (!shadow) await recordMemoryLearning(transactionClient!, memory.id, learned.eventId, learned.learning?.evidenceGroups.flat())
   if (params.derivation) {
     await recordDerivedResource(transactionClient!, params.derivation, {
       ...memory, workspaceId: memory.workspaceId!, resourceKind: 'memory', resourceId: memory.id, version: memory.scopeVersion,
@@ -403,6 +420,7 @@ export function emitCreatedMemoryEdges(memory: Memory, params: Parameters<typeof
  * ("Promote to workspace").
  */
 export type MemoryUpdateFields = {
+  learning?: MemoryLearning | null
   summary?: string
   detail?: string
   confidence?: number
@@ -489,6 +507,7 @@ export async function updateMemory(
 
       // Merge updates over the old row. Untouched fields carry through.
       const next = {
+        learning: updates.learning === undefined ? old.learning ?? null : updates.learning === null ? null : memoryLearningSchema.parse(updates.learning),
         userId: old.userId as string | null,
         assistantId: old.assistantId as string | null,
         summary: updates.summary ?? old.summary,
@@ -501,6 +520,7 @@ export async function updateMemory(
         compartments: updates.compartments ?? old.compartments,
         projectIds: updates.projectIds ?? old.projectIds,
       }
+      if (old.learning && updates.learning === null) throw new Error("memory_learning_cannot_clear")
       if (floor && derivation) {
         // The superseding row keeps the memory's own visibility and carries
         // every label its new inputs had (decision D3). New inputs private to
@@ -532,7 +552,7 @@ export async function updateMemory(
       // Supersession leaves the historical source row intact. Invalidate its
       // existing descendants before inserting the replacement (which may
       // legitimately cite that prior version under the new combined floor).
-      const changed = next.scope !== old.scope || next.summary !== old.summary || next.detail !== old.detail
+      const changed = JSON.stringify(next.learning) !== JSON.stringify(old.learning ?? null) || next.scope !== old.scope || next.summary !== old.summary || next.detail !== old.detail
         || next.sensitivity !== old.sensitivity || next.workspaceId !== old.workspaceId
         || next.userId !== old.userId || next.assistantId !== old.assistantId
         || JSON.stringify(next.tags) !== JSON.stringify(old.tags)
@@ -569,9 +589,9 @@ export async function updateMemory(
            created_by_user_id, created_by_assistant_id, source_episode_id,
            verified_by_user_id, verified_at,
            original_scope, original_sensitivity, original_summary,
-           compartments, project_ids, valid_from
+           compartments, learning, project_ids, valid_from
          )
-         VALUES ($1, $2, $3, COALESCE($4, (SELECT workspace_id FROM assistants WHERE id = $1)), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, now())
+         VALUES ($1, $2, $3, COALESCE($4, (SELECT workspace_id FROM assistants WHERE id = $1)), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $23, $22, now())
          RETURNING ${MEMORY_SELECT}`,
         [
           next.assistantId, next.userId, old.appId, next.workspaceId,
@@ -582,9 +602,13 @@ export async function updateMemory(
           old.originalScope, old.originalSensitivity, old.originalSummary,
           next.compartments,
           next.projectIds,
+          next.learning,
         ],
       )
       const newRow = insertResult.rows[0]
+      if (old.learning) await client.query(`INSERT INTO decision_derivations(decision_event_id,workspace_id,artifact_kind,artifact_id,relation)
+        SELECT decision_event_id,workspace_id,artifact_kind,$2,relation FROM decision_derivations
+        WHERE artifact_kind='memory' AND artifact_id=$1 ON CONFLICT DO NOTHING`,[old.id,newRow.id])
 
       if (derivation && !transition) await recordDerivedResource(client, derivation, {
         ...newRow, workspaceId: newRow.workspaceId!, resourceKind: 'memory', resourceId: newRow.id, version: newRow.scopeVersion,
@@ -638,11 +662,11 @@ export async function insertHeldMemoryReplacement(
        assistant_id, user_id, app_id, workspace_id, scope, tags, summary, detail, confidence,
        sensitivity, source, source_session_id, created_by_user_id, created_by_assistant_id, source_episode_id,
        verified_by_user_id, verified_at, original_scope, original_sensitivity, original_summary,
-       compartments, project_ids, valid_from)
+       compartments, learning, project_ids, valid_from)
      SELECT assistant_id, user_id, app_id, workspace_id, scope, tags, summary, detail, confidence,
        sensitivity, source, source_session_id, created_by_user_id, created_by_assistant_id, source_episode_id,
        verified_by_user_id, verified_at, original_scope, original_sensitivity, original_summary,
-       compartments, project_ids, now()
+       compartments, learning, project_ids, now()
        FROM memories WHERE workspace_id=$1 AND id=$2
      RETURNING id, scope_version::text AS version, user_id AS "userId"`,
     [workspaceId, heldId],
@@ -676,9 +700,9 @@ function queryMemoryViewer<T extends pg.QueryResultRow>(ctx: AccessContext,sql: 
     departmentRead: ctx.departmentRead,sharedAudience: ctx.sharedAudience },() => queryGated<T>(ctx,canonical,params))
 }
 
-const MEMORY_QUERY_FIELDS=["id", "assistant_id", "user_id", "app_id", "workspace_id", "scope", "tags", "summary", "detail", "confidence", "sensitivity", "compartments", "project_ids", "scope_version", "scope_held", "source", "source_session_id", "recall_count", "useful_recall_count", "last_recalled_at", "created_at", "updated_at", "created_by_user_id", "created_by_assistant_id", "source_episode_id", "verified_by_user_id", "verified_at", "valid_from", "valid_to", "superseded_by", "retracted_at", "retracted_reason", "retracted_by", "original_scope", "original_sensitivity", "original_summary"] as const
+const MEMORY_QUERY_FIELDS=["id", "assistant_id", "user_id", "app_id", "workspace_id", "scope", "tags", "summary", "detail", "confidence", "sensitivity", "compartments", "project_ids", "scope_version", "scope_held", "source", "source_session_id", "recall_count", "useful_recall_count", "last_recalled_at", "created_at", "updated_at", "created_by_user_id", "created_by_assistant_id", "source_episode_id", "verified_by_user_id", "verified_at", "valid_from", "valid_to", "superseded_by", "retracted_at", "retracted_reason", "retracted_by", "original_scope", "original_sensitivity", "original_summary", "learning"] as const
 const MEMORY_INDEX_FIELDS=['id','summary','tags','app_id','scope','confidence','valid_to','scope_held','updated_at',
- 'workspace_id','user_id','assistant_id','scope_version','sensitivity','compartments','project_ids'] as const
+ 'workspace_id','user_id','assistant_id','created_by_user_id','scope_version','sensitivity','compartments','project_ids','learning'] as const
 const MEMORY_RANKED_FIELDS=[...MEMORY_INDEX_FIELDS,'created_at','last_recalled_at','recall_count'] as const
 const memoryQuerySource=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),
@@ -713,7 +737,7 @@ async function queryMemoryCollection<T extends pg.QueryResultRow>(ctx:AccessCont
   await authority.execution.security.authority.assertCurrent();await validateCallerScopeEvidence({sources},ceiling,client)
   const admitted=snapshots.filter(row=>row.row!==null).map(row=>{if(row.source?.resourceKind!=='memory')throw new DerivedScopeError('scope_evidence_missing');return row.row})
   const relation=`memory_viewer_rows AS MATERIALIZED (SELECT r.*,to_tsvector('simple',coalesce(r.summary,'')||' '||coalesce(r.detail,'')) AS search_vector
-   FROM jsonb_to_recordset($${params.length+1}::jsonb) AS r(id uuid,assistant_id uuid,user_id uuid,app_id text,workspace_id uuid,scope text,tags text[],summary text,detail text,confidence double precision,sensitivity text,compartments text[],project_ids uuid[],scope_version bigint,scope_held boolean,source text,source_session_id uuid,recall_count integer,useful_recall_count integer,last_recalled_at timestamptz,created_at timestamptz,updated_at timestamptz,created_by_user_id uuid,created_by_assistant_id uuid,source_episode_id uuid,verified_by_user_id uuid,verified_at timestamptz,valid_from timestamptz,valid_to timestamptz,superseded_by uuid,retracted_at timestamptz,retracted_reason text,retracted_by uuid,original_scope text,original_sensitivity text,original_summary text))`
+   FROM jsonb_to_recordset($${params.length+1}::jsonb) AS r(id uuid,assistant_id uuid,user_id uuid,app_id text,workspace_id uuid,scope text,tags text[],summary text,detail text,confidence double precision,sensitivity text,compartments text[],project_ids uuid[],scope_version bigint,scope_held boolean,source text,source_session_id uuid,recall_count integer,useful_recall_count integer,last_recalled_at timestamptz,created_at timestamptz,updated_at timestamptz,created_by_user_id uuid,created_by_assistant_id uuid,source_episode_id uuid,verified_by_user_id uuid,verified_at timestamptz,valid_from timestamptz,valid_to timestamptz,superseded_by uuid,retracted_at timestamptz,retracted_reason text,retracted_by uuid,original_scope text,original_sensitivity text,original_summary text,learning jsonb))`
   const payload=sql.replace(/\bFROM\s+(?:public\.)?memories\b/gi,'FROM memory_viewer_rows')
   const statement=/^\s*WITH\s/i.test(payload)?payload.replace(/^(\s*WITH(?:\s+RECURSIVE)?)\s+/i,`$1 ${relation}, `):`WITH ${relation} ${payload}`
   const result=await client.query<T>(statement,[...params,JSON.stringify(admitted)])
@@ -768,9 +792,9 @@ export async function getMemoryById(ctx: AccessContext, id: string, transactionC
  * and therefore can't fit the universal-projection model. See
  * `permissions.md` § Privileged-service exception.
  */
-export async function getMemoryByIdSystem(id: string): Promise<Memory | null> {
+export async function getMemoryByIdSystem(id: string, review = false): Promise<Memory | null> {
   const result = await query<Memory>(
-    `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND valid_to IS NULL AND NOT scope_held
+    `SELECT ${MEMORY_SELECT} FROM memories WHERE id = $1 AND valid_to IS NULL AND NOT scope_held ${review ? '' : 'AND memory_learning_allows(learning)'}
        AND public.application_memory_unproven_ancestry_allows(workspace_id,id,scope_version::text)`,
     [id],
   )
@@ -1155,11 +1179,11 @@ export async function getMemoryIndexSystem(
   id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string
 }>> {
   const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string }>(
-    `SELECT id, summary, tags, app_id as "appId", sensitivity, workspace_id AS "workspaceId",
+    `SELECT id, summary, tags, learning, app_id as "appId", sensitivity, workspace_id AS "workspaceId",
        user_id AS "userId", assistant_id AS "assistantId", compartments, project_ids AS "projectIds", scope_version::text AS "scopeVersion"
      FROM memories
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2
-       AND valid_to IS NULL AND NOT scope_held
+       AND valid_to IS NULL AND NOT scope_held AND memory_learning_allows(learning)
        AND public.application_memory_unproven_ancestry_allows(workspace_id,id,scope_version::text)
        AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)
        AND confidence > 0
@@ -1594,6 +1618,7 @@ export async function markVerifiedDirect(
   const sql = `UPDATE memories
         SET verified_by_user_id = $2,
             verified_at = now(),
+            learning = CASE WHEN learning IS NULL THEN NULL ELSE learning || '{"state":"established","origin":"explicit","confirmed":true,"candidateUntil":null,"evidenceGroups":[]}'::jsonb END,
             updated_at = now()
       WHERE id = $1
         AND valid_to IS NULL
@@ -1634,7 +1659,7 @@ export async function listCronContextCandidatesForPrune(
         AND m.user_id = $2
         AND m.valid_to IS NULL
         AND 'operational-state' = ANY(m.tags)
-        AND m.source = 'model'
+        AND m.source = 'model' AND coalesce(m.learning->>'state','legacy') <> 'established'
         AND m.created_at < now() - make_interval(secs => $3::double precision * 86400)`,
     [assistantId, userId, minAgeDays],
   )
@@ -1683,6 +1708,7 @@ export async function getMemoryStats(ctx: AccessContext): Promise<{
 // ── Deep consolidation helpers ─────────────────────────────────
 
 export type MemoryWithMetricsRow = {
+  learning?: MemoryLearning | null
   workspaceId: string
   compartments: string[]
   projectIds: string[]
@@ -1750,7 +1776,7 @@ export async function listMemoriesWithMetrics(
             assistant_id as "assistantId",
             user_id as "userId",
             app_id as "appId",
-            scope, summary, detail, tags, confidence, sensitivity,
+            scope, summary, detail, tags, confidence, sensitivity, learning,
             workspace_id AS "workspaceId", compartments, project_ids AS "projectIds", scope_version::text AS "scopeVersion",
             recall_count as "recallCount",
             useful_recall_count as "usefulRecallCount",
@@ -1759,38 +1785,16 @@ export async function listMemoriesWithMetrics(
             GREATEST(EXTRACT(EPOCH FROM (now() - created_at)) / 86400, 0)::int as "ageDays",
             created_at as "createdAt"
      FROM memories
-     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2 AND valid_to IS NULL AND NOT scope_held
+     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2 AND valid_to IS NULL AND NOT scope_held AND memory_learning_allows(learning)
        AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)${pageSql}`,
     params,
   )
   return result.rows
 }
 
-/**
- * Persist a computed consolidation score. When `boostConfidence` is true,
- * raise confidence to max(current, 0.95) and stamp `promoted_at`.
- */
-export async function writeConsolidationScore(
-  id: string,
-  score: number,
-  boostConfidence: boolean,
-): Promise<void> {
-  if (boostConfidence) {
-    await query(
-      `UPDATE memories SET
-         consolidation_score = $2,
-         confidence = GREATEST(confidence, 0.95),
-         promoted_at = now(),
-         updated_at = now()
-       WHERE id = $1`,
-      [id, score],
-    )
-    return
-  }
-  await query(
-    `UPDATE memories SET consolidation_score = $2, updated_at = now() WHERE id = $1`,
-    [id, score],
-  )
+/** Persist utility without changing belief confidence. */
+export async function writeConsolidationScore(id: string, score: number, _boostConfidence: boolean): Promise<void> {
+  await query('UPDATE memories SET consolidation_score=$2, updated_at=now() WHERE id=$1',[id,score])
 }
 
 /**
@@ -1855,7 +1859,7 @@ export async function listForSoulSynthesis(
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2
        AND valid_to IS NULL
        AND ${scopeClause}
-       AND NOT scope_held
+       AND NOT scope_held AND memory_learning_allows(learning)
        AND NOT (tags && ARRAY['self-profile','consolidation:soul','consolidation:domain']::text[])
      ORDER BY confidence DESC, updated_at DESC`,
     params,
@@ -2212,11 +2216,11 @@ export async function getWorkspaceMemoryIndexSystem(
   id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string
 }>> {
   const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; workspaceId: string; userId: string | null; assistantId: string | null; compartments: string[]; projectIds: string[]; scopeVersion: string }>(
-    `SELECT id, summary, tags, app_id as "appId", sensitivity, workspace_id AS "workspaceId",
+    `SELECT id, summary, tags, learning, app_id as "appId", sensitivity, workspace_id AS "workspaceId",
        user_id AS "userId", assistant_id AS "assistantId", compartments, project_ids AS "projectIds", scope_version::text AS "scopeVersion"
      FROM memories
      WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2
-       AND valid_to IS NULL AND NOT scope_held
+       AND valid_to IS NULL AND NOT scope_held AND memory_learning_allows(learning)
        AND public.application_memory_unproven_ancestry_allows(workspace_id,id,scope_version::text)
        AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)
        AND confidence > 0
@@ -2556,7 +2560,7 @@ export async function listWorkspaceMemoriesWithMetrics(
             assistant_id as "assistantId",
             user_id as "userId",
             app_id as "appId",
-            scope, summary, detail, tags, confidence, sensitivity,
+            scope, summary, detail, tags, confidence, sensitivity, learning,
             workspace_id AS "workspaceId", compartments, project_ids AS "projectIds", scope_version::text AS "scopeVersion",
             recall_count as "recallCount",
             useful_recall_count as "usefulRecallCount",
@@ -2565,7 +2569,7 @@ export async function listWorkspaceMemoriesWithMetrics(
             GREATEST(EXTRACT(EPOCH FROM (now() - created_at)) / 86400, 0)::int as "ageDays",
             created_at as "createdAt"
      FROM memories
-     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2 AND valid_to IS NULL AND NOT scope_held
+     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2 AND valid_to IS NULL AND NOT scope_held AND memory_learning_allows(learning)
        AND NOT EXISTS(SELECT 1 FROM memory_summary_slots slot WHERE slot.memory_id=memories.id)
        ${excludeExternalPrincipalsSql('memories.user_id')}${pageSql}`,
     params,

@@ -115,6 +115,37 @@ async function runLoop(provider: LLMProvider): Promise<QueryEvent[]> {
 }
 
 describe('[COMP:engine/query-loop] Transient stream retry', () => {
+  async function runRetryLoop(provider: LLMProvider) {
+    vi.useFakeTimers()
+    try {
+      const result = runLoop(provider)
+      // Attach a rejection handler before advancing asynchronous work.
+      const settled = result.then(events => ({ events }), error => ({ error }))
+      await vi.runAllTimersAsync()
+      const outcome = await settled
+      if ('error' in outcome) throw outcome.error
+      expect(vi.getTimerCount()).toBe(0)
+      return outcome.events
+    } finally { vi.useRealTimers() }
+  }
+
+  it('keeps the two-second backoff before a single retry', async () => {
+    vi.useFakeTimers()
+    try {
+      const { provider, calls } = scriptedProvider([
+        { kind: 'throwBefore', error: new Error('read ECONNRESET') },
+        { kind: 'chunks', chunks: textChunks('recovered') },
+      ])
+      const result = runLoop(provider)
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(calls).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect((await result).some(event => event.type === 'text_delta' && event.text === 'recovered')).toBe(true)
+      expect(calls).toHaveLength(2)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
+
   it('checks live authority before exposing a streamed event and does not retry', async () => {
     const { provider, calls } = scriptedProvider([
       { kind: 'chunks', chunks: textChunks('restricted') },
@@ -158,7 +189,7 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
       { kind: 'chunks', chunks: textChunks('back from the stall') },
     ])
 
-    const events = await runLoop(provider)
+    const events = await runRetryLoop(provider)
 
     const text = events
       .filter((e) => e.type === 'text_delta')
@@ -181,15 +212,14 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
     expect(calls[0].messages).toEqual(calls[1].messages)
   })
 
-  // 3 sub-cases × 2s backoff = 6s; bump the per-test timeout above the 5s default.
-  it('retries on ECONNRESET / 503 / "socket hang up"', { timeout: 10_000 }, async () => {
+  it('retries on ECONNRESET / 503 / "socket hang up"', async () => {
     for (const errMsg of ['read ECONNRESET', '503 Service Unavailable', 'socket hang up']) {
       const { provider, calls } = scriptedProvider([
         { kind: 'throwBefore', error: new Error(errMsg) },
         { kind: 'chunks', chunks: textChunks('ok') },
       ])
 
-      const events = await runLoop(provider)
+      const events = await runRetryLoop(provider)
       const text = events
         .filter((e) => e.type === 'text_delta')
         .map((e) => (e.type === 'text_delta' ? e.text : ''))
@@ -199,7 +229,7 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
     }
   })
 
-  it('retries when only err.code says ECONNRESET (message is just "aborted")', { timeout: 10_000 }, async () => {
+  it('retries when only err.code says ECONNRESET (message is just "aborted")', async () => {
     // Repro: production incident 2026-08-27 — Node's node:https
     // ConnResetException has message "aborted" and code ECONNRESET; the
     // message-only regex never matched, so a custom-LLM connection reset
@@ -211,7 +241,7 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
       { kind: 'chunks', chunks: textChunks('ok') },
     ])
 
-    const events = await runLoop(provider)
+    const events = await runRetryLoop(provider)
     const text = events
       .filter((e) => e.type === 'text_delta')
       .map((e) => (e.type === 'text_delta' ? e.text : ''))
@@ -220,7 +250,7 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
     expect(calls).toHaveLength(2)
   })
 
-  it('retries when the socket code is nested in err.cause (undici shape)', { timeout: 10_000 }, async () => {
+  it('retries when the socket code is nested in err.cause (undici shape)', async () => {
     const socketErr = new Error('other side closed') as NodeJS.ErrnoException
     socketErr.code = 'UND_ERR_SOCKET'
     const wrapped = new Error('terminated', { cause: socketErr })
@@ -229,7 +259,7 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
       { kind: 'chunks', chunks: textChunks('ok') },
     ])
 
-    const events = await runLoop(provider)
+    const events = await runRetryLoop(provider)
     const text = events
       .filter((e) => e.type === 'text_delta')
       .map((e) => (e.type === 'text_delta' ? e.text : ''))
@@ -250,7 +280,7 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
       { kind: 'throwAfter', chunks: partialChunks, error: new Error('Stream idle for 30000ms') },
     ])
 
-    const events = await runLoop(provider)
+    const events = await runRetryLoop(provider)
 
     // The partial text was yielded, then the loop emitted an error event
     // and exited without retrying.
@@ -273,7 +303,7 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
       { kind: 'throwBefore', error: abortErr },
     ])
 
-    const events = await runLoop(provider)
+    const events = await runRetryLoop(provider)
     expect(events.some((e) => e.type === 'error')).toBe(true)
     expect(calls).toHaveLength(1) // no retry — user is gone
   })
@@ -283,14 +313,13 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
       { kind: 'throwBefore', error: new Error('401 invalid api key') },
     ])
 
-    const events = await runLoop(provider)
+    const events = await runRetryLoop(provider)
     expect(events.some((e) => e.type === 'error')).toBe(true)
     expect(calls).toHaveLength(1)
   })
 
-  it('refreshes the retry budget per turn — a stall on the post-tool-result turn still recovers', { timeout: 10_000 }, async () => {
-    // Repro: production incident 2026-06-10 (session ab96e27e, user 99c7fb99).
-    // A .docx dropped into a long doc-editor session idled turn 0 (>30s prefill
+  it('refreshes the retry budget per turn — a stall on the post-tool-result turn still recovers', async () => {
+    // A document dropped into a long editor session can idle turn 0 (>30s prefill
     // TTFT on the oversized prompt). The warm-cache retry recovered and the
     // model called a read tool (getCurrentPage). The *next* turn re-prefilled
     // the now-larger prompt and idled the same way — but the single transient
@@ -304,7 +333,7 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
       { kind: 'chunks', chunks: textChunks('recovered after the second stall') }, // retry recovers
     ])
 
-    const events = await runLoop(provider)
+    const events = await runRetryLoop(provider)
 
     const text = events
       .filter((e) => e.type === 'text_delta')
@@ -330,7 +359,7 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
       { kind: 'chunks', chunks: textChunks('would have worked') }, // never reached
     ])
 
-    const events = await runLoop(provider)
+    const events = await runRetryLoop(provider)
 
     // Loop bails on the second consecutive idle timeout.
     expect(events.some((e) => e.type === 'error')).toBe(true)

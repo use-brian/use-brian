@@ -103,6 +103,8 @@ import remarkGfm from "remark-gfm";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { navigateChatLocation } from "@/lib/chat-last-location";
 import { ChatRecoveryAction } from "./chat-recovery";
+import { ChatLegacyHistory } from "./chat-legacy-history";
+import { ChatDisplayHistoryRow, ChatDisplayHistoryStatus, mergeDisplayTimeline, usePersonalDisplayHistory } from "./chat-display-history";
 import {
   ArrowUp,
   AtSign,
@@ -645,6 +647,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const panePolicy: ChatSessionPolicy = !activeSessionId
     ? FRESH_PANE_POLICY
     : activeRow?.policy ?? paneSummary?.policy ?? PENDING_POLICY;
+
+  // Independent current authorization for saved display; these rows never enter chat state.
+  const displayHistory = usePersonalDisplayHistory(workspaceId, activeSessionId,
+    !!activeContextSession?.policy && !panePolicy.post && (activeContextSession.transport ?? "web") === "web"
+    && activeContextSession.appOrigin === "chat");
+  const { refresh: refreshDisplayHistory, invalidate: invalidateDisplayHistory } = displayHistory;
+  const [canonicalHistoryIds, setCanonicalHistoryIds] = useState<{ sessionId: string; ids: ReadonlySet<string> } | null>(null);
 
   // ── In-chat goal pursuit (docs/architecture/features/goals.md) ────────────
   /** Reload the open session's goals. Guarded against thread switches: only
@@ -1376,6 +1385,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       const epoch = sessionEpochRef.current;
       if (sessionIdRef.current !== sessionId || stream.inFlight()) return;
       const controllerRun = chatController.capture();
+      refreshDisplayHistory();
       const request = ++transcriptRequestRef.current;
       transcriptAbortRef.current?.abort();
       const controller = new AbortController();
@@ -1403,6 +1413,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           !chatController.isCurrent(controllerRun)
         ) return;
         const rows = mapTranscriptRows(persisted);
+        setCanonicalHistoryIds({ sessionId, ids: new Set(persisted.map(row => row.id)) });
         writeTranscriptCache(sessionId, rows);
         chat.loadMessages(rows);
         setHistoryRecoverySessionId(null);
@@ -1415,6 +1426,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // denial must clear protected content instead of retaining it.
           const denied = isAuthoritativeRosterDenial(error);
           if (denied) {
+            if (!isSessionHistoryUnavailable(error)) invalidateDisplayHistory();
+            setCanonicalHistoryIds({ sessionId, ids: new Set() });
             evictTranscriptCache(sessionId);
             chat.loadMessages([]);
           }
@@ -1433,7 +1446,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     },
     // `chat.loadMessages` is a stable useCallback from the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chatController, stream.inFlight, mapTranscriptRows, t.errorGeneric, t.historyUnavailable],
+    [chatController, stream.inFlight, mapTranscriptRows, refreshDisplayHistory, invalidateDisplayHistory, t.errorGeneric, t.historyUnavailable],
   );
 
   /** True from a switch onto a session with NO cached transcript until its
@@ -1462,6 +1475,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setPendingQuestion(null);
     setStartingShared(false);
     setHistoryRecoverySessionId(null);
+    setCanonicalHistoryIds(null);
     // Thread switches now arrive from the sidebar panel via the URL, so the
     // in-flight stream (if any) belongs to the OLD thread — kill it before
     // painting the new one, exactly what the old in-surface rail did on
@@ -2558,6 +2572,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     /** Cmd/Ctrl+Enter during a room turn this pane does not stream (D3). */
     steer?: boolean;
   }) => {
+    if (sessionIdRef.current && historyRecoverySessionId === sessionIdRef.current) return false;
     // Both views wait for the creation context (T5): a fresh pane binds its
     // Team/Project from the one hero picker before its first send.
     if(!sessionIdRef.current&&!creationContext.snapshot()){setError(view==="workspace"?t.newWorkspaceChatFailed:t.errorGeneric);return false;}
@@ -3540,7 +3555,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     }
     return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [creationContext, input, activeAssistant, activeSessionId, activeContextSession?.contextProjectId, panePolicy, paneHumanCount, remoteActive, postToRoom, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
+  }, [historyRecoverySessionId, creationContext, input, activeAssistant, activeSessionId, activeContextSession?.contextProjectId, panePolicy, paneHumanCount, remoteActive, postToRoom, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
 
   // While this full-page surface is mounted it IS the visible chat, so a
   // short capture's voice turn must land in the open thread here — never in
@@ -3963,6 +3978,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     () => computeTranscriptRowMeta(chat.state.messages as SurfaceMessage[]),
     [chat.state.messages],
   );
+
+  const displayTimeline = useMemo(() => mergeDisplayTimeline(chat.state.messages as SurfaceMessage[],
+    displayHistory.rows, canonicalHistoryIds?.sessionId === activeSessionId ? canonicalHistoryIds.ids : undefined),
+    [chat.state.messages, displayHistory.rows, canonicalHistoryIds, activeSessionId]);
+  const hasHistoricalDisplayRows = displayTimeline.some(entry => entry.historicalDisplayOnly);
 
   /** The typing indicator's line: one named typist, two named, or several. */
   const typingLabel = useMemo(() => {
@@ -4524,6 +4544,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // visible and ride the next turn.
         sendDisabled={
           (!activeSessionId && !creationContext.ready) ||
+          (activeSessionId !== null && historyRecoverySessionId === activeSessionId) ||
           (chat.state.isStreaming && !canQueueMidTurn) ||
           (canQueueMidTurn && (att.hasReady || pendingRecordings.length > 0)) ||
           !activeAssistant ||
@@ -4907,7 +4928,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 }
               }}
             />}
-            {chat.state.messages.length === 0 &&
+            {displayTimeline.length === 0 && !displayHistory.loading && !displayHistory.failed &&
+              !(activeSessionId && historyRecoverySessionId === activeSessionId) &&
               !chat.state.isStreaming &&
               !remoteActive &&
               (transcriptCold ? (
@@ -4933,7 +4955,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   {panePolicy.post ? t.sharedTranscriptEmpty : t.transcriptEmpty}
                 </p>
               ))}
-            {(chat.state.messages as SurfaceMessage[]).map((m, messageIndex) => {
+            {displayTimeline.map(entry => {
+              if (entry.historicalDisplayOnly) return <ChatDisplayHistoryRow key={`display-${entry.row.id}`} row={entry.row} />;
+              const { message: m, canonicalIndex: messageIndex } = entry;
               const meta = transcriptMeta[messageIndex];
               const timeKnown = !Number.isNaN(m.timestamp.getTime());
               // Day separator — a centered chip whenever the local calendar
@@ -5185,6 +5209,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 </Fragment>
               );
             })}
+            <ChatDisplayHistoryStatus history={displayHistory} hasHistoricalRows={hasHistoricalDisplayRows} />
             {/* In-chat pursuit cards newer than every persisted message (the
                 arming turn is still streaming). */}
             {goalPlacement.trailing.map((goal) => (
@@ -5421,10 +5446,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 </span>
               </div>
             )}
-            {error && (
+            {error && !(activeSessionId && historyRecoverySessionId === activeSessionId) && (
               <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                 {error}
-                {activeSessionId && historyRecoverySessionId === activeSessionId && <ChatRecoveryAction
+              </div>
+            )}
+            {activeSessionId && historyRecoverySessionId === activeSessionId && !displayHistory.loading && !displayHistory.hasPage && (
+              <ChatLegacyHistory key={`${workspaceId}:${activeSessionId}`} workspaceId={workspaceId} sessionId={activeSessionId} fallback={t.historyUnavailable}>
+                <ChatRecoveryAction
                   key={`${workspaceId}:${activeSessionId}`} workspaceId={workspaceId} sessionId={activeSessionId}
                   onRecovered={(result) => {
                     if (sessionIdRef.current !== activeSessionId || result.workspaceId !== workspaceId) return;
@@ -5440,8 +5469,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                     selectSession(result.sessionId, "personal");
                     dispatchChatSessionsRefresh(workspaceId);
                   }}
-                />}
-              </div>
+                />
+              </ChatLegacyHistory>
             )}
             {(activeRow?.recoveredFromSessionId ?? paneSummary?.recoveredFromSessionId) && (
               <div className="rounded-md border border-border px-3 py-2 text-sm text-muted-foreground">
@@ -5495,9 +5524,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           : null}
 
         {/* Composer bar — the same bottom-aligned composite box as the welcome. */}
-        <div data-chat-composer-dock className="shrink-0 bg-gradient-to-t from-background from-80% to-transparent px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 @[560px]/chat-reading:px-6 @[560px]/chat-reading:pb-6 @[560px]/chat-reading:pt-3">
+        {!(activeSessionId && historyRecoverySessionId === activeSessionId) && <div data-chat-composer-dock className="shrink-0 bg-gradient-to-t from-background from-80% to-transparent px-3 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 @[560px]/chat-reading:px-6 @[560px]/chat-reading:pb-6 @[560px]/chat-reading:pt-3">
           <div className="mx-auto w-full max-w-[52rem]">{composerBox}</div>
-        </div>
+        </div>}
       </section>
       <ChatSidePane
         workspaceId={workspaceId}

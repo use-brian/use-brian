@@ -27,6 +27,7 @@ import { useT } from "@/lib/i18n/client";
 import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
 import { useRecordingSummary } from "@/lib/recordings/use-recording-summary";
 import { RecordingChromeContent } from "@/components/recordings/recording-chrome";
+import { RecordingProcessAction } from "@/components/recordings/recording-process-action";
 import { ReclassifyContextButton } from "@/components/context/reclassify-context-dialog";
 
 export default function RecordingDetailPage() {
@@ -34,7 +35,7 @@ export default function RecordingDetailPage() {
   const params = useParams<{ workspaceId: string; recordingId: string }>();
   const searchParams = useSearchParams();
   const pageId = searchParams.get("page");
-  const { summary: rec, error } = useRecordingSummary(
+  const { summary: rec, error, recovery } = useRecordingSummary(
     params.workspaceId,
     params.recordingId,
   );
@@ -66,12 +67,12 @@ export default function RecordingDetailPage() {
             <ReclassifyContextButton workspaceId={params.workspaceId} primitive="recording" rowId={rec.recordingId} />
           </div>
           <RecordingPlayerProvider
-            key={params.recordingId}
-            recordingId={canPlay ? params.recordingId : null}
+            key={rec.recordingId}
+            recordingId={canPlay ? rec.recordingId : null}
             durationMs={rec.durationMs ?? 0}
           >
             <RecordingChromeContent
-              recordingId={params.recordingId}
+              recordingId={rec.recordingId}
               workspaceId={params.workspaceId}
               title={title}
               summary={rec}
@@ -79,6 +80,11 @@ export default function RecordingDetailPage() {
             />
           </RecordingPlayerProvider>
         </>
+      ) : recovery ? (
+        <section className="space-y-4">
+          <h1 className="break-words text-xl font-semibold">{recovery.title}</h1>
+          <RecordingProcessAction key={params.recordingId} workspaceId={params.workspaceId} recordingId={params.recordingId} mime={recovery.mime} recovery={recovery} />
+        </section>
       ) : (
         <p role="status" className="text-sm text-muted-foreground">
           {error ? t.recordings.detailNotFound : t.recordings.panelLoading}

@@ -226,6 +226,10 @@ export async function verifyBrainRow(
  *  - workspace_file: sensitivity, tags
  *  - task: title, status, due_at, tags, assignee_id, priority, description, icon */
 export type AdjustMemoryChanges = {
+  memoryLearning?: {
+    applicability?: { projectId?:string; taskId?:string; operation?:"email"|"tool"|"feed"; operationKey?:string; activity?:"status_update"|"client_report"; exceptionTo?:string };
+    appliesFrom?:string|null; appliesUntil?:string|null;
+  };
   scope?: "personal" | "workspace_shared" | "workspace";
   sensitivity?: "public" | "internal" | "confidential";
   summary?: string;

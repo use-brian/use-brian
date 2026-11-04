@@ -710,7 +710,7 @@ export function brainRoutes(deps: {
                 // axis — carried through, never decoded here.
                 const cursor = state?.s?.[scopeKey(scope)]
                 return retrievalStore.search(
-                  ctx,
+                  { ...ctx, memoryReview: true },
                   scope === undefined
                     ? { query: q, limit, semantic: false, cursor }
                     : { query: q, scope, limit, semantic: false, cursor },

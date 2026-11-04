@@ -1521,6 +1521,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
 
     const calleeCtx = {
       ...automaticContextAccess(turnScope.access, turnScope.activeProjectId),
+      memoryContext: {
+        ...(turnScope.activeProjectId ? {projectId:turnScope.activeProjectId} : {}),
+        ...(params.decisionContext?.applicability ? {
+          operation:params.decisionContext.applicability.kind,
+          ...(params.decisionContext.applicability.key ? {operationKey:params.decisionContext.applicability.key} : {}),
+        } : {}),
+      },
       clientSelfMemory: externalClient?.clientSelfMemory,
     }
     const [soulContext, identityMemories, rankedIndex] = await Promise.all([

@@ -780,9 +780,9 @@ export async function runDeepConsolidation(
         tags: memory.tags,
       })
       const boost = score >= promoteThreshold
-      await store.writeConsolidationScore(memory.id, score, boost)
+      await store.writeConsolidationScore(memory.id, score, false)
       if (boost) promoted++
-      if (score < pruneThreshold) {
+      if (score < pruneThreshold && memory.learning?.state !== 'established') {
         const minAge = isRemOutput(memory) ? remPruneAgeDays : pruneAfterDays
         if (memory.ageDays >= minAge) {
           await store.deleteMemory(memory.id)
@@ -1531,9 +1531,9 @@ export async function runTeamDeepConsolidation(
         tags: memory.tags,
       })
       const boost = score >= promoteThreshold
-      await store.writeConsolidationScore(memory.id, score, boost)
+      await store.writeConsolidationScore(memory.id, score, false)
       if (boost) promoted++
-      if (score < pruneThreshold) {
+      if (score < pruneThreshold && memory.learning?.state !== 'established') {
         const minAge = isRemOutput(memory) ? remPruneAgeDays : pruneAfterDays
         if (memory.ageDays >= minAge) {
           await store.deleteMemory(memory.id)

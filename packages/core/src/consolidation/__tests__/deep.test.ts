@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { memoryLearningSchema } from '../../memory/learning.js'
 import { runDeepConsolidation, bucketDomains } from '../phases.js'
 import type { MemoryStore, MemoryWithMetrics, MemoryRecord } from '../../memory/types.js'
 
@@ -49,6 +50,7 @@ function mem(partial: Partial<MemoryWithMetrics> & { id: string; summary: string
     detail: partial.detail ?? null,
     tags: partial.tags ?? [],
     confidence: partial.confidence ?? 0.8,
+    learning: partial.learning,
     sensitivity: partial.sensitivity ?? 'internal',
     assistantId: partial.assistantId ?? 'a1',
     userId: partial.userId ?? 'u1',
@@ -168,7 +170,7 @@ describe('[COMP:consolidation/deep-orchestrator] runDeepConsolidation — scorin
     expect(state.scores.get('m2')!.score).toBeGreaterThan(0)
   })
 
-  it('promotes confidence on high-scoring memories', async () => {
+  it('ranks useful memories without promoting confidence', async () => {
     state.memoriesWithMetrics = [
       mem({
         id: 'hot',
@@ -184,7 +186,7 @@ describe('[COMP:consolidation/deep-orchestrator] runDeepConsolidation — scorin
 
     await runDeepConsolidation(store, 'a1', 'u1', async () => 'NO_SOUL')
 
-    expect(state.scores.get('hot')!.boosted).toBe(true)
+    expect(state.scores.get('hot')!.boosted).toBe(false)
   })
 
   it('prunes memories scoring below 0.3 that are older than 30 days', async () => {
@@ -206,6 +208,13 @@ describe('[COMP:consolidation/deep-orchestrator] runDeepConsolidation — scorin
   // aren't subject to memory consolidation at all" (entities are a
   // separate primitive). Test deleted as the contract it asserted is
   // gone. (See docs/architecture/context-engine/memory-system.md.)
+
+  it('keeps an established preference even when old and never recalled', async()=>{
+    state.memoriesWithMetrics=[mem({id:'durable',summary:'Prefers compact updates',ageDays:180,recallCount:0,
+      learning:memoryLearningSchema.parse({version:1,state:'established',origin:'explicit'})})]
+    await runDeepConsolidation(store,'a1','u1',async()=>'NO_SOUL')
+    expect(state.deleted.has('durable')).toBe(false)
+  })
 
   it('does not prune low-scoring memories younger than 30 days', async () => {
     state.memoriesWithMetrics = [

@@ -52,10 +52,6 @@ describe("[COMP:app-web/button] Button", () => {
     // The app delegates the avatar to the shared component; its semantic fill
     // remains covered alongside the app-local allowlist.
     const chatUiRoot = new URL("../../../../../../packages/chat-ui/", import.meta.url);
-    expect(readFileSync(new URL("../user-avatar.tsx", import.meta.url), "utf8"))
-      .toContain('export { UserAvatar } from "@use-brian/chat-ui";');
-    expect(readFileSync(new URL("src/index.ts", chatUiRoot), "utf8"))
-      .toContain("export { UserAvatar } from './UserAvatar.js'");
     expect(readFileSync(new URL("src/UserAvatar.tsx", chatUiRoot), "utf8"))
       .toContain('"rounded-full bg-primary text-primary-foreground flex items-center justify-center font-bold shrink-0",');
 

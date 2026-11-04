@@ -17,6 +17,7 @@ export function ContextScopePicker({
   onProjectChange,
   disabled,
   teamDisabled,
+  requireTeam=false,
   hideTeam=false,
   projectDisabled,
   showProjectHint=true,
@@ -30,6 +31,8 @@ export function ContextScopePicker({
   onProjectChange: (id: string | null) => void;
   disabled?: boolean;
   teamDisabled?: boolean;
+  /** Require an explicit Department instead of offering General. */
+  requireTeam?: boolean;
   hideTeam?: boolean;
   projectDisabled?: boolean;
   showProjectHint?: boolean;
@@ -42,10 +45,11 @@ export function ContextScopePicker({
         {inline ? <><Building2 className="size-4 shrink-0" aria-hidden /><span className="sr-only">{t.team}</span></> : t.team}
         <SearchableSelect
           className={inline ? "min-w-0 gap-1 border-transparent bg-transparent px-1.5 shadow-none hover:bg-background/70 max-sm:min-h-11" : "max-sm:min-h-11"}
-          value={teamId ?? GENERAL}
+          value={teamId ?? (requireTeam ? "" : GENERAL)}
+          placeholder={t.selectDepartment}
           onValueChange={(value) => onTeamChange(value === GENERAL ? null : value)}
           items={[
-            { value: GENERAL, label: t.general },
+            ...(requireTeam ? [] : [{ value: GENERAL, label: t.general }]),
             ...teams.filter((team) => team.status === "active").map((team) => ({ value: team.id, label: team.name })),
           ]}
           searchPlaceholder={t.searchTeams}

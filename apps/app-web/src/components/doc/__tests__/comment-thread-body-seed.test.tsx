@@ -168,6 +168,8 @@ describe("[COMP:app-web/comment-thread-body] seed one-shot across navigation", (
     const text = container!.textContent ?? "";
     expect(text).toContain("Help me to format current page properties");
     expect(text).not.toContain(dict.comments.emptyThread);
+    // Reopening an AI-backed thread must not opt the next manual reply into AI.
+    expect(container!.querySelector(`[aria-label="${dict.comments.aiReply}"]`)?.getAttribute("aria-pressed")).toBe("false");
   });
 });
 

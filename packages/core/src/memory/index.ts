@@ -97,3 +97,5 @@ export type {
   DeadlineResolverOptions,
   CompositeResolverOptions,
 } from './commitment-resolvers.js'
+
+export * from './learning.js'

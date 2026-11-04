@@ -1,3 +1,4 @@
+import { memoryLearningAdmissionEnabled } from './memory-learning.js'
 import { createHash } from 'node:crypto'
 import { ContextScopeAccumulator, DerivedScopeError,bindScopeSource,bindScopeSources,boundScopeSources, type EntityLinksStore, type MemoryRecord, type MemoryStore, type ScopeSource } from '@use-brian/core'
 import { query } from './client.js'
@@ -36,7 +37,7 @@ function bindMemorySource<T extends MemorySourceRow>(row: T): T {
 
 function projectMemory(m: MemoryRecord): MemoryRecord {
   return bindScopeSources(bindMemorySource({ id: m.id, scope: m.scope, summary: m.summary,
-    detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
+    learning: m.learning, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
     workspaceId: m.workspaceId, userId: m.userId, assistantId: m.assistantId,
     compartments: m.compartments, projectIds: m.projectIds, scopeVersion: m.scopeVersion,
     ...(m.scopeSource ? { scopeSource: m.scopeSource } : {}),
@@ -56,6 +57,7 @@ function projectMemory(m: MemoryRecord): MemoryRecord {
 export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {}): MemoryStore {
   const { entityLinks } = deps
   return {
+    learningEnabled: memoryLearningAdmissionEnabled(),
     async create(params) {
       const {authority,...command}=params
       if(authority){
@@ -207,6 +209,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
         detail: r.detail,
         tags: r.tags,
         confidence: r.confidence,
+        learning: r.learning,
         sensitivity: r.sensitivity,
         workspaceId: r.workspaceId, compartments: r.compartments, projectIds: r.projectIds, scopeVersion: r.scopeVersion,
         assistantId: r.assistantId,
@@ -490,7 +493,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       const rows = await listWorkspaceMemoriesWithMetrics(assistantId, workspaceId, page)
       return rows.map((r) => ({
         id: r.id, scope: r.scope, summary: r.summary,
-        detail: r.detail, tags: r.tags, confidence: r.confidence, sensitivity: r.sensitivity, workspaceId: r.workspaceId,
+        learning: r.learning, detail: r.detail, tags: r.tags, confidence: r.confidence, sensitivity: r.sensitivity, workspaceId: r.workspaceId,
         compartments: r.compartments, projectIds: r.projectIds, scopeVersion: r.scopeVersion,
         assistantId: r.assistantId, userId: r.userId, appId: r.appId,
         recallCount: r.recallCount, usefulRecallCount: r.usefulRecallCount,

@@ -1,3 +1,5 @@
+import { resolveCurrentRecordingId } from '../recordings/recovery.js'
+import { memoryActivityFromText } from '@use-brian/core'
 import {consumeHostReadObservation,combineHostReadObservations,inheritRoutineCalendarRead,type RoutineCalendarCall} from '@use-brian/core'
 import {parseHostObservation,type HostObservation} from '@use-brian/shared'
 import {boundScopeSources} from '@use-brian/core'
@@ -38,6 +40,8 @@ import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
 import { createTurnTiming, markTurnEnd } from './turn-timings.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
+import { createRequestPermissionContext, type RequestPermissionContext } from '../context-scope/request-permission-context.js'
+import { createExecutionPermissionSnapshots } from '../context-scope/execution-permission-snapshots.js'
 import {
   resolvePinnedContext,
   type ResolvedPinnedPageTarget,
@@ -129,7 +133,7 @@ import {
   sessionMessageInputScope,
   automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
-import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
+import { resolveExecutionContextSystem, type ResolveExecutionContextInput } from '../context-scope/execution-context.js'
 import { prepareAssistantRun } from '../turn/prepare.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
@@ -2385,6 +2389,7 @@ export function chatRoutes(options: WebChatOptions): Router {
     // its own entry, and the Map leaking one row per turn for the process's
     // lifetime. Set once at registration, never cleared.
     let abortRegistryToken: string | null = null
+    let requestPermissions: RequestPermissionContext | undefined
 
     try {
       const jwtUserId = (req as { userId?: string }).userId
@@ -2959,7 +2964,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Resolve the one trusted scope before this entry point performs any
       // persistent semantic write or enters the normal model path.
       const abortController = new AbortController()
-      const resolvedExecution = await resolveExecutionContextSystem({
+      const executionInput: ResolveExecutionContextInput = {
         userId: user.id,
         assistant,
         // A room, doc comment thread or Feed draft reads only rows the whole
@@ -2990,7 +2995,8 @@ export function chatRoutes(options: WebChatOptions): Router {
             ?authSessionStore.validateAccess(credentialClaims):Promise.resolve(false):undefined}),
         sessionAuthority: session,
         ...(officeLane ? officeLaneExecutionBounds(officeLane, user.id, officeLaneDeps) : {}),
-      })
+      }
+      const resolvedExecution = await resolveExecutionContextSystem(executionInput)
       const turnScope = resolvedExecution.turnScope
       const executionContext = resolvedExecution.executionContext
       const authority = executionContext.security.authority
@@ -3042,11 +3048,21 @@ export function chatRoutes(options: WebChatOptions): Router {
         userId: user.id,
         sharedAudience: !policyFor(session).context.personalMemory,
       })
+      // Native history/parent admission keys on sessions.workspace_id. A projected
+      // null (legacy personal resume before backfill) must not take that path.
+      // Readers that omit the field keep the ownership-only gate.
       const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
         && executionContext.identity.kind === 'attended'
         && executionContext.identity.principal.kind === 'workspace_member'
+        && (session.workspaceId === undefined || session.workspaceId === executionContext.ownership.workspaceId)
         ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
-      const nativeOutputBoundary=nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
+      const permissionContext = nativeTranscriptAuthority
+        ? createRequestPermissionContext(resolvedExecution, scopeAccumulator, session, {
+            createActionSnapshots: () => createExecutionPermissionSnapshots(executionInput),
+          })
+        : undefined
+      requestPermissions = permissionContext
+      const nativeOutputBoundary=!permissionContext&&nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
         &&!executionContext.security.access.sharedAudience&&classifySession(session).surface==='chat'?createNativeAttendedOutputBoundary(executionContext,scopeAccumulator,{
         workspaceId:assistant.workspaceId??'',assistantId:assistant.id,userId:user.id,channelType:'web',
         channelId:session.channelId,sessionId:session.id,recipientType:turnPolicy.deliveryCeiling.recipientType,
@@ -4640,7 +4656,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const readClearance = turnScope.access.clearance ?? assistant.clearance
       const readCompartments = turnScope.effectiveCompartments
       // Automatic context reads only the bound shared Project (D18 relevance).
-      const viewerCtx = automaticContextAccess(turnScope.access, turnScope.activeProjectId)
+      const viewerCtx = { ...automaticContextAccess(turnScope.access, turnScope.activeProjectId), memoryContext: { ...(turnScope.activeProjectId ? {projectId:turnScope.activeProjectId} : {}), activity:memoryActivityFromText(typeof message === "string" ? message : undefined) } }
       turnTiming.mark('admission')
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
@@ -5304,8 +5320,9 @@ export function chatRoutes(options: WebChatOptions): Router {
                 const activeRecordingId = pageMeta
                   ? recordingIdFromAnchorKey(pageMeta.anchorKey) ?? pageMeta.linkedRecordingId
                   : null
-                if (activeRecordingId) {
-                  activeRecordingBlock = `\n\n${buildActiveRecordingInstruction(activeRecordingId)}`
+                if (activeRecordingId && pageMeta) {
+                  const currentRecordingId = await resolveCurrentRecordingId({ actorUserId: user.id }, pageMeta.workspaceId, activeRecordingId)
+                  if (currentRecordingId) activeRecordingBlock = `\n\n${buildActiveRecordingInstruction(currentRecordingId)}`
                 }
               } catch (err) {
                 console.error('[chat] active recording context failed:', err)
@@ -7505,6 +7522,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 : null,
             // The turn's user message — doc page-creation tools snapshot it
             // as the new page's `origin_prompt` (the History "first prompt").
+            userMessageId: storedUserMsg.id,
             userMessageText:
               typeof message === 'string' && message.trim() ? message.trim() : undefined,
             currentTurnAttachmentIds,
@@ -7740,7 +7758,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           // section 6). See docs/architecture/engine/mid-turn-input.md.
           turnInbox: turnInbox.port,
           },
-          sink: { kind: 'sse', ...(nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority ? { assertOutputAuthority:assertDeliveryAudience } : {}),
+          sink: { kind: 'sse', ...(permissionContext
+            ? { permissionContext, assertOutputAuthority: permissionContext.authorizeDelivery,
+                onOutputAuthorityTiming: (ms: number) => turnTiming.add('audience_check', ms) }
+            : nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority ? { assertOutputAuthority:assertDeliveryAudience } : {}),
           onReplyTextComplete: () => postReply.announceTextCompletion(() => {
             sendActivityEvent('reply_text_complete', {})
             turnStream.setReplyPhase('saving')
@@ -9257,6 +9278,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
       res.end()
     } finally {
+      requestPermissions?.dispose()
       // The turn's per-phase wall-clock, once per request. Only a request that
       // reached the query loop is a turn (queued mid-turn input, 409s and
       // pre-flight refusals are not); those still surface through

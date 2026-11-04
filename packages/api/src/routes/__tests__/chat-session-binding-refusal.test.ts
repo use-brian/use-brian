@@ -35,7 +35,7 @@ const source = readFileSync(CHAT_TS, 'utf8')
  */
 function sessionBindingBlock(): string {
   const start = source.indexOf('const verdict = crossAssistantSendPolicy({')
-  const end = source.indexOf('const resolvedExecution = await resolveExecutionContextSystem({', start)
+  const end = source.indexOf('const resolvedExecution = await resolveExecutionContextSystem(', start)
   expect(start).toBeGreaterThan(-1)
   expect(end).toBeGreaterThan(start)
   return source.slice(start, end)

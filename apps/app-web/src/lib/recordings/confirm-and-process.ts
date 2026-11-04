@@ -2,8 +2,10 @@
 
 /**
  * The recording pre-flight, in one place: estimate → cost + blueprint +
- * destination confirmation → process. [COMP:recordings/confirm-and-process]
+ * destination confirmation → process (automatic for recorder captures). [COMP:recordings/confirm-and-process]
  *
+ * Recorder Stop / recovery Save skips the popup, retaining the cheap probe
+ * and server processing guards. Other surfaces share the confirmation picker.
  * Every surface that spends a transcription runs THIS, so the pre-flight
  * invariant (docs/architecture/engine/preflight-confirmation.md) has exactly
  * one implementation to be right. Two callers today: `useRecordingUpload.run`,
@@ -59,6 +61,8 @@ export type ConfirmProcessInput = {
   pinnedPage?: boolean;
   /** Live-capture fell back to assembling its persisted windows. */
   assembled?: boolean;
+  /** Recorder Stop / recovery Save already authorizes first-run processing. */
+  automatic?: boolean;
   /**
    * A processing run already COMPLETED. The confirm then has to say that a
    * re-run re-transcribes and can duplicate extracted memories, and only then
@@ -94,6 +98,26 @@ export async function confirmAndProcessRecording(
   input: ConfirmProcessInput,
 ): Promise<ConfirmProcessResult> {
   const { workspaceId, recordingId, t } = input;
+
+  if (input.automatic) {
+    // Retain the server's duration, credit and duplicate-processing guards.
+    // No picker/setup request may prevent a stopped capture from transcribing.
+    input.onStage?.("estimate");
+    await estimateRecording(recordingId);
+    const workspaceDefault = input.pinnedPage
+      ? null
+      : await getWorkspaceDefaultBlueprint(workspaceId)
+          .then((ws) => ws?.defaultRecordingBlueprintId ?? null)
+          .catch(() => null);
+    input.onStage?.("process");
+    const result = await processRecording(
+      recordingId,
+      recordingBlueprintToSlug(seedRecordingBlueprint(workspaceDefault)),
+      null,
+      undefined,
+    );
+    return { outcome: "queued", result };
+  }
 
   // The roster, the workspace default, and the destination pages ride alongside
   // the estimate so the dialog opens with its picker ready. Any of the three

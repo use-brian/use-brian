@@ -38,6 +38,7 @@ export type MemoryVerificationAction =
   | 'adjust_scope'
   | 'adjust_sensitivity'
   | 'edit_summary'
+  | 'edit_applicability'
   | 'delete'
 
 export type MemoryVerification = {
@@ -114,6 +115,7 @@ export async function verifyMemoryDecision(params: {
       `UPDATE memories
           SET verified_by_user_id = $2,
               verified_at = now(),
+              learning = CASE WHEN learning IS NULL THEN NULL ELSE learning || '{"state":"established","origin":"explicit","confirmed":true,"candidateUntil":null,"evidenceGroups":[]}'::jsonb END,
               updated_at = now()
         WHERE id = $1 AND valid_to IS NULL`,
       [params.memoryId, params.verifiedBy],
@@ -165,6 +167,7 @@ export async function adjustMemoryDecision(params: {
         verifiedBy: params.verifiedBy,
       }, client)
     }
+    if (params.verifications.length === 0) await recordVerification({memoryId:params.memoryId,workspaceId:params.workspaceId,verifiedBy:params.verifiedBy,action:'confirm'},client)
     const stamped = await markVerifiedDirect(updated.id, params.verifiedBy, client)
     if (!stamped) throw new Error('Superseded memory disappeared before verification stamp')
     await client.query('COMMIT')
@@ -266,6 +269,7 @@ function verificationChangedFields(action: MemoryVerificationAction): string[] {
     case 'adjust_scope': return ['scope']
     case 'adjust_sensitivity': return ['sensitivity']
     case 'edit_summary': return ['summary']
+    case 'edit_applicability': return ['learning']
     case 'delete': return ['valid_to']
     case 'confirm': return []
   }

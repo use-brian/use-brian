@@ -242,3 +242,12 @@ describe("[COMP:app-web/brain-property-fields] property-edit logic", () => {
     expect(humaniseKey("status")).toBe("Status");
   });
 });
+
+
+describe("[COMP:app-web/brain-property-fields] memory applicability edits",()=>{
+  it("keeps other constraints while reflecting a confirmed expiry change",()=>{
+    const before={learning:{version:1,state:"candidate",applicability:{activity:"client_report"},appliesUntil:null}};
+    const after=applyChangesToBody(before,{memoryLearning:{appliesUntil:"2026-12-01T00:00:00Z"}},"memory");
+    expect(after.learning).toMatchObject({state:"established",confirmed:true,applicability:{activity:"client_report"},appliesUntil:"2026-12-01T00:00:00Z"});
+  });
+});

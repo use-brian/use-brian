@@ -315,9 +315,9 @@ export function CommentThreadBody({
   const [busy, setBusy] = React.useState(false);
   // Per-turn AI-reply toggle for a manual reply: on → the assistant answers
   // (the /api/chat stream); off → the reply is a plain teammate comment posted
-  // straight to the thread with no AI turn. Defaults on (the historical
-  // behavior); the `seed` hand-off always uses the AI path regardless.
-  const [aiReply, setAiReply] = React.useState(true);
+  // straight to the thread with no AI turn. Manual replies default off;
+  // the first-message seed independently carries its explicitly chosen mode.
+  const [aiReply, setAiReply] = React.useState(false);
   // A page-composer hand-off (the `seed` prop), captured once at mount so the
   // fetch-skip + single auto-send decisions hold for THIS thread instance — the
   // popover keys the body by thread id, so a different thread is a fresh mount.
@@ -1055,7 +1055,7 @@ export function CommentThreadBody({
               </button>
             ) : null}
             <ComposerControls
-              phoneTargets={!!inline}
+              phoneTargets
               model={controls.model}
               onModelChange={controls.setModel}
               plan={controls.plan}

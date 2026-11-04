@@ -100,6 +100,7 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
     model,
     tools: new Map([...tools].filter(([_, t]) => t.isReadOnly)),
     maxTurns: options.maxWorkerTurns ?? 2, // 1 search + 1 URL read = 2 turns max
+    preserveExecutionContext: true,
   })
   // Workflow research steps persist each worker (worker_runs rows) and run the
   // research-mode discipline on the research-tier model. Chat preflight leaves
@@ -139,9 +140,9 @@ export function buildPreflightPrompt(basePrompt: string, preflightContext: strin
 
 # Pre-Researched Context
 
-The following research was already gathered for the user's request. Compose your response directly from these findings.
+The following preliminary findings were gathered for the user's request. Use successful findings without repeating completed lookups. Complete any uncovered checks using your available tools before answering.
 
-You do not have direct access to web search or URL reader tools for this turn — they were already used during research. If you genuinely need additional information not covered below, use spawnWorker to delegate the lookup.
+A failed lookup or a worker's missing tool is not evidence that a source is empty or that the user's connection is unavailable. Preserve genuine access failures, but do not turn incomplete preliminary research into the final answer when an authorized read is still available.
 
 ${preflightContext}`
 }

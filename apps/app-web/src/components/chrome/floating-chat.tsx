@@ -3023,6 +3023,7 @@ export function FloatingChat({
     onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string; liveWindowsDone?: Promise<void> }) => {
       const outcome = await captureUpload.run(file, {
         kind: "meeting",
+        automatic: true,
         ...(live ? { existingPageId: live.pageId } : {}),
         ...(live?.sessionId ? { liveSessionId: live.sessionId } : {}),
         ...(live?.liveWindowsDone ? { liveWindowsDone: live.liveWindowsDone } : {}),

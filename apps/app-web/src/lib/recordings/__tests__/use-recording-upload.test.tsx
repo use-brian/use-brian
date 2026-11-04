@@ -64,6 +64,7 @@ vi.mock("@/lib/i18n/client", () => ({
 
 import { RecordingApiError } from "@/lib/api/recordings";
 import { useRecordingUpload } from "../use-recording-upload";
+import { confirmAndProcessRecording } from "../confirm-and-process";
 
 type HookValue = ReturnType<typeof useRecordingUpload>;
 
@@ -96,6 +97,26 @@ afterEach(() => {
 });
 
 describe("[COMP:web/recording-upload] operation ownership", () => {
+  it.each([false, true])("preserves automatic transcription through upload (assembly fallback: %s)", async (fallback) => {
+    if (fallback) api.startRecordingUpload.mockRejectedValueOnce(new Error("upload failed"));
+    else api.startRecordingUpload.mockResolvedValueOnce({ recordingId: "capture-1" });
+    if (fallback) api.finalizeLiveRecording.mockResolvedValueOnce({ recordingId: "capture-1" });
+    vi.mocked(confirmAndProcessRecording).mockResolvedValueOnce({
+      outcome: "queued", result: { recordingId: "capture-1", status: "queued", jobId: "job-1" },
+    });
+    await act(async () => {
+      const outcome = await capture.run(new File(["audio"], "recording.webm"), {
+        kind: "meeting", automatic: true, existingPageId: "page-1", liveSessionId: "live-1",
+      });
+      expect(outcome.outcome).toBe("queued");
+    });
+    expect(confirmAndProcessRecording).toHaveBeenCalledWith(expect.objectContaining({
+      recordingId: "capture-1", automatic: true, pinnedPage: true,
+      ...(fallback ? { assembled: true } : {}),
+    }));
+    expect(capture.status).toBe("done");
+  });
+
   it("preserves the fallback server prerequisite error and returns failure for local retention", async () => {
     api.startRecordingUpload.mockRejectedValueOnce(Object.assign(new RecordingApiError("admission", 500), { code: "recording_upload_prepare_failed" }));
     api.finalizeLiveRecording.mockRejectedValueOnce(Object.assign(new RecordingApiError("ffmpeg unavailable", 503), { code: "recording_media_tools_unavailable" }));

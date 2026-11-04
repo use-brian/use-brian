@@ -211,6 +211,26 @@ describe("[COMP:app-web/workspace-sections] transfer ownership from the member r
     expect(document.body.textContent).not.toContain("Your personal workspace");
   });
 
+  it.each(["", "Plan"])("saves an optional workspace purpose %j from General", async (purpose) => {
+    authFetchMock.mockResolvedValue({ ok: true, json: async () => ({ ...detail(), templates: [] }) });
+    await loadSurfaceCache(workspaceDetailCacheKey("w1"), async () => detail());
+    await act(async () => { root!.render(<WorkspaceGeneralSection onWorkspaceDeleted={() => {}} />); await settle(); });
+    const heading = Array.from(container!.querySelectorAll("h3")).find(node => node.textContent === "Purpose")!;
+    const section = heading.parentElement!.parentElement!;
+    await act(async () => section.querySelector<HTMLButtonElement>("button")!.click());
+    const input = section.querySelector("textarea")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, purpose);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const save = Array.from(section.querySelectorAll("button")).find(node => node.textContent === "Save")!;
+    expect(save.disabled).toBe(false);
+    await act(async () => { save.click(); await settle(); });
+    const patch = authFetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
+    expect(patch).toBeDefined();
+    expect(JSON.parse(patch![1].body)).toEqual({ purpose });
+  });
+
   it("a non-owner gets no row menu at all", async () => {
     routeFetch();
     await mount(detail({ role: "admin" }));

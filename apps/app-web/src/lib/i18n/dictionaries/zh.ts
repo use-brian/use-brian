@@ -579,6 +579,7 @@ export const zh: Dictionary = {
     "choose": "建立前請選擇部門或明確選擇一般範圍。",
     "boundaries": "私有所有權、專案和機密等級限制仍然適用。共享不會授予管理權限或公開存取。",
     "stale": "存取上下文已變更或到期。請重新整理並審核目的地後再建立。草稿尚未提交。",
+    "unavailable": "無法載入目的地與存取設定。請檢查連線後重試。草稿尚未提交。",
     "review": "審核重新整理後的目的地",
     "setup": "工作區設定保持不變。此處無法啟用存取模式。",
     "migration": "管理員可以檢視已儲存的遷移計畫，並請 Brian 準備明確的提案。套用批次不會啟用模式。"
@@ -2536,6 +2537,7 @@ export const zh: Dictionary = {
     back: "返回",
   },
   contextScope: {
+    selectDepartment: "選擇部門",
     sharedProjects: {
       "linkedUnchanged": "{count} 個已連結的項目保留目前的存取設定。",
       "assistantNotParticipant": "此助理不是專案的參與者。請在下方的存取權面板加入,或選擇已是參與者的助理。",
@@ -2956,8 +2958,8 @@ export const zh: Dictionary = {
       title: "建立工作空間",
       back: "返回",
       namePlaceholder: "工作空間名稱",
-      purposePlaceholder: "用途：這個工作空間將共享哪些知識？",
-      purposeMinHint: "至少 10 個字。用以判斷哪些記憶歸屬工作空間、哪些屬於個人。",
+      purposePlaceholder: "描述（選填）：這個工作空間用來做什麼？",
+      purposeMinHint: "選填。幫助 Brian 區分工作空間的共享知識與個人記憶。你可以稍後在設定中新增。",
       cancel: "取消",
       submit: "建立",
       submitting: "建立中…",
@@ -3846,7 +3848,7 @@ export const zh: Dictionary = {
       copied: "已複製連結",
       duplicate: "複製",
       delete: "刪除",
-      comment: "向 AI 留言",
+      comment: "留言",
       colorText: "文字顏色",
       colorBackground: "背景",
       colorClear: "清除顏色",
@@ -5501,7 +5503,7 @@ export const zh: Dictionary = {
       "這個工作空間是做什麼用的。系統會以此判斷哪些是團隊共享的記憶、哪些屬於個人。",
     purposeEmpty: "尚未設定。",
     purposePlaceholder: "這個工作空間做什麼？",
-    purposeMinHint: "10–500 字。",
+    purposeMinHint: "選填，最多 500 字。",
     purposeSaving: "儲存中…",
     purposeSaveFailed: "儲存用途失敗",
     inviteHeading: "邀請成員",
@@ -5582,7 +5584,7 @@ export const zh: Dictionary = {
     fallbackDesc: "預設為關閉。開啟後，此端點無法回應的訊息會改由該層級的內建模型回覆，回覆中會註明此事，並以一般 Brian 用量計費。",
   },
   comments: {
-    toolbarButton: "向 AI 留言",
+    toolbarButton: "留言",
     toolbarButtonAria: "對所選內容加上評論",
     badgeAria: "{count} 則評論",
     popoverTitle: "評論",
@@ -5620,7 +5622,7 @@ export const zh: Dictionary = {
     aiReply: "AI 回覆",
     aiReplyOff: "僅限團隊",
     aiReplyHintOn: "助理會回覆這則評論",
-    aiReplyHintOff: "給團隊看的評論 — 助理不會回覆",
+    aiReplyHintOff: "給團隊看的評論。開啟 AI 回覆即可請助理回應。",
     quoteSelectionAria: "回覆所選文字",
     clearQuote: "移除引用",
     history: {
@@ -7598,9 +7600,20 @@ export const zh: Dictionary = {
     // 文案改放在 `chat.*` 之下。）
   },
   memoriesReview: {
+    learningExpired: "已過期: 不再用於回覆。",
+    learningActivity: "用途",
+    learningAnyActivity: "所有用途",
+    learningStatusUpdate: "進度更新",
+    learningClientReport: "客戶報告",
+    learningExpiryDate: "到期 00:00 UTC",
+
     title: "審核記憶",
-    description:
-      "這裡的內容都已經儲存，助理也已經在使用。審核不是儲存，而是確認：確認過的記憶會被視為更可靠，優先被取用。你也可以調整、編輯或刪除。",
+    description: "審閱助理儲存的記憶。暫定記憶在獲得支持或確認之前不會使用。你可以確認、編輯或刪除。",
+    learningEvidence: "來自 {sources} 個獨立來源的 {events} 次觀察。推測的個人偏好需要至少 2 個來源的 3 次觀察，或由你確認。",
+    learningTentative: "暫定記憶: 已儲存供審閱，不用於回覆。",
+    learningEstablished: "已確立記憶: 在適用情境中使用。",
+    learningRetired: "已停用記憶: 不再用於回覆。",
+    learningUntil: "適用至 {date}",
     loading: "載入中…",
     loadMore: "載入更多",
     loadingMore: "載入中…",
@@ -8927,8 +8940,26 @@ export const zh: Dictionary = {
     "noProjects": "沒有可用的專案"
 },
   chatApp: {
+    displayHistory: {
+      "label": "已儲存訊息",
+      "notice": "這些已儲存訊息僅供參考，不會傳送給助理。",
+      "unavailableMessage": "你目前的存取權限無法查看這則訊息。",
+      "failed": "無法檢查部分已儲存訊息。請重試以載入完整對話。",
+      "more": "顯示更多已儲存訊息",
+      "retry": "重試載入記錄"
+    },
+    legacyHistory: {
+      "title": "私人聊天記錄",
+      "notice": "你可以在這裡查看之前的訊息。開啟新聊天以繼續；這些記錄不會傳送給助理。",
+      "you": "你",
+      "assistant": "Brian",
+      "unavailableMessage": "目前的存取權限無法顯示此訊息。",
+      "more": "顯示更多訊息",
+      "loading": "正在開啟你的私人記錄",
+      "retry": "重試"
+},
     recovery: {
-      "action": "復原聊天",
+      "action": "在新聊天中繼續",
       "working": "正在準備復原",
       "title": "開啟新的私人聊天？",
       "description": "新私人聊天會使用此對話的助理、部門和專案選擇。之前的訊息、檔案和待處理操作會保留在原聊天，不會複製或重新執行。",
@@ -13167,19 +13198,35 @@ export const zh: Dictionary = {
     "cancel": "取消",
     "close": "關閉原文",
     "busy": "儲存中",
-    "scopeHint": "傳送前會檢查實際金鑰和擷取助理的權限。請透過現有金鑰覆寫或助理預設控制項指定此設定檔。",
+    "scopeHint": "建立設定檔後，前往連線將它指定給金鑰或已連線應用程式。也可以在下方設定助理預設值。",
     "detail": "閱讀原文",
     "none": "未申報",
     "delivery": "傳送",
     "archived": "已封存"
 },
   programmaticAccess: {
+    navigation: {
+      connections: "連線",
+      capture: "擷取",
+      applications: "應用程式",
+      description: "將外部工具連接到工作區。",
+      endpoint: "MCP 端點",
+      instructions: "連線說明",
+      captureHint: "管理已連線工具如何將訊息儲存至工作區。",
+      captureAdminOnly: "只有工作區管理員可以管理擷取設定檔。",
+      archive: "工程封存",
+      archiveHint: "將提示和最終回覆儲存為工程歷史，不擷取記憶。",
+      extractHint: "依照所選規則從擷取的訊息中提取記憶。",
+      manage: "管理",
+      enabled: "已啟用",
+      disabled: "已停用",
+    },
     createBlockedEnforcement:
       "此安裝尚未完成部門隔離設定，因此暫時無法將金鑰限制在某個部門。請聯絡負責維運 Use Brian 的人員進行更新，或建立不指定部門的金鑰。",
     createContextUnavailable:
       "該部門或專案已不再啟用。請選擇其他部門或專案，或建立不指定的金鑰。",
-    newKey: "新增金鑰",
-    keysTitle: "金鑰",
+    newKey: "建立金鑰",
+    keysTitle: "API 金鑰",
     lastUsedLabel: "最近使用",
     createdLabel: "建立於",
     endpointLabel: "連接用戶端",
@@ -13255,7 +13302,7 @@ export const zh: Dictionary = {
     },
     capture: {
       title: "擷取設定檔",
-      description: "以有順序的規則路由逐則 MCP 寫入。排程符合時會彙集訊息，每個時間窗只呼叫一次擷取模型。",
+      description: "選擇要從已連線工具儲存的內容及處理方式。",
       poolingHint: "設定檔可重複使用。每位助理選擇預設值，每把金鑰或已連結應用也可覆寫。",
       profileNamePlaceholder: "寫作工作流程",
       partitionLabel: "批次分區",
@@ -13264,7 +13311,7 @@ export const zh: Dictionary = {
       partitionSession: "依工作階段",
       partitionSubject: "依對象",
       createProfile: "建立設定檔",
-      empty: "尚無擷取設定檔。請建立設定檔、加入規則，再指派給助理。",
+      empty: "尚無擷取設定檔。建立後，將它指定給連線或助理。",
       profileMeta: "{partition} · {count} 條規則",
       enable: "啟用",
       disable: "停用",
@@ -13821,6 +13868,13 @@ export const zh: Dictionary = {
     clearFinished: "清除已完成",
   },
   recordings: {
+    processTranscribe: "轉錄",
+    processRetry: "重試轉錄",
+    processPreparing: "正在準備…",
+    processQueued: "轉錄已排隊。處理期間你可以繼續工作。",
+    processActionFailed: "無法開始轉錄。請重新整理頁面，並確認你仍可存取原始音訊。",
+    recoveryBody: "使用已儲存的音訊復原錄音，無需下載或重新上傳。",
+
     panelTitle: "錄音",
     panelSearchPlaceholder: "搜尋錄音",
     panelFilterLabel: "依狀態篩選",

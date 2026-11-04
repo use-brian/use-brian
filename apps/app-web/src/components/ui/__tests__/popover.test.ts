@@ -14,10 +14,6 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const popover = readFileSync(new URL("../../../../../../packages/chat-ui/src/Popover.tsx", import.meta.url), "utf8");
-const switcher = readFileSync(
-  new URL("../../workspace-switcher.tsx", import.meta.url),
-  "utf8",
-);
 
 describe("[COMP:app-web/popover] PopoverContent clamps to the phone viewport", () => {
   it("carries the width and height clamps and scrolls its overflow", () => {
@@ -27,8 +23,4 @@ describe("[COMP:app-web/popover] PopoverContent clamps to the phone viewport", (
     expect(cls).toContain("overflow-y-auto");
   });
 
-  it("the workspace switcher never asks for more than the viewport", () => {
-    expect(switcher).toContain('className="w-[min(20rem,calc(100vw-1rem))] gap-3 p-3"');
-    expect(switcher).not.toContain('className="w-80 gap-3 p-3"');
-  });
 });

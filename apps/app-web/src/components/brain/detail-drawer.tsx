@@ -2144,6 +2144,7 @@ function PrimitiveSection({
     if (r.goal) setTaskGoal(r.goal);
   }
   const summary = String(detail.body.summary ?? "");
+  const learning = detail.body.learning as (NonNullable<AdjustMemoryChanges["memoryLearning"]> & {state?:string;evidenceCount?:number;independentSources?:number}) | null | undefined;
   const memoryDetail = (detail.body.detail as string | null) ?? null;
   // CRM rows store the user-facing label in `name`; everything else uses `display_name`.
   const crmName = String(detail.body.name ?? detail.body.display_name ?? "");
@@ -2354,6 +2355,28 @@ function PrimitiveSection({
         icon={pageIcon}
         onCommit={commitTitle}
       />
+
+      {isMemory && learning && (
+        <div className="mb-3 rounded-lg border border-border p-3 text-sm text-muted-foreground">
+          <p>{learning.state === "candidate" ? review.learningTentative : learning.state === "retired" ? review.learningRetired : learning.appliesUntil && Date.parse(learning.appliesUntil) <= Date.now() ? review.learningExpired : review.learningEstablished}</p>
+          {learning.state === "candidate" && <p>{review.learningEvidence.replace("{events}", String(learning.evidenceCount ?? 0)).replace("{sources}", String(learning.independentSources ?? 0))}</p>}
+          {learning.appliesUntil && <p>{review.learningUntil.replace("{date}", new Date(learning.appliesUntil).toLocaleString())}</p>}
+        </div>
+      )}
+
+      {isMemory && learning && <>
+        <SelectProperty label={review.learningActivity} value={learning.applicability?.activity ?? "all"}
+          options={[{value:"all",label:review.learningAnyActivity},{value:"status_update",label:review.learningStatusUpdate},{value:"client_report",label:review.learningClientReport}]}
+          onCommit={value => {
+            const applicability = {...learning.applicability};
+            if (value === "all") delete applicability.activity;
+            else applicability.activity = value as "status_update" | "client_report";
+            return commitChanges({memoryLearning:{applicability}});
+          }} />
+        <DateProperty label={review.learningExpiryDate}
+          value={learning.appliesUntil ? new Date(learning.appliesUntil).toISOString().slice(0,10) : ""}
+          onCommit={value => commitChanges({memoryLearning:{appliesUntil:dateInputToIso(value)}})} />
+      </>}
 
       {/* Property list — one inline-editable row per field. */}
       <div className="flex flex-col">

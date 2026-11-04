@@ -415,8 +415,9 @@ describe('[COMP:brain/memory-evolution-worker] createMemoryEvolutionWorker', () 
   })
 
   it('emits tick_complete after a manual tick with zero workspaces', async () => {
-    // First tick query — candidate workspaces. Return empty.
+    // Candidate retirement runs before selecting workspaces.
     mockQuery.mockResolvedValueOnce({ rows: [] } as any)
+      .mockResolvedValueOnce({ rows: [] } as any)
     const events: any[] = []
     const worker = createMemoryEvolutionWorker({
       tickIntervalMs: 1_000_000,
