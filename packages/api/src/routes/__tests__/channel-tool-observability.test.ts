@@ -85,6 +85,27 @@ describe('[COMP:api/channel-tool-observability] Channel tool observability', () 
     vi.mocked(notifyBrainWriteIfMatch).mockClear()
   })
 
+  it('attributes preliminary worker reads and failures without publishing successful result content', () => {
+    const { logger, events } = makeAnalytics()
+    recordChannelToolResults({
+      ...base,
+      workerId: 'worker_1',
+      results: [
+        toolResult({ toolUseId: 'read_1', name: 'googleCalendarListEvents', content: 'Private event details' }),
+        toolResult({ toolUseId: 'read_2', name: 'imapSearchMessages', content: 'Read permission denied', isError: true }),
+      ],
+      analytics: logger, usageStore: undefined,
+    })
+    expect(events).toHaveLength(2)
+    expect(events[0].metadata).toMatchObject({
+      tool_name: 'googleCalendarListEvents', success: true, in_worker: true, worker_id: 'worker_1', phase: 'preflight',
+    })
+    expect(events[1].metadata).toMatchObject({
+      tool_name: 'imapSearchMessages', success: false, error_message: 'Read permission denied', in_worker: true,
+    })
+    expect(JSON.stringify(events)).not.toContain('Private event details')
+  })
+
   it('emits tool_executed on the pipeline channel, never the hardcoded web literal', () => {
     const { logger, events } = makeAnalytics()
     for (const channelType of ['telegram', 'slack', 'whatsapp', 'discord', 'feishu']) {

@@ -127,6 +127,25 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     expect(describe('calendar', [buildTool({ ...read, description: 'calendar ' + 'x'.repeat(12_000) })])).not.toContain('already discovered')
   })
 
+  it('does not discover an indexed source through a same-named unrelated direct tool', async () => {
+    const read = buildTool({ name: 'searchRecords', description: 'Search records', inputSchema: z.object({}),
+      isReadOnly: true, requiresConfirmation: false, execute: async () => ({ data: [] }) })
+    const remote = { name: 'remote', url: 'https://connector.example/mcp', tools: [
+      { name: 'searchRecords', description: 'Remote records', inputSchema: { type: 'object' as const, properties: {} } },
+    ] }
+    for (const source of [
+      { kind: 'local' as const, serverName: 'local', tools: [read] },
+      { kind: 'remote' as const, server: remote, serverUrl: remote.url, callMcpTool: async () => ({}) },
+    ]) {
+      const tools = createMcpSearchTools({ index: buildToolIndex([source]), settingsStore: makeFakeSettingsStore(),
+        assistantId: 'a1', userId: 'u1', exposeLocalReadTools: true })
+      const search = tools.find(tool => tool.name === 'mcp_search')!
+      // Injection preserves this existing registry entry over the adapter.
+      const context = { ...ctx, requestTools: new Map([[read.name, { ...read }]]) }
+      expect(String((await search.execute({ query: 'searchRecords' }, context)).data)).toContain('No tools found')
+    }
+  })
+
   it('exposes only unique visible local read schemas and preserves capability and input guards', async () => {
     const execute = vi.fn(async () => ({ data: [] }))
     const read = buildTool({ name: 'calendarRead', description: 'Read events', inputSchema: z.object({ from: z.string() }),

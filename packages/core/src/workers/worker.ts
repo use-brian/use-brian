@@ -177,6 +177,9 @@ export type WorkerOptions = {
   model: string
   tools: Map<string, Tool> // restricted tool set
   maxTurns?: number
+  /** In-process preflight reads belong to the same admitted turn. Preserve
+   * its pinned connector authority; ordinary delegated workers keep a child context. */
+  preserveExecutionContext?: boolean
   /** Forward worker query loop events (tool_start, tool_result, etc.) to the caller. */
   onEvent?: (workerId: string, event: QueryEvent) => void
   /** Forward each worker run's accumulated LLM usage (the terminal-once
@@ -475,6 +478,7 @@ export function createWorkerManager(options: WorkerOptions) {
   ): Promise<WorkerResult> {
     const description = displayLabel ?? prompt.slice(0, 100)
     const abortController = new AbortController()
+    const workerAbortSignal = AbortSignal.any([abortController.signal, context.abortSignal])
     const isResume = !!resumeHistory && resumeHistory.length > 0
     // Row identity for the persistence layer. A rehydrated worker
     // reuses the existing row's id so recordTurn / recordCompletion
@@ -486,6 +490,13 @@ export function createWorkerManager(options: WorkerOptions) {
     let workerTools = requestTools
       ? new Map([...requestTools].filter(([_, t]) => t.isReadOnly))
       : options.tools
+    // Governed connector reads may defer their schemas in the parent. Workers
+    // have no deferred-schema selector, so expose those read schemas here.
+    workerTools = new Map([...workerTools]
+      .filter(([, tool]) => tool.isReadOnly)
+      .map(([name, tool]) => [name, tool.deferredSchemaOnly
+        ? { ...tool, deferredSchemaOnly: false }
+        : tool]))
 
     const sessionConfig = context.sessionId
       ? sessionConfigs.get(context.sessionId)
@@ -646,7 +657,9 @@ export function createWorkerManager(options: WorkerOptions) {
         let urlReaderCalls = 0
         let webSearchCalls = 0
 
-        const workerExecution = context.executionContext
+        const workerExecution = options.preserveExecutionContext
+          ? context.executionContext
+          : context.executionContext
           ? createExecutionContext({
               identity: {
                 kind: 'delegated',
@@ -661,7 +674,7 @@ export function createWorkerManager(options: WorkerOptions) {
               authority: context.executionContext.security.authority,
               lifecycle: {
                 ...context.executionContext.lifecycle,
-                abortSignal: abortController.signal,
+                abortSignal: workerAbortSignal,
               },
               surface: context.executionContext.surface,
               attribution: context.executionContext.attribution,
@@ -687,7 +700,8 @@ export function createWorkerManager(options: WorkerOptions) {
             // A worker acts for the turn that spawned it: if a human attends
             // that turn, they attend the worker's writes too (D13).
             attended: isAttendedTurn(context),
-            abortSignal: abortController.signal,
+            abortSignal: workerAbortSignal,
+            requestTools: workerTools,
             // Workers must NOT have workerManager — otherwise Phase 4b
             // triggers inside the worker and deadlocks waiting for sibling workers.
             workerManager: undefined,
