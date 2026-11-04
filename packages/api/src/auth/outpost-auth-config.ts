@@ -1,6 +1,8 @@
 import { domainToASCII } from 'node:url'
 
 export type OutpostAuthConfigInput = {
+  OUTPOST_LOCAL_OWNER_USER_ID?: string
+  OUTPOST_LOCAL_OWNER_EMAIL?: string
   OUTPOST_AUTH_EMAIL_ENABLED?: boolean
   OUTPOST_AUTH_OIDC_ENABLED?: boolean
   OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED?: boolean
@@ -22,6 +24,7 @@ export type OutpostAuthConfigInput = {
 }
 
 export type OutpostAuthConfig = {
+  localOwner?: { userId: string; email: string }
   emailEnabled: boolean
   oidcEnabled: boolean
   oidc?: {
@@ -70,6 +73,18 @@ export function validateOutpostAuthConfig(
   nodeEnv: string,
   input: OutpostAuthConfigInput,
 ): OutpostAuthConfig | undefined {
+  let localOwner: OutpostAuthConfig['localOwner']
+  if (input.OUTPOST_LOCAL_OWNER_USER_ID !== undefined || input.OUTPOST_LOCAL_OWNER_EMAIL !== undefined) {
+    const userId = input.OUTPOST_LOCAL_OWNER_USER_ID?.trim().toLowerCase()
+    const email = input.OUTPOST_LOCAL_OWNER_EMAIL?.trim().toLowerCase()
+    if (profile !== 'outpost' || !userId || !UUID_RE.test(userId) || !email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new Error('OUTPOST_LOCAL_OWNER_USER_ID and OUTPOST_LOCAL_OWNER_EMAIL require a valid Outpost owner UUID and email together')
+    }
+    if (input.OUTPOST_AUTH_EMAIL_ENABLED === false || input.OUTPOST_AUTH_OIDC_ENABLED === true) {
+      throw new Error('Outpost local owner adoption requires email authentication enabled and OIDC disabled')
+    }
+    localOwner = { userId, email }
+  }
   if (profile !== 'outpost') return undefined
 
   const emailEnabled = input.OUTPOST_AUTH_EMAIL_ENABLED ?? true
@@ -89,7 +104,7 @@ export function validateOutpostAuthConfig(
     }
   }
 
-  if (!oidcEnabled) return { emailEnabled, oidcEnabled }
+  if (!oidcEnabled) return { emailEnabled, oidcEnabled, ...(localOwner ? { localOwner } : {}) }
 
   requireValues(input, [
     'OUTPOST_OIDC_ISSUER_URL',

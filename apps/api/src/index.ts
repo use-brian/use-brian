@@ -84,6 +84,8 @@ const env: OpenApiEnv = {
   CAMPAIGN_DKIM_PRIVATE_KEY: process.env.CAMPAIGN_DKIM_PRIVATE_KEY,
   AUTHED_APP_URL: process.env.AUTHED_APP_URL,
   AUTH_PORTAL_URL: process.env.AUTH_PORTAL_URL,
+  OUTPOST_LOCAL_OWNER_USER_ID: process.env.OUTPOST_LOCAL_OWNER_USER_ID,
+  OUTPOST_LOCAL_OWNER_EMAIL: process.env.OUTPOST_LOCAL_OWNER_EMAIL,
   OUTPOST_AUTH_EMAIL_ENABLED: !['false', '0'].includes(
     (process.env.OUTPOST_AUTH_EMAIL_ENABLED ?? '').trim().toLowerCase(),
   ),
