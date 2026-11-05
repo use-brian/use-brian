@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowUpCircle, CircleAlert, RefreshCw } from "lucide-react";
 
 import { desktopBridge, type DesktopUpdateStatus } from "@/lib/desktop-auth-source";
+import { useOptionalAppSession } from "@/components/app-session";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import type { OfflineSyncState } from "@/lib/offline/use-offline-sync";
@@ -23,6 +24,8 @@ export function WorkspaceStatus({ offlineState, sidebarOpen }: {
   offlineState: OfflineSyncState;
   sidebarOpen: boolean;
 }) {
+  const admission = useOptionalAppSession();
+  if (admission?.state.connection === "offline") offlineState = { ...offlineState, offline: true };
   const t = useT().docPage;
   const [status, setStatus] = useState<DesktopUpdateStatus | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -103,7 +106,7 @@ export function WorkspaceStatus({ offlineState, sidebarOpen }: {
         <Tooltip open={tooltipOpen && !detailsOpen} onOpenChange={setTooltipOpen} side="right" sideOffset={4} delay={100} appearance="rail" label={<span className="block max-w-64 whitespace-normal">{label}{secondaryLabel ? <span className="mt-1 block text-white/70">{secondaryLabel}</span> : null}</span>}>
           <PopoverTrigger aria-label={status ? `${label}. ${secondaryLabel}` : label} className={cn(
             "flex h-11 max-w-full items-center gap-2 rounded-lg px-3 hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 md:h-7 md:w-11 md:justify-center md:px-0",
-            status?.phase === "ready" && !hasSyncNotice && "bg-primary/10 hover:bg-primary/15",
+            status?.phase === "ready" && !hasSyncNotice && "bg-muted hover:bg-accent",
             !sidebarOpen && "max-md:bg-background max-md:shadow-sm max-md:ring-1 max-md:ring-border",
           )}>
             {hasSyncNotice ? (

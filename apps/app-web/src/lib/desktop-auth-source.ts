@@ -1,3 +1,4 @@
+import { notifySessionLogout } from "@/lib/session-events";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Desktop auth source — the Bearer-token half of the auth seam.
@@ -102,7 +103,16 @@ export type DesktopUpdateStatus =
   | { phase: "downloading"; version: string; percent: number }
   | { phase: "ready"; version: string };
 
+export type DesktopSignInState = { phase: "idle" | "browser" | "exchanging" | "error"; appUrl?: string };
 export interface DesktopBridge {
+  onSessionRestored?: (callback: () => void) => () => void;
+  onSessionCleared?: (callback: (reason: "logout" | "expired") => void) => () => void;
+  getSignInState?: () => Promise<DesktopSignInState>;
+  onSignInState?: (callback: (state: DesktopSignInState) => void) => () => void;
+  reopenSignIn?: () => void;
+  cancelSignIn?: () => void;
+  /** Show the main app account controls after session rejection, without starting OAuth. */
+  showAccounts?: () => void;
   /** Pair resolves successfully only once the embedded browser relay is ready. */
   browserControl?: (message: DesktopBrowserControlMessage) => Promise<{ ok: boolean; controlEpoch?: number; hasControl?: boolean; connected?: boolean; automaticBlocked?: boolean; browserProfileId?: string; workspaceId?: string }>;
   /** Host OS reported by Electron (`darwin`, `win32`, or `linux`). */
@@ -150,7 +160,7 @@ export interface DesktopBridge {
    * (null = revert to the primary-display default).
    */
   setCaptureSource?: (id: string | null) => void;
-  signIn: () => void;
+  signIn: (options?: { userId?: string }) => void;
   /**
    * Shell self-update status for the footer chip. Absent in browsers and in
    * shells older than the chip; null when there is nothing to show.
@@ -361,8 +371,8 @@ export function isDesktopAuth(): boolean {
 /**
  * When running inside the Electron desktop shell (thin OR bundled), route logout
  * through the shell: it clears its own session in place (cookie jar in the thin
- * shell, the safeStorage token in bundled mode) and reloads to the sign-in
- * landing. Returns `true` when the shell handled it, so the web logout handlers
+ * shell, the safeStorage token in bundled mode) and reloads the main app
+ * account view. Returns `true` when the shell handled it, so the web logout handlers
  * can skip the browser/primary-auth path entirely.
  *
  * This MUST take precedence over `buildPrimaryAuthUrl(...)`: in Electron the
@@ -378,6 +388,7 @@ export function desktopSignOut(): boolean {
   const signOut =
     desktopBridge()?.signOut;
   if (typeof signOut !== "function") return false;
+  notifySessionLogout();
   signOut();
   return true;
 }
@@ -490,6 +501,8 @@ export const desktopAuthSource: AuthSource = {
   },
 
   redirectToLogin() {
-    desktopBridge()?.signIn?.();
+    const bridge = desktopBridge();
+    if (bridge?.showAccounts) bridge.showAccounts();
+    else bridge?.signIn?.();
   },
 };

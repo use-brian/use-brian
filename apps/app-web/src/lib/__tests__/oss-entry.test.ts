@@ -92,3 +92,10 @@ describe("[COMP:app-web/local-session-route] ossSignedOutRedirect", () => {
     expect(ossSignedOutRedirect("/w/abc")).toBeNull();
   });
 });
+
+
+describe("[COMP:app-web/oss-entry] normalized return isolation", () => {
+  it.each(["/\\outside.example/path", "/\noutside.example", "/\t/outside.example", "///outside.example", "/" + "x".repeat(4096)])("rejects %j", raw => {
+    expect(sanitizeNext(raw)).toBe("/");
+  });
+});

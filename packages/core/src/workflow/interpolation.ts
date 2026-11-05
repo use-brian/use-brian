@@ -23,7 +23,7 @@
  * [COMP:workflow/interpolation]
  */
 
-const TOKEN = /\{\{\s*([a-zA-Z][a-zA-Z0-9_.]*)\s*\}\}/g
+const TOKEN = /\{\{\s*([a-zA-Z][a-zA-Z0-9_.]*)(?:\s*\|\s*preview:([1-9][0-9]{0,2}|1000))?\s*\}\}/g
 
 export type InterpolationScope = {
   /** Successful deterministic tool output, available only to its notification. */
@@ -40,10 +40,15 @@ export type InterpolationScope = {
 
 /** Substitute `{{...}}` tokens in a single string. */
 export function interpolateString(s: string, scope: InterpolationScope): string {
-  return s.replace(TOKEN, (_, path: string) => {
+  return s.replace(TOKEN, (_, path: string, preview?: string) => {
     const v = resolvePath(scope, path)
     if (v === undefined || v === null) return ''
-    if (typeof v === 'string') return v
+    if (typeof v === 'string') {
+      if (!preview) return v
+      const chars = Array.from(v.replace(/\s+/gu, ' ').trim())
+      const limit = Number(preview)
+      return chars.length <= limit ? chars.join('') : chars.slice(0, limit - 1).join('').trimEnd() + '…'
+    }
     if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint') return String(v)
     try {
       return JSON.stringify(v)

@@ -93,6 +93,7 @@ describe("[COMP:app-web/site-route] Custom-domain host classification", () => {
     it("guards the operator prefixes exactly as the pre-custom-domain matcher", () => {
       expect(isGuardedPath("/teams")).toBe(true);
       expect(isGuardedPath("/redeem")).toBe(true);
+      expect(isGuardedPath("/oauth/authorize")).toBe(true);
       expect(isGuardedPath("/w")).toBe(true);
       expect(isGuardedPath("/w/ws-1/p/abc")).toBe(true);
       expect(isGuardedPath("/settings/profile")).toBe(true);
@@ -108,6 +109,7 @@ describe("[COMP:app-web/site-route] Custom-domain host classification", () => {
       expect(isGuardedPath("/s/product/roadmap")).toBe(false);
       expect(isGuardedPath("/open")).toBe(false);
       expect(isGuardedPath("/login")).toBe(false);
+      expect(isGuardedPath("/oauth/callback")).toBe(false);
       expect(isGuardedPath("/site/docs.acme.com")).toBe(false);
       // prefix must be a whole segment: /workflows is not /workflow
       expect(isGuardedPath("/workflowish")).toBe(false);

@@ -1,7 +1,8 @@
+import { enqueueFileIngestJob } from '../file-ingest-jobs-store.js'
 import { boundScopeSource, ContextScopeAccumulator, createFileTools, type ToolContext } from '@use-brian/core'
 import { createFilesApi } from '../../files/files-api.js'
 import { createArtifactPromoter } from '../../files/artifact-promote.js'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import type { AccessContext, WorkspaceFileCreateInput } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease } from '../client.js'
@@ -477,5 +478,116 @@ describe('[COMP:retrieval/provenance] schema-safe primitive probes', () => {
     const link = await createDbEntityLinksStore().create({workspaceId:f.workspaceId,sourceKind:'entity',sourceId:source.id,targetKind:'entity',targetId:target.id,edgeType:'works_at',source:'user',userId:f.userId})
     const result = await createDbProvenanceStore().provenance({workspaceId:f.workspaceId,userId:f.userId,assistantId:'',assistantKind:'primary',clearance:'confidential'}, {row_id:link.id})
     expect(result?.data).toMatchObject({primitive:'entity_links',authorship:{created_by_user_id:'',created_by_assistant_id:null},supersession:{preceded_by:null,superseded_by:null}})
+  })
+})
+
+describe('[COMP:files/upload-identity] canonical upload identity', () => {
+  it('converges concurrent document and ingestion uploads on one file and one stored object', async () => {
+    const f = await fixture('legacy'), blobs = new Map<string, Buffer>()
+    const gcs = { writeBlob: async (key:string,bytes:Buffer) => { blobs.set(key,bytes) }, deleteBlob: async (key:string) => { blobs.delete(key) } }
+    const api = createFilesApi({store:createDbWorkspaceFilesStore(),gcs:gcs as never,bucket:'fixture',auditStore:{append:async()=>{}} as never})
+    const ctx = {workspaceId:f.workspaceId,userId:f.userId}
+    const params = {mime:'application/pdf',bytes:Buffer.from('identical upload'),reusableUploadName:'notes.pdf'}
+    const results = await Promise.all([
+      api.writeBytes(ctx,{...params,path:'/doc/unique-notes.pdf'}),
+      api.writeBytes(ctx,{...params,path:'/uploads/notes.pdf'}),
+    ])
+    expect(results.every(r=>r.ok)).toBe(true)
+    expect(new Set(results.map(r=>r.ok?r.value.id:'error')).size).toBe(1)
+    expect(await f.rows()).toHaveLength(1)
+    expect(blobs.size).toBe(1)
+    const access={workspaceId:f.workspaceId,userId:f.userId,assistantId:'',assistantKind:'primary' as const}
+    const original=results[0].ok?results[0].value:null
+    if(!original)throw new Error('missing upload')
+    // The worker stamps source_episode_id after successful decomposition.
+    await pool.query('UPDATE workspace_files SET source_episode_id=$2 WHERE id=$1',[original.id,randomUUID()])
+    expect((await createDbWorkspaceFilesStore().searchByText(access,{})).map(r=>r.id)).toContain(original.id)
+    const again = await api.writeBytes(ctx,{...params,path:'/doc/another-notes.pdf'})
+    expect(again.ok && again.value.id).toBe(original.id)
+    expect(blobs.size).toBe(1)
+  })
+
+  it('reuses a document attachment for ingestion and exposes it after explicit analysis', async () => {
+    const f=await fixture('legacy'),store=createDbWorkspaceFilesStore(),writes=vi.fn(async()=>{})
+    const api=createFilesApi({store,gcs:{writeBlob:writes,deleteBlob:async()=>{}} as never,bucket:'fixture',auditStore:{append:async()=>{}} as never})
+    const ctx={workspaceId:f.workspaceId,userId:f.userId}
+    const p={mime:'application/pdf',bytes:Buffer.from('pdf'),reusableUploadName:'notes.pdf'}
+    const original=await api.writeBytes(ctx,{...p,path:'/doc/attachment-notes.pdf'})
+    const reused=await api.writeBytes(ctx,{...p,path:'/uploads/notes.pdf'})
+    expect(reused).toEqual(original)
+    if(!original.ok)throw new Error('missing upload')
+    const access={...ctx,assistantId:'',assistantKind:'primary' as const}
+    expect(await store.searchByText(access,{})).toEqual([])
+    await pool.query('UPDATE workspace_files SET source_episode_id=$2 WHERE id=$1',[original.value.id,randomUUID()])
+    expect((await enqueueFileIngestJob({fileId:original.value.id,workspaceId:f.workspaceId,actingUserId:f.userId,onlyIfUnprocessed:true})).enqueued).toBe(false)
+    expect((await store.searchByText(access,{})).map(r=>r.id)).toContain(original.value.id)
+    expect((await store.listIndexRanked(access,50)).map(r=>r.id)).toContain(original.value.id)
+    expect(writes).toHaveBeenCalledTimes(1)
+  })
+
+  it('resolves the ready Simple default before same-path and at-quota reuse', async () => {
+    const f=await fixture(),store=createDbWorkspaceFilesStore(),gcs={writeBlob:vi.fn(async()=>{}),deleteBlob:vi.fn(async()=>{})}
+    let cap=100
+    const api=createFilesApi({store,gcs:gcs as never,bucket:'fixture',auditStore:{append:async()=>{}} as never,storageLimitBytesFor:async()=>cap})
+    const ctx={workspaceId:f.workspaceId,userId:f.userId}
+    const p={path:'/uploads/notes.pdf',mime:'application/pdf',bytes:Buffer.from('pdf'),reusableUploadName:'notes.pdf'}
+    const first=await api.writeBytes(ctx,p)
+    expect(first.ok && first.value.compartments).toEqual([f.key])
+    cap=0
+    expect(await api.writeBytes(ctx,p)).toEqual(first)
+    expect(await api.writeBytes(ctx,{...p,path:'/uploads/another-path.pdf'})).toEqual(first)
+    expect(gcs.writeBlob).toHaveBeenCalledTimes(1)
+    expect(await f.rows()).toHaveLength(1)
+  })
+
+  it('rechecks a fresh enqueue snapshot after waiting for the worker completion stamp', async () => {
+    const f=await fixture('legacy')
+    const file=await f.create({path:'/uploads/queued.txt'})
+    const worker=await pool.connect()
+    let queued:ReturnType<typeof enqueueFileIngestJob>|undefined
+    try {
+      await worker.query('BEGIN')
+      await worker.query('UPDATE workspace_files SET source_episode_id=$2 WHERE id=$1',[file.id,randomUUID()])
+      queued=enqueueFileIngestJob({fileId:file.id,workspaceId:f.workspaceId,actingUserId:f.userId,onlyIfUnprocessed:true})
+      // Prove the enqueue is actually waiting on the worker's file lock.
+      let waiting=false
+      for(let attempt=0;attempt<100 && !waiting;attempt++) {
+        waiting=(await pool.query(`SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+          AND wait_event_type='Lock' AND query LIKE 'INSERT INTO file_ingest_jobs%') AS waiting`)).rows[0].waiting
+        if(!waiting)await new Promise(resolve=>setTimeout(resolve,10))
+      }
+      expect(waiting).toBe(true)
+      await worker.query('COMMIT')
+      expect(await queued).toEqual({enqueued:false,jobId:null})
+    } finally {
+      await worker.query('ROLLBACK')
+      worker.release()
+      await queued
+    }
+  })
+
+  it('separates uploader, bytes, filename and sensitivity; metadata cannot forge identity', async () => {
+    const f = await fixture('legacy')
+    const api = createFilesApi({store:createDbWorkspaceFilesStore(),gcs:{writeBlob:async()=>{},deleteBlob:async()=>{}} as never,bucket:'fixture',auditStore:{append:async()=>{}} as never})
+    const ctx = {workspaceId:f.workspaceId,userId:f.userId}
+    const p = {mime:'application/pdf',bytes:Buffer.from('pdf'),reusableUploadName:'notes.pdf'}
+    const first=await api.writeBytes(ctx,{...p,path:'/doc/first.pdf'})
+    for (const [i,patch] of [{bytes:Buffer.from('other')},{reusableUploadName:'renamed.pdf'},{sensitivity:'confidential' as const}].entries()) {
+      const result=await api.writeBytes(ctx,{...p,...patch,path:`/doc/variant-${i}.pdf`})
+      expect(result.ok && first.ok && result.value.id!==first.value.id).toBe(true)
+    }
+    const other=await api.writeBytes({...ctx,userId:f.member},{...p,path:'/doc/other-uploader.pdf'})
+    expect(other.ok && first.ok && other.value.id!==first.value.id).toBe(true)
+    for(const [i,scope] of [{writeCompartments:[f.key]},{writeCompartments:[f.otherKey]},{writeProjectIds:[f.projectId]}].entries()) {
+      const separated=await api.writeBytes({...ctx,...scope},{...p,path:`/doc/scope-${i}.pdf`})
+      expect(separated.ok && first.ok && separated.value.id!==first.value.id).toBe(true)
+    }
+    expect(await f.rows()).toHaveLength(8)
+    if(!first.ok)throw new Error('missing original')
+    const forged=createHash('sha256').update(JSON.stringify('notes.pdf')).update('\0').update(Buffer.from('forged')).digest('hex')
+    await updateWorkspaceFileMeta(f.userId,f.workspaceId,first.value.id,{metadata:{uploadIdentity:forged,upload_identity:forged}})
+    const distinct=await api.writeBytes(ctx,{...p,path:'/doc/forged-metadata.pdf',bytes:Buffer.from('forged')})
+    expect(distinct.ok && distinct.value.id!==first.value.id).toBe(true)
+    await expect(pool.query('UPDATE workspace_files SET upload_identity=$2 WHERE id=$1',[first.value.id,'a'.repeat(64)])).rejects.toThrow('file_upload_identity_immutable')
   })
 })

@@ -1220,6 +1220,9 @@ export async function advanceWorkflowRun(
       if (step.storeOutputAs && step.type !== 'branch' && step.type !== 'wait') {
         vars = { ...vars, [step.storeOutputAs]: dispatchResult.output }
       }
+      if (dispatchResult.delivery?.status === 'delivered' && dispatchResult.delivery.messageId) {
+        vars = { ...vars, [`__deliveryMsg_${step.id}`]: dispatchResult.delivery.messageId }
+      }
       // Seed successors (unless the run is already failing — no new work).
       if (!firstFailure && !pausedOutcome) {
         for (const nextId of runtimeSuccessors(step, dispatchResult, orderedIds)) {

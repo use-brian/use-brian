@@ -259,6 +259,7 @@ export const ToolCallDeliverySchema = z.object({
   channelType: z.enum(['telegram', 'slack', 'whatsapp', 'msteams', 'custom', 'feishu']),
   channelId: z.string().min(1).max(256).refine(value => !value.includes('{{') && !value.includes('}}'), 'Tool delivery requires a literal destination.'),
   channelIntegrationId: z.string().uuid().optional(),
+  thread: z.object({ fromStep: z.string().min(1).max(64) }).strict().optional(),
 }).strict()
 
 const toolCallStepSchema = z.object({
@@ -858,7 +859,7 @@ const legacyWorkflowDefinitionSchema = z
       }
     }
 
-    // `deliver.thread.fromStep` must reference a DIFFERENT assistant_call step
+    // `deliver.thread.fromStep` must reference a DIFFERENT delivery step
     // that delivers to the SAME channel — the thread parent is the message
     // that step posted this run. Also platform-gated: Slack (thread_ts),
     // Telegram (reply), and Feishu (reply_in_thread) support threaded replies. Mirrors the page.fromStep
@@ -867,7 +868,7 @@ const legacyWorkflowDefinitionSchema = z
     const deliverSteps = new Map(
       def.steps
         .filter((s) =>
-          s.type === 'assistant_call' &&
+          (s.type === 'assistant_call' || s.type === 'tool_call') &&
           s.deliver !== undefined &&
           'channelId' in s.deliver,
         )
@@ -879,7 +880,7 @@ const legacyWorkflowDefinitionSchema = z
     )
     for (const [i, step] of def.steps.entries()) {
       if (
-        step.type !== 'assistant_call' ||
+        (step.type !== 'assistant_call' && step.type !== 'tool_call') ||
         !step.deliver ||
         !('thread' in step.deliver) ||
         !step.deliver.thread
@@ -905,7 +906,7 @@ const legacyWorkflowDefinitionSchema = z
       if (!parent) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `step "${step.id}".deliver.thread.fromStep references "${ref}", which is not an assistant_call step with a \`deliver\` target — the thread parent must be a message an earlier deliver-step posts this run.`,
+          message: `step "${step.id}".deliver.thread.fromStep references "${ref}", which is not a delivery step with a \`deliver\` target — the thread parent must be a message an earlier deliver-step posts this run.`,
           path: ['steps', i, 'deliver', 'thread', 'fromStep'],
         })
       } else if (
@@ -943,7 +944,7 @@ const legacyWorkflowDefinitionSchema = z
       } else if (!parent) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `failureDelivery.thread.fromStep references "${ref}", which is not an assistant_call step with a deliver target.`,
+          message: `failureDelivery.thread.fromStep references "${ref}", which is not a delivery step with a deliver target.`,
           path: ['failureDelivery', 'thread', 'fromStep'],
         })
       } else if (

@@ -30,13 +30,20 @@ export async function deliverToolCallNotification(params: {
   const text = sanitizeDeliveryText(interpolateString(step.deliveryText, { ...params.scope, prev: params.output }))
   if (!text.trim()) return { status: 'skipped', channelType, reason: 'empty_text' }
   if (!deps.deliverToChannel) return { status: 'skipped', channelType, reason: 'not_wired' }
+  const { thread, ...destination } = target.data
+  const parent = thread ? params.scope.vars[`__deliveryMsg_${thread.fromStep}`] : undefined
+  if (thread && (!['slack', 'telegram', 'feishu'].includes(channelType) || typeof parent !== 'string' || !parent)) {
+    return { status: 'failed', channelType, error: 'Thread parent delivery receipt is unavailable; no top-level message was sent.' }
+  }
   try {
-    return await deps.deliverToChannel({
+    const outcome = await deps.deliverToChannel({
       workspaceId: run.workspaceId, assistantId: params.assistantId,
-      userId: run.triggeredBy ?? workflow.createdBy, ...target.data, text,
+      userId: run.triggeredBy ?? workflow.createdBy, ...destination, text,
+      ...(thread ? { threadRef: parent as string } : {}),
       scopeEvidence: structuredClone(params.scopeEvidence),
       publication: { runId: run.id, stepId: step.id },
     })
+    return outcome.status === 'delivered' && thread ? { ...outcome, thread: 'applied' } : outcome
   } catch (error) {
     return { status: 'failed', channelType, error: error instanceof Error ? error.message : String(error) }
   }

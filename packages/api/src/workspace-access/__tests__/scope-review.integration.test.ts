@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import express from 'express'
 import type { PoolClient } from 'pg'
 import request from 'supertest'
-import { afterAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { getPool, getAppPool } from '../../db/client.js'
 import { createMemory } from '../../db/memories.js'
 import { createTask } from '../../db/tasks.js'
@@ -396,30 +396,40 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
     expect((await f.apply(saved)).status).toBe('stale')
     expect((await pool.query('SELECT compartments FROM memories WHERE id=$1',[root.id])).rows[0].compartments).toEqual([])
   })
-  it.each([1,2])('refuses more than 500 unique descendants across %s selected roots without creating a job',async(rootCount)=>{
-    const f=await fixture(),roots:string[]=[]
-    for(let i=0;i<rootCount;i++){
-      const root=await f.create();roots.push(root.id)
-      // This exercises impact bounds, not hundreds of independent memory admissions.
-      // Copy the canonical root's private envelope; keep every database trigger enabled.
-      const outputs=(await pool.query<{id:string}>(`INSERT INTO memories(
-        workspace_id,user_id,assistant_id,created_by_user_id,summary,sensitivity,scope,compartments,project_ids)
-        SELECT workspace_id,user_id,assistant_id,created_by_user_id,summary,sensitivity,scope,compartments,project_ids
-          FROM memories CROSS JOIN generate_series(1,$2::int) WHERE id=$1 RETURNING id`,
-      [root.id,rootCount===1?501:251])).rows.map(row=>row.id)
-      const derivations=(await pool.query<{id:string}>(`INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,producer,user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
-        SELECT workspace_id,'memory',id,scope_version::text,'impact-bound-fixture',user_id,assistant_id,sensitivity,compartments,project_ids,1 FROM memories WHERE id=ANY($1::uuid[]) RETURNING id`,[outputs])).rows.map(row=>row.id)
-      await pool.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
-        SELECT $1,id,'memory',$2,$3 FROM unnest($4::uuid[]) AS id`,[f.workspaceId,root.id,root.scopeVersion,derivations])
-    }
-    const reach=(await pool.query<{root:string;count:number}>(`SELECT source_id AS root,count(DISTINCT d.resource_id)::int AS count
-      FROM scope_derivation_sources s JOIN scope_derivations d ON d.id=s.derivation_id AND d.workspace_id=s.workspace_id
-      WHERE s.workspace_id=$1 AND s.source_kind='memory' AND s.source_id=ANY($2::uuid[])
-      GROUP BY source_id`,[f.workspaceId,roots])).rows
-    expect(reach).toHaveLength(rootCount)
-    expect(reach.every(row=>row.count===(rootCount===1?501:251))).toBe(true)
-    await expect(f.preview(roots,'assign_team')).rejects.toMatchObject({code:'scope_review_impact_too_large'})
-    expect((await pool.query('SELECT id FROM workspace_scope_reviews WHERE workspace_id=$1',[f.workspaceId])).rows).toHaveLength(0)
+  describe.each([1,2])('impact limit with %s selected roots',rootCount=>{
+    let f:Awaited<ReturnType<typeof fixture>>
+    const roots:string[]=[]
+    beforeAll(async()=>{
+      f=await fixture()
+      for(let i=0;i<rootCount;i++){
+        const root=await f.create();roots.push(root.id)
+        // This exercises impact bounds, not hundreds of independent memory admissions.
+        // Copy the canonical root's private envelope; keep every database trigger enabled.
+        const outputs=(await pool.query<{id:string}>(`INSERT INTO memories(
+          workspace_id,user_id,assistant_id,created_by_user_id,summary,sensitivity,scope,compartments,project_ids)
+          SELECT workspace_id,user_id,assistant_id,created_by_user_id,summary,sensitivity,scope,compartments,project_ids
+            FROM memories CROSS JOIN generate_series(1,$2::int) WHERE id=$1 RETURNING id`,
+        [root.id,rootCount===1?501:251])).rows.map(row=>row.id)
+        const derivations=(await pool.query<{id:string}>(`INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,producer,user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
+          SELECT workspace_id,'memory',id,scope_version::text,'impact-bound-fixture',user_id,assistant_id,sensitivity,compartments,project_ids,1 FROM memories WHERE id=ANY($1::uuid[]) RETURNING id`,[outputs])).rows.map(row=>row.id)
+        // Trigger-heavy provenance construction has its own fixture budget.
+        // Bound each statement without relaxing the interactive query deadline.
+        for(let offset=0;offset<derivations.length;offset+=25){
+          await pool.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+            SELECT $1,id,'memory',$2,$3 FROM unnest($4::uuid[]) AS id`,[f.workspaceId,root.id,root.scopeVersion,derivations.slice(offset,offset+25)])
+        }
+      }
+    },120_000)
+    it(`refuses more than 500 unique descendants across ${rootCount} selected roots without creating a job`,async()=>{
+      const reach=(await pool.query<{root:string;count:number}>(`SELECT source_id AS root,count(DISTINCT d.resource_id)::int AS count
+        FROM scope_derivation_sources s JOIN scope_derivations d ON d.id=s.derivation_id AND d.workspace_id=s.workspace_id
+        WHERE s.workspace_id=$1 AND s.source_kind='memory' AND s.source_id=ANY($2::uuid[])
+        GROUP BY source_id`,[f.workspaceId,roots])).rows
+      expect(reach).toHaveLength(rootCount)
+      expect(reach.every(row=>row.count===(rootCount===1?501:251))).toBe(true)
+      await expect(f.preview(roots,'assign_team')).rejects.toMatchObject({code:'scope_review_impact_too_large'})
+      expect((await pool.query('SELECT id FROM workspace_scope_reviews WHERE workspace_id=$1',[f.workspaceId])).rows).toHaveLength(0)
+    })
   })
   it('accounts for shared descendants already held by an earlier page of the same job',async()=>{
     const f=await fixture(),ids:string[]=[]

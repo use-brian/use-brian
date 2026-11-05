@@ -1,7 +1,7 @@
 /**
  * API origin for app-web's own SERVER-side calls to the API service — the
  * machine-to-machine hops: the proxy's token refresh, the `/api/auth/*` route
- * handlers, `lib/server-fetch.ts`. Nothing here is ever rendered.
+ * handlers. Nothing here is ever rendered.
  *
  * Why this is not `API_URL`: those two origins are the same in a cloud deploy
  * and deliberately different in a self-host. On a single-box deploy app-web and

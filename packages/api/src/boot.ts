@@ -236,6 +236,7 @@ import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
 import { createWorkspaceChatHandoffStore } from './db/workspace-chat-handoff-store.js'
 import { authRoutes } from './routes/auth.js'
+import { adoptVerifiedLocalOwner } from './db/outpost-owner-adoption.js'
 import { devAuthRoutes, isLocalDevEnv } from './routes/dev-auth.js'
 import { localSessionRoutes, isOssEdition, isSelfHostedOssEnv } from './routes/local-session.js'
 import {
@@ -931,6 +932,8 @@ export interface OpenApiEnv {
   /** Dedicated Outpost auth portal; falls back to APP_URL in other profiles. */
   AUTH_PORTAL_URL?: string
   OUTPOST_AUTH_EMAIL_ENABLED?: boolean
+  OUTPOST_LOCAL_OWNER_USER_ID?: string
+  OUTPOST_LOCAL_OWNER_EMAIL?: string
   OUTPOST_AUTH_OIDC_ENABLED?: boolean
   OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED?: boolean
   OUTPOST_OIDC_ENROLLMENT_MODE?: string
@@ -1564,6 +1567,7 @@ export interface BootContext {
 }
 
 type EmailAuth = {
+  resolveVerifiedEmailUser?: (email: string) => Promise<NonNullable<Awaited<ReturnType<typeof findUserById>>> | null>
   magicLinkStore: ReturnType<typeof createDbMagicLinkStore>
   smtpClient: ReturnType<typeof createSmtpClient>
   appUrl: string
@@ -2579,6 +2583,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           }),
           appUrl: env.AUTH_PORTAL_URL ?? env.APP_URL,
           canSignInEmail: canSignInOutpostEmail,
+          resolveVerifiedEmailUser: outpostAuthConfig?.localOwner
+            ? async (email) => {
+                const id = await adoptVerifiedLocalOwner(outpostAuthConfig.localOwner!, email)
+                if (!id) return null
+                const user = await findUserById(id)
+                if (!user) throw new Error('outpost_owner_adoption_user_missing')
+                return user
+              }
+            : undefined,
           allowedReturnOrigins: [env.APP_URL, env.AUTHED_APP_URL].filter((origin): origin is string => !!origin),
         }
       : undefined

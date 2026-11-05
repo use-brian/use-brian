@@ -43,6 +43,7 @@ export type FileIngestCounts = {
 }
 
 export type FileIngestResult = {
+  alreadyIngested?: boolean
   fileName: string
   fileId: string
   path: string

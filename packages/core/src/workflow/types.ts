@@ -200,11 +200,12 @@ export type WorkflowDelivery =
       replyToTrigger: true
     }
 
-/** Fixed deterministic delivery: no dynamic recipient, thread, or question. */
+/** Fixed deterministic delivery, optionally replying to a prior delivery. */
 export type ToolCallDelivery = {
   channelType: Exclude<Extract<WorkflowDelivery, { channelId: string }>['channelType'], 'web'>
   channelId: string
   channelIntegrationId?: string
+  thread?: { fromStep: string }
 }
 
 export type ToolCallStep = WorkflowStepCommon & {

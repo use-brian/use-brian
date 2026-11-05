@@ -70,7 +70,7 @@ export function normalizeHostHeader(raw: string): string {
 /** The auth-guarded operator prefixes — mirrors the pre-custom-domain
  *  matcher. The matcher now also carries a broad entry (host routing needs
  *  to see every path), so the guard must scope itself. */
-const GUARDED_EXACT = new Set(["/teams", "/redeem"]);
+const GUARDED_EXACT = new Set(["/teams", "/redeem", "/oauth/authorize"]);
 const GUARDED_PREFIXES = [
   "/w",
   "/home",

@@ -16,7 +16,19 @@
 
 </div>
 
-<p align="center"><img src="assets/demo.gif" alt="Use Brian demo: tell it a decision in chat, it files it into the brain graph, writes the doc, and sets up a weekly workflow" width="800" /></p>
+<p align="center"><a href="assets/demo.mp4"><img src="assets/demo.gif" alt="Use Brian's current UI: Page, browser extension, recordings, Tasks, CRM and workflow triggers; a shared brain and team chat with scoped context and action permissions; hosted and self-hosted accounts, channels, agent tools, MCP and assistant APIs" width="960" /></a></p>
+
+<p align="center"><a href="assets/demo.mp4">Full demo (MP4)</a> · Current UI with a fictional example workspace</p>
+
+The tour follows three chapters:
+
+1. **Feature showcase:** store docs in Page, navigate the web, record meetings,
+   manage Tasks and CRM, and trigger workflows with schedules or webhooks.
+2. **Built for business and teams:** one shared brain to retrieve, synthesize
+   and update information; people and agents in shared chats; Department,
+   Project and clearance controls; governed actions; hosted or self-hosted.
+3. **Connectivity:** messaging channels, specialist agents as tools, scoped MCP
+   access for external agents, and assistant APIs for your own app.
 
 ---
 

@@ -244,7 +244,7 @@ export type ToolCallStep = {
   storeOutputAs?: string;
   toolName: string;
   arguments: Record<string, unknown>;
-  deliver?: { channelType: Exclude<DeliverChannelType, "web">; channelId: string; channelIntegrationId?: string };
+  deliver?: { channelType: Exclude<DeliverChannelType, "web">; channelId: string; channelIntegrationId?: string; thread?: { fromStep: string } };
   deliveryText?: string;
   approval?: {
     required?: boolean;

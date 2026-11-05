@@ -110,6 +110,9 @@ export type FilesWriteBytesParams = {
   summary?: string | null
   tags?: string[]
   sensitivity?: FileSensitivity
+  /** Trusted upload boundary only: original filename, hashed with bytes by FilesApi.
+   * Authored/derived writes never opt in. Not an HTTP or model argument. */
+  reusableUploadName?: string
   /** Internal-only Office PDF lease marker. Public tools never set this. */
   sessionOwned?: true
 }

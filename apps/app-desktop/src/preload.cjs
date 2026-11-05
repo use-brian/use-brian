@@ -172,6 +172,18 @@ ipcRenderer.on("embedded-browser:request-theme", () => {
 document.addEventListener("DOMContentLoaded", startBrowserTheme);
 if (document.readyState === "interactive" || document.readyState === "complete") startBrowserTheme();
 
+const sessionClearedListeners = new Set();
+let clearTokenCache = () => {};
+let restoreTokenCache = () => {};
+const sessionRestoredListeners = new Set();
+ipcRenderer.on("Use Brian:session-restored", () => {
+  restoreTokenCache();
+  for (const callback of sessionRestoredListeners) callback();
+});
+ipcRenderer.on("Use Brian:session-cleared", (_event, reason) => {
+  clearTokenCache();
+  for (const callback of sessionClearedListeners) callback(reason === "logout" ? "logout" : "expired");
+});
 const deploymentListeners = new Set();
 let pendingDeployment = null;
 ipcRenderer.on("Use Brian:choose-deployment", (_event, url) => {
@@ -286,7 +298,30 @@ const bridge = {
       "Use Brian:set-capture-source",
       typeof id === "string" ? id : null,
     ),
-  signIn: () => ipcRenderer.send("Use Brian:sign-in"),
+  signIn: (options) => ipcRenderer.send("Use Brian:sign-in", options),
+  onSessionCleared: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    sessionClearedListeners.add(callback);
+    ipcRenderer.send("Use Brian:session-guard-ready", true);
+    return () => {
+      sessionClearedListeners.delete(callback);
+      if (!sessionClearedListeners.size) ipcRenderer.send("Use Brian:session-guard-ready", false);
+    };
+  },
+  onSessionRestored: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    sessionRestoredListeners.add(callback);
+    return () => sessionRestoredListeners.delete(callback);
+  },
+  getSignInState: () => ipcRenderer.invoke("Use Brian:get-sign-in-state"),
+  onSignInState: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on("Use Brian:sign-in-state", listener);
+    return () => ipcRenderer.removeListener("Use Brian:sign-in-state", listener);
+  },
+  reopenSignIn: () => ipcRenderer.send("Use Brian:reopen-sign-in"),
+  cancelSignIn: () => ipcRenderer.send("Use Brian:cancel-sign-in"),
   signOut: () => ipcRenderer.send("Use Brian:sign-out"),
   // macOS Settings -> Preferences uses this fixed, argument-free action to
   // open the bundled shortcut import. app-web hides it on every other OS.
@@ -340,6 +375,7 @@ const bridge = {
   selectAccount: (key) => ipcRenderer.invoke("Use Brian:select-account", key),
   removeAccount: (key) => ipcRenderer.invoke("Use Brian:remove-account", key),
   selectCloud: () => ipcRenderer.invoke("Use Brian:select-cloud"),
+  showAccounts: () => ipcRenderer.send("Use Brian:show-accounts"),
   chooseDeployment: () => ipcRenderer.send("Use Brian:choose-deployment"),
   onChooseDeployment: (callback) => {
     if (typeof callback !== "function") return () => {};
@@ -438,6 +474,8 @@ if (process.argv.includes("--usebrian-bundled")) {
   // Seed the token cache synchronously at load so the first authFetch has a
   // token without an async round-trip; the `AuthSource` getters are sync.
   let cache = ipcRenderer.sendSync("Use Brian:get-tokens") || null;
+  clearTokenCache = () => { cache = null; };
+  restoreTokenCache = () => { cache = ipcRenderer.sendSync("Use Brian:get-tokens") || null; };
 
   bridge.getAccessToken = () => (cache && cache.accessToken) || null;
   bridge.getRefreshToken = () => (cache && cache.refreshToken) || null;

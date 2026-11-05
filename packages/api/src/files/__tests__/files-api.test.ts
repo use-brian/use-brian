@@ -922,3 +922,52 @@ describe('[COMP:files/api] current authority after storage I/O', () => {
     expect(await api.readBytes(ctx,'/guarded.txt')).toMatchObject({ok:false,error:{kind:'not_found'}})
   })
 })
+
+describe('[COMP:files/upload-identity] upload reuse orchestration', () => {
+  it('reuses before quota and storage I/O, preserving the original path and attribution', async () => {
+    const store = makeFakeStore(), gcs = makeFakeGcs(), audit = makeFakeAudit()
+    const original = await store.create(ctx.userId, {
+      workspaceId: ctx.workspaceId, path: '/doc/original.pdf', parentPath: '/doc', name: 'original.pdf',
+      mime: 'application/pdf', sizeBytes: 3, storageUri: 'gs://b/original', createdByUserId: ctx.userId,
+    })
+    store.findReusableUpload = vi.fn(async () => original)
+    const api = createFilesApi({ gcs, store, auditStore: audit, bucket: 'b', storageLimitBytesFor: async () => 0 })
+    const result = await api.writeBytes(ctx, { path: '/uploads/original.pdf', bytes: Buffer.from('pdf'), mime: 'application/pdf', reusableUploadName: 'original.pdf' })
+    expect(result).toEqual({ ok: true, value: original })
+    expect(store.findReusableUpload).toHaveBeenCalledWith(expect.objectContaining({ userId: ctx.userId }), expect.objectContaining({ uploadIdentity: expect.stringMatching(/^[a-f0-9]{64}$/), sizeBytes: 3 }))
+    expect(gcs.blobs.size).toBe(0)
+    expect(audit.events).toHaveLength(0)
+  })
+
+  it('cleans only its staging object when the serialized writer finds a concurrent winner', async () => {
+    const store = makeFakeStore(), gcs = makeFakeGcs(), audit = makeFakeAudit()
+    const original = await store.create(ctx.userId, { workspaceId: ctx.workspaceId, path: '/doc/original.pdf', parentPath: '/doc', name: 'original.pdf', mime: 'application/pdf', sizeBytes: 3, storageUri: 'gs://b/original' })
+    gcs.blobs.set('original', Buffer.from('pdf'))
+    store.findReusableUpload = vi.fn(async () => null)
+    store.create = vi.fn(async () => original)
+    const api = createFilesApi({ gcs, store, auditStore: audit, bucket: 'b' })
+    const result = await api.writeBytes(ctx, { path: '/uploads/original.pdf', bytes: Buffer.from('pdf'), mime: 'application/pdf', reusableUploadName: 'original.pdf' })
+    expect(result).toEqual({ ok: true, value: original })
+    expect([...gcs.blobs.keys()]).toEqual(['original'])
+    expect(audit.events).toHaveLength(0)
+  })
+
+  it.each(['conflict','quota'])('rechecks reuse before a concurrent %s refusal', async reason => {
+    const store=makeFakeStore(),gcs=makeFakeGcs()
+    const original=await store.create(ctx.userId,{workspaceId:ctx.workspaceId,path:'/uploads/notes.pdf',parentPath:'/uploads',name:'notes.pdf',mime:'application/pdf',sizeBytes:3,storageUri:'gs://b/original'})
+    store.findReusableUpload=vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(original)
+    if(reason==='quota')store.getByPath=vi.fn(async()=>null)
+    const api=createFilesApi({gcs,store,bucket:'b',auditStore:makeFakeAudit(),storageLimitBytesFor:async()=>0})
+    expect(await api.writeBytes(ctx,{path:'/uploads/notes.pdf',mime:'application/pdf',bytes:Buffer.from('pdf'),reusableUploadName:'notes.pdf'})).toEqual({ok:true,value:original})
+    expect(gcs.blobs.size).toBe(0)
+    expect(store.findReusableUpload).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not reuse authored, session-owned or derived files through an upload hint', async () => {
+    const store = makeFakeStore()
+    store.findReusableUpload = vi.fn(async () => null)
+    const api = createFilesApi({ gcs: makeFakeGcs(), store, auditStore: makeFakeAudit(), bucket: 'b' })
+    await api.writeBytes(ctx, { path: '/authored/notes.txt', bytes: Buffer.from('text'), mime: 'text/plain', reusableUploadName: 'notes.txt' })
+    expect(store.findReusableUpload).not.toHaveBeenCalled()
+  })
+})

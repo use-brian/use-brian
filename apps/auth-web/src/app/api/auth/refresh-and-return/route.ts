@@ -9,11 +9,12 @@ import { normalizedRetry } from "./retry";
 const rejected = (status: number) => status === 400 || status === 401 || status === 403;
 const escape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-function retryResponse(requestUrl: string, next: URL | null, retry: number, locale: Locale) {
+function retryResponse(requestUrl: string, next: URL | null, retry: number, locale: Locale, failureNext: URL | null) {
   const config = portalConfig();
   const t = dictionaryFor(locale).refresh;
   const self = new URL("/api/auth/refresh-and-return", config.portalOrigin);
   if (next) self.searchParams.set("next", next.toString());
+  if (failureNext) self.searchParams.set("failureNext", failureNext.href);
   self.searchParams.set("retry", String(retry + 1));
   const manual = new URL(self); manual.searchParams.delete("retry");
   const auto = retry < 4;
@@ -24,10 +25,13 @@ export async function GET(request: Request) {
   const config = portalConfig();
   const url = new URL(request.url);
   const next = safeReturnUrl(url.searchParams.get("next"), config);
+  const candidateFailure = safeReturnUrl(url.searchParams.get("failureNext"), config);
+  const failureNext = candidateFailure && next && candidateFailure.origin === next.origin &&
+    candidateFailure.origin === new URL(config.appOrigin).origin && candidateFailure.pathname === "/accounts" ? candidateFailure : null;
   const cookieHeader = request.headers.get("cookie") ?? "";
   const token = parseLastCookie(cookieHeader, "refresh_token");
   if (!token) {
-    const response = NextResponse.redirect(loginUrl(config, next));
+    const response = NextResponse.redirect(failureNext ?? loginUrl(config, next));
     clearAuthCookies(response);
     return response;
   }
@@ -40,10 +44,10 @@ export async function GET(request: Request) {
       return response;
     }
     if (rejected(backend.status)) {
-      const response = NextResponse.redirect(loginUrl(config, next));
+      const response = NextResponse.redirect(failureNext ?? loginUrl(config, next));
       clearAuthCookies(response);
       return response;
     }
   } catch { /* transient below */ }
-  return retryResponse(request.url, next, normalizedRetry(url.searchParams.get("retry")), normalizeLocale(parseLastCookie(cookieHeader, "locale")));
+  return retryResponse(request.url, next, normalizedRetry(url.searchParams.get("retry")), normalizeLocale(parseLastCookie(cookieHeader, "locale")), failureNext);
 }

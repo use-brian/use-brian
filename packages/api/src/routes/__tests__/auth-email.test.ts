@@ -784,3 +784,63 @@ describe('[COMP:api/auth-email-verify-code] POST /auth/email/verify-code', () =>
     expect(upsert).not.toHaveBeenCalled()
   })
 })
+
+describe('[COMP:api/outpost-owner-adoption] native email verification boundary', () => {
+  const adoptedUser = {
+    id: '10000000-0000-4000-a000-000000000001', email: 'owner@example.com', name: 'Example Owner',
+    avatarUrl: null, createdAt: new Date('2026-01-01T00:00:00Z'),
+  } as import('../../db/users.js').User
+
+  it.each(['verify', 'verify-code'])('adopts only the consumed recipient in /email/%s', async (path) => {
+    const resolveVerifiedEmailUser = vi.fn(async () => adoptedUser)
+    const store = makeStore({
+      consumeByToken: async () => ({ email: adoptedUser.email!, nextPath: null, locale: null }),
+      consumeByCode: async () => ({ status: 'ok', email: adoptedUser.email!, nextPath: null, locale: null }),
+    })
+    const app = makeApp({ magicLinkStore: store, appUrl: 'https://auth.example.com', canSignInEmail: async () => true, resolveVerifiedEmailUser })
+    const response = await request(app).post(`/auth/email/${path}`).send(
+      path === 'verify' ? { token: 'verified-token', email: 'attacker@example.com' } : { email: adoptedUser.email, code: '123456' },
+    )
+    expect(response.status).toBe(200)
+    expect(response.body.user.id).toBe(adoptedUser.id)
+    expect(response.body.isNew).toBe(false)
+    expect(resolveVerifiedEmailUser).toHaveBeenCalledExactlyOnceWith(adoptedUser.email)
+    expect(findOrCreateUserMock).not.toHaveBeenCalled()
+    expect(findUserByEmailMock).not.toHaveBeenCalled()
+  })
+
+  it('cannot adopt on an unverified request or after enrollment denial', async () => {
+    const resolveVerifiedEmailUser = vi.fn(async () => adoptedUser)
+    const app = makeApp({ magicLinkStore: makeStore(), smtpClient: makeSmtp().client,
+      appUrl: 'https://auth.example.com', resolveVerifiedEmailUser })
+    await request(app).post('/auth/email/request-link').send({ email: adoptedUser.email })
+    expect((await request(app).post('/auth/email/verify').send({ token: 'invalid' })).status).toBe(401)
+    expect((await request(app).post('/auth/email/verify-code').send({ email: adoptedUser.email, code: '123456' })).status).toBe(401)
+    const denied = makeApp({ magicLinkStore: makeStore({ consumeByToken: async () => ({ email: adoptedUser.email!, nextPath: null, locale: null }) }),
+      appUrl: 'https://auth.example.com', canSignInEmail: async () => false, resolveVerifiedEmailUser })
+    expect((await request(denied).post('/auth/email/verify').send({ token: 'valid' })).status).toBe(403)
+    expect(resolveVerifiedEmailUser).not.toHaveBeenCalled()
+  })
+
+  it('does not create a new account when the configured owner conversion refuses', async () => {
+    const resolveVerifiedEmailUser = vi.fn(async () => { throw new Error('outpost_owner_adoption_source_changed') })
+    const app = makeApp({ magicLinkStore: makeStore({ consumeByToken: async () => ({ email: adoptedUser.email!, nextPath: null, locale: null }) }),
+      appUrl: 'https://auth.example.com', resolveVerifiedEmailUser })
+    expect((await request(app).post('/auth/email/verify').send({ token: 'valid' })).status).toBe(500)
+    expect(findOrCreateUserMock).not.toHaveBeenCalled()
+    expect(findUserByEmailMock).not.toHaveBeenCalled()
+  })
+
+  it('does not adopt during application-only onboarding', async () => {
+    const onboarding = await import('../../application-platform/onboarding.js')
+    const spy = vi.spyOn(onboarding, 'applicationOnboardingFromNextPath').mockResolvedValue('application')
+    try {
+      const resolveVerifiedEmailUser = vi.fn(async () => adoptedUser)
+      findUserByEmailMock.mockResolvedValue(adoptedUser)
+      const app = makeApp({ magicLinkStore: makeStore({ consumeByToken: async () => ({ email: adoptedUser.email!, nextPath: null, locale: null }) }),
+        appUrl: 'https://auth.example.com', resolveVerifiedEmailUser })
+      expect((await request(app).post('/auth/email/verify').send({ token: 'valid' })).status).toBe(200)
+      expect(resolveVerifiedEmailUser).not.toHaveBeenCalled()
+    } finally { spy.mockRestore() }
+  })
+})

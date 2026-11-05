@@ -111,14 +111,9 @@ export async function proxy(request: NextRequest) {
         new URL(ossEntry, ossPublicAppOrigin(request.url)),
       );
     }
-    if (primary) {
-      // Cross-origin to the primary's /login. Carries the original URL
-      // so post-OAuth lands the user back here.
-      const loginUrl = new URL("/login", primary);
-      loginUrl.searchParams.set("next", browserUrl.toString());
-      return NextResponse.redirect(loginUrl);
-    }
-    return NextResponse.redirect(new URL("/login", browserUrl));
+    const entry = new URL("/accounts", browserUrl);
+    entry.searchParams.set("next", browserUrl.pathname + browserUrl.search);
+    return NextResponse.redirect(entry);
   }
 
   if (hasAccess) {
@@ -131,6 +126,9 @@ export async function proxy(request: NextRequest) {
   if (primary) {
     const refreshUrl = new URL("/api/auth/refresh-and-return", primary);
     refreshUrl.searchParams.set("next", browserUrl.toString());
+    const failure = new URL("/accounts", browserUrl);
+    failure.searchParams.set("next", browserUrl.pathname + browserUrl.search);
+    refreshUrl.searchParams.set("failureNext", failure.href);
     return NextResponse.redirect(refreshUrl);
   }
 
@@ -143,7 +141,7 @@ export async function proxy(request: NextRequest) {
     );
     const res = NextResponse.redirect(
       new URL(
-        ossEntry ?? "/login",
+        ossEntry ?? `/accounts?next=${encodeURIComponent(browserUrl.pathname + browserUrl.search)}`,
         ossEntry ? ossPublicAppOrigin(request.url) : browserUrl,
       ),
     );

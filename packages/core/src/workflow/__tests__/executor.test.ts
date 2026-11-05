@@ -795,6 +795,32 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     })
   })
 
+  it('carries the deterministic parent receipt to its full-text thread without consulting a model', async () => {
+    const stores = makeFakeStores()
+    const tool = makeFakeTool('readEnquiry')
+    const deliverToChannel = vi.fn(async (params: Parameters<NonNullable<ExecutorDeps['deliverToChannel']>>[0]) => ({
+      status: 'delivered' as const, channelType: 'slack', channelId: params.channelId, messageId: params.threadRef ? '2.0' : '1.0',
+    }))
+    const consult = vi.fn()
+    const deps: ExecutorDeps = { workflowStore: stores.workflowStore, runStore: stores.runStore,
+      consultTransport: { send: consult }, resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map([[tool.name, tool]]), deliverToChannel }
+    const { run } = await seedWorkflowAndRun(deps, { startStepId: 'parent', steps: [
+      { id: 'parent', type: 'tool_call', toolName: tool.name, arguments: {},
+        deliver: { channelType: 'slack', channelId: 'C123' }, deliveryText: 'Compact summary' },
+      { id: 'reply', type: 'tool_call', toolName: tool.name, arguments: {},
+        deliver: { channelType: 'slack', channelId: 'C123', thread: { fromStep: 'parent' } }, deliveryText: 'Full enquiry' },
+    ] })
+    expect(await advanceWorkflowRun(deps, run.id)).toMatchObject({ kind: 'completed' })
+    expect(deliverToChannel).toHaveBeenCalledTimes(2)
+    expect(deliverToChannel.mock.calls[0][0]).not.toHaveProperty('threadRef')
+    expect(deliverToChannel.mock.calls[1][0]).toMatchObject({ threadRef: '1.0', text: 'Full enquiry' })
+    expect(stores.runs.get(run.id)?.vars).toMatchObject({ __deliveryMsg_parent: '1.0', __deliveryMsg_reply: '2.0' })
+    expect(consult).not.toHaveBeenCalled()
+    await advanceWorkflowRun(deps, run.id)
+    expect(deliverToChannel).toHaveBeenCalledTimes(2)
+  })
+
   it('runs a linear assistant_call → tool_call to completion', async () => {
     let capturedToolInput: unknown = null
     const stores = makeFakeStores()

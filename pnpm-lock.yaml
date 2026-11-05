@@ -898,6 +898,9 @@ importers:
       crc-32:
         specifier: ^1.2.2
         version: 1.2.2
+      decimal.js:
+        specifier: ^10.6.0
+        version: 10.6.0
       docx:
         specifier: ^9.7.1
         version: 9.7.1

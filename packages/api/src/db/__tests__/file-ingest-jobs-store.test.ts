@@ -36,6 +36,15 @@ describe('[COMP:files/file-ingest-jobs-store] file-ingest job queue', () => {
     expect(sql).toContain("NOT COALESCE((f.metadata->>'noIndex')::boolean,false)")
   })
 
+  it('checks current completion at enqueue for fresh intake only', async () => {
+    mockQuery.mockResolvedValue({rows:[]} as never)
+    await enqueueFileIngestJob({fileId:'file-1',workspaceId:'ws-1',actingUserId:'u-1',onlyIfUnprocessed:true})
+    expect(mockQuery.mock.calls[0][0]).toContain('f.source_episode_id IS NULL')
+    expect(mockQuery.mock.calls[0][0]).toContain('FOR UPDATE OF f')
+    await enqueueFileIngestJob({fileId:'file-1',workspaceId:'ws-1',actingUserId:'u-1'})
+    expect(mockQuery.mock.calls[1][0]).not.toContain('f.source_episode_id IS NULL')
+  })
+
   it('enqueue is idempotent — ON CONFLICT DO NOTHING yields enqueued:false', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] } as never)
     const res = await enqueueFileIngestJob({ fileId: 'file-1', workspaceId: 'ws-1', actingUserId: 'u-1' })

@@ -321,6 +321,13 @@ describe('[COMP:api/files-route] File routes', () => {
       })
   }
 
+  it('does not enqueue repeated multipart ingestion of an already analyzed upload', async () => {
+    const res = await postIngest(ingestorFor({alreadyIngested:true}))
+    expect(res.status).toBe(200)
+    expect(res.body.files[0]).toMatchObject({ok:true,status:'stored',alreadyIngested:true})
+    expect(enqueueFileIngestJob).not.toHaveBeenCalled()
+  })
+
   it('queues the brain ingest instead of running it on the request thread', async () => {
     const ingestor = ingestorFor()
     const res = await postIngest(ingestor)

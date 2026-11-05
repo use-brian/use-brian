@@ -448,3 +448,19 @@ describe("[COMP:app-web/desktop-auth-source] native account dialog request", () 
     expect(send).toHaveBeenLastCalledWith("Use Brian:account-dialog-ready", false);
   });
 });
+
+
+describe("[COMP:app-web/desktop-auth-source] account recovery", () => {
+  it("shows in-app account controls after rejection without opening browser sign-in", () => {
+    const { bridge, send } = loadPreload(null);
+    setBridge(bridge);
+    desktopAuthSource.redirectToLogin();
+    expect(send).toHaveBeenCalledExactlyOnceWith("Use Brian:show-accounts");
+  });
+  it("retains the explicit sign-in fallback for older shells", () => {
+    const signIn = vi.fn();
+    setBridge({ signIn });
+    desktopAuthSource.redirectToLogin();
+    expect(signIn).toHaveBeenCalledOnce();
+  });
+});

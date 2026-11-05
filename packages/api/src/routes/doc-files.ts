@@ -139,6 +139,7 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
           bytes: file.buffer,
           mime: file.mimetype,
           title: fileName,
+          reusableUploadName: fileName,
         })
 
         if (!result.ok) {

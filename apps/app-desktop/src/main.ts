@@ -117,7 +117,6 @@ import {
   decideLoadFailureAction,
   shouldAttemptLocalMint,
   shouldMintLocalSessionBeforeLoad,
-  shouldShowSignInLandingOnLaunch,
 } from "./window-policy.js";
 import {
   isAllowedGatewayNavigation,
@@ -179,6 +178,8 @@ import {
   SESSION_REFRESH_CHECK_INTERVAL_MS,
   buildSessionCookies,
   serializePendingVerifier,
+  parseAuthReturnIntent,
+  type AuthReturnIntent,
   parsePendingVerifier,
   type DesktopSession,
 } from "./desktop-auth.js";
@@ -293,6 +294,7 @@ let selectingAccount = false;
 let connectingDeployment = false;
 let removingAccount = false;
 const accountDialogRenderers = new Set<number>();
+const sessionGuardRenderers = new Set<number>();
 function accountTarget(): AccountTarget {
   return { kind: cfg.target, appUrl: cfg.appUrl, apiUrl: cfg.apiUrl, auth: cfg.targetAuth, publicConfig: cfg.publicConfig };
 }
@@ -306,9 +308,8 @@ const isDev = !app.isPackaged;
 const PRELOAD_PATH = join(__dirname, "preload.cjs");
 const PET_PRELOAD_PATH = join(__dirname, "pet-preload.cjs");
 const BRIAN_PET_PAGE = join(__dirname, "brian-pet.html");
-const SIGNIN_PAGE = join(__dirname, "signin.html");
 /**
- * The offline landing — shown (instead of the sign-in landing) when a signed-in
+ * The offline landing — shown (instead of the main app account view) when a signed-in
  * user's main-frame load fails for lack of network. Keeps the session intact and
  * auto-reconnects. See `showOffline` + "Offline resilience" in the spec.
  */
@@ -347,6 +348,31 @@ let brianPetPosition: BrianPosition | null = null;
 let brianPetDragOffset: BrianPosition | null = null;
 /** The PKCE verifier for an in-flight sign-in; held until the callback returns. */
 let pendingVerifier: string | null = null;
+let pendingAuthIntent: AuthReturnIntent | undefined;
+let authGeneration = 0;
+let authExchangeAbort: AbortController | null = null;
+let credentialGeneration = 0;
+let authStartUrl: string | null = null;
+let authLastOptions: { addAccount?: boolean; userId?: string } = {};
+let signInState: { phase: "idle" | "browser" | "exchanging" | "error"; appUrl?: string } = { phase: "idle" };
+function publishSignInState(phase: typeof signInState.phase): void {
+  signInState = { phase, ...(phase !== "idle" ? { appUrl: cfg.appUrl } : {}) };
+  for (const win of [mainWindow, desktopChatWindow]) if (win && !win.isDestroyed() && isAppPage(win)) {
+    win.webContents.send("Use Brian:sign-in-state", signInState);
+  }
+}
+function openSignInBrowser(url: string): void {
+  const generation = authGeneration; const target = cfg;
+  const failed = () => { if (generation === authGeneration && target === cfg) cancelSignIn("error"); };
+  try { void Promise.resolve(shell.openExternal(url)).catch(failed); } catch { failed(); }
+}
+function cancelSignIn(phase: "idle" | "error" = "idle"): void {
+  ++authGeneration;
+  authExchangeAbort?.abort(); authExchangeAbort = null;
+  closeAuthServer(); clearPersistedVerifier();
+  pendingVerifier = null; pendingAuthIntent = undefined; pendingAddAccount = false; authStartUrl = null;
+  publishSignInState(phase);
+}
 /** Whether the in-flight sign-in adds a second account (stash) vs replaces the active one. */
 let pendingAddAccount = false;
 /** The loopback-callback nonce for an in-flight sign-in (CSRF guard). */
@@ -764,9 +790,9 @@ function createWindow(initialLoad: { useBrian?: boolean; route?: string; linkReq
   });
 
   win.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace) accountDialogRenderers.delete(win.webContents.id);
+    if (isMainFrame && !isInPlace) { accountDialogRenderers.delete(win.webContents.id); sessionGuardRenderers.delete(win.webContents.id); }
   });
-  win.webContents.once("destroyed", () => accountDialogRenderers.delete(win.webContents.id));
+  win.webContents.once("destroyed", () => { accountDialogRenderers.delete(win.webContents.id); sessionGuardRenderers.delete(win.webContents.id); });
   win.webContents.on("did-navigate", () => rememberWorkspace(win));
   win.webContents.on("did-navigate-in-page", () => rememberWorkspace(win));
 
@@ -837,19 +863,9 @@ function createWindow(initialLoad: { useBrian?: boolean; route?: string; linkReq
   });
 
   if (accessReauthorizationNeeded && cfg.target === "local") {
-    void win.webContents.loadFile(SIGNIN_PAGE, {
-      query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
+    void loadApp(win, { accountEntry: "access" }).then(() => {
+      win.webContents.send("Use Brian:choose-deployment", cfg.appUrl);
     });
-  } else if (
-    shouldShowSignInLandingOnLaunch({
-      bundled: cfg.bundled,
-      targetAuth: cfg.targetAuth,
-      hasStoredTokens: readStoredTokens() !== null,
-    })
-  ) {
-    // The SPA's anonymous state is defensive only. Signed-out packaged launches
-    // use the same branded native landing as the existing desktop auth flow.
-    void win.webContents.loadFile(SIGNIN_PAGE);
   } else {
     void loadApp(win, initialLoad);
   }
@@ -879,7 +895,8 @@ function isAppPage(win: BrowserWindow): boolean {
   try {
     const current = new URL(win.webContents.getURL());
     if (current.origin === cfg.appOrigin) return true;
-    return bundledAvailable() && current.pathname === pathToFileURL(BUNDLE_INDEX).pathname;
+    return existsSync(BUNDLE_INDEX) && current.protocol === "file:" && current.host === "" &&
+      current.pathname === pathToFileURL(BUNDLE_INDEX).pathname;
   } catch {
     return false;
   }
@@ -1430,17 +1447,22 @@ async function recoverBackgroundGatewayRequest(requestUrl: string): Promise<void
   });
 }
 
-/** Show the built-in sign-in landing (never a blank window). */
+/** Show the main app account view (never a blank window). */
 function promptSignIn(): void {
+  if (mainWindow && !mainWindow.isDestroyed() && isAppPage(mainWindow) && sessionGuardRenderers.has(mainWindow.webContents.id)) {
+    stopRetryWatchers();
+    notifyNativeSessionCleared("expired");
+    focusWindow(mainWindow);
+    return;
+  }
   stopRetryWatchers(); // leaving the offline/brain-down state for a real sign-out
-  // A redirect handler can call this while Chromium is still cancelling the
-  // intercepted navigation. Replacing it synchronously races that cancellation
-  // and aborts this file load too, so start the landing on the next turn.
+  // Defer past Chromium's intercepted redirect cancellation so it cannot
+  // abort the replacement app load.
   setImmediate(() => {
     const win = ensureWindow();
-    void win.webContents.loadFile(SIGNIN_PAGE).then(
+    void loadApp(win, { accountEntry: "signed-out" }).then(
       () => focusWindow(win),
-      (err) => ignoreAbortedLoad("Sign-in landing", err),
+      (err) => ignoreAbortedLoad("Account entry", err),
     );
   });
 }
@@ -1448,7 +1470,7 @@ function promptSignIn(): void {
 // ── Offline landing + auto-retry ───────────────────────────────
 //
 // A signed-in user whose Mac drops off the network must never be bounced to the
-// sign-in landing (that reads as a spurious logout). Instead the shell shows a
+// main app account view (that reads as a spurious logout). Instead the shell shows a
 // branded offline landing and polls connectivity, reloading the app the moment
 // the network returns. The jar's refresh token is untouched throughout. Spec:
 // docs/architecture/features/app-desktop.md → "Offline resilience".
@@ -1725,12 +1747,8 @@ async function activateTarget(
   changingTarget = true;
   embeddedBrowser.dispose();
   try {
-    closeAuthServer();
+    cancelSignIn();
     closeConnectorServer();
-    clearPersistedVerifier();
-    pendingVerifier = null;
-    pendingState = null;
-    pendingAddAccount = false;
     if (!(await targetOperations.idle())) return false;
     const oldWindow = mainWindow;
     const bounds = oldWindow?.getBounds();
@@ -1751,12 +1769,8 @@ async function activateTarget(
     const next = resolveConfig(process.env, raw, bundledDefaultForRuntime(app.isPackaged));
     writeFileSync(targetFile(), raw);
     stopRetryWatchers();
-    closeAuthServer();
+    cancelSignIn();
     closeConnectorServer();
-    clearPersistedVerifier();
-    pendingVerifier = null;
-    pendingState = null;
-    pendingAddAccount = false;
     lastWorkspaceId = null;
     lastAssistantId = null;
     lastLocalMintAt = 0;
@@ -1922,11 +1936,10 @@ function showLocalDown(
   win: BrowserWindow,
   reason: "unreachable" | "auth" | "gateway-auth" = "unreachable",
 ): void {
-  void win.webContents
-    .loadFile(SIGNIN_PAGE, { query: { mode: "local-down", target: cfg.appUrl, reason } })
+  void loadApp(win, { accountEntry: reason })
     .then(() => focusWindow(win));
   stopRetryWatchers();
-  if (reason === "gateway-auth") return;
+  if (reason !== "unreachable") return;
   localRetryTimer = setInterval(() => {
     void (async () => {
       if ((await probeLocalBrain(cfg.apiUrl)).kind === "ready") await retryLoad(win);
@@ -1936,8 +1949,8 @@ function showLocalDown(
 
 /**
  * The menu/tray "Switch to ..." action. Cloud → local ALWAYS opens the
- * in-app Add account dialog when its renderer is ready; first launch and
- * older thin renderers use the `local-choose` fallback. In either view:
+ * in-app Add account dialog when its renderer is ready; otherwise it loads
+ * the shared renderer and queues the same dialog request. In either view:
  * the user confirms or edits the URL, and Connect probes + switches. Never
  * silently adopt whatever answers on the default port — a dev running the
  * hosted-edition stack there gets the wrong brain with familiar data, which
@@ -1952,9 +1965,10 @@ function chooseOwnDeployment(): void {
     focusWindow(win);
     return;
   }
-  void win.webContents
-    .loadFile(SIGNIN_PAGE, { query: { mode: "local-choose", url: rememberedLocalAppUrl() } })
-    .then(() => focusWindow(win));
+  void loadApp(win, { accountEntry: "signed-out" }).then(() => {
+    win.webContents.send("Use Brian:choose-deployment", rememberedLocalAppUrl());
+    focusWindow(win);
+  });
 }
 
 function switchTargetFromMenu(): void {
@@ -1965,8 +1979,7 @@ function switchTargetFromMenu(): void {
 function isCurrentAccountSender(id: number): boolean {
   return [mainWindow, desktopChatWindow].some((win) =>
     win && !win.isDestroyed() && win.webContents.id === id &&
-    (isAppPage(win) || win.webContents.getURL().startsWith(pathToFileURL(SIGNIN_PAGE).href) ||
-      ["", "about:blank"].includes(win.webContents.getURL())));
+    (isAppPage(win) || ["", "about:blank"].includes(win.webContents.getURL())));
 }
 
 function isTrustedLinkSender(event: IpcMainInvokeEvent): boolean {
@@ -2026,13 +2039,19 @@ async function loadApp(
     route?: string;
     useBrian?: boolean;
     linkRequestId?: string;
+    accountEntry?: "signed-out" | "unreachable" | "auth" | "gateway-auth" | "access";
   } = {},
 ): Promise<void> {
   return targetOperations.run(async () => {
     const hasUseBrianPrompt =
       opts.useBrian === true || pendingUseBrianPrompt !== null;
-    if (bundledAvailable()) {
-      if (!(await ensureBundledLocalSession(win))) return;
+    if (opts.accountEntry || bundledAvailable()) {
+      if (!existsSync(BUNDLE_INDEX)) {
+        dialog.showErrorBox("Account view unavailable", "Build the desktop renderer before opening account controls.");
+        win.show();
+        return;
+      }
+      if (!opts.accountEntry && !(await ensureBundledLocalSession(win))) return;
       // The bundled renderer loads from file://, so it has no env: hand it the API
       // base (and the capture/record intent) via the query string. The client reads
       // `?api=` for Bearer requests and `?app=` for shareable web page links.
@@ -2041,6 +2060,7 @@ async function loadApp(
         api: cfg.apiUrl,
         publicConfig: JSON.stringify(cfg.publicConfig),
       };
+      if (opts.accountEntry) query.accountEntry = opts.accountEntry;
       if (opts.capture) query.capture = "1";
       if (opts.record) query.record = "1";
       if (hasUseBrianPrompt) query.useBrian = "1";
@@ -2313,6 +2333,7 @@ function persistSession(sess: DesktopSession): boolean {
 }
 
 function persistRendererTokens(input: unknown): void {
+  if (!readStoredTokens()) return; // A late renderer refresh cannot undo logout.
   const serialized = serializeRendererTokens(input, Date.now());
   const tokens = serialized ? parseStoredTokens(serialized) : null;
   if (!tokens) return;
@@ -2321,10 +2342,17 @@ function persistRendererTokens(input: unknown): void {
   deploymentAccounts.put(accountTarget(), tokens);
 }
 
-function clearStoredTokens(): void {
+function notifyNativeSessionCleared(reason: "logout" | "expired"): void {
+  for (const win of [mainWindow, desktopChatWindow]) if (win && !win.isDestroyed() && isAppPage(win)) {
+    win.webContents.send("Use Brian:session-cleared", reason);
+  }
+}
+function clearStoredTokens(reason: "logout" | "expired" = "expired"): void {
+  ++credentialGeneration;
   embeddedBrowser.dispose();
   const tokens = readStoredTokens();
   if (tokens) deploymentAccounts.remove(deploymentAccountKey({ target: accountTarget(), tokens }));
+  notifyNativeSessionCleared(reason);
 }
 
 /** Cookie compatibility mode imports its saved identities without exposing credentials. */
@@ -2863,13 +2891,12 @@ function installAccessRequestHook(): void {
 function showAccessReauthorization(): void {
   if (!mainWindow || mainWindow.isDestroyed() || cfg.target !== "local") return;
   const win = mainWindow;
-  void win.webContents
-    .loadFile(SIGNIN_PAGE, {
-      query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
-    })
-    .then(() => {
-      if (!win.isDestroyed()) focusWindow(win);
-    });
+  void loadApp(win, { accountEntry: "access" }).then(() => {
+    if (!win.isDestroyed()) {
+      win.webContents.send("Use Brian:choose-deployment", cfg.appUrl);
+      focusWindow(win);
+    }
+  });
 }
 
 function startAccessGrantKeepalive(): void {
@@ -2939,8 +2966,19 @@ function closeConnectorServer(): void {
  * works in an unpackaged dev run, unlike the `usebrian://auth` scheme. If the
  * loopback server can't bind, fall back to the scheme (packaged builds only).
  */
-function startSignIn(opts: { addAccount?: boolean } = {}): void {
-  if (changingTarget) return;
+function startSignIn(opts: { addAccount?: boolean; userId?: string } = {}): void {
+  if (changingTarget || signInState.phase === "exchanging") return;
+  if (signInState.phase === "browser" && authStartUrl) { openSignInBrowser(authStartUrl); return; }
+  cancelSignIn();
+  const generation = authGeneration;
+  const target = cfg;
+  authLastOptions = opts;
+  const win = mainWindow;
+  const current = win && isAppPage(win) ? new URL(win.webContents.getURL()) : null;
+  const route = current?.protocol === "file:" ? current.hash.slice(1) : current ? current.pathname + current.search + current.hash : "";
+  const originalUser = readStoredTokens()?.user?.id ?? opts.userId;
+  pendingAuthIntent = opts.addAccount ? undefined : parseAuthReturnIntent({ appUrl: cfg.appUrl, apiUrl: cfg.apiUrl, route, ...(originalUser ? { userId: originalUser } : {}) });
+  publishSignInState("browser");
   const { verifier, challenge } = generatePkcePair();
   pendingVerifier = verifier;
   pendingAddAccount = opts.addAccount ?? false;
@@ -2951,15 +2989,15 @@ function startSignIn(opts: { addAccount?: boolean } = {}): void {
   try {
     writeFileSync(
       pendingVerifierFile(),
-      serializePendingVerifier(verifier, Date.now(), addAccount),
+      serializePendingVerifier(verifier, Date.now(), addAccount, pendingAuthIntent),
     );
   } catch (err) {
     console.warn("Failed to persist sign-in state:", err);
   }
 
-  closeAuthServer();
   const state = pendingState;
   const server = createServer((req, res) => {
+    if (generation !== authGeneration || target !== cfg) { res.writeHead(410); res.end(); return; }
     // A non-/cb request (e.g. favicon) or a stale/forged `state` parses to null:
     // reply 404 and leave the server open. A real callback 302s the browser to
     // the branded canvas page (so the bare loopback URL + code never linger in
@@ -2977,25 +3015,26 @@ function startSignIn(opts: { addAccount?: boolean } = {}): void {
     res.end();
     closeAuthServer();
     if (cb.kind === "code") void completeSignIn(cb.code);
-    else dialog.showErrorBox("Sign-in failed", `The sign-in could not complete (${cb.error}).`);
+    else cancelSignIn("error");
   });
   server.on("error", (err) => {
     // Bind failure — fall back to the custom scheme (works on packaged builds).
     console.warn("Loopback sign-in server failed; falling back to scheme:", err);
     closeAuthServer();
-    void shell.openExternal(buildDesktopAuthStartUrl(cfg.appUrl, challenge, { addAccount }));
+    if (generation !== authGeneration || target !== cfg) return;
+    authStartUrl = buildDesktopAuthStartUrl(cfg.appUrl, challenge, { addAccount });
+    authServerTimer = setTimeout(() => cancelSignIn("error"), LOOPBACK_SERVER_TTL_MS);
+    openSignInBrowser(authStartUrl);
   });
   authServer = server;
-  authServerTimer = setTimeout(closeAuthServer, LOOPBACK_SERVER_TTL_MS);
+  authServerTimer = setTimeout(() => cancelSignIn("error"), LOOPBACK_SERVER_TTL_MS);
   server.listen(0, "127.0.0.1", () => {
     const port = (server.address() as AddressInfo).port;
-    void shell.openExternal(
-      buildDesktopAuthStartUrl(cfg.appUrl, challenge, {
-        redirectUri: buildLoopbackRedirectUri(port),
-        state,
-        addAccount,
-      }),
-    );
+    if (generation !== authGeneration || target !== cfg) return;
+    authStartUrl = buildDesktopAuthStartUrl(cfg.appUrl, challenge, {
+      redirectUri: buildLoopbackRedirectUri(port), state, addAccount,
+    });
+    openSignInBrowser(authStartUrl);
   });
 }
 
@@ -3008,32 +3047,48 @@ async function completeSignIn(code: string): Promise<void> {
 }
 
 async function completeSignInImpl(code: string): Promise<void> {
-  return targetOperations.run(async () => {
+  const generation = authGeneration;
+  const target = cfg;
+  const staged: { current?: { target: AccountTarget; session: DesktopSession; route?: string } } = {};
+  await targetOperations.run(async () => {
     // In-memory state is authoritative for the loopback transport (same process);
     // the persisted blob covers the cross-process `usebrian://auth` fallback. Both
     // carry the add-account intent so the right process knows to stash vs replace.
     const pending = pendingVerifier
-      ? { verifier: pendingVerifier, addAccount: pendingAddAccount }
+      ? { verifier: pendingVerifier, addAccount: pendingAddAccount, intent: pendingAuthIntent }
       : readPersistedVerifier();
     if (!pending) {
-      dialog.showErrorBox(
-        "Sign-in failed",
-        "This sign-in link is no longer valid. Please start sign-in again from the app.",
-      );
+      publishSignInState("error");
       return;
     }
-    const { verifier, addAccount } = pending;
+    const { verifier, addAccount, intent } = pending;
+    if (intent && (intent.appUrl !== cfg.appUrl || intent.apiUrl !== cfg.apiUrl)) { cancelSignIn("error"); return; }
+    publishSignInState("exchanging");
     pendingVerifier = null;
     pendingAddAccount = false;
     clearPersistedVerifier();
     closeAuthServer(); // idempotent — the loopback path already closed it
     try {
+      const abort = new AbortController();
+      authExchangeAbort = abort;
       const result = await exchangeCode(
         cfg.apiUrl,
         code,
         verifier,
         cfg.target === "local" ? authenticatedSessionFetch : undefined,
+        abort.signal,
       );
+      if (authExchangeAbort === abort) authExchangeAbort = null;
+      if (generation !== authGeneration || target !== cfg) return;
+      if (!result.user?.id) throw new Error("Sign-in did not return an account identity");
+      const currentUser = cfg.bundled ? readStoredTokens()?.user?.id : parseUserCookieValue(await readJarCookie("user"))?.id;
+      const route = intent && (!intent.userId || intent.userId === result.user.id) ? intent.route : undefined;
+      if (currentUser && currentUser !== result.user.id) {
+        const tokens = parseStoredTokens(serializeTokens(result, Date.now()));
+        if (!tokens || !deploymentAccounts.put(accountTarget(), tokens, false)) throw new Error("Could not save the account securely");
+        staged.current = { target: accountTarget(), session: result, route };
+        return; // Drain this operation before replacing the old account windows.
+      }
       if (cfg.bundled) {
         // Saving the new identity preserves every previously saved account.
         if (!persistSession(result)) {
@@ -3057,15 +3112,35 @@ async function completeSignInImpl(code: string): Promise<void> {
         }
       }
       const win = ensureWindow();
-      await loadApp(win);
+      for (const accountWindow of [mainWindow, desktopChatWindow]) {
+        if (accountWindow && !accountWindow.isDestroyed() && isAppPage(accountWindow)) {
+          accountWindow.webContents.send("Use Brian:session-restored");
+        }
+      }
+      publishSignInState("idle");
+      authStartUrl = null; pendingAuthIntent = undefined;
+      await loadApp(win, route ? { route } : {});
       focusWindow(win); // focus AFTER the reload so the fresh contents take input
       const pendingLink = linkNavigation.state();
       if (pendingLink) linkNavigation.retry(pendingLink.requestId);
     } catch (err) {
-      dialog.showErrorBox("Sign-in failed", err instanceof Error ? err.message : String(err));
+      if (generation === authGeneration && target === cfg) { console.warn("Desktop sign-in failed", err); publishSignInState("error"); }
     }
 
   });
+  if (staged.current) {
+    if (generation !== authGeneration || target !== cfg) return;
+    const selected = staged.current;
+    const ok = await activateTarget(selected.target.kind, selected.target.appUrl, selected.target.apiUrl,
+      selected.target.auth, async () => {
+        if (!cfg.bundled) for (const spec of buildSessionCookies(selected.target.appUrl, selected.session)) {
+          await targetSession(selected.target).cookies.set(spec);
+        }
+        if (!persistSession(selected.session)) throw new Error("Could not save the selected account");
+      }, selected.target.publicConfig, selected.route);
+    if (!ok) publishSignInState("error");
+    else { const link = linkNavigation.state(); if (link) linkNavigation.retry(link.requestId); }
+  }
 }
 
 // ── Connector OAuth (Google / Notion) — RFC 8252 loopback, mirrors sign-in ──
@@ -3311,6 +3386,9 @@ async function signOut(): Promise<void> {
 
 async function signOutImpl(): Promise<void> {
   if (removingAccount) return;
+  cancelSignIn();
+  ++credentialGeneration;
+  notifyNativeSessionCleared("logout");
   return targetOperations.run(async () => {
     const pendingLink = linkNavigation.state();
     if (pendingLink) linkNavigation.cancel(pendingLink.requestId);
@@ -3321,10 +3399,9 @@ async function signOutImpl(): Promise<void> {
     }
     if (cfg.bundled) {
       // Remove only this account; other deployments remain available.
-      clearStoredTokens();
+      clearStoredTokens("logout");
       const win = ensureWindow();
-      if (cfg.targetAuth === "local-session") await loadApp(win);
-      else await win.webContents.loadFile(SIGNIN_PAGE);
+      await loadApp(win);
       focusWindow(win);
       return;
     }
@@ -3436,7 +3513,7 @@ function currentTrustedAppUrl(win: BrowserWindow): string | null {
  * A `/login` redirect is not proof that the user signed out. If the durable
  * refresh credential still exists, join the shell's single-flight refresh and
  * resume the document that was visible before the redirect. Only an absent or
- * definitively rejected credential reaches the sign-in landing.
+ * definitively rejected credential reaches the main app account view.
  */
 async function recoverCloudSessionOrSignIn(resumeUrl: string | null): Promise<void> {
   return targetOperations.run(async () => {
@@ -3502,7 +3579,8 @@ function trustedTokenSender(event: IpcMainInvokeEvent): boolean {
 async function refreshBundledTokens(event: IpcMainInvokeEvent): Promise<RendererRefreshResult> {
   if (changingTarget || selectingAccount || removingAccount || !trustedTokenSender(event)) return { kind: "transient" };
   const expectedConfig = cfg;
-  const valid = () => cfg === expectedConfig && trustedTokenSender(event);
+  const expectedCredential = credentialGeneration;
+  const valid = () => cfg === expectedConfig && credentialGeneration === expectedCredential && trustedTokenSender(event);
   if (!bundledRefreshInFlight) {
     const run = targetOperations.run(async (): Promise<RendererRefreshResult> => {
       const stored = readStoredTokens();
@@ -3527,6 +3605,7 @@ async function refreshBundledTokens(event: IpcMainInvokeEvent): Promise<Renderer
     void run.finally(() => { if (bundledRefreshInFlight === run) bundledRefreshInFlight = null; });
   }
   const result = await bundledRefreshInFlight;
+  if (result.kind === "unauthenticated" && cfg === expectedConfig && trustedTokenSender(event) && !readStoredTokens()) return result;
   return valid() ? result : { kind: "transient" };
 }
 
@@ -3576,6 +3655,7 @@ function refreshSessionInPlace(): Promise<RefreshOutcome> {
             await targetSession().cookies.remove(cfg.appUrl, name);
           }
         } finally { browserIdentityChanging = false; }
+        notifyNativeSessionCleared("expired");
         return "signed-out";
       }
       // The refresh response carries no `plan`, so keep the display-only `user`
@@ -3673,7 +3753,7 @@ function startSessionKeepalive(): Promise<void> {
         // local target reloads the app instead: its /login bounce re-mints the
         // local-owner session (see mintLocalSession).
         if (cfg.targetAuth === "local-session") void loadApp(mainWindow);
-        else void mainWindow.webContents.loadFile(SIGNIN_PAGE);
+        else if (!sessionGuardRenderers.has(mainWindow.webContents.id)) void loadApp(mainWindow, { accountEntry: "signed-out" });
       }
     } catch (err) {
       console.warn("Session keep-alive tick failed:", err);
@@ -4146,9 +4226,24 @@ if (!gotLock) {
     else pendingUrl = url;
   });
 
-  // The sign-in landing's button asks the main process to start the flow.
-  ipcMain.on("Use Brian:sign-in", (event) => {
-    if (!changingTarget && isCurrentAccountSender(event.sender.id)) startSignIn();
+  // The main app account view's button asks the main process to start the flow.
+  ipcMain.on("Use Brian:show-accounts", (event) => {
+    if (!changingTarget && isCurrentAccountSender(event.sender.id) && event.senderFrame === event.sender.mainFrame) promptSignIn();
+  });
+  ipcMain.handle("Use Brian:get-sign-in-state", (event) => isCurrentAccountSender(event.sender.id) && event.senderFrame === event.sender.mainFrame ? signInState : { phase: "idle" });
+  ipcMain.on("Use Brian:cancel-sign-in", (event) => {
+    if (isCurrentAccountSender(event.sender.id) && event.senderFrame === event.sender.mainFrame) cancelSignIn();
+  });
+  ipcMain.on("Use Brian:reopen-sign-in", (event) => {
+    if (!isCurrentAccountSender(event.sender.id) || event.senderFrame !== event.sender.mainFrame) return;
+    if (signInState.phase === "browser" && authStartUrl) openSignInBrowser(authStartUrl);
+    else startSignIn(authLastOptions);
+  });
+  ipcMain.on("Use Brian:sign-in", (event, options?: { userId?: unknown }) => {
+    if (!changingTarget && isCurrentAccountSender(event.sender.id) && event.senderFrame === event.sender.mainFrame) {
+      const userId = typeof options?.userId === "string" && options.userId.length <= 128 ? options.userId : undefined;
+      startSignIn({ userId });
+    }
   });
   // macOS does not install an app-owned Siri phrase automatically. Settings
   // opens the fixed Apple-signed shortcut template bundled with this app; only
@@ -4498,6 +4593,10 @@ if (!gotLock) {
   });
   ipcMain.on("Use Brian:use-cloud", (event) => {
     if (isCurrentAccountSender(event.sender.id)) void useCloud();
+  });
+  ipcMain.on("Use Brian:session-guard-ready", (event, ready: unknown) => {
+    if (!isCurrentAccountSender(event.sender.id) || event.senderFrame !== event.sender.mainFrame) return;
+    if (ready === true) sessionGuardRenderers.add(event.sender.id); else sessionGuardRenderers.delete(event.sender.id);
   });
   ipcMain.on("Use Brian:account-dialog-ready", (event, ready: unknown) => {
     if (!isCurrentAccountSender(event.sender.id) || event.senderFrame !== event.sender.mainFrame) return;

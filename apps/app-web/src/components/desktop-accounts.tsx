@@ -12,6 +12,7 @@ import { confirmDialog } from "@/components/ui/confirm-dialog";
 
 /** One identity list across desktop deployments. [COMP:app-web/desktop-accounts] */
 export function DesktopAccounts(props: {
+  variant?: "menu" | "standalone";
   allowedKeys?: readonly string[];
   onSelect?: (account: DesktopAccount) => Promise<void> | void;
 } = {}) {
@@ -142,12 +143,12 @@ export function DesktopAccounts(props: {
           <div key={account.key} className="min-w-0">
             <div className={`flex min-w-0 rounded ${customizing ? "flex-col items-stretch" : "items-center"} ${account.active ? "bg-muted/60" : ""}`}>
               <button
-                type="button" role="menuitem"
+                type="button" role={props.variant === "standalone" ? undefined : "menuitem"}
                 disabled={pending !== null || !canSwitch || customizing}
                 aria-current={account.active ? "true" : undefined}
                 aria-label={`${account.displayName || account.email || account.name} (${label}, ${account.appUrl})`}
                 onClick={() => void select(account)}
-                className="flex min-h-8 max-sm:min-h-11 min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-muted"
+                className="flex min-h-8 max-md:min-h-11 min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-muted"
               >
                 {account.icon?.startsWith("data:image/png;base64,") ? <UserAvatar key={account.icon} size={24} name={account.name} avatarUrl={account.icon} /> : account.icon ? <span aria-hidden className="flex size-6 shrink-0 items-center justify-center text-xl">{account.icon}</span> : <UserAvatar
                   size={24}
@@ -163,7 +164,7 @@ export function DesktopAccounts(props: {
                   <span className="block truncate text-[11px] text-muted-foreground" title={source}>{account.appUrl}</span>
                 </span>
                 {selecting ? <span aria-hidden className="size-3 shrink-0 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
-                  : account.active ? <span aria-hidden className="text-primary">✓</span> : null}
+                  : account.active ? <span aria-hidden className="text-foreground">✓</span> : null}
               </button>
               {customizing && canCustomize ? (
                 <div className="flex shrink-0 items-center justify-end px-1">
@@ -187,7 +188,7 @@ export function DesktopAccounts(props: {
               {canRemove && !customizing ? (
                 <button
                   type="button"
-                  role="menuitem"
+                  role={props.variant === "standalone" ? undefined : "menuitem"}
                   disabled={pending !== null}
                   aria-label={format(t.removeConnectionAria, { url: account.appUrl })}
                   title={t.removeConnection}
@@ -212,11 +213,11 @@ export function DesktopAccounts(props: {
                   } />
                   <input id={`account-name-${account.key}`} autoFocus value={displayName} maxLength={80} disabled={pending !== null}
                     placeholder={account.email || account.name || label} onChange={(event) => setDisplayName(event.target.value)}
-                    className="h-8 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-[16px] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 max-sm:min-h-11 md:text-xs" />
+                    className="h-8 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-[16px] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 max-md:min-h-11 md:text-xs" />
                 </div>
                 <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" aria-label={t.uploadAccountImage} disabled={pending !== null}
                   onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void uploadIcon(file); }} />
-                <Button type="button" variant="outline" size="sm" disabled={pending !== null} onClick={() => fileInput.current?.click()} className="max-sm:min-h-11">
+                <Button type="button" variant="outline" size="sm" disabled={pending !== null} onClick={() => fileInput.current?.click()} className="max-md:min-h-11">
                   <Upload aria-hidden className="size-3.5" />{t.uploadAccountImage}
                 </Button>
                 <p className="text-[11px] leading-snug text-muted-foreground">{t.accountImageHint}</p>
@@ -231,16 +232,16 @@ export function DesktopAccounts(props: {
           </div>
         );
       })}
-      {!props.allowedKeys && !accounts.some((account) => account.deployment === "cloud") && canSwitch && (
+      {props.variant !== "standalone" && !props.allowedKeys && !accounts.some((account) => account.deployment === "cloud") && canSwitch && (
         <button type="button" role="menuitem" disabled={pending !== null} onClick={() => void select()}
-          className="min-h-8 max-sm:min-h-11 rounded px-2 py-1.5 text-left text-sm hover:bg-muted">
+          className="min-h-8 max-md:min-h-11 rounded px-2 py-1.5 text-left text-sm hover:bg-muted">
           {t.openCloudAccount}
         </button>
       )}
       {canCustomize && accounts.length > 0 && (
         <button type="button" disabled={pending !== null} aria-pressed={customizing}
           onClick={() => { setCustomizing(!customizing); setEditing(null); setError(null); }}
-          className="min-h-8 max-sm:min-h-11 rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted">
+          className="min-h-8 max-md:min-h-11 rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted">
           {customizing ? t.customizeDone : t.customizeAccounts}
         </button>
       )}

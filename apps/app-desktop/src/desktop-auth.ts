@@ -60,7 +60,24 @@ export function generatePkcePair(): PkcePair {
 export const PENDING_VERIFIER_TTL_MS = 5 * 60 * 1000;
 
 /** A parsed pending sign-in: the PKCE verifier plus whether it's an add-account flow. */
+export interface AuthReturnIntent {
+  appUrl: string; apiUrl: string; route: string; userId?: string;
+}
+/** A route is local navigation, never an external redirect. */
+export function parseAuthReturnIntent(value: unknown): AuthReturnIntent | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const v = value as Partial<AuthReturnIntent>;
+  if (typeof v.appUrl !== "string" || typeof v.apiUrl !== "string" || typeof v.route !== "string" ||
+      v.route.length > 4096 || /[\\\u0000-\u0020]/.test(v.route) || !/^\/(?:w\/|desktop\/chat\/|teams(?:[?#]|$)|redeem(?:[?#]|$))/.test(v.route) ||
+      (v.userId !== undefined && (typeof v.userId !== "string" || !v.userId || v.userId.length > 128))) return undefined;
+  try {
+    for (const raw of [v.appUrl, v.apiUrl]) { const u = new URL(raw); if (!["http:", "https:"].includes(u.protocol) || u.username || u.password) return undefined; }
+    if (new URL(v.route, v.appUrl).origin !== new URL(v.appUrl).origin) return undefined;
+  } catch { return undefined; }
+  return { appUrl: v.appUrl, apiUrl: v.apiUrl, route: v.route, ...(v.userId ? { userId: v.userId } : {}) };
+}
 export interface PendingVerifier {
+  intent?: AuthReturnIntent;
   verifier: string;
   /** True when this sign-in adds a second account rather than replacing the active one. */
   addAccount: boolean;
@@ -70,8 +87,9 @@ export function serializePendingVerifier(
   verifier: string,
   nowMs: number,
   addAccount = false,
+  intent?: AuthReturnIntent,
 ): string {
-  return JSON.stringify({ verifier, createdAt: nowMs, addAccount });
+  return JSON.stringify({ verifier, createdAt: nowMs, addAccount, ...(intent ? { intent } : {}) });
 }
 
 /**
@@ -86,7 +104,7 @@ export function parsePendingVerifier(
   nowMs: number,
   maxAgeMs: number = PENDING_VERIFIER_TTL_MS,
 ): PendingVerifier | null {
-  let obj: { verifier?: unknown; createdAt?: unknown; addAccount?: unknown };
+  let obj: { verifier?: unknown; createdAt?: unknown; addAccount?: unknown; intent?: unknown };
   try {
     obj = JSON.parse(raw) as typeof obj;
   } catch {
@@ -96,7 +114,9 @@ export function parsePendingVerifier(
   if (typeof obj.createdAt !== "number") return null;
   const age = nowMs - obj.createdAt;
   if (age < 0 || age > maxAgeMs) return null;
-  return { verifier: obj.verifier, addAccount: obj.addAccount === true };
+  const intent = parseAuthReturnIntent(obj.intent);
+  if (obj.intent !== undefined && !intent) return null;
+  return { verifier: obj.verifier, addAccount: obj.addAccount === true, ...(intent ? { intent } : {}) };
 }
 
 // ── URLs ───────────────────────────────────────────────────────
@@ -225,6 +245,7 @@ type FetchLike = (input: string, init: {
   method: string;
   headers: Record<string, string>;
   body: string;
+  signal?: AbortSignal;
 }) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
 
 /** Cookies observed on this response, already matched to its app-origin jar. */
@@ -250,11 +271,13 @@ export async function exchangeCode(
   code: string,
   verifier: string,
   fetchImpl: FetchLike = fetch as unknown as FetchLike,
+  signal?: AbortSignal,
 ): Promise<DesktopSession> {
   const res = await fetchImpl(`${apiUrl}/auth/desktop/exchange`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code, verifier }),
+    ...(signal ? { signal } : {}),
   });
   if (!res.ok) {
     throw new Error(`Desktop exchange failed (HTTP ${res.status})`);
