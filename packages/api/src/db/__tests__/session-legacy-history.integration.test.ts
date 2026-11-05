@@ -58,7 +58,7 @@ describe.skipIf(!seedFile).sequential('[COMP:api/session-legacy-history] real fr
    expect(response.body.rows.map((r:{text:string})=>r.text)).toEqual(['Fictional saved question','Fictional saved answer'])
    expect(response.body.nextSequence).toBe(2)
    const next=await request(app).get(url(seed.sessions.normal,'&afterSequence=2&limit=2')).set('Authorization','Bearer '+token).expect(200)
-   expect(next.body.rows.map((r:{text:string})=>r.text)).toEqual([null,'Fictional next question'])
+   expect(next.body.rows.map((r:{text:string})=>r.text)).toEqual(['Fictional next question'])
    expect(next.body.nextSequence).toBeNull()
    expect(JSON.stringify(next.body)).not.toContain('Hidden planning')
    await request(app).get(`/sessions/${seed.sessions.normal}/messages`).set('Authorization','Bearer '+token).expect(403)
@@ -94,7 +94,7 @@ describe.skipIf(!seedFile).sequential('[COMP:api/session-legacy-history] real fr
    }
    await getPool().query("INSERT INTO session_messages(session_id,sequence_num,role,content) VALUES($1,5,'assistant','\"Later private bytes\"')",[seed.sessions.late])
    const response=await request(app).get(url(seed.sessions.late)).set('Authorization','Bearer '+token).expect(200)
-   expect(response.body.rows).toHaveLength(4)
+   expect(response.body.rows).toHaveLength(3)
    expect(JSON.stringify(response.body)).not.toContain('Later private bytes')
   })
   it('keeps the frozen pagination order when a current sequence changes',async()=>{
@@ -103,19 +103,19 @@ describe.skipIf(!seedFile).sequential('[COMP:api/session-legacy-history] real fr
    expect(first.body.nextSequence).toBe(2)
    expect(first.body.rows[1]).toMatchObject({sequence:2,available:false,text:null})
    const second=await request(app).get(url(seed.sessions.changed,'&afterSequence=2&limit=2')).set('Authorization','Bearer '+token).expect(200)
-   expect(second.body.rows.map((row:{sequence:number})=>row.sequence)).toEqual([3,4])
+   expect(second.body.rows.map((row:{sequence:number})=>row.sequence)).toEqual([4])
   })
   it('checks a modern row envelope without rewriting it as legacy',async()=>{
    const response=await request(app).get(url(seed.sessions.scoped)).set('Authorization','Bearer '+token).expect(200)
-   expect(response.body.rows[3]).toMatchObject({available:true,text:'Fictional next question'})
+   expect(response.body.rows[2]).toMatchObject({available:true,text:'Fictional next question'})
   })
-  it('does not use absent historical metadata to bypass recorded source derivations',async()=>{
+  it('retains owner-readable historical text without promoting its recorded derivation to current evidence',async()=>{
    await getPool().query(`INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,producer,user_id,
     assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
     SELECT $2,'session_message',id,'1','fixture:recorded-source',$3,NULL,'confidential','{}','{}',1
     FROM session_messages WHERE session_id=$1 AND sequence_num=2`,[seed.sessions.derivation,seed.workspaceId,seed.ownerId])
    const response=await request(app).get(url(seed.sessions.derivation)).set('Authorization','Bearer '+token).expect(200)
-   expect(response.body.rows[1]).toMatchObject({available:false,text:null})
+   expect(response.body.rows[1]).toMatchObject({available:true,text:'Fictional saved answer'})
    expect(response.body.rows[0]).toMatchObject({available:true,text:'Fictional saved question'})
   })
   it('rechecks live membership for a previously readable private transcript',async()=>{

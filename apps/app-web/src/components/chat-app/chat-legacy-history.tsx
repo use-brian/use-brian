@@ -2,6 +2,7 @@
 
 /** Owner-only historical display, separate from actionable chat state. [COMP:app-web/chat-legacy-history] */
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ChatDisplayHistoryRow } from "./chat-display-history";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/client";
 import { getUserInfo, subscribeUserInfo } from "@/lib/user";
@@ -64,11 +65,7 @@ export function ChatLegacyHistory({ workspaceId, sessionId, fallback, children }
   const visible = state.key === key ? state : null;
   return <section aria-label={t.title} className="space-y-4 text-sm text-foreground">
     {visible?.page ? <>
-      <p role="status" className="rounded-md border bg-muted/30 p-3 text-muted-foreground">{t.notice}</p>
-      {visible.page.rows.map(row => <article key={row.id} className="rounded-lg border p-3">
-        <p className="mb-2 text-xs font-medium text-muted-foreground">{row.role === "user" ? t.you : t.assistant}</p>
-        <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{row.available ? row.text : t.unavailableMessage}</p>
-      </article>)}
+      {visible.page.rows.map(row => <ChatDisplayHistoryRow key={row.id} row={row} />)}
       {visible.page.nextSequence !== null && <Button variant="outline" className="max-sm:min-h-11" disabled={visible.loading}
         onClick={() => read.current(true)}>{t.more}</Button>}
     </> : visible?.failed ? <p role="alert" className="text-destructive">{fallback}</p>

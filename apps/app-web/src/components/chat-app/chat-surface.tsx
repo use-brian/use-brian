@@ -651,7 +651,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // Independent current authorization for saved display; these rows never enter chat state.
   const displayHistory = usePersonalDisplayHistory(workspaceId, activeSessionId,
     !!activeContextSession?.policy && !panePolicy.post && (activeContextSession.transport ?? "web") === "web"
-    && activeContextSession.appOrigin === "chat");
+    && (activeContextSession.appOrigin === "chat" || activeContextSession.appOrigin == null));
   const { refresh: refreshDisplayHistory, invalidate: invalidateDisplayHistory } = displayHistory;
   const [canonicalHistoryIds, setCanonicalHistoryIds] = useState<{ sessionId: string; ids: ReadonlySet<string> } | null>(null);
 
@@ -3972,17 +3972,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     !!activeSessionId &&
     reconnectSessionId === activeSessionId;
 
-  /** Group-chat timeline metadata: day separators + sender-group headers
-   *  (docs/architecture/features/chat-app.md → "Transcript timestamps"). */
-  const transcriptMeta = useMemo(
-    () => computeTranscriptRowMeta(chat.state.messages as SurfaceMessage[]),
-    [chat.state.messages],
-  );
-
   const displayTimeline = useMemo(() => mergeDisplayTimeline(chat.state.messages as SurfaceMessage[],
     displayHistory.rows, canonicalHistoryIds?.sessionId === activeSessionId ? canonicalHistoryIds.ids : undefined),
     [chat.state.messages, displayHistory.rows, canonicalHistoryIds, activeSessionId]);
-  const hasHistoricalDisplayRows = displayTimeline.some(entry => entry.historicalDisplayOnly);
+  // Group the visible conversation, including owner-readable historical replies.
+  // Canonical indexes still address only actionable/currently admitted messages.
+  const transcriptMeta = useMemo(() => computeTranscriptRowMeta(displayTimeline.map(entry =>
+    entry.historicalDisplayOnly ? { role: entry.row.role, timestamp: new Date(entry.row.timestamp) } : entry.message)),
+    [displayTimeline]);
 
   /** The typing indicator's line: one named typist, two named, or several. */
   const typingLabel = useMemo(() => {
@@ -4955,10 +4952,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   {panePolicy.post ? t.sharedTranscriptEmpty : t.transcriptEmpty}
                 </p>
               ))}
-            {displayTimeline.map(entry => {
-              if (entry.historicalDisplayOnly) return <ChatDisplayHistoryRow key={`display-${entry.row.id}`} row={entry.row} />;
+            {displayTimeline.map((entry, displayIndex) => {
+              const meta = transcriptMeta[displayIndex];
+              if (entry.historicalDisplayOnly) return <Fragment key={`display-${entry.row.id}`}>
+                {meta?.daySeparator && <div className="flex items-center justify-center" role="separator">
+                  <span className="rounded-full bg-muted px-2.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+                    {formatTranscriptDayLabel(meta.daySeparator, new Date(), locale, { today: t.dayToday, yesterday: t.dayYesterday })}
+                  </span>
+                </div>}
+                <ChatDisplayHistoryRow row={entry.row} meta={meta} avatar={avatarFor(null)}
+                  authorName={entry.row.role === "assistant" ? assistantNameFor(null) ?? undefined : undefined} />
+              </Fragment>;
               const { message: m, canonicalIndex: messageIndex } = entry;
-              const meta = transcriptMeta[messageIndex];
               const timeKnown = !Number.isNaN(m.timestamp.getTime());
               // Day separator — a centered chip whenever the local calendar
               // day turns over, the group-chat timeline anchor.
@@ -5209,7 +5214,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 </Fragment>
               );
             })}
-            <ChatDisplayHistoryStatus history={displayHistory} hasHistoricalRows={hasHistoricalDisplayRows} />
+            {!(activeSessionId && historyRecoverySessionId === activeSessionId && displayHistory.failed) &&
+              <ChatDisplayHistoryStatus history={displayHistory} />}
             {/* In-chat pursuit cards newer than every persisted message (the
                 arming turn is still streaming). */}
             {goalPlacement.trailing.map((goal) => (

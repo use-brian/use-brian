@@ -8859,8 +8859,8 @@ export const zhCN: Dictionary = {
       "label": "已保存消息",
       "notice": "这些已保存消息仅供参考，不会发送给助手。",
       "unavailableMessage": "你当前的访问权限无法查看这条消息。",
-      "failed": "无法检查部分已保存消息。请重试以加载完整对话。",
-      "more": "显示更多已保存消息",
+      "failed": "未能加载完整对话。请重试。",
+      "more": "显示更多消息",
       "retry": "重试加载记录"
     },
     legacyHistory: {

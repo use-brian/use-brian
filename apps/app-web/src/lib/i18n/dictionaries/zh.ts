@@ -8986,8 +8986,8 @@ export const zh: Dictionary = {
       "label": "已儲存訊息",
       "notice": "這些已儲存訊息僅供參考，不會傳送給助理。",
       "unavailableMessage": "你目前的存取權限無法查看這則訊息。",
-      "failed": "無法檢查部分已儲存訊息。請重試以載入完整對話。",
-      "more": "顯示更多已儲存訊息",
+      "failed": "未能載入完整對話。請重試。",
+      "more": "顯示更多訊息",
       "retry": "重試載入記錄"
     },
     legacyHistory: {

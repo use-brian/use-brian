@@ -1,7 +1,11 @@
 "use client";
 
 /** Human display only; never an input to the chat reducer or transcript cache. [COMP:app-web/chat-display-history] */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { ChatMarkdown } from "@use-brian/chat-ui";
+import remarkGfm from "remark-gfm";
+import { ChatPaneLink } from "./chat-link-routing";
+import { formatTranscriptTime, type TranscriptRowMeta } from "./chat-transcript";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/skeleton";
 import { useLocale, useT } from "@/lib/i18n/client";
@@ -103,27 +107,42 @@ export function usePersonalDisplayHistory(workspaceId: string, sessionId: string
     failed: !!current?.failed, hasMore: current?.page?.nextSequence != null, refresh, more, invalidate };
 }
 
-/** No message-id selector, Markdown, links, attachments or actions: selection cannot enter the quote handler. */
-export function ChatDisplayHistoryRow({ row }: { row: DisplayRow }) {
+/** Ordinary transcript presentation without a message-id selector or semantic
+ * actions: displaying a published utterance does not admit it as new evidence. */
+const HISTORY_MARKDOWN_COMPONENTS = {
+  a: ChatPaneLink,
+  // Historical Markdown must not automatically fetch remote image URLs.
+  img: ({ alt }: { alt?: string }) => <span>{alt}</span>,
+};
+const HISTORY_REMARK_PLUGINS = [remarkGfm];
+export function ChatDisplayHistoryRow({ row, avatar, authorName, meta }: {
+  row: DisplayRow; avatar?: ReactNode; authorName?: string; meta?: TranscriptRowMeta;
+}) {
   const t = useT().chatApp;
   const locale = useLocale();
   const date = new Date(row.timestamp);
-  return <article data-historical-display-only="true" className="rounded-lg border bg-muted/20 p-3 text-foreground">
-    <div className="mb-2 flex flex-wrap items-baseline gap-2 text-xs text-muted-foreground">
-      <span className="font-medium">{row.role === "user" ? t.legacyHistory.you : t.legacyHistory.assistant}</span>
-      {Number.isFinite(date.getTime()) && <time dateTime={row.timestamp}>{date.toLocaleString(locale)}</time>}
-      <span>{t.displayHistory.label}</span>
-    </div>
-    <p className="whitespace-pre-wrap text-[16px] leading-relaxed [overflow-wrap:anywhere]">{row.available ? row.text : t.displayHistory.unavailableMessage}</p>
+  const human = row.role === "user";
+  const header = (meta?.startsGroup ?? true) && <span className="mb-0.5 flex flex-wrap items-baseline gap-1.5 text-xs text-muted-foreground">
+    <span className="font-medium">{authorName ?? (human ? t.legacyHistory.you : t.legacyHistory.assistant)}</span>
+    {Number.isFinite(date.getTime()) && <time dateTime={row.timestamp} title={date.toLocaleString(locale)}>{formatTranscriptTime(date, locale)}</time>}
+  </span>;
+  const text = row.available ? row.text : t.displayHistory.unavailableMessage;
+  return <article data-historical-display-only="true"
+    className={`${human ? "flex flex-col items-end" : "flex gap-2.5"}${meta && !meta.startsGroup ? " -mt-3.5" : ""}`}>
+    {human ? <>{header}<div data-brian-chat-user className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[16px] @[560px]/chat-reading:text-[15px] leading-[1.5] [overflow-wrap:anywhere] whitespace-pre-wrap text-secondary-foreground shadow-sm">{text}</div></>
+      : <>{avatar}<div className="min-w-0 flex-1 space-y-2.5 pt-0.5">{header}
+        <div data-brian-chat-answer className="chat-markdown prose prose-sm dark:prose-invert max-w-none text-[16px] @[560px]/chat-reading:text-[15px] leading-[1.65] text-foreground [overflow-wrap:anywhere]">
+          <ChatMarkdown text={text ?? ""} components={HISTORY_MARKDOWN_COMPONENTS} remarkPlugins={HISTORY_REMARK_PLUGINS} />
+        </div>
+      </div></>}
   </article>;
 }
 
-export function ChatDisplayHistoryStatus({ history, hasHistoricalRows }: {
-  history: ReturnType<typeof usePersonalDisplayHistory>; hasHistoricalRows: boolean;
+export function ChatDisplayHistoryStatus({ history }: {
+  history: ReturnType<typeof usePersonalDisplayHistory>;
 }) {
   const t = useT().chatApp.displayHistory;
   return <>
-    {hasHistoricalRows && <p role="status" className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">{t.notice}</p>}
     {history.loading && !history.hasPage && <div aria-hidden data-testid="chat-display-history-skeleton" className="space-y-2"><Skeleton className="h-4 w-3/4" /><Skeleton className="h-4 w-1/2" /></div>}
     {history.failed && <div className="space-y-2"><p role="alert" className="text-sm text-muted-foreground">{t.failed}</p>
       <Button variant="outline" className="max-sm:min-h-11" onClick={history.refresh}>{t.retry}</Button></div>}

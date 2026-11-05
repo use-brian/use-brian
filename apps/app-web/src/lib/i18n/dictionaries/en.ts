@@ -9260,8 +9260,8 @@ export const en = {
       "label": "Saved message",
       "notice": "These saved messages are shown for reference only. They are not sent to the assistant.",
       "unavailableMessage": "This message is unavailable with your current access.",
-      "failed": "Some saved messages could not be checked. Retry to load the complete conversation.",
-      "more": "Show more saved messages",
+      "failed": "Could not load the complete conversation. Try again.",
+      "more": "Show more messages",
       "retry": "Retry history"
     },
     legacyHistory: {
