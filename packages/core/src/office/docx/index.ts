@@ -189,7 +189,10 @@ function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>, conte
         margins: docxCellMargins(cell.margins),
         verticalAlign: cell.verticalAlignment === 'middle' ? VerticalAlignTable.CENTER : cell.verticalAlignment === 'bottom' ? VerticalAlignTable.BOTTOM : VerticalAlignTable.TOP,
         borders: docxCellBorders(cell.borders),
-        children: officeCellParagraphs(cell).map(({ format, runs }) => new Paragraph({ alignment: paragraphAlignment(format.alignment), ...paragraphNumbering(format), spacing: paragraphSpacing({ spacingAfterPt: 0, ...format }), children: richChildren(runs) })),
+        children: officeCellParagraphs(cell).map(({ format, runs }) => new Paragraph({ alignment: paragraphAlignment(format.alignment), ...paragraphNumbering(format), spacing: paragraphSpacing({ spacingAfterPt: 0, ...format }),
+          // Keep original values in the canonical part. Native no-wrap text
+          // avoids soft word breaks before an exact row clips its overflow.
+          children: richChildren(cell.wrapText === false ? runs.map(run => ({ ...run, text: run.text.replace(/ /g, '\u00a0') })) : runs) })),
       }, cell.wrapText)),
     })),
   })
@@ -315,6 +318,7 @@ export async function exportOfficeDocument(
       })] }) } : undefined,
       footers: { default: new Footer({ children: [new Paragraph({
         alignment: paragraphAlignment(section.footerAlignment),
+        indent: section.footerIndentLeftPt === undefined ? undefined : { left: Math.round(section.footerIndentLeftPt * 20) },
         border: section.footerBorderTop ? { top: { style: BorderStyle.SINGLE, color: color(section.footerBorderTop.color), size: Math.max(1, Math.round(section.footerBorderTop.widthPt * 8)), space: 6 } } : undefined,
         children: [...richChildren(section.footer), ...(section.showPageNumber ? [new TextRun(' '), new TextRun({ children: [PageNumber.CURRENT] })] : [])],
       })] }) },
@@ -562,6 +566,11 @@ function effectiveParagraphFormat(fragment: string, styleFragment = '', numberin
   }
 }
 
+function textParagraphLeftIndent(xml: string): number | undefined {
+  const value = xmlValue(paragraphProperties(xml), 'w:ind', 'w:left')
+  return value !== undefined && /^-?\d+$/.test(value) && Math.abs(Number(value)) <= 20_000 ? Number(value) / 20 : undefined
+}
+
 function textParagraphAlignment(xml: string): 'start' | 'center' | 'end' {
   const paragraphs = [...xml.matchAll(/<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/g)]
     .map((match) => match[0])
@@ -700,7 +709,7 @@ function parseWordTable(fragment: string, id: string, styles: WordStyles, number
         verticalAlignment: wordVerticalAlignment(cellProperties),
         margins: wordCellMargins(cellProperties, 'tcMar', tableMargins),
         borders: wordTableBorders(cellProperties, 'tcBorders'),
-        wrapText: !/<w:noWrap\b/i.test(cellProperties),
+        wrapText: !onOff(cellProperties, 'w:noWrap'),
       }
       cells.push(cell)
       if (verticalMergeValue === 'restart') for (let offset = 0; offset < colSpan; offset += 1) nextVerticalMerges.set(column + offset, cell)
@@ -893,6 +902,7 @@ async function externalDocumentSnapshot(zip: JSZip, xml: string, context: Office
         headerImage: headerImage.image,
         headerAlignment: textParagraphAlignment(headerXml),
         footerAlignment: textParagraphAlignment(footerXml),
+        ...(textParagraphLeftIndent(footerXml) === undefined ? {} : { footerIndentLeftPt: textParagraphLeftIndent(footerXml) }),
         headerBorderBottom: borderFromXml(headerXml, 'bottom'),
         footerBorderTop: borderFromXml(footerXml, 'top'),
         showPageNumber: footerFields.count > 0,

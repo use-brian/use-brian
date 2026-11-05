@@ -83,7 +83,7 @@ const OfficeEmptyBlockInput = Extension.create({
 const OfficeDocument = Node.create({ name: "doc", topNode: true, content: "officeSection+" });
 const OfficeSection = Node.create({
   name: "officeSection", content: "officeHeader officeBody officeFooter", group: "block", defining: true,
-  addAttributes: () => attrs("id", "page", "headerImage", "headerAlignment", "footerAlignment", "headerBorderBottom", "footerBorderTop", "showPageNumber"),
+  addAttributes: () => attrs("id", "page", "headerImage", "headerAlignment", "footerAlignment", "footerIndentLeftPt", "headerBorderBottom", "footerBorderTop", "showPageNumber"),
   parseHTML: () => [{ tag: "section[data-office-section]" }],
   renderHTML: ({ node, HTMLAttributes }) => ["section", mergeAttributes(withoutObjectAttributes(HTMLAttributes, ["page", "headerImage", "headerBorderBottom", "footerBorderTop"]), {
     class: "office-document-section", "data-office-section": "true",
@@ -92,7 +92,7 @@ const OfficeSection = Node.create({
     "data-footer-alignment": node.attrs.footerAlignment ?? "start",
     "data-header-border": node.attrs.headerBorderBottom ? "true" : "false",
     "data-footer-border": node.attrs.footerBorderTop ? "true" : "false",
-    style: sectionStyle(node.attrs.page),
+    style: `${sectionStyle(node.attrs.page) ?? ""};--office-footer-indent-left:${Number(node.attrs.footerIndentLeftPt ?? 0)}pt`,
   }), 0],
 });
 const OfficeHeader = Node.create({
@@ -389,7 +389,7 @@ export function officeDocumentEditorExtensions(artifactId:string|null=null): Any
 function sectionStyle(page: unknown): string | undefined {
   if (!page || typeof page !== "object") return undefined;
   const value = page as Record<string, unknown>;
-  return [`--office-page-width:${Number(value.widthPt)}pt`, `--office-page-height:${Number(value.heightPt)}pt`, `--office-margin-top:${Number(value.marginTopPt)}pt`, `--office-margin-right:${Number(value.marginRightPt)}pt`, `--office-margin-bottom:${Number(value.marginBottomPt)}pt`, `--office-margin-left:${Number(value.marginLeftPt)}pt`].join(";");
+  return [`--office-page-width:${Number(value.widthPt)}pt`, `--office-page-height:${Number(value.heightPt)}pt`, `--office-margin-top:${Number(value.marginTopPt)}pt`, `--office-margin-right:${Number(value.marginRightPt)}pt`, `--office-margin-bottom:${Number(value.marginBottomPt)}pt`, `--office-margin-left:${Number(value.marginLeftPt)}pt`, ...(typeof value.footerDistancePt === "number" ? [`--office-footer-bottom:${value.footerDistancePt}pt`, "--office-footer-height:auto", "--office-footer-min-height:0"] : [])].join(";");
 }
 
 function withoutObjectAttributes(value: Record<string, unknown>, names: string[]): Record<string, unknown> {

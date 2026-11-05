@@ -73,3 +73,14 @@ rotated pages, and deliberately cropped pages are outside this rounding repair.
 A cell's explicit `wrapText: false` survives native DOCX export as `w:noWrap`.
 The editable canonical part alone is insufficient: external office renderers
 must receive the wrapping policy in the ordinary WordprocessingML cell properties.
+
+Office's page setup exposes the existing footer edge distance and a signed left
+indent for the footer paragraph. The indent changes the footer text area while
+retaining the page margins and body layout. Native DOCX, canonical/Yjs editing,
+and preview layout preserve it. Table controls expose minimum/exact row height
+so templates can clip an overflowing field in its own row without moving the
+following date or location row. Clipboard text remains ordinary editable text.
+
+For a no-wrap cell, native Word text uses typographic no-break spaces while the
+canonical part retains the original value. Explicit paragraph and line breaks
+remain intact. An exact row height controls clipping of excess lines.

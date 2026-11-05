@@ -2,11 +2,28 @@ import JSZip from 'jszip'
 import { describe, expect, it } from 'vitest'
 import { layoutOfficeArtifact, renderOfficePreviewSvg } from '@use-brian/office-renderer'
 import { exportOfficeDocument, importOfficeDocument } from '../docx/index.js'
-import { id } from './fixtures.js'
+import { id, documentSnapshot } from './fixtures.js'
 
 const context = { artifactId: id(60), workspaceId: id(2), templateVersionId: null, locale: 'en-US', defaultLanguage: 'en-US', title: 'Mixed sections' }
 
 describe('[COMP:office/docx-engine] DOCX sections', () => {
+  it.each([-5.45, 6.1])('keeps footer indent %s through native export and preview layout', async indent => {
+    const snapshot = documentSnapshot()
+    snapshot.sections[0].footer = [{ ...snapshot.sections[0].header[0], id: id(71), text: '2' }]
+    snapshot.sections[0].footerAlignment = 'center'
+    snapshot.sections[0].footerIndentLeftPt = indent
+    const footer = layoutOfficeArtifact(snapshot).pages[0].primitives.find(p => p.sourceKind === 'footer')!
+    expect(footer.xPt).toBe(72 + indent)
+    expect(footer.widthPt).toBe(468 - indent)
+    const native = await JSZip.loadAsync((await exportOfficeDocument(snapshot)).bytes)
+    expect(await native.file('word/footer1.xml')!.async('string')).toContain(`w:left="${Math.round(indent * 20)}"`)
+    native.remove('customXml/brian-office.json')
+    const reopened = await importOfficeDocument(await native.generateAsync({ type: 'uint8array' }), context)
+    expect(reopened.ok, JSON.stringify(reopened.diagnostics)).toBe(true)
+    if (reopened.snapshot?.family !== 'document') throw new Error('document required')
+    expect(reopened.snapshot.sections[0].footerIndentLeftPt).toBe(indent)
+  })
+
   it('keeps exact row heights and clips preview overflow without moving following content', async () => {
     const zip = new JSZip()
     zip.file('[Content_Types].xml', '<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')

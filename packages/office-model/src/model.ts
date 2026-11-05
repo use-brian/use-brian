@@ -292,6 +292,7 @@ export const DocumentSectionSchema = z
     }).strict().optional(),
     headerAlignment: z.enum(['start', 'center', 'end']).optional(),
     footerAlignment: z.enum(['start', 'center', 'end']).optional(),
+    footerIndentLeftPt: z.number().min(-1000).max(1000).optional(),
     headerBorderBottom: z.object({ color: OfficeColorSchema, widthPt: z.number().positive().max(20) }).strict().optional(),
     footerBorderTop: z.object({ color: OfficeColorSchema, widthPt: z.number().positive().max(20) }).strict().optional(),
     showPageNumber: z.boolean(),
