@@ -33,7 +33,7 @@ await assertLocalFixture()
 const pool=getPool(),artifacts=createOfficeArtifactStore(),templates=createOfficeTemplateStore(),groups=createDbWorkspaceGroupStore()
 const hash='a'.repeat(64)
 const tables=['office_templates','office_template_versions','office_resources','office_template_resource_refs'] as const
-async function fixture(grantLifetimeMs=86_400_000) {
+async function fixture(grantLifetimeMs=86_400_000,fieldSchema:unknown={}) {
   const workspaceId=randomUUID(),owner=randomUUID(),reader=randomUUID(),editor=randomUUID()
   for(const id of [owner,reader,editor])await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
   // These suites pin the legacy (flag-off) model: read grants are read-only there.
@@ -52,7 +52,7 @@ async function fixture(grantLifetimeMs=86_400_000) {
   const bundleFileId=await file(),resourceFileId=await file()
   const resourceParams={userId:owner,workspaceId,kind:'brand_media' as const,name:'Library image',fileId:resourceFileId,hash,mime:'image/png',licence:{},embeddingRights:'allowed' as const,sensitivity:'internal' as const}
   const resource=await templates.addResource(resourceParams)
-  const versionParams={userId:owner,templateId:template.id,workspaceId,bundleFileId,bundleHash:hash,capabilityVersion:1,locales:['en'],tags:[],whenToUse:[],whenNotToUse:[],exampleRequests:[],fieldSchema:{},admissionReceipt:{},provenance:{},resourceIds:[resource.id],status:'admitted' as const}
+  const versionParams={userId:owner,templateId:template.id,workspaceId,bundleFileId,bundleHash:hash,capabilityVersion:1,locales:['en'],tags:[],whenToUse:[],whenNotToUse:[],exampleRequests:[],fieldSchema,admissionReceipt:{},provenance:{},resourceIds:[resource.id],status:'admitted' as const}
   const version=await templates.addVersion(versionParams)
   async function grant() {
     const request=randomUUID()
@@ -68,6 +68,31 @@ async function fixture(grantLifetimeMs=86_400_000) {
 afterAll(async()=>{await getAppPool().end();await pool.end()})
 
 describe('[COMP:api/office-access] current Office library scopes (PG18)',()=>{
+  it('edits admitted template draft routing and appends a new version without changing the prior field schema',async()=>{
+    const fields=Array.from({length:18},(_,index)=>({id:randomUUID(),name:`FIELD_${index}`,type:'plainText',targetIds:[randomUUID()],required:false,locked:false,repeating:false,minItems:0,maxItems:1,maxLength:100_000}))
+    const f=await fixture(86_400_000,fields)
+    const prior=(await pool.query('SELECT row_to_json(v) AS value FROM office_template_versions v WHERE id=$1',[f.version.id])).rows[0].value
+    const routing={source:'upload',fields,slideRecipes:[]}
+    expect(await templates.saveDraftRouting({userId:f.editor,templateId:f.template.id,routing})).toBe(true)
+    expect(await templates.getDraftRouting(f.editor,f.template.id)).toEqual(routing)
+    expect(await templates.getDraftRouting(f.reader,f.template.id)).toEqual(routing)
+    const changed={...routing,fields:fields.map((field,index)=>index===0?{...field,label:'Reviewed next version'}:field)}
+    expect(await templates.saveDraftRouting({userId:f.reader,templateId:f.template.id,routing:changed})).toBe(false)
+    expect(await templates.getDraftRouting(f.editor,f.template.id)).toEqual(routing)
+    expect(await templates.saveDraftRouting({userId:f.editor,templateId:f.template.id,routing:changed})).toBe(true)
+    const next=await templates.addVersion({...f.versionParams,userId:f.editor,bundleHash:'b'.repeat(64),fieldSchema:changed.fields})
+    expect(next.version).toBe(2)
+    expect((await pool.query('SELECT parent_version_id,field_schema FROM office_template_versions WHERE id=$1',[next.id])).rows).toEqual([{parent_version_id:f.version.id,field_schema:changed.fields}])
+    expect((await pool.query('SELECT row_to_json(v) AS value FROM office_template_versions v WHERE id=$1',[f.version.id])).rows[0].value).toEqual(prior)
+    expect((await pool.query('SELECT lifecycle_state,current_version_id FROM office_templates WHERE id=$1',[f.template.id])).rows).toEqual([{lifecycle_state:'admitted',current_version_id:next.id}])
+  })
+  it.each(['deprecated','trash','retained'] as const)('withholds draft routing in %s registry state',async state=>{
+    const f=await fixture(),routing={source:'upload',fields:[],slideRecipes:[]}
+    expect(await templates.saveDraftRouting({userId:f.editor,templateId:f.template.id,routing})).toBe(true)
+    await pool.query('UPDATE office_templates SET lifecycle_state=$2 WHERE id=$1',[f.template.id,state])
+    expect(await templates.getDraftRouting(f.editor,f.template.id)).toBeNull()
+    expect(await templates.saveDraftRouting({userId:f.editor,templateId:f.template.id,routing})).toBe(false)
+  })
   it('deduplicates bytes only inside one durable file scope',async()=>{
     const f=await fixture(),otherTeam=await groups.createTeam(f.owner,f.workspaceId,{name:'Separate library department',key:'separate-library'})
     const sameScope=await templates.addResource({...f.resourceParams,name:'Same file retry'})
@@ -140,12 +165,15 @@ describe('[COMP:api/office-access] current Office library scopes (PG18)',()=>{
   })
   it.each(['holding','retracted','superseded','private','clearance'] as const)('withholds template dependencies after a file becomes %s',async change=>{
     const f=await fixture()
+    expect(await templates.saveDraftRouting({userId:f.editor,templateId:f.template.id,routing:{source:'upload',fields:[],slideRecipes:[]}})).toBe(true)
     if(change==='holding')await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[f.resourceFileId])
     if(change==='retracted')await pool.query('UPDATE workspace_files SET retracted_at=now() WHERE id=$1',[f.resourceFileId])
     if(change==='superseded')await pool.query('UPDATE workspace_files SET valid_to=now() WHERE id=$1',[f.resourceFileId])
     if(change==='private')await pool.query('UPDATE workspace_files SET user_id=$2 WHERE id=$1',[f.resourceFileId,f.owner])
     if(change==='clearance')await pool.query("UPDATE workspace_files SET sensitivity='confidential' WHERE id=$1",[f.resourceFileId])
     for(const table of tables)expect((await queryWithRLS(f.reader,`SELECT * FROM ${table} WHERE workspace_id=$1`,[f.workspaceId])).rows,table).toHaveLength(0)
+    expect(await templates.getDraftRouting(f.reader,f.template.id)).toBeNull()
+    expect(await templates.saveDraftRouting({userId:f.reader,templateId:f.template.id,routing:{}})).toBe(false)
   })
   it('checks the linked draft and bundle separately from resource file access',async()=>{
     const f=await fixture()
@@ -352,7 +380,7 @@ async function metadataFixture() {
   router.use(officeCollaborationRoutes({getArtifact:artifacts.get,resolveAccess:resolveOfficeAccess,
     getSnapshot:(...args)=>after(f.live.get(...args)),listThreads:(...args)=>after(comments.listThreads(...args)),
     listSuggestions:(...args)=>after(comments.listSuggestions(...args))} as OfficeCollaborationRouteDeps))
-  router.use(officeTemplateRoutes({list:(...args)=>after(templates.list(...args)),getTemplate:templates.get,getSnapshot:f.live.get,
+  router.use(officeTemplateRoutes({list:(...args)=>after(templates.list(...args)),getTemplate:templates.get,getArtifact:artifacts.get,getSnapshot:f.live.get,
     getDraftRouting:(...args)=>after(templates.getDraftRouting(...args))} as OfficeTemplatesRouteDeps))
   router.use(officeJobRoutes({get:(...args)=>after(jobs.get(...args)),events:(...args)=>after(jobs.listEvents(...args)),steer:jobs.steer,cancel:jobs.cancel}))
   const paths={

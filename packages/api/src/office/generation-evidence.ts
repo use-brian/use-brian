@@ -7,6 +7,7 @@ import { canRead, parseAuthoringAuthority } from '@use-brian/core'
 import { assertExecutionResourceScope } from '../db/access-predicate.js'
 import { getAppPool, applyRLSGucs, rollbackAndRelease } from '../db/client.js'
 import { runWithAgentAccess } from '../db/agent-access-context.js'
+import { assertOfficeGenerationOrigin } from './generation-origin.js'
 
 type Source = OfficeOutputScope & { id: string; kind: string; version: string; private: boolean; artifactId?:string }
 export type OfficeGenerationEvidence = { sources: Source[]; scope: OfficeOutputScope; private: boolean; fingerprint: string }
@@ -74,16 +75,12 @@ export async function readOfficeGenerationEvidence(client: PoolClient, workspace
  * at publication, under the same app-role identity as the Office mutation. */
 export async function validateDepartmentOfficeGeneration(client: PoolClient,
   job: import('../db/office-generation.js').OfficeGenerationJobRow) {
-  const projection = job.authorityProjection as {creationBinding?:{protocol?:string;actorUserId?:string;workspaceId?:string;authSessionId?:string;sourceFingerprint?:string;authoringAuthority?:unknown;ambientSourceHandles?:string[]}}
+  const projection = job.authorityProjection as {creationBinding?:{protocol?:string;actorUserId?:string;workspaceId?:string;sourceFingerprint?:string;authoringAuthority?:unknown;ambientSourceHandles?:string[]}}
   const binding = projection.creationBinding
   if (binding?.protocol !== 'office_department_v2') return
-  if (binding.actorUserId !== job.initiatedByUserId || binding.workspaceId !== job.workspaceId || !binding.authSessionId) throw missing()
+  if (binding.actorUserId !== job.initiatedByUserId || binding.workspaceId !== job.workspaceId) throw missing()
   await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[job.workspaceId])
-  const live = await client.query(`SELECT s.id FROM auth_sessions s JOIN users u ON u.id=s.user_id
-    JOIN workspace_members m ON m.user_id=u.id AND m.workspace_id=$3
-    WHERE s.id=$1 AND s.user_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
-      AND s.auth_version=u.auth_version FOR SHARE OF s,u,m`,[binding.authSessionId,job.initiatedByUserId,job.workspaceId])
-  if (!live.rows.length) throw missing()
+  await assertOfficeGenerationOrigin(client,job)
   const brief=job.brief as {templateId?:string;sourceHandles?:string[]}
   const current=await readOfficeGenerationEvidence(client,job.workspaceId,{...brief,sourceHandles:[...(brief.sourceHandles??[]),...(binding.ambientSourceHandles??[])]})
   if (current.fingerprint !== binding.sourceFingerprint) throw new WorkspaceAccessError('office_source_changed',409)

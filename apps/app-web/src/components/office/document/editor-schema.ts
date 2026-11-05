@@ -5,11 +5,12 @@ import { Mark, Node, mergeAttributes, type AnyExtension } from "@tiptap/core";
 import { NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, useEditorState, type NodeViewProps } from "@tiptap/react";
 import { createElement, type CSSProperties } from "react";
 import StarterKit from "@tiptap/starter-kit";
+import { isChangeOrigin } from "@tiptap/extension-collaboration";
 import { officeTableResolvedColumnWidthsPt, officeNumberingCounter, type OfficeRichTextRun, type OfficeTable, type OfficeEditorJsonNode, type OfficeParagraphFormat } from "@use-brian/office-model";
 import { officeDocumentCellStyles, officeParagraphCss, officeScaleSegments, officeScaledSegmentCss, officeTextAdvance, officeRunFontCss } from "@use-brian/office-renderer";
 import { Extension } from "@tiptap/core";
 import { Plugin } from "@tiptap/pm/state";
-import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import { useOfficeResourceMedia } from "@/lib/use-doc-media";
 import { DocumentCommentDecorations } from "./comment-decorations";
 import { DocumentPaginationDecorations } from "./pagination-decorations";
@@ -20,10 +21,69 @@ const attrs = (...names: string[]) => Object.fromEntries(names.map((name) => [na
 const render = (tag: string, className?: string) => ({ HTMLAttributes }: { HTMLAttributes: Record<string, unknown> }) => [tag, mergeAttributes(HTMLAttributes, className ? { class: className } : {}), 0] as const;
 const atomRender = (tag: string, className: string) => ({ HTMLAttributes }: { HTMLAttributes: Record<string, unknown> }) => [tag, mergeAttributes(HTMLAttributes, { class: className })] as const;
 
+const EMPTY_RUN_STYLE: OfficeRichTextRun["style"] = { fontFamily: "Arial", fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: "#111111" };
+const richTextBlocks = new Set(["paragraph", "heading", "officeHeader", "officeFooter", "officeListItem", "officeTableCellText"]);
+function freshRunAttributes(source?: Record<string, unknown>) {
+  return { id: crypto.randomUUID(), style: structuredClone(source?.style ?? EMPTY_RUN_STYLE), ...(typeof source?.href === "string" ? { href: source.href } : {}) };
+}
+function blockRunAttributes(node: import("@tiptap/pm/model").Node): Record<string, unknown> | undefined {
+  let attributes: Record<string, unknown> | undefined;
+  node.forEach(child => { attributes ??= child.type.name === "officeEmptyRun" ? child.attrs : child.marks.find(mark => mark.type.name === "officeRun")?.attrs; });
+  return attributes;
+}
+function insertEmptyOfficeBlockText(view: EditorView, from: number, to: number, text: string, defaultTransaction?: () => import("@tiptap/pm/state").Transaction): boolean {
+  const $from = view.state.doc.resolve(from), $to = view.state.doc.resolve(to);
+  if (!text || !$from.sameParent($to) || !richTextBlocks.has($from.parent.type.name) || $from.parent.textContent.length) return false;
+  let onlyEmptyRuns = true;
+  $from.parent.forEach(node => { if (node.type.name !== "officeEmptyRun") onlyEmptyRuns = false; });
+  if (!onlyEmptyRuns) return false;
+  const source = blockRunAttributes($from.parent) ?? view.state.storedMarks?.find(mark => mark.type.name === "officeRun")?.attrs;
+  const mark = view.state.schema.marks.officeRun.create(freshRunAttributes(source));
+  const transaction = view.state.tr.replaceWith($from.start(), $from.end(), view.state.schema.text(text, [mark])).setStoredMarks([mark]);
+  const composition = defaultTransaction?.().getMeta("composition");
+  if (composition !== undefined) transaction.setMeta("composition", composition);
+  view.dispatch(transaction.scrollIntoView());
+  return true;
+}
+
+// Preserve only newly emptied local blocks. Remote/saved malformed text is
+// intentionally left to the strict canonical decoder instead of being healed.
+const OfficeEmptyBlockInput = Extension.create({
+  name: "officeEmptyBlockInput",
+  addProseMirrorPlugins: () => [new Plugin({
+    appendTransaction(transactions, oldState, newState) {
+      if (!transactions.some(transaction => transaction.docChanged) || transactions.some(isChangeOrigin)) return null;
+      const emptiedStyles = new Map<string, Record<string, unknown>>();
+      oldState.doc.descendants(node => {
+        if (!richTextBlocks.has(node.type.name) || typeof node.attrs.id !== "string" || node.content.size === 0) return;
+        const source = blockRunAttributes(node);
+        if (source) emptiedStyles.set(node.attrs.id, source);
+      });
+      const transaction = newState.tr;
+      newState.doc.descendants((node, position) => {
+        if (!richTextBlocks.has(node.type.name) || node.content.size !== 0) return;
+        const source = emptiedStyles.get(node.attrs.id);
+        if (source) transaction.insert(transaction.mapping.map(position + 1), newState.schema.nodes.officeEmptyRun.create(freshRunAttributes(source)));
+      });
+      return transaction.docChanged ? transaction : null;
+    },
+    props: {
+      handleTextInput: insertEmptyOfficeBlockText,
+      handlePaste(view, event) {
+        const text = event.clipboardData?.getData("text/plain") ?? "";
+        const { from, to } = view.state.selection;
+        if (!insertEmptyOfficeBlockText(view, from, to, text.replace(/\r\n?/g, "\n"))) return false;
+        event.preventDefault();
+        return true;
+      },
+    },
+  })],
+});
+
 const OfficeDocument = Node.create({ name: "doc", topNode: true, content: "officeSection+" });
 const OfficeSection = Node.create({
   name: "officeSection", content: "officeHeader officeBody officeFooter", group: "block", defining: true,
-  addAttributes: () => attrs("id", "page", "headerImage", "headerAlignment", "footerAlignment", "headerBorderBottom", "footerBorderTop", "showPageNumber"),
+  addAttributes: () => attrs("id", "page", "headerImage", "headerAlignment", "footerAlignment", "footerIndentLeftPt", "headerBorderBottom", "footerBorderTop", "showPageNumber"),
   parseHTML: () => [{ tag: "section[data-office-section]" }],
   renderHTML: ({ node, HTMLAttributes }) => ["section", mergeAttributes(withoutObjectAttributes(HTMLAttributes, ["page", "headerImage", "headerBorderBottom", "footerBorderTop"]), {
     class: "office-document-section", "data-office-section": "true",
@@ -32,7 +92,7 @@ const OfficeSection = Node.create({
     "data-footer-alignment": node.attrs.footerAlignment ?? "start",
     "data-header-border": node.attrs.headerBorderBottom ? "true" : "false",
     "data-footer-border": node.attrs.footerBorderTop ? "true" : "false",
-    style: sectionStyle(node.attrs.page),
+    style: `${sectionStyle(node.attrs.page) ?? ""};--office-footer-indent-left:${Number(node.attrs.footerIndentLeftPt ?? 0)}pt`,
   }), 0],
 });
 const OfficeHeader = Node.create({
@@ -104,22 +164,51 @@ const OfficeTable = Node.create({
       ["colgroup", {}, ...widths.map((width) => ["col", { style: `width:${width / total * 100}%` }])], ["tbody", {}, 0]];
   },
 });
-const OfficeTableRow = Node.create({ name: "officeTableRow", content: "officeTableCell*", addAttributes: () => attrs("id", "minHeightPt"), parseHTML: () => [{ tag: "tr" }], renderHTML: ({ HTMLAttributes }) => ["tr", mergeAttributes(HTMLAttributes, { style: typeof HTMLAttributes.minHeightPt === "number" ? `height:${HTMLAttributes.minHeightPt}pt` : undefined }), 0] });
+const OfficeTableRow = Node.create({ name: "officeTableRow", content: "officeTableCell*", addAttributes: () => attrs("id", "minHeightPt", "heightRule"), parseHTML: () => [{ tag: "tr" }], renderHTML: ({ HTMLAttributes }) => ["tr", mergeAttributes(HTMLAttributes, { style: typeof HTMLAttributes.minHeightPt === "number" ? `height:${HTMLAttributes.minHeightPt}pt` : undefined }), 0] });
 const OfficeTableCell = Node.create({ name: "officeTableCell", content: "officeTableCellText+", isolating: true, addAttributes: () => attrs("id", "rowSpan", "colSpan", "fill", "alignment", "verticalAlignment", "margins", "borders", "wrapText"), parseHTML: () => [{ tag: "td" }, { tag: "th" }], renderHTML: ({ HTMLAttributes }) => ["td", mergeAttributes(withoutObjectAttributes(HTMLAttributes, ["margins", "borders"]), { rowspan: HTMLAttributes.rowSpan, colspan: HTMLAttributes.colSpan }), 0] });
 const OfficeTableCellText = Node.create({
   priority: 1000,
+  addProseMirrorPlugins() {
+    return [new Plugin({ props: { handlePaste(view, event) {
+      const { $from, $to } = view.state.selection;
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      // Text pasted into one cell follows its destination typography. The
+      // generic HTML clipboard parser can otherwise promote cell paragraphs
+      // into body content and parse CSS strings as canonical run attributes.
+      if ($from.parent.type.name !== "officeTableCellText" || !$from.sameParent($to) || !text) return false;
+      event.preventDefault();
+      const normalized = text.replace(/\r\n?/g, "\n");
+      if (!insertEmptyOfficeBlockText(view, $from.pos, $to.pos, normalized)) view.dispatch(view.state.tr.insertText(normalized).scrollIntoView());
+      return true;
+    } } })];
+  },
   addKeyboardShortcuts() {
     return { Enter: () => {
       if (!this.editor.isActive("officeTableCellText")) return false;
       const { $from } = this.editor.state.selection;
       const attributes = $from.parent.attrs;
+      const source = this.editor.state.storedMarks?.find(mark => mark.type.name === "officeRun")?.attrs
+        ?? $from.marks().find(mark => mark.type.name === "officeRun")?.attrs ?? blockRunAttributes($from.parent);
+      const originalPosition = $from.before();
       const cellId = $from.node($from.depth - 1).attrs.id;
       const promoted = { ...attributes, paragraphStart: true, id: !attributes.paragraphStart || attributes.id === cellId ? crypto.randomUUID() : attributes.id };
       return this.editor.chain().command(({ tr }) => {
         tr.setNodeMarkup(tr.selection.$from.before(), undefined, promoted);
         return true;
       }).splitBlock().command(({ tr }) => {
-        tr.setNodeMarkup(tr.selection.$from.before(), undefined, { ...attributes, id: crypto.randomUUID(), paragraphStart: true });
+        const nextPosition = tr.selection.$from.before();
+        tr.setNodeMarkup(nextPosition, undefined, { ...attributes, id: crypto.randomUUID(), paragraphStart: true });
+        const next = tr.doc.nodeAt(nextPosition)!;
+        next.forEach((child, offset) => {
+          if (child.type.name === "officeEmptyRun") tr.setNodeMarkup(nextPosition + 1 + offset, undefined, freshRunAttributes(child.attrs));
+          if (!child.isText) return;
+          const mark = child.marks.find(candidate => candidate.type.name === "officeRun");
+          if (mark) tr.removeMark(nextPosition + 1 + offset, nextPosition + 1 + offset + child.nodeSize, mark.type)
+            .addMark(nextPosition + 1 + offset, nextPosition + 1 + offset + child.nodeSize, mark.type.create(freshRunAttributes(mark.attrs)));
+        });
+        if (next.content.size === 0) tr.insert(nextPosition + 1, tr.doc.type.schema.nodes.officeEmptyRun.create(freshRunAttributes(source)));
+        if (tr.doc.nodeAt(originalPosition)?.content.size === 0) tr.insert(originalPosition + 1, tr.doc.type.schema.nodes.officeEmptyRun.create(freshRunAttributes(source)));
+        tr.ensureMarks([tr.doc.type.schema.marks.officeRun.create(freshRunAttributes(source))]);
         return true;
       }).run();
     } };
@@ -286,7 +375,7 @@ export function officeDocumentEditorExtensions(artifactId:string|null=null): Any
   return [
     OfficeDocument, OfficeSection, OfficeHeader.configure({artifactId}), OfficeBody, OfficeFooter,
     Paragraph, Heading, OfficeList, OfficeListItem, OfficeTable, OfficeTableRow,
-    OfficeTableCell, OfficeTableCellText, OfficeTableFormatting, OfficeParagraphSpacing, OfficeInlineFidelity, OfficeEmptyRun, OfficeRun,
+    OfficeTableCell, OfficeTableCellText, OfficeTableFormatting, OfficeParagraphSpacing, OfficeInlineFidelity, OfficeEmptyRun, OfficeRun, OfficeEmptyBlockInput,
     OfficeImage.configure({artifactId}),
     DocumentCommentDecorations,
     projectionAtom("officeChart", "chart", ["altText", "title"], ["chartType", "title", "categories", "series", "altText"]),
@@ -300,7 +389,7 @@ export function officeDocumentEditorExtensions(artifactId:string|null=null): Any
 function sectionStyle(page: unknown): string | undefined {
   if (!page || typeof page !== "object") return undefined;
   const value = page as Record<string, unknown>;
-  return [`--office-page-width:${Number(value.widthPt)}pt`, `--office-page-height:${Number(value.heightPt)}pt`, `--office-margin-top:${Number(value.marginTopPt)}pt`, `--office-margin-right:${Number(value.marginRightPt)}pt`, `--office-margin-bottom:${Number(value.marginBottomPt)}pt`, `--office-margin-left:${Number(value.marginLeftPt)}pt`].join(";");
+  return [`--office-page-width:${Number(value.widthPt)}pt`, `--office-page-height:${Number(value.heightPt)}pt`, `--office-margin-top:${Number(value.marginTopPt)}pt`, `--office-margin-right:${Number(value.marginRightPt)}pt`, `--office-margin-bottom:${Number(value.marginBottomPt)}pt`, `--office-margin-left:${Number(value.marginLeftPt)}pt`, ...(typeof value.footerDistancePt === "number" ? [`--office-footer-bottom:${value.footerDistancePt}pt`, "--office-footer-height:auto", "--office-footer-min-height:0"] : [])].join(";");
 }
 
 function withoutObjectAttributes(value: Record<string, unknown>, names: string[]): Record<string, unknown> {

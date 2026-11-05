@@ -28,6 +28,7 @@ export type OfficeArtifact = {
   mode?: "artifact" | "template" | "session";
   title: string;
   version: number;
+  sensitivity?: "public" | "internal" | "confidential";
   lifecycleState: "active" | "archived" | "trash" | "retained" | "purged";
   role: "view" | "comment" | "edit";
   expiresAt?: string;

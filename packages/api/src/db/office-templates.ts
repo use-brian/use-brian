@@ -74,7 +74,10 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       const result = await db<{ draftRouting: unknown | null }>(userId, `
         SELECT draft_routing AS "draftRouting"
           FROM office_templates
-         WHERE id=$1 AND lifecycle_state='draft'
+         WHERE id=$1 AND lifecycle_state IN ('draft','admitted')
+           AND EXISTS (SELECT 1 FROM office_artifacts a WHERE a.id=office_templates.draft_artifact_id
+             AND a.workspace_id=office_templates.workspace_id AND a.family=office_templates.family
+             AND a.mode='template' AND a.lifecycle_state='active')
       `, [templateId])
       return result.rows[0]?.draftRouting ?? null
     },
@@ -83,7 +86,10 @@ export function createOfficeTemplateStore(db: OfficeDbQuery = defaultOfficeDbQue
       const result = await db<{ id: string }>(params.userId, `
         UPDATE office_templates
            SET draft_routing=$2::jsonb, updated_at=now()
-         WHERE id=$1 AND lifecycle_state='draft'
+         WHERE id=$1 AND lifecycle_state IN ('draft','admitted')
+           AND EXISTS (SELECT 1 FROM office_artifacts a WHERE a.id=office_templates.draft_artifact_id
+             AND a.workspace_id=office_templates.workspace_id AND a.family=office_templates.family
+             AND a.mode='template' AND a.lifecycle_state='active')
         RETURNING id
       `, [params.templateId, JSON.stringify(params.routing)])
       return result.rows.length === 1

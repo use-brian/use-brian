@@ -1,4 +1,4 @@
-import {bindDepartmentOfficeKnowledge} from '../generation-evidence.js'
+import {bindDepartmentOfficeKnowledge,withDepartmentOfficeGeneration} from '../generation-evidence.js'
 import {readOfficeGenerationRecovery,resumeOfficeGeneration} from '../generation-recovery.js'
 import {templateBundle,completeSpreadsheetSnapshot} from '../../../../core/src/office/__tests__/fixtures.js'
 import {createOfficeGenerationWorker} from '../generation-worker.js'
@@ -23,6 +23,11 @@ import {createTokens} from '../../auth/jwt.js'
 import {createOfficeService} from '../service.js'
 import {officeArtifactRoutes} from '../../routes/office-artifacts.js'
 import {WorkspaceAccessError} from '../../workspace-access/policy.js'
+import {createChatOfficeGeneration} from '../chat-generation.js'
+import {createPersonalWebSession} from '../../db/sessions.js'
+import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
+import {findAssistantById} from '../../db/users.js'
+import {createOfficeTools,executionToolContext,type ToolContext} from '@use-brian/core'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool(),secret=randomUUID()
@@ -42,7 +47,7 @@ app.use(((error,_req,res,_next)=>{
   if(error instanceof WorkspaceAccessError)return void res.status(error.status).json({error:error.code})
   res.status(500).json({error:error instanceof Error?error.message:'unexpected_fixture_error'})
 }) as ErrorRequestHandler)
-async function fixture(family:'document'|'presentation'|'spreadsheet'='document',state='ready') {
+async function fixture(family:'document'|'presentation'|'spreadsheet'='document',state='ready',scope:'department'|'general'='department') {
   const userId=randomUUID(),workspaceId=randomUUID(),assistantId=randomUUID()
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[userId])
   await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Synthetic cutover Office',$2,true)",[workspaceId,userId])
@@ -51,14 +56,15 @@ async function fixture(family:'document'|'presentation'|'spreadsheet'='document'
   await groups.addMember(userId,department.id,userId)
   await pool.query("INSERT INTO assistants(id,name,owner_user_id,workspace_id,kind,clearance) VALUES($1,'Primary',$2,$3,'primary','confidential')",[assistantId,userId,workspaceId])
   await queryWithRLS(userId,'INSERT INTO workspace_group_assistants(group_id,assistant_id) VALUES($1,$2)',[department.id,assistantId])
-  await queryWithRLS(userId,"SELECT department_set_home($1,'user',$2,$3)",[workspaceId,userId,department.id])
+  if(scope==='department')await queryWithRLS(userId,"SELECT department_set_home($1,'user',$2,$3)",[workspaceId,userId,department.id])
   await queryWithRLS(userId,"SELECT department_set_home($1,'assistant',$2,$3)",[workspaceId,assistantId,department.id])
   await pool.query('UPDATE assistants SET default_workspace_group_id=$2 WHERE id=$1',[assistantId,department.id])
   await pool.query('UPDATE workspace_access_policies SET access_mode=$2,setup_state=$3,default_department_id=$4 WHERE workspace_id=$1',[workspaceId,'departments',state,department.id])
   const session=await authSessionStore.create(userId,{deviceLabel:'Synthetic fixture',userAgent:null,ipAddress:null})
   const token=createTokens(userId,secret,session!).accessToken
   const source=randomUUID()
-  await pool.query("INSERT INTO knowledge_entries(id,workspace_id,path,title,content,sensitivity,compartments) VALUES($1,$2,$1::uuid::text,'Synthetic knowledge','Fictional source','internal',$3)",[source,workspaceId,[department.compartmentKey]])
+  const compartments=scope==='general'?[]:[department.compartmentKey]
+  await pool.query("INSERT INTO knowledge_entries(id,workspace_id,path,title,content,sensitivity,compartments) VALUES($1,$2,$1::uuid::text,'Synthetic knowledge','Fictional source','internal',$3)",[source,workspaceId,compartments])
   const draft=await officeArtifactStore.createShell({userId,workspaceId,family,mode:'template',title:'Synthetic template',templateVersionId:null,capabilityVersion:1,sensitivity:'internal'})
   const templates=createOfficeTemplateStore()
   const template=await templates.createDraft({userId,workspaceId,family,name:'Synthetic template',description:'Fixture',sensitivity:'internal',draftArtifactId:draft.id})
@@ -76,14 +82,127 @@ async function fixture(family:'document'|'presentation'|'spreadsheet'='document'
   const resolver={forWorkspace:async()=>({gcs:gcs as never,bucket:'fixture',byo:true}),forUri:async()=>gcs as never}
   const filesApi=createFilesApi({resolver,store:createDbWorkspaceFilesStore(),auditStore:{append:async()=>{}} as never})
   const file=randomUUID()
-  await pool.query("INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri,compartments) VALUES($1,$2,$1::uuid::text,'bundle.json',$4,$3)",[file,workspaceId,[department.compartmentKey],buildStorageUri('fixture',workspaceId,file)])
+  await pool.query("INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri,compartments) VALUES($1,$2,$1::uuid::text,'bundle.json',$4,$3)",[file,workspaceId,compartments,buildStorageUri('fixture',workspaceId,file)])
   blobs.set(buildStorageKey(workspaceId,file),bytes)
   const version=await templates.addVersion({userId,templateId:template.id,workspaceId,bundleFileId:file,bundleHash:hash,capabilityVersion:1,locales:['en'],tags:[],whenToUse:[],whenNotToUse:[],exampleRequests:[],fieldSchema:{},admissionReceipt:{},provenance:{},resourceIds:[],status:'admitted'})
-  const input={workspaceId,assistantId,family,outcome:'Prepare a fictional report',audience:'Personal',sourceHandles:[`knowledge:${source}`],templateId:version.id,additionalContext:'Use only fictional facts.',destination:{kind:'department',departmentId:department.id},idempotencyKey:randomUUID()}
+  const input={workspaceId,assistantId,family,outcome:'Prepare a fictional report',audience:scope==='general'?'Workspace':'Personal',sourceHandles:[`knowledge:${source}`],templateId:version.id,additionalContext:'Use only fictional facts.',destination:scope==='general'?undefined:{kind:'department',departmentId:department.id},idempotencyKey:randomUUID()}
   const post=(patch:Record<string,unknown>={})=>request(app).post('/office/artifacts').set('Authorization',`Bearer ${token}`).send({...input,...patch})
-  return {resolver,filesApi,bundle,blobs,during(fn:()=>Promise<void>){duringIO=fn},userId,workspaceId,assistantId,department,source,draft,template,version,session:session!,input,post}
+  return {resolver,filesApi,bundle,bundleFile:file,blobs,during(fn:()=>Promise<void>){duringIO=fn},userId,workspaceId,assistantId,department,source,draft,template,version,session:session!,input,post}
 }
+
+async function chatFixture(firstTurn=false) {
+  const f=await fixture('document','ready','general')
+  const homeOwner=randomUUID()
+  await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[homeOwner])
+  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','confidential')",[f.workspaceId,homeOwner])
+  await pool.query('INSERT INTO department_owners(workspace_id,department_id,user_id) VALUES($1,$2,$3)',[f.workspaceId,f.department.id,homeOwner])
+  await pool.query('DELETE FROM department_owners WHERE department_id=$1 AND user_id=$2',[f.department.id,f.userId])
+  await pool.query("DELETE FROM department_edges WHERE department_id=$1 AND principal_kind='user' AND user_id=$2",[f.department.id,f.userId])
+  const session=await createPersonalWebSession({userId:f.userId,assistantId:f.assistantId,workspaceId:f.workspaceId,channelType:'web',appOrigin:'chat',channelId:randomUUID()},
+    {actorUserId:f.userId,authSessionId:f.session.id,authVersion:f.session.authVersion})
+  // A persisted user message locks the context before its tool turn starts.
+  const locked=(await pool.query('UPDATE sessions SET context_locked_at=clock_timestamp() WHERE id=$1 RETURNING context_locked_at',[session.id])).rows[0]
+  session.contextLockedAt=locked.context_locked_at
+  const execution=(await resolveExecutionContextSystem({userId:f.userId,workspaceId:f.workspaceId,assistant:(await findAssistantById(f.assistantId))!,
+    memberMode:'member',session,sessionAuthority:firstTurn?{...session,contextLockedAt:null}:session,nativeSessionCredential:{userId:f.userId,sessionId:f.session.id,authVersion:f.session.authVersion},
+    identity:{kind:'attended',principal:{kind:'workspace_member',userId:f.userId,authenticationKind:'native_session'}},
+    ownership:{kind:'workspace',workspaceId:f.workspaceId},lifecycle:{sessionId:session.id,sessionPersisted:true,channelType:'web',channelId:session.channelId,abortSignal:new AbortController().signal}})).executionContext
+  const context=executionToolContext(execution,{appId:'chat'}) as ToolContext
+  const input={...f.input,sourceHandles:[],userId:f.userId,sensitivity:'internal' as const,compartments:[],projectIds:[],compartmentGrant:context.compartments??null,projectGrant:context.projectIds??null}
+  return {...f,chat:session,context,request:input}
+}
+
+describe('[COMP:api/office-chat-generation] native chat generation authority',()=>{
+  it.each([false,true])('publishes General without granting assistant home access (first turn: %s)',async firstTurn=>{
+    const f=await chatFixture(firstTurn)
+    const tool=createOfficeTools({port:{createFromContext:async(context,input)=>(await createChatOfficeGeneration(context,input))!,
+      create:async()=>{throw new Error('Unexpected legacy creation')},get:async()=>null,revise:async()=>null}}).find(tool=>tool.name==='createOfficeArtifact')!
+    const receipt=await tool.execute({family:'document',outcome:f.request.outcome,audience:f.request.audience,
+      templateId:f.version.id,sourceHandles:[],additionalContext:f.request.additionalContext,idempotencyKey:f.request.idempotencyKey},f.context)
+    expect(receipt.isError).not.toBe(true)
+    expect(receipt.data).toMatchObject({status:'queued'})
+    const data=receipt.data as {artifactId:string;jobId:string}
+    const created={artifactId:data.artifactId,jobId:data.jobId}
+    expect(created).not.toBeNull()
+    expect(await createChatOfficeGeneration(f.context,f.request)).toEqual(created)
+    expect((await pool.query("SELECT 1 FROM office_artifacts WHERE workspace_id=$1 AND mode='artifact'",[f.workspaceId])).rows).toHaveLength(1)
+    const job=await officeGenerationStore.claim({userId:f.userId,leaseToken:randomUUID(),leaseMs:60_000})
+    expect(job?.id).toBe(created!.jobId)
+    expect(job?.authorityProjection).toMatchObject({compartments:[],creationBinding:{protocol:'office_department_v2',origin:'native_personal_chat',chatSessionId:f.chat.id,authSessionId:f.session.id}})
+    await withDepartmentOfficeGeneration(job!,()=>publishDepartmentOfficeSnapshot({job:job!,leaseToken:job!.leaseToken!,
+      snapshot:{...f.bundle.snapshot,artifactId:created!.artifactId,workspaceId:f.workspaceId,templateVersionId:f.version.id},resolver:f.resolver,storageLimitBytes:1e9}))
+    expect(await officeGenerationStore.get(f.userId,job!.id)).toMatchObject({status:'completed'})
+    expect(await officeArtifactStore.get(f.userId,created!.artifactId)).toMatchObject({compartments:[],headVersion:1})
+    expect(await createOfficeLiveStore().get(f.userId,created!.artifactId)).not.toBeNull()
+    expect((await pool.query("SELECT 1 FROM department_edges WHERE department_id=$1 AND principal_kind='user' AND user_id=$2",[f.department.id,f.userId])).rows).toHaveLength(0)
+  })
+  it.each(['auth','context','source'] as const)('rejects changed %s before publication',async reason=>{
+    const f=await chatFixture(),created=await createChatOfficeGeneration(f.context,f.request)
+    const job=await officeGenerationStore.claim({userId:f.userId,leaseToken:randomUUID(),leaseMs:60_000})
+    if(reason==='auth')await authSessionStore.revokeForUser(f.userId,f.session.id)
+    if(reason==='context')await pool.query('UPDATE sessions SET context_locked_at=clock_timestamp() WHERE id=$1',[f.chat.id])
+    if(reason==='source')await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[f.bundleFile])
+    await expect(withDepartmentOfficeGeneration(job!,()=>publishDepartmentOfficeSnapshot({job:job!,leaseToken:job!.leaseToken!,
+      snapshot:{...f.bundle.snapshot,artifactId:created!.artifactId,workspaceId:f.workspaceId,templateVersionId:f.version.id},resolver:f.resolver,storageLimitBytes:1e9}))).rejects.toBeTruthy()
+    expect(await officeArtifactStore.listVersions(f.userId,created!.artifactId)).toEqual([])
+  })
+  it('refuses a forged caller before writing any artifact or job',async()=>{
+    const f=await chatFixture()
+    await expect(createChatOfficeGeneration({...f.context,userId:randomUUID()},f.request)).rejects.toMatchObject({code:'context_not_available'})
+    expect((await pool.query("SELECT 1 FROM office_artifacts WHERE workspace_id=$1 AND mode='artifact'",[f.workspaceId])).rows).toHaveLength(0)
+    expect((await pool.query('SELECT 1 FROM office_generation_jobs WHERE workspace_id=$1',[f.workspaceId])).rows).toHaveLength(0)
+  })
+  it('does not erase additional department obligations to make creation succeed',async()=>{
+    const f=await chatFixture()
+    await expect(createChatOfficeGeneration(f.context,{...f.request,compartments:[f.department.compartmentKey!]})).rejects.toBeTruthy()
+    expect((await pool.query("SELECT 1 FROM office_artifacts WHERE workspace_id=$1 AND mode='artifact'",[f.workspaceId])).rows).toHaveLength(0)
+    expect((await pool.query('SELECT 1 FROM office_generation_jobs WHERE workspace_id=$1',[f.workspaceId])).rows).toHaveLength(0)
+  })
+})
 describe('[COMP:api/organization-cutover] v2 Office generation before and after activation',()=>{
+  it.each([false,true])('publishes inherited General without applying assistant home (actor membership: %s)',async actorHasHomeMembership=>{
+    const f=await fixture('document','ready','general')
+    if(!actorHasHomeMembership) {
+      // Keep a real Department owner while removing the requesting person's
+      // membership; the fixture creator initially owns this Department.
+      const homeOwner=randomUUID()
+      await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[homeOwner])
+      await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'member','confidential')",[f.workspaceId,homeOwner])
+      await pool.query('INSERT INTO department_owners(workspace_id,department_id,user_id) VALUES($1,$2,$3)',[f.workspaceId,f.department.id,homeOwner])
+      await pool.query('DELETE FROM department_owners WHERE department_id=$1 AND user_id=$2',[f.department.id,f.userId])
+      await pool.query("DELETE FROM department_edges WHERE department_id=$1 AND principal_kind='user' AND user_id=$2",[f.department.id,f.userId])
+    }
+    // The real app role cannot see the assistant's home edge when the actor has
+    // no membership there. Publication must not depend on granting that access.
+    const visible=await queryWithRLS(f.userId,"SELECT assistant_id FROM department_edges WHERE department_id=$1 AND principal_kind='assistant' AND assistant_id=$2",[f.department.id,f.assistantId])
+    expect(visible.rows).toHaveLength(actorHasHomeMembership?1:0)
+    const created=await f.post()
+    expect(created.status,JSON.stringify(created.body)).toBe(202)
+    const job=await officeGenerationStore.claim({userId:f.userId,leaseToken:randomUUID(),leaseMs:60_000})
+    expect(job?.id).toBe(created.body.jobId)
+    expect(job?.authorityProjection).toMatchObject({compartments:[],projectIds:[],sensitivity:'internal'})
+    await withDepartmentOfficeGeneration(job!,()=>publishDepartmentOfficeSnapshot({job:job!,leaseToken:job!.leaseToken!,
+      snapshot:{...f.bundle.snapshot,artifactId:created.body.artifactId,workspaceId:f.workspaceId,templateVersionId:f.version.id},resolver:f.resolver,storageLimitBytes:1e9}))
+    expect(await officeGenerationStore.get(f.userId,job!.id)).toMatchObject({status:'completed'})
+    expect(await officeArtifactStore.get(f.userId,created.body.artifactId)).toMatchObject({compartments:[],projectIds:[],sensitivity:'internal',headVersion:1})
+    expect(await createOfficeLiveStore().get(f.userId,created.body.artifactId)).not.toBeNull()
+    const file=(await pool.query('SELECT f.compartments,f.project_ids,f.sensitivity FROM workspace_files f JOIN office_generation_file_bindings b ON b.file_id=f.id WHERE b.job_id=$1',[job!.id])).rows[0]
+    expect(file).toEqual({compartments:[],project_ids:[],sensitivity:'internal'})
+    expect((await pool.query("SELECT user_id FROM department_edges WHERE department_id=$1 AND principal_kind='user' AND user_id=$2",[f.department.id,f.userId])).rows).toHaveLength(actorHasHomeMembership?1:0)
+    expect((await pool.query('SELECT home_department_id FROM assistants WHERE id=$1',[f.assistantId])).rows[0].home_department_id).toBe(f.department.id)
+    expect((await pool.query('SELECT required_compartments FROM office_artifact_sources WHERE artifact_id=$1',[created.body.artifactId])).rows).toEqual(expect.arrayContaining([{required_compartments:[]}]))
+  })
+  it('revalidates General source authority after staging and removes unpublished bytes',async()=>{
+    const f=await fixture('document','ready','general'),created=await f.post()
+    expect(created.status,JSON.stringify(created.body)).toBe(202)
+    const job=await officeGenerationStore.claim({userId:f.userId,leaseToken:randomUUID(),leaseMs:60_000}),before=new Set(f.blobs.keys())
+    f.during(async()=>{await pool.query('UPDATE knowledge_entries SET scope_held=true WHERE id=$1',[f.source])})
+    await expect(withDepartmentOfficeGeneration(job!,()=>publishDepartmentOfficeSnapshot({job:job!,leaseToken:job!.leaseToken!,
+      snapshot:{...f.bundle.snapshot,artifactId:created.body.artifactId,workspaceId:f.workspaceId,templateVersionId:f.version.id},resolver:f.resolver,storageLimitBytes:1e9}))).rejects.toThrow('office_source_unavailable')
+    expect(new Set(f.blobs.keys())).toEqual(before)
+    expect(await officeArtifactStore.listVersions(f.userId,created.body.artifactId)).toEqual([])
+    expect((await pool.query('SELECT file_id FROM office_generation_file_bindings WHERE job_id=$1',[job!.id])).rows).toEqual([])
+  })
   it.each(['document','presentation','spreadsheet'] as const)('admits %s with its real source and template into Personal',async family=>{
     const f=await fixture(family),response=await f.post()
     expect(response.status,JSON.stringify(response.body)).toBe(202)
@@ -131,7 +250,7 @@ describe('[COMP:api/organization-cutover] v2 Office generation before and after 
     f.during(async()=>{
       if(change==='source')await pool.query('UPDATE knowledge_entries SET scope_held=true WHERE id=$1',[f.source])
       if(change==='session')await authSessionStore.revokeForUser(f.userId,f.session.id)
-      if(change==='assistant')await pool.query("DELETE FROM department_edges WHERE department_id=$1 AND principal_kind='assistant' AND principal_id=$2",[f.department.id,f.assistantId])
+      if(change==='assistant')await pool.query("DELETE FROM department_edges WHERE department_id=$1 AND principal_kind='assistant' AND assistant_id=$2",[f.department.id,f.assistantId])
       if(change==='member')await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.userId])
       if(change==='cancel')await pool.query('UPDATE office_generation_jobs SET cancel_requested_at=now() WHERE id=$1',[job!.id])
     })

@@ -210,3 +210,11 @@ export function templateBundle(family: 'document' | 'presentation' = 'document')
     sourceHash: 'a'.repeat(64),
   }
 }
+
+/** A real rendered-page fixture for PDF export/release contract tests. */
+export async function officePdfFixture(pages = [{ widthPt: 612, heightPt: 792 }]): Promise<Uint8Array> {
+  const { PDFDocument } = await import('@cantoo/pdf-lib')
+  const pdf = await PDFDocument.create()
+  for (const size of pages) pdf.addPage([size.widthPt, size.heightPt]).drawText('Office PDF fixture', { x: 12, y: size.heightPt - 24 })
+  return pdf.save()
+}

@@ -5,7 +5,7 @@ import { getDefaultAssistant, getUserAssistant, findAssistantById, getWorkspaceP
 import { getWorkspaceFileById } from '../db/workspace-files.js'
 import { isMediaMime, resolveRecordingForFile } from '../recordings/recording-for-file.js'
 import { enqueueFileIngestJob, getFileIngestJob } from '../db/file-ingest-jobs-store.js'
-import { findOrCreateSession, findSessionById } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionById } from '../db/sessions.js'
 import {
   isStructuredDocument,
   documentMimeType,
@@ -239,12 +239,23 @@ export function fileRoutes(
       if (!session) {
         // Atomic upsert: retries and multiple attachments from a fresh pane
         // bind to the same session, which the client adopts for its first turn.
-        session = await findOrCreateSession({
+        const appOrigin = fields.appOrigin && UPLOAD_ORIGINS.has(fields.appOrigin) ? fields.appOrigin : null
+        if (appOrigin === 'chat' && (!req.userId || !req.authSessionId || req.authVersion === undefined)) {
+          res.status(401).json({ error: 'Sign in to attach files to a personal chat.', code: 'personal_session_auth_required' })
+          return
+        }
+        const createSession = appOrigin === 'chat'
+          ? (params: Parameters<typeof findOrCreateSession>[0]) => createPersonalWebSession(
+            { ...params, workspaceId: assistant.workspaceId },
+            { actorUserId: req.userId!, authSessionId: req.authSessionId!, authVersion: req.authVersion! },
+          )
+          : findOrCreateSession
+        session = await createSession({
           assistantId: assistant.id,
           userId: user.id,
           channelType: 'web',
           channelId: fields.channelId ?? crypto.randomUUID(),
-          appOrigin: fields.appOrigin && UPLOAD_ORIGINS.has(fields.appOrigin) ? fields.appOrigin : null,
+          appOrigin,
           ...(fields.contextGroupId !== undefined ? { contextGroupId: fields.contextGroupId } : {}),
           ...(fields.contextProjectId !== undefined ? { contextProjectId: fields.contextProjectId } : {}),
         })

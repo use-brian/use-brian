@@ -160,6 +160,7 @@ export function createSessionAuthorityLease(input: {
       : null
   }, input.policyCurrent)
   const invocation = lease.snapshotSource!()
+  lease.snapshotNativeSessionCredential = () => nativeCredential ? { ...nativeCredential } : null
   lease.snapshotSource = () => {
     if (!input.durableSessionSource || expected.contextLockedAt === null || input.credentialCurrent || input.maximumAccessCurrent
       ||nativeCredential&&nativeCredential.userId!==expected.authorityUserId) return { ...invocation }
