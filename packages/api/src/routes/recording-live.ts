@@ -89,6 +89,8 @@ export type RecordingLiveRouteDeps = UploadAdoptionDeps & {
   filesResolver?: FilesClientResolver
   transcribeWindow?: (input: { buffer: Buffer; mime: string }) => Promise<LiveTranscriptionResult>
   reviseNotes?: (input: { previousNotes: string; transcript: string }) => Promise<LiveNotesResult>
+  /** Uses only the current notes page, retaining that page's own audience. */
+  autoTitleNotes?: (input: { userId: string; workspaceId: string; pageId: string; assistantId: string }) => Promise<void>
   // Injectable seams for tests; default to the real store/helpers.
   liveWindows?: {
     insert: typeof insertLiveWindow
@@ -405,7 +407,7 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
           userId,
           workspaceId,
           name: resolvedTitle,
-          nameOrigin: 'user',
+          nameOrigin: title?.trim() ? 'user' : 'placeholder',
           entity: 'tasks',
           viewType: 'table',
           binding: { entity: 'tasks', viewType: 'table' },
@@ -640,6 +642,8 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
       const ops = notesRegionOps(current, notesHeadingId, markerBlockId, notesBlocksOf(notes.text))
       if (ops) await applyPageOps(deps, userId, pageId, ops)
       notesText = notes.text
+      try { await deps.autoTitleNotes?.({ userId, workspaceId, pageId, assistantId }) }
+      catch (error) { console.warn('[recording-live] title deferred:', error) }
       // Tagging failures must not interrupt the lossless capture or its notes.
       try { await meetingTags.apply(userId, workspaceId, pageId, notes.text) }
       catch (error) { console.error('[recording-live] meeting tagging failed:', error) }

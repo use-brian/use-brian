@@ -87,6 +87,9 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
         `brain-entity:${workspaceId}:`,
         `brain-entry:${workspaceId}:`,
         `brain-blueprint:${workspaceId}:`,
+        // A completed recording's topic title is shared with its file display.
+        `recordings:${workspaceId}:`,
+        `recording:${workspaceId}:`,
         `feed-collaboration:${workspaceId}`,
         // Every task change (claim, follow-up, status, supersession) can move
         // a card between work sections or out of them, and the dock's task

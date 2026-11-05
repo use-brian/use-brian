@@ -735,6 +735,8 @@ import { setBrandEventDispatcher } from './brand-event-fanout.js'
 import { setMessageEventDispatcher } from './message-events.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecordingWithBookkeeping } from './recordings/process-recording.js'
+import { createRecordingAutoTitleWorker, datedRecordingTitle } from './recordings/auto-title.js'
+import { runDocAutoTitle } from './doc/auto-title.js'
 import { createRecordingFrameAnalyzer } from './recordings/frame-analysis.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
 import { getRecording, updateRecording } from './db/recordings-store.js'
@@ -6333,6 +6335,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       backgroundModel,
       voiceTranscription,
       usageStore,
+      autoTitleNotes: async ({ userId, workspaceId, pageId, assistantId }) => {
+        const view = await savedViewStore.getById(userId, pageId)
+        if (!view || view.workspaceId !== workspaceId || view.nameOrigin !== 'placeholder') return
+        const runtime = await resolveBackgroundRuntime(workspaceId)
+        const timezone = (await query<{ timezone: string }>('SELECT timezone FROM users WHERE id=$1', [userId])).rows[0]?.timezone ?? 'UTC'
+        const result = await runDocAutoTitle({
+          userId, pageId, provider: runtime?.provider ?? provider,
+          backgroundModel: runtime?.selector ?? backgroundModel,
+          docPageStore, savedViewStore, minChars: 80,
+          formatTitle: topic => datedRecordingTitle(view.createdAt, timezone, topic),
+        })
+        if (result.applied) notifyWorkspaceChange(workspaceId, 'file', 'update')
+        if (result.usage && usageStore) await usageStore.recordUsage({
+          userId, assistantId, workspaceId, sessionId: null, model: result.model ?? backgroundModel,
+          modelTier: 'standard', ...result.usage, source: 'overhead:title',
+          actualCostUsd: runtime?.providerKeySource === 'user' ? 0 : calculateCost(result.model ?? backgroundModel, result.usage),
+          providerKeySource: runtime?.providerKeySource ?? 'platform',
+        })
+      },
       // Window-audio persistence + the assembled-windows finalize fallback.
       filesResolver,
       filesApi,
@@ -9407,6 +9428,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     : null
   if (runWorkers && ports.runOpenRecordingWorker !== false && recordingProcessWorker) recordingProcessWorker.start()
 
+  // Shared by both recording processors; also names existing completed media.
+  const recordingAutoTitleWorker = createRecordingAutoTitleWorker({
+    resolveRuntime: async workspaceId => {
+      const runtime = await resolveBackgroundRuntime(workspaceId)
+      return runtime ? {
+        provider: runtime.provider, model: runtime.selector, maxTokens: runtime.maxTokens, inputTokenLimit: runtime.inputTokenLimit,
+        providerKeySource: runtime.providerKeySource,
+      } : configuredProviders.size ? { provider, model: backgroundModel, providerKeySource: 'platform' } : null
+    },
+    recordUsage: async (candidate, result) => {
+      if (!result.usage || !usageStore) return
+      await usageStore.recordUsage({
+        userId: candidate.userId, workspaceId: candidate.workspaceId, assistantId: '', sessionId: null,
+        model: result.model, modelTier: 'standard', ...result.usage,
+        actualCostUsd: result.providerKeySource === 'user' ? 0 : calculateCost(result.model, result.usage),
+        source: 'overhead:title', providerKeySource: result.providerKeySource ?? 'platform',
+      })
+    },
+  })
+  if (runWorkers) recordingAutoTitleWorker.start()
+
   // ── file_cache reaper ──
   // Cached files are read with an `expires_at > now()` filter, so a lapsed row
   // is already invisible; this jittered 6h sweep reclaims its storage. Gated on
@@ -10238,6 +10280,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     gdriveCatalogWorker?.stop()
     linkedinImportWorker?.stop()
     recordingProcessWorker?.stop()
+    await recordingAutoTitleWorker.stop()
     await liveInteraction?.stop()
     officeLifecycleWorker.stop()
     await codexProviderManager?.close()

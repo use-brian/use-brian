@@ -28,7 +28,7 @@ import { admitWorkspaceResource } from '../workspace-access/resource-admission.j
 
 const FULL_SELECT = `
   id, workspace_id as "workspaceId", path, parent_path as "parentPath",
-  name, title, summary, mime, size_bytes as "sizeBytes",
+  name, COALESCE(generated_title, title) AS title, summary, mime, size_bytes as "sizeBytes",
   tags, related_ids as "relatedIds", storage_uri as "storageUri",
   purpose, sensitivity, compartments, project_ids as "projectIds", metadata, scope_version::text as "scopeVersion",
   user_id as "userId", assistant_id as "assistantId",
@@ -45,7 +45,7 @@ const FULL_SELECT = `
 
 const INDEX_SELECT = `
   id, workspace_id as "workspaceId", path, parent_path as "parentPath",
-  name, title, summary, mime, size_bytes as "sizeBytes",
+  name, COALESCE(generated_title, title) AS title, summary, mime, size_bytes as "sizeBytes",
   purpose, tags, sensitivity, compartments, project_ids as "projectIds", updated_at as "updatedAt",
   user_id AS "userId", assistant_id AS "assistantId", scope_version::text AS "scopeVersion"
 `
@@ -787,7 +787,7 @@ export async function searchWorkspaceFiles(
   let orderBy = 'updated_at DESC'
 
   if (opts.query && opts.query.trim().length > 0) {
-    wheres.push(`search_vector @@ plainto_tsquery('english', $${idx})`)
+    wheres.push(`(search_vector @@ plainto_tsquery('english', $${idx}) OR generated_title ILIKE '%' || $${idx} || '%')`)
     values.push(opts.query)
     orderBy = `ts_rank_cd(search_vector, plainto_tsquery('english', $${idx})) DESC`
     idx++
@@ -922,8 +922,8 @@ export async function supersedeWorkspaceFile(
     }
 
     const sourceGuard = fileSourceGuard(userId, access, 3)
-    const current = await client.query<FileRow>(
-      `SELECT ${FULL_SELECT} FROM workspace_files
+    const current = await client.query<FileRow & { authoredTitle: string | null }>(
+      `SELECT ${FULL_SELECT}, title AS "authoredTitle" FROM workspace_files
        WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
        AND ${sourceGuard.sql} FOR UPDATE`,
       [id, workspaceId, ...sourceGuard.params],
@@ -1023,7 +1023,7 @@ export async function supersedeWorkspaceFile(
         patch.path ?? old.path,
         patch.parentPath ?? old.parentPath,
         patch.name ?? old.name,
-        patch.title !== undefined ? patch.title : old.title,
+        patch.title !== undefined ? patch.title : old.authoredTitle,
         patch.summary !== undefined ? patch.summary : old.summary,
         patch.mime ?? old.mime,
         patch.sizeBytes,

@@ -192,6 +192,16 @@ function chunkRequest(
 }
 
 describe('[COMP:recordings/live-page-route]', () => {
+  it.each([undefined, 'My planning session'])('keeps an explicit title and arms auto-title only for a default page (%s)', async title => {
+    const h = harness()
+    const response = await request(h.app).post('/api/recordings/live/start')
+      .send({ workspaceId: WORKSPACE_ID, destination: 'new', ...(title ? { title } : {}) })
+    expect(response.status).toBe(201)
+    expect(h.createDraft).toHaveBeenCalledWith(expect.objectContaining({
+      nameOrigin: title ? 'user' : 'placeholder', ...(title ? { name: title } : {}),
+    }), expect.anything())
+  })
+
   it('creates one localized folder, preserves a rename and nests later meetings under it', async () => {
     const h = harness()
     const start = () => request(h.app).post('/api/recordings/live/start')

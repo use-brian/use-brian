@@ -43,6 +43,8 @@ export type RunDocAutoTitleParams = {
    * `AUTO_TITLE_AI_MIN_CHARS` (its first edit is intentional).
    */
   minChars: number
+  /** Host-owned display wrapper, e.g. a recording's original date/time prefix. */
+  formatTitle?: (topic: string) => string
 }
 
 export type RunDocAutoTitleResult = {
@@ -101,7 +103,7 @@ export async function runDocAutoTitle(
   //    `WHERE name_origin = 'placeholder'` makes that a clean no-op (null).
   //    The icon rides the same statement (COALESCE — never clobbers a
   //    user-chosen emoji).
-  const committed = await savedViewStore.setAutoTitle(userId, pageId, gen.title, gen.icon)
+  const committed = await savedViewStore.setAutoTitle(userId, pageId, params.formatTitle?.(gen.title) ?? gen.title, gen.icon)
   return {
     applied: committed !== null,
     title: committed?.name ?? null,
