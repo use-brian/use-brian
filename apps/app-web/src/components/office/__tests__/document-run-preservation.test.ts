@@ -103,6 +103,21 @@ describe("[COMP:app-web/office-document-editor] canonical run preservation", () 
     } finally { editor.destroy(); doc.destroy(); }
   });
 
+  it("keeps HTML clipboard text in its selected cell with destination typography", () => {
+    const { editor, doc, cell, start } = setup();
+    try {
+      editor.commands.setTextSelection({ from: start, to: start + cell.runs[0].text.length });
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      const html = '<p data-office-table-cell-text="true"><span data-office-run="true" style="font-family:Times New Roman;font-size:24pt">500</span></p>';
+      Object.defineProperty(paste, "clipboardData", { value: { getData: (type: string) => type === "text/plain" ? "500" : type === "text/html" ? html : "", types: ["text/plain", "text/html"], files: [] } });
+      editor.view.dom.dispatchEvent(paste);
+      const result = peerSnapshot(doc);
+      const table = result.family === "document" ? result.sections[0].nodes.find(node => node.kind === "table") : undefined;
+      expect(table?.kind === "table" && table.rows[0].cells[0].runs.map(run => run.text).join("")).toBe("500");
+      expect(table?.kind === "table" && table.rows[0].cells[0].runs[0].style).toEqual(cell.runs[0].style);
+    } finally { editor.destroy(); doc.destroy(); }
+  });
+
   it("persists DOM composition input into an emptied cell with its original typography", async () => {
     const { editor, doc, cell, start } = setup();
     // jsdom has no range geometry; input and DOM parsing remain real.
