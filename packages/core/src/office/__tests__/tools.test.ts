@@ -21,6 +21,14 @@ vi.mock('../templates/compiler.js', async (importOriginal) => {
 const context = { userId: id(80), assistantId: id(81), workspaceId: id(2), sessionId: id(82), appId: 'chat', channelType: 'web', channelId: 'web', abortSignal: new AbortController().signal }
 
 describe('[COMP:office/tools] Office tools', () => {
+  it('passes host context to atomic creation without falling through to legacy creation', async () => {
+    const createFromContext = vi.fn(async () => ({artifactId:id(1),jobId:id(90)}))
+    const create = vi.fn()
+    const tool = createOfficeTools({port:{createFromContext,create,get:vi.fn(),revise:vi.fn()}}).find(t=>t.name==='createOfficeArtifact')!
+    expect((await tool.execute({family:'document',outcome:'Quotation',audience:'Client',sourceHandles:[],idempotencyKey:'native-chat-test'},context)).data).toMatchObject({status:'queued'})
+    expect(createFromContext).toHaveBeenCalledWith(context,expect.objectContaining({userId:context.userId,workspaceId:context.workspaceId}))
+    expect(create).not.toHaveBeenCalled()
+  })
   it('discovers a named published template and binds its version when creating from chat', async () => {
     const template = { templateId: id(10), templateVersionId: id(11), name: 'Waterman', description: 'Photography', family: 'document' as const, version: 4 }
     const listTemplates = vi.fn(async () => ({ templates: [template], scopeEvidence: { sensitivity: 'internal' as const, compartments: [], projectIds: [] } }))

@@ -54,6 +54,7 @@ export type OfficeArtifactToolProjection = {
 }
 
 export type OfficeToolPort = {
+  createFromContext?(context: ToolContext, input: Parameters<OfficeToolPort['create']>[0]): Promise<{ artifactId: string; jobId: string }>
   listTemplates?(context: ToolContext, input: { family?: OfficePublishedTemplate['family']; query?: string }): Promise<{ templates: OfficePublishedTemplate[]; scopeEvidence?: ScopeEvidence }>
   resumeGeneration?(context: ToolContext, input: z.infer<typeof OfficeGenerationTemplateSelection>): Promise<{artifactId:string;jobId:string}>
   retryTemplateImport?(input: { userId: string; workspaceId: string; artifactId: string; failedJobId: string; fileId?: string; assistantId?: string; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<{ jobId: string } | null>
@@ -229,7 +230,8 @@ export function createOfficeTools(params: {
       })
       let result: { artifactId: string; jobId: string }
       try {
-        result = await params.port.create({ userId: context.userId, assistantId: context.assistantId, workspaceId: context.workspaceId, ...input, ...writeScope, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null })
+        const request = { userId: context.userId, assistantId: context.assistantId, workspaceId: context.workspaceId, ...input, ...writeScope, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null }
+        result = params.port.createFromContext ? await params.port.createFromContext(context, request) : await params.port.create(request)
       } catch (error) {
         if (error instanceof Error && (error.message === 'office_source_unavailable' || (error as Error & { code?: string }).code === 'office_source_unavailable')) {
           return { data: 'createOfficeArtifact could not use the selected Office source. No generation job was queued. Call listOfficeTemplates for an accessible published template and pass its templateVersionId as templateId; registry template IDs and editable draft artifact IDs are not version IDs. Do not retry the same unavailable binding or claim the document is ready.', isError: true }

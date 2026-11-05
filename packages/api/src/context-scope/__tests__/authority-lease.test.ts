@@ -203,6 +203,12 @@ describe('[COMP:api/authority-lease] current authority at execution boundaries',
     claims.authVersion=99
     await lease.assertCurrent()
     expect(lease.snapshotSource!()).toMatchObject({kind:'session',nativeCredential:expected})
+    const detached=lease.snapshotNativeSessionCredential!()!
+    detached.authVersion=100
+    expect(lease.snapshotNativeSessionCredential!()).toEqual(expected)
+    const unlocked=createSessionAuthorityLease({...input,nativeSessionCredential:expected,session:{...session,contextLockedAt:null}})
+    expect(unlocked.snapshotSource!().kind).toBe('invocation')
+    expect(unlocked.snapshotNativeSessionCredential!()).toEqual(expected)
     expect(nativeAuth.seen).toContainEqual(expected)
     for(const opaque of [{credentialCurrent:async()=>true},{maximumAccessCurrent:async()=>input.starting}])expect(createSessionAuthorityLease({...input,...opaque}).snapshotSource!().kind).toBe('invocation')
     nativeAuth.valid=false

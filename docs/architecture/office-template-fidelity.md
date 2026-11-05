@@ -6,6 +6,22 @@ and LibreOffice PDF generators. Reference PDFs are comparison inputs only.
 
 ## Chat template discovery
 
+Native attended personal web chats create template-derived Office jobs through
+one app-role transaction, rather than the legacy shell/job pair. The host checks
+the execution identity and live persisted chat binding, records its bounded
+authoring authority and source fingerprint, and revalidates those at claim and
+publication. A General template's inherited placement stays General when the
+turn adds no department; this does not grant membership in the assistant's home.
+Department and Project floors, private sources, and turn evidence remain binding.
+Changed chat context, revoked membership, held/changed sources or a narrower
+current authoring ceiling prevent publication. Human form jobs retain their
+authenticated-session binding; chat jobs cannot manufacture that proof.
+The session authority lease exposes a detached host-only native credential
+snapshot separately from durable source evidence. A first user turn may still
+have an unlocked construction snapshot: Office checks the live, now-locked chat
+inside its transaction and the original authority lease again. This does not
+make an invocation-only source eligible for generic durable replay.
+
 Chat exposes a read-only `listOfficeTemplates` tool for finding currently
 published templates by family and name. It returns registry and published-version
 IDs separately; `createOfficeArtifact.templateId` binds the published-version ID,

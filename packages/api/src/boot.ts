@@ -676,6 +676,7 @@ import { createOfficePdfSessionStore } from './db/office-pdf-sessions.js'
 import { createOfficeReleaseStore } from './db/office-release.js'
 import { createOfficeService } from './office/service.js'
 import { createOfficeTemplateDiscovery } from './office/template-discovery.js'
+import { createChatOfficeGeneration } from './office/chat-generation.js'
 import { deriveOfficeSnapshot } from './office/release.js'
 import { createOfficeLifecycleWorker, purgeExpiredPdfSessions, runPdfPurgeBlobWorker } from './office/lifecycle-worker.js'
 import { resolveDurableOfficeAccess, resolveOfficeAccess } from './office/access.js'
@@ -3147,6 +3148,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     port: {
       ...officeService,
       listTemplates: createOfficeTemplateDiscovery(),
+      async createFromContext(context,input) {
+        const created = await createChatOfficeGeneration(context,input)
+        if (!created) return officeService.create(input)
+        wakeOfficeGeneration?.(context.userId)
+        return created
+      },
       async resumeGeneration(context,input) {
         const result=await withOfficeClassificationActor(context,()=>resumeOfficeGeneration(context.userId,input))
         wakeOfficeGeneration?.(context.userId)

@@ -12,6 +12,7 @@ import { admitWorkspaceResource } from '../workspace-access/resource-admission.j
 import type { FilesClientResolver } from '../files/files-api.js'
 import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
 import { validateDepartmentOfficeGeneration } from './generation-evidence.js'
+import { assertOfficeGenerationOrigin } from './generation-origin.js'
 import { promptOnlyBrief, constructPromptOnlyDocument } from './prompt-only.js'
 import { OfficeGenerationBriefSchema } from '@use-brian/core'
 import type { LLMProvider } from '@use-brian/core'
@@ -42,9 +43,7 @@ async function authorize(client:PoolClient, expected:OfficeGenerationJobRow, lea
   if(!department && (b?.protocol!=='office_prompt_only_v1' || b.actorUserId!==actor || b.workspaceId!==job.workspaceId || b.implicitContext!=='disabled'
     || !equal(b.sources,[]) || !equal(p.sourceHandles,[]) || !Array.isArray(p.compartments) || !Array.isArray(p.projectIds)
     || !equal(p.compartmentGrant,p.compartments) || !equal(p.projectGrant,p.projectIds) || job.templateVersionId || job.baseArtifactVersion!==0)) throw denied()
-  const session=await client.query(`SELECT s.id FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.user_id=$2
-    AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND s.auth_version=u.auth_version FOR SHARE OF s,u`,[b.authSessionId,actor])
-  if(!session.rows.length) throw denied()
+  await assertOfficeGenerationOrigin(client,job)
   const a=(await client.query(`SELECT * FROM office_artifacts WHERE id=$1 AND workspace_id=$2 AND family=$3 AND mode='artifact'
     AND lifecycle_state='active' AND head_version=0 AND head_version_id IS NULL
     AND NOT scope_review_state_held('office_artifact',id) AND office_generation_artifact_allows(id,workspace_id,true) FOR UPDATE`,[job.artifactId,job.workspaceId,department?OfficeGenerationBriefSchema.parse(job.brief).family:'document'])).rows[0]
