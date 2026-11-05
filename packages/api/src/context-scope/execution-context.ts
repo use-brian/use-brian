@@ -1,3 +1,4 @@
+import {bindPrivateTranscriptCredential} from '../db/private-transcript.js'
 /** Trusted API construction for the core execution-context contract. */
 
 import {
@@ -235,7 +236,7 @@ export async function resolveExecutionContextSystem(
           : null
       }, policyCurrent)
 
-  return {
+  const result = {
     turnScope,
     executionContext: createExecutionContext({
       identity: input.identity,
@@ -256,4 +257,6 @@ export async function resolveExecutionContextSystem(
       attribution: input.attribution,
     }),
   }
+  if(input.nativeSessionCredential)bindPrivateTranscriptCredential(result.executionContext,input.nativeSessionCredential)
+  return result
 }

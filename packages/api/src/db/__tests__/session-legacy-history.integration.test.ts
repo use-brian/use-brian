@@ -1,4 +1,9 @@
 import {randomUUID} from 'node:crypto'
+import type {LLMProvider,Message,StreamChunk} from '@use-brian/core'
+import {chatRoutes} from '../../routes/chat.js'
+import {createDbMemoryStore} from '../memory-store.js'
+import {createDbCapabilityStore} from '../capability-store.js'
+import {createPendingApprovalsStore} from '../pending-approvals-store.js'
 import {readFile,writeFile} from 'node:fs/promises'
 import {afterAll,describe,expect,it} from 'vitest'
 import express from 'express'
@@ -49,7 +54,7 @@ describe.skipIf(!seedFile).sequential('[COMP:api/session-legacy-history] real fr
  }else{
   let seed:Seed,token:string,app:express.Express
   const url=(id:string,extra='')=>`/sessions/${id}/legacy-history?workspaceId=${seed.workspaceId}${extra}`
-  it('opens unchanged private text automatically while canonical history still refuses missing model evidence',async()=>{
+  it('opens unchanged private text as ordinary same-session history',async()=>{
    seed=JSON.parse(await readFile(seedFile,'utf8'))
    token=createTokens(seed.ownerId,secret,{id:seed.deviceId,authVersion:seed.version}).accessToken
    app=express();app.use('/sessions',requireAuth(secret),sessionRoutes())
@@ -61,10 +66,39 @@ describe.skipIf(!seedFile).sequential('[COMP:api/session-legacy-history] real fr
    expect(next.body.rows.map((r:{text:string})=>r.text)).toEqual(['Fictional next question'])
    expect(next.body.nextSequence).toBeNull()
    expect(JSON.stringify(next.body)).not.toContain('Hidden planning')
-   await request(app).get(`/sessions/${seed.sessions.normal}/messages`).set('Authorization','Bearer '+token).expect(403)
+   const ordinary=await request(app).get(`/sessions/${seed.sessions.normal}/messages`).set('Authorization','Bearer '+token).expect(200)
+   expect(JSON.stringify(ordinary.body)).toContain('Fictional saved answer')
+   expect(JSON.stringify(ordinary.body)).not.toContain('Hidden planning')
    expect((await getPool().query('SELECT to_jsonb(m) AS value FROM session_messages m WHERE session_id=$1 ORDER BY sequence_num',[seed.sessions.normal])).rows).toEqual(before)
    await request(app).get(url(seed.sessions.dock)).set('Authorization','Bearer '+token).expect(200)
   })
+  it('continues a migrated conversation through the ordinary provider and preserves the same session',async()=>{
+   await getPool().query("UPDATE workspaces SET plan='pro' WHERE id=$1",[seed.workspaceId])
+   const original=(await getPool().query('SELECT id,content,scope_version,workspace_id FROM session_messages WHERE session_id=$1 ORDER BY sequence_num',[seed.sessions.normal])).rows
+   const calls:Message[][]=[]
+   const chunks=(text:string):StreamChunk[]=>[{type:'message_start',model:'fixture'},{type:'text_delta',text},
+    {type:'message_end',stopReason:'end_turn',usage:{inputTokens:10,outputTokens:5}}]
+   const provider:LLMProvider={name:'fictional-legacy-continuation',models:['fixture'],
+    stream:async function*(){yield* chunks('Fictional discussion')},
+    createSession(){return{send(messages){calls.push(structuredClone(messages));return(async function*(){yield* chunks('Continuing our earlier discussion.')})()}}}}
+   const continuation=express();continuation.use(express.json())
+   continuation.use('/chat',requireAuth(secret),chatRoutes({provider,systemPrompt:'Continue the fictional conversation.',tools:new Map(),
+    memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore(),pendingApprovalsStore:createPendingApprovalsStore()}))
+   const response=await request(continuation).post('/chat').set('Authorization','Bearer '+token).send({sessionId:seed.sessions.normal,
+    assistantId:seed.assistantId,workspaceId:seed.workspaceId,message:'What did we discuss earlier?',mode:'default',model:'pro'})
+   expect(response.status,response.text).toBe(200)
+   expect(response.text).not.toContain('event: error')
+   expect(calls.length,response.text).toBeGreaterThan(0)
+   expect(JSON.stringify(calls[0])).toContain('Fictional saved answer')
+   expect(JSON.stringify(calls[0])).not.toContain('Hidden planning')
+   const reopened=await request(app).get(`/sessions/${seed.sessions.normal}/messages`).set('Authorization','Bearer '+token).expect(200)
+   expect(JSON.stringify(reopened.body)).toContain('Fictional saved answer')
+   expect(JSON.stringify(reopened.body)).toContain('Continuing our earlier discussion.')
+   expect((await getPool().query('SELECT id,content,scope_version,workspace_id FROM session_messages WHERE id=ANY($1::uuid[]) ORDER BY sequence_num',[original.map(row=>row.id)])).rows).toEqual(original)
+   expect((await getPool().query('SELECT workspace_id FROM sessions WHERE id=$1',[seed.sessions.normal])).rows[0].workspace_id).toBe(seed.workspaceId)
+   await expect(getPool().query("UPDATE session_legacy_history SET binding='[]' WHERE session_id=$1",[seed.sessions.normal])).rejects.toMatchObject({code:'42501'})
+   await expect(getPool().query('UPDATE session_legacy_history_messages SET sequence_num=sequence_num WHERE session_id=$1',[seed.sessions.normal])).rejects.toMatchObject({code:'42501'})
+  },120_000)
   it('denies other members, foreign workspaces, non-native devices and owner-pool calls',async()=>{
    await getPool().query("UPDATE workspace_members SET role='admin' WHERE workspace_id=$1 AND user_id=$2",[seed.workspaceId,seed.firstId])
    const auth=(await authSessionStore.create(seed.firstId,{deviceLabel:'Fictional other device',userAgent:null,ipAddress:null}))!
@@ -73,6 +107,7 @@ describe.skipIf(!seedFile).sequential('[COMP:api/session-legacy-history] real fr
    await request(app).get(`/sessions/${seed.sessions.normal}/legacy-history?workspaceId=${randomUUID()}`).set('Authorization','Bearer '+token).expect(404)
    await request(app).get(url(seed.sessions.normal)).expect(401)
    await expect(getPool().query('SELECT read_private_legacy_history($1,$2,$3,$4,0,50)',[seed.workspaceId,seed.sessions.normal,seed.deviceId,seed.version])).rejects.toMatchObject({code:'42501'})
+   await expect(getPool().query('SELECT resume_private_legacy_session($1,$2,$3,$4)',[seed.workspaceId,seed.sessions.normal,seed.deviceId,seed.version])).rejects.toMatchObject({code:'42501'})
    const client=await getAppPool().connect()
    try{await client.query('BEGIN');await applyRLSGucs(client,seed.ownerId)
     await client.query("SELECT set_config('app.application_id',$1,true)",[randomUUID()])

@@ -1,3 +1,4 @@
+import {mergePrivateTranscript} from './private-transcript.js'
 /** Current native session query captures. [COMP:api/application-persistence] */
 import {z} from 'zod'
 import type {PoolClient} from 'pg'
@@ -49,11 +50,12 @@ export async function readAdmittedSessionQuery(input:{sessionId:string;throughSe
  // an authorization decision; the non-owner projection admits every candidate.
  const roots=await sessionQueryRootMetadata(workspaceId,sessionId,throughSequence,topicThrough)
  const captured=await readJointSessionQueryFrame(authority,roots,{sessionId,throughSequence,topicThroughSequence:topicThrough})
- const history=captured.history.slice(1).map(row=>{
+ let history=captured.history.slice(1).map(row=>{
   const value=row.row!
   return bindScopeSources<SessionMessage>({...value,sessionId,createdAt:new Date(value.createdAt),replyToText:null,topicLabel:null,topicConfidence:null},row.sources)
  })
  bindScopeSources(history,captured.history.flatMap(row=>row.sources))
+ history=await mergePrivateTranscript(authority,sessionId,history,throughSequence)
  const annotations=bindScopeSources(captured.annotations.slice(1).map(row=>bindScopeSources(row.row!,row.sources)),captured.annotations.flatMap(row=>row.sources))
  const result=bindScopeSources({history,annotations},[...boundScopeSources(history),...boundScopeSources(annotations)])
  authority.accumulator.note({sources:boundScopeSources(result)})

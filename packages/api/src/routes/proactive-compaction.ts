@@ -50,6 +50,7 @@ import { recordOverheadUsage } from './_overhead-usage.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
 import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
+import {readPrivateTranscript,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
 import { getApplicationExecutionBinding } from '../application-platform/execution-context.js'
 
 /**
@@ -443,10 +444,21 @@ export async function runProactiveCompaction(
   assertModelBinding()
   await assertCurrent?.call(authority)
   assertModelBinding()
-  const priorSummary = persistSessionSummary ? await readCompactSummary(session.id, binding) : null
+  let recoveredTranscript: SessionMessage[] | null = null
+  let priorSummary: Awaited<ReturnType<typeof readCompactSummary>> = null
+  try { priorSummary = persistSessionSummary ? await readCompactSummary(session.id, binding) : null }
+  catch (error) {
+    if (!(error instanceof DerivedScopeError) || error.code !== 'scope_source_changed' || !binding) throw error
+    recoveredTranscript = await readPrivateTranscript(binding, session.id, 2147483647)
+    if (!recoveredTranscript) throw error
+    const merged = new Map(recoveredTranscript.map(row => [row.id, row]))
+    for (const row of suppliedRows) merged.set(row.id, row)
+    sessionMessages = bindScopeSources([...merged.values()].sort((a,b) => a.sequenceNum-b.sequenceNum),
+      [...boundScopeSources(recoveredTranscript), ...boundScopeSources(suppliedRows)])
+  }
   assertModelBinding()
   if (priorSummary) sessionMessages = suppliedRows.filter(row => row.sequenceNum >= priorSummary.boundarySequence)
-  else if (persistSessionSummary && binding && session.compactBoundarySequence !== null) {
+  else if (!recoveredTranscript && persistSessionSummary && binding && session.compactBoundarySequence !== null) {
     throw Object.assign(new DerivedScopeError('scope_source_changed'), { reason: 'authority_changed' as const, retrySafe: false })
   }
   if (modelContext) modelContext.scopeAccumulator.note(scopeEvidenceFromRows(sessionMessages))
@@ -616,7 +628,8 @@ export async function runProactiveCompaction(
       provider,
       model: compactionModel,
       messages: compactableForLLM,
-      systemPrompt,
+      systemPrompt: modelContext?.scopeAccumulator.evidence.sources?.some(source => source.resourceKind === 'private_transcript')
+        ? systemPrompt + '\n' + PRIVATE_TRANSCRIPT_INSTRUCTION : systemPrompt,
       profile,
       channelClass,
       assertInputAuthority: assertModelInput,
@@ -648,7 +661,7 @@ export async function runProactiveCompaction(
     // pass-through — the other compaction already trimmed the history.
     const published = persistSessionSummary
       ? await guarded(() => setCompactSummaryAndBoundary(
-          sessionId, summaryText, newCursor, priorSummary?.boundarySequence ?? null,
+          sessionId, summaryText, newCursor, priorSummary?.boundarySequence ?? (recoveredTranscript ? session.compactBoundarySequence : null),
           binding ? { authority: binding, derivation: {
             producer: 'compaction:session-summary', sources: boundScopeSources(compactResult.boundaryMessage),
           } } : undefined,

@@ -1,3 +1,4 @@
+import {resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
 import { resolveCurrentRecordingId } from '../recordings/recovery.js'
 import { memoryActivityFromText } from '@use-brian/core'
 import {consumeHostReadObservation,combineHostReadObservations,inheritRoutineCalendarRead,type RoutineCalendarCall} from '@use-brian/core'
@@ -2698,6 +2699,13 @@ export function chatRoutes(options: WebChatOptions): Router {
           channelId: stickyChannelId,
         })
       }
+      if (session && !session.workspaceId && session.userId === user.id && session.assistantId === assistant.id && assistant.workspaceId
+        && credentialClaims?.userId === user.id && credentialClaims.sessionId && credentialClaims.authVersion !== undefined) {
+        if (await resumePrivateLegacySession(assistant.workspaceId,session.id,
+          {userId:user.id,sessionId:credentialClaims.sessionId,authVersion:credentialClaims.authVersion})) {
+          session = await findSessionById(session.id)
+        }
+      }
       if (!session) {
         const channelId = stickyChannelId || crypto.randomUUID()
         const requestedContext = requestedContextGroupId !== undefined
@@ -4584,6 +4592,10 @@ export function chatRoutes(options: WebChatOptions): Router {
         compactionResult.messages,
         modelRequiresToolSignatures(resolveModel(requestedModel, userPlan, 'ok')),
       )
+
+      if (scopeAccumulator.evidence.sources?.some(source => source.resourceKind === 'private_transcript')) {
+        messages = [{role:'system',content:PRIVATE_TRANSCRIPT_INSTRUCTION}, ...messages]
+      }
 
       // Doc tool-result elision (across-turn context-window control).
       // Doc authoring accumulates a full-page outline in every

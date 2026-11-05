@@ -1,6 +1,7 @@
 /** Current native attended history and annotations. [COMP:api/application-persistence] */
 import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,isTrivialChatMessage,DerivedScopeError,executionToolContext,
  type ResearchClassifyOptions,type ResearchClassifyResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
+import {readPrivateTranscript} from '../db/private-transcript.js'
 import {getPool} from '../db/client.js'
 import {readAdmittedSessionQuery,captureSessionTopics,sessionQueryRootMetadata} from '../db/session-query-reader.js'
 import {readSessionQueryFrame} from '../db/session-context-revisions.js'
@@ -118,7 +119,7 @@ export function captureNativeClassifiedAssembly(assessment:TopicAssessment,autho
 
 async function classifiedTranscriptCurrent(execution:SessionContextAuthority['execution'],receipt:ClassifiedTranscript){
  return(await getPool().query<{current:boolean}>(`SELECT
-  (SELECT coalesce(max(sequence_num),0) FROM session_messages WHERE workspace_id=$1 AND session_id=$2)=$3
+  (SELECT coalesce(max(sequence_num),0) FROM session_messages WHERE (workspace_id=$1 OR workspace_id IS NULL) AND session_id=$2)=$3
   AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM session_message_annotation_heads h JOIN session_messages m
    ON m.workspace_id=h.workspace_id AND m.session_id=h.session_id AND m.id=h.message_id
    WHERE h.workspace_id=$1 AND h.session_id=$2 AND h.message_id=$4 AND h.scope_revision_id=$5 AND m.sequence_num=$3)) AS current`,
@@ -285,8 +286,13 @@ export async function attendedSessionTurnCount(authority:SessionContextAuthority
 /** Capture before filtering/formatting, retaining complete query obligations even for an empty window. */
 export async function readAttendedSessionHistory(authority:SessionContextAuthority,sessionId:string,fromSequence?:number|null,throughSequence?:number):Promise<SessionMessage[]> {
  const high=throughSequence??(await getPool().query<{sequence:number}>(
-  'SELECT coalesce(max(sequence_num),0)::int AS sequence FROM session_messages WHERE workspace_id=$1 AND session_id=$2',
+  'SELECT coalesce(max(sequence_num),0)::int AS sequence FROM session_messages WHERE (workspace_id=$1 OR workspace_id IS NULL) AND session_id=$2',
   [authority.execution.security.access.workspaceId,sessionId])).rows[0].sequence
+ const legacy=(await getPool().query<{legacy:boolean}>('SELECT workspace_id IS NULL AS legacy FROM sessions WHERE id=$1',[sessionId])).rows[0]?.legacy
+ if(legacy){
+  const transcript=await readPrivateTranscript(authority,sessionId,high)
+  if(transcript)return attendedHistoryResult(authority,sessionId,transcript,boundScopeSources(transcript),fromSequence)
+ }
  const query=await readAdmittedSessionQuery({sessionId,throughSequence:high,authority})
  const annotations=new Map(query.annotations.map(row=>[row.id,row]))
  const history=query.history.map(row=>{

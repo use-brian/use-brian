@@ -71,7 +71,7 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   return{f,device,claims,session,input,reply,memories,authority,fresh,display}
  }
 
- it.each([0,1])('keeps published replies after an original %s-memory cohort grows while model evidence stays current',async count=>{
+ it.each([0,1])('keeps published replies after an original %s-memory cohort grows while fresh source evidence stays current',async count=>{
   const c=await setup(count)
   expect((await readAttendedSessionHistory(await c.fresh(),c.session.id)).map(row=>row.id)).toContain(c.reply.id)
   const before=await c.display({authority:await c.fresh()})
@@ -85,7 +85,7 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   await expect(assertSourceModelInputAuthority({...executionToolContext(c.authority.execution,{appId:'fictional-current-model'}),
    scopeAccumulator:c.authority.accumulator})).rejects.toMatchObject({reason:'authority_changed'})
   const modelHistory=await readAttendedSessionHistory(await c.fresh(),c.session.id)
-  expect(modelHistory.map(row=>row.id)).not.toContain(c.reply.id)
+  expect(modelHistory.map(row=>row.id)).toContain(c.reply.id)
   expect(JSON.stringify(after)).not.toContain('resourceKind')
  })
 
@@ -122,7 +122,7 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   expect(display?.rows.every(row=>row.available)).toBe(true)
   expect(display?.rows.at(-1)?.content).toEqual([{type:'text',text:'Fictional later published reply'}])
   const modelHistory=await readAttendedSessionHistory(await c.fresh(),c.session.id)
-  expect(modelHistory.map(row=>row.id)).toEqual([c.input.id,laterInput.id])
+  expect(modelHistory.map(row=>row.id)).toEqual([c.input.id,c.reply.id,laterInput.id,laterReply.id])
  })
 
  it('withholds an explicitly held message without erasing the rest of the conversation',async()=>{
@@ -161,7 +161,7 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memories[0].id])
   const display=await c.display()
   const modelHistory=await readAttendedSessionHistory(await c.fresh(),c.session.id)
-  expect(modelHistory.map(row=>row.id)).not.toContain(c.reply.id)
+  expect(modelHistory.map(row=>row.id)).toContain(c.reply.id)
   expect(display?.rows.find(row=>row.id===c.input.id)?.available).toBe(true)
   expect(display?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:true})
   expect(JSON.stringify(display)).toContain('Fictional published reply')
