@@ -102,7 +102,7 @@ function evaluate(expression: string): string {
 
 export const calculateTool = buildTool({
   name: 'calculate',
-  description: 'Calculate arithmetic deterministically. ALWAYS call this tool when answering arithmetic questions; do not calculate mentally. Supports decimal/scientific numbers, +, -, *, /, parentheses, and ^ with integer powers from -1000 to 1000. Write percentages explicitly as /100 (e.g. 200*15/100); no implicit multiplication, functions, units, or thousands separators. Uses 40 significant digits, rounding half up; repeating divisions and other long results are approximate. No Python, network, or computer access needed.',
+  description: 'ALWAYS use for arithmetic answers, not mental math. Decimal/scientific numbers; + - * / (); ^ integer powers [-1000,1000]. Percentages: 200*15/100. No implicit multiplication, functions, units, commas, or %. 40 significant digits, half-up rounding; long/repeating results approximate.',
   inputSchema: z.object({
     expression: z.string().min(1).max(MAX_LENGTH).describe('Arithmetic expression, e.g. "(12.5 + 7.5) * 3" or "200 * 15 / 100".'),
   }),
