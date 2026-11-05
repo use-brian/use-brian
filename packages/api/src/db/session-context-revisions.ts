@@ -129,6 +129,11 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         prepared = external && action==='retain' ? await prepare!(execution, sources, 'retain') : undefined
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
         const value = await time('publication_write',()=>run(client,checked,annotationChecked))
+        // COMMIT's deferred-trigger phase can outlive statement_timeout while
+        // retaining the session lock needed by heartbeat/Stop. Flush the exact
+        // same checks as a bounded statement, then recheck live authority and
+        // cancellation before allowing the transaction to commit.
+        if (writeSessionId && !owner) await time('publication_constraints',()=>client.query('SET CONSTRAINTS ALL IMMEDIATE'))
         await execution.security.authority.assertCurrent()
         if (execution.lifecycle.abortSignal.aborted&&!finalizing || JSON.stringify(accumulator.evidence) !== before
           || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()

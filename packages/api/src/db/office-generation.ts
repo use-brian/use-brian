@@ -1,6 +1,7 @@
 /** Durable Office job/event/steering store. [COMP:api/office-generation] */
 import { OfficeImportDiagnosticSchema, type OfficeImportDiagnostic } from '@use-brian/office-model'
 import { APP_LEVEL_ASSISTANT_ID } from '@use-brian/shared'
+import { officeGenerationOriginAllowsSql } from '../office/generation-origin.js'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 import { dispatchOfficeJobLocal } from '../office/job-event-bus.js'
 
@@ -123,11 +124,7 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
            WHERE job_kind = ANY($3::text[]) AND status IN ('queued','running') AND cancel_requested_at IS NULL
              AND next_attempt_at <= now()
              AND (coalesce(authority_projection->'creationBinding'->>'protocol','') NOT IN ('office_prompt_only_v1','office_department_v2')
-               OR (initiated_by_user_id=$4::uuid AND EXISTS (
-                 SELECT 1 FROM auth_sessions s JOIN users u ON u.id=s.user_id
-                   WHERE s.id::text=pending.authority_projection->'creationBinding'->>'authSessionId'
-                     AND s.user_id=pending.initiated_by_user_id AND s.revoked_at IS NULL
-                     AND s.expires_at>clock_timestamp() AND s.auth_version=u.auth_version)
+               OR (initiated_by_user_id=$4::uuid AND ${officeGenerationOriginAllowsSql('pending')}
                  AND EXISTS (
                  SELECT 1 FROM office_artifacts a WHERE a.id=pending.artifact_id AND a.workspace_id=pending.workspace_id
                    AND a.lifecycle_state='active'

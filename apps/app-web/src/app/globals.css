@@ -3043,7 +3043,7 @@ button.doc-comment-card:hover {
   color: var(--muted-foreground);
   outline-offset: 3px;
 }
-.office-document-footer { bottom: 0; height: var(--office-margin-bottom, 72pt); }
+.office-document-footer { left: calc(var(--office-margin-left, 72pt) + var(--office-footer-indent-left, 0pt)); bottom: var(--office-footer-bottom, 0pt); height: var(--office-footer-height, var(--office-margin-bottom, 72pt)); min-height: var(--office-footer-min-height, 1.5rem); }
 /* Header projections must stay inside the top margin even when the source
    image or editable header text is taller than that band. */
 .office-document-header {

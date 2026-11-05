@@ -29,6 +29,9 @@ type TaskAuthorityContext = {
 
 /** Host-owned live authorization boundary for a running model/tool turn. */
 export type CurrentAuthorityBoundary = {
+  /** Host-authenticated native credential, separate from durable source eligibility.
+   * A domain must revalidate it and the live session before persisting a job. */
+  snapshotNativeSessionCredential?(): { userId: string; sessionId: string; authVersion: number } | null
   /** Detached, host-owned source evidence; never model-supplied. */
   snapshotSource?(): AuthoritySource
   assertCurrent(): Promise<void>

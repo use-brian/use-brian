@@ -114,7 +114,9 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
   router.get('/templates/:templateId/routing', officeMetadataRoute(async (req, userId) => {
     const templateId = String(req.params.templateId)
     const template = await deps.getTemplate(userId, templateId)
-    if (!template?.draftArtifactId || template.lifecycleState !== 'draft') return {status:404,body:{ error: 'Template draft not found' }}
+    if (!template?.draftArtifactId || !['draft','admitted'].includes(template.lifecycleState)) return {status:404,body:{ error: 'Template draft not found' }}
+    const artifact = await deps.getArtifact(userId, template.draftArtifactId)
+    if (!artifact || artifact.workspaceId !== template.workspaceId || artifact.family !== template.family || artifact.mode !== 'template' || artifact.lifecycleState !== 'active') return {status:404,body:{ error: 'Template draft not found' }}
     const snapshot = await deps.getSnapshot(userId, template.draftArtifactId)
     if (!snapshot) return {status:409,body:{ error: 'template_draft_not_ready' }}
     const routing = await deps.getDraftRouting(userId, templateId) ?? inferOfficeTemplateRouting(snapshot.snapshot)
@@ -129,7 +131,9 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
     if (!body.success) return void res.status(400).json({ error: 'Invalid template routing draft', issues: body.error.issues })
     const templateId = String(req.params.templateId)
     const template = await deps.getTemplate(userId, templateId)
-    if (!template?.draftArtifactId || template.lifecycleState !== 'draft') return void res.status(404).json({ error: 'Template draft not found' })
+    if (!template?.draftArtifactId || !['draft','admitted'].includes(template.lifecycleState)) return void res.status(404).json({ error: 'Template draft not found' })
+    const artifact = await deps.getArtifact(userId, template.draftArtifactId)
+    if (!artifact || artifact.workspaceId !== template.workspaceId || artifact.family !== template.family || artifact.mode !== 'template' || artifact.lifecycleState !== 'active') return void res.status(404).json({ error: 'Template draft not found' })
     const snapshot = await deps.getSnapshot(userId, template.draftArtifactId)
     if (!snapshot) return void res.status(409).json({ error: 'template_draft_not_ready' })
     const diagnostics = officeTemplateRoutingDiagnostics(snapshot.snapshot, body.data.routing)

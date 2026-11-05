@@ -22,7 +22,7 @@ import express, { type Router } from 'express'
 export function createTestApp(
   mountPath: string,
   router: Router,
-  opts?: { userId?: string; authSessionId?: string },
+  opts?: { userId?: string; authSessionId?: string; authVersion?: number },
 ): express.Express {
   const app = express()
 
@@ -38,6 +38,7 @@ export function createTestApp(
     app.use((_req, _res, next) => {
       ;(_req as express.Request & { userId?: string }).userId = opts.userId
       ;(_req as express.Request & { authSessionId?: string }).authSessionId = opts.authSessionId
+      ;(_req as express.Request & { authVersion?: number }).authVersion = opts.authVersion
       next()
     })
   }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { deriveOfficeSnapshot, prepareOfficeRelease, reviewOfficeRelease } from '../release.js'
 import { nextOfficeLifecycleState } from '../lifecycle-worker.js'
-import { completePresentationSnapshot, completeSpreadsheetSnapshot, documentSnapshot, id, resolveFixtureResource } from '../../../../core/src/office/__tests__/fixtures.js'
+import { completePresentationSnapshot, completeSpreadsheetSnapshot, documentSnapshot, id, resolveFixtureResource, officePdfFixture } from '../../../../core/src/office/__tests__/fixtures.js'
 
 function input(overrides: Record<string, unknown> = {}) {
   return { snapshot: documentSnapshot(), expectedVersion: 3, currentVersion: 3, headVersionId: id(30), lifecycleState: 'active', canEdit: true, artifactSensitivity: 'internal' as const, action: 'export' as const, destination: { sensitivity: 'internal' as const, external: false }, claims: [], media: [], ...overrides }
@@ -48,7 +48,7 @@ describe('[COMP:api/office-release] Office exact-head release', () => {
   it('preflights and persists a Document PDF while native DOCX stays unchanged', async () => {
     const snapshot = documentSnapshot()
     expect(reviewOfficeRelease(input({ snapshot, format: 'pdf' }))).toMatchObject({ status: 'ready', blocks: [] })
-    const bytes = new Uint8Array([37, 80, 68, 70])
+    const bytes = await officePdfFixture()
     const expectedPageCount = 1
     const pdf = await prepareOfficeRelease({ ...input({ snapshot, format: 'pdf' }), resolveResource: resolveFixtureResource, documentPdfPort: { convert: async () => bytes, pageCount: async () => expectedPageCount } })
     expect(pdf).toMatchObject({ bytes, mime: 'application/pdf', extension: 'pdf', receipt: { status: 'ready', documentPdf: { expectedPageCount, actualPageCount: expectedPageCount, issues: [] } } })

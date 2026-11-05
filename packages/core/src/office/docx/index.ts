@@ -24,6 +24,9 @@ import {
   ShadingType,
   Table,
   TableCell,
+  XmlComponent,
+  ImportedXmlComponent,
+  type ITableCellOptions,
   TableLayoutType,
   TableRow,
   TextRun,
@@ -153,6 +156,15 @@ function evenColumnsDxa(count: number, totalDxa: number): number[] {
   return Array.from({ length: count }, (_u, index) => (index === 0 ? totalDxa - base * (count - 1) : base))
 }
 
+/** docx exposes no noWrap option; extend its cell property component rather
+ * than dropping the canonical wrapping policy from the native package. */
+class OfficeDocxTableCell extends TableCell {
+  constructor(options: ITableCellOptions, wrapText?: boolean) {
+    super(options)
+    if (wrapText === false) (this.root[0] as XmlComponent).addChildElement(new ImportedXmlComponent('w:noWrap'))
+  }
+}
+
 function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>, contentWidthDxa: number): Table {
   const widthPt = node.widthPt ?? node.columnWidthsPt?.reduce((sum, width) => sum + width, 0)
   // Widths must stay absolute (DXA): the docx library serializes
@@ -169,16 +181,19 @@ function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>, conte
     borders: docxTableBorders(node.borders ?? (node.rows.some((row) => row.cells.some((cell) => cell.borders)) ? {} : undefined)),
     rows: node.rows.map((row, rowIndex) => new TableRow({
       tableHeader: rowIndex < node.headerRows,
-      height: row.minHeightPt === undefined ? undefined : { value: Math.round(row.minHeightPt * 20), rule: HeightRule.ATLEAST },
-      children: row.cells.map((cell) => new TableCell({
+      height: row.minHeightPt === undefined ? undefined : { value: Math.round(row.minHeightPt * 20), rule: row.heightRule === 'exact' ? HeightRule.EXACT : HeightRule.ATLEAST },
+      children: row.cells.map((cell) => new OfficeDocxTableCell({
         columnSpan: cell.colSpan,
         rowSpan: cell.rowSpan,
         shading: cell.fill ? { fill: color(cell.fill), type: ShadingType.CLEAR } : undefined,
         margins: docxCellMargins(cell.margins),
         verticalAlign: cell.verticalAlignment === 'middle' ? VerticalAlignTable.CENTER : cell.verticalAlignment === 'bottom' ? VerticalAlignTable.BOTTOM : VerticalAlignTable.TOP,
         borders: docxCellBorders(cell.borders),
-        children: officeCellParagraphs(cell).map(({ format, runs }) => new Paragraph({ alignment: paragraphAlignment(format.alignment), ...paragraphNumbering(format), spacing: paragraphSpacing({ spacingAfterPt: 0, ...format }), children: richChildren(runs) })),
-      })),
+        children: officeCellParagraphs(cell).map(({ format, runs }) => new Paragraph({ alignment: paragraphAlignment(format.alignment), ...paragraphNumbering(format), spacing: paragraphSpacing({ spacingAfterPt: 0, ...format }),
+          // Keep original values in the canonical part. Native no-wrap text
+          // avoids soft word breaks before an exact row clips its overflow.
+          children: richChildren(cell.wrapText === false ? runs.map(run => ({ ...run, text: run.text.replace(/ /g, '\u00a0') })) : runs) })),
+      }, cell.wrapText)),
     })),
   })
 }
@@ -293,7 +308,7 @@ export async function exportOfficeDocument(
       properties: {
         page: {
           size: { width: Math.round(section.page.widthPt * 20), height: Math.round(section.page.heightPt * 20) },
-          margin: { top: Math.round(section.page.marginTopPt * 20), right: Math.round(section.page.marginRightPt * 20), bottom: Math.round(section.page.marginBottomPt * 20), left: Math.round(section.page.marginLeftPt * 20) },
+          margin: { top: Math.round(section.page.marginTopPt * 20), right: Math.round(section.page.marginRightPt * 20), bottom: Math.round(section.page.marginBottomPt * 20), left: Math.round(section.page.marginLeftPt * 20), header: section.page.headerDistancePt === undefined ? undefined : Math.round(section.page.headerDistancePt * 20), footer: section.page.footerDistancePt === undefined ? undefined : Math.round(section.page.footerDistancePt * 20) },
         },
       },
       headers: headerChildren.length ? { default: new Header({ children: [new Paragraph({
@@ -301,11 +316,12 @@ export async function exportOfficeDocument(
         border: section.headerBorderBottom ? { bottom: { style: BorderStyle.SINGLE, color: color(section.headerBorderBottom.color), size: Math.max(1, Math.round(section.headerBorderBottom.widthPt * 8)), space: 6 } } : undefined,
         children: headerChildren,
       })] }) } : undefined,
-      footers: section.footer.length || section.showPageNumber ? { default: new Footer({ children: [new Paragraph({
+      footers: { default: new Footer({ children: [new Paragraph({
         alignment: paragraphAlignment(section.footerAlignment),
+        indent: section.footerIndentLeftPt === undefined ? undefined : { left: Math.round(section.footerIndentLeftPt * 20) },
         border: section.footerBorderTop ? { top: { style: BorderStyle.SINGLE, color: color(section.footerBorderTop.color), size: Math.max(1, Math.round(section.footerBorderTop.widthPt * 8)), space: 6 } } : undefined,
         children: [...richChildren(section.footer), ...(section.showPageNumber ? [new TextRun(' '), new TextRun({ children: [PageNumber.CURRENT] })] : [])],
-      })] }) } : undefined,
+      })] }) },
       children: children.length ? children : [new Paragraph('')],
     })
   }
@@ -550,6 +566,11 @@ function effectiveParagraphFormat(fragment: string, styleFragment = '', numberin
   }
 }
 
+function textParagraphLeftIndent(xml: string): number | undefined {
+  const value = xmlValue(paragraphProperties(xml), 'w:ind', 'w:left')
+  return value !== undefined && /^-?\d+$/.test(value) && Math.abs(Number(value)) <= 20_000 ? Number(value) / 20 : undefined
+}
+
 function textParagraphAlignment(xml: string): 'start' | 'center' | 'end' {
   const paragraphs = [...xml.matchAll(/<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/g)]
     .map((match) => match[0])
@@ -688,17 +709,19 @@ function parseWordTable(fragment: string, id: string, styles: WordStyles, number
         verticalAlignment: wordVerticalAlignment(cellProperties),
         margins: wordCellMargins(cellProperties, 'tcMar', tableMargins),
         borders: wordTableBorders(cellProperties, 'tcBorders'),
-        wrapText: !/<w:noWrap\b/i.test(cellProperties),
+        wrapText: !onOff(cellProperties, 'w:noWrap'),
       }
       cells.push(cell)
       if (verticalMergeValue === 'restart') for (let offset = 0; offset < colSpan; offset += 1) nextVerticalMerges.set(column + offset, cell)
       column += colSpan
     }
     activeVerticalMerges = nextVerticalMerges
-    const height = Number(xmlValue(wordContainer(rowFragment, 'trPr'), 'w:trHeight')) / 20
+    const rowProperties = wordContainer(rowFragment, 'trPr')
+    const height = Number(xmlValue(rowProperties, 'w:trHeight')) / 20
     return {
       id: stableOfficeUuid(`${id}:row:${rowIndex}`),
       minHeightPt: Number.isFinite(height) && height > 0 ? height : undefined,
+      heightRule: Number.isFinite(height) && height > 0 && xmlValue(rowProperties, 'w:trHeight', 'w:hRule') === 'exact' ? 'exact' as const : undefined,
       cells,
     }
   })
@@ -773,7 +796,6 @@ function formattingDiagnostics(xml: string, stylesXml: string): OfficePreflightD
     [/<w:tabs\b/, 'tab_stops', 'Custom tab stops are not supported; tab characters are retained.'],
     [/<w:tblStylePr\b/, 'conditional_table_style', 'Conditional table style regions are not supported; base table properties are retained.'],
     [/w:(?:asciiTheme|hAnsiTheme|eastAsiaTheme|cstheme)=/, 'theme_font', 'Theme font references are not resolved; explicit font names are retained.'],
-    [/<w:trHeight\b[^>]*w:hRule="exact"/, 'exact_row_height', 'Exact row heights are rendered as minimum heights.'],
     [/<w:rFonts\b[^>]*w:eastAsia=/, 'east_asian_shaping', 'East Asian font names are retained; browser font availability and shaping may differ from Word.'],
   ]
   const diagnostics: OfficePreflightDiagnostic[] = checks.filter(([pattern]) => pattern.test(source)).map(([, code, message]) => ({ severity: 'warning', code: `docx.formatting.${code}`, path: 'word/document.xml', message }))
@@ -805,10 +827,18 @@ async function externalDocumentSnapshot(zip: JSZip, xml: string, context: Office
   const styles = styleFragments(stylesXml)
   const numberingXml = await zip.file('word/numbering.xml')?.async('string') ?? ''
   const numbering = parseWordNumbering(numberingXml, context.artifactId)
-  const nodes: DocumentFlowNode[] = []
+  let nodes: DocumentFlowNode[] = []
+  const sectionBodies: Array<{ nodes: DocumentFlowNode[]; properties: string }> = []
   let ordinal = 0
-  for (const match of body.matchAll(/<(w:p|w:tbl)(?:\s[^>]*)?>[\s\S]*?<\/\1>|<w:p\s*\/>/g)) {
+  for (const match of body.matchAll(/<(w:p|w:tbl|w:sectPr)(?:\s[^>]*)?>[\s\S]*?<\/\1>|<w:p\s*\/>|<w:sectPr\s*\/>/g)) {
     const fragment = match[0]
+    const sectionProperties = match[1] === 'w:tbl' ? undefined : fragment.match(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>|<w:sectPr\s*\/>/)
+    const finishSection = () => {
+      if (!sectionProperties) return
+      sectionBodies.push({ nodes, properties: sectionProperties[0] })
+      nodes = []
+    }
+    if (/^<w:sectPr\b/.test(fragment)) { finishSection(); continue }
     const id = stableOfficeUuid(`${context.artifactId}:docx:${ordinal}`)
     ordinal += 1
     if (match[1] === 'w:tbl') {
@@ -817,9 +847,11 @@ async function externalDocumentSnapshot(zip: JSZip, xml: string, context: Office
     }
     if (/<w:br[^>]*w:type="page"/.test(fragment)) {
       nodes.push({ id, kind: 'pageBreak' })
+      finishSection()
       continue
     }
     const text = textFromWordXml(fragment)
+    if (sectionProperties && !text && !/<w:(?:drawing|pict)\b/.test(fragment)) { finishSection(); continue }
     if (!text && !/<w:p\b/.test(fragment)) continue
     const styleName = xmlValue(paragraphProperties(fragment), 'w:pStyle') ?? (styles.defaultParagraph || 'Body')
     const heading = styleName.match(/^Heading\s*([1-6])$/i)
@@ -827,22 +859,59 @@ async function externalDocumentSnapshot(zip: JSZip, xml: string, context: Office
     const runs = richRunsFromWordXml(fragment, id, inherited, styles)
     const format = effectiveParagraphFormat(fragment, inherited, numbering)
     nodes.push(heading ? { id, kind: 'heading', level: Number(heading[1]), styleName, runs, ...format } : { id, kind: 'paragraph', styleName, runs, ...format })
+    finishSection()
   }
+  if (nodes.length || sectionBodies.length === 0) sectionBodies.push({ nodes, properties: '' })
   const documentRels = await zip.file('word/_rels/document.xml.rels')?.async('string') ?? ''
-  const hasDistinctFirstPage = /<w:titlePg\b/.test(body)
-  const preferredReferenceType = hasDistinctFirstPage ? 'first' : 'default'
-  const headerId = sectionRelationshipId(xml, 'header', preferredReferenceType) ?? sectionRelationshipId(xml, 'header', 'default')
-  const footerId = sectionRelationshipId(xml, 'footer', preferredReferenceType) ?? sectionRelationshipId(xml, 'footer', 'default')
-  const headerPath = headerId ? partTarget(documentRels, headerId, 'word') : null
-  const footerPath = footerId ? partTarget(documentRels, footerId, 'word') : null
-  const headerXml = headerPath ? await zip.file(headerPath)?.async('string') ?? '' : ''
-  const footerXml = footerPath ? await zip.file(footerPath)?.async('string') ?? '' : ''
-  const footerFields = normalizeFooterPageFields(footerXml)
-  const headerImage = headerPath ? await headerImageFromWordXml(zip, headerPath, headerXml, context) : {}
-  const sectionProperties = body.match(/<w:sectPr(?:\s[^>]*)?>([\s\S]*?)<\/w:sectPr>/)?.[1] ?? ''
-  const widthPt = Number(xmlValue(sectionProperties, 'w:pgSz', 'w:w') ?? 12_240) / 20
-  const heightPt = Number(xmlValue(sectionProperties, 'w:pgSz', 'w:h') ?? 15_840) / 20
-  const margin = (name: 'top' | 'right' | 'bottom' | 'left', fallback: number) => Number(xmlValue(sectionProperties, 'w:pgMar', `w:${name}`) ?? fallback * 20) / 20
+  const sections: DocumentSnapshot['sections'] = []
+  const resources: OfficeImportResult['resources'] = []
+  const diagnostics: OfficePreflightDiagnostic[] = []
+  const headerPaths: Partial<Record<'first' | 'default', string | null>> = {}
+  const footerPaths: Partial<Record<'first' | 'default', string | null>> = {}
+  let allPartsXml = xml
+  for (const [sectionIndex, sectionBody] of sectionBodies.entries()) {
+    const sectionProperties = sectionBody.properties
+    const hasDistinctFirstPage = /<w:titlePg\b/.test(sectionProperties)
+    const preferredReferenceType = hasDistinctFirstPage ? 'first' : 'default'
+    for (const type of ['first', 'default'] as const) {
+      const headerId = sectionRelationshipId(sectionProperties, 'header', type)
+      const footerId = sectionRelationshipId(sectionProperties, 'footer', type)
+      if (headerId) headerPaths[type] = partTarget(documentRels, headerId, 'word')
+      if (footerId) footerPaths[type] = partTarget(documentRels, footerId, 'word')
+    }
+    const headerPath = headerPaths[preferredReferenceType] ?? headerPaths.default ?? null
+    const footerPath = footerPaths[preferredReferenceType] ?? footerPaths.default ?? null
+    const headerXml = headerPath ? await zip.file(headerPath)?.async('string') ?? '' : ''
+    const footerXml = footerPath ? await zip.file(footerPath)?.async('string') ?? '' : ''
+    const footerFields = normalizeFooterPageFields(footerXml)
+    const headerImage = headerPath ? await headerImageFromWordXml(zip, headerPath, headerXml, context) : {}
+    allPartsXml += headerXml + footerXml
+    if (headerImage.resource && !resources.some(resource => resource.ref.id === headerImage.resource!.ref.id)) resources.push(headerImage.resource)
+    const widthPt = Number(xmlValue(sectionProperties, 'w:pgSz', 'w:w') ?? 12_240) / 20
+    const heightPt = Number(xmlValue(sectionProperties, 'w:pgSz', 'w:h') ?? 15_840) / 20
+    const margin = (name: 'top' | 'right' | 'bottom' | 'left', fallback: number) => Number(xmlValue(sectionProperties, 'w:pgMar', `w:${name}`) ?? fallback * 20) / 20
+    const distance = (name: 'header' | 'footer') => {
+      const value = xmlValue(sectionProperties, 'w:pgMar', `w:${name}`)
+      return value === undefined ? undefined : Number(value) / 20
+    }
+    sections.push({
+        id: stableOfficeUuid(`${context.artifactId}:section:${sectionIndex}`),
+        page: { widthPt, heightPt, marginTopPt: margin('top', 72), marginRightPt: margin('right', 72), marginBottomPt: margin('bottom', 72), marginLeftPt: margin('left', 72), headerDistancePt: distance('header'), footerDistancePt: distance('footer'), orientation: xmlValue(sectionProperties, 'w:pgSz', 'w:orient') === 'landscape' ? 'landscape' : 'portrait' },
+        header: richRunsFromWordXml(headerXml, `${context.artifactId}:section:${sectionIndex}:header`).filter((run) => run.text),
+        footer: richRunsFromWordXml(footerFields.xml, `${context.artifactId}:section:${sectionIndex}:footer`).filter((run) => run.text),
+        headerImage: headerImage.image,
+        headerAlignment: textParagraphAlignment(headerXml),
+        footerAlignment: textParagraphAlignment(footerXml),
+        ...(textParagraphLeftIndent(footerXml) === undefined ? {} : { footerIndentLeftPt: textParagraphLeftIndent(footerXml) }),
+        headerBorderBottom: borderFromXml(headerXml, 'bottom'),
+        footerBorderTop: borderFromXml(footerXml, 'top'),
+        showPageNumber: footerFields.count > 0,
+        nodes: sectionBody.nodes,
+    })
+    if (footerFields.count) diagnostics.push({ severity: 'warning', code: 'docx.formatting.footer_page_number', path: footerPath ?? 'word/footer.xml', message: 'Footer PAGE fields become one dynamic page number at the footer end; cached values are removed. Original field placement and number formatting are normalized.' })
+    const breakType = xmlValue(sectionProperties, 'w:type')
+    if (breakType && breakType !== 'nextPage') diagnostics.push({ severity: 'warning', code: 'docx.formatting.section_break', path: `sections.${sectionIndex}`, message: 'This section break is normalized to a new page.' })
+  }
   const snapshot: DocumentSnapshot = {
     schemaVersion: 1,
     capabilityVersion: 1,
@@ -854,27 +923,14 @@ async function externalDocumentSnapshot(zip: JSZip, xml: string, context: Office
     templateVersionId: context.templateVersionId,
     rootId: stableOfficeUuid(`${context.artifactId}:root`),
     title: context.title,
-    resources: headerImage.resource ? [headerImage.resource.ref] : [],
+    resources: resources.map(resource => resource.ref),
     accessibility: { title: context.title },
-    sections: [{
-      id: stableOfficeUuid(`${context.artifactId}:section:0`),
-      page: { widthPt, heightPt, marginTopPt: margin('top', 72), marginRightPt: margin('right', 72), marginBottomPt: margin('bottom', 72), marginLeftPt: margin('left', 72), orientation: xmlValue(sectionProperties, 'w:pgSz', 'w:orient') === 'landscape' ? 'landscape' : 'portrait' },
-      header: richRunsFromWordXml(headerXml, `${context.artifactId}:header`).filter((run) => run.text),
-      footer: richRunsFromWordXml(footerFields.xml, `${context.artifactId}:footer`).filter((run) => run.text),
-      headerImage: headerImage.image,
-      headerAlignment: textParagraphAlignment(headerXml),
-      footerAlignment: textParagraphAlignment(footerXml),
-      headerBorderBottom: borderFromXml(headerXml, 'bottom'),
-      footerBorderTop: borderFromXml(footerXml, 'top'),
-      showPageNumber: footerFields.count > 0,
-      nodes,
-    }],
+    sections,
   }
-  const diagnostics = formattingDiagnostics(xml + headerXml + footerXml, stylesXml + numberingXml)
-  if (footerFields.count) diagnostics.push({ severity: 'warning', code: 'docx.formatting.footer_page_number', path: footerPath ?? 'word/footer.xml', message: 'Footer PAGE fields become one dynamic page number at the footer end; cached values are removed. Original field placement and number formatting are normalized.' })
+  diagnostics.push(...formattingDiagnostics(allPartsXml, stylesXml + numberingXml))
   const references = [...(xml + stylesXml).matchAll(/<w:numPr\b[^>]*>([\s\S]*?)<\/w:numPr>/g)]
   if (references.some(m => xmlValue(m[1], 'w:numId') !== '0' && (!numbering.has(xmlValue(m[1], 'w:numId') ?? '') || Number(xmlValue(m[1], 'w:ilvl') ?? 0) !== 0))) diagnostics.push({ severity: 'warning', code: 'docx.formatting.numbering', path: 'word/numbering.xml', message: 'Only single-level decimal, Roman and letter numbering without level overrides is supported; unsupported markers were omitted.' })
-  return { snapshot, resources: headerImage.resource ? [headerImage.resource] : [], diagnostics }
+  return { snapshot, resources, diagnostics }
 }
 
 export async function importOfficeDocument(bytes: Uint8Array, context: OfficeImportContext): Promise<OfficeImportResult> {

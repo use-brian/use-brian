@@ -15,6 +15,12 @@ export const OfficeGenerationTemplateSelection = z.object({
   artifactId: z.string().uuid(), jobId: z.string().uuid(), templateVersionId: z.string().uuid(),
 }).strict()
 export type OfficeTemplateChoice = { templateVersionId: string; name: string }
+export type OfficePublishedTemplate = OfficeTemplateChoice & {
+  templateId: string
+  family: 'document' | 'presentation' | 'spreadsheet'
+  description: string
+  version: number
+}
 
 export type OfficeArtifactToolProjection = {
   artifactId: string
@@ -22,6 +28,7 @@ export type OfficeArtifactToolProjection = {
   mode?: 'artifact' | 'template' | 'session'
   title: string
   version: number
+  sensitivity?: 'public' | 'internal' | 'confidential'
   expiresAt?: string
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained'
   role: 'view' | 'comment' | 'edit'
@@ -48,6 +55,8 @@ export type OfficeArtifactToolProjection = {
 }
 
 export type OfficeToolPort = {
+  createFromContext?(context: ToolContext, input: Parameters<OfficeToolPort['create']>[0]): Promise<{ artifactId: string; jobId: string }>
+  listTemplates?(context: ToolContext, input: { family?: OfficePublishedTemplate['family']; query?: string }): Promise<{ templates: OfficePublishedTemplate[]; scopeEvidence?: ScopeEvidence }>
   resumeGeneration?(context: ToolContext, input: z.infer<typeof OfficeGenerationTemplateSelection>): Promise<{artifactId:string;jobId:string}>
   retryTemplateImport?(input: { userId: string; workspaceId: string; artifactId: string; failedJobId: string; fileId?: string; assistantId?: string; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<{ jobId: string } | null>
   inspectClassification?(context:ToolContext, artifactId:string): Promise<unknown>;
@@ -73,7 +82,7 @@ function link(origin: string | undefined, workspaceId: string, artifactId: strin
  * said which id, never explained that ineligibility and absence are
  * deliberately indistinguishable here (the tool returns no existence signal to
  * an ineligible caller), never named where a real id comes from, and never
- * told the model to stop. There is no list tool to point at — an Office id
+ * told the model to stop. There is no artifact list tool to point at — an Office id
  * reaches a session from a createOfficeArtifact result, an editor URL, or the
  * user — so the discovery pointer names those instead.
  */
@@ -159,20 +168,37 @@ export function createOfficeTools(params: {
       }
     : undefined
 
+  const listOfficeTemplates = params.port.listTemplates ? buildTool({
+    name: 'listOfficeTemplates',
+    requiresCapability: 'office',
+    resolveConfirmation: askGate('listOfficeTemplates'),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    description: 'Find currently published Brian Office templates in this workspace by name and family before creating a document from a named or latest template. Returns permission-filtered metadata and templateVersionId for createOfficeArtifact.templateId. Registry templateId and editable draft artifact IDs are different and cannot be used as published-version bindings. Does not create documents or reserve document numbers.',
+    inputSchema: z.object({ family: z.enum(['document', 'presentation', 'spreadsheet']).optional(), query: z.string().trim().min(1).max(200).optional() }).strict(),
+    async execute(input, context) {
+      const blocked = await blockGate('listOfficeTemplates', context)
+      if (blocked) return blocked
+      if (!context.workspaceId) return { data: 'listOfficeTemplates did not run: open a chat in the intended workspace first. No templates were read.', isError: true }
+      const { templates, scopeEvidence } = await params.port.listTemplates!(context, input)
+      return { data: { templates }, scopeEvidence }
+    },
+  }) : null
+
   const createOfficeArtifact = buildTool({
     name: 'createOfficeArtifact',
     requiresCapability: 'office',
     resolveConfirmation: askGate('createOfficeArtifact'),
     isConcurrencySafe: false,
     isReadOnly: false,
-    description: 'Start a durable Brian-native Document, Presentation, or Spreadsheet only after an explicit user request to create/build/draft one. Returns an artifact shell and background job immediately. The worker requires an admitted template and permission-filtered brain grounding. Optional additional context can carry user-supplied facts, constraints, examples, or reference URLs. This tool creates inside the workspace; it does not export, share, send, publish, or bypass a missing-fact/template/permission gate.',
+    description: 'Start a durable Brian-native Document, Presentation, or Spreadsheet only after an explicit user request to create/build/draft one. For a named or latest template, call listOfficeTemplates first and pass its templateVersionId as templateId. Returns an artifact shell and background job immediately; only that receipt proves creation started. The worker requires an admitted template and permission-filtered brain grounding. Additional context carries user facts, requested calculations and dates. This tool creates inside the workspace; it does not export, share, send, publish, reserve document numbers or bypass missing-fact/template/permission gates.',
     inputSchema: z.object({
       family: z.enum(['document', 'presentation', 'spreadsheet']),
       outcome: z.string().min(1).max(4_000).describe('The requested deliverable and intended outcome'),
       audience: z.string().min(1).max(1_000),
       additionalContext: z.string().min(1).max(4_000).optional().describe('Optional user-supplied facts, constraints, examples, or reference URLs for this artifact'),
-      sourceHandles: z.array(z.string().min(1).max(1_000)).max(100).default([]).describe('Explicit accessible page/file/URL handles named by the user or resolved during the turn'),
-      templateId: z.string().uuid().optional(),
+      sourceHandles: z.array(z.string().min(1).max(1_000)).max(100).default([]).describe('Explicit supported evidence handles, such as knowledge:<uuid>. The selected template is bound separately; do not add its registry or draft artifact UUID here.'),
+      templateId: z.string().uuid().optional().describe('Published templateVersionId returned by listOfficeTemplates, NOT its registry templateId or draft artifactId.'),
       idempotencyKey: z.string().min(8).max(255),
     }),
     async execute(input, context) {
@@ -203,7 +229,16 @@ export function createOfficeTools(params: {
         compartmentGrant: context.assistantCompartments,
         projectGrant: context.assistantProjectIds,
       })
-      const result = await params.port.create({ userId: context.userId, assistantId: context.assistantId, workspaceId: context.workspaceId, ...input, ...writeScope, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null })
+      let result: { artifactId: string; jobId: string }
+      try {
+        const request = { userId: context.userId, assistantId: context.assistantId, workspaceId: context.workspaceId, ...input, ...writeScope, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null }
+        result = params.port.createFromContext ? await params.port.createFromContext(context, request) : await params.port.create(request)
+      } catch (error) {
+        if (error instanceof Error && (error.message === 'office_source_unavailable' || (error as Error & { code?: string }).code === 'office_source_unavailable')) {
+          return { data: 'createOfficeArtifact could not use the selected Office source. No generation job was queued. Call listOfficeTemplates for an accessible published template and pass its templateVersionId as templateId; registry template IDs and editable draft artifact IDs are not version IDs. Do not retry the same unavailable binding or claim the document is ready.', isError: true }
+        }
+        throw error
+      }
       return { data: { ...result, status: 'queued', editorUrl: link(params.appOrigin, context.workspaceId, result.artifactId) } }
     },
   })
@@ -214,7 +249,7 @@ export function createOfficeTools(params: {
     resolveConfirmation: askGate('getOfficeArtifact'),
     isConcurrencySafe: true,
     isReadOnly: true,
-    description: 'Read the current permission-filtered metadata, collaboration role, version, lifecycle, generation state, and one bounded page of the semantic target outline for a Brian-native Office artifact. A draft paused for template selection includes job.inputQuestion and permission-filtered job.templateChoices with published version IDs. Use the returned stable target IDs with reviseOfficeArtifact. When nextTargetOffset is present, call again with that targetOffset to continue discovery. Returns no existence signal when the caller is ineligible and never returns binary resources or the complete canonical snapshot.',
+    description: 'Read current permission-filtered metadata, collaboration role, version, lifecycle, generation state and semantic targets for a Brian-native Office artifact. Inspecting mode=template does not create a document: use listOfficeTemplates to obtain its published templateVersionId for createOfficeArtifact. A draft paused for template selection includes job.inputQuestion and permission-filtered job.templateChoices. Use stable target IDs with reviseOfficeArtifact. Follow nextTargetOffset for more targets. Returns no existence signal for ineligible callers and never returns binary resources or the full canonical snapshot.',
     inputSchema: z.object({ artifactId: z.string().uuid(), targetOffset: z.number().int().min(0).optional() }),
     async execute(input, context) {
       const blocked = await blockGate('getOfficeArtifact', context)
@@ -426,5 +461,5 @@ export function createOfficeTools(params: {
       return {data:{...data,editorUrl:context.workspaceId ? link(params.appOrigin,context.workspaceId,data.artifactId) : undefined}}
     },
   })] : []
-  return [createOfficeArtifact, getOfficeArtifact, reviseOfficeArtifact, openPdfEditingSession, placePdfSignature,...classificationTools, ...recoveryTools,...generationRecoveryTools]
+  return [...(listOfficeTemplates ? [listOfficeTemplates] : []), createOfficeArtifact, getOfficeArtifact, reviseOfficeArtifact, openPdfEditingSession, placePdfSignature,...classificationTools, ...recoveryTools,...generationRecoveryTools]
 }

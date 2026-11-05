@@ -10,6 +10,7 @@ import type {
 } from '@use-brian/core'
 import { canRead } from '@use-brian/core'
 import { queryWithRLS } from './client.js'
+import { buildAccessPredicate } from './access-predicate.js'
 
 /**
  * `provenance-store.ts` — WS-5 / WU-5.5.
@@ -123,9 +124,15 @@ async function probePrimitive(
   spec: { table: string; hasSupersededBy: boolean },
   rowId: string,
 ): Promise<RawRow | null> {
+  const access = buildAccessPredicate(actor, { startIdx: 2 })
   const supersededByCol = spec.hasSupersededBy
     ? 'superseded_by AS "supersededBy"'
     : 'NULL::uuid AS "supersededBy"'
+  // Edges have visibility owners and verifiers, but no author columns.
+  // Never substitute those principals for unknown authorship.
+  const authorColumns = spec.table === 'entity_links'
+    ? 'NULL::uuid AS "createdByUserId", NULL::uuid AS "createdByAssistantId"'
+    : 'created_by_user_id AS "createdByUserId", created_by_assistant_id AS "createdByAssistantId"'
   const result = await queryWithRLS<{
     source: string
     sourceEpisodeId: string | null
@@ -139,16 +146,15 @@ async function probePrimitive(
     actor.userId,
     `SELECT source,
             source_episode_id        AS "sourceEpisodeId",
-            created_by_user_id       AS "createdByUserId",
-            created_by_assistant_id  AS "createdByAssistantId",
+            ${authorColumns},
             created_at               AS "createdAt",
             valid_from               AS "validFrom",
             valid_to                 AS "validTo",
             ${supersededByCol}
        FROM ${spec.table}
-      WHERE id = $1
+      WHERE id = $1 AND (${access.sql})
       LIMIT 1`,
-    [rowId],
+    [rowId, ...access.params],
   )
   const row = result.rows[0]
   if (!row) return null
@@ -195,9 +201,9 @@ async function probeEntityInstance(
             created_at      AS "createdAt",
             last_edited_at  AS "lastEditedAt"
        FROM entity_instances
-      WHERE id = $1
+      WHERE id = $1 AND workspace_id = $2
       LIMIT 1`,
-    [rowId],
+    [rowId, actor.workspaceId],
   )
   const row = result.rows[0]
   if (!row) return null
@@ -237,10 +243,11 @@ async function findPrecededBy(
   table: string,
   rowId: string,
 ): Promise<string | null> {
+  const access = buildAccessPredicate(actor, { startIdx: 2 })
   const result = await queryWithRLS<{ id: string }>(
     actor.userId,
-    `SELECT id FROM ${table} WHERE superseded_by = $1 LIMIT 1`,
-    [rowId],
+    `SELECT id FROM ${table} WHERE superseded_by = $1 AND (${access.sql}) LIMIT 1`,
+    [rowId, ...access.params],
   )
   return result.rows[0]?.id ?? null
 }
@@ -256,6 +263,7 @@ async function fetchReExtractionHistory(
   table: string,
   rowId: string,
 ): Promise<Array<{ from_episode: string; at: string }>> {
+  const access = buildAccessPredicate(actor, { startIdx: 2 })
   const out: Array<{ from_episode: string; at: string }> = []
   const seen = new Set<string>([rowId])
   let cursor: string | null = rowId
@@ -269,9 +277,9 @@ async function fetchReExtractionHistory(
                 source_episode_id AS "sourceEpisodeId",
                 valid_from        AS "validFrom"
            FROM ${table}
-          WHERE superseded_by = $1
+          WHERE superseded_by = $1 AND (${access.sql})
           LIMIT 1`,
-        [cursor],
+        [cursor, ...access.params],
       )
     const prior = result.rows[0]
     if (!prior || seen.has(prior.id)) break
@@ -297,6 +305,7 @@ async function fetchEpisode(
   actor: RetrievalActor,
   episodeId: string,
 ): Promise<ProvenanceSourceEpisode | null> {
+  const access = buildAccessPredicate(actor, { startIdx: 2 })
   const result = await queryWithRLS<EpisodeRow>(
     actor.userId,
     `SELECT id,
@@ -305,9 +314,9 @@ async function fetchEpisode(
             sensitivity,
             content_ref  AS "contentRef"
        FROM episodes
-      WHERE id = $1
+      WHERE id = $1 AND (${access.sql})
       LIMIT 1`,
-    [episodeId],
+    [episodeId, ...access.params],
   )
   const row = result.rows[0]
   if (!row) return null
@@ -334,10 +343,11 @@ async function fetchEpisode(
  * row is RLS-hidden OR above the actor's clearance ceiling.
  */
 async function isEpisodeAccessible(actor: RetrievalActor, episodeId: string): Promise<boolean> {
+  const access = buildAccessPredicate(actor, { startIdx: 2 })
   const result = await queryWithRLS<{ sensitivity: Sensitivity }>(
     actor.userId,
-    `SELECT sensitivity FROM episodes WHERE id = $1 LIMIT 1`,
-    [episodeId],
+    `SELECT sensitivity FROM episodes WHERE id = $1 AND (${access.sql}) LIMIT 1`,
+    [episodeId, ...access.params],
   )
   const row = result.rows[0]
   if (!row) return false
