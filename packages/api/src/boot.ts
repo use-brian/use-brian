@@ -675,6 +675,7 @@ import { createOfficeLiveStore } from './db/office-live.js'
 import { createOfficePdfSessionStore } from './db/office-pdf-sessions.js'
 import { createOfficeReleaseStore } from './db/office-release.js'
 import { createOfficeService } from './office/service.js'
+import { createOfficeTemplateDiscovery } from './office/template-discovery.js'
 import { deriveOfficeSnapshot } from './office/release.js'
 import { createOfficeLifecycleWorker, purgeExpiredPdfSessions, runPdfPurgeBlobWorker } from './office/lifecycle-worker.js'
 import { resolveDurableOfficeAccess, resolveOfficeAccess } from './office/access.js'
@@ -3145,6 +3146,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of createOfficeTools({
     port: {
       ...officeService,
+      listTemplates: createOfficeTemplateDiscovery(),
       async resumeGeneration(context,input) {
         const result=await withOfficeClassificationActor(context,()=>resumeOfficeGeneration(context.userId,input))
         wakeOfficeGeneration?.(context.userId)

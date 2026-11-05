@@ -21,6 +21,32 @@ vi.mock('../templates/compiler.js', async (importOriginal) => {
 const context = { userId: id(80), assistantId: id(81), workspaceId: id(2), sessionId: id(82), appId: 'chat', channelType: 'web', channelId: 'web', abortSignal: new AbortController().signal }
 
 describe('[COMP:office/tools] Office tools', () => {
+  it('discovers a named published template and binds its version when creating from chat', async () => {
+    const template = { templateId: id(10), templateVersionId: id(11), name: 'Waterman', description: 'Photography', family: 'document' as const, version: 4 }
+    const listTemplates = vi.fn(async () => ({ templates: [template], scopeEvidence: { sensitivity: 'internal' as const, compartments: [], projectIds: [] } }))
+    const create = vi.fn(async () => ({ artifactId: id(1), jobId: id(90) }))
+    const tools = new Map(createOfficeTools({ port: { listTemplates, create, get: vi.fn(), revise: vi.fn() } }).map(tool => [tool.name, tool]))
+    const found = await tools.get('listOfficeTemplates')!.execute({ family: 'document', query: 'Waterman' }, context)
+    expect(found.data).toEqual({ templates: [template] })
+    expect(found.scopeEvidence).toMatchObject({ sensitivity: 'internal' })
+    const result = await tools.get('createOfficeArtifact')!.execute({ family: 'document', outcome: 'Test quotation', audience: 'Client', sourceHandles: [], templateId: template.templateVersionId, idempotencyKey: 'waterman-test-123' }, context)
+    expect(result.data).toMatchObject({ artifactId: id(1), status: 'queued' })
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ templateId: id(11), sourceHandles: [] }))
+    const blocked = createOfficeTools({ port: { listTemplates, create, get: vi.fn(), revise: vi.fn() }, resolvePolicy: async () => 'block' }).find(tool => tool.name === 'listOfficeTemplates')!
+    expect((await blocked.execute({}, context)).isError).toBe(true)
+    expect(listTemplates).toHaveBeenCalledTimes(1)
+    expect((await tools.get('listOfficeTemplates')!.execute({}, { ...context, workspaceId: undefined })).isError).toBe(true)
+    expect(listTemplates).toHaveBeenCalledTimes(1)
+  })
+  it('explains how to recover an unavailable template binding without claiming creation', async () => {
+    const create = vi.fn(async () => { throw new Error('office_source_unavailable') })
+    const tool = createOfficeTools({ port: { create, get: vi.fn(), revise: vi.fn() } }).find(tool => tool.name === 'createOfficeArtifact')!
+    const result = await tool.execute({ family: 'document', outcome: 'Test quotation', audience: 'Client', sourceHandles: [], templateId: id(10), idempotencyKey: 'waterman-test-123' }, context)
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('No generation job was queued')
+    expect(result.data).toContain('listOfficeTemplates')
+    expect(result.data).toContain('templateVersionId')
+  })
   it('offers template recovery through the same typed selection and enforces tool policy',async()=>{
     const resumeGeneration=vi.fn(async()=>({artifactId:id(1),jobId:id(90)}))
     const port:OfficeToolPort={create:vi.fn(),get:vi.fn(),revise:vi.fn(),resumeGeneration}

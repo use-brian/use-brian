@@ -323,6 +323,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'updateBrandDraft', description: 'Propose a change to the brand draft (an owner or admin approves it in Studio)', classification: 'write', defaultPolicy: 'ask' },
   ],
   office: [
+    { name: 'listOfficeTemplates', description: 'Find accessible published Office templates and their version IDs', classification: 'read', defaultPolicy: 'allow' },
     { name: 'proposeOfficeEvidenceFill', description: 'Propose source-linked values for selected worksheet cells; human acceptance required', classification: 'write', defaultPolicy: 'allow' },
     { name: 'createOfficeArtifact', description: 'Start a durable Brian-native Document, Presentation, or Spreadsheet job', classification: 'write', defaultPolicy: 'allow' },
     { name: 'getOfficeClassification', description: 'Read the department and sensitivity protections of an Office artifact', classification: 'read', defaultPolicy: 'allow' },
@@ -670,6 +671,7 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'fileDelete',
   ],
   office: [
+    'listOfficeTemplates',
     'proposeOfficeEvidenceFill',
     'createOfficeArtifact',
     'getOfficeClassification',

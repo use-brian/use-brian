@@ -4,6 +4,23 @@ The existing Office workflow imports editable DOCX templates into the canonical
 document model, fills their placeholders, and exports through the existing DOCX
 and LibreOffice PDF generators. Reference PDFs are comparison inputs only.
 
+## Chat template discovery
+
+Chat exposes a read-only `listOfficeTemplates` tool for finding currently
+published templates by family and name. It returns registry and published-version
+IDs separately; `createOfficeArtifact.templateId` binds the published-version ID,
+never the registry or editable draft ID. Discovery uses current application-role
+RLS and the active turn's clearance, department and Project ceilings across the
+template, draft, bundle and referenced resources. It returns bounded metadata,
+not bundle bytes or unpublished drafts, and contributes the returned scopes to
+the turn's evidence. It grants no new access.
+
+Creation tool descriptions direct named-template requests through discovery.
+An unavailable source gives an actionable discovery instruction rather than an
+opaque exception. A read-only inspection or failed creation is never described
+as a queued or completed document. Discovery does not reserve quote numbers;
+monthly numbering requires existing records or an explicit user-supplied number.
+
 ## Sections
 
 DOCX import retains each paragraph section boundary and the final body section.

@@ -2,6 +2,8 @@
 
 | COMP tag | doc path | source path | test path |
 |---|---|---|---|
+| office/tools | docs/architecture/office-template-fidelity.md (chat template discovery) | packages/core/src/office/tools.ts; packages/shared/src/builtin-connectors.ts | packages/core/src/office/__tests__/tools.test.ts |
+| api/office-template-discovery | docs/architecture/office-template-fidelity.md (chat template discovery) | packages/api/src/office/template-discovery.ts; packages/api/src/boot.ts | packages/api/src/office/__tests__/template-discovery.test.ts; packages/api/src/office/__tests__/generation-recovery.integration.test.ts |
 | office/document-pdf | docs/architecture/office-template-fidelity.md | packages/core/src/office/docx/pdf.ts | packages/core/src/office/__tests__/document-pdf.test.ts |
 | api/office-routes | docs/architecture/office-template-fidelity.md (editable routing after template admission) | packages/api/src/routes/office-templates.ts | packages/api/src/routes/__tests__/office-token-routing.test.ts; packages/api/src/routes/__tests__/office-routes.test.ts |
 | api/office-store | docs/architecture/office-template-fidelity.md (mutable draft routing and immutable admitted versions) | packages/api/src/db/office-templates.ts | packages/api/src/db/__tests__/office-store.integration.test.ts |
