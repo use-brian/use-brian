@@ -74,6 +74,14 @@ A cell's explicit `wrapText: false` survives native DOCX export as `w:noWrap`.
 The editable canonical part alone is insufficient: external office renderers
 must receive the wrapping policy in the ordinary WordprocessingML cell properties.
 
+An admitted template keeps its linked active authoring draft editable for the
+next version. Routing reads and reviewed routing saves accept both draft and
+admitted registry states, subject to the same linked artifact and current SQL
+read/mutation authority. Deprecated, trashed, retained, purged, missing or held
+sources remain unavailable. Saving draft routing does not modify the current
+admitted version's field schema or bundle. Publishing appends another immutable
+version and advances the registry head through the existing compile checks.
+
 Office's page setup exposes the existing footer edge distance and a signed left
 indent for the footer paragraph. The indent changes the footer text area while
 retaining the page margins and body layout. Native DOCX, canonical/Yjs editing,

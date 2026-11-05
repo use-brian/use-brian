@@ -180,6 +180,7 @@ describe('[COMP:api/office-routes] Office API routes', () => {
     const test = app()
     const snapshot = guidedTemplateSnapshot({ artifactId: ARTIFACT, workspaceId: WORKSPACE, family: 'presentation', title: 'Company deck', guidance: 'Use for company introductions.' })
     test.templates.getTemplate.mockResolvedValue({ id: 'template-1', workspaceId: WORKSPACE, family: 'presentation', name: 'Company deck', lifecycleState: 'draft', draftArtifactId: ARTIFACT } as never)
+    test.templates.getArtifact.mockResolvedValue({id:ARTIFACT,workspaceId:WORKSPACE,family:'presentation',mode:'template',lifecycleState:'active'} as never)
     test.templates.getSnapshot.mockResolvedValue({ snapshot, seq: 1, baseVersion: 0 } as never)
     const inferred = await request(test.server).get('/api/office/templates/template-1/routing').expect(200)
     expect(inferred.body.routing).toMatchObject({ source: 'scratch', slideRecipes: [{ role: 'cover' }, { role: 'section' }] })
