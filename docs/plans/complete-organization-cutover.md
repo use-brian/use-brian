@@ -66,6 +66,13 @@ the read/mutation checks; preserve private ownership, assistant partition,
 sensitivity, Department and Project floors and lineage. Ordinary root-file home
 defaults and classic mode admission remain unchanged.
 
+V2 Office generation publishes its version backing file into the artifact's
+revalidated canonical envelope. When that envelope is General, admit General
+explicitly rather than applying the executing assistant's home Department.
+This does not grant membership in that home Department or change the saved job
+ceiling. Keep source/template, actor/session, assistant, lease, quota and exact
+artifact-envelope checks in the atomic publication transaction.
+
 The SQL backstop for the superseded creation-receipt protocol must select the
 same model as the TypeScript writer. Existing v2 department stamping, row
 policies and derivation guards stay enabled. Tests must show both successful

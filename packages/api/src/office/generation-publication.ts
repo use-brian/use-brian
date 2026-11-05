@@ -94,9 +94,13 @@ async function publishGenerationSnapshot(params:{job:OfficeGenerationJobRow;leas
     }
     // Inherited artifact envelope, with current mutation authority. Visibility is
     // additionally constrained by the live parent binding for every generic read.
+    // A canonical v2 General artifact is already placed: do not reapply the
+    // executing assistant's root-file home Department default to its backing file.
+    const inheritedGeneral=department && a.compartments.length===0
     const admitted=await admitWorkspaceResource(client,job.workspaceId,actor,{writerKind:'workspace_file',rowVisibility:{userId:null,assistantId:null},visibility:'workspace',sensitivity:a.sensitivity,
       inherited:{visibility:'workspace',sensitivity:a.sensitivity,compartments:a.compartments,projectIds:a.project_ids},
-      requestedLabels:{compartments:a.compartments,projectIds:a.project_ids}})
+      ...(inheritedGeneral?{destination:{kind:'general'},requestedLabels:{projectIds:a.project_ids}}
+        :{requestedLabels:{compartments:a.compartments,projectIds:a.project_ids}})})
     if(!equal(admitted.envelope.compartments,a.compartments)||!equal(admitted.envelope.projectIds,a.project_ids)||admitted.envelope.sensitivity!==a.sensitivity) throw denied()
     const parent=`/office/artifacts/${job.artifactId}/versions`, name=`1-${hash}.json`
     await client.query(`INSERT INTO workspace_files(id,workspace_id,path,parent_path,name,mime,size_bytes,storage_uri,sensitivity,compartments,project_ids,created_by_user_id,metadata)
