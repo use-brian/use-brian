@@ -30,6 +30,9 @@ RLS and the active turn's clearance, department and Project ceilings across the
 template, draft, bundle and referenced resources. It returns bounded metadata,
 not bundle bytes or unpublished drafts, and contributes the returned scopes to
 the turn's evidence. It grants no new access.
+The tool is registered in both Office governance catalogs as a read operation
+with the existing allow/ask/block policy handling and a human-readable display
+name. Registry integrity tests cover the advertised and boot-injected vocabulary.
 
 Creation tool descriptions direct named-template requests through discovery.
 An unavailable source gives an actionable discovery instruction rather than an

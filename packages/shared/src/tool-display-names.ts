@@ -197,6 +197,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   getIngestApplication: 'Read an ingest application',
   retryIngestApplication: 'Retry an ingest application',
 
+  listOfficeTemplates: 'Find published Office templates',
   createOfficeArtifact: 'Create an Office artifact',
   getOfficeClassification: 'Read Office protection',
   restrictOfficeClassification: 'Add Office protection',

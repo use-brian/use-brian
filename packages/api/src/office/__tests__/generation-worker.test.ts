@@ -451,7 +451,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
 
     await expect(service.get({ userId: 'user-1', artifactId: 'artifact-1' })).resolves.toEqual({
       artifactId: 'artifact-1', family: 'presentation', mode: 'artifact', title: 'Company introduction', version: 0,
-      lifecycleState: 'active', role: 'edit', scopeEvidence: { sensitivity: 'internal', compartments: [], projectIds: [] }, job: { id: 'job-1', status: 'failed', stage: 'failed', errorCode },
+      lifecycleState: 'active', role: 'edit', sensitivity: 'internal', scopeEvidence: { sensitivity: 'internal', compartments: [], projectIds: [] }, job: { id: 'job-1', status: 'failed', stage: 'failed', errorCode },
     })
   })
 
