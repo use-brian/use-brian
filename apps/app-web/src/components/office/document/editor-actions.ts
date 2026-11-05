@@ -118,7 +118,7 @@ export function setDocumentBlockStyle(editor: Editor | null, style: DocumentBloc
   editor.commands.focus();
 }
 
-export function setDocumentBlockAttributes(editor: Editor | null, patch: Record<string, unknown>): void {
+export function setDocumentBlockAttributes(editor: Editor | null, patch: Record<string, unknown>, focusEditor = true): void {
   if (!editor) return;
   const current = ancestor(editor, ["paragraph", "heading", "officeList", "officeTableCellText", "officeTableCell"]);
   if (!current) return;
@@ -128,7 +128,7 @@ export function setDocumentBlockAttributes(editor: Editor | null, patch: Record<
     ? { paragraphStart: true, ...(!current.node.attrs.paragraphStart || current.node.attrs.id === cell?.node.attrs.id ? { id: uuid() } : {}) }
     : {};
   editor.view.dispatch(editor.state.tr.setNodeMarkup(current.pos, undefined, { ...current.node.attrs, ...spacing, ...paragraph, ...patch }).scrollIntoView());
-  editor.commands.focus();
+  if (focusEditor) editor.commands.focus();
 }
 
 export function setDocumentSectionAttributes(editor: Editor | null, patch: Record<string, unknown>, focusEditor = true): void {

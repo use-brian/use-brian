@@ -88,6 +88,11 @@ retaining the page margins and body layout. Native DOCX, canonical/Yjs editing,
 and preview layout preserve it. Table controls expose minimum/exact row height
 so templates can clip an overflowing field in its own row without moving the
 following date or location row. Clipboard text remains ordinary editable text.
+The paragraph spacing menu accepts fractional point values for exact line height
+and space before/after a paragraph, including paragraphs inside table cells.
+Numeric edits retain input focus and the collaborative selection while updating
+the canonical paragraph attributes. Escape closes spacing and table menus even
+when a numeric input is focused; tall menus scroll within the available viewport.
 
 For a no-wrap cell, native Word text uses typographic no-break spaces while the
 canonical part retains the original value. Explicit paragraph and line breaks

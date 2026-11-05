@@ -10,6 +10,26 @@ import { officeDocumentEditorExtensions } from "../document/editor-schema";
 import { applyDocumentRunFormatting, clearDocumentRunFormatting, convertDocumentList, currentDocumentSectionAttributes, documentProductivity, findDocumentText, insertDocumentBreak, insertDocumentImage, insertDocumentTable, moveDocumentTableCell, replaceDocumentText, runDocumentTableAction, setDocumentBlockAttributes, setDocumentBlockStyle, setDocumentRowAttributes, setDocumentSectionAttributes } from "../document/editor-actions";
 
 describe("[COMP:app-web/office-document-editor] Document productivity and keyboard actions", () => {
+  it("retains numeric-input focus while persisting fractional paragraph spacing", () => {
+    const doc = snapshotToYDoc(documentFixture());
+    const editor = new Editor({ extensions: [...officeDocumentEditorExtensions(), Collaboration.configure({ fragment: getDocumentFragment(doc) })] });
+    const input = document.createElement("input");
+    document.body.append(input);
+    try {
+      let start = 0;
+      editor.state.doc.descendants((node, pos) => { if (node.type.name === "officeTableCellText") start = pos + 1; });
+      editor.commands.setTextSelection(start);
+      input.focus();
+      setDocumentBlockAttributes(editor, { lineSpacingPt: 11, spacingBeforePt: 1.3, spacingAfterPt: 0 }, false);
+      setDocumentBlockAttributes(editor, { lineSpacingPt: 11.45 }, false);
+      expect(document.activeElement).toBe(input);
+      const result = yDocToSnapshot(doc);
+      const table = result.family === "document" ? result.sections[0].nodes.find(node => node.kind === "table") : undefined;
+      expect(table?.kind === "table" && table.rows[0].cells[0].runs[0].paragraphStart).toMatchObject({ lineSpacingPt: 11.45, lineSpacingRule: "exact", spacingBeforePt: 1.3, spacingAfterPt: 0 });
+      expect(editor.view.dom.querySelector("[data-office-table-cell-text]")?.getAttribute("style")).toContain("line-height: 11.45pt");
+    } finally { input.remove(); editor.destroy(); doc.destroy(); }
+  });
+
   it("persists row sizing and footer position changes through the collaborative editor", () => {
     const snapshot = documentFixture();
     const table = snapshot.sections[0].nodes.find(node => node.kind === "table")!;
