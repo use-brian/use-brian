@@ -6,6 +6,7 @@ import { xSearchTool, createXSearchTool } from './x-search.js'
 import { askQuestionTool } from './ask-question.js'
 import { createTaskTool, updateTaskTool, _getSessionTasksSize } from './tasks.js'
 import { getTimeTool } from './get-time.js'
+import { calculateTool } from './calculate.js'
 import { createEngineBaseTools } from './ask-engines.js'
 import type { ExternalCredentialPool } from '../../providers/credential-pool.js'
 
@@ -16,6 +17,7 @@ export {
   createTaskTool,
   updateTaskTool,
   getTimeTool,
+  calculateTool,
   createEngineBaseTools,
   createUrlReaderTool,
   createWebSearchTool,
@@ -53,6 +55,7 @@ export function createBaseTools(
     createTaskTool,
     updateTaskTool,
     getTimeTool,
+    calculateTool,
   ]
 
   if (credentialPool || process.env.XAI_API_KEY) {

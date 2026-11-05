@@ -1,7 +1,7 @@
 export type { CurrentAuthorityBoundary, Tool, ToolContext, ToolResult, ToolResultMeta } from './types.js'
 export { buildTool } from './types.js'
 export { filterToolsByCapabilities, isAttendedTurn, provenanceSessionId, toolTransport } from './capability-gate.js'
-export { createBaseTools, createEngineBaseTools, createUrlReaderTool, createWebSearchTool, createXSearchTool, urlReaderTool, webSearchTool, askQuestionTool, createTaskTool, updateTaskTool, getTimeTool, _getSessionTasksSize } from './base/index.js'
+export { createBaseTools, createEngineBaseTools, createUrlReaderTool, createWebSearchTool, createXSearchTool, urlReaderTool, webSearchTool, askQuestionTool, createTaskTool, updateTaskTool, getTimeTool, calculateTool, _getSessionTasksSize } from './base/index.js'
 export {
   createGoogleMapsTools,
   extractGoogleMapsSources,
