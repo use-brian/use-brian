@@ -7,9 +7,30 @@ import { applyDocumentCommand, documentRangePreimageHash, attachDocumentResource
 import { readFileSync } from "node:fs";
 import { documentFixture, uid } from "./editor-fixtures";
 import { officeDocumentEditorExtensions } from "../document/editor-schema";
-import { applyDocumentRunFormatting, clearDocumentRunFormatting, convertDocumentList, currentDocumentSectionAttributes, documentProductivity, findDocumentText, insertDocumentBreak, insertDocumentImage, insertDocumentTable, moveDocumentTableCell, replaceDocumentText, runDocumentTableAction, setDocumentBlockAttributes, setDocumentBlockStyle, setDocumentSectionAttributes } from "../document/editor-actions";
+import { applyDocumentRunFormatting, clearDocumentRunFormatting, convertDocumentList, currentDocumentSectionAttributes, documentProductivity, findDocumentText, insertDocumentBreak, insertDocumentImage, insertDocumentTable, moveDocumentTableCell, replaceDocumentText, runDocumentTableAction, setDocumentBlockAttributes, setDocumentBlockStyle, setDocumentRowAttributes, setDocumentSectionAttributes } from "../document/editor-actions";
 
 describe("[COMP:app-web/office-document-editor] Document productivity and keyboard actions", () => {
+  it("persists row sizing and footer position changes through the collaborative editor", () => {
+    const snapshot = documentFixture();
+    const table = snapshot.sections[0].nodes.find(node => node.kind === "table")!;
+    if (table.kind !== "table") throw new Error("table required");
+    const doc = snapshotToYDoc(snapshot);
+    const editor = new Editor({ extensions: [...officeDocumentEditorExtensions(), Collaboration.configure({ fragment: getDocumentFragment(doc) })] });
+    try {
+      let start = 0;
+      editor.state.doc.descendants((node, position) => { if (node.type.name === "officeTableCellText" && node.attrs.id === table.rows[0].cells[0].id) start = position + 1; });
+      editor.commands.setTextSelection(start);
+      setDocumentRowAttributes(editor, { minHeightPt: 12.65, heightRule: "exact" });
+      setDocumentSectionAttributes(editor, { footerIndentLeftPt: 5.45, page: { ...snapshot.sections[0].page, footerDistancePt: 40.25 } }, false);
+      const result = yDocToSnapshot(doc);
+      if (result.family !== "document") throw new Error("document required");
+      expect(result.sections[0]).toMatchObject({ footerIndentLeftPt: 5.45, page: { footerDistancePt: 40.25 } });
+      const updated = result.sections[0].nodes.find(node => node.kind === "table");
+      expect(updated?.kind === "table" && updated.rows[0]).toMatchObject({ minHeightPt: 12.65, heightRule: "exact" });
+      expect(editor.view.dom.querySelector("section")?.getAttribute("style")).toContain("--office-footer-indent-left: 5.45pt");
+    } finally { editor.destroy(); doc.destroy(); }
+  });
+
   it("keeps multiline pasted values inside their cell and retains exact row heights", () => {
     const snapshot = documentFixture();
     const table = snapshot.sections[0].nodes.find(node => node.kind === "table")!;
