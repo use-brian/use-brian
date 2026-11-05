@@ -45,6 +45,10 @@ function service() {
 }
 
 describe('[COMP:brain/context-projection] Office turn-scope projection', () => {
+  it('returns the admitted classification for local export without exposing an out-of-scope root', async () => {
+    const { port } = service()
+    expect(await port.get({userId:artifact.ownerUserId,artifactId:artifact.id,clearance:'confidential',compartmentGrant:artifact.compartments,projectGrant:artifact.projectIds})).toMatchObject({sensitivity:'internal'})
+  })
   it('makes an out-of-Project id indistinguishable from an unknown artifact', async () => {
     const { port } = service()
     await expect(port.get({

@@ -28,6 +28,7 @@ export type OfficeArtifactToolProjection = {
   mode?: 'artifact' | 'template' | 'session'
   title: string
   version: number
+  sensitivity?: 'public' | 'internal' | 'confidential'
   expiresAt?: string
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained'
   role: 'view' | 'comment' | 'edit'

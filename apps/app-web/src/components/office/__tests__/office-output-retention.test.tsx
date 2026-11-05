@@ -83,6 +83,19 @@ describe('[COMP:app-web/office-iteration-panel] protected Office output retentio
     expect(revoke).toHaveBeenCalledWith('blob:protected-office-output')
   })
 
+  it.each(['public','internal','confidential',undefined] as const)('keeps the local PDF destination at the artifact tier (%s)', async sensitivity => {
+    state.review.mockResolvedValue(protectedValue({...receipt}))
+    state.release.mockResolvedValue(protectedValue({releaseId:'release-a',fileId:'file-a',receipt}))
+    state.read.mockResolvedValue(protectedValue(new Blob(['pdf'],{type:'application/pdf'})))
+    render({...artifact(),sensitivity})
+    const preview=[...host.querySelectorAll<HTMLButtonElement>('button')].find(button=>button.textContent===en.office.previewDocumentPdf)!
+    await act(async()=>{preview.click();await Promise.resolve();await Promise.resolve();await Promise.resolve()})
+    const input=expect.objectContaining({destination:{sensitivity:sensitivity??'confidential',external:false},format:'pdf'})
+    expect(state.review).toHaveBeenCalledWith('artifact-a',input)
+    expect(state.release).toHaveBeenCalledWith('artifact-a',input)
+    expect(host.querySelector('iframe')).not.toBeNull()
+  })
+
   it('discards a late review after the mounted artifact owner changes', async () => {
     let resolveReview!: (value: OfficeReleaseReceipt) => void
     state.review.mockImplementation(() => new Promise(resolve => { resolveReview = resolve }))

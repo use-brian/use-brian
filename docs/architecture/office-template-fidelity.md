@@ -69,6 +69,13 @@ as canonical run formatting.
 
 ## Verification
 
+Local native downloads and PDF previews preserve the artifact's current
+sensitivity. The permission-filtered artifact projection includes that tier;
+File actions uses it for both review and release, with a confidential fallback
+for older metadata. A local download must not request an implicit downgrade to
+internal. Server review still rejects stale or broader destinations, and output
+retention and access checks remain unchanged.
+
 Local Document editing preserves a canonical run through cell paragraph splits,
 full-cell deletion, and Find/Replace to an empty value. A split keeps the source
 typography on empty paragraphs and restores a fresh `officeRun` stored mark after
