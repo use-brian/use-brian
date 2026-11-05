@@ -27,12 +27,16 @@ Supported syntax:
 - `+`, `-`, `*`, `/`, unary signs, and parentheses.
 - `^` for integer powers from -1000 to 1000, right-associative.
   `2^3^2` is `512`; `-2^2` is `-4`; `(-2)^2` is `4`.
-- Whitespace between tokens.
+- ASCII spaces, tabs, carriage returns, and newlines between tokens.
 
 Express percentages using `/100`. Functions, variables, units, thousands
 separators, implicit multiplication, `%`, and JavaScript syntax are not
-supported. A restricted parser consumes the entire input; it never uses `eval`
-or `Function`.
+supported. The execution boundary checks the type, length, and an ASCII
+character allowlist before parsing, even when called without schema validation.
+Invalid input is rejected, never coerced, stripped, or Unicode-normalized.
+A restricted parser consumes the entire input; it never uses `eval`, `Function`,
+a JavaScript VM, or dynamic property lookup. Only validated numeric literals
+reach `decimal.js`; input cannot request function calls, imports, or globals.
 
 Inputs are limited to 2048 characters and 64 recursive nesting levels. Each
 nonzero literal and intermediate result must have a decimal exponent between

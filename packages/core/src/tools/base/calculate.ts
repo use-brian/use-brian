@@ -10,9 +10,17 @@ const MAX_DEPTH = 64
 const MAX_EXPONENT = 1000
 
 /** Restricted recursive-descent grammar; never evaluates JavaScript or names. */
-function evaluate(expression: string): string {
-  if (!expression.trim() || expression.length > MAX_LENGTH) {
-    throw new Error(`Expression must contain 1–${MAX_LENGTH} characters.`)
+function evaluate(input: unknown): string {
+  // Validate here as well as in the schema: direct execute() calls can bypass
+  // schema validation. Never coerce objects or strip/normalize invalid input.
+  if (typeof input !== 'string' || input.length === 0 || input.length > MAX_LENGTH) {
+    throw new Error(`Expression must be a string containing 1–${MAX_LENGTH} characters.`)
+  }
+  const expression = input
+  // Fail closed before parsing. e/E are allowed only for numeric exponents;
+  // the grammar below must still consume the entire expression.
+  if (!/^[0-9eE+\-*/^(). \t\r\n]+$/.test(expression)) {
+    throw new Error('Expression contains unsupported characters.')
   }
   let position = 0
   let depth = 0

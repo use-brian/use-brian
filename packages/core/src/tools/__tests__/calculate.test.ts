@@ -1,5 +1,5 @@
 import { Decimal } from 'decimal.js'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { calculateTool } from '../base/calculate.js'
 
 const ctx = {
@@ -40,6 +40,42 @@ describe('[COMP:tools/base] calculate', () => {
     const result = await calculate(expression)
     expect(result.isError).toBe(true)
     expect(typeof result.data).toBe('string')
+  })
+
+  it('rejects JavaScript injection without executing any payload', async () => {
+    const probe = vi.fn()
+    vi.stubGlobal('__calculatorInjectionProbe', probe)
+    const call = 'globalThis.__calculatorInjectionProbe()'
+    try {
+      for (const expression of [
+        call, `1;${call}`, `1,${call}`, `1+(${call})`,
+        `(()=>{${call}})()`, `eval("${call}")`, `Function("${call}")()`,
+        `({}).constructor.constructor("${call}")()`,
+        `[]['filter']['constructor']("${call}")()`,
+        '`' + '${' + call + '}' + '`',
+        'import("node:fs")', 'require("node:child_process")',
+        '__proto__', 'constructor', '1/*comment*/+2', '1//comment\n+2',
+        '1\\u002b2', '1\u0000+2', '１+２', '1\u202e+2',
+        '1\u00a0+2', '1\u2028+2', '1\u200b+2',
+      ]) {
+        expect((await calculate(expression)).isError, expression).toBe(true)
+      }
+      expect(probe).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('rejects non-string direct calls without invoking coercion hooks', async () => {
+    const coerce = vi.fn(() => '1+2')
+    for (const expression of [null, undefined, 123, [], {}, {
+      toString: coerce, valueOf: coerce, [Symbol.toPrimitive]: coerce,
+    }]) {
+      // Deliberately bypass the model input schema and TypeScript boundary.
+      const result = await calculateTool.execute({ expression: expression as unknown as string }, ctx)
+      expect(result.isError).toBe(true)
+    }
+    expect(coerce).not.toHaveBeenCalled()
   })
 
   it('is read-only, concurrency-safe, and needs no capability', () => {
