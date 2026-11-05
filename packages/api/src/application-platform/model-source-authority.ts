@@ -17,6 +17,14 @@ import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseAppl
 const invalid = new WeakSet<ExecutionContext>()
 function denied(): never { throw new SourceProtocolError('source_access_denied') }
 
+/** Keep the private exception chain for server logs, never JSON/wire output. */
+function sourceAuthorityError(error: unknown): SourceProtocolError {
+  if (error instanceof SourceProtocolError) return error
+  return Object.defineProperty(new SourceProtocolError('source_unavailable'), 'cause', {
+    value: error, configurable: true, writable: true, enumerable: false,
+  })
+}
+
 /** No proof/allow cache: every call prepares a new source operation. Native authority stays separate. */
 export async function assertSourceModelInputAuthority(context: ToolContext): Promise<void> {
   return assertSourceModelAuthority(context, 'context')
@@ -129,7 +137,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     accumulator.note(raised)
   } catch (error) {
     if (execution) invalid.add(execution)
-    throw Object.assign(error instanceof SourceProtocolError ? error : new SourceProtocolError('source_unavailable'), {
+    throw Object.assign(sourceAuthorityError(error), {
       reason: 'authority_changed' as const,retrySafe: false,
     })
   }
@@ -149,7 +157,7 @@ function assertNativeOutputBinding(binding:NativeOutputBinding,context:ToolConte
 function nativeOutputFailure(execution:ExecutionContext,error:unknown):never{
  invalid.add(execution)
  if(isDeliveryAudienceUnverifiedError(error))throw error
- throw Object.assign(error instanceof SourceProtocolError?error:new SourceProtocolError('source_unavailable'),{
+ throw Object.assign(sourceAuthorityError(error),{
   reason:'authority_changed' as const,retrySafe:false,
  })
 }
