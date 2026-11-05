@@ -68,3 +68,7 @@ snaps a custom size by at most half a point. The correction changes page boxes
 only and retains the original upper-left content origin, fonts, vectors, and
 annotation coordinates. It never rescales page content. Larger size differences,
 rotated pages, and deliberately cropped pages are outside this rounding repair.
+
+A cell's explicit `wrapText: false` survives native DOCX export as `w:noWrap`.
+The editable canonical part alone is insufficient: external office renderers
+must receive the wrapping policy in the ordinary WordprocessingML cell properties.

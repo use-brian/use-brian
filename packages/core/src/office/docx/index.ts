@@ -24,6 +24,9 @@ import {
   ShadingType,
   Table,
   TableCell,
+  XmlComponent,
+  ImportedXmlComponent,
+  type ITableCellOptions,
   TableLayoutType,
   TableRow,
   TextRun,
@@ -153,6 +156,15 @@ function evenColumnsDxa(count: number, totalDxa: number): number[] {
   return Array.from({ length: count }, (_u, index) => (index === 0 ? totalDxa - base * (count - 1) : base))
 }
 
+/** docx exposes no noWrap option; extend its cell property component rather
+ * than dropping the canonical wrapping policy from the native package. */
+class OfficeDocxTableCell extends TableCell {
+  constructor(options: ITableCellOptions, wrapText?: boolean) {
+    super(options)
+    if (wrapText === false) (this.root[0] as XmlComponent).addChildElement(new ImportedXmlComponent('w:noWrap'))
+  }
+}
+
 function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>, contentWidthDxa: number): Table {
   const widthPt = node.widthPt ?? node.columnWidthsPt?.reduce((sum, width) => sum + width, 0)
   // Widths must stay absolute (DXA): the docx library serializes
@@ -170,7 +182,7 @@ function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>, conte
     rows: node.rows.map((row, rowIndex) => new TableRow({
       tableHeader: rowIndex < node.headerRows,
       height: row.minHeightPt === undefined ? undefined : { value: Math.round(row.minHeightPt * 20), rule: row.heightRule === 'exact' ? HeightRule.EXACT : HeightRule.ATLEAST },
-      children: row.cells.map((cell) => new TableCell({
+      children: row.cells.map((cell) => new OfficeDocxTableCell({
         columnSpan: cell.colSpan,
         rowSpan: cell.rowSpan,
         shading: cell.fill ? { fill: color(cell.fill), type: ShadingType.CLEAR } : undefined,
@@ -178,7 +190,7 @@ function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>, conte
         verticalAlign: cell.verticalAlignment === 'middle' ? VerticalAlignTable.CENTER : cell.verticalAlignment === 'bottom' ? VerticalAlignTable.BOTTOM : VerticalAlignTable.TOP,
         borders: docxCellBorders(cell.borders),
         children: officeCellParagraphs(cell).map(({ format, runs }) => new Paragraph({ alignment: paragraphAlignment(format.alignment), ...paragraphNumbering(format), spacing: paragraphSpacing({ spacingAfterPt: 0, ...format }), children: richChildren(runs) })),
-      })),
+      }, cell.wrapText)),
     })),
   })
 }

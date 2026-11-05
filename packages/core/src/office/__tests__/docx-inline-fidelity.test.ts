@@ -4,7 +4,7 @@ import { applyDocumentCommand, documentRangePreimageHash, documentNumberedParagr
 import { layoutOfficeArtifact, renderOfficePreviewSvg } from '@use-brian/office-renderer'
 import { exportOfficeDocument, importOfficeDocument } from '../docx/index.js'
 import { nineLevelNumberingFixture } from './docx-numbering-fixture.js'
-import { id } from './fixtures.js'
+import { id, documentSnapshot } from './fixtures.js'
 
 const context = { artifactId: id(60), workspaceId: id(2), templateVersionId: null, locale: 'en-US', defaultLanguage: 'en-US', title: 'Synthetic inline fidelity' }
 const run = (text: string) => `<w:r><w:rPr><w:rFonts w:ascii="Arial Narrow" w:eastAsia="Synthetic CJK"/><w:w w:val="80"/></w:rPr><w:t>${text}</w:t></w:r>`
@@ -30,6 +30,22 @@ function labels(snapshot: DocumentSnapshot) {
 
 // Entire fixture is generated from generic labels; no uploaded document content.
 describe('[COMP:office/docx-engine] Bounded inline fidelity', () => {
+  it('preserves explicit cell no-wrap in native XML without the canonical part', async () => {
+    const source = documentSnapshot()
+    const table = source.sections[0].nodes.find(node => node.kind === 'table')!
+    if (table.kind !== 'table') throw new Error('table required')
+    table.rows[0].cells[0].wrapText = false
+    table.rows[0].cells[1].wrapText = true
+    const zip = await JSZip.loadAsync((await exportOfficeDocument(source)).bytes)
+    const xml = await zip.file('word/document.xml')!.async('string')
+    expect(xml.match(/<w:noWrap\b/g)).toHaveLength(1)
+    zip.remove('customXml/brian-office.json')
+    const reopened = await imported(await zip.generateAsync({ type: 'uint8array' }))
+    const result = reopened.sections[0].nodes.find(node => node.kind === 'table')!
+    if (result.kind !== 'table') throw new Error('table required')
+    expect(result.rows[0].cells.map(cell => cell.wrapText)).toEqual([false, true])
+  })
+
   it('admits level zero from nine declared levels and keeps unused unsupported levels inert', async () => {
     const result = await importOfficeDocument(await nineLevelNumberingFixture(), context)
     expect(result.diagnostics.some(d => d.code === 'docx.formatting.numbering')).toBe(false)
