@@ -1,7 +1,9 @@
+import {usesPrivateChatPresentation} from '../session-kind.js'
 import {pinSessionTitleClaims,sessionTitleProjection,sessionTitleProjections,renameCurrentSessionTitle,resolveSessionTitleAuthority} from './session-title-authority.js'
 import {sessionRecoveryRoutes} from './session-recovery.js'
 import {sessionLegacyHistoryRoutes} from './session-legacy-history.js'
 import {sessionDisplayHistoryRoutes} from './session-display-history.js'
+import {readPrivateChatPresentation} from '../db/chat-presentation.js'
 import {DerivedScopeError,executionToolContext} from '@use-brian/core'
 import {readAttendedSessionHistory} from './attended-session-context.js'
 import {assertSourceModelOutputAuthority} from '../application-platform/model-source-authority.js'
@@ -1299,6 +1301,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
+      if (req.authSessionId && req.authVersion !== undefined && session.userId === jwtUserId
+        && usesPrivateChatPresentation(session)) {
+        const messages = await readPrivateChatPresentation({ sessionId: session.id,
+          claims: { userId: jwtUserId, sessionId: req.authSessionId, authVersion: req.authVersion } })
+        res.json(messages)
+        return
+      }
       const authority = await resolveSessionTitleAuthority({
         claims: pinSessionTitleClaims(req), sessionId: session.id, readOnly: true,
       })
@@ -1353,6 +1362,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         }
       }))
     } catch (err) {
+      if (err instanceof WorkspaceAccessError) {
+        res.status(err.status).json({ error: 'Session history is unavailable with your current access', code: 'session_history_unavailable' })
+        return
+      }
       if (err instanceof DerivedScopeError || isAuthorityChangedError(err)
         || err instanceof Error && 'code' in err && err.code === 'source_access_denied') {
         res.status(403).json({ error: 'Session history is unavailable with your current access', code: 'session_history_unavailable' })

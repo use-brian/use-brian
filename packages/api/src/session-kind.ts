@@ -409,6 +409,12 @@ export function isPersonalChat(kind: SessionKind): boolean {
     && kind.lane === 'conversation' && kind.surface !== 'doc'
 }
 
+/** Closed native owner presentation purpose; SQL still authorizes the real row. */
+export function usesPrivateChatPresentation(row: SessionKindRow): boolean {
+ return row.visibility==='personal' && row.channelType==='web' && row.anchorKind==='none'
+  && row.mode==null && (row.appOrigin==null || row.appOrigin==='chat')
+}
+
 /**
  * Answer every concern for one kind. Pure. Each field's rule is documented in
  * docs/plans/unified-sessions.md section 4.2, amended by

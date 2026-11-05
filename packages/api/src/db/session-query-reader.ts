@@ -1,12 +1,12 @@
-import {mergePrivateTranscript} from './private-transcript.js'
+import {readPrivateTranscript} from './private-transcript.js'
 /** Current native session query captures. [COMP:api/application-persistence] */
 import {z} from 'zod'
 import type {PoolClient} from 'pg'
 import {bindScopeSources,boundScopeSources,ContextScopeAccumulator,DerivedScopeError,type ScopeSource,type SessionContextAuthority} from '@use-brian/core'
 import {applicationJsonSchema} from '@use-brian/shared'
 import {getPool} from './client.js'
-import type {SessionMessage} from './sessions.js'
-import {readJointSessionQueryFrame} from './session-context-revisions.js'
+import {readSessionMessageScopeSource,type SessionMessage} from './sessions.js'
+import {readJointSessionQueryFrame,readRetainedContextFrame} from './session-context-revisions.js'
 import {nativeSessionAnnotationSchema as annotation} from '../application-platform/native-session-query-evidence.js'
 
 const source=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
@@ -39,23 +39,55 @@ export async function sessionQueryRootMetadata(workspaceId:string,sessionId:stri
   .flatMap(row=>row.source?[row.source]:[])
 }
 /** The selector is server query metadata, never source authority or a client allow token. */
-export async function readAdmittedSessionQuery(input:{sessionId:string;throughSequence:number;topicThroughSequence?:number;authority:SessionContextAuthority}):Promise<{
+export async function readAdmittedSessionQuery(input:{sessionId:string;throughSequence:number;topicThroughSequence?:number;currentMessageId?:string;currentMessageSequence?:number;authority:SessionContextAuthority}):Promise<{
  history:SessionMessage[];annotations:SessionQueryAnnotation[]}> {
  const {authority,sessionId,throughSequence}=input,{execution}=authority
  const topicThrough=input.topicThroughSequence??throughSequence,workspaceId=execution.security.access.workspaceId
  if(!(authority.accumulator instanceof ContextScopeAccumulator)||execution.lifecycle.sessionId!==sessionId||execution.lifecycle.sessionPersisted===false
   ||![throughSequence,topicThrough].every(value=>Number.isSafeInteger(value)&&value>=0&&value<=2147483647))changed()
  await execution.security.authority.assertCurrent()
+ // Private dialogue is its own source. Do not traverse old facts just to
+ // discover that they are obsolete before remembering what was said.
+ const transcript=await readPrivateTranscript(authority,sessionId,throughSequence)
+ if(transcript){
+  const history=[...transcript],sources=[...boundScopeSources(transcript)]
+  // Only the actual current authored input needs raw attachment/model context.
+  // Its ordinary source is freshly admitted, independently of earlier replies.
+  if(input.currentMessageId){
+   const currentSequence=input.currentMessageSequence??throughSequence
+   if(!Number.isSafeInteger(currentSequence)||currentSequence<1||currentSequence>throughSequence)changed()
+   const currentSource=await readSessionMessageScopeSource(workspaceId,input.currentMessageId)
+   if(!currentSource)changed()
+   const current=await readRetainedContextFrame(authority,[currentSource],async client=>{
+    const row=(await client.query<SessionMessage>(`SELECT id,session_id AS "sessionId",role,content,
+     sequence_num AS "sequenceNum",created_at AS "createdAt",NULL::text AS "replyToText",
+     NULL::text AS "topicLabel",NULL::float AS "topicConfidence",channel_message_id AS "channelMessageId",
+     sender_user_id AS "senderUserId",sender_assistant_id AS "senderAssistantId",attachments
+     FROM session_messages WHERE workspace_id=$1 AND session_id=$2 AND id=$3 AND sequence_num=$4
+      AND role='user' AND session_recording_read_allowed(session_id)`,
+     [workspaceId,sessionId,input.currentMessageId,currentSequence])).rows[0]
+    if(!row)changed()
+    return bindScopeSources(row,[currentSource])
+   })
+   const index=history.findIndex(row=>row.id===current.id)
+   if(index<0)history.push(current);else history[index]=current
+   sources.push(currentSource)
+  }
+  history.sort((a,b)=>a.sequenceNum-b.sequenceNum)
+  bindScopeSources(history,sources)
+  const result=bindScopeSources({history,annotations:[] as SessionQueryAnnotation[]},sources)
+  authority.accumulator.note({sources})
+  return result
+ }
  // Discover immutable identities only. Neither owner discovery nor metadata is
  // an authorization decision; the non-owner projection admits every candidate.
  const roots=await sessionQueryRootMetadata(workspaceId,sessionId,throughSequence,topicThrough)
  const captured=await readJointSessionQueryFrame(authority,roots,{sessionId,throughSequence,topicThroughSequence:topicThrough})
- let history=captured.history.slice(1).map(row=>{
+ const history=captured.history.slice(1).map(row=>{
   const value=row.row!
   return bindScopeSources<SessionMessage>({...value,sessionId,createdAt:new Date(value.createdAt),replyToText:null,topicLabel:null,topicConfidence:null},row.sources)
  })
  bindScopeSources(history,captured.history.flatMap(row=>row.sources))
- history=await mergePrivateTranscript(authority,sessionId,history,throughSequence)
  const annotations=bindScopeSources(captured.annotations.slice(1).map(row=>bindScopeSources(row.row!,row.sources)),captured.annotations.flatMap(row=>row.sources))
  const result=bindScopeSources({history,annotations},[...boundScopeSources(history),...boundScopeSources(annotations)])
  authority.accumulator.note({sources:boundScopeSources(result)})

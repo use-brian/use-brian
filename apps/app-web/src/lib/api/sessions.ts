@@ -116,6 +116,8 @@ type SessionFileAttachment = {
 
 export type DocSessionMessage = {
   id: string;
+  /** False means a direct message restriction, not changed upstream sources. */
+  available?: boolean;
   role: "user" | "assistant" | "tool" | "system";
   content: unknown;
   /** ISO string — server emits a Date which JSON-serialises here. */
@@ -176,6 +178,7 @@ type RawListRow = {
 
 type RawMessageRow = {
   id: string;
+  available?: boolean;
   role: string;
   content: unknown;
   timestamp: string | Date;
@@ -847,6 +850,7 @@ export async function fetchSessionMessages(
     if (!Array.isArray(data)) throw new Error("chat_history_invalid_response");
     return data.map((m) => ({
       id: m.id,
+      ...(m.available === false ? { available: false } : {}),
       role: (m.role as DocSessionMessage["role"]) ?? "assistant",
       content: m.content,
       timestamp: toIso(m.timestamp),

@@ -1,6 +1,6 @@
 /** Same-owner conversation evidence, independent of upstream facts. [COMP:api/private-transcript] */
 import {z} from 'zod'
-import {bindScopeSources,boundScopeSources,ContextScopeAccumulator,DerivedScopeError,type ScopeSource,type SessionContextAuthority,type ExecutionContext} from '@use-brian/core'
+import {bindScopeSources,DerivedScopeError,type ScopeSource,type SessionContextAuthority,type ExecutionContext} from '@use-brian/core'
 import {applyRLSGucs,getAppPool,runWithAgentAccess,rollbackAndRelease} from './client.js'
 import {privateHistoryText} from './session-legacy-history.js'
 import type {SessionMessage} from './sessions.js'
@@ -34,6 +34,19 @@ export async function resumePrivateLegacySession(workspaceId:string,sessionId:st
  finally{await rollbackAndRelease(client)}
 }
 
+/** Upload identity is part of the dialogue; file bodies require a fresh read. */
+export function privateTranscriptText(content: unknown, role: 'user'|'assistant'): string|null {
+ if(role!=='user')return privateHistoryText(content,role)
+ const blocks=typeof content==='string'?[{type:'text',text:content}]:Array.isArray(content)?content:[]
+ if(blocks.some(block=>block?.type==='tool_result'||block?.type==='host_observation'))return null
+ const text=blocks.flatMap(block=>block?.type==='text'&&typeof block.text==='string'?[block.text]:[]).join('\n')
+ const headers=text.replace(/<attached_file\b([^>]*)>[\s\S]*?(?:<\/attached_file>|$)/gi,(_match,attrs:string)=>{
+  const field=(name:string)=>JSON.stringify((new RegExp(`\\b${name}="([^"]*)"`,'i').exec(attrs)?.[1]??'').slice(0,1024))
+  return `[Attached file: ${field('name')}; fileId: ${field('id')}; type: ${field('type')}]`
+ }).replace(/<attached_file\b[^>]*$/gi,'')
+ return privateHistoryText(headers,role)
+}
+
 /** Only a host native session lease can select this purpose; never a client flag. */
 export async function readPrivateTranscript(authority:SessionContextAuthority,sessionId:string,throughSequence:number):Promise<SessionMessage[]|null>{
  const {execution,accumulator}=authority,{identity,security,lifecycle}=execution
@@ -56,7 +69,7 @@ export async function readPrivateTranscript(authority:SessionContextAuthority,se
    const parsed=capture.parse(raw),source:ScopeSource=parsed.source
    if(source.workspaceId!==workspaceId||source.userId!==security.access.userId)throw new DerivedScopeError('scope_source_changed')
    const rows=parsed.rows.flatMap(row=>{
-    const text=privateHistoryText(row.content,row.role)
+    const text=privateTranscriptText(row.content,row.role)
     return text?[bindScopeSources<SessionMessage>({id:row.id,sessionId,role:row.role,content:[{type:'text',text}],
      sequenceNum:row.sequence,createdAt:new Date(row.timestamp),replyToText:null,topicLabel:null,topicConfidence:null,
      channelMessageId:null,senderUserId:row.role==='user'?source.userId:null,senderAssistantId:null,attachments:[]},[source])]:[]
@@ -68,18 +81,4 @@ export async function readPrivateTranscript(authority:SessionContextAuthority,se
   }catch(error){await client.query('ROLLBACK');throw error}
   finally{await rollbackAndRelease(client)}
  })
-}
-
-/** Keep current tool/attachment context; fill historical dialogue by stored identity. */
-export async function mergePrivateTranscript(authority:SessionContextAuthority,sessionId:string,rows:SessionMessage[],through:number):Promise<SessionMessage[]>{
- const captureAuthority={execution:authority.execution,accumulator:new ContextScopeAccumulator()}
- const transcript=await readPrivateTranscript(captureAuthority,sessionId,through)
- if(!transcript)return rows
- const currentIds=new Set(rows.map(row=>row.id))
- if(transcript.every(row=>currentIds.has(row.id)))return rows
- authority.accumulator.note(captureAuthority.accumulator.evidence)
- const merged=new Map(transcript.map(row=>[row.id,row]))
- for(const row of rows)merged.set(row.id,row)
- return bindScopeSources([...merged.values()].sort((a,b)=>a.sequenceNum-b.sequenceNum),
-  [...boundScopeSources(rows),...boundScopeSources(transcript)])
 }

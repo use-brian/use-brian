@@ -6,7 +6,9 @@ import {chatRoutes} from '../../routes/chat.js'
 import {runProactiveCompaction} from '../../routes/proactive-compaction.js'
 import {createDbCapabilityStore} from '../../db/capability-store.js'
 import {createPendingApprovalsStore} from '../../db/pending-approvals-store.js'
-import {afterAll,afterEach,describe,expect,it} from 'vitest'
+import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
+import * as queryFrames from '../../db/session-context-revisions.js'
+import * as storedSessions from '../../db/sessions.js'
 import {boundScopeSources,ContextScopeAccumulator,executionToolContext} from '@use-brian/core'
 import {getAppPool,getPool} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
@@ -16,7 +18,7 @@ import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
 import {readPrivateTranscript} from '../../db/private-transcript.js'
 import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
-import {readAttendedSessionHistory} from '../../routes/attended-session-context.js'
+import {readAttendedSessionHistory,captureAttendedSessionClassification,assessAttendedSessionMessage,readClassifiedSessionHistory} from '../../routes/attended-session-context.js'
 import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../model-source-authority.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -24,7 +26,7 @@ await assertLocalFixture()
 
 describe.sequential('[COMP:api/private-transcript] ordinary private conversation continuity',()=>{
  let fixture:Awaited<ReturnType<typeof persistentContextFixture>>|undefined
- afterEach(async()=>{await fixture?.cleanup();fixture=undefined})
+ afterEach(async()=>{vi.restoreAllMocks();await fixture?.cleanup();fixture=undefined})
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
  async function setup(member=false){
   fixture=await persistentContextFixture('confidential');const f=fixture,userId=member?f.secondId:f.ownerId
@@ -38,7 +40,7 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
   const memory=await f.memory('The fictional office currently opens at nine.',userId)
   const fresh=()=>resolveSessionTitleAuthority({claims,sessionId:session.id,readOnly:false})
   const original=await fresh(),query=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:input.sequenceNum,authority:original})
-  expect(boundScopeSources(query).some(source=>source.resourceKind==='private_transcript')).toBe(false)
+  expect(boundScopeSources(query).some(source=>source.resourceKind==='private_transcript')).toBe(true)
   const memories=await createDbMemoryStore().getIndex(original.execution.security.access,false,original)
   original.accumulator.note({sources:[...boundScopeSources(query),...boundScopeSources(memories)]})
   const [reply]=await publishNativeSessionMessageBatch({sessionId:session.id,authority:original,derivationTarget:scope,
@@ -65,6 +67,45 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
    derivation:{producer:'fixture:continuation',sources:authority.accumulator.evidence.sources??[]},
    messages:[{role:'assistant',content:[{type:'text',text:'We chose the amber notebook.'}]}]})
   expect((await readAttendedSessionHistory(await c.fresh(),c.session.id)).map(row=>row.id)).toContain(continued.id)
+ })
+ it('admits current uploaded content independently while keeping earlier dialogue as utterances',async()=>{
+  const c=await setup()
+  await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memory.id])
+  const content=[{type:'text',text:'Read <attached_file id="fictional" name="notes.txt" type="text/plain">FRESH_FILE_BODY</attached_file>'},
+   {type:'image',mimeType:'image/png',data:'YWJj'}]
+  const current=await addSessionMessage({sessionId:c.session.id,role:'user',content,senderUserId:c.userId,scope:c.scope})
+  const authority=await c.fresh()
+  const query=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:current.sequenceNum,currentMessageId:current.id,authority})
+  expect(query.history.find(row=>row.id===current.id)?.content).toEqual(content)
+  expect(query.history.find(row=>row.id===c.reply.id)?.content).toEqual([{type:'text',text:'We chose the amber notebook. The office opens at nine.'}])
+  expect(boundScopeSources(query).some(source=>source.resourceKind==='session_message'&&source.resourceId===current.id)).toBe(true)
+  await assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fictional-current-upload'}),scopeAccumulator:authority.accumulator})
+  const followup=await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'What did the attached file say?'}],senderUserId:c.userId,scope:c.scope})
+  const later=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:followup.sequenceNum,currentMessageId:followup.id,authority:await c.fresh()})
+  const historicalUpload=JSON.stringify(later.history.find(row=>row.id===current.id)?.content)
+  expect(historicalUpload).toContain('notes.txt')
+  expect(historicalUpload).toContain('fictional')
+  expect(historicalUpload).not.toContain('FRESH_FILE_BODY')
+  await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[current.id])
+  await expect(assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fictional-current-upload'}),scopeAccumulator:authority.accumulator})).rejects.toBeTruthy()
+ })
+ it.each([true,false])('preserves the active upload when new messages force classified history recapture (header: %s)',async header=>{
+  const c=await setup()
+  const content=[...(header?[{type:'text',text:'<attached_file id="upload" name="scan.png" type="image/png">[image]</attached_file>'}]:[]),
+   {type:'image',mimeType:'image/png',data:'YWJj'}]
+  const current=await addSessionMessage({sessionId:c.session.id,role:'user',content,senderUserId:c.userId,scope:c.scope})
+  const authority=await c.fresh()
+  const capture=await captureAttendedSessionClassification({authority,session:c.session,message:current})
+  const provider:LLMProvider={name:'fictional-classification',models:['fixture'],createSession(){throw new Error('Unexpected session')},
+   stream:async function*(){yield{type:'text_delta',text:JSON.stringify({topic_label:'Upload',state:'continue',confidence:0.9,related_topics:[]})}}}
+  const assessment=await assessAttendedSessionMessage({authority,session:c.session,message:current,provider,model:'fixture',capture})
+  const classified=await assessment.defer()
+  const later=await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'An additional note.'}],senderUserId:c.userId,scope:c.scope})
+  const history=await readClassifiedSessionHistory(authority,c.session.id,classified.history)
+  expect(history.find(row=>row.id===current.id)?.content).toEqual(content)
+  expect(history.map(row=>row.id)).toContain(later.id)
+  expect(history.findIndex(row=>row.id===current.id)).toBeLessThan(history.findIndex(row=>row.id===later.id))
+  await assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fictional-recaptured-upload'}),scopeAccumulator:authority.accumulator})
  })
  it('works for an ordinary member who owns their conversation',async()=>{
   const c=await setup(true);await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memory.id])
@@ -125,12 +166,27 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
   expect(summary?.summary).toContain('amber notebook')
   expect(summary?.boundarySequence).toBe(next.sequenceNum)
  },120_000)
- it.each([false,true])('passes old dialogue to the actual web provider, including obsolete summary recovery: %s',async compacted=>{
+ it.each(['ordinary','compacted','history-timeout','summary-timeout'])('passes old dialogue to the actual web provider: %s',async mode=>{
+  const compacted=mode==='compacted'||mode==='summary-timeout'
   const c=await setup()
   if(compacted)expect(await setCompactSummaryAndBoundary(c.session.id,'The office opens at nine; amber notebook selected.',c.reply.sequenceNum,null,
    {authority:c.original,derivation:{producer:'fixture:old-summary',sources:c.original.accumulator.evidence.sources??[]}})).not.toBeNull()
   await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memory.id])
   await c.f.pool.query("UPDATE workspaces SET plan='pro' WHERE id=$1",[c.f.workspaceId])
+  if(mode==='summary-timeout'){
+   const original=storedSessions.readCompactSummary
+   vi.spyOn(storedSessions,'readCompactSummary').mockImplementation((id,authority)=>{
+    if(id===c.session.id)throw Object.assign(new Error('fictional_old_summary_timeout'),{code:'57014'})
+    return original(id,authority)
+   })
+  }
+  if(mode==='history-timeout'){
+   const original=queryFrames.readJointSessionQueryFrame
+   vi.spyOn(queryFrames,'readJointSessionQueryFrame').mockImplementation((authority,roots,selection)=>{
+    if(selection.sessionId===c.session.id)throw Object.assign(new Error('fictional_old_history_timeout'),{code:'57014'})
+    return original(authority,roots,selection)
+   })
+  }
   const calls:Message[][]=[]
   const chunks=(text:string):StreamChunk[]=>[{type:'message_start',model:'fixture'},{type:'text_delta',text},
    {type:'message_end',stopReason:'end_turn',usage:{inputTokens:10,outputTokens:5}}]

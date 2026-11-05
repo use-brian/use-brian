@@ -1,7 +1,6 @@
 /** Current native attended history and annotations. [COMP:api/application-persistence] */
 import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,isTrivialChatMessage,DerivedScopeError,executionToolContext,
  type ResearchClassifyOptions,type ResearchClassifyResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
-import {readPrivateTranscript} from '../db/private-transcript.js'
 import {getPool} from '../db/client.js'
 import {readAdmittedSessionQuery,captureSessionTopics,sessionQueryRootMetadata} from '../db/session-query-reader.js'
 import {readSessionQueryFrame} from '../db/session-context-revisions.js'
@@ -21,7 +20,7 @@ export async function captureAttendedSessionClassification(input:ClassificationI
  const {authority,session,message}=input
  const execution=authority.execution,accumulator=authority.accumulator
  if(message.sessionId!==session.id||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
- const query=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,topicThroughSequence:message.sequenceNum-1,authority})
+ const query=await readAdmittedSessionQuery({sessionId:session.id,throughSequence:message.sequenceNum,topicThroughSequence:message.sequenceNum-1,currentMessageId:message.id,authority})
  if(authority.execution!==execution||authority.accumulator!==accumulator)throw new DerivedScopeError('scope_source_changed')
  const capture=Object.freeze({})
  classificationCaptures.set(capture,{authority,execution,accumulator,rootAuthority:authority,rootExecution:execution,rootAccumulator:accumulator,
@@ -42,7 +41,7 @@ export function forkAttendedSessionClassification(input:ClassificationInput){
  return{authority,capture,mergeEvidence:()=>input.authority.accumulator.note(structuredClone(authority.accumulator.evidence))}
 }
 async function classificationQuery(input:ClassificationInput,topicThroughSequence:number){
- if(!input.capture)return readAdmittedSessionQuery({sessionId:input.session.id,throughSequence:input.message.sequenceNum,topicThroughSequence,authority:input.authority})
+ if(!input.capture)return readAdmittedSessionQuery({sessionId:input.session.id,throughSequence:input.message.sequenceNum,topicThroughSequence,currentMessageId:input.message.id,authority:input.authority})
  const captured=classificationCaptures.get(input.capture)
  if(!captured||captured.authority!==input.authority||captured.sessionId!==input.session.id||captured.messageId!==input.message.id||captured.sequence!==input.message.sequenceNum)
   throw new DerivedScopeError('scope_evidence_missing')
@@ -231,7 +230,9 @@ function attendedHistoryResult(authority:SessionContextAuthority,sessionId:strin
 /** Reuse bytes only after a fresh canonical query frame admits their complete original evidence. */
 export async function readClassifiedSessionHistory(authority:SessionContextAuthority,sessionId:string,classifiedHistory:readonly SessionMessage[],fromSequence?:number|null):Promise<SessionMessage[]>{
  const receipt=classifiedTranscripts.get(classifiedHistory),{execution}=authority
- const fresh=()=>readAttendedSessionHistory(authority,sessionId,fromSequence)
+ const currentInput=receipt?.execution===execution&&receipt.sessionId===sessionId
+  ?{id:receipt.messageId,sequence:receipt.through}:undefined
+ const fresh=()=>readAttendedSessionHistory(authority,sessionId,fromSequence,undefined,currentInput)
  if(!receipt||receipt.execution!==execution||receipt.sessionId!==sessionId||execution.lifecycle.sessionId!==sessionId)return fresh()
  const current=()=>classifiedTranscriptCurrent(execution,receipt)
  await execution.security.authority.assertCurrent()
@@ -284,16 +285,12 @@ export async function attendedSessionTurnCount(authority:SessionContextAuthority
 }
 
 /** Capture before filtering/formatting, retaining complete query obligations even for an empty window. */
-export async function readAttendedSessionHistory(authority:SessionContextAuthority,sessionId:string,fromSequence?:number|null,throughSequence?:number):Promise<SessionMessage[]> {
+export async function readAttendedSessionHistory(authority:SessionContextAuthority,sessionId:string,fromSequence?:number|null,throughSequence?:number,currentInput?:{id:string;sequence:number}):Promise<SessionMessage[]> {
  const high=throughSequence??(await getPool().query<{sequence:number}>(
   'SELECT coalesce(max(sequence_num),0)::int AS sequence FROM session_messages WHERE (workspace_id=$1 OR workspace_id IS NULL) AND session_id=$2',
   [authority.execution.security.access.workspaceId,sessionId])).rows[0].sequence
- const legacy=(await getPool().query<{legacy:boolean}>('SELECT workspace_id IS NULL AS legacy FROM sessions WHERE id=$1',[sessionId])).rows[0]?.legacy
- if(legacy){
-  const transcript=await readPrivateTranscript(authority,sessionId,high)
-  if(transcript)return attendedHistoryResult(authority,sessionId,transcript,boundScopeSources(transcript),fromSequence)
- }
- const query=await readAdmittedSessionQuery({sessionId,throughSequence:high,authority})
+ const query=await readAdmittedSessionQuery({sessionId,throughSequence:high,authority,
+  ...(currentInput?{currentMessageId:currentInput.id,currentMessageSequence:currentInput.sequence}:{})})
  const annotations=new Map(query.annotations.map(row=>[row.id,row]))
  const history=query.history.map(row=>{
   const annotation=annotations.get(row.id)

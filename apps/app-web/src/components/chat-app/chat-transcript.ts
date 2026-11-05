@@ -18,6 +18,7 @@ type TranscriptDocumentAttachment = {
  * host-agnostic chat-ui package.
  */
 export type ChatSurfaceMessage = Message & {
+  historyUnavailable?: boolean;
   senderName?: string;
   /** Non-null marks a final provider delivery, including an unnamed bot. */
   publishedSenderName?: string | null;
@@ -185,6 +186,7 @@ function sameAssistantRun(
   return (
     earlier.role === "assistant" &&
     later.role === "assistant" &&
+    !earlier.historyUnavailable && !later.historyUnavailable &&
     earlier.publishedSenderName == null &&
     later.publishedSenderName == null &&
     (earlier.senderAssistantId ?? null) === (later.senderAssistantId ?? null)

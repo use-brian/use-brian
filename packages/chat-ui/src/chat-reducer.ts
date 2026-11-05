@@ -52,6 +52,18 @@ export type ChatAction =
   | { type: 'confirmation/update'; toolCallId: string; patch: Partial<PendingConfirmation> }
   | { type: 'confirmation/clear' }
 
+/** Compare detached transcript snapshots, including host-owned attachment fields. */
+function sameMessageValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+  if (left instanceof Date && right instanceof Date) return Object.is(left.getTime(), right.getTime())
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+  if (Array.isArray(left) !== Array.isArray(right) || Object.getPrototypeOf(left) !== Object.getPrototypeOf(right)) return false
+  if (!Array.isArray(left) && Object.getPrototypeOf(left) !== Object.prototype) return false
+  const a = left as Record<string, unknown>, b = right as Record<string, unknown>
+  const keys = Object.keys(a)
+  return keys.length === Object.keys(b).length && keys.every(key => Object.hasOwn(b, key) && sameMessageValue(a[key], b[key]))
+}
+
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case 'session/set':
@@ -66,8 +78,15 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       if (state.sessionId === action.sessionId) return state
       return { ...state, sessionId: action.sessionId }
 
-    case 'messages/load':
-      return { ...state, messages: action.messages }
+    case 'messages/load': {
+      const previous = new Map(state.messages.map(message => [message.id, message]))
+      const messages = action.messages.map(message => {
+        const existing = previous.get(message.id)
+        return existing && sameMessageValue(existing, message) ? existing : message
+      })
+      if (messages.length === state.messages.length && messages.every((message, index) => message === state.messages[index])) return state
+      return { ...state, messages }
+    }
 
     case 'message/append':
       return { ...state, messages: [...state.messages, action.message] }

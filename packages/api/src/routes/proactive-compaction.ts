@@ -444,13 +444,14 @@ export async function runProactiveCompaction(
   assertModelBinding()
   await assertCurrent?.call(authority)
   assertModelBinding()
-  let recoveredTranscript: SessionMessage[] | null = null
-  let priorSummary: Awaited<ReturnType<typeof readCompactSummary>> = null
-  try { priorSummary = persistSessionSummary ? await readCompactSummary(session.id, binding) : null }
-  catch (error) {
-    if (!(error instanceof DerivedScopeError) || error.code !== 'scope_source_changed' || !binding) throw error
-    recoveredTranscript = await readPrivateTranscript(binding, session.id, 2147483647)
-    if (!recoveredTranscript) throw error
+  // Private dialogue is authoritative independently of an old generated
+  // summary. Rebuild from its complete transcript without admitting that
+  // summary's obsolete source graph, including when the graph is unavailable.
+  const recoveredTranscript = persistSessionSummary && binding
+    ? await readPrivateTranscript(binding, session.id, 2147483647) : null
+  const priorSummary = !recoveredTranscript && persistSessionSummary
+    ? await readCompactSummary(session.id, binding) : null
+  if (recoveredTranscript) {
     const merged = new Map(recoveredTranscript.map(row => [row.id, row]))
     for (const row of suppliedRows) merged.set(row.id, row)
     sessionMessages = bindScopeSources([...merged.values()].sort((a,b) => a.sequenceNum-b.sequenceNum),

@@ -104,7 +104,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { navigateChatLocation } from "@/lib/chat-last-location";
 import { ChatRecoveryAction } from "./chat-recovery";
 import { ChatLegacyHistory } from "./chat-legacy-history";
-import { ChatDisplayHistoryRow, ChatDisplayHistoryStatus, mergeDisplayTimeline, usePersonalDisplayHistory } from "./chat-display-history";
+import { ChatDisplayHistoryRow } from "./chat-display-history";
 import {
   ArrowUp,
   AtSign,
@@ -648,12 +648,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     ? FRESH_PANE_POLICY
     : activeRow?.policy ?? paneSummary?.policy ?? PENDING_POLICY;
 
-  // Independent current authorization for saved display; these rows never enter chat state.
-  const displayHistory = usePersonalDisplayHistory(workspaceId, activeSessionId,
-    !!activeContextSession?.policy && !panePolicy.post && (activeContextSession.transport ?? "web") === "web"
-    && (activeContextSession.appOrigin === "chat" || activeContextSession.appOrigin == null));
-  const { refresh: refreshDisplayHistory, invalidate: invalidateDisplayHistory } = displayHistory;
-  const [canonicalHistoryIds, setCanonicalHistoryIds] = useState<{ sessionId: string; ids: ReadonlySet<string> } | null>(null);
 
   // ── In-chat goal pursuit (docs/architecture/features/goals.md) ────────────
   /** Reload the open session's goals. Guarded against thread switches: only
@@ -796,6 +790,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  stream can take over, including for turns started by this same user. */
   const directTurnSessionRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const followTranscriptRef = useRef(true);
+  const scrolledSessionRef = useRef<string | null | undefined>(undefined);
 
   /** Where each session goal's inline card anchors in the transcript (after
    *  the last message at-or-before its creation — the arming turn). */
@@ -1339,7 +1335,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         return {
           id: r.id,
           role: r.role as "user" | "assistant",
-          text: parsedUser?.text ?? extractMessageText(r.content),
+          text: r.available === false ? t.displayHistory.unavailableMessage : parsedUser?.text ?? extractMessageText(r.content),
+          ...(r.available === false ? { historyUnavailable: true } : {}),
           timestamp: new Date(r.timestamp),
           ...(toolsUsed.length > 0 ? { toolsUsed } : {}),
           ...(activityNotes.length > 0 ? { activityNotes } : {}),
@@ -1372,7 +1369,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           (m.pageLinks?.length ?? 0) > 0,
       );
     return coalesce ? coalesceAssistantRunMessages(persistedRows) : persistedRows;
-  }, [tChat.toolNarration]);
+  }, [tChat.toolNarration, t.displayHistory.unavailableMessage]);
 
   /** Load a thread's persisted transcript into the reducer through the
    *  per-session `chat-transcript:` cache key. `force` is the refetch the
@@ -1385,7 +1382,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       const epoch = sessionEpochRef.current;
       if (sessionIdRef.current !== sessionId || stream.inFlight()) return;
       const controllerRun = chatController.capture();
-      refreshDisplayHistory();
       const request = ++transcriptRequestRef.current;
       transcriptAbortRef.current?.abort();
       const controller = new AbortController();
@@ -1413,7 +1409,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           !chatController.isCurrent(controllerRun)
         ) return;
         const rows = mapTranscriptRows(persisted);
-        setCanonicalHistoryIds({ sessionId, ids: new Set(persisted.map(row => row.id)) });
         writeTranscriptCache(sessionId, rows);
         chat.loadMessages(rows);
         setHistoryRecoverySessionId(null);
@@ -1426,8 +1421,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           // denial must clear protected content instead of retaining it.
           const denied = isAuthoritativeRosterDenial(error);
           if (denied) {
-            if (!isSessionHistoryUnavailable(error)) invalidateDisplayHistory();
-            setCanonicalHistoryIds({ sessionId, ids: new Set() });
             evictTranscriptCache(sessionId);
             chat.loadMessages([]);
           }
@@ -1446,7 +1439,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     },
     // `chat.loadMessages` is a stable useCallback from the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chatController, stream.inFlight, mapTranscriptRows, refreshDisplayHistory, invalidateDisplayHistory, t.errorGeneric, t.historyUnavailable],
+    [chatController, stream.inFlight, mapTranscriptRows, t.errorGeneric, t.historyUnavailable],
   );
 
   /** True from a switch onto a session with NO cached transcript until its
@@ -1475,7 +1468,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setPendingQuestion(null);
     setStartingShared(false);
     setHistoryRecoverySessionId(null);
-    setCanonicalHistoryIds(null);
     // Thread switches now arrive from the sidebar panel via the URL, so the
     // in-flight stream (if any) belongs to the OLD thread — kill it before
     // painting the new one, exactly what the old in-surface rail did on
@@ -2240,11 +2232,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     };
   }, [typingActive, activeSessionId, sendTypingBeacon]);
 
-  // Keep the transcript pinned to the newest turn as it streams.
-  useEffect(() => {
+  // Follow new content only while the reader has chosen the bottom. Refreshes
+  // and typing beacons must never pull someone away from an older message.
+  useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    if (scrolledSessionRef.current !== activeSessionId) {
+      scrolledSessionRef.current = activeSessionId;
+      followTranscriptRef.current = true;
+    }
+    if (followTranscriptRef.current) el.scrollTop = el.scrollHeight;
   }, [
+    activeSessionId,
     chat.state.messages,
     chat.state.streamingText,
     streamingEvents,
@@ -2732,6 +2731,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       ? undefined
       : (freshChannelIdRef.current ??= crypto.randomUUID());
 
+    followTranscriptRef.current = true;
     const localUserId = `local-${Date.now()}`;
     const userAttachments: MessageAttachmentRef[] = usesComposerTray
       ? readyAttachments(att.attachments).map((attachment) => ({
@@ -3972,9 +3972,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     !!activeSessionId &&
     reconnectSessionId === activeSessionId;
 
-  const displayTimeline = useMemo(() => mergeDisplayTimeline(chat.state.messages as SurfaceMessage[],
-    displayHistory.rows, canonicalHistoryIds?.sessionId === activeSessionId ? canonicalHistoryIds.ids : undefined),
-    [chat.state.messages, displayHistory.rows, canonicalHistoryIds, activeSessionId]);
+  const displayTimeline = useMemo(() => (chat.state.messages as SurfaceMessage[]).map((message, canonicalIndex) => ({
+    historicalDisplayOnly: message.historyUnavailable === true, message, canonicalIndex,
+    row: { id: message.id, role: message.role, timestamp: Number.isNaN(message.timestamp.getTime()) ? "" : message.timestamp.toISOString(), sequence: canonicalIndex + 1,
+      available: false, text: null },
+  })), [chat.state.messages]);
   // Group the visible conversation, including owner-readable historical replies.
   // Canonical indexes still address only actionable/currently admitted messages.
   const transcriptMeta = useMemo(() => computeTranscriptRowMeta(displayTimeline.map(entry =>
@@ -4877,7 +4879,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           data-chat-transcript
           // The pill is anchored to a viewport rect, so scrolling would strand
           // it over the wrong text. Dismiss rather than chase.
-          onScroll={selectionQuote ? () => setSelectionQuote(null) : undefined}
+          onScroll={(event) => {
+            const el = event.currentTarget;
+            followTranscriptRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 64;
+            if (selectionQuote) setSelectionQuote(null);
+          }}
           className="min-h-0 flex-1 overflow-y-auto px-3 pt-4 pb-6 @[560px]/chat-reading:px-6 @[560px]/chat-reading:pt-6"
         >
           <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-6">
@@ -4925,7 +4931,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 }
               }}
             />}
-            {displayTimeline.length === 0 && !displayHistory.loading && !displayHistory.failed &&
+            {displayTimeline.length === 0 &&
               !(activeSessionId && historyRecoverySessionId === activeSessionId) &&
               !chat.state.isStreaming &&
               !remoteActive &&
@@ -5214,8 +5220,6 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 </Fragment>
               );
             })}
-            {!(activeSessionId && historyRecoverySessionId === activeSessionId && displayHistory.failed) &&
-              <ChatDisplayHistoryStatus history={displayHistory} />}
             {/* In-chat pursuit cards newer than every persisted message (the
                 arming turn is still streaming). */}
             {goalPlacement.trailing.map((goal) => (
@@ -5457,7 +5461,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 {error}
               </div>
             )}
-            {activeSessionId && historyRecoverySessionId === activeSessionId && !displayHistory.loading && !displayHistory.hasPage && (
+            {activeSessionId && historyRecoverySessionId === activeSessionId && !transcriptCold && (
               <ChatLegacyHistory key={`${workspaceId}:${activeSessionId}`} workspaceId={workspaceId} sessionId={activeSessionId} fallback={t.historyUnavailable}>
                 <ChatRecoveryAction
                   key={`${workspaceId}:${activeSessionId}`} workspaceId={workspaceId} sessionId={activeSessionId}
