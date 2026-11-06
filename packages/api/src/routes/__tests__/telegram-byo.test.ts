@@ -3312,11 +3312,10 @@ describe('Telegram workflow provider identity', () => {
     expect(dispatchIncomingMessageEvent).toHaveBeenCalledOnce()
     await expectMentionMatches(vi.mocked(dispatchIncomingMessageEvent).mock.calls[0][0], ['@other', '123', '@testbot', '999999'])
   })
-  it('checks the same recording policy for direct and nested passive replies without workspace events', async () => {
+  it('keeps direct and nested passive replies out of recording and events when chat is disabled', async () => {
     linkedDiscussionChatId = -10010
     mockResolveTelegramRouting.mockClear()
     mockResolveAnyRouting.mockClear()
-    const destinations: string[] = []
     for (const reply of [{ message_id: 30, is_automatic_forward: true }, { message_id: 31 }]) {
       await disableChat()
       await postUpdate(app(), { update_id: 2, message: {
@@ -3326,9 +3325,9 @@ describe('Telegram workflow provider identity', () => {
       } })
       await flushMicrotasks()
       expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
-      destinations.push(vi.mocked(telegramRecordingEnabled).mock.calls.at(-1)![1])
     }
-    expect(destinations).toEqual(['-10020:discussion:30', '-10020:discussion:30'])
+    expect(admitTelegramRecording).not.toHaveBeenCalled()
+    expect(archiveUnroutedInbound).not.toHaveBeenCalled()
     expect(mockResolveTelegramRouting).not.toHaveBeenCalled()
     expect(mockResolveAnyRouting).not.toHaveBeenCalled()
     expect(pipelineCalls).toHaveLength(0)
@@ -3692,7 +3691,11 @@ describe('[COMP:api/telegram-byo-route] original media archive', () => {
 })
 
 describe('[COMP:api/telegram-byo-route] workspace ingress admission', () => {
-  it('answers a direct group invocation while recording is stopped without durable content sinks', async () => {
+  it.each([
+    { label: 'explicit mention', config: { requireMention: true }, text: '@testbot help', entities: [{ type: 'mention', offset: 0, length: 8 }] },
+    { label: 'configured topic without mention', config: { requireMention: true, requireMentionOverrides: [{ chatId: '-100', topicId: 898 }] }, text: 'help', entities: [] },
+    { label: 'configured group without mention', config: { requireMention: false }, text: 'help', entities: [] },
+  ])('answers $label without a recorder and without durable content sinks', async ({ config, text, entities }) => {
     const { findAssistantById } = await import('../../db/users.js')
     const old = await findAssistantById('assistant_1')
     vi.mocked(findAssistantById).mockResolvedValue({...old,workspaceId:'ws_1'} as never)
@@ -3700,9 +3703,9 @@ describe('[COMP:api/telegram-byo-route] workspace ingress admission', () => {
     const stream = vi.fn(async function* () { yield {type:'text_delta',text:'A current-message reply.'} })
     const instance = createTestApp('/webhook/telegram-byo',telegramByoRoutes({provider:{stream} as never,
       systemPrompt:'Private owner instructions',tools:new Map(),memoryStore:{} as never,
-      integrationStore:makeIntegrationStore() as never,capabilityStore:{} as never,apiUrl:'http://test'}))
+      integrationStore:makeIntegrationStore(config) as never,capabilityStore:{} as never,apiUrl:'http://test'}))
     try {
-      await postUpdate(instance,{message:message({text:'@testbot help',entities:[{type:'mention',offset:0,length:8}]})})
+      await postUpdate(instance,{message:message({text,entities})})
       await vi.waitFor(()=>expect(adapterSendCalls.some(c=>c.text==='A current-message reply.')).toBe(true))
       expect(stream).toHaveBeenCalledOnce()
       expect(JSON.stringify(stream.mock.calls)).not.toContain('Private owner instructions')
@@ -3716,6 +3719,21 @@ describe('[COMP:api/telegram-byo-route] workspace ingress admission', () => {
       vi.mocked(telegramRecordingEnabled).mockResolvedValue(true)
       vi.mocked(findAssistantById).mockResolvedValue(old)
     }
+  })
+  it('keeps unmentioned traffic passive when recording is unavailable and mentions are required', async () => {
+    vi.mocked(telegramRecordingEnabled).mockResolvedValue(false)
+    const stream = vi.fn(async function* () { yield {type:'text_delta',text:'Must not send'} })
+    const instance = createTestApp('/webhook/telegram-byo', telegramByoRoutes({provider:{stream} as never,
+      systemPrompt:'',tools:new Map(),memoryStore:{} as never,
+      integrationStore:makeIntegrationStore({requireMention:true}) as never,capabilityStore:{} as never,apiUrl:'http://test'}))
+    try {
+      await postUpdate(instance,{message:message()})
+      await vi.waitFor(()=>expect(telegramRecordingEnabled).toHaveBeenCalled())
+      await flushMicrotasks()
+      expect(stream).not.toHaveBeenCalled()
+      expect(admitTelegramRecording).not.toHaveBeenCalled()
+      expectNoCapture()
+    } finally { vi.mocked(telegramRecordingEnabled).mockResolvedValue(true) }
   })
   function app(config: Record<string, unknown> = {}) {
     return createTestApp('/webhook/telegram-byo', telegramByoRoutes({

@@ -539,8 +539,9 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           return
         }
       }
-      if (!await telegramRecordingEnabled(integration.id, conversationId)
-        && !explicitlyAddressed(threadMessage) && !threadUpdate.callback_query) return
+      // Recording ownership does not decide whether this conversation may
+      // invoke Brian. The ordinary adapter applies its mention/topic policy;
+      // processMessage keeps replies stateless when recording is unavailable.
       updateAdmitted = conversationOwned || !!threadUpdate.callback_query || explicitlyAddressed(threadMessage)
       // Albums can carry their sole mention on a later member. Until then
       // retain only the ephemeral bot/conversation/sender-scoped buffer.
