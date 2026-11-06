@@ -1,10 +1,8 @@
 name: Desktop release
 
 on:
-  workflow_run:
-    workflows: [CI]
+  push:
     branches: [main]
-    types: [completed]
   workflow_dispatch:
 
 # Never interrupt notarization or expose a partially uploaded release.
@@ -21,12 +19,8 @@ jobs:
     if: >-
       github.repository == 'use-brian/use-brian' &&
       vars.DESKTOP_RELEASE_ENABLED == 'true' &&
-      ((github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.event == 'push' &&
-        github.event.workflow_run.head_branch == 'main' &&
-        github.event.workflow_run.head_repository.full_name == github.repository) ||
-       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -36,18 +30,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Plan from tested production inputs
+      - name: Plan from current production inputs
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-        run: node apps/app-desktop/scripts/release.mjs plan "$SOURCE_SHA"
+          SOURCE_SHA: ${{ github.sha }}
+        run: node apps/app-desktop/scripts/release.mjs plan-build "$SOURCE_SHA"
+
+  await_ci:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Require successful CI for the exact production commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
+        run: node apps/app-desktop/scripts/release.mjs wait-ci "$SOURCE_SHA"
 
   build_macos:
     needs: plan
@@ -82,6 +98,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
       - name: Install pinned dependencies
         run: pnpm install --frozen-lockfile
       - name: Build desktop workspace dependencies
@@ -170,7 +187,7 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: [plan, build_macos, build_windows]
+    needs: [plan, build_macos, build_windows, await_ci]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

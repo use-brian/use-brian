@@ -594,6 +594,20 @@ export function createFilesApi(deps: CreateFilesApiDeps): DerivedFilesApi {
       return ok(updated)
     },
 
+    async download(ctx,idOrPath) {
+      const unavailable = () => err<{file:WorkspaceFile;url:string;expiresAt:string}>({kind:'not_found',reference:idOrPath})
+      const file = await executeWithCurrentAuthority(()=>resolveByIdOrPath(ctx,idOrPath))
+      if (!file || file.validTo || file.retractedAt || file.supersededBy) return unavailable()
+      const revision = readRevision(file)
+      const gcs = await resolver.forUri(ctx.workspaceId,file.storageUri)
+      const url = await gcs.signedReadUrl(storageKeyForWorkspaceFile(file),60)
+      return executeWithCurrentAuthority(async()=>{
+        const current = await resolveByIdOrPath(ctx,file.id)
+        if (!current || readRevision(current) !== revision) return unavailable()
+        return ok({file:current,url,expiresAt:new Date(Date.now()+60_000).toISOString()})
+      })
+    },
+
     async stat(ctx, idOrPath): Promise<FilesResult<WorkspaceFile>> {
       // Metadata only — no blob fetch. Backs `sendFile`'s gates.
       const file = await resolveByIdOrPath(ctx, idOrPath)

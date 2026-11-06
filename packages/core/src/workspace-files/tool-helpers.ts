@@ -71,6 +71,7 @@ export function workspaceGate(workspaceId: string | null | undefined): { data: s
 }
 
 export function ctxFor(context: {
+  executionContext?: FilesContext['executionContext']
   userId: string
   workspaceId?: string | null
   assistantId?: string | null
@@ -93,6 +94,7 @@ export function ctxFor(context: {
   const sources = context.scopeAccumulator?.evidence.sources
   return {
     ...(sources?.length ? { derivation: { producer: 'workspace-file-tool', sources } } : {}),
+    executionContext: context.executionContext,
     userId: context.userId,
     workspaceId: context.workspaceId!,
     assistantId: context.assistantId ?? null,

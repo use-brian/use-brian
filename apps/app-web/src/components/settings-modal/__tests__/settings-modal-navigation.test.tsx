@@ -32,7 +32,7 @@ vi.mock("@/lib/user", async (importOriginal) => ({
 vi.mock("@/lib/auth-fetch", () => ({
   authFetch: vi.fn(async (url: string) => ({
     ok: true,
-    json: async () => url.endsWith("/invitations")
+    json: async () => url.endsWith("/page-templates") ? {templates: []} : url.endsWith("/invitations")
       ? { invitations: [] }
       : { id: "workspace-1", name: "Example workspace", role: "owner", members: [
         {userId:'user-1',userName:'Riley',role:'owner',email:'riley@example.com'},
@@ -116,6 +116,16 @@ async function choose(label: string) {
 }
 
 describe("[COMP:app-web/settings-modal] mobile section navigation", () => {
+  it('opens workspace General without internal migration or activation chores', async () => {
+    await render(true, 'ws-general');
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.textContent).toContain(en.chrome.settingsModal.workspace.general);
+    expect(document.body.textContent).not.toContain(en.accessMigration.title);
+    expect(document.body.textContent).not.toContain(en.accessMigration.legacy);
+    expect(document.body.textContent).not.toContain(en.accessMigration.finishSetup);
+    expect(document.body.textContent).not.toContain(en.modeContext.migration);
+  });
+
   it("redirects legacy Projects settings to the workspace Projects browser", async () => {
     await render(true, "ws-projects");
     expect(navigation.push).toHaveBeenCalledWith("/w/workspace-1/projects");

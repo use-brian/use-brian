@@ -20,7 +20,6 @@ import { Chip, ClearancePill, EmptyState, HowItWorks, InfoNote, OrgAvatar, StatS
 import { format } from '@/lib/i18n/format';
 import { OrganizationTopbarActions, organizationTopbarActionCls } from '@/components/organization/organization-chrome';
 import { ScopeReviewPanel } from './scope-review';
-import {MigrationProgressPanel} from './migration-progress';
 import {AccessExplanationPanel,AccessEventsPanel} from './access-inspection';
 
 const fieldClass='min-h-8 max-sm:min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
@@ -85,7 +84,6 @@ function WorkspaceAccessPanel({selection,embedded,hideIdentity}:{selection?:Acce
     </StatStrip>:null}
     {notReady?<p role="status" style={toneFill('orange')} className="flex items-start gap-2 rounded-lg px-3 py-2 text-[13px] leading-relaxed"><ShieldAlert aria-hidden className="mt-0.5 size-4 shrink-0"/>{personDetail?t.personAccessLimited:t.notReady}</p>:null}
     {!personDetail ? <HowItWorks summary={t.notesSummary}><p>{t.boundaryHint}{data.canAdminister?` ${t.adminHint}`:''}</p>{peopleVisible&&!selection?<p>{t.peopleHint}</p>:null}</HowItWorks> : null}
-    {historyVisible&&data.canAdminister?<MigrationProgressPanel/>:null}
     {historyVisible?<OrganizationTopbarActions>
       {data.canAdminister?<button type="button" aria-label={t.reviewData} title={t.reviewData} onClick={()=>setReviewOpen(true)} className={organizationTopbarActionCls}><ScanSearch aria-hidden className="size-3.5 shrink-0"/><span className="max-lg:hidden">{t.reviewData}</span></button>:null}
       <button type="button" aria-label={t.accessAudit} title={t.accessAudit} aria-pressed={inspection==='events'} onClick={()=>setInspection('events')} className={organizationTopbarActionCls}><History aria-hidden className="size-3.5 shrink-0"/><span className="max-lg:hidden">{t.accessAudit}</span></button>

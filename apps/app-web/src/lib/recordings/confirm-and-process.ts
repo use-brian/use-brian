@@ -18,6 +18,7 @@
  * copy - those differ per surface. It owns the part that must not differ.
  */
 
+import type { PinnedOfflineSession } from "@/lib/offline/application-write-authority";
 import { createElement } from "react";
 import { MEETING_NOTES_STARTER } from "@use-brian/doc-model";
 import type { Dictionary } from "@/lib/i18n";
@@ -63,6 +64,7 @@ export type ConfirmProcessInput = {
   assembled?: boolean;
   /** Recorder Stop / recovery Save already authorizes first-run processing. */
   automatic?: boolean;
+  session?: PinnedOfflineSession;
   /**
    * A processing run already COMPLETED. The confirm then has to say that a
    * re-run re-transcribes and can duplicate extracted memories, and only then
@@ -103,7 +105,7 @@ export async function confirmAndProcessRecording(
     // Retain the server's duration, credit and duplicate-processing guards.
     // No picker/setup request may prevent a stopped capture from transcribing.
     input.onStage?.("estimate");
-    await estimateRecording(recordingId);
+    await (input.session ? estimateRecording(recordingId, input.session) : estimateRecording(recordingId));
     const workspaceDefault = input.pinnedPage
       ? null
       : await getWorkspaceDefaultBlueprint(workspaceId)
@@ -115,6 +117,7 @@ export async function confirmAndProcessRecording(
       recordingBlueprintToSlug(seedRecordingBlueprint(workspaceDefault)),
       null,
       undefined,
+      ...(input.session ? [input.session] : []),
     );
     return { outcome: "queued", result };
   }

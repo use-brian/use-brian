@@ -285,7 +285,7 @@ describe('[COMP:api/organization-cutover] owner-reviewed atomic activation (PG18
   }finally {await c.query('ROLLBACK');c.release()}
   expect((await f.apply(reviewed.body)).status).toBe(200)
   const mode=await request(app).get(`/workspaces/${f.w}/access/mode`).set('Authorization',`Bearer ${f.token}`)
-  expect(mode.body).toMatchObject({setupState:'ready',cutoverReceiptId:reviewed.body.reviewId,canFinalize:true})
+  expect(mode.body).toMatchObject({setupState:'ready',cutoverReceiptId:reviewed.body.reviewId,canFinalize:false})
  })
  it('fails quickly under a concurrent writer without leaving partial state, then permits a fresh review',async()=>{
   const f=await fixture(),writer=await pool.connect()
@@ -342,4 +342,65 @@ describe('[COMP:api/organization-cutover] owner-reviewed atomic activation (PG18
   expect((await getMigrationPlan(f.w,f.u,otherPlan)).blockers).toEqual(['organization_cutover_target_changed'])
  })
 
+})
+
+describe('[COMP:api/organization-upgrade-worker] unattended setup completion (PG18)',()=>{
+ it('completes with revoked human sessions and preserves content, grants and schedule fields',async()=>{
+  const {completeOrganizationUpgrade}=await import('../organization-cutover.js')
+  const f=await fixture()
+  await pool.query('UPDATE auth_sessions SET revoked_at=clock_timestamp() WHERE user_id=$1',[f.u])
+  const snapshot=async()=>({
+   members:(await pool.query('SELECT to_jsonb(m) AS row FROM workspace_members m WHERE workspace_id=$1 ORDER BY user_id',[f.w])).rows,
+   artifacts:(await pool.query('SELECT to_jsonb(a) AS row FROM office_artifacts a WHERE workspace_id=$1 ORDER BY id',[f.w])).rows,
+   jobs:(await pool.query("SELECT to_jsonb(j)-ARRAY['workflow_authoring_snapshot','updated_at'] AS row FROM scheduled_jobs j WHERE id=ANY($1::uuid[]) ORDER BY id",[f.jobIds])).rows,
+  })
+  const before=await snapshot()
+  const results=await Promise.all([completeOrganizationUpgrade(f.w),completeOrganizationUpgrade(f.w)])
+  expect(results.filter(r=>r.status==='applied')).toHaveLength(1)
+  expect(await snapshot()).toEqual(before)
+  const review=(await pool.query(`SELECT r.execution_kind,r.actor_user_id,r.auth_session_id,r.status,p.setup_state,p.default_department_id
+   FROM workspace_organization_cutover_reviews r JOIN workspace_access_policies p ON p.completed_cutover_id=r.id WHERE p.workspace_id=$1`,[f.w])).rows[0]
+  expect(review).toEqual({execution_kind:'background',actor_user_id:null,auth_session_id:null,status:'applied',setup_state:'ready',default_department_id:f.team.id})
+  expect((await pool.query('SELECT workflow_authoring_snapshot FROM scheduled_jobs WHERE id=ANY($1::uuid[])',[f.jobIds])).rows.every(r=>r.workflow_authoring_snapshot)).toBe(true)
+  expect(await completeOrganizationUpgrade(f.w)).toMatchObject({status:'already_ready'})
+  expect((await pool.query('SELECT count(*)::int AS count FROM workspace_organization_cutover_reviews WHERE workspace_id=$1',[f.w])).rows[0].count).toBe(1)
+  const id=f.jobIds[0]
+  await pool.query('UPDATE scheduled_jobs SET next_run_at=clock_timestamp() WHERE id=$1',[id])
+  const claim=await f.jobs.claimDueJob!(id)
+  expect(claim?.scheduleClaimId).toBeTruthy()
+  const run=await createDbWorkflowRunStore().createRun({workflowId:claim!.workflowId!,workspaceId:f.w,triggerKind:'schedule',triggeredBy:null,
+   scheduledJob:{id,claimId:claim!.scheduleClaimId!}})
+  expect(run.contextGroupId).toBe(f.team.id)
+  expect(await f.jobs.finishScheduleClaim!(id,claim!.scheduleClaimId!,{success:true,nextRunAt:new Date(0),maxConsecutiveFailures:3})).toMatchObject({applied:true})
+ })
+ it('preserves General as the default and does not relocate assistant homes',async()=>{
+  const {completeOrganizationUpgrade}=await import('../organization-cutover.js')
+  const f=await fixture()
+  await pool.query('UPDATE workspace_access_policies SET default_department_id=NULL WHERE workspace_id=$1',[f.w])
+  const before=(await pool.query('SELECT to_jsonb(a) AS row FROM assistants a WHERE workspace_id=$1',[f.w])).rows
+  const result=await completeOrganizationUpgrade(f.w)
+  expect(result.status,JSON.stringify(result)).toBe('applied')
+  expect((await pool.query('SELECT default_department_id FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0].default_department_id).toBeNull()
+  expect((await pool.query('SELECT to_jsonb(a) AS row FROM assistants a WHERE workspace_id=$1',[f.w])).rows).toEqual(before)
+ })
+ it('keeps a busy workspace compatible and completes on a subsequent automatic attempt',async()=>{
+  const {completeOrganizationUpgrade}=await import('../organization-cutover.js')
+  const f=await fixture(),lease=randomUUID()
+  await pool.query("UPDATE scheduled_jobs SET dispatch_lease_id=$2,dispatch_lease_expires_at=clock_timestamp()+interval '1 minute' WHERE id=$1",[f.jobIds[0],lease])
+  const blocked=await completeOrganizationUpgrade(f.w)
+  expect(blocked).toMatchObject({status:'blocked',blockers:expect.arrayContaining([{code:'cutover_schedule_not_quiet',kind:'scheduled_job',id:f.jobIds[0]}])})
+  expect((await pool.query('SELECT setup_state FROM workspace_access_policies WHERE workspace_id=$1',[f.w])).rows[0].setup_state).toBe('legacy')
+  await pool.query('UPDATE scheduled_jobs SET dispatch_lease_id=NULL,dispatch_lease_expires_at=NULL WHERE id=$1',[f.jobIds[0]])
+  expect(await completeOrganizationUpgrade(f.w)).toMatchObject({status:'applied'})
+ })
+ it('does not let an app-role caller fabricate a background review',async()=>{
+  const f=await fixture(),client=await getAppPool().connect()
+  try {
+   await client.query('BEGIN')
+   await client.query("SELECT set_config('app.current_user_id',$1,true),set_config('app.system_bypass','true',true)",[f.u])
+   await expect(client.query(`INSERT INTO workspace_organization_cutover_reviews(workspace_id,execution_kind,actor_user_id,auth_session_id,
+     target_department_id,policy_revision,idempotency_key,payload_hash,evidence)
+     VALUES($1,'background',NULL,NULL,NULL,1,$2,repeat('a',64),'{}')`,[f.w,randomUUID()])).rejects.toThrow()
+  }finally {await client.query('ROLLBACK');client.release()}
+ })
 })

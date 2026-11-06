@@ -39,6 +39,15 @@ beforeEach(() => {
 })
 
 describe('[COMP:recordings/transcript-artifact] OSS transcript artifact', () => {
+  it('keeps an existing dated topic first when a recording transcript is recreated', async () => {
+    const api = filesApi()
+    const persist = createTranscriptArtifactWriter({ filesApi: api as never })
+    await persist({ ...input, title: '2026-11-05 08:30 · Product launch planning' }, provenance)
+    expect(api.writeBytes).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      title: '2026-11-05 08:30 · Product launch planning · Transcript',
+    }))
+  })
+
   it('writes the shared timestamp format and marks duplicate indexing skipped', async () => {
     const api = filesApi()
     const persist = createTranscriptArtifactWriter({

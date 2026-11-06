@@ -1,3 +1,13 @@
+import { createOfficeVersionRuntime } from './office/version-runtime.js'
+import { workspaceCredentialDelegation } from '@use-brian/core'
+import { captureWorkspaceMcpDelegation, restoreWorkspaceMcpDelegation } from './workspace-mcp/delegation.js'
+import { injectDocTools } from './doc/inject.js'
+import { resolvePinnedContext } from './resolve-session-pins.js'
+import { injectWorkspaceMcpSkills } from './workspace-mcp/skills.js'
+import { findSessionById } from './db/sessions.js'
+import { classifySession } from './session-kind.js'
+import { createSessionPinTools } from './session-pin-tools.js'
+import { createWorkspaceMcpProfile } from './workspace-mcp/profile.js'
 import { createRecoverRecordingTool, resolveCurrentRecordingId } from './recordings/recovery.js'
 import { feishuNotificationRoutes } from './routes/feishu-notifications.js'
 import { enqueueNativeSessionStateJob } from './db/session-state-jobs.js'
@@ -37,7 +47,8 @@ import { assertLocalTaskExecutionAuthority, createLocalTaskAdmission } from './s
 import { createBrowserTaskDiscard } from './sandbox/task-discard.js'
 import { resolveBrowserProfileDepartmentRead, resolveHumanBrowserProfileDepartmentRead } from './sandbox/profile-authority.js'
 import { previewCrmDestination, resolveCrmDestination } from './crm-operations/creation-destination.js'
-import { getWorkspaceMembershipWithReadScopeSystem } from './db/workspace-store.js'
+import { getWorkspaceMembershipWithReadScopeSystem, getConnectorUserId } from './db/workspace-store.js'
+import { injectMcpTools } from './mcp/inject.js'
 import { resolveDepartmentReadGrant } from './context-scope/department-resolver.js'
 import { createTemplateImportRecovery } from './office/template-import-recovery.js'
 import { triageTaskForGoal } from './db/goal-task-triage.js'
@@ -158,7 +169,7 @@ import {
   createAssociationTools,
   createCrmEmailDraftTools,
   createCampaignTools,
-  createMemoryTools,
+  createMemoryTools, createSelfProfileTool, createPlanTools, createSessionStateTools,
   createRetrievalTools,
   createViewTools,
   createFileTools,
@@ -277,7 +288,7 @@ import {
 } from './db/content-planning-store.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createSmtpTransport } from './email/smtp-client.js'
-import { chatRoutes, createUpdateViewedSkillTool, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
+import { createNativeChatRuntime, createUpdateViewedSkillTool, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import {
   isDecisionModelRow,
   menuForClass,
@@ -285,7 +296,7 @@ import {
   modelRates,
   registryRow,
 } from '@use-brian/shared/model-registry'
-import { BACKGROUND_MODEL, backgroundModelFor, ensureServableModel, providerVisionModelFor } from './model-resolution.js'
+import { BACKGROUND_MODEL, backgroundModelFor, resolveModel, ensureServableModel, providerVisionModelFor } from './model-resolution.js'
 import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
 import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
@@ -676,6 +687,8 @@ import { createOfficeLiveStore } from './db/office-live.js'
 import { createOfficePdfSessionStore } from './db/office-pdf-sessions.js'
 import { createOfficeReleaseStore } from './db/office-release.js'
 import { createOfficeService } from './office/service.js'
+import { createOfficeTemplateDiscovery } from './office/template-discovery.js'
+import { createChatOfficeGeneration } from './office/chat-generation.js'
 import { deriveOfficeSnapshot } from './office/release.js'
 import { createOfficeLifecycleWorker, purgeExpiredPdfSessions, runPdfPurgeBlobWorker } from './office/lifecycle-worker.js'
 import { resolveDurableOfficeAccess, resolveOfficeAccess } from './office/access.js'
@@ -735,6 +748,8 @@ import { setBrandEventDispatcher } from './brand-event-fanout.js'
 import { setMessageEventDispatcher } from './message-events.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecordingWithBookkeeping } from './recordings/process-recording.js'
+import { createRecordingAutoTitleWorker, datedRecordingTitle } from './recordings/auto-title.js'
+import { runDocAutoTitle } from './doc/auto-title.js'
 import { createRecordingFrameAnalyzer } from './recordings/frame-analysis.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
 import { getRecording, updateRecording } from './db/recordings-store.js'
@@ -856,6 +871,7 @@ import { oauthAuthorizationsRoutes } from './routes/oauth-authorizations.js'
 import { createJobExecutor } from './scheduling/executor.js'
 import { createStuckSessionSweeper } from './scheduling/stuck-session-sweeper.js'
 import { createViewsPruneWorker } from './scheduling/views-prune-worker.js'
+import {createOrganizationUpgradeWorker} from './workspace-access/organization-upgrade-worker.js'
 import { createCleanupWorker } from './scheduling/cleanup-worker.js'
 import { createCalleeExecutor } from './inter-assistant/executor.js'
 import { deliverToChannel } from './inter-assistant/deliver.js'
@@ -3112,7 +3128,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   let wakeOfficeGeneration: ((userId: string) => void) | null = null
   const officeGenerationAvailable = (_family?: 'document' | 'presentation' | 'spreadsheet') => wakeOfficeGeneration !== null
-  const officeService = createOfficeService({
+  const officeLifecycle = { resolveAccess: resolveDurableOfficeAccess, transition: officeArtifactStore.transitionLifecycle, revokeOffline: officeReleaseStore.revokeOfflinePackages }
+  const officeService = createOfficeService({updateCommentThread:officeCommentStore.updateThread,resolveComment:officeCommentStore.resolve,versions:() => officeVersionRuntime,release:() => officeReleaseDeps,lifecycle:officeLifecycle,getJob:officeGenerationStore.get,cancelJob:officeGenerationStore.cancel,listVersions:officeArtifactStore.listVersions,listThreads:officeCommentStore.listThreads,listSuggestions:officeCommentStore.listSuggestions,captureObservation:officeArtifactStore.captureObservation,list:officeArtifactStore.list,
     generationAvailable: officeGenerationAvailable,
     createShell: officeArtifactStore.createShell,
     deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
@@ -3158,6 +3175,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   for (const tool of createOfficeTools({
     port: {
       ...officeService,
+      listTemplates: createOfficeTemplateDiscovery(),
+      async createFromContext(context,input) {
+        const created = await createChatOfficeGeneration(context,input)
+        if (!created) return officeService.create(input)
+        wakeOfficeGeneration?.(context.userId)
+        return created
+      },
       async resumeGeneration(context,input) {
         const result=await withOfficeClassificationActor(context,()=>resumeOfficeGeneration(context.userId,input))
         wakeOfficeGeneration?.(context.userId)
@@ -3474,6 +3498,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         callerUserId: request.caller.userId,
         callerAccessCeiling: request.callerAccessCeiling,
         callerScopeEvidence: request.callerScopeEvidence,
+        callerWorkspaceDelegation: request.callerWorkspaceDelegation,
         calleeAssistantId: request.target.assistantId,
         expectedWorkspaceId: request.target.workspaceId,
         question: request.message.parts
@@ -3530,6 +3555,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
 
   const interAssistantTools = createInterAssistantTools({
+    captureWorkspaceDelegation: async context => {
+      const retained = workspaceCredentialDelegation(context.executionContext)
+      if (retained) return retained
+      const identity = context.executionContext?.identity
+      if (identity?.kind !== 'programmatic' || context.sessionPersisted !== true) return undefined
+      return captureWorkspaceMcpDelegation(context)
+    },
     isFollowing: (follower, following) => connectionStore.isFollowing(follower, following),
     getFollowing: async (id) => {
       const conns = await connectionStore.getFollowing(id)
@@ -3634,7 +3666,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     sendPage: sendPagePort,
     resolveVerifiedClientEmail: ({ apiKeyId, assistantId, email }) =>
       linkedIdentityStore.findUniqueVerifiedApiClientByEmail({ apiKeyId, assistantId, email }),
-    buildToolRegistry: ({ workspaceId, assistantId, userId, turnScope }) => buildWorkflowToolRegistry(
+    buildToolRegistry: async ({ workspaceId, assistantId, userId, turnScope, workspaceDelegation }) => {
+      const parent = workspaceDelegation ? await restoreWorkspaceMcpDelegation(workspaceDelegation,capabilityStore) : undefined
+      return buildWorkflowToolRegistry(
       {
         firstParty: allTools,
         connectorStore,
@@ -3655,8 +3689,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         engineHooks: ports.engineHooks,
         assistantConnectorGrantsStore,
       },
-      { workspaceId, assistantId, userId, turnScope },
-    ),
+      { workspaceId, assistantId, userId, turnScope, workspaceConsent: parent?.consent },
+    )
+    },
     pauseRunForWait: params => pauseWorkflowRunForWait(params,{jobStore,runStore:workflowRunStore,resolvePrimary:resolvePrimaryAssistantForWorkspace}),
     emitAudit: async (event) => {
       const details: Record<string, unknown> = {}
@@ -4837,6 +4872,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       void (async()=>{for(let i=0;i<10;i++){try{if(!await engineeringArchive!.drain())break}catch{break}}})().finally(()=>{draining=false})
     },30_000);timer.unref()}
     const fileTools = createFileTools(filesApi, {
+      transfers: chunkedFileUploads,
       entityLinks: entityLinksStore,
       readCachedFile: (id, ctx) => fileStore.get(id, ctx),
       resolvePolicy: resolveFilesToolPolicy,
@@ -4861,6 +4897,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         }
       },
     })
+    allTools.set('startFileUpload', fileTools.startFileUpload)
+    allTools.set('getFileUploadParts', fileTools.getFileUploadParts)
+    allTools.set('completeFileUpload', fileTools.completeFileUpload)
+    allTools.set('abortFileUpload', fileTools.abortFileUpload)
+    allTools.set('getFileDownload', fileTools.getFileDownload)
     allTools.set('fileWrite', fileTools.fileWrite)
     allTools.set('fileAppend', fileTools.fileAppend)
     allTools.set('fileRead', fileTools.fileRead)
@@ -5669,7 +5710,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const feedReviewContext = createFeedReviewContextLoader(ports.feedHistorySql)
   const feedGeneration = createFeedGenerationService(createFeedGenerationPort(createFeedEditorialModelResolver({ provider, configuredProviders, resolveWorkspaceCustomLlm, usageStore, checkCreditBudget: ports.checkCreditBudget, triggerKey: 'feed_generation' }), { transport: geminiTransport, resolveWorkspaceKey: resolveWorkspaceByoGeminiKey, files: filesApi ?? undefined, usageStore, codex: codexProviderManager?.images ?? ports.feedImage?.codex,
       config: ports.feedImage?.config, billing: ports.feedImage?.billing }), feedReviewContext)
-  app.use('/api/chat', optionalAuth(env.JWT_SECRET), chatRoutes({
+  const nativeChatRuntime = createNativeChatRuntime({
     enqueueSessionTitleJob: enqueueNativeSessionTitleJob,
     enqueueSessionStateJob: enqueueNativeSessionStateJob,
     feedGeneration,
@@ -5761,7 +5802,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     buildBlueprintPromptFragment,
     introspectionTools,
     workspaceChatHandoffTool,
-  }))
+  })
+  app.use('/api/chat', optionalAuth(env.JWT_SECRET), nativeChatRuntime.router)
 
   app.use('/api/v1', publicApiRoutes({
     provider,
@@ -5789,7 +5831,106 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     checkCreditBudget: ports.checkCreditBudget,
   }))
 
+  const workspaceNativeTools = new Map(allTools)
+  for (const tool of [
+    ...Object.values(brainMemoryTools), ...Object.values(brainRetrievalTools),
+    ...Object.values(createPlanTools(planStore)), ...Object.values(createSessionStateTools(sessionStateStore)),
+    createSelfProfileTool(entitiesStore, entityLinksStore),
+    ...blueprintRecordTools, ...(generateBlueprintTool ? [generateBlueprintTool] : []),
+  ]) workspaceNativeTools.set(tool.name, tool)
+  const workspaceMcpProfile = createWorkspaceMcpProfile({ nativeTools: workspaceNativeTools, capabilityStore,
+    runNativeTurn: nativeChatRuntime.runWorkspaceTurn,
+    approvalsStore: pendingApprovalsStore, rawWrites: agentToolset.rawWrites,
+    injectTools: async (tools, context, consent) => {
+      const execution = context.executionContext
+      if (!execution || !context.workspaceId) throw new Error('workspace_mcp_authority_required')
+      const access = execution.security.access
+      const actor = await findUserById(context.userId)
+      if (!actor) throw new Error('workspace_mcp_actor_unavailable')
+      for (const tool of Object.values(createSessionPinTools({ sessionId: context.sessionId, workspaceId: context.workspaceId,
+        clearance: access.clearance, assistantId: context.assistantId, publishSessionEvent }))) tools.set(tool.name, tool)
+      if (access.assistantKind === 'primary' && brainInspectionTools) {
+        for (const tool of Object.values(brainInspectionTools)) tools.set(tool.name, tool)
+      }
+      const connectorBindings: Record<string, string> = {}
+      const connectorUserId = await getConnectorUserId(context.userId, context.workspaceId)
+      const connectors = await injectMcpTools({
+        userId: await getConnectorUserId(context.userId, context.workspaceId),
+        assistantId: context.assistantId, assistantTeamId: context.workspaceId,
+        tools, connectorStore, settingsStore: mcpSettingsStore, assistantConnectorStore,
+        connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore,
+        assistantConnectorGrantsStore, connectorSourceRuntimeFactory,
+        knowledgeStore, gdriveFilesStore, filesApi: filesApi ?? undefined,
+        keepBuiltinsDirect: true, keepDynamicToolsDirect: true,
+        restrictSearchToToolNames: consent?.operationNames,
+        // Missing legacy bindings are an empty maximum, never a wildcard.
+        bindingMaximum: consent ? consent.connectorBindings : undefined,
+        onAdmittedBinding: (key, fingerprint) => { connectorBindings[key] = fingerprint },
+        engineHooks: ports.engineHooks, userTimezone: actor.timezone,
+        actorIdentity: { channel: 'programmatic', id: actor.email, email: actor.email, userId: actor.id },
+        contextScope: { effectiveCompartments: access.compartments ?? null,
+          effectiveProjectIds: access.projectIds ?? [], access },
+        executionContext: execution, scopeAccumulator: context.scopeAccumulator,
+        connectorActionAudit: ports.buildConnectorActionAudit?.({
+          workspaceId: context.workspaceId, assistantClearance: access.clearance,
+          sensitivityAccumulator: context.sensitivity, connectorActionStore, episodesStore,
+        }),
+        introspectionTools: access.assistantKind === 'primary' ? introspectionTools : undefined,
+      })
+      const assistant = await findAssistantById(context.assistantId)
+      if (!assistant || assistant.workspaceId !== context.workspaceId) throw new Error('workspace_mcp_assistant_unavailable')
+      const session = context.sessionPersisted ? await findSessionById(context.sessionId) : null
+      await injectExtraTools({ tools, userId: context.userId,
+        assistant: { id: assistant.id, kind: assistant.kind, appType: assistant.appType ?? null },
+        ...(session ? { session: { id: session.id, mode: session.mode, channelType: session.channelType,
+          anchor: classifySession(session).anchor.kind } } : {}),
+        connectorActionAudit: ports.buildConnectorActionAudit?.({ workspaceId: context.workspaceId,
+          assistantClearance: access.clearance, sensitivityAccumulator: context.sensitivity, connectorActionStore, episodesStore }),
+      })
+      if (context.activeCapabilities?.has('page')) {
+        const runtime = await resolveWorkspaceCustomLlm({ workspaceId: context.workspaceId,
+          requestedTier: 'standard', allowDefault: true, allowAnyDefault: true })
+        const plan = await getWorkspacePlan(context.workspaceId)
+        const standardModel = resolveModel('standard', plan, 'ok')
+        const pageTools = new Map<string, Tool>()
+        const pins = session ? await resolvePinnedContext({ sessionId: session.id,
+          workspaceId: context.workspaceId, clearance: session.effectiveClearance, context }) : null
+        await injectDocTools({ tools: pageTools, userId: context.userId, assistant,
+          docSurface: true, fileStore, filesApi: filesApi ?? undefined,
+          ingestPage: ingestPageRunner ? args => ingestPageRunner(args) : undefined, editPageTargets: pins?.pageTargets ?? [],
+          provider: runtime?.provider ?? provider, backgroundModel: runtime?.selector ?? backgroundModelFor(configuredProviders),
+          fallbackModel: configuredProviders ? ensureServableModel(standardModel, configuredProviders) : standardModel,
+          onEditUsage: ({ model, usage }) => recordOverheadUsage({ usageStore,
+            userId: execution.attribution.billingUserId ?? context.userId, actorUserId: context.userId,
+            assistantId: context.assistantId, sessionId: context.sessionId, model, usage,
+            source: 'overhead:doc-edit', triggerKey: 'doc_edit_worker', modelTier: 'standard',
+            providerKeySource: runtime?.providerKeySource ?? 'platform' }),
+        })
+        tools.delete('renderView')
+        for (const [name, tool] of pageTools) tools.set(name, tool.isReadOnly ? tool : { ...tool,
+          async execute(input, invocation) {
+            await invocation.authority!.assertCurrent()
+            if (ports.checkCreditBudget && (await ports.checkCreditBudget(context.workspaceId!, await getWorkspacePlan(context.workspaceId!))).status === 'blocked') {
+              return { isError: true, data: { code: 'budget_exhausted', message: 'Workspace model work is unavailable under the current plan.' } }
+            }
+            return tool.execute(input, invocation)
+          },
+        })
+      }
+      await injectWorkspaceMcpSkills(context, { skillStore, connectorUserId, assistantId: assistant.id,
+        assistantClearance: access.clearance, assistantKind: assistant.kind, assistantAppType: assistant.appType ?? null,
+        tools, availableConnectorIds: connectors.admittedConnectorIds ?? new Set(), unavailableCapabilities: [],
+        communitySkills: communitySkillRegistry, channel: 'workspace_mcp', workspaceId: context.workspaceId,
+        workspaceSkillStore, workspaceSkillEnablementStore, workspaceSkillFilesStore,
+      })
+      return connectorBindings
+    },
+  })
+
   app.use('/api/v1', assistantMcpRoutes({
+    apiUrl: env.API_URL,
+    authorizationStoreFor: assistantId => createDbOAuthAuthorizationStore({ audience: 'assistant', assistantId }),
+    workspaceProfile: workspaceMcpProfile,
     apiKeyStore,
     capabilityStore,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
@@ -5798,7 +5939,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use(
     '/api/assistants/:assistantId/integrations/api-keys',
     requireAuth(env.JWT_SECRET),
-    apiKeyRoutes(apiKeyStore),
+    apiKeyRoutes(apiKeyStore, workspaceMcpProfile),
   )
 
   // ── Shopify store access, shared by BOTH surfaces that have it ──────────
@@ -5926,6 +6067,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
 
   app.use('/api/brain/mcp', brainMcpRoutes({
+    workspaceProfile: workspaceMcpProfile,
     brainKeyStore,
     authorizationStore: oauthAuthorizationStore,
     // Custom Home app bridge. Without this the bridge-token path in
@@ -6020,7 +6162,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     )
   }
 
-  app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL }))
+  app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL, assistantWorkspaceOAuth: true }))
   app.use(connectorActorMetadataRoutes(env.API_URL))
   const applicationService = new ApplicationPlatformService([
     createCanonicalNativeApplicationModule(), createCanonicalGenericApplicationModule(), ...(opts.applicationModules ?? []),
@@ -6031,12 +6173,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       requireAuth: requireAuth(env.JWT_SECRET) },
     management: { service: new ApplicationManagementService(applicationService), requireAuth: requireAuth(env.JWT_SECRET),
       origins: [env.APP_URL, env.AUTHED_APP_URL].filter(Boolean) as string[] } }))
+  app.use('/api/v1/assistants/:assistantId/oauth', (req,res,next) => {
+    const assistantId = req.params.assistantId
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(assistantId)) { res.status(404).end(); return }
+    return oauthRoutes({ assistantId, workspaceProfile: workspaceMcpProfile, clientStore: oauthClientStore,
+      authorizationStore: createDbOAuthAuthorizationStore({ audience: 'assistant', assistantId }),workspaceStore,
+      signingSecret: env.JWT_SECRET,webAppUrl: env.AUTHED_APP_URL ?? env.APP_URL,requireAuth: requireAuth(env.JWT_SECRET) })(req,res,next)
+  })
   app.use('/api/brain/oauth', oauthRoutes({
+    workspaceProfile: workspaceMcpProfile,
     clientStore: oauthClientStore,
     authorizationStore: oauthAuthorizationStore,
     workspaceStore,
     signingSecret: env.JWT_SECRET ?? 'dev-oauth-signing-secret',
-    webAppUrl: env.APP_URL,
+    webAppUrl: env.AUTHED_APP_URL ?? env.APP_URL,
     requireAuth: requireAuth(env.JWT_SECRET),
   }))
   app.use('/api/apps/learn-japanese', learnJapaneseRoutes({
@@ -6332,6 +6482,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       backgroundModel,
       voiceTranscription,
       usageStore,
+      autoTitleNotes: async ({ userId, workspaceId, pageId, assistantId }) => {
+        const view = await savedViewStore.getById(userId, pageId)
+        if (!view || view.workspaceId !== workspaceId || view.nameOrigin !== 'placeholder') return
+        const runtime = await resolveBackgroundRuntime(workspaceId)
+        const timezone = (await query<{ timezone: string }>('SELECT timezone FROM users WHERE id=$1', [userId])).rows[0]?.timezone ?? 'UTC'
+        const result = await runDocAutoTitle({
+          userId, pageId, provider: runtime?.provider ?? provider,
+          backgroundModel: runtime?.selector ?? backgroundModel,
+          docPageStore, savedViewStore, minChars: 80,
+          formatTitle: topic => datedRecordingTitle(view.createdAt, timezone, topic),
+        })
+        if (result.applied) notifyWorkspaceChange(workspaceId, 'file', 'update')
+        if (result.usage && usageStore) await usageStore.recordUsage({
+          userId, assistantId, workspaceId, sessionId: null, model: result.model ?? backgroundModel,
+          modelTier: 'standard', ...result.usage, source: 'overhead:title',
+          actualCostUsd: runtime?.providerKeySource === 'user' ? 0 : calculateCost(result.model ?? backgroundModel, result.usage),
+          providerKeySource: runtime?.providerKeySource ?? 'platform',
+        })
+      },
       // Window-audio persistence + the assembled-windows finalize fallback.
       filesResolver,
       filesApi,
@@ -6651,7 +6820,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   app.use('/api/invitations', optionalAuth(env.JWT_SECRET), invitationRouter)
 
-  app.use('/api/workspaces/:workspaceId/brain-keys', requireAuth(env.JWT_SECRET), brainKeysRoutes({ brainKeyStore, workspaceStore }))
+  app.use('/api/workspaces/:workspaceId/brain-keys', requireAuth(env.JWT_SECRET), brainKeysRoutes({ brainKeyStore, workspaceStore, workspaceProfile: workspaceMcpProfile }))
   if(engineeringHistory)app.use('/api/workspaces/:workspaceId/engineering-history',requireAuth(env.JWT_SECRET),engineeringHistoryRoutes({service:engineeringHistory,workspaceStore}))
   app.use(
     '/api/workspaces/:workspaceId/programmatic-capture-profiles',
@@ -6887,6 +7056,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
 
   app.use('/api/approvals', requireAuth(env.JWT_SECRET), approvalsRoutes({
+    workspaceMcpReview: workspaceMcpProfile.respondToApproval,
     approvalsStore: pendingApprovalsStore,
     workspaceStore,
     bridgeDeps: approvalBridgeDeps,
@@ -7216,18 +7386,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       getInboxRetentionDays: getWorkspaceInboxRetentionDays,
     }),
   )
-  const readOfficeVersionSnapshot = async (userId: string, artifactId: string, versionId: string) => {
-    if (!filesApi) return null
-    const source = await officeArtifactStore.getVersionSource(userId, artifactId, versionId)
-    if (!source) return null
-    const read = await filesApi.readBytes({ workspaceId: source.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, source.snapshotFileId)
-    if (!read.ok) throw new Error(`Office version snapshot unavailable: ${read.error.kind}`)
-    const actualHash = createHash('sha256').update(read.value.bytes).digest('hex')
-    if (actualHash !== source.snapshotHash) throw new Error('Office version snapshot hash mismatch')
-    const snapshot = assertOfficeArtifactSnapshot(JSON.parse(new TextDecoder().decode(read.value.bytes)))
-    if (snapshot.artifactId !== artifactId) throw new Error('Office version snapshot artifact mismatch')
-    return { snapshot, source }
-  }
+  const officeVersionRuntime = filesApi ? createOfficeVersionRuntime({ files: filesApi, artifacts: officeArtifactStore, replaceLive: replaceLiveOfficeSnapshot }) : null
+  const readOfficeVersionSnapshot = async (userId: string, artifactId: string, versionId: string) =>
+    officeVersionRuntime?.read(userId, artifactId, versionId) ?? null
   const officeSearchProjector = createOfficeSearchProjector(async (userId, artifactId, versionId) =>
     (await readOfficeVersionSnapshot(userId, artifactId, versionId))?.snapshot ?? null)
   if (runWorkers) officeSearchProjector.start()
@@ -7239,20 +7400,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const visible = await Promise.all(artifacts.map((artifact) => officeService.get({ userId, artifactId: artifact.id })))
       return visible.filter((artifact): artifact is NonNullable<typeof artifact> => artifact !== null)
     },
-    async restoreVersion(params) {
-      const loaded = await readOfficeVersionSnapshot(params.userId, params.artifactId, params.targetVersionId)
-      if (!loaded) return null
-      const doc = snapshotToYDoc(loaded.snapshot)
-      const restored = await officeArtifactStore.restoreVersion({
-        ...params,
-        snapshotTitle: loaded.snapshot.title,
-        liveUpdate: encodeOfficeState(doc),
-        liveStateVector: officeStateVector(doc),
-        liveCanonicalHash: loaded.source.snapshotHash,
-      })
-      if (restored) await replaceLiveOfficeSnapshot(loaded.snapshot, { expectedVersion: restored.version, canonicalHash: loaded.source.snapshotHash })
-      return restored
-    },
+    restoreVersion: async params => officeVersionRuntime?.restore(params) ?? null,
     getArtifact: officeArtifactStore.get,
     resolveAccess: resolveDurableOfficeAccess,
     listVersions: officeArtifactStore.listVersions,
@@ -7721,6 +7869,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   const officeRevisionWorker = filesApi ? createOfficeRevisionWorker({
+    get: officeGenerationStore.get,
     claim: officeGenerationStore.claim,
     getSnapshot: officeLiveStore.get,
     async revise({ snapshot, targetIds, instruction, currentVersion, versionDrifted, job }) {
@@ -7754,6 +7903,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         targetIds: nextTargetIds,
         lockedTargetIds,
         instruction: nextInstruction,
+        operations: (job.brief as {commandOperations?:unknown[]}).commandOperations,
         brandVoice,
         // The command planner derives bounded repair eligibility from the
         // selected scope (including explicit section/slide descendants).
@@ -8009,14 +8159,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     load: loadOfficeReleaseContext,
     resolveResource: (userId, workspaceId) => async (resourceId) => readOfficeResource(userId, workspaceId, resourceId),
     revalidate: revalidateOfficeRelease,
-    async saveReleasedFile({ userId, workspaceId, artifactId, version, action, extension, mime, bytes, hash, scope, session }) {
+    async saveReleasedFile(params) {
+      const { userId, workspaceId, artifactId, version, action, extension, mime, bytes, scope, session } = params
       if (session && pdfSessionAssets) {
         return (await pdfSessionAssets.write({ userId, workspaceId,
           path: `/office/sessions/${artifactId}/release/v${version}-${action}-${randomUUID()}.${extension}`,
           bytes, mime, sensitivity: scope.sensitivity, compartments: scope.compartments, projectIds: scope.projectIds,
           metadata: PDF_SESSION_FILE_METADATA })).id
       }
-      return saveClassifiedOfficeFile!({ userId, workspaceId, path: `/office/releases/${artifactId}/v${version}-${action}-${randomUUID()}.${extension}`, bytes, mime, hash, scope })
+      return officeReleaseRuntime!.saveOfficeReleaseFile(params)
     },
     async loadPdf({ userId, context }) {
       if (!pdfSessionService || !pdfSessionAssets || context.snapshot.family !== 'pdf') return null
@@ -8055,7 +8206,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     crmDocumentRuntime.binding = createCrmOfficeBindingFromOffice({ filesApi, artifacts: officeArtifactStore, live: officeLiveStore,
       readTemplateBundle: (userId, workspaceId, versionId) => officeTemplateBundleReader(userId, workspaceId, versionId), releaseDeps: officeReleaseDeps })
   }
-  app.use('/api/office', requireAuth(env.JWT_SECRET), officeLifecycleRoutes({ resolveAccess: resolveDurableOfficeAccess, transition: officeArtifactStore.transitionLifecycle, revokeOffline: officeReleaseStore.revokeOfflinePackages }))
+  app.use('/api/office', requireAuth(env.JWT_SECRET), officeLifecycleRoutes(officeLifecycle))
   const loadOfficeOfflineContext = async (userId: string, artifactId: string) => {
     const reply = await readOfficeProjection(userId, async () => {
       const [artifact, access, live, comments, history] = await Promise.all([
@@ -8585,6 +8736,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) sessionTitleWorker.start()
+  if (runWorkers) workspaceMcpProfile.runWorker?.start()
 
   const sessionStateWorker = createSessionStateWorker({
     async resolveRuntime(workspaceId) {
@@ -8603,6 +8755,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) sessionStateWorker.start()
+
+  const organizationUpgradeWorker = createOrganizationUpgradeWorker()
+  if (runWorkers) organizationUpgradeWorker.start()
 
   const cleanupWorker = createCleanupWorker({ jobStore })
   if (runWorkers) cleanupWorker.start()
@@ -9403,6 +9558,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     : null
   if (runWorkers && ports.runOpenRecordingWorker !== false && recordingProcessWorker) recordingProcessWorker.start()
 
+  // Shared by both recording processors; also names existing completed media.
+  const recordingAutoTitleWorker = createRecordingAutoTitleWorker({
+    resolveRuntime: async workspaceId => {
+      const runtime = await resolveBackgroundRuntime(workspaceId)
+      return runtime ? {
+        provider: runtime.provider, model: runtime.selector, maxTokens: runtime.maxTokens, inputTokenLimit: runtime.inputTokenLimit,
+        providerKeySource: runtime.providerKeySource,
+      } : configuredProviders.size ? { provider, model: backgroundModel, providerKeySource: 'platform' } : null
+    },
+    recordUsage: async (candidate, result) => {
+      if (!result.usage || !usageStore) return
+      await usageStore.recordUsage({
+        userId: candidate.userId, workspaceId: candidate.workspaceId, assistantId: '', sessionId: null,
+        model: result.model, modelTier: 'standard', ...result.usage,
+        actualCostUsd: result.providerKeySource === 'user' ? 0 : calculateCost(result.model, result.usage),
+        source: 'overhead:title', providerKeySource: result.providerKeySource ?? 'platform',
+      })
+    },
+  })
+  if (runWorkers) recordingAutoTitleWorker.start()
+
   // ── file_cache reaper ──
   // Cached files are read with an `expires_at > now()` filter, so a lapsed row
   // is already invisible; this jittered 6h sweep reclaims its storage. Gated on
@@ -10195,10 +10371,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   async function shutdown(): Promise<void> {
+    await organizationUpgradeWorker.stop()
     await officeSearchProjector.stop()
     await stopWatchCleanup?.() // Watch boot lifecycle: stop and drain retention work.
     console.log('Shutting down — flushing analytics...')
     await sessionTitleWorker.stop()
+    await workspaceMcpProfile.runWorker?.stop()
     await sessionStateWorker.stop()
     consolidationWorker.stop()
     skillReviewWorker.stop()
@@ -10233,6 +10411,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     gdriveCatalogWorker?.stop()
     linkedinImportWorker?.stop()
     recordingProcessWorker?.stop()
+    await recordingAutoTitleWorker.stop()
     await liveInteraction?.stop()
     officeLifecycleWorker.stop()
     await codexProviderManager?.close()

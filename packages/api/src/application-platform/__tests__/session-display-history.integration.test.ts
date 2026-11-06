@@ -31,8 +31,8 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
  afterEach(async()=>{await fixture?.cleanup();fixture=undefined})
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
 
- async function setup(originalMemories=0,configure?:(f:Awaited<ReturnType<typeof persistentContextFixture>>)=>Promise<void>){
-  fixture=await persistentContextFixture('confidential');const f=fixture
+ async function setup(originalMemories=0,configure?:(f:Awaited<ReturnType<typeof persistentContextFixture>>)=>Promise<void>,member=false){
+  fixture=await persistentContextFixture('confidential');const f=member?{...fixture,ownerId:fixture.secondId}:fixture
   await f.pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1',[f.workspaceId])
   const createdDevice=await authSessionStore.create(f.ownerId,{deviceLabel:'Fictional transcript browser',userAgent:'Fixture',ipAddress:'127.0.0.1'})
   if(!createdDevice)throw new Error('Missing fixture device')
@@ -71,7 +71,7 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   return{f,device,claims,session,input,reply,memories,authority,fresh,display}
  }
 
- it.each([0,1])('keeps published replies after an original %s-memory cohort grows while model evidence stays current',async count=>{
+ it.each([0,1])('keeps published replies after an original %s-memory cohort grows while fresh source evidence stays current',async count=>{
   const c=await setup(count)
   expect((await readAttendedSessionHistory(await c.fresh(),c.session.id)).map(row=>row.id)).toContain(c.reply.id)
   const before=await c.display({authority:await c.fresh()})
@@ -85,21 +85,19 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   await expect(assertSourceModelInputAuthority({...executionToolContext(c.authority.execution,{appId:'fictional-current-model'}),
    scopeAccumulator:c.authority.accumulator})).rejects.toMatchObject({reason:'authority_changed'})
   const modelHistory=await readAttendedSessionHistory(await c.fresh(),c.session.id)
-  expect(modelHistory.map(row=>row.id)).not.toContain(c.reply.id)
+  expect(modelHistory.map(row=>row.id)).toContain(c.reply.id)
   expect(JSON.stringify(after)).not.toContain('resourceKind')
  })
 
- it('keeps the position but withholds bytes when an original positive memory source is held',async()=>{
+ it('keeps delivered replies when an upstream memory is held',async()=>{
   const c=await setup(1)
   await c.f.memory('Fictional independent growth before source withdrawal',c.f.ownerId)
   expect((await c.display())?.rows.find(row=>row.id===c.reply.id)?.available).toBe(true)
   await c.f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[c.memories[0].id])
   const result=await c.display()
   expect(result?.rows.find(row=>row.id===c.input.id)?.available).toBe(true)
-  const unavailable=result?.rows.find(row=>row.id===c.reply.id)
-  expect(unavailable).toMatchObject({id:c.reply.id,sequence:c.reply.sequenceNum,role:'assistant',available:false})
-  expect(unavailable?.content??null).toBeNull()
-  expect(JSON.stringify(result)).not.toContain('Fictional published reply')
+  expect(result?.rows.find(row=>row.id===c.reply.id)).toMatchObject({id:c.reply.id,sequence:c.reply.sequenceNum,role:'assistant',available:true,
+   content:[{type:'text',text:'Fictional published reply'}]})
  })
 
  it('preserves later replies whose original history inherits an earlier empty memory cohort',async()=>{
@@ -124,49 +122,52 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   expect(display?.rows.every(row=>row.available)).toBe(true)
   expect(display?.rows.at(-1)?.content).toEqual([{type:'text',text:'Fictional later published reply'}])
   const modelHistory=await readAttendedSessionHistory(await c.fresh(),c.session.id)
-  expect(modelHistory.map(row=>row.id)).toEqual([c.input.id,laterInput.id])
+  expect(modelHistory.map(row=>row.id)).toEqual([c.input.id,c.reply.id,laterInput.id,laterReply.id])
  })
 
- it('withholds a reply when its original authored source becomes held',async()=>{
+ it('withholds an explicitly held message without erasing the rest of the conversation',async()=>{
   const c=await setup()
   await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.input.id])
   const result=await c.display()
   expect(result?.rows).toHaveLength(2)
-  expect(result?.rows.every(row=>!row.available&&row.content==null)).toBe(true)
+  expect(result?.rows.find(row=>row.id===c.input.id)).toMatchObject({available:false,content:null})
+  expect(result?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:true})
  })
 
- it('refuses changed original authored bytes and their advanced native scope version',async()=>{
+ it('keeps a delivered reply after the original request is edited',async()=>{
   const c=await setup()
   const before=(await c.f.pool.query('SELECT scope_version FROM session_messages WHERE id=$1',[c.input.id])).rows[0].scope_version
   await c.f.pool.query('UPDATE session_messages SET content=$2 WHERE id=$1',
    [c.input.id,JSON.stringify([{type:'text',text:'Fictional edited original request'}])])
   expect(Number((await c.f.pool.query('SELECT scope_version FROM session_messages WHERE id=$1',[c.input.id])).rows[0].scope_version)).toBeGreaterThan(Number(before))
   const display=await c.display()
-  expect(display?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:false})
-  expect(JSON.stringify(display)).not.toContain('Fictional published reply')
+  expect(display?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:true})
+  expect(JSON.stringify(display)).toContain('Fictional published reply')
  })
 
- it('refuses an original positive memory whose version and body changed',async()=>{
+ it('keeps a delivered reply after its memory source is edited',async()=>{
   const c=await setup(1)
   await c.f.pool.query('UPDATE memories SET summary=$2,scope_version=scope_version+1 WHERE id=$1',
    [c.memories[0].id,'Fictional replacement of the original memory'])
   const display=await c.display()
   expect(display?.rows.find(row=>row.id===c.input.id)?.available).toBe(true)
-  expect(display?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:false})
-  expect(JSON.stringify(display)).not.toContain('Fictional published reply')
+  expect(display?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:true})
+  expect(JSON.stringify(display)).toContain('Fictional published reply')
  })
 
- it('withholds the persisted reply when an original positive memory is deleted',async()=>{
+ it('keeps a delivered reply after its memory source is deleted',async()=>{
   const c=await setup(1)
   expect((await c.display())?.rows.find(row=>row.id===c.reply.id)?.available).toBe(true)
   await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memories[0].id])
   const display=await c.display()
+  const modelHistory=await readAttendedSessionHistory(await c.fresh(),c.session.id)
+  expect(modelHistory.map(row=>row.id)).toContain(c.reply.id)
   expect(display?.rows.find(row=>row.id===c.input.id)?.available).toBe(true)
-  expect(display?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:false})
-  expect(JSON.stringify(display)).not.toContain('Fictional published reply')
+  expect(display?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:true})
+  expect(JSON.stringify(display)).toContain('Fictional published reply')
  })
 
- it('withholds a reply after the original memory summary READ role is revoked without editing or holding its source',async()=>{
+ it('keeps delivered replies when upstream READ policy changes',async()=>{
   let configured:Awaited<ReturnType<typeof persistentContextFixture>>|undefined,registered=false
   try{
    const c=await setup(1,async f=>{
@@ -200,8 +201,8 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
    expect((await c.f.pool.query('SELECT scope_version,scope_held,summary FROM memories WHERE id=$1',[c.memories[0].id])).rows[0]).toEqual(sourceBefore)
    const display=await c.display({authority:await c.fresh()})
    expect(display?.rows.find(row=>row.id===c.input.id)?.available).toBe(true)
-   expect(display?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:false})
-   expect(JSON.stringify(display)).not.toContain('Fictional published reply')
+   expect(display?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:true})
+   expect(JSON.stringify(display)).toContain('Fictional published reply')
   }finally{
    if(configured){
     await configured.pool.query("DELETE FROM application_native_resource_owners WHERE workspace_id=$1 AND module_key='native'",[configured.workspaceId])
@@ -210,6 +211,22 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
     await configured.pool.query('DROP FUNCTION IF EXISTS display_memory_policy_record(uuid,jsonb,text,text); DROP FUNCTION IF EXISTS display_memory_policy_catalog(uuid,jsonb,text); DROP TABLE IF EXISTS display_memory_policy_fixture')
    }
   }
+ })
+
+ it('keeps an ordinary member own conversation readable after source changes without granting other members access',async()=>{
+  const c=await setup(1,undefined,true)
+  await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memories[0].id])
+  expect((await c.display({authority:await c.fresh()}))?.rows.every(row=>row.available)).toBe(true)
+  const other=await authSessionStore.create(c.f.firstId,{deviceLabel:'Fictional member device',userAgent:null,ipAddress:null})
+  if(!other)throw new Error('Missing other member device')
+  await expect(c.display({actor:c.f.firstId,device:other.id,version:other.authVersion})).rejects.toMatchObject({code:'42501'})
+ })
+
+ it('keeps an older null-surface personal web conversation readable',async()=>{
+  const c=await setup(1)
+  await c.f.pool.query('UPDATE sessions SET app_origin=NULL WHERE id=$1',[c.session.id])
+  await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memories[0].id])
+  expect((await c.display({authority:await c.fresh()}))?.rows.every(row=>row.available)).toBe(true)
  })
 
  it('refuses another member, another device owner, missing or revoked devices and stale device versions',async()=>{
@@ -229,6 +246,20 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   await expect(c.display({session:c.f.session.id})).rejects.toMatchObject({code:'42501'})
  })
 
+ it('still denies a message assigned to a different owner and a private chat under recording privacy hold',async()=>{
+  const c=await setup()
+  await c.f.pool.query('UPDATE session_messages SET user_id=$2 WHERE id=$1',[c.reply.id,c.f.firstId])
+  expect((await c.display())?.rows.find(row=>row.id===c.reply.id)).toMatchObject({available:false,content:null})
+  await c.f.pool.query('UPDATE sessions SET recording_privacy_held=true WHERE id=$1',[c.session.id])
+  await expect(c.display()).rejects.toMatchObject({code:'42501'})
+ })
+
+ it('still denies historical display after workspace membership is revoked',async()=>{
+  const c=await setup()
+  await c.f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[c.f.workspaceId,c.f.ownerId])
+  await expect(c.display()).rejects.toMatchObject({code:'42501'})
+ })
+
  it('keeps relaxed helpers private and refuses owner-role impersonation at the public entry',async()=>{
   const c=await setup()
   const helpers=(await getAppPool().query<{name:string;callable:boolean;public_execute:boolean}>(`SELECT p.proname AS name,
@@ -245,7 +276,7 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
 
  it('paginates stable positions, including unavailable replies, without duplicating earlier rows',async()=>{
   const c=await setup(1)
-  await c.f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[c.memories[0].id])
+  await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.reply.id])
   const first=await c.display({limit:1})
   expect(first?.rows.map(row=>row.id)).toEqual([c.input.id])
   expect(first?.nextSequence).toBe(c.input.sequenceNum)
@@ -274,6 +305,8 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   for(const row of visible.body.rows){expect(row).not.toHaveProperty('content');expect(row).not.toHaveProperty('source')}
   expect(JSON.stringify(visible.body)).not.toContain('resourceKind')
   await c.f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[c.memories[0].id])
+  expect((await read()).body.rows.find((row:DisplayRow)=>row.id===c.reply.id)).toMatchObject({available:true,text:'Fictional published reply'})
+  await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.reply.id])
   const held=await read()
   expect(held.status).toBe(200)
   expect(held.body.rows.find((row:DisplayRow)=>row.id===c.reply.id)).toMatchObject({available:false,text:null})
@@ -282,19 +315,19 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
   expect((await read()).status).toBe(401)
  })
 
- it('refuses a changed canonical evaluator contract instead of silently using an older display helper',async()=>{
+ it('does not make human history depend on the current model evaluator implementation',async()=>{
   const c=await setup(),signature='public.application_session_eval_scope(uuid,text,uuid,text,jsonb)'
   const original=(await c.f.pool.query<{definition:string}>('SELECT pg_get_functiondef($1::regprocedure) AS definition',[signature])).rows[0].definition
   const changed=original.replace('\nBEGIN\n','\nBEGIN\n RETURN NULL;\n')
   expect(changed).not.toBe(original)
   try{
    await c.f.pool.query(changed)
-   await expect(c.display()).rejects.toMatchObject({code:'42501'})
+   expect((await c.display())?.rows.every(row=>row.available)).toBe(true)
   }finally{await c.f.pool.query(original)}
   expect((await c.display())?.rows.every(row=>row.available)).toBe(true)
  })
 
- it('keeps original positive source authority locked through the actual display store commit',async()=>{
+ it('keeps direct message authority locked through the actual display store commit',async()=>{
   const c=await setup(1),writer=await getPool().connect()
   let release!:()=>void,captured!:()=>void,paused=false
   const gate=new Promise<void>(resolve=>{release=resolve}),capture=new Promise<void>(resolve=>{captured=resolve})
@@ -319,7 +352,7 @@ describe.sequential('[COMP:api/session-display-history] durable personal transcr
    getAppPool().on('acquire',trace)
    reading=readPrivateSessionDisplay({claims:c.claims,workspaceId:c.f.workspaceId,sessionId:c.session.id,afterSequence:0,limit:100})
    await Promise.race([capture,reading.then(()=>{throw new Error('Display completed without the capture boundary')})])
-   holding=writer.query('UPDATE memories SET scope_held=true WHERE id=$1',[c.memories[0].id])
+   holding=writer.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.reply.id])
    await expect.poll(async()=>(await c.f.pool.query<{blocked:boolean}>(
     'SELECT cardinality(pg_blocking_pids($1))>0 AS blocked',[pid])).rows[0].blocked,{timeout:3000}).toBe(true)
    release()

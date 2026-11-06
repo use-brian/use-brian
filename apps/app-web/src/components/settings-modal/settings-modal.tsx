@@ -19,7 +19,6 @@
  * shell that dispatches to them.
  */
 
-import {WorkspaceModeSummary} from "@/components/context/mode-aware-context";
 import { useEffect, useRef, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { useRouter } from "next/navigation";
@@ -379,7 +378,7 @@ function SectionBody({
     case "notifications":
       return <NotificationsSection />;
     case "ws-general":
-      return <><WorkspaceModeSummary/><WorkspaceGeneralSection onWorkspaceDeleted={onClose} /></>;
+      return <WorkspaceGeneralSection onWorkspaceDeleted={onClose} />;
     case "ws-members":
     case "ws-teams":
     case "ws-access":

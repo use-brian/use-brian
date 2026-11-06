@@ -28,6 +28,36 @@ describe("[COMP:app-web/app-session] session and workspace admission", () => {
     admission.resolve({ status: 200, data: workspace }); await allowed;
     expect(controller.snapshot().admissions[workspace.id]).toMatchObject({ kind: "allowed", value: { workspaceId: workspace.id } });
   });
+  it.each([408, 429, 500, 503, "network"])("keeps admitted workspace mounted through session failure %s", async status => {
+    await controller.check(); await controller.admit(workspace.id);
+    const states: string[] = [];
+    controller.subscribe(() => states.push(controller.snapshot().admissions[workspace.id]?.kind ?? "missing"));
+    adapter.session = status === "network" ? vi.fn().mockRejectedValue(new TypeError("offline")) : vi.fn().mockResolvedValue({ status });
+    await controller.check();
+    expect(controller.snapshot().session).toBe("authenticated");
+    expect(controller.snapshot().admissions[workspace.id].kind).toBe("allowed");
+    expect(states).toEqual(["allowed"]);
+  });
+  it.each([408, 429, 500, 503])("retains verified admission on workspace HTTP %s, then recovers", async status => {
+    await controller.check(); await controller.admit(workspace.id);
+    adapter.workspace = vi.fn().mockResolvedValue({ status });
+    await controller.admit(workspace.id, true);
+    expect(controller.snapshot()).toMatchObject({ connection: "unavailable", admissions: { [workspace.id]: { kind: "allowed" } } });
+    adapter.workspace = vi.fn().mockResolvedValue({ status: 200, data: workspace });
+    await controller.admit(workspace.id, true);
+    expect(controller.snapshot().connection).toBe("online");
+  });
+  it("never restores a denied workspace after a subsequent transport failure", async () => {
+    await controller.check(); await controller.admit(workspace.id);
+    adapter.workspace = vi.fn().mockResolvedValue({ status: 403 }); await controller.admit(workspace.id, true);
+    adapter.session = vi.fn().mockRejectedValue(new TypeError("offline")); await controller.check();
+    expect(controller.snapshot().admissions[workspace.id]?.kind).not.toBe("allowed");
+  });
+  it("restores cached admissions atomically during an unavailable cold start", async () => {
+    adapter.session = vi.fn().mockResolvedValue({ status: 503 });
+    await controller.check();
+    expect(controller.snapshot()).toMatchObject({ session: "authenticated", connection: "unavailable", admissions: { [workspace.id]: { kind: "allowed" } } });
+  });
   it("never treats saved rows as authentication without a credential", async () => {
     identity = null; credential = false; adapter.session = vi.fn().mockResolvedValue({ status: 401 });
     await controller.check(); expect(controller.snapshot().session).toBe("signed-out"); expect(adapter.read).not.toHaveBeenCalled();
@@ -51,6 +81,13 @@ describe("[COMP:app-web/app-session] session and workspace admission", () => {
   it.each(["another-deployment/user-one", "deployment-a/user-two"])("rejects cached authority from %s", async other => {
     cache.identity = other; adapter.session = vi.fn().mockRejectedValue(new TypeError("network"));
     await controller.check(); expect(controller.snapshot().session).not.toBe("authenticated");
+  });
+  it.each([403, 404])("does not restore session cache after a live session HTTP %s", async status => {
+    await controller.check(); await controller.admit(workspace.id);
+    adapter.session = vi.fn().mockResolvedValue({ status }); await controller.check();
+    adapter.session = vi.fn().mockRejectedValue(new TypeError("offline")); await controller.check();
+    expect(controller.snapshot().session).not.toBe("authenticated");
+    expect(controller.snapshot().admissions).toEqual({});
   });
   it("does not use cache after a live session rejection", async () => {
     await controller.check(); await controller.admit(workspace.id);

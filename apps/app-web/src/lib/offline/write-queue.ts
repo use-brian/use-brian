@@ -45,6 +45,8 @@ export interface QueuedWrite {
   authority?: OfflineWriteAuthority;
   /** Persisted before dispatch so a lost response cannot become a blind retry. */
   effect?: "pending" | "uncertain";
+  base?: { field: "name" | "icon" | "fullWidth" | "clearance"; value: string | boolean | null };
+  conflict?: boolean;
 }
 
 /** Optional per-field merge for `merge`-coalesced ops (e.g. entity patches). */

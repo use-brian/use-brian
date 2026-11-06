@@ -1,3 +1,4 @@
+import { workspaceCredentialDelegation } from '../security/workspace-delegation.js'
 /**
  * Workflow executor — advances a `workflow_runs` row through its definition.
  *
@@ -117,6 +118,7 @@ export type ResolvePrimaryAssistant = (workspaceId: string) => Promise<string | 
 type WorkflowToolRegistry = Map<string, Tool> & { discoveryWarnings?: readonly string[] }
 
 export type BuildToolRegistry = (params: {
+  workspaceDelegation?: import('../a2a/types.js').WorkspaceCredentialDelegation
   workspaceId: string
   /** The acting assistant — typically the workspace's primary. */
   assistantId: string
@@ -904,6 +906,7 @@ export async function advanceWorkflowRun(
   let toolRegistry: WorkflowToolRegistry
   try {
     const discover = () => deps.buildToolRegistry({
+      workspaceDelegation: workspaceCredentialDelegation(runtimeScope?.executionContext),
       workspaceId: run.workspaceId,
       assistantId: toolAssistantId,
       // Scheduled / wait-wakeup runs have `run.triggeredBy === null`; fall
@@ -1219,6 +1222,9 @@ export async function advanceWorkflowRun(
       }
       if (step.storeOutputAs && step.type !== 'branch' && step.type !== 'wait') {
         vars = { ...vars, [step.storeOutputAs]: dispatchResult.output }
+      }
+      if (dispatchResult.delivery?.status === 'delivered' && dispatchResult.delivery.messageId) {
+        vars = { ...vars, [`__deliveryMsg_${step.id}`]: dispatchResult.delivery.messageId }
       }
       // Seed successors (unless the run is already failing — no new work).
       if (!firstFailure && !pausedOutcome) {
@@ -1808,7 +1814,9 @@ async function dispatchAssistantCall(
     }
   }
 
+  const workspaceParent = workspaceCredentialDelegation(ctx.runtimeScope?.executionContext)
   const request: ConsultRequest = {
+    callerWorkspaceDelegation: workspaceParent,
     callerScopeEvidence: ctx.externalClientPrincipal ? undefined : ctx.scopeAccumulator.evidence,
     callerAccessCeiling: ctx.runtimeScope && !ctx.externalClientPrincipal
       ? pinAccessCeiling(ctx.runtimeScope.turnScope.access)
@@ -1906,7 +1914,7 @@ async function dispatchAssistantCall(
     },
     caller: {
       workspaceId: ctx.run.workspaceId,
-      assistantId: ctx.primaryAssistantId,
+      assistantId: workspaceParent?.assistantId ?? ctx.primaryAssistantId,
       // Scheduled / wait-wakeup runs have `triggeredBy === null`; fall back
       // to the workflow's creator so the callee has a real RLS user — same
       // fallback the deliver/approval paths below already use.

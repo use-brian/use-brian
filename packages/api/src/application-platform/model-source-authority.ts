@@ -1,3 +1,4 @@
+import { hasWorkspaceMcpRetainedAuthority } from '../db/session-context-revisions.js'
 import {tryNativeInvocationEvidence} from '../context-scope/native-invocation-evidence.js'
 import {createAttendedDeliveryAudienceAuthorizer,tryValidateNativePersonalOutput,tryResolveNativePersonalRecipient} from '../context-scope/attended-audience.js'
 import {DeliveryAudienceUnverifiedError,isDeliveryAudienceUnverifiedError,type DeliveryAudienceInput} from '../context-scope/delivery-authority.js'
@@ -16,6 +17,14 @@ import { applyApplicationRLSContext, getApplicationExecutionBinding, releaseAppl
 
 const invalid = new WeakSet<ExecutionContext>()
 function denied(): never { throw new SourceProtocolError('source_access_denied') }
+
+/** Keep the private exception chain for server logs, never JSON/wire output. */
+function sourceAuthorityError(error: unknown): SourceProtocolError {
+  if (error instanceof SourceProtocolError) return error
+  return Object.defineProperty(new SourceProtocolError('source_unavailable'), 'cause', {
+    value: error, configurable: true, writable: true, enumerable: false,
+  })
+}
 
 /** No proof/allow cache: every call prepares a new source operation. Native authority stays separate. */
 export async function assertSourceModelInputAuthority(context: ToolContext): Promise<void> {
@@ -86,8 +95,9 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
       && execution.security.access.assistantId === execution.assistant.id
       && execution.ownership.kind === 'workspace' && execution.ownership.workspaceId === workspaceId
       && !execution.surface.systemRead && !execution.security.access.systemRead && !execution.surface.clientSelfMemory
+    const nativeProgrammatic = !external && !cohort.independent && !application && hasWorkspaceMcpRetainedAuthority(execution)
     if (execution.ownership.kind !== 'workspace' || execution.security.access.sharedAudience && external
-      || !nativeDelegated && (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
+      || !nativeDelegated && !nativeProgrammatic && (!application || external) && (execution.identity.kind !== 'attended' || execution.identity.principal.kind !== 'workspace_member')) denied()
     if ((external || cohort.independent) && !prepare) denied()
     // Query context covers the complete original cohort. Only the original
     // consumed evidence asks for delivery; candidates do not become outputs.
@@ -104,7 +114,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
           FROM pg_catalog.pg_roles r JOIN pg_catalog.pg_class c ON c.oid='entity_instances'::regclass WHERE r.rolname=current_user`)
         if (role.rows[0]?.bypass !== false) denied()
         await applyRLSGucs(client, execution.security.access.userId)
-        if (nativeDelegated || nativeVerifiedAttended) await client.query("SELECT set_config('app.v2_assistant_id',$1,true)", [execution.assistant.id])
+        if (nativeDelegated || nativeVerifiedAttended || nativeProgrammatic) await client.query("SELECT set_config('app.v2_assistant_id',$1,true)", [execution.assistant.id])
         await client.query('SELECT id FROM workspaces WHERE id=$1 FOR SHARE',[workspaceId])
         await applyApplicationRLSContext(client, execution)
         if (contextProof) {
@@ -129,7 +139,7 @@ async function assertSourceModelAuthority(context: ToolContext, action: 'context
     accumulator.note(raised)
   } catch (error) {
     if (execution) invalid.add(execution)
-    throw Object.assign(error instanceof SourceProtocolError ? error : new SourceProtocolError('source_unavailable'), {
+    throw Object.assign(sourceAuthorityError(error), {
       reason: 'authority_changed' as const,retrySafe: false,
     })
   }
@@ -149,7 +159,7 @@ function assertNativeOutputBinding(binding:NativeOutputBinding,context:ToolConte
 function nativeOutputFailure(execution:ExecutionContext,error:unknown):never{
  invalid.add(execution)
  if(isDeliveryAudienceUnverifiedError(error))throw error
- throw Object.assign(error instanceof SourceProtocolError?error:new SourceProtocolError('source_unavailable'),{
+ throw Object.assign(sourceAuthorityError(error),{
   reason:'authority_changed' as const,retrySafe:false,
  })
 }

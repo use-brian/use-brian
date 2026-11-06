@@ -36,6 +36,26 @@ describe("[COMP:app-web/app-session] every protected route uses admission", () =
     await act(async () => accept({ status: 200, data: workspace }));
     expect(mounts).toBe(1); expect(host.textContent).toContain("Private draft");
   });
+  it.each(["network", 503])("keeps the editor instance and draft through %s and reconnect", async failure => {
+    await render();
+    const draft = host.querySelector("button");
+    adapter.session = failure === "network" ? vi.fn().mockRejectedValue(new TypeError("offline")) : vi.fn().mockResolvedValue({ status: failure });
+    adapter.workspace = vi.fn().mockRejectedValue(new TypeError("offline"));
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(host.querySelector("button")).toBe(draft); expect(cleanups).toBe(0);
+    adapter.session = vi.fn().mockResolvedValue({ status: 200, data: { workspaces: [workspace] } });
+    adapter.workspace = vi.fn().mockResolvedValue({ status: 200, data: workspace });
+    await act(async () => { window.dispatchEvent(new Event("online")); });
+    expect(host.querySelector("button")).toBe(draft); expect(mounts).toBe(1); expect(cleanups).toBe(0);
+    expect(adapter.workspace).toHaveBeenCalledOnce();
+  });
+  it("automatically recovers an unavailable cold start without an account click", async () => {
+    adapter.session = vi.fn().mockResolvedValue({ status: 503 });
+    await render(); expect(mounts).toBe(0);
+    adapter.session = vi.fn().mockResolvedValue({ status: 200, data: { workspaces: [workspace] } });
+    await act(async () => { window.dispatchEvent(new Event("online")); });
+    expect(mounts).toBe(1);
+  });
   it("unmounts protected consumers on rejection and does not open browser OAuth", async () => {
     const signIn = vi.fn(); window.usebrianDesktop = { signIn };
     await render(); expect(mounts).toBe(1);

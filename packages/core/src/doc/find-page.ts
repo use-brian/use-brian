@@ -163,7 +163,7 @@ export function createFindPageTool(deps: FindPageToolDeps): Tool {
 
       // Read-by-id: the agent already has a pageId (its own or a prior match).
       if (input.pageId) {
-        const current = await deps.docPageStore.getVersionedPage(context.userId, input.pageId)
+        const current = await deps.docPageStore.getVersionedPage(context.userId, input.pageId, context)
         if (!current) {
           return {
             data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
@@ -212,7 +212,7 @@ export function createFindPageTool(deps: FindPageToolDeps): Tool {
       // One-shot read: unambiguous single hit → fetch its body so the agent
       // doesn't need a second round-trip (critical where `exportPage` is absent).
       if (input.includeContent && matches.length === 1) {
-        const current = await deps.docPageStore.getVersionedPage(context.userId, matches[0].id)
+        const current = await deps.docPageStore.getVersionedPage(context.userId, matches[0].id, context)
         if (current) result.content = capMarkdown(pageToMarkdown(current.page, current.title))
       }
 

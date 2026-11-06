@@ -1,3 +1,7 @@
+import { workspaceCredentialDelegation, bindWorkspaceCredentialDelegation, intersectWorkspaceCredentialDelegations } from '@use-brian/core'
+import { restoreWorkspaceMcpDelegation } from '../workspace-mcp/delegation.js'
+import { createDbCapabilityStore } from '../db/capability-store.js'
+import { hasWorkspaceMcpRetainedAuthority, bindWorkspaceMcpPublication, bindWorkspaceMcpWorkflowPublication } from '../db/session-context-revisions.js'
 import { assertSourceModelInputAuthority,assertSourceModelOutputAuthority } from '../application-platform/model-source-authority.js'
 import { assertCurrentAuthority,runWithAuthorityLease,executeWithCurrentAuthority,createAuthorityLease } from '../context-scope/authority-lease.js'
 import { crmOperationsSha256 } from '@use-brian/core'
@@ -24,7 +28,7 @@ type Proof = {
   userId: string; workspaceId: string; assistantId: string; taskId: string
   snapshot: string; contextGroupId: string | null; contextProjectId: string | null
   authority: AuthoringAuthority
-  retained?: { sources: ScopeSource[]; sourceAuthority: Extract<AuthoritySource,{kind: 'session'}>; version: string; assistantKind: 'primary'|'standard'|'app' }
+  retained?: { sources: ScopeSource[]; sourceAuthority: Extract<AuthoritySource,{kind: 'session'|'invocation'}>; version: string; assistantKind: 'primary'|'standard'|'app' }
 }
 const proofs = new WeakMap<object, Proof>()
 const retainedAuthorities = new WeakMap<object, SessionContextAuthority>()
@@ -216,17 +220,22 @@ async function retainedTask(client:PoolClient,input:Pick<Proof,'userId'|'workspa
 
 async function captureRetainedTaskGoalSource(input:Pick<Proof,'userId'|'workspaceId'|'assistantId'|'taskId'>,authority:SessionContextAuthority):Promise<object>{
   const execution=authority.execution,origin=AuthoritySourceSchema.safeParse(execution.security.authority.snapshotSource?.())
-  if(!(authority.accumulator instanceof ContextScopeAccumulator)||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
-    ||execution.identity.principal.userId!==input.userId||execution.security.access.userId!==input.userId||execution.security.access.workspaceId!==input.workspaceId||execution.assistant.id!==input.assistantId
-    ||!origin.success||origin.data.kind!=='session'||origin.data.authorityUserId!==input.userId||origin.data.executingAssistantId!==input.assistantId
-    ||origin.data.workspaceId!==input.workspaceId||origin.data.ignoreSessionBinding||origin.data.systemRead||execution.surface.readOnly)throw denied()
+  const parent=workspaceCredentialDelegation(execution)
+  const native=execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'&&execution.identity.principal.userId===input.userId
+  const machine=!!parent&&hasWorkspaceMcpRetainedAuthority(execution)&&execution.identity.kind==='programmatic'&&execution.identity.principal.actorUserId===input.userId
+  if(!(authority.accumulator instanceof ContextScopeAccumulator)||(!native&&!machine)||execution.security.access.userId!==input.userId||execution.security.access.workspaceId!==input.workspaceId||execution.assistant.id!==input.assistantId
+    ||!origin.success||execution.surface.readOnly)throw denied()
+  if(machine ? origin.data.kind!=='invocation'||parent!.userId!==input.userId||parent!.workspaceId!==input.workspaceId||parent!.assistantId!==input.assistantId
+    : origin.data.kind!=='session'||origin.data.authorityUserId!==input.userId||origin.data.executingAssistantId!==input.assistantId
+      ||origin.data.workspaceId!==input.workspaceId||origin.data.ignoreSessionBinding||origin.data.systemRead)throw denied()
+  if(origin.data.kind!=='session'&&origin.data.kind!=='invocation')throw denied()
   const root=(await getPool().query<{source:ScopeSource&{held:boolean}}>("SELECT read_scope_source($1,'task',$2) AS source",[input.workspaceId,input.taskId])).rows[0]?.source
   if(!root||root.held!==false)throw denied()
   const roots=new ContextScopeAccumulator(execution.security.provenance);roots.note(authority.accumulator.evidence);roots.note({sources:[root]})
   const row=await readRetainedContextFrame(authority,roots.evidence.sources??[],client=>retainedTask(client,input,authority))
   roots.note({sources:row.sources});roots.note({sources:[...await readExternalSourceAncestors(input.workspaceId,roots.evidence.sources??[]),...await readApplicationFieldAncestors(input.workspaceId,roots.evidence.sources??[])]})
   const proof:Proof={userId:input.userId,workspaceId:input.workspaceId,assistantId:input.assistantId,taskId:input.taskId,
-    snapshot:row.snapshot,contextGroupId:row.contextGroupId,contextProjectId:row.contextProjectId,authority:pinAuthoringAuthority({...execution.security.access,clearance:row.sensitivity,compartments:row.compartments,mutationCompartments:row.compartments,projectIds:row.projectIds,visibilityAssistantIds:[input.assistantId]}),
+    snapshot:row.snapshot,contextGroupId:row.contextGroupId,contextProjectId:row.contextProjectId,authority:{...pinAuthoringAuthority({...execution.security.access,clearance:row.sensitivity,compartments:row.compartments,mutationCompartments:row.compartments,projectIds:row.projectIds,visibilityAssistantIds:[input.assistantId]}),...(parent?{workspaceDelegation:parent}:{})},
     retained:{sources:roots.evidence.sources??[],sourceAuthority:origin.data,version:row.version,assistantKind:execution.assistant.kind}}
   await assertRetainedTaskGoalCurrent(proof,authority)
   const existing=(await getPool().query<{proof:Proof}>('SELECT proof FROM goal_task_source_authority WHERE task_id=$1',[input.taskId])).rows[0]?.proof
@@ -262,10 +271,15 @@ export async function resolveRetainedTaskGoalAuthority(goal:Pick<GoalRecord,'id'
   if(goal.workspaceId!==proof.workspaceId||goal.createdByUserId!==proof.userId||goal.host?.type!=='task'||goal.host.id!==proof.taskId
     ||!isDeepStrictEqual(goal.authoringAuthority,proof.authority))throw denied()
   const lease=await resolveBrowserTaskExecutionAuthority({userId:proof.userId,workspaceId:proof.workspaceId,executionAuthority:proof.authority,sourceAuthority:proof.retained.sourceAuthority})
-  const execution=createExecutionContext({identity:{kind:'attended',principal:{kind:'workspace_member',userId:proof.userId,authenticationKind:'native_session'}},ownership:{kind:'workspace',workspaceId:proof.workspaceId},
-    access:{...proof.authority.ceiling,assistantId:proof.assistantId,assistantKind:proof.retained.assistantKind},authority:lease,
+  const parent=proof.authority.workspaceDelegation
+  const restored=parent?await restoreWorkspaceMcpDelegation(parent,createDbCapabilityStore()):undefined
+  const sessionId=parent?.sessionId??(proof.retained.sourceAuthority.kind==='session'?proof.retained.sourceAuthority.id:undefined)
+  if(!sessionId)throw denied()
+  const execution=createExecutionContext({identity:restored?.context.executionContext!.identity??{kind:'attended',principal:{kind:'workspace_member',userId:proof.userId,authenticationKind:'native_session'}},ownership:{kind:'workspace',workspaceId:proof.workspaceId},
+    access:{...proof.authority.ceiling,...(parent?{sharedAudience:true}:{}),assistantId:proof.assistantId,assistantKind:proof.retained.assistantKind},authority:lease,
     provenance:{sources:proof.retained.sources},writeDefaults:{compartments:[],projectIds:[]},
-    lifecycle:{sessionId:proof.retained.sourceAuthority.id,channelType:'goal',channelId:goal.id,abortSignal:new AbortController().signal,sessionPersisted:true}})
+    lifecycle:{sessionId,channelType:'goal',channelId:goal.id,abortSignal:new AbortController().signal,sessionPersisted:true}})
+  if(parent){bindWorkspaceCredentialDelegation(execution,parent);bindWorkspaceMcpPublication(execution)}
   const authority={execution,accumulator:new ContextScopeAccumulator({sources:proof.retained.sources})}
   await assertRetainedTaskGoalCurrent(proof,authority)
   return {authority,assertCurrent:()=>assertRetainedTaskGoalCurrent(proof,authority)}
@@ -294,8 +308,9 @@ export async function retainedTaskGoalCaller(userId:string,goalId:string){
 export async function writeRetainedTaskGoal<T extends object|null>(goalId:string,authority:SessionContextAuthority,write:(client:PoolClient)=>Promise<T>):Promise<T>{
  const saved=(await getPool().query<{proof:Proof}>('SELECT proof FROM goal_task_source_authority WHERE goal_id=$1',[goalId])).rows[0]?.proof
  const {execution}=authority
- if(!saved?.retained||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
-  ||execution.identity.principal.userId!==saved.userId||execution.security.access.userId!==saved.userId
+ const native=execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'&&execution.identity.principal.userId===saved?.userId
+ const machine=!!workspaceCredentialDelegation(execution)&&hasWorkspaceMcpRetainedAuthority(execution)&&execution.identity.kind==='programmatic'&&execution.identity.principal.actorUserId===saved?.userId
+ if(!saved?.retained||(!native&&!machine)||execution.security.access.userId!==saved.userId
   ||execution.assistant.id!==saved.assistantId||execution.security.access.workspaceId!==saved.workspaceId)throw denied()
  return writeRetainedContextFrame(authority,saved.retained.sources,async client=>{
   await client.query("SELECT set_config('app.retained_task_goal',$1,true)",[saved.taskId])
@@ -392,6 +407,8 @@ export async function resolveRetainedGoalWorkflowRuntime(runId:string){
   access:{...original.authority.execution.security.access,...ceiling,assistantId:saved.assistantId,assistantKind:original.authority.execution.assistant.kind},authority:lease,
   provenance:evidence,writeDefaults:{compartments:saved.contextGroupId?ceiling.mutationCompartments??[]:[],projectIds:saved.contextProjectId?[saved.contextProjectId]:[]},
   lifecycle:{sessionId:runId,channelType:'workflow',channelId:runId,abortSignal:new AbortController().signal,sessionPersisted:false},attribution:{billingUserId:saved.actor}})
+ const parent=intersectWorkspaceCredentialDelegations(workspaceCredentialDelegation(original.authority.execution),saved.workflowAuthority.workspaceDelegation)
+ if(parent){bindWorkspaceCredentialDelegation(execution,parent);bindWorkspaceMcpWorkflowPublication(execution)}
  const authority={execution,accumulator:new ContextScopeAccumulator(evidence)}
  const frame=async<T>(retaining:boolean,operation:(client:PoolClient)=>Promise<T>)=>{
   const transact=retaining?writeRetainedGoalWorkflowContextFrame:readRetainedContextFrame
@@ -411,6 +428,8 @@ export async function resolveRetainedGoalWorkflowRuntime(runId:string){
  advanceLease.snapshotSource=()=>structuredClone(source)
  const advanceExecution=createExecutionContext({identity:execution.identity,ownership:execution.ownership,access:execution.security.access,
   authority:advanceLease,provenance:evidence,writeDefaults:execution.security.writeDefaults,lifecycle:execution.lifecycle,attribution:execution.attribution})
+ if(parent){bindWorkspaceCredentialDelegation(advanceExecution,parent);bindWorkspaceMcpWorkflowPublication(advanceExecution)}
+ retainedWorkflowWriteContexts.set(advanceExecution,{runId,taskId:saved.taskId,assistantId:saved.assistantId,sources:structuredClone(saved.sources)})
  return{saved,authority:{execution:advanceExecution,accumulator:authority.accumulator},evidence,frame,executeWithAuthority:async<T>(operation:()=>Promise<T>)=>runWithAgentAccess(execution.security.access,()=>runWithAuthorityLease(advanceLease,()=>executeWithCurrentAuthority(async()=>{
   await frame(false,async()=>undefined);const result=await operation();await frame(false,async()=>undefined);return result
  }))) }

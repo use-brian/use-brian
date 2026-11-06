@@ -382,10 +382,11 @@ describe("[COMP:app-web/offline-pages] Page read capabilities and owner binding"
     expect(await listViews({ workspaceId: wid })).toEqual([page]);
   });
 
-  it.each(["offline", "network", "server"])("keeps cached content but withholds capabilities on %s fallback", async (failure) => {
+  it.each(["offline", "network", "server", "timeout"])("keeps cached content but withholds capabilities on %s fallback", async (failure) => {
     const page = await pageWithCapabilities();
     await cachePage(page);
     vi.stubGlobal("navigator", { onLine: failure !== "offline" });
+    if (failure === "timeout") vi.mocked(authFetch).mockRejectedValueOnce(new DOMException("deadline", "TimeoutError"));
     if (failure === "network") vi.mocked(authFetch).mockRejectedValueOnce(new TypeError("Fictional network failure"));
     if (failure === "server") vi.mocked(authFetch).mockResolvedValueOnce(reply({}, 503));
     const result = await getView(id);

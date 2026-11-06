@@ -26,6 +26,7 @@ export type BrainKeyScope = "read" | "read_write";
 export type BrainKeyClearance = "public" | "internal" | "confidential";
 
 export type BrainKey = {
+  workspaceMcpConsent?: { version: 1; expiresAt: string; maxClearance: BrainKeyClearance; operationNames: string[] } | null;
   id: string;
   name: string;
   prefix: string;
@@ -63,6 +64,7 @@ export async function createBrainKey(
   workspaceId: string,
   params: {
     name: string;
+    workspaceAccess?: boolean;
     scope: BrainKeyScope;
     maxClearance?: BrainKeyClearance | null;
     contextGroupId?: string | null;

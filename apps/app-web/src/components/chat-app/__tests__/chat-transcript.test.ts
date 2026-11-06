@@ -38,6 +38,11 @@ function tool(id: string): ToolUsed {
 }
 
 describe("[COMP:app-web/chat-transcript] assistant-run history grouping", () => {
+  it("keeps a directly restricted row separate from adjacent assistant replies", () => {
+    const rows = [assistant("a1", "Earlier answer"), assistant("a2", "Unavailable", { historyUnavailable: true }), assistant("a3", "Later answer")];
+    expect(coalesceAssistantRunMessages(rows)).toEqual(rows);
+  });
+
   it("renders one logical assistant message for a multi-step tool run", () => {
     const messages = coalesceAssistantRunMessages([
       user("u0", "send an email"),

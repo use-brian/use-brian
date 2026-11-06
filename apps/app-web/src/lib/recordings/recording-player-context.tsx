@@ -29,6 +29,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { mediaOwner, ownsMedia, readOfflineMedia, removeOfflineMedia, downloadOfflineMedia } from "./offline-media";
 import { getRecordingMediaUrl } from "@/lib/api/recordings";
 
 export type RecordingPlayerApi = {
@@ -46,6 +47,8 @@ export type RecordingPlayerApi = {
   isLoading: boolean;
   /** Set when the media URL could not be minted; the bar renders the reason. */
   error: string | null;
+  /** Retry playback in place without discarding the document. */
+  retry: () => void;
   /**
    * The moment a citation asked to SHOW, or null. Distinct from `currentMs`:
    * seeking moves the playhead, but a reader clicking `[0:47:21]` in the brief
@@ -86,6 +89,7 @@ const NOOP: RecordingPlayerApi = {
   togglePlay: () => {},
   isLoading: false,
   error: null,
+  retry: () => {},
   transcriptFocus: null,
   showTranscriptAt: () => {},
   clearTranscriptFocus: () => {},
@@ -122,59 +126,166 @@ export function RecordingPlayerProvider({
    * passes the public source-scoped fetcher instead — same `{url, expiresAt}`
    * contract, so the refresh-before-expiry machinery is shared.
    */
-  mintMediaUrl?: () => Promise<{ url: string; expiresAt: string; mime?: string }>;
+  mintMediaUrl?: (signal?: AbortSignal) => Promise<{ url: string; expiresAt: string; mime?: string }>;
   children: ReactNode;
 }) {
+  const owner = mintMediaUrl ? null : mediaOwner();
+  const ownerKey = JSON.stringify(owner);
   const audioRef = useRef<HTMLVideoElement | null>(null);
   const [url, setUrl] = useState<string | null>(null);
   const [mediaMime, setMediaMime] = useState<string | null>(null);
   const [videoStage, setVideoStage] = useState<HTMLElement | null>(null);
-  const [expiresAt, setExpiresAt] = useState<number | null>(null);
+
   const [currentMs, setCurrentMs] = useState(0);
   const [mediaDurationMs, setMediaDurationMs] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** A seek requested before the URL landed — replayed once it does. */
-  const pendingSeekMs = useRef<number | null>(null);
-
-  const mint = useCallback(async () => {
-    if (!recordingId) return;
-    try {
-      const media = mintMediaUrl
-        ? await mintMediaUrl()
-        : await getRecordingMediaUrl(recordingId);
-      setUrl(media.url);
-      setExpiresAt(Date.parse(media.expiresAt));
-      if (media.mime !== undefined) setMediaMime(media.mime);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }, [recordingId, mintMediaUrl]);
+  /** Playback intent survives URL renewal, including a paused playhead. */
+  const pendingSeek = useRef<{ ms: number; play: boolean } | null>(null);
+  const retryRef = useRef<() => void>(() => {});
+  const mediaErrorRef = useRef<() => void>(() => {});
+  const retry = useCallback(() => retryRef.current(), []);
 
   useEffect(() => {
+    let live = true;
+    let inFlight = false;
+    let currentUrl: string | null = null;
+    const cacheOwner = owner;
+    let localUrl: string | null = null;
+    let download = new AbortController();
+    const useLocal = async () => {
+      if (!recordingId || !cacheOwner || !ownsMedia(cacheOwner)) return false;
+      const blob = await readOfflineMedia(cacheOwner, recordingId);
+      if (!live || terminal || !blob || !ownsMedia(cacheOwner)) return false;
+      if (!localUrl) localUrl = URL.createObjectURL(blob);
+      rememberPosition(); currentUrl = localUrl; setUrl(localUrl); setMediaMime(blob.type); setError(null);
+      mediaFailed = false; return true;
+    };
+    let expiry = 0;
+    let failures = 0;
+    let terminal = false;
+    let mediaFailed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let activeRequest: AbortController | null = null;
     setUrl(null);
-    setExpiresAt(null);
+    setMediaMime(null);
+    setMediaDurationMs(0);
+    setCurrentMs(0);
+    setIsPlaying(false);
     setError(null);
-    void mint();
-  }, [mint]);
 
-  // Refresh BEFORE expiry rather than after a failure. A playback URL is a
-  // time-limited bearer token; discovering that mid-scrub is a 403 the user
-  // experiences as the player simply breaking.
-  useEffect(() => {
-    if (!expiresAt) return;
-    const delay = Math.max(expiresAt - Date.now() - REFRESH_MARGIN_MS, 60_000);
-    const t = setTimeout(() => void mint(), delay);
-    return () => clearTimeout(t);
-  }, [expiresAt, mint]);
+    const rememberPosition = () => {
+      const el = audioRef.current;
+      if (el && currentUrl && !pendingSeek.current) {
+        pendingSeek.current = { ms: el.currentTime * 1000, play: !el.paused };
+      }
+    };
+    const scheduleRetry = () => {
+      clearTimeout(timer);
+      if (terminal || failures >= 5) return;
+      timer = setTimeout(() => { void mint(); }, Math.min(1000 * 2 ** failures++, 30_000));
+    };
+    const mint = async () => {
+      if (!live || !recordingId || inFlight) return;
+      clearTimeout(timer);
+      inFlight = true;
+      const request = new AbortController();
+      activeRequest = request;
+      const timeout = setTimeout(() => request.abort(), 15_000);
+      try {
+        const media = await Promise.race([
+          mintMediaUrl ? mintMediaUrl(request.signal) : getRecordingMediaUrl(recordingId, request.signal),
+          new Promise<never>((_, reject) => request.signal.addEventListener("abort", () => reject(new Error("Playback request interrupted")), { once: true })),
+        ]);
+        if (!live) return;
+        const sameUrl = currentUrl === media.url;
+        if (!sameUrl || mediaFailed) rememberPosition();
+        currentUrl = media.url;
+        const parsedExpiry = Date.parse(media.expiresAt);
+        expiry = Number.isFinite(parsedExpiry) ? parsedExpiry : Date.now() + 6 * 60_000;
+        setUrl(media.url);
+        if (media.mime !== undefined) setMediaMime(media.mime);
+        if (cacheOwner && ownsMedia(cacheOwner)) {
+          void readOfflineMedia(cacheOwner, recordingId).then(blob => {
+            if (!blob && live) return downloadOfflineMedia(cacheOwner, recordingId, media.url,
+              AbortSignal.any([download.signal, AbortSignal.timeout(120_000)]));
+          }).catch(() => {});
+        }
+        setError(null);
+        // A signer can return the same URL. React won't reload an unchanged src.
+        if (sameUrl && mediaFailed) audioRef.current?.load();
+        mediaFailed = false;
+        timer = setTimeout(() => { void mint(); }, Math.max(expiry - Date.now() - REFRESH_MARGIN_MS, 60_000));
+      } catch (err) {
+        if (!live) return;
+        const status = err && typeof err === "object" && "status" in err ? err.status : undefined;
+        terminal = status === 401 || status === 403 || status === 404;
+        if (terminal) {
+          download.abort();
+          if (cacheOwner) void removeOfflineMedia(cacheOwner, recordingId).catch(() => {});
+          currentUrl = null;
+          audioRef.current?.pause();
+          audioRef.current?.removeAttribute("src");
+          audioRef.current?.load();
+          setUrl(null);
+          setIsPlaying(false);
+          pendingSeek.current = null;
+        }
+        if (!terminal && (!currentUrl || mediaFailed) && await useLocal().catch(() => false)) return;
+        // Failed renewal must not hide a usable buffered source.
+        if (!currentUrl || mediaFailed) setError(err instanceof Error ? err.message : String(err));
+        scheduleRetry();
+      } finally {
+        clearTimeout(timeout);
+        activeRequest = null;
+        inFlight = false;
+      }
+    };
+    const retryNow = () => {
+      if (download.signal.aborted) download = new AbortController();
+      terminal = false;
+      failures = 0;
+      void mint();
+    };
+    const recover = () => {
+      if (document.visibilityState === "hidden" || terminal) return;
+      if (!currentUrl || mediaFailed || expiry - Date.now() <= REFRESH_MARGIN_MS) retryNow();
+    };
+    retryRef.current = retryNow;
+    mediaErrorRef.current = () => {
+      if (terminal) return;
+      rememberPosition();
+      mediaFailed = true;
+      setIsPlaying(false);
+      setError("Media unavailable");
+      scheduleRetry();
+    };
+    void useLocal().catch(() => {});
+    void mint();
+    window.addEventListener("online", recover);
+    window.addEventListener("focus", recover);
+    document.addEventListener("visibilitychange", recover);
+    return () => {
+      live = false;
+      download.abort();
+      if (localUrl) URL.revokeObjectURL(localUrl);
+      activeRequest?.abort();
+      pendingSeek.current = null;
+      clearTimeout(timer);
+      retryRef.current = () => {};
+      mediaErrorRef.current = () => {};
+      window.removeEventListener("online", recover);
+      window.removeEventListener("focus", recover);
+      document.removeEventListener("visibilitychange", recover);
+    };
+  }, [recordingId, mintMediaUrl, ownerKey]);
 
   const seekTo = useCallback((ms: number) => {
     const el = audioRef.current;
     if (!el || !el.src) {
       // The URL has not landed yet — remember it and apply on load rather than
       // silently dropping the user's click.
-      pendingSeekMs.current = ms;
+      pendingSeek.current = { ms, play: true };
       return;
     }
     el.currentTime = Math.max(0, ms / 1000);
@@ -217,6 +328,7 @@ export function RecordingPlayerProvider({
       togglePlay,
       isLoading: recordingId != null && url == null && error == null,
       error,
+      retry,
       transcriptFocus,
       showTranscriptAt,
       clearTranscriptFocus,
@@ -233,6 +345,7 @@ export function RecordingPlayerProvider({
       togglePlay,
       url,
       error,
+      retry,
       transcriptFocus,
       showTranscriptAt,
       clearTranscriptFocus,
@@ -261,19 +374,14 @@ export function RecordingPlayerProvider({
       onLoadedMetadata={(e) => {
         const d = e.currentTarget.duration;
         if (Number.isFinite(d)) setMediaDurationMs(d * 1000);
-        const ms = pendingSeekMs.current;
-        if (ms != null) {
-          pendingSeekMs.current = null;
-          seekTo(ms);
+        const intent = pendingSeek.current;
+        if (intent) {
+          pendingSeek.current = null;
+          e.currentTarget.currentTime = Math.max(0, intent.ms / 1000);
+          if (intent.play) void e.currentTarget.play().catch(() => {});
         }
       }}
-      onError={() => {
-        // Most likely an expired URL (the token outlived the refresh timer —
-        // e.g. the tab slept). Re-mint once and resume where we were.
-        const at = audioRef.current?.currentTime ?? 0;
-        pendingSeekMs.current = at * 1000;
-        void mint();
-      }}
+      onError={() => mediaErrorRef.current()}
     />
   ) : null;
 

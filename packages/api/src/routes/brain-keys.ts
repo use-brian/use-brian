@@ -1,3 +1,4 @@
+import type { WorkspaceMcpProfile } from '../workspace-mcp/profile.js'
 import {notifyWorkspaceChange} from '../brain-stream/notify.js'
 import { withExternalKeyActor } from '../db/external-key-admission.js'
 /**
@@ -31,6 +32,7 @@ import {
 } from '../db/context-scope-store.js'
 
 type Options = {
+  workspaceProfile?: WorkspaceMcpProfile
   brainKeyStore: BrainKeyStore
   workspaceStore: WorkspaceStore
   contextStore?: ContextScopeStore
@@ -43,6 +45,8 @@ const UUID_RE =
 const CreateBody = z
   .object({
     name: z.string().min(1).max(120),
+    workspaceAccess: z.boolean().optional(),
+    expiresInDays: z.number().int().min(1).max(90).optional(),
     scope: z.enum(['read', 'read_write']).default('read_write'),
     // Per-key clearance cap (migration 262). Omitted/null = the workspace
     // primary assistant's clearance governs.
@@ -127,6 +131,9 @@ export function brainKeysRoutes(opts: Options): Router {
       res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
       return
     }
+    if (!parsed.data.workspaceAccess && parsed.data.expiresInDays !== undefined) {
+      res.status(400).json({ error: 'workspace_mcp_consent_required' }); return
+    }
     try {
       const contextGroupId = parsed.data.contextGroupId ?? null
       const contextProjectId = parsed.data.contextProjectId ?? null
@@ -144,6 +151,12 @@ export function brainKeysRoutes(opts: Options): Router {
           return
         }
       }
+      if (parsed.data.workspaceAccess && !opts.workspaceProfile) throw new Error('workspace_mcp_profile_unavailable')
+      const workspaceMcpConsent = parsed.data.workspaceAccess ? await opts.workspaceProfile!.issue({
+        actorUserId: req.userId!, authSessionId: req.authSessionId, workspaceId,
+        readOnly: parsed.data.scope === 'read', contextGroupId, contextProjectId,
+        maxClearance: parsed.data.maxClearance, expiresInDays: parsed.data.expiresInDays,
+      }) : undefined
       const created = await withExternalKeyActor(req.userId!, req.authSessionId, () => opts.brainKeyStore.create({
         workspaceId,
         name: parsed.data.name,
@@ -152,10 +165,12 @@ export function brainKeysRoutes(opts: Options): Router {
         contextGroupId: parsed.data.contextGroupId,
         contextProjectId: parsed.data.contextProjectId,
         actingUserId: req.userId!,
+        ...(workspaceMcpConsent ? { workspaceMcpConsent } : {}),
       }))
       // `key` (plaintext) is returned ONLY here — never again.
       res.json({
         id: created.id,
+        workspaceMcpConsent: created.workspaceMcpConsent,
         name: created.name,
         key: created.plaintext,
         prefix: created.prefix,
@@ -170,6 +185,9 @@ export function brainKeysRoutes(opts: Options): Router {
         lastUsedAt: created.lastUsedAt,
       })
     } catch (err) {
+      if ((err as Error).message.startsWith('workspace_mcp_')) {
+        res.status(409).json({ error: (err as Error).message }); return
+      }
       if ((err as { code?: string }).code === 'context_activation_blocked') {
         res.status(409).json({
           error: 'context_activation_blocked',

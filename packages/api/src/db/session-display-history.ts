@@ -46,7 +46,7 @@ export async function readPrivateSessionDisplay(input: {
           const text = available ? privateHistoryText(content, row.role) : null
           return { ...row, available: text !== null, text }
         })
-        // SQL brackets its source read with native authority checks. This
+        // SQL brackets its transcript read with native authority checks. This
         // original host lease also fences changes during the awaited read.
         await execution.security.authority.assertCurrent()
         await client.query('COMMIT')
@@ -56,7 +56,7 @@ export async function readPrivateSessionDisplay(input: {
         throw error
       } finally { client.release() }
     })
-    // COMMIT is the display-read linearization point: SQL source and policy
+    // COMMIT is the display-read linearization point: SQL transcript and policy
     // locks cover the captured text through the final host lease check above.
     return result
   } catch (error) {

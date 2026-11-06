@@ -506,6 +506,7 @@ async function continueAfterDecision(
 
   // The approved effect is already durable. Its notification is a separate,
   // best-effort publication and can never cause the tool to be retried.
+  let notificationDeliveryVars: Record<string, unknown> = {}
   if (notification) {
     const evidence = scopeAccumulator.evidence
     await deps.runStore.updateRun(run.id, {
@@ -538,6 +539,9 @@ async function continueAfterDecision(
         }),
       },
     })
+    if (delivery?.status === 'delivered' && delivery.messageId) {
+      notificationDeliveryVars = { [`__deliveryMsg_${notification.stepId}`]: delivery.messageId }
+    }
     if (delivery) {
       await deps.runStore.updateStepRun(updated.workflowStepRunId, {
         output: { ...wrapOutput(result.data), __delivery: delivery },
@@ -563,6 +567,7 @@ async function continueAfterDecision(
   // Optionally store the tool output under storeOutputAs.
   let nextVars = {
     ...run.vars,
+    ...notificationDeliveryVars,
     [WORKFLOW_SCOPE_EVIDENCE_VAR]: scopeAccumulator.evidence,
   }
   if (stepDef?.storeOutputAs && stepDef.type === 'tool_call') {
@@ -677,6 +682,9 @@ export async function enqueueToolInvocationResume(
   },
 ): Promise<ToolInvocationResumeOutcome> {
   const { approval, decision, reason } = params
+  // These continuations have a durable credential parent. Replaying them as
+  // an ordinary chat session would discard that ceiling and its revocation.
+  if (approval.approvalPayload.workspaceMcpOperation === true || typeof approval.approvalPayload.workspaceMcpRunId === 'string') return { kind: 'no_checkpoint' }
   const sessionId = approval.blockingSessionId
 
   // No suspended session recorded → nothing to resume.

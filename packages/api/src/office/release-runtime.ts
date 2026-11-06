@@ -3,6 +3,7 @@
  * invoice issue) so one implementation serves every release caller.
  * [COMP:api/office-release] */
 import { performance } from 'node:perf_hooks'
+import { createHash, randomUUID } from 'node:crypto'
 import type { BrandClaim } from '@use-brian/shared'
 import { workspaceFileReadRevision, type createFilesApi } from '../files/files-api.js'
 
@@ -14,7 +15,7 @@ import { materializeOfficeTemplateBundleForGeneration } from './presentation-gen
 import type { Sensitivity } from '@use-brian/core'
 import { createOfficeResourceReader } from './resource-read.js'
 import { resolveOfficeAccess } from './access.js'
-import { officeReleaseContextRevision, type OfficeReleaseContext } from '../routes/office-releases.js'
+import { officeReleaseContextRevision, type OfficeReleaseContext, type OfficeReleaseRouteDeps } from '../routes/office-releases.js'
 import type { createOfficeArtifactStore } from '../db/office-artifacts.js'
 import type { createOfficeLiveStore } from '../db/office-live.js'
 import type { createOfficeReleaseStore } from '../db/office-release.js'
@@ -155,7 +156,28 @@ export function createOfficeReleaseRuntime(deps: {
     }
     return Number.isFinite(validForMs) && validForMs > 0 ? { scope, validForMs: Math.floor(validForMs) } : null
   }
-  return { readBoundOfficeFile, saveClassifiedOfficeFile, readOfficeResource, loadOfficeReleaseContext, revalidateOfficeRelease }
+  const saveOfficeReleaseFile: OfficeReleaseRouteDeps['saveReleasedFile'] = async params => {
+    if (params.session || params.source.artifact.mode === 'session') throw new Error('office_session_writer_required')
+    const current = await loadOfficeReleaseContext(params.userId, params.artifactId)
+    if (!current || current.artifact.workspaceId !== params.workspaceId || current.artifact.headVersion !== params.version
+      || officeReleaseContextRevision(current) !== officeReleaseContextRevision(params.source)) throw new Error('office_projection_changed')
+    const live = await deps.live.get(params.userId, params.artifactId)
+    if (!live || JSON.stringify(live.snapshot) !== JSON.stringify(current.snapshot)) throw new Error('office_projection_changed')
+    const observation = await deps.artifacts.captureObservation(params.userId, current.artifact, live.canonicalHash)
+    if (!observation || !filesApi.writeDerivedBytes) throw new Error('office_source_unavailable')
+    if (createHash('sha256').update(params.bytes).digest('hex') !== params.hash) throw new Error('office_output_hash_mismatch')
+    // A release is an ordinary source-derived File. Internal Office paths are
+    // reserved for their separate artifact/session publication contracts.
+    const saved = await filesApi.writeDerivedBytes({ workspaceId: params.workspaceId, userId: params.userId,
+      assistantId: params.actorAssistantId, assistantKind: 'standard',
+      writeSensitivity: params.scope.sensitivity, writeCompartments: params.scope.compartments, writeProjectIds: params.scope.projectIds,
+    }, { path: `/exports/office/${params.artifactId}/v${params.version}-${params.action}-${randomUUID()}.${params.extension}`,
+      bytes: params.bytes, mime: params.mime, sensitivity: params.scope.sensitivity,
+    }, { producer: 'office:release', sources: [observation] })
+    if (!saved.ok) throw new Error(`Office output save failed: ${saved.error.kind}`)
+    return saved.value.id
+  }
+  return { readBoundOfficeFile, saveClassifiedOfficeFile, saveOfficeReleaseFile, readOfficeResource, loadOfficeReleaseContext, revalidateOfficeRelease }
 }
 
 /** Read an admitted template version's bundle under its source authority. */

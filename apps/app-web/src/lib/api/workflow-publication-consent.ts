@@ -49,8 +49,24 @@ async function request(path: string, init?: RequestInit): Promise<WorkflowPublic
   }
 }
 
-export function getWorkflowPublicationConsents(workflowId: string) {
-  return request(`${encodeURIComponent(workflowId)}/publication-consents`);
+export async function getWorkflowPublicationConsents(workflowId: string) {
+  // Bound the complete read, including an auth refresh or a stalled response body.
+  // A rejected read releases the shared cache's in-flight slot so Retry can work.
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      request(`${encodeURIComponent(workflowId)}/publication-consents`, { signal: controller.signal }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error("publication_consent_failed"));
+        }, 12_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function approveWorkflowPublicationConsent(workflowId: string, stepId: string, workflowUpdatedAt: string, consentVersion: string) {

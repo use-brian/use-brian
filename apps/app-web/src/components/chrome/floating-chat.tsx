@@ -1,4 +1,5 @@
 "use client";
+import { useDurableDraft } from "@/lib/offline/use-durable-draft";
 
 
 import { canonicalInteractionAdditions } from "@/lib/live-interaction/canonical";
@@ -521,7 +522,8 @@ export function FloatingChat({
   const searchParams = useSearchParams();
   const showPageTarget = isDocOrigin && surfaceFromPathname(pathname) === "p" && !panelFromSearch(searchParams);
   const [expanded, setExpanded] = useState(false);
-  const [input, setInput] = useState("");
+  const [input, setInput, draftStorageFailed] = useDurableDraft(workspaceId, `dock:${pathname}`);
+  const draftWarning = useT().comments.localDraftFailed;
   const [acceptedGoal, setAcceptedGoal] =
     useState<GoalAcceptedNotice | null>(null);
   /** Anchors the slash-command popup and scopes its outside-click dismissal
@@ -2998,6 +3000,7 @@ export function FloatingChat({
       if (existing) return existing;
       const epoch = threadEpochRef.current;
       const response = await authFetch(`${API_URL}/api/sessions/personal`, {
+            signal: AbortSignal.timeout(5_000),
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspaceId, assistantId: activeAssistantId, channelId: crypto.randomUUID() }),
       });
@@ -3020,10 +3023,12 @@ export function FloatingChat({
     prepareLivePage: liveRecording.prepare,
     prepareCaptureSource: (initialSource) => pickCaptureSource(initialSource, tRecorder),
     streamLiveWindow: liveRecording.streamWindow,
-    onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string; liveWindowsDone?: Promise<void> }) => {
+    onMeetingCapture: async (file: File, live?: { pageId?: string; sessionId?: string; liveWindowsDone?: Promise<void>; recoveryId?: string; assistantId?: string }) => {
       const outcome = await captureUpload.run(file, {
         kind: "meeting",
         automatic: true,
+        recoveryId: live?.recoveryId,
+        assistantId: live?.assistantId,
         ...(live ? { existingPageId: live.pageId } : {}),
         ...(live?.sessionId ? { liveSessionId: live.sessionId } : {}),
         ...(live?.liveWindowsDone ? { liveWindowsDone: live.liveWindowsDone } : {}),
@@ -3814,6 +3819,7 @@ export function FloatingChat({
           ) : (
             <SurfaceContextChip surface={origin} dict={t.surfaceTarget} />
           )}
+      {draftStorageFailed && <p role="status" className="text-xs text-muted-foreground">{draftWarning}</p>}
           <ChatComposer
             value={input}
             onChange={setInput}
@@ -3833,7 +3839,7 @@ export function FloatingChat({
             }
             // Hard-disable only for states where composing makes no sense
             // (suspended on a clarifying question, offline).
-            disabled={!!pendingQuestion || offline}
+            disabled={!!pendingQuestion}
             // Mid-turn sends are text-only: an attachment needs the full
             // pre-turn pipeline (cache read, PDF distillation, transcription),
             // which belongs to a turn of its own. Staged chips stay visible

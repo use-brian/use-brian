@@ -1,6 +1,7 @@
 /** Durable Office job/event/steering store. [COMP:api/office-generation] */
 import { OfficeImportDiagnosticSchema, type OfficeImportDiagnostic } from '@use-brian/office-model'
 import { APP_LEVEL_ASSISTANT_ID } from '@use-brian/shared'
+import { officeGenerationOriginAllowsSql } from '../office/generation-origin.js'
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
 import { dispatchOfficeJobLocal } from '../office/job-event-bus.js'
 
@@ -117,25 +118,40 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
     },
 
     async claim(params: { userId: string; leaseToken: string; leaseMs: number; jobKinds?: OfficeGenerationJobRow['jobKind'][] }): Promise<OfficeGenerationJobRow | null> {
+      const retired = await db<{ id: string; workspaceId: string }>(params.userId, `
+        WITH candidates AS (
+          SELECT id FROM office_generation_jobs
+          WHERE initiated_by_user_id=$1 AND authority_projection ? 'workspaceDelegation'
+            AND status IN ('queued','running','needs_input')
+            AND (status<>'running' OR lease_expires_at IS NULL OR lease_expires_at<clock_timestamp())
+            AND workspace_mcp_parent_current(authority_projection->'workspaceDelegation') IS NOT TRUE
+          ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 100
+        ), retired AS (
+          UPDATE office_generation_jobs j SET status='failed',stage='failed',error_code='workspace_access_changed',
+            error_detail=NULL,completed_at=now(),updated_at=now(),lease_token=NULL,lease_expires_at=NULL
+          FROM candidates c WHERE j.id=c.id RETURNING j.id,j.workspace_id
+        ), events AS (
+          INSERT INTO office_generation_events(job_id,workspace_id,seq,code,params,actor_type,safe_narration)
+          SELECT id,workspace_id,${NEXT_SEQ('retired.id')},'office.job.failed',
+            '{"code":"workspace_access_changed"}'::jsonb,'system','Workspace connection access changed'
+          FROM retired
+        ) SELECT id,workspace_id AS "workspaceId" FROM retired
+      `,[params.userId])
+      for(const row of retired.rows)dispatchOfficeJobLocal({jobId:row.id,workspaceId:row.workspaceId})
       const result = await db<OfficeGenerationJobRow>(params.userId, `
         WITH candidate AS (
           SELECT id FROM office_generation_jobs pending
            WHERE job_kind = ANY($3::text[]) AND status IN ('queued','running') AND cancel_requested_at IS NULL
              AND next_attempt_at <= now()
              AND (coalesce(authority_projection->'creationBinding'->>'protocol','') NOT IN ('office_prompt_only_v1','office_department_v2')
-               OR (initiated_by_user_id=$4::uuid AND EXISTS (
-                 SELECT 1 FROM auth_sessions s JOIN users u ON u.id=s.user_id
-                   WHERE s.id::text=pending.authority_projection->'creationBinding'->>'authSessionId'
-                     AND s.user_id=pending.initiated_by_user_id AND s.revoked_at IS NULL
-                     AND s.expires_at>clock_timestamp() AND s.auth_version=u.auth_version)
+               OR (initiated_by_user_id=$4::uuid AND ${officeGenerationOriginAllowsSql('pending')}
                  AND EXISTS (
-                 SELECT 1 FROM office_artifacts a WHERE a.id=pending.artifact_id AND a.workspace_id=pending.workspace_id
-                   AND a.lifecycle_state='active'
-                   AND office_artifact_scope_allows(a.id,a.workspace_id,true)
-                   AND to_jsonb(a.compartments)=authority_projection->'compartments'
-                   AND to_jsonb(a.project_ids)=authority_projection->'projectIds'
-                   AND a.sensitivity=authority_projection->>'sensitivity'
-                   AND to_jsonb(a.visibility_user_ids)=authority_projection->'visibilityUserIds')))
+                   SELECT 1 FROM office_artifacts a WHERE a.id=pending.artifact_id AND a.workspace_id=pending.workspace_id
+                     AND a.lifecycle_state='active' AND office_artifact_scope_allows(a.id,a.workspace_id,true)
+                     AND to_jsonb(a.compartments)=authority_projection->'compartments'
+                     AND to_jsonb(a.project_ids)=authority_projection->'projectIds'
+                     AND a.sensitivity=authority_projection->>'sensitivity'
+                     AND to_jsonb(a.visibility_user_ids)=authority_projection->'visibilityUserIds')))
              AND (lease_expires_at IS NULL OR lease_expires_at < now())
            ORDER BY next_attempt_at, created_at
            FOR UPDATE SKIP LOCKED LIMIT 1
@@ -247,7 +263,19 @@ export function createOfficeGenerationStore(db: OfficeDbQuery = defaultOfficeDbQ
     },
 
     async cancel(userId: string, jobId: string): Promise<boolean> {
-      const result = await db<{ id: string }>(userId, `UPDATE office_generation_jobs SET cancel_requested_at=now(),updated_at=now() WHERE id=$1 AND status IN ('queued','running','needs_input') RETURNING id`, [jobId])
+      const result = await db<{ id: string; workspaceId: string }>(userId, `
+        WITH cancelled AS (
+          UPDATE office_generation_jobs SET cancel_requested_at=now(),updated_at=now(),
+            status=CASE WHEN status='running' THEN status ELSE 'cancelled' END,
+            stage=CASE WHEN status='running' THEN stage ELSE 'cancelled' END,
+            completed_at=CASE WHEN status='running' THEN completed_at ELSE now() END
+          WHERE id=$1 AND status IN ('queued','running','needs_input') RETURNING id,workspace_id,status
+        ), events AS (
+          INSERT INTO office_generation_events(job_id,workspace_id,seq,code,params,actor_type,safe_narration)
+          SELECT id,workspace_id,${NEXT_SEQ('cancelled.id')},'office.job.cancelled','{}'::jsonb,'system','Cancelled'
+          FROM cancelled WHERE status='cancelled'
+        ) SELECT id,workspace_id AS "workspaceId" FROM cancelled`, [jobId])
+      for(const row of result.rows)dispatchOfficeJobLocal({jobId:row.id,workspaceId:row.workspaceId})
       return result.rows.length === 1
     },
 

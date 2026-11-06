@@ -36,6 +36,7 @@ import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
 import type { Dictionary } from "@/lib/i18n";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
+import { Checkbox } from "@/components/ui/checkbox";
 import { webAppUrl } from "@/lib/primary-auth";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { ModelTierRow, isModelAlias, type ModelAlias } from "@/components/studio/model-tier-row";
@@ -56,6 +57,7 @@ type ApiKeyRow = {
   prefix: string;
   /** 'chat' = /messages only; 'agent' = also opens the assistant MCP endpoint.
    *  Optional to tolerate older cached responses — treat undefined as 'chat'. */
+  workspaceMcpConsent?: { version: 1; expiresAt: string; operationNames: string[] } | null;
   scope?: ApiKeyScope;
   /** Context posture (migration 417). Optional for pre-417 rows — treat
    *  undefined as 'external'/'thin', the behavior those keys always had. */
@@ -629,6 +631,7 @@ function KeyRow({
         <div className="text-[12px] text-muted-foreground mt-0.5 font-mono">
           {row.prefix}…
         </div>
+        {row.workspaceMcpConsent && <p className="mt-1 text-xs text-muted-foreground">{t.apiKeys.expiresAtLabel}: {formatDate(row.workspaceMcpConsent.expiresAt)}</p>}
       </div>
       <div className="text-[12px] text-muted-foreground tabular-nums w-28 text-right">
         {relative(row.lastUsedAt, t)}
@@ -675,6 +678,7 @@ function CreateKeyForm({
   const t = useT();
   const [name, setName] = useState(defaultName);
   const [scope, setScope] = useState<ApiKeyScope>("chat");
+  const [workspaceAccess, setWorkspaceAccess] = useState(true);
   const [audience, setAudience] = useState<ApiKeyAudience>("external");
   const [anonContext, setAnonContext] = useState<ApiKeyAnonContext>("thin");
   const [toolPolicy, setToolPolicy] = useState<ApiKeyToolPolicy>("public_research");
@@ -693,6 +697,7 @@ function CreateKeyForm({
         body: JSON.stringify({
           name: name.trim(),
           scope,
+          ...(scope === "agent" ? { workspaceAccess } : {}),
           audience,
           // The anonymous lane only exists on external keys; the route 400s
           // the contradictory internal+full pair, so normalize here.
@@ -742,7 +747,7 @@ function CreateKeyForm({
           />
         </div>
 
-        <div role="radiogroup" aria-label={t.apiKeys.audienceLabel} className="space-y-2">
+        {(scope !== "agent" || !workspaceAccess) && <div role="radiogroup" aria-label={t.apiKeys.audienceLabel} className="space-y-2">
           <span className="text-[13px] text-muted-foreground">{t.apiKeys.audienceLabel}</span>
           <ScopeCard
             selected={audience === "external"}
@@ -758,7 +763,7 @@ function CreateKeyForm({
             disabled={submitting}
             onSelect={() => setAudience("internal")}
           />
-        </div>
+        </div>}
 
         {audience === "external" && scope === "chat" && (
           <div role="radiogroup" aria-label={t.apiKeys.anonContextLabel} className="space-y-2">
@@ -785,7 +790,7 @@ function CreateKeyForm({
           </div>
         )}
 
-        {audience === "external" && (
+        {audience === "external" && scope === "chat" && (
           <div role="radiogroup" aria-label={t.apiKeys.toolPolicyLabel} className="space-y-2">
             <span className="text-[13px] text-muted-foreground">{t.apiKeys.toolPolicyLabel}</span>
             <ScopeCard
@@ -811,6 +816,12 @@ function CreateKeyForm({
         )}
       </div>
 
+      {scope === "agent" && <label className="flex min-h-8 max-sm:min-h-11 max-w-xl items-start gap-3 rounded-lg border border-border p-3">
+        <Checkbox checked={workspaceAccess} onCheckedChange={setWorkspaceAccess} disabled={submitting} />
+        <span><span className="text-sm font-medium">{t.apiKeys.workspaceAccessLabel}</span>
+          <span className="mt-1 block text-xs text-muted-foreground">{t.apiKeys.workspaceAccessDescription}</span></span>
+      </label>}
+
       <label className="block max-w-xl">
         <span className="text-[13px] text-muted-foreground">{t.apiKeys.create.nameLabel}</span>
         <input
@@ -819,7 +830,7 @@ function CreateKeyForm({
           onChange={(e) => setName(e.target.value)}
           placeholder={t.apiKeys.create.placeholder}
           maxLength={120}
-          className="mt-1 w-full bg-background border border-border rounded-lg px-3 py-2 text-[16px] md:text-[14px] focus:outline-none focus:ring-2 focus:ring-primary/40"
+          className="mt-1 w-full bg-background border border-border rounded-lg px-3 py-2 text-[16px] md:text-[14px] focus:outline-none focus:ring-2 focus:ring-ring"
         />
       </label>
 
@@ -861,9 +872,9 @@ function ScopeCard({
       aria-checked={selected}
       disabled={disabled}
       onClick={onSelect}
-      className={`w-full text-left border rounded-lg px-3 py-2.5 transition-colors focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-60 ${
+      className={`w-full text-left border rounded-lg px-3 py-2.5 transition-colors focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 ${
         selected
-          ? "border-primary/60 bg-muted"
+          ? "border-foreground/60 bg-muted"
           : "border-border hover:border-foreground/30"
       }`}
     >
@@ -871,7 +882,7 @@ function ScopeCard({
         <span
           aria-hidden
           className={`size-3 shrink-0 rounded-full border ${
-            selected ? "border-primary bg-primary" : "border-border bg-background"
+            selected ? "border-foreground bg-foreground" : "border-border bg-background"
           }`}
         />
         <span className="text-[14px] font-medium">{label}</span>
@@ -935,7 +946,7 @@ function RevealKeyView({
         </code>
         {t.apiKeys.reveal.usageHintMid}
         <code className="bg-muted px-1 py-0.5 rounded">
-          {format(t.apiKeys.reveal.usageHintEndpoint, { id: assistantId })}
+          {created.workspaceMcpConsent ? `/api/v1/assistants/${assistantId}/mcp` : format(t.apiKeys.reveal.usageHintEndpoint, { id: assistantId })}
         </code>
         {t.apiKeys.reveal.usageHintSuffix}
       </div>

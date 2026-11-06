@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import * as brandStore from '../../db/brand-store.js'
 import {documentSnapshot,completePresentationSnapshot,resolveFixtureResource,id} from '../../../../core/src/office/__tests__/fixtures.js'
-import { exportOfficePresentation, type Message } from '@use-brian/core'
+import { exportOfficePresentation, type Message, type ProviderRequest } from '@use-brian/core'
 import type { DocumentSnapshot, PresentationSnapshot, SpreadsheetSnapshot } from '@use-brian/office-model'
 import { createOfficeGenerationWorker } from '../generation-worker.js'
 import { createOfficeImportWorker } from '../import-worker.js'
@@ -23,6 +23,7 @@ const GENERAL_OFFICE_SCOPE = {
 }
 
 const OFFICE_SCOPE_DEPS = {
+  captureObservation: vi.fn(async () => null),
   raiseScope: vi.fn(async () => true),
 }
 
@@ -63,8 +64,8 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     }
     const template = { id: uid(21), workspaceId: uid(2), family: 'document' as const, version: 1, status: 'admitted' as const, name: 'Invoice', description: 'Use for customer invoices', tags: ['invoice'], locales: ['en-US'], whenToUse: ['invoices'], whenNotToUse: ['letters'], exampleRequests: ['Create an invoice'], fields: [], slideRecipes: [], snapshot, resources: [], lockedObjectIds: [], allowedRepeatTargetIds: [], requiredEvidence: [], sensitivity: 'internal' as const, visibilityUserIds: [], capabilityVersion: 1, sourceHash: 'e'.repeat(64) }
     const payload = JSON.stringify({ title: 'Invoice INV-2026-001', values: { CUSTOMER_NAME: 'Northstar Studio Ltd.', INVOICE_NUMBER: 'INV-2026-001', OPTIONAL_NOTE: '', TOTAL: 'USD 11,000.00' } })
-    const requests: Array<{ systemPrompt?: string; messages?: Message[] }> = []
-    const provider = { async *stream(request: { systemPrompt?: string; messages?: Message[] }) { requests.push(request); yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
+    const requests: ProviderRequest[] = []
+    const provider = { async *stream(request: ProviderRequest) { requests.push(request); yield { type: 'message_start' as const, model: 'test' }; yield { type: 'text_delta' as const, text: payload }; yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } } } }
 
     const generated = await generateDocumentFromTemplate({ provider: provider as never, model: 'test', artifactId: uid(20), workspaceId: uid(2), templateVersionId: uid(21), outcome: 'Create the supplied invoice', audience: 'Accounts payable', template })
 
@@ -75,10 +76,18 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(JSON.stringify(generated)).not.toContain('{{')
     expect(generated.sections[0]?.nodes[0]).toMatchObject({ kind: 'table', columnWidthsPt: [80, 160], widthPt: 240, layout: 'fixed', margins: { leftPt: 4 }, borders: { bottom: { color: '#34D3FF', widthPt: 1.125, style: 'solid' } } })
     expect(requests[0]?.systemPrompt).toContain('every supplied placeholder key exactly once')
-    expect(requests[0]).toMatchObject({ responseFormat: 'json', maxTokens: 6000,
-      responseSchema: { type: 'object', required: ['title', 'values'],
-        properties: { values: { required: ['CUSTOMER_NAME', 'INVOICE_NUMBER', 'OPTIONAL_NOTE', 'TOTAL'] } } } })
-    expect(JSON.stringify(requests[0])).not.toContain('additionalProperties')
+    expect(requests[0]).toMatchObject({ responseFormat: 'json', maxTokens: 6000 })
+    expect(requests[0]?.responseSchema).toEqual({
+      type: 'object', additionalProperties: false, required: ['title', 'values'],
+      properties: {
+        title: { type: 'string' },
+        values: {
+          type: 'object', additionalProperties: false,
+          properties: { CUSTOMER_NAME: { type: 'string' }, INVOICE_NUMBER: { type: 'string' }, OPTIONAL_NOTE: { type: 'string' }, TOTAL: { type: 'string' } },
+          required: ['CUSTOMER_NAME', 'INVOICE_NUMBER', 'OPTIONAL_NOTE', 'TOTAL'],
+        },
+      },
+    })
     expect(JSON.stringify(requests[0]?.messages)).toContain('CUSTOMER_NAME')
   })
 
@@ -443,7 +452,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
 
     await expect(service.get({ userId: 'user-1', artifactId: 'artifact-1' })).resolves.toEqual({
       artifactId: 'artifact-1', family: 'presentation', mode: 'artifact', title: 'Company introduction', version: 0,
-      lifecycleState: 'active', role: 'edit', scopeEvidence: { sensitivity: 'internal', compartments: [], projectIds: [] }, job: { id: 'job-1', status: 'failed', stage: 'failed', errorCode },
+      lifecycleState: 'active', role: 'edit', sensitivity: 'internal', scopeEvidence: { sensitivity: 'internal', compartments: [], projectIds: [] }, job: { id: 'job-1', status: 'failed', stage: 'failed', errorCode },
     })
   })
 
@@ -500,9 +509,10 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
 
   it('stores comment-role Brian commands as a proposal instead of committing them', async () => {
     const uid = (n: number) => `39000000-0000-4000-8000-${String(n).padStart(12, '0')}`
-    const job = { id: uid(500), workspaceId: uid(501), artifactId: uid(502), initiatedByUserId: uid(503), assistantId: uid(504), jobKind: 'revise', status: 'queued', stage: 'queued', brief: { instruction: 'Tighten this', targetIds: [uid(505)], expectedVersion: 2 }, authorityProjection: { role: 'comment' }, templateVersionId: null, baseArtifactVersion: 2, checkpoint: {}, checkpointVersion: 0, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() } as OfficeGenerationJobRow
+    const job = { id: uid(500), workspaceId: uid(501), artifactId: uid(502), initiatedByUserId: uid(503), assistantId: uid(504), jobKind: 'revise', status: 'running', stage: 'running', brief: { instruction: 'Tighten this', targetIds: [uid(505)], expectedVersion: 2 }, authorityProjection: { role: 'comment' }, templateVersionId: null, baseArtifactVersion: 2, checkpoint: {}, checkpointVersion: 0, leaseToken: null, leaseExpiresAt: new Date(Date.now()+60_000), cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() } as OfficeGenerationJobRow
     const command = { commandId: uid(506), artifactId: job.artifactId, baseVersion: 2, actor: { type: 'assistant' as const, id: job.assistantId! }, origin: 'ai' as const, kind: 'deleteObject' as const, targetId: uid(505) }
     const deps = {
+      get: vi.fn(async () => job),
       claim: vi.fn(async () => job),
       getSnapshot: vi.fn(async () => ({ snapshot: revisionFixture(job.artifactId, uid(505)), baseVersion: 2, seq: 7 })),
       revise: vi.fn(async () => ({ mode: 'proposal' as const, commands: [command], affectedObjectIds: [uid(505)] })),
@@ -516,9 +526,10 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
 
   it('turns a revision whose queued base advanced into a proposal', async () => {
     const uid = (n: number) => `39100000-0000-4000-8000-${String(n).padStart(12, '0')}`
-    const job = { id: uid(500), workspaceId: uid(501), artifactId: uid(502), initiatedByUserId: uid(503), assistantId: uid(504), jobKind: 'revise', status: 'queued', stage: 'queued', brief: { instruction: 'Make this a heading', targetIds: [uid(505)], expectedVersion: 3 }, authorityProjection: { role: 'edit' }, templateVersionId: null, baseArtifactVersion: 3, checkpoint: {}, checkpointVersion: 0, leaseToken: null, leaseExpiresAt: null, cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() } as OfficeGenerationJobRow
+    const job = { id: uid(500), workspaceId: uid(501), artifactId: uid(502), initiatedByUserId: uid(503), assistantId: uid(504), jobKind: 'revise', status: 'running', stage: 'running', brief: { instruction: 'Make this a heading', targetIds: [uid(505)], expectedVersion: 3 }, authorityProjection: { role: 'edit' }, templateVersionId: null, baseArtifactVersion: 3, checkpoint: {}, checkpointVersion: 0, leaseToken: null, leaseExpiresAt: new Date(Date.now()+60_000), cancelRequestedAt: null, errorCode: null, createdAt: new Date(), updatedAt: new Date() } as OfficeGenerationJobRow
     const command = { commandId: uid(506), artifactId: job.artifactId, baseVersion: 4, actor: { type: 'assistant' as const, id: job.assistantId! }, origin: 'ai' as const, kind: 'setObjectProperty' as const, targetId: uid(505), path: ['styleName'], value: 'Heading' }
     const deps = {
+      get: vi.fn(async () => job),
       claim: vi.fn(async () => job),
       getSnapshot: vi.fn(async () => ({ snapshot: revisionFixture(job.artifactId, uid(505)), baseVersion: 4, seq: 8 })),
       revise: vi.fn(async () => ({ mode: 'proposal' as const, commands: [command], affectedObjectIds: [uid(505)] })),
@@ -528,6 +539,21 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(deps.revise).toHaveBeenCalledWith(expect.objectContaining({ currentVersion: 4, versionDrifted: true }))
     expect(deps.propose).toHaveBeenCalledWith({ job, baseVersion: 4, commands: [command], affectedObjectIds: [uid(505)] })
     expect(deps.commit).not.toHaveBeenCalled()
+  })
+
+  it.each(['cancel','lease-loss'] as const)('does not publish a revision after %s during planning',async reason=>{
+    const uid=(n:number)=>`39200000-0000-4000-8000-${String(n).padStart(12,'0')}`
+    const job={id:uid(1),artifactId:uid(2),workspaceId:uid(3),initiatedByUserId:uid(4),assistantId:uid(5),status:'running',leaseToken:uid(6),leaseExpiresAt:new Date(Date.now()+60_000),cancelRequestedAt:null,
+      authorityProjection:{},brief:{instruction:'Edit',targetIds:[uid(7)],expectedVersion:2}} as OfficeGenerationJobRow
+    let stopped=false
+    const deps={claim:vi.fn(async()=>job),get:vi.fn(async()=>stopped?{...job,...(reason==='cancel'?{cancelRequestedAt:new Date()}:{leaseToken:uid(99)})}:job),
+      getSnapshot:vi.fn(async()=>({snapshot:revisionFixture(job.artifactId,uid(7)),baseVersion:2,seq:1})),
+      revise:vi.fn(async()=>{stopped=true;return{mode:'proposal' as const,commands:[],affectedObjectIds:[]}}),
+      commit:vi.fn(),propose:vi.fn(),appendEvent:vi.fn(),finish:vi.fn(async()=>true)}
+    await createOfficeRevisionWorker(deps)(job.initiatedByUserId)
+    expect(deps.commit).not.toHaveBeenCalled();expect(deps.propose).not.toHaveBeenCalled();expect(deps.appendEvent).not.toHaveBeenCalled()
+    if(reason==='cancel')expect(deps.finish).toHaveBeenCalledWith(expect.objectContaining({status:'cancelled'}))
+    else expect(deps.finish).not.toHaveBeenCalled()
   })
 
   it('claims work, persists localized events, and records a terminal failure', async () => {

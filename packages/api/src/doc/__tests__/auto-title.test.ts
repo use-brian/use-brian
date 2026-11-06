@@ -58,6 +58,18 @@ function savedStore(committed: { name: string; icon: string | null } | null): {
 const LONG = 'A page about quarterly revenue growth and enterprise renewals.' // > floor
 
 describe('[COMP:api/doc-auto-title] runDocAutoTitle', () => {
+  it('applies a host-owned date prefix through the same guarded title commit', async () => {
+    const title = '2026-11-05 08:30 · Quarterly Revenue Growth'
+    const { store, setAutoTitle } = savedStore({ name: title, icon: null })
+    const result = await runDocAutoTitle({
+      userId: USER_ID, pageId: PAGE_ID, provider: mockProvider('Quarterly Revenue Growth'),
+      docPageStore: pageStore({ nameOrigin: 'placeholder', text: LONG }), savedViewStore: store,
+      minChars: 10, formatTitle: topic => `2026-11-05 08:30 · ${topic}`,
+    })
+    expect(setAutoTitle).toHaveBeenCalledWith(USER_ID, PAGE_ID, title, null)
+    expect(result.title).toBe(title)
+  })
+
   it('generates + commits for a placeholder page over the size floor', async () => {
     const { store, setAutoTitle } = savedStore({
       name: 'Quarterly Revenue Growth',

@@ -1,3 +1,4 @@
+import { WorkspaceCredentialDelegationSchema } from './workspace-delegation.js'
 import { intersectDepartmentReadGrants, type DepartmentReadGrant } from './department-read.js'
 import type { AccessContext } from './access-context.js'
 import { intersectScopeGrants, type ScopeGrant } from './context-scope.js'
@@ -17,6 +18,7 @@ export type AccessCeiling = {
 
 /** Durable consent captured from an attended authoring turn. */
 export type AuthoringAuthority = {
+  workspaceDelegation?: import('../a2a/types.js').WorkspaceCredentialDelegation
   version: 1
   assistantId: string
   ceiling: AccessCeiling
@@ -53,7 +55,7 @@ export function pinAuthoringAuthority(context: AccessContext): AuthoringAuthorit
 /** Parse persisted JSON without accepting partial or model-authored authority. */
 export function parseAuthoringAuthority(value: unknown): AuthoringAuthority | null {
   if (!value || typeof value !== 'object') return null
-  const candidate = value as { version?: unknown; assistantId?: unknown; ceiling?: unknown }
+  const candidate = value as { version?: unknown; assistantId?: unknown; ceiling?: unknown; workspaceDelegation?: unknown }
   if (candidate.version !== 1 || typeof candidate.assistantId !== 'string' || !candidate.assistantId) return null
   if (!candidate.ceiling || typeof candidate.ceiling !== 'object') return null
   const ceiling = candidate.ceiling as AccessCeiling
@@ -69,7 +71,9 @@ export function parseAuthoringAuthority(value: unknown): AuthoringAuthority | nu
       projectIds: grant(ceiling.projectIds),
       visibilityAssistantIds: grant(ceiling.visibilityAssistantIds),
     }
-    return { version: 1, assistantId: candidate.assistantId, ceiling: normalized }
+    const parent = candidate.workspaceDelegation === undefined ? undefined : WorkspaceCredentialDelegationSchema.parse(candidate.workspaceDelegation)
+    if (parent && (parent.userId !== normalized.userId || parent.workspaceId !== normalized.workspaceId)) return null
+    return { version: 1, assistantId: candidate.assistantId, ceiling: normalized, ...(parent ? { workspaceDelegation: parent } : {}) }
   } catch {
     return null
   }

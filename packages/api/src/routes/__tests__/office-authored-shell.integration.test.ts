@@ -33,7 +33,7 @@ afterAll(async () => { await getAppPool().end(); await pool.end() })
 
 // The production parent router, actual session middleware/ledger, and real
 // default Office store. Unrelated Office operations are not exercised here.
-const service = createOfficeService({
+const service = createOfficeService({captureObservation:officeArtifactStore.captureObservation,
   generationAvailable: () => true, createShell: officeArtifactStore.createShell,
   deleteEmptyShell: officeArtifactStore.deleteEmptyShell, getArtifact: officeArtifactStore.get,
   raiseScope: officeArtifactStore.raiseScope, resolveAccess: async () => null,

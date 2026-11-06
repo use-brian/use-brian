@@ -146,8 +146,8 @@ describe("[COMP:app-web/doc-topbar] Top-bar chrome", () => {
       html.match(new RegExp(`aria-label="${en.docPage.topbarCloseTabAria}"`, "g")) ??
       []
     ).length;
-    // Two strips render (desktop + phone, CSS picks one): a ✕ per tab in each.
-    expect(closes).toBe(4);
+    // Desktop keeps both chips; phone keeps only the active chip.
+    expect(closes).toBe(3);
   });
 
   it("hides the close affordance when only one tab is open", () => {
@@ -188,9 +188,9 @@ describe("[COMP:app-web/doc-topbar] Phone tab strip", () => {
   });
 
   it("keeps a chip per tab up to the chip cap", () => {
-    expect(PHONE_TAB_CHIPS).toBe(2);
-    const two = [tab("a", false), tab("b", true)];
-    expect(collapseTabStrip(two)).toEqual({ chips: two, menu: [] });
+    expect(PHONE_TAB_CHIPS).toBe(1);
+    const one = [tab("a", true)];
+    expect(collapseTabStrip(one)).toEqual({ chips: one, menu: [] });
   });
 
   it("collapses past the cap to the ACTIVE chip plus every tab in the menu", () => {
@@ -205,7 +205,7 @@ describe("[COMP:app-web/doc-topbar] Phone tab strip", () => {
     expect(collapseTabStrip(three).chips.map((t) => t.key)).toEqual(["a"]);
   });
 
-  it("keeps a compact phone history menu at two tabs and tab overflow at three", () => {
+  it("keeps a compact phone history menu and collapses multiple tabs", () => {
     const two = bar({ tabs: [tab("a", true), tab("b", false)] });
     expect(two).toContain("data-doc-tabs-menu");
 

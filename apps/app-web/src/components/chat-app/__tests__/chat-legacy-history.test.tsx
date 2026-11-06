@@ -31,6 +31,8 @@ describe('[COMP:app-web/chat-legacy-history] automatic private display',()=>{
   expect(mocks.read).toHaveBeenCalledWith(source,workspace,0,expect.any(AbortSignal))
   expect(container!.textContent).toContain(page.rows[0].text)
   expect(container!.querySelector('img,iframe,a,textarea')).toBeNull()
+  expect(container!.textContent).not.toContain(en.chatApp.legacyHistory.notice)
+  expect(container!.querySelector('[data-brian-chat-user]')?.textContent).toBe(page.rows[0].text)
   expect([...container!.querySelectorAll('button')].map(button=>button.textContent)).toEqual(['Continue'])
  })
  it('uses bounded pagination and renders withheld rows explicitly',async()=>{

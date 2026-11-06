@@ -469,7 +469,7 @@ export function ToolNotificationFields({ step, onChange, destinations, channelOp
         if (!delivery) { onChange({ ...step, deliver: undefined, deliveryText: undefined }); return; }
         if (!("channelId" in delivery) || delivery.channelType === "web") return;
         onChange({ ...step, deliver: { channelType: delivery.channelType, channelId: delivery.channelId,
-          channelIntegrationId: delivery.channelIntegrationId }, deliveryText: step.deliveryText ?? "" });
+          channelIntegrationId: delivery.channelIntegrationId, thread: delivery.thread }, deliveryText: step.deliveryText ?? "" });
       }} />
     {step.deliver && <div className="flex flex-col gap-1.5">
       <FieldLabel label={b.toolNotificationTextLabel} hint={b.toolNotificationTextHint} />

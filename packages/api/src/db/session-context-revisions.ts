@@ -7,7 +7,7 @@ import { createMemory } from './memories.js'
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import {
-  ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope, intersectAccessCeilings, accessCeilingContains, pinAccessCeiling, RANK, scopeGrantContains,
+  workspaceCredentialDelegation, ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope, intersectAccessCeilings, accessCeilingContains, pinAccessCeiling, RANK, scopeGrantContains,
   type DerivedWriteEvidence, type ScopeEvidence, type ExecutionContext, type ResourceScope, type ScopeSource, type SessionContextAuthority,
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from './client.js'
@@ -30,6 +30,36 @@ export type SessionContextRevision = {
 type Prepare = (execution: ExecutionContext, sources: readonly ScopeSource[], action: 'context' | 'retain') => Promise<PreparedExternalSourceAuthority>
 type PublicationMeasure=<T>(counter:string,run:()=>Promise<T>)=>Promise<T>
 const retainedHosts = new WeakMap<ExecutionContext, Prepare>()
+const programmaticPublications = new WeakSet<ExecutionContext>()
+/** Identity of a host-bound workspace invocation, never a serialized source grant. */
+export function hasWorkspaceMcpRetainedAuthority(execution: ExecutionContext): boolean {
+ return programmaticPublications.has(execution)
+}
+/** Host-only binding after durable workspace MCP operation admission. */
+export function bindWorkspaceMcpPublication(execution: ExecutionContext): void {
+ const {identity,security,ownership,surface}=execution
+ if(identity.kind!=='programmatic'||!['brain_key','assistant_key','oauth_token'].includes(identity.principal.kind)
+   ||identity.principal.actorUserId!==security.access.userId||ownership.kind!=='workspace'
+   ||ownership.workspaceId!==security.access.workspaceId||!security.access.sharedAudience
+   ||execution.lifecycle.sessionPersisted===false||surface.readOnly||surface.systemRead||surface.clientSelfMemory
+   ||security.access.systemRead||getApplicationExecutionBinding(execution))missing()
+ programmaticPublications.add(execution)
+}
+
+/** Canonical workflow resolver only: machine work keeps its native source
+ * admission without becoming an attended human or a persisted chat session. */
+export function bindWorkspaceMcpWorkflowPublication(execution: ExecutionContext): void {
+ const {identity,security,ownership,surface}=execution
+ const parent=workspaceCredentialDelegation(execution),source=security.authority.snapshotSource?.()
+ if(!parent||identity.kind!=='system'||identity.purpose!=='workflow'||source?.kind!=='workflow'
+   ||source.runId!==identity.jobId||source.authorityUserId!==security.access.userId
+   ||source.workspaceId!==security.access.workspaceId||source.executingAssistantId!==execution.assistant.id
+   ||ownership.kind!=='workspace'||ownership.workspaceId!==security.access.workspaceId
+   ||!security.access.sharedAudience||surface.readOnly||surface.systemRead||surface.clientSelfMemory
+   ||security.access.systemRead||getApplicationExecutionBinding(execution))missing()
+ programmaticPublications.add(execution)
+}
+
 /** R4 supplies its real invocation's prepared operation; no service/creator impersonation. */
 export function bindSessionContextRetainedAuthority(execution: ExecutionContext, prepare: Prepare): void {
   retainedHosts.set(execution, prepare)
@@ -90,7 +120,7 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         // Native publication needs the exact original assistant even with the
         // legacy department policy. The v2 flag remains unchanged.
         if (execution.identity.kind === 'attended' && execution.identity.principal.kind === 'workspace_member'
-          ||nativeDelegatedSessionPublication(execution)
+          ||nativeDelegatedSessionPublication(execution)||programmaticPublications.has(execution)
           ||execution.identity.kind==='system'&&execution.identity.purpose==='workflow'&&execution.security.authority.snapshotSource?.().kind==='workflow') {
           await client.query("SELECT set_config('app.v2_assistant_id',$1,true)", [execution.assistant.id])
         }
@@ -129,6 +159,11 @@ async function transaction<T>(authority: SessionContextAuthority, sources: reado
         prepared = external && action==='retain' ? await prepare!(execution, sources, 'retain') : undefined
         if (prepared) await pinPreparedExternalSourceAuthority(client, execution, prepared)
         const value = await time('publication_write',()=>run(client,checked,annotationChecked))
+        // COMMIT's deferred-trigger phase can outlive statement_timeout while
+        // retaining the session lock needed by heartbeat/Stop. Flush the exact
+        // same checks as a bounded statement, then recheck live authority and
+        // cancellation before allowing the transaction to commit.
+        if (writeSessionId && !owner) await time('publication_constraints',()=>client.query('SET CONSTRAINTS ALL IMMEDIATE'))
         await execution.security.authority.assertCurrent()
         if (execution.lifecycle.abortSignal.aborted&&!finalizing || JSON.stringify(accumulator.evidence) !== before
           || host !== retainedHosts.get(execution) || !host && wiring !== getSharedRetainedSourceAuthority()) changed()
@@ -190,7 +225,7 @@ export function readNativeTitleGroupFrame(authority:SessionContextAuthority,head
 export function writeRetainedContextFrame<T>(authority:SessionContextAuthority,sources:readonly ScopeSource[],
  publish:(client:PoolClient)=>Promise<T>):Promise<T>{
  const {execution}=requireAuthority(authority)
- if(execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
+ if((execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member')&&!programmaticPublications.has(execution)
   ||execution.ownership.kind!=='workspace'||execution.surface.readOnly||execution.surface.systemRead
   ||execution.lifecycle.abortSignal.aborted)missing()
  return transaction(authority,structuredClone(sources),'retain',false,publish,undefined,undefined,undefined,true)
@@ -376,7 +411,7 @@ export async function withSessionMessagePublication<T>(authority:SessionContextA
  const time:PublicationMeasure=options?.measure??((_counter,run)=>run())
  if(turnToken&&stoppedTurnToken)changed()
  if(execution.lifecycle.sessionPersisted===false||!(execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member')
-  &&!nativeDelegatedSessionPublication(execution))changed()
+  &&!nativeDelegatedSessionPublication(execution)&&!programmaticPublications.has(execution))changed()
  return transaction(authority,combined.evidence.sources??[],'retain',false,async(client,_checked,annotationChecked)=>{
   messagePublications.set(client,{authority})
   try{

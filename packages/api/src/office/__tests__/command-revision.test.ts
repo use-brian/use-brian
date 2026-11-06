@@ -1,6 +1,8 @@
+import { createOfficeService } from '../service.js'
 import { describe, expect, it, vi } from 'vitest'
-import type { Message } from '@use-brian/core'
-import { applyOfficeCommand, PdfSnapshotSchema, type DocumentSnapshot, type PdfSnapshot, type PresentationSnapshot, type SpreadsheetSnapshot } from '@use-brian/office-model'
+import type { Message, OfficeToolPort } from '@use-brian/core'
+import { applyOfficeCommand, applyOfficeSnapshotCommand, documentRangePreimageHash, PdfSnapshotSchema, type DocumentSnapshot, type PdfSnapshot, type PresentationSnapshot, type SpreadsheetSnapshot } from '@use-brian/office-model'
+import { createApplyOfficeCommandsTool } from '@use-brian/core'
 import { generateAssistantOfficeCommands, officeRevisionFitRepairScope } from '../command-revision.js'
 
 const uid = (n: number) => `38000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -97,12 +99,11 @@ describe('[COMP:office/pdf-tools] target-native PDF command planning', () => {
   })
 
   it('projects bounded PDF targets and refuses no-target or comment-only revisions', async () => {
-    const { createOfficeService } = await import('../service.js')
     const snapshot = pdf()
     const createJob = vi.fn(async () => ({ id: uid(95), artifactId: snapshot.artifactId } as never))
     const raiseScope = vi.fn(async () => true)
     let access: { role: 'edit' | 'comment'; canEdit: boolean; canComment: boolean } = { role: 'edit', canEdit: true, canComment: true }
-    const service = createOfficeService({
+    const service = createOfficeService({captureObservation:async()=>null,
       generationAvailable: () => true,
       createShell: vi.fn(), deleteEmptyShell: vi.fn(),
       getArtifact: async () => ({
@@ -152,8 +153,9 @@ describe('[COMP:api/office-generation] Brian-native Office command planning', ()
     expect(prompt).toContain('Individual header/footer run IDs are not updateText or deleteObject targets')
     const catalogLine = prompt.split('\n').find((line) => line.startsWith('[{"kind":'))
     const catalog = JSON.parse(catalogLine ?? '[]')
-    expect(catalog).toHaveLength(24)
+    expect(catalog).toHaveLength(25)
     expect(catalog).toContainEqual({ kind: 'appendSpreadsheetRecords', required: ['sheetId', 'tableId', 'records'], optional: ['prototypeRow'] })
+    expect(catalog).toContainEqual({ kind: 'replaceTextRange', required: ['targetId', 'from', 'to', 'runs', 'preimageHash'], optional: [] })
     expect(catalog).toContainEqual({ kind: 'updateText', required: ['targetId', 'runs'], optional: [] })
     expect(catalog).toContainEqual({ kind: 'deleteObject', required: ['targetId'], optional: [] })
     expect(catalog).toContainEqual({ kind: 'insertDocumentNode', required: ['sectionId', 'node'], optional: ['index', 'beforeNodeId', 'afterNodeId'] })
@@ -164,7 +166,7 @@ describe('[COMP:api/office-generation] Brian-native Office command planning', ()
     expect(prompt).toContain('targetId, never id')
     expect(prompt).toContain('id, text, and style copied from the context')
     expect(prompt).toContain('Never put a bare text field on an operation')
-    expect(prompt).toContain('This is a document. Use only updateText, insertDocumentNode, deleteObject, and setObjectProperty.')
+    expect(prompt).toContain('This is a document. Use only updateText, replaceTextRange, insertDocumentNode, deleteObject, and setObjectProperty.')
     expect(prompt).toContain('Delete a document table row with deleteObject targeting the row ID')
   })
 
@@ -402,9 +404,8 @@ it('[COMP:office/fit-repair] exhausts repair candidates without multiplying LLM 
 })
 
 it('[COMP:api/office-generation] exposes native tables as semantic getOfficeArtifact targets', async () => {
-  const { createOfficeService } = await import('../service.js')
   const snapshot = tableSpreadsheet()
-  const service = createOfficeService({
+  const service = createOfficeService({captureObservation:async()=>null,
     getArtifact: async () => ({ id: snapshot.artifactId, family: 'spreadsheet', title: snapshot.title, headVersion: 1, lifecycleState: 'active', sensitivity: 'internal', compartments: [], projectIds: [] }),
     resolveAccess: async () => ({ role: 'edit' }), latestJob: async () => null, getSnapshot: async () => ({ snapshot }),
   } as never)
@@ -500,5 +501,81 @@ describe('default selection-scoped fit repair', () => {
     const commands = await generateAssistantOfficeCommands({ ...planParams(snapshot, [uid(26)]), instruction: 'Make this text 9pt', provider: model as never })
     expect(commands).toHaveLength(1)
     expect(commands[0]).toMatchObject({ targetId: uid(28), value: 9 })
+  })
+})
+
+
+describe('[COMP:office/tools] explicit canonical revision plans',()=>{
+  it.each(['document','presentation','spreadsheet','pdf'] as const)('replays %s operations with server attribution and no model call',async family=>{
+    const snapshot=family==='document'?document():family==='presentation'?presentation():family==='spreadsheet'?spreadsheet():pdf()
+    const target=family==='document'?uid(11):family==='presentation'?uid(26):family==='spreadsheet'?uid(43):uid(65)
+    const operation=family==='spreadsheet'?{kind:'setSpreadsheetCell',sheetId:uid(42),cellId:uid(43),address:'A1',valueType:'number',value:3}
+      :family==='pdf'?{kind:'setPdfFieldValue',fieldId:uid(65),value:'Revised'}
+      :{kind:'updateText',targetId:target,runs:[{id:family==='document'?uid(12):uid(28),text:'Revised',style}]}
+    const model=provider({commands:[]}),validateCandidate=vi.fn(async()=>{})
+    const commands=await generateAssistantOfficeCommands({provider:model as never,model:'test',snapshot,baseVersion:1,assistantId:uid(99),targetIds:[target],
+      instruction:'Apply explicit changes',operations:[operation],validateCandidate})
+    expect(model.requests).toHaveLength(0);expect(validateCandidate).toHaveBeenCalledOnce()
+    expect(commands).toHaveLength(1);expect(commands[0]).toMatchObject({artifactId:snapshot.artifactId,baseVersion:1,actor:{type:'assistant',id:uid(99)},origin:'ai'})
+  })
+  it.each(['explicit', 'planned'] as const)('preserves the merged footer layout controls through %s commands', async mode => {
+    const snapshot = document()
+    const operations = [
+      { kind: 'setObjectProperty', targetId: uid(10), path: ['page', 'footerDistancePt'], value: 18.25 },
+      { kind: 'setObjectProperty', targetId: uid(10), path: ['footerIndentLeftPt'], value: -4.5 },
+    ]
+    const model = provider({ commands: operations })
+    const commands = await generateAssistantOfficeCommands({ provider: model as never, model: 'test', snapshot,
+      baseVersion: 1, assistantId: uid(90), targetIds: [uid(10)], instruction: 'Set the selected footer layout',
+      ...(mode === 'explicit' ? { operations } : {}), validateCandidate: async () => {} })
+    let result = snapshot
+    for (const command of commands) result = applyOfficeSnapshotCommand(result, command) as DocumentSnapshot
+    expect(result.sections[0]?.page.footerDistancePt).toBe(18.25)
+    expect(result.sections[0]?.footerIndentLeftPt).toBe(-4.5)
+    expect(result.sections[0]?.nodes[0]).toEqual(snapshot.sections[0]?.nodes[0])
+    expect(model.requests).toHaveLength(mode === 'explicit' ? 0 : 1)
+  })
+  it.each(['explicit', 'planned'] as const)('replays %s Document text ranges without replacing surrounding formatting', async mode => {
+    const snapshot = document(), original = structuredClone(snapshot), model = provider({ commands: [] })
+    const operation = { kind: 'replaceTextRange', targetId: uid(11), from: 2, to: 6,
+      preimageHash: documentRangePreimageHash('igin'), runs: [{ id: uid(91), text: 'ANGE', style: { ...style, bold: true } }] }
+    const planner = mode === 'planned' ? provider({ commands: [operation] }) : model
+    const commands = await generateAssistantOfficeCommands({ ...planParams(snapshot, [uid(11)]), provider: planner as never,
+      ...(mode === 'explicit' ? { operations: [operation] } : {}) })
+    const revised = applyOfficeSnapshotCommand(snapshot, commands[0]!) as DocumentSnapshot
+    const node = revised.sections[0]!.nodes[0]!
+    expect(node.kind).toBe('paragraph')
+    if (node.kind !== 'paragraph') throw new Error('Expected paragraph')
+    expect(node.runs.map(run => run.text).join('')).toBe('OrANGEal')
+    expect(node.runs.map(run => [run.text, run.style.bold])).toEqual([['Or', false], ['ANGE', true], ['al', false]])
+    expect(snapshot).toEqual(original)
+    expect(model.requests).toHaveLength(0)
+    if (mode === 'planned') {
+      expect(planner.requests).toHaveLength(1)
+      expect(planner.requests[0]?.systemPrompt).toContain('This is a document. Use only updateText, replaceTextRange,')
+      expect(planner.requests[0]?.systemPrompt).toMatch(/Use only these operation kinds: [^\n]*replaceTextRange/)
+    }
+    await expect(generateAssistantOfficeCommands({ ...planParams(snapshot, [uid(11)]), provider: model as never,
+      operations: [{ ...operation, preimageHash: documentRangePreimageHash('stale') }] })).rejects.toThrow('preimage changed')
+    await expect(generateAssistantOfficeCommands({ ...planParams(snapshot, [uid(11)]), provider: model as never,
+      operations: [{ ...operation, to: 99 }] })).rejects.toThrow('outside the target')
+    await expect(generateAssistantOfficeCommands({ ...planParams(snapshot, [uid(11)]), provider: model as never,
+      operations: [{ ...operation, targetId: uid(12) }] })).rejects.toThrow()
+  })
+  it('does not repair or retry explicit plans that escape selection, change locks or place signatures',async()=>{
+    const model=provider({commands:[]}),base={provider:model as never,model:'test',snapshot:presentation(),baseVersion:1,assistantId:uid(99),targetIds:[uid(26)],instruction:'Apply'}
+    await expect(generateAssistantOfficeCommands({...base,operations:[{kind:'deleteObject',targetId:uid(27)}]})).rejects.toThrow()
+    await expect(generateAssistantOfficeCommands({...base,operations:[{kind:'placePdfSignature',targetId:uid(69)}]})).rejects.toThrow()
+    await expect(generateAssistantOfficeCommands({...base,operations:[{kind:'updateText',targetId:uid(26),runs:[],actor:{type:'user',id:uid(80)}}]})).rejects.toThrow()
+    expect(model.requests).toHaveLength(0)
+  })
+  it('queues typed operations through the shared revision service and respects policy',async()=>{
+    const revise=vi.fn(async(_input: Parameters<OfficeToolPort['revise']>[0])=>({jobId:uid(90),mode:'proposal' as const})),port={create:vi.fn(),get:vi.fn(),revise}
+    const tool=createApplyOfficeCommandsTool(port),context={userId:uid(80),assistantId:uid(99),workspaceId:uid(2),clearance:'internal'} as never
+    const input={artifactId:uid(1),targetIds:[uid(11)],expectedVersion:1,idempotencyKey:'explicit-fictional-request',commands:[{kind:'updateText' as const,targetId:uid(11),runs:[{id:uid(12),text:'Revised',style}]}]}
+    expect((await tool.execute(input,context)).data).toEqual({jobId:uid(90),mode:'proposal'})
+    expect(revise.mock.calls[0]?.[0]).toMatchObject({commandOperations:input.commands,targetIds:input.targetIds,expectedVersion:1})
+    expect((await createApplyOfficeCommandsTool(port,async()=>'block').execute(input,context)).isError).toBe(true)
+    expect(revise).toHaveBeenCalledOnce()
   })
 })

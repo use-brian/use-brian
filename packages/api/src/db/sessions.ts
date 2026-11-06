@@ -389,6 +389,26 @@ type CreateSessionParams = {
   expectedPolicyRevision?: string
 }
 
+/** Explicit machine admission; the database verifies the finite parent key. */
+export async function findOrCreateWorkspaceMcpSession(params: CreateSessionParams,
+  credential: { kind: 'brain_key' | 'assistant_key' | 'oauth_token'; id: string; selectionId?: string }): Promise<Session> {
+  // Like shared native session creation, metadata uses the canonical session writer.
+  // The database trigger still validates the machine receipt and live key.
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, params.userId)
+    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [params.workspaceId])
+    await client.query("SELECT set_config('app.session_creation_admission',$1,true)", [JSON.stringify({
+      protocol: '1', provenance: 'workspace_mcp', keyKind: credential.kind, keyId: credential.id, selectionId: credential.selectionId,
+    })])
+    const session = await insertSession(params, (sql, values) => client.query(sql, values), true)
+    await client.query('COMMIT')
+    return session
+  } catch (error) { await client.query('ROLLBACK'); throw error }
+  finally { client.release() }
+}
+
 export async function findOrCreateSession(params: CreateSessionParams): Promise<Session> {
   return findOrCreateSessionInternal(params, false)
 }

@@ -25,7 +25,7 @@ function browserAdapter(): SessionAdapter {
     if (navigator.onLine === false) throw new TypeError("Offline");
     const before = identity();
     let res: Response;
-    try { res = await authFetch(`${publicRuntimeConfig().apiUrl}/api${path}`); }
+    try { res = await authFetch(`${publicRuntimeConfig().apiUrl}/api${path}`, { signal: AbortSignal.timeout(15_000) }); }
     catch (error) { if (error instanceof AuthRefreshUnavailableError) return { status: 503 }; throw error; }
     if (before && identity() !== before) return { status: 409 };
     if (!res.ok) return { status: res.status };
@@ -60,7 +60,9 @@ export function AppSessionProvider({ children, adapter, serverUserId }: { childr
   }, [controller]);
   useEffect(() => {
     const recheck = () => {
-      if (document.visibilityState === "hidden" || controller.snapshot().session !== "authenticated") return;
+      const snapshot = controller.snapshot();
+      if (document.visibilityState === "hidden" ||
+          (snapshot.session !== "authenticated" && !(snapshot.session === "checking" && snapshot.connection !== "online"))) return;
       void controller.check().then(() => {
         const id = /^\/w\/([^/]+)/.exec(path)?.[1] ?? /^\/desktop\/chat\/([^/]+)/.exec(path)?.[1];
         if (id) void controller.admit(id, true);

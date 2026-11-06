@@ -54,7 +54,7 @@ export function useLiveRecordingPage(workspaceId: string, assistantId: string) {
   const failedWindowsRef = useRef(new WeakMap<LiveRecordingPage, number>());
 
   const prepare = useCallback(async (navigate = true): Promise<LiveRecordingPage | null> => {
-    const pages = await listViews({ workspaceId, state: "saved" }).catch(() => []);
+    const pages = await listViews({ workspaceId, state: "saved", signal: AbortSignal.timeout(5_000) }).catch(() => []);
     const items: SearchableSelectItem[] = [
       { value: LIVE_MEETING_NOTES, label: t.liveMeetingNotesFolder },
       { value: LIVE_NEW_ROOT, label: t.liveNewRoot },

@@ -503,6 +503,7 @@ export async function injectDocTools(
   const loadPageContext = async (
     instruction: string,
     selectedPageId?: string | null,
+    context?: import('@use-brian/core').ToolContext,
   ): Promise<string> => {
     const pageId = selectedPageId ?? null
     if (!pageId) {
@@ -513,7 +514,7 @@ export async function injectDocTools(
       ].join('\n')
     }
 
-    const current = await docPageStore.getVersionedPage(options.userId, pageId)
+    const current = await docPageStore.getVersionedPage(options.userId, pageId, context)
     if (!current) {
       return `The server-bound page ${pageId} is unavailable. Do not guess a replacement page.`
     }

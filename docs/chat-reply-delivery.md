@@ -66,6 +66,28 @@ does not change the live-input, writer or database guarantees above.
 
 ## Authenticated transcript reads
 
+### Attachments before the first message
+
+A native personal Chat upload that creates its staging session must use
+`createPersonalWebSession`, with the actor, authentication session and auth
+version taken from verified request claims. Use the resolved assistant's
+workspace and the selected Team/Project context. Never manufacture the personal
+session admission receipt through the legacy session upsert or accept auth
+claims from multipart fields. Missing authentication claims refuse the upload
+before parsing or caching the file. Existing-session uploads retain their
+current session-read gate and do not create another session.
+
+The 2026-11-04 attachment failure was a staging-session insert refused by
+`personal_session_admission_required`, before PDF parsing began.
+
+### Delivery refusals at the model boundary
+
+An output boundary must preserve a structured `delivery_audience_unverified`
+refusal so the chat route can report the existing destination-access error.
+It must still invalidate that execution and prevent later output. An input
+failure retains the generic model-context refusal, and private diagnostics
+such as the refused Team axis never enter the client error payload.
+
 The browser history endpoint must resolve the verified native caller's current
 read-only session authority and read the canonical admitted history, including
 its immutable source dependencies and topic annotations. It must revalidate

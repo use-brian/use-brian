@@ -35,7 +35,7 @@ describe('[COMP:app-web/workspace-access] request and administration paths',()=>
   it('exposes migration progress on the actual Organization Access route only to administrators',async()=>{
     await render({selection:{kind:'requests'}});expect(host.querySelector('[data-migration-progress]')).toBeNull();
     const data=fixture();data.canAdminister=true;mocks.fetch.mockResolvedValue(data);await act(async()=>invalidateSurfaceCache('workspace-access:'));
-    expect(host.querySelector('[data-migration-progress]')).not.toBeNull();
+    expect(host.querySelector('[data-migration-progress]')).toBeNull();
     expect(host.textContent).not.toContain(en.applicationManagement.title);
   });
   it('keeps person access scoped to the selected profile and clears it on selection changes',async()=>{

@@ -118,6 +118,15 @@ describe('[COMP:api/public-api-route] POST /assistants/:id/messages — auth', (
     expect((await post('a-1', { token: 'tok' })).status).toBe(401)
   })
 
+  it('keeps workspace consent out of the legacy public turn lane', async () => {
+    mockParseToken.mockReturnValueOnce({ keyId: 'k-1', secret: 'ok' })
+    apiKeyStore.getByIdSystem.mockResolvedValueOnce({ ...activeKey, workspaceMcpConsent: { version: 1 } })
+    mockVerifySecret.mockResolvedValueOnce(true)
+    const res = await post('a-1', { token: 'tok', body: {} })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('workspace_key_requires_mcp')
+  })
+
   it('passes auth but rejects an invalid request body with 400', async () => {
     mockParseToken.mockReturnValueOnce({ keyId: 'k-1', secret: 'ok' })
     apiKeyStore.getByIdSystem.mockResolvedValueOnce(activeKey)

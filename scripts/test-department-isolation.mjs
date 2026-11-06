@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
+import { tmpdir } from 'node:os'
+import { isDeepStrictEqual } from 'node:util'
+import { createAcceptanceReport, mergeAcceptanceReports, parseShard, suitesForShard } from './testing/department-isolation-report.mjs'
 import {
   DEPARTMENT_ISOLATION_BOUNDARIES,
   DEPARTMENT_ISOLATION_CASES,
-  DEPARTMENT_ISOLATION_CASE_IDS,
-  DEPARTMENT_ISOLATION_MANIFEST_REVISION,
   DEPARTMENT_ISOLATION_SUITES,
   departmentIsolationManifestCoverage,
 } from '../packages/shared/src/department-isolation-coverage.ts'
@@ -18,12 +19,20 @@ const args = process.argv.slice(2)
 let pgBin = process.env.BRIAN_TEST_PG_BIN
 let foundation = false
 let reportPath
+let shard = null
+let profile = 'full'
+let mergeDirectory
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--foundation') foundation = true
+  if (args[i] === '--profile' && args[i + 1]) profile = args[++i]
+  else if (args[i] === '--foundation') foundation = true
+  else if (args[i] === '--shard' && args[i + 1]) shard = parseShard(args[++i])
+  else if (args[i] === '--merge' && args[i + 1]) mergeDirectory = args[++i]
   else if (args[i] === '--pg-bin' && args[i + 1]) pgBin = args[++i]
   else if (args[i] === '--report' && args[i + 1]) reportPath = args[++i]
   else throw new Error(`Unknown or incomplete option: ${args[i]}`)
 }
+suitesForShard(shard, profile)
+if ((foundation && (shard || mergeDirectory)) || (shard && mergeDirectory)) throw new Error('--foundation, --shard and --merge are mutually exclusive')
 if (reportPath && !isAbsolute(reportPath)) throw new Error('--report must be an absolute JSON path')
 if (!foundation && !reportPath) throw new Error('Full mode requires --report <absolute-json-path>')
 
@@ -31,6 +40,9 @@ const sha256 = value => createHash('sha256').update(value).digest('hex')
 const relTest = (suite, testFile) => join(suite.packageDir, testFile)
 const relevantPaths = new Set([
   'scripts/test-department-isolation.mjs',
+  'scripts/testing/department-isolation-report.mjs',
+  'scripts/crm/local-fixture.mjs',
+  'apps/api/src/__tests__/prepared-pglite.ts',
   'packages/shared/src/department-isolation-coverage.ts',
   ...DEPARTMENT_ISOLATION_BOUNDARIES.flatMap(boundary => boundary.sourcePaths),
   ...DEPARTMENT_ISOLATION_SUITES.flatMap(suite => suite.testFiles.map(file => relTest(suite,file))),
@@ -85,23 +97,12 @@ function flattenNodeAssertions(report,suite) {
   return assertions
 }
 
-function evidenceFor(selectors,assertions) {
-  return selectors.map(selector=>{
-    const suiteAssertions=assertions.filter(assertion=>assertion.suiteId===selector.suiteId)
-    const fileAssertions=suiteAssertions.filter(assertion=>assertion.testFile.endsWith(selector.testFile))
-    const matches=fileAssertions.filter(assertion=>assertion.fullName.includes(selector.titleIncludes))
-    return {
-      ...selector,
-      actual:matches.map(match=>({testFile:match.testFile,fullName:match.fullName,status:match.status,durationMs:match.durationMs})),
-      passed:matches.length>0&&matches.every(match=>match.status==='passed'),
-      ...(matches.length===0?{candidates:(fileAssertions.length?fileAssertions:suiteAssertions).map(match=>({
-        testFile:match.testFile,fullName:match.fullName,status:match.status,
-      }))}:{}),
-    }
-  })
-}
 
 async function migrationRevision(url) {
+  if (!url) {
+    const rows = (await readdir(join(root, 'packages/api/migrations'))).filter(name => name.endsWith('.sql')).sort()
+    return { latest: rows.at(-1), count: rows.length, ledgerHash: sha256(rows.join('\n')) }
+  }
   const client=new pg.Client({connectionString:url})
   await client.connect()
   try {
@@ -110,26 +111,62 @@ async function migrationRevision(url) {
   } finally {await client.end()}
 }
 
+async function currentMetadata(env) {
+  const migrations = (await readdir(join(root, 'packages/api/migrations')))
+    .filter(name => name.endsWith('.sql')).map(name => `packages/api/migrations/${name}`)
+  return {
+    revision: (await runCommand('git', ['rev-parse', 'HEAD'], { cwd: root, env })).trim(),
+    sourceHashes: await hashes(new Set([...relevantPaths, ...migrations])), dirtySourceHashes: await dirtySourceHashes(env),
+  }
+}
+
+async function saveReport(report) {
+  if (report.mode === 'full' && report.cases.length !== DEPARTMENT_ISOLATION_CASES.length) {
+    throw new Error('Full acceptance report is missing registered cases')
+  }
+  if (reportPath) {
+    await mkdir(dirname(reportPath), { recursive: true })
+    await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 })
+  }
+  console.log(JSON.stringify({ mode: report.mode, profile: report.profile, profileAccepted: report.profileAccepted, revision: report.revision, report: reportPath ?? null,
+    ...report.counts, fullMatrixAccepted: report.fullMatrixAccepted }))
+}
+
 async function run() {
   validateAmbientDatabase(process.env)
   const manifestCoverage=departmentIsolationManifestCoverage()
   if(!manifestCoverage.complete)throw new Error(`Department isolation manifest is incomplete: ${JSON.stringify(manifestCoverage)}`)
-  const fixture = await createLocalFixture({ pgBin })
+  const metadata = await currentMetadata(cleanRuntimeEnvironment(process.env))
+  if (mergeDirectory) {
+    const paths = (await readdir(mergeDirectory)).filter(path => /^department-isolation-\d+\.json$/.test(path)).sort()
+    const reports = await Promise.all(paths.map(async path => JSON.parse(await readFile(join(mergeDirectory, path), 'utf8'))))
+    const report = mergeAcceptanceReports(reports, metadata, profile)
+    await saveReport(report)
+    if (!report.profileAccepted) throw new Error(`Department isolation acceptance failed; report: ${reportPath}`)
+    return
+  }
+  const selectedSuites=foundation
+    ? DEPARTMENT_ISOLATION_SUITES.filter(suite=>!['review-lifecycle','ui','compatibility'].includes(suite.id))
+    : suitesForShard(shard, profile)
+  const native = selectedSuites.some(suite => suite.packageDir !== 'apps/api')
+  const fixture = native ? await createLocalFixture({ pgBin, prepareTemplate: true }) : {
+    directory: await mkdtemp(join(tmpdir(), 'brian-isolation-report-')), env: {},
+    async dispose() { await rm(this.directory, { recursive: true, force: true }) },
+  }
   try {
     if(reportPath&&resolve(reportPath).startsWith(`${resolve(fixture.directory)}/`))throw new Error('--report must be outside the disposable fixture')
     const reports = join(fixture.directory, 'reports')
     await mkdir(reports)
     const runtime=cleanRuntimeEnvironment(process.env)
     const env = {
-      ...runtime,...fixture.env,CONTEXT_SCOPE_TEST_DATABASE_URL:fixture.adminUrl,
+      ...runtime,...fixture.env,...(fixture.adminUrl ? { CONTEXT_SCOPE_TEST_DATABASE_URL:fixture.adminUrl } : {}),
       CI:'true',GEMINI_API_KEY:'',OPENAI_API_KEY:'',ANTHROPIC_API_KEY:'',BRIAN_TEST_NO_PAID:'1',
     }
-    const selectedSuites=foundation
-      ? DEPARTMENT_ISOLATION_SUITES.filter(suite=>!['review-lifecycle','ui','compatibility'].includes(suite.id))
-      : DEPARTMENT_ISOLATION_SUITES
+    if (native) await runCommand('node', ['--test', 'scripts/__tests__/prepared-fixture.integration.test.mjs'], { cwd: root, env, inherit: true })
     const suiteResults=[]
     const assertions=[]
     for (const suite of selectedSuites) {
+      const startedAt = Date.now()
       const nodeSuite=suite.packageDir==='apps/api'
       const outputFile = join(reports, suite.id+(nodeSuite?'.xml':'.json'))
       const executionErrors=[]
@@ -137,7 +174,7 @@ async function run() {
       if(nodeSuite){
         try {
           await runCommand('node',[
-            '--import','tsx','--test','--test-reporter=junit',
+            '--import','tsx','--test','--test-concurrency=1','--test-reporter=junit',
             `--test-reporter-destination=${outputFile}`,...suite.testFiles,
           ],{
             cwd:join(root,suite.packageDir),env,
@@ -178,38 +215,18 @@ async function run() {
       const passed=actual.filter(assertion=>assertion.status==='passed').length
       const failed=actual.filter(assertion=>assertion.status==='failed').length
       const skipped=actual.length-passed-failed
-      suiteResults.push({id:suite.id,testFiles:[...suite.testFiles],actual:actual.length,passed,failed,skipped,
+      suiteResults.push({id:suite.id,durationMs:Date.now()-startedAt,testFiles:[...suite.testFiles],actual:actual.length,passed,failed,skipped,
         failures:actual.filter(assertion=>assertion.status!=='passed').map(assertion=>({testFile:assertion.testFile,fullName:assertion.fullName,status:assertion.status,failures:assertion.failures})),executionError})
     }
-    const cases=foundation?[]:DEPARTMENT_ISOLATION_CASES.map(entry=>{
-      const evidence=evidenceFor(entry.assertions,assertions)
-      return{id:entry.id,passed:evidence.length>0&&evidence.every(item=>item.passed),evidence}
+    if (!isDeepStrictEqual(metadata, await currentMetadata(env))) throw new Error('Source changed during acceptance execution')
+    const finalReport = createAcceptanceReport({
+      metadata: { ...metadata, migration: await migrationRevision(fixture.adminUrl) },
+      suites: suiteResults, assertions, foundation, shard, profile,
     })
-    const boundaries=foundation?[]:DEPARTMENT_ISOLATION_BOUNDARIES.map(entry=>{
-      const evidence=evidenceFor(entry.tests,assertions)
-      return{id:entry.id,family:entry.family,cases:[...entry.cases],passed:evidence.length>0&&evidence.every(item=>item.passed),evidence}
-    })
-    const suiteFailures=suiteResults.some(suite=>suite.executionError||suite.actual===0||suite.failed>0||suite.skipped>0)
-    const caseCoverage=new Set(cases.map(entry=>entry.id))
-    const manifestCasesComplete=DEPARTMENT_ISOLATION_CASE_IDS.every(id=>caseCoverage.has(id))
-    const fullMatrixAccepted=!foundation&&manifestCoverage.complete&&manifestCasesComplete&&!suiteFailures
-      &&cases.length===DEPARTMENT_ISOLATION_CASE_IDS.length&&cases.every(entry=>entry.passed)
-      &&boundaries.length===DEPARTMENT_ISOLATION_BOUNDARIES.length&&boundaries.every(entry=>entry.passed)
-    const revision=(await runCommand('git',['rev-parse','HEAD'],{cwd:root,env})).trim()
-    const finalReport={
-      formatVersion:1,mode:foundation?'foundation':'full',createdAt:new Date().toISOString(),
-      revision,manifestRevision:DEPARTMENT_ISOLATION_MANIFEST_REVISION,
-      migration:await migrationRevision(fixture.adminUrl),
-      manifestCoverage:{...manifestCoverage,caseIds:[...DEPARTMENT_ISOLATION_CASE_IDS],boundaryIds:DEPARTMENT_ISOLATION_BOUNDARIES.map(entry=>entry.id)},
-      sourceHashes:await hashes(relevantPaths),dirtySourceHashes:await dirtySourceHashes(env),
-      suites:suiteResults,cases,boundaries,
-      counts:{suites:suiteResults.length,assertions:assertions.length,passed:assertions.filter(item=>item.status==='passed').length,failed:assertions.filter(item=>item.status==='failed').length,skipped:assertions.filter(item=>!['passed','failed'].includes(item.status)).length},
-      fullMatrixAccepted,
+    await saveReport(finalReport)
+    if (!finalReport.suitesPassed || (!foundation && !shard && !finalReport.profileAccepted)) {
+      throw new Error(`Department isolation acceptance failed; report: ${reportPath}`)
     }
-    if(reportPath){await mkdir(dirname(reportPath),{recursive:true});await writeFile(reportPath,`${JSON.stringify(finalReport,null,2)}\n`,{mode:0o600})}
-    console.log(JSON.stringify({mode:finalReport.mode,revision,report:reportPath??null,...finalReport.counts,fullMatrixAccepted}))
-    if(!foundation&&!fullMatrixAccepted)throw new Error(`Department isolation acceptance failed; report: ${reportPath}`)
-    if(foundation&&suiteFailures)throw new Error('Department isolation foundation suite failed')
   } finally { await fixture.dispose() }
 }
 run().catch(error => { console.error(error.message); process.exitCode = 1 })

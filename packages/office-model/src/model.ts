@@ -180,6 +180,7 @@ export const OfficeTableSchema = NodeBaseSchema.extend({
     z.object({
       id: OfficeUuidSchema,
       minHeightPt: z.number().min(0).max(2_000).optional(),
+      heightRule: z.enum(['exact', 'atLeast']).optional(),
       cells: z.array(OfficeTableCellSchema).max(100),
     }).strict(),
   ).min(1).max(5_000),
@@ -279,7 +280,7 @@ export type DocumentFlowNode = z.infer<typeof DocumentFlowNodeSchema>
 export const DocumentSectionSchema = z
   .object({
     id: OfficeUuidSchema,
-    page: z.object({ widthPt: z.number().min(144).max(2_000), heightPt: z.number().min(144).max(2_000), marginTopPt: z.number().min(0).max(500), marginRightPt: z.number().min(0).max(500), marginBottomPt: z.number().min(0).max(500), marginLeftPt: z.number().min(0).max(500), orientation: z.enum(['portrait', 'landscape']) }).strict(),
+    page: z.object({ widthPt: z.number().min(144).max(2_000), heightPt: z.number().min(144).max(2_000), marginTopPt: z.number().min(0).max(500), marginRightPt: z.number().min(0).max(500), marginBottomPt: z.number().min(0).max(500), marginLeftPt: z.number().min(0).max(500), headerDistancePt: z.number().min(0).max(500).optional(), footerDistancePt: z.number().min(0).max(500).optional(), orientation: z.enum(['portrait', 'landscape']) }).strict(),
     header: z.array(OfficeRichTextRunSchema).max(1_000),
     footer: z.array(OfficeRichTextRunSchema).max(1_000),
     headerImage: z.object({
@@ -291,6 +292,7 @@ export const DocumentSectionSchema = z
     }).strict().optional(),
     headerAlignment: z.enum(['start', 'center', 'end']).optional(),
     footerAlignment: z.enum(['start', 'center', 'end']).optional(),
+    footerIndentLeftPt: z.number().min(-1000).max(1000).optional(),
     headerBorderBottom: z.object({ color: OfficeColorSchema, widthPt: z.number().positive().max(20) }).strict().optional(),
     footerBorderTop: z.object({ color: OfficeColorSchema, widthPt: z.number().positive().max(20) }).strict().optional(),
     showPageNumber: z.boolean(),

@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -15,8 +16,11 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       workflow.jobs['build-typecheck'],
       workflow.jobs['api-tests'],
       workflow.jobs['app-web-tests'],
+      workflow.jobs['offline-continuity'],
       workflow.jobs['heavyweight-tests'],
       workflow.jobs['remaining-tests'],
+      workflow.jobs['ci-scope'],
+      workflow.jobs['department-isolation-shards'],
       workflow.jobs['department-isolation'],
     ];
     for (const job of executionJobs) {
@@ -60,16 +64,88 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(remainingCommand).toContain("--filter='!@use-brian/core'");
     expect(remainingCommand).toContain("--filter='!app-web'");
     expect(remainingCommand).toContain("--filter='!@use-brian/app-desktop'");
+    expect(remainingCommand).toContain("--filter='!@use-brian/api-open'");
     expect(remainingCommand).toContain('--concurrency=4');
+    const embedded = workflow.jobs['embedded-database-tests'];
+    expect(embedded.strategy.matrix.shard).toEqual([1, 2, 3]);
+    expect(embedded.strategy['fail-fast']).toBe(false);
+    const nodeTests = embedded.steps.find((step: { name?: string }) => step.name === 'Embedded database tests');
+    expect(nodeTests.run).toContain('scripts/testing/embedded-database-tests.mjs ${{ matrix.shard }}');
+    expect(embedded.steps.find((step: { name?: string }) => step.name === 'Runtime unit tests').if).toBe('matrix.shard == 3');
+    const acceptance = workflow.jobs['department-isolation-shards'];
+    expect(acceptance.strategy.matrix.shard).toContain('fromJSON(needs.ci-scope.outputs.shards)');
+    expect(workflow.jobs['embedded-current-tests'].if).toBe("needs.ci-scope.outputs.historical == 'false'");
+    expect(embedded.if).toBe("needs.ci-scope.outputs.historical == 'true'");
+    expect(workflow.on.schedule).toHaveLength(1);
+    expect(workflow.on).toHaveProperty('workflow_dispatch');
+    expect(workflow.concurrency.group).toContain('nightly');
+    expect(acceptance.strategy['fail-fast']).toBe(false);
+    expect(acceptance.steps.find((step: { name?: string }) => step.name === 'Run no-credential acceptance').run)
+      .toContain('--shard ${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }}');
+    expect(acceptance.steps.find((step: { uses?: string }) => step.uses === 'actions/upload-artifact@v4').with.name)
+      .toContain('${{ matrix.shard }}');
+    const aggregate = workflow.jobs['department-isolation'];
+    expect(aggregate.needs).toEqual(['ci-scope', 'department-isolation-shards']);
+    expect(aggregate.if).toContain('always()');
+    expect(aggregate.steps.find((step: { name?: string }) => step.name === 'Verify complete acceptance evidence').run)
+      .toContain('--merge');
     expect(workflow.jobs['build-test'].needs).toEqual([
+      'ci-scope',
+      'embedded-current-tests',
       'build-typecheck',
       'api-tests',
       'app-web-tests',
+      'offline-continuity',
       'heavyweight-tests',
       'remaining-tests',
+      'embedded-database-tests',
       'department-isolation',
     ]);
     expect(workflow.jobs['build-test'].if).toContain('always()');
+  });
+
+  it('keeps offline regressions mandatory and executable in the focused lane', () => {
+    const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
+    const lane = workflow.jobs['offline-continuity'];
+    expect(lane['continue-on-error']).not.toBe(true);
+    const commands = lane.steps.filter((step: { run?: string }) => step.run?.includes('vitest run'));
+    expect(commands).toHaveLength(2);
+    for (const step of commands) {
+      expect(step.if).toBeUndefined();
+      expect(step['continue-on-error']).not.toBe(true);
+      expect(step.run).not.toMatch(/--passWithNoTests|--testNamePattern|\|\|\s*true/);
+      const directory = step.run.includes('--filter app-web ') ? 'apps/app-web' : 'apps/app-desktop';
+      const files = step.run.match(/(?:src|desktop)\/[^\s]+\.test\.tsx?/g) ?? [];
+      expect(files.length).toBeGreaterThan(0);
+      for (const file of files) expect(readFileSync(join(sourceRoot, directory, file), 'utf8')).toContain('[COMP:');
+    }
+    const app = commands[0].run;
+    for (const suite of ['app-session.test', 'auth-fetch.test', 'offline-bootstrap.test',
+      'offline-pages.test', 'offline-writes.test', 'use-offline-sync.test',
+      'recorder-engine-live.test', 'recording-player-context.test']) expect(app).toContain(suite);
+    for (const suite of ['desktop-auth.test', 'window-policy.test', 'desktop-token-store.test', 'desktop-packaging.test']) {
+      expect(commands[1].run).toContain(suite);
+    }
+    expect(workflow.jobs['build-test'].steps[0].env.OFFLINE_CONTINUITY_RESULT)
+      .toBe('${{ needs.offline-continuity.result }}');
+  });
+
+  it('fails the aggregate for every unsuccessful selected lane and unknown selection', () => {
+    const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
+    const script = workflow.jobs['build-test'].steps[0].run;
+    const base = Object.fromEntries(Object.keys(workflow.jobs['build-test'].steps[0].env).map(key => [key, 'success']));
+    for (const historical of ['true', 'false']) {
+      const env: Record<string, string | undefined> = { ...process.env, ...base, HISTORICAL: historical,
+        EMBEDDED_CURRENT_RESULT: historical === 'true' ? 'skipped' : 'success',
+        EMBEDDED_DATABASE_TESTS_RESULT: historical === 'true' ? 'success' : 'skipped' };
+      expect(spawnSync('bash', ['-c', script], { env }).status).toBe(0);
+      for (const key of Object.keys(base).filter(key => key !== 'HISTORICAL' && env[key] === 'success')) {
+        for (const result of ['failure', 'cancelled', 'skipped', '']) {
+          expect(spawnSync('bash', ['-c', script], { env: { ...env, [key]: result } }).status).not.toBe(0);
+        }
+      }
+      expect(spawnSync('bash', ['-c', script], { env: { ...env, HISTORICAL: '' } }).status).not.toBe(0);
+    }
   });
 
   it('bounds internal Vitest fan-out for subprocess and socket-heavy suites', () => {

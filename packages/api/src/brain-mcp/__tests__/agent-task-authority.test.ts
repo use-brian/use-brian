@@ -19,19 +19,6 @@ vi.mock('../tools.js', () => ({
   buildBrainTools: state.buildTools,
   resolveAgentCapabilities: async () => new Set(),
 }))
-vi.mock('@modelcontextprotocol/sdk/server/mcp.js', () => ({
-  McpServer: class {
-    async connect() {}
-    async close() {}
-  },
-}))
-vi.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
-  StreamableHTTPServerTransport: class {
-    async handleRequest(_req: unknown, res: express.Response) { res.status(200).json({ ok: true }) }
-    async close() {}
-  },
-}))
-
 describe('[COMP:api/brain-mcp] Home-app consult authority', () => {
   const auth: BrainAuth = {
     keyId: 'app-fixture', workspaceId: 'workspace-fixture', scope: 'read',
@@ -52,7 +39,9 @@ describe('[COMP:api/brain-mcp] Home-app consult authority', () => {
     app.use('/', brainMcpRoutes({ agentTask, brainKeyStore: {} as never,
       memoryTools: {} as never, taskTools: {} as never, crmTools: {} as never,
       retrievalTools: {} as never }))
-    await request(app).post('/').send({ actingUserId: 'owner-fixture', maxClearance: 'confidential' }).expect(200)
+    await request(app).post('/').set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', id: 1, method: 'tools/list',
+        params: { actingUserId: 'owner-fixture', maxClearance: 'confidential' } }).expect(200)
     return { agentTask, toolOptions: state.buildTools.mock.calls[0]![0] }
   }
 

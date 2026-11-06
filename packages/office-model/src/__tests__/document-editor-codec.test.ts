@@ -24,6 +24,7 @@ function completeDocumentFixture() {
     headerImage: { resourceId: id(80), altText: 'Fictional logo', decorative: false, widthPt: 90, heightPt: 24 },
     headerAlignment: 'center',
     footerAlignment: 'end',
+    footerIndentLeftPt: -5.45,
     headerBorderBottom: { color: '#123456', widthPt: 1 },
     footerBorderTop: { color: '#654321', widthPt: 2 },
     nodes: [

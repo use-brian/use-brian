@@ -5,13 +5,15 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { runReflectionConsolidation, type ScopeSource } from '@use-brian/core'
 // Native loading preserves the maintained fixture's import.meta.resolve in Node22.
-const { assertLocalFixture,createLocalFixture,cleanRuntimeEnvironment,runCommand } = createRequire(import.meta.url)(
+const { assertLocalFixture,createLocalFixture,cloneLocalFixture,cleanRuntimeEnvironment,runCommand } = createRequire(import.meta.url)(
   fileURLToPath(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url)))
 // Refuse plain/ambient invocation before creating any fixture or DB-bound module.
 await assertLocalFixture()
 const runtime=cleanRuntimeEnvironment(process.env)
 const pgBin=(await runCommand('pg_config',['--bindir'],{env:runtime})).trim()
-const isolatedFixture=await createLocalFixture({pgBin,env:runtime})
+const isolatedFixture=process.env.BRIAN_ASSURANCE_TEMPLATE
+  ? await cloneLocalFixture(process.env)
+  : await createLocalFixture({pgBin,env:runtime})
 const previousEnvironment=new Map<string,string|undefined>(Object.keys(isolatedFixture.env).map(key=>[key,process.env[key]]))
 let closePools:(()=>Promise<void>)|undefined,disposed=false
 async function disposeReflectionFixture(){

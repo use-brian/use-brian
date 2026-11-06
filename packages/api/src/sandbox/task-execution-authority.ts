@@ -1,4 +1,8 @@
-import { AuthoritySourceSchema, pinAccessCeiling, parseAuthoringAuthority, type CurrentAuthorityBoundary, type SandboxTaskRecord } from '@use-brian/core'
+import { restoreWorkspaceMcpDelegation } from '../workspace-mcp/delegation.js'
+import { createDbCapabilityStore } from '../db/capability-store.js'
+import { bindWorkspaceMcpPublication } from '../db/session-context-revisions.js'
+import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
+import { intersectAccessCeilings, AuthoritySourceSchema, pinAccessCeiling, parseAuthoringAuthority, type CurrentAuthorityBoundary, type SandboxTaskRecord } from '@use-brian/core'
 import { createAuthorityLease, createSessionAuthorityLease } from '../context-scope/authority-lease.js'
 import { resolveLiveAccessCeilingSystem } from '../context-scope/resolve-turn-scope.js'
 import { findAssistantById } from '../db/users.js'
@@ -18,13 +22,37 @@ export async function resolveBrowserTaskExecutionAuthority(task: Pick<SandboxTas
   if (parsedSource && !parsedSource.success) throw unavailable()
   const source = parsedSource?.data
   if (!source) throw unavailable()
+  const parent = frozen.workspaceDelegation
+    ? await restoreWorkspaceMcpDelegation(frozen.workspaceDelegation,createDbCapabilityStore()) : undefined
+  const bounded = (original: CurrentAuthorityBoundary): CurrentAuthorityBoundary => {
+    if (!parent) return original
+    const execution=parent.context.executionContext!
+    bindWorkspaceMcpPublication(execution)
+    const lease=createAuthorityLease(frozen.ceiling,async()=>{
+      await execution.security.authority.assertCurrent()
+      await original.assertCurrent()
+      return intersectAccessCeilings(frozen.ceiling,execution.security.ceiling)
+    })
+    return {
+      ...lease,
+      async execute<T>(operation:()=>Promise<T>):Promise<T> {
+        return lease.execute(async()=>{
+          await assertSourceModelInputAuthority(parent.context)
+          const result=await operation()
+          await assertSourceModelInputAuthority(parent.context)
+          return result
+        })
+      },
+    }
+  }
+
   if (source?.kind === 'workflow') {
     if (source.authorityUserId !== task.userId || source.workspaceId !== task.workspaceId
       || source.executingAssistantId !== frozen.assistantId) throw unavailable()
-    return createAuthorityLease(frozen.ceiling, async () => {
+    return bounded(createAuthorityLease(frozen.ceiling, async () => {
       const current = await resolveRetainedWorkflowSource(source, transaction)
       return pinAccessCeiling(current.turnScope.access)
-    })
+    }))
   }
   // A locked file connection cannot safely fall back to owner-pool resolution.
   if (transaction) throw unavailable()
@@ -40,7 +68,7 @@ export async function resolveBrowserTaskExecutionAuthority(task: Pick<SandboxTas
       nativeSessionCredential:source.nativeCredential,
       memberMode: source.memberMode, ignoreSessionBinding: source.ignoreSessionBinding, systemRead: source.systemRead,
     })
-    return createAuthorityLease(frozen.ceiling, async () => {
+    return bounded(createAuthorityLease(frozen.ceiling, async () => {
       await sessionLease.assertCurrent()
       // Unlike findSessionById, this authority-only read must not refresh activity.
       const session = (await query<Parameters<typeof gateSessionRead>[1] & { contextBindingOrigin: string }>(`SELECT id, user_id AS "userId", assistant_id AS "assistantId",
@@ -53,10 +81,10 @@ export async function resolveBrowserTaskExecutionAuthority(task: Pick<SandboxTas
         || await gateSessionRead(source.authorityUserId, session)) return null
       await sessionLease.assertCurrent()
       return frozen.ceiling
-    })
+    }))
   }
-  return createAuthorityLease(frozen.ceiling, async () => {
-    if (source?.kind === 'invocation') {
+  return bounded(createAuthorityLease(frozen.ceiling, async () => {
+    if (source?.kind === 'invocation' && !parent) {
       if (!caller?.snapshotSource || caller.snapshotSource().invocationId !== source.invocationId) return null
       await caller.assertCurrent()
     }
@@ -66,5 +94,5 @@ export async function resolveBrowserTaskExecutionAuthority(task: Pick<SandboxTas
       userId: task.userId, workspaceId: task.workspaceId, assistant,
       key: { contextGroupId: frozen.ceiling.departmentRead?.contextDepartment ?? null, contextProjectId: null },
     })
-  })
+  }))
 }

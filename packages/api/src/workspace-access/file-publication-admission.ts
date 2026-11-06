@@ -88,7 +88,7 @@ export async function admitUploadedFile(client: PoolClient, actor: string, input
   if (binding.executingAssistantId && binding.executingAssistantId!==access?.assistantId) throw denied()
   const policy=await readAdmissionPolicy(client,input.workspaceId)
   if (usesClassicModeAdmission(policy) && !binding.ready) throw new WorkspaceAccessError('access_policy_conflict',409)
-  const after={...input,...binding,createdByUserId:actor,createdByAssistantId:null}
+  const after={...input,...binding,createdByUserId:actor,createdByAssistantId:upload.transfer_binding?.sessionId ? upload.assistant_id : null}
   await admitBoundFile(client,actor,after,binding,access)
   return after
 }

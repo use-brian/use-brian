@@ -132,7 +132,7 @@ describe('[COMP:api/application-governance] complete native owner and compiled c
     await source('company');await protect('company')
     const value=await catalog();expect(value.configurationOperations).toEqual([{operationKey:'set_mode',inputFields,requiredRoleKeys:['controller']}]);expect(value.operations).toContain('configure')
     const tools=await buildNativeApplicationGovernanceMcpTools(getAppPool(),await execution(),'native'),tool=tools.find(value=>value.name==='applicationGovernancePreview')!
-    const schema=z.object(tool.inputSchema);expect(schema.safeParse({moduleKey:'native',expectedRevision:value.revision,operation:configure()}).success).toBe(true)
+    const schema=tool.inputSchema instanceof z.ZodType?tool.inputSchema:z.object(tool.inputSchema);expect(schema.safeParse({moduleKey:'native',expectedRevision:value.revision,operation:configure()}).success).toBe(true)
     expect(schema.safeParse({moduleKey:'native',expectedRevision:value.revision,operation:configure('invented')}).success).toBe(false)
     await expect(asMember(client=>client.query("INSERT INTO application_native_configuration_operations(module_key,operation_key,input_fields,required_role_keys,apply_handler) VALUES('native','injected','[]',ARRAY['controller'],'native_governance_fixture_configure(uuid,jsonb)'::regprocedure)"))).rejects.toMatchObject({code:'42501'})
     await expect(preview({...configure(),handler:'injected'})).rejects.toMatchObject({code:'invalid_value'})

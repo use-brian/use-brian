@@ -17,22 +17,26 @@ describe('[COMP:office/deck-retirement] Legacy Deck retirement', () => {
 
   it('advertises only the canonical Office replacement tools', () => {
     expect(OFFICIAL_CONNECTOR_TOOLS.office.map((tool) => tool.name)).toEqual([
+      'listOfficeTemplates',
       'proposeOfficeEvidenceFill',
       'createOfficeArtifact',
       'getOfficeClassification',
       'restrictOfficeClassification',
       'retryOfficeTemplateImport', 'resumeOfficeGeneration',
+      'restoreOfficeVersion', 'assignOfficeComment', 'resolveOfficeComment', 'exportOfficeArtifact', 'changeOfficeLifecycle', 'cancelOfficeJob', 'applyOfficeCommands', 'getOfficeHistory', 'getOfficeComments', 'getOfficeSuggestions', 'listOfficeArtifacts',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
       'openPdfEditingSession',
       'placePdfSignature',
     ])
     expect(BOOT_INJECTED_BUILTIN_TOOLS.office).toEqual([
+      'listOfficeTemplates',
       'proposeOfficeEvidenceFill',
       'createOfficeArtifact',
       'getOfficeClassification',
       'restrictOfficeClassification',
       'retryOfficeTemplateImport', 'resumeOfficeGeneration',
+      'restoreOfficeVersion', 'assignOfficeComment', 'resolveOfficeComment', 'exportOfficeArtifact', 'changeOfficeLifecycle', 'cancelOfficeJob', 'applyOfficeCommands', 'getOfficeHistory', 'getOfficeComments', 'getOfficeSuggestions', 'listOfficeArtifacts',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
       'openPdfEditingSession',

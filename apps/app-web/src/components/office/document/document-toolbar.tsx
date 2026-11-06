@@ -27,7 +27,7 @@ import {
   currentDocumentSectionAttributes, deleteSelectedDocumentNode, documentProductivity, documentSelectionFormatting,
   documentSelectionHasStyle, findDocumentText, focusDocumentHeading, insertDocumentBreak, insertDocumentTable,
   replaceDocumentText, runDocumentTableAction, selectedDocumentNode, setDocumentBlockAttributes,
-  setDocumentBlockStyle, setDocumentCellAttributes, setDocumentSectionAttributes, setDocumentTableAttributes,
+  setDocumentBlockStyle, setDocumentCellAttributes, setDocumentRowAttributes, setDocumentSectionAttributes, setDocumentTableAttributes,
   toggleDocumentRunStyle, updateSelectedDocumentNode, type DocumentAlignment, type DocumentBlockStyle,
 } from "./editor-actions";
 
@@ -216,9 +216,15 @@ function InsertMenu({ editor, editable, onInsertImage, editLink }: { editor: Edi
 
 function SpacingMenu({ editor, editable }: { editor: Editor | null; editable: boolean }) {
   const t = useT().office;
+  const block = selectedDocumentNode(editor, "officeTableCellText") ?? selectedDocumentNode(editor, "paragraph") ?? selectedDocumentNode(editor, "heading");
   return <DropdownMenu>
     <DropdownMenuTrigger render={<button type="button" disabled={!editable} className={officeToolbarButtonClassName}>{t.spacing}<ChevronDown className="size-3" /></button>} />
-    <DropdownMenuContent align="start">
+    <DropdownMenuContent align="start" className="max-h-[min(40rem,var(--available-height))] max-w-[calc(100vw-1.5rem)] overflow-y-auto">
+      {block ? <div className="space-y-2 p-2" onKeyDown={(event) => { if (event.key !== "Escape") event.stopPropagation(); }}>
+        <label className="block text-xs">{t.lineHeightPt}<input type="number" min={0.1} max={1000} step={0.05} value={block.node.attrs.lineSpacingPt ?? ""} onChange={(event) => setDocumentBlockAttributes(editor, event.target.value ? { lineSpacingPt: Number(event.target.value) } : { lineSpacingPt: null, lineSpacingRule: null, lineSpacingMultiple: null }, false)} className={`${officeInputClassName} mt-1 w-full`} /></label>
+        <label className="block text-xs">{t.paragraphBeforePt}<input type="number" min={0} max={1000} step={0.05} value={block.node.attrs.spacingBeforePt ?? 0} onChange={(event) => setDocumentBlockAttributes(editor, { spacingBeforePt: Number(event.target.value) }, false)} className={`${officeInputClassName} mt-1 w-full`} /></label>
+        <label className="block text-xs">{t.paragraphAfterPt}<input type="number" min={0} max={1000} step={0.05} value={block.node.attrs.spacingAfterPt ?? 0} onChange={(event) => setDocumentBlockAttributes(editor, { spacingAfterPt: Number(event.target.value) }, false)} className={`${officeInputClassName} mt-1 w-full`} /></label>
+      </div> : null}
       {[12, 15, 18, 24].map((value) => <DropdownMenuItem key={value} onClick={() => setDocumentBlockAttributes(editor, { lineSpacingPt: value })}>{t.lineSpacingValue.replace("{value}", String(value))}</DropdownMenuItem>)}
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => setDocumentBlockAttributes(editor, { spacingBeforePt: 6 })}>{t.addSpaceBefore}</DropdownMenuItem>
@@ -259,10 +265,10 @@ function PageSetupMenu({ editor, editable, section, onInsertHeaderImage }: { edi
   const t = useT().office;
   const page = section?.page as Record<string, number | string> | undefined;
   const showPageNumber = section?.showPageNumber === true;
-  function patchPage(patch: Record<string, number | string>) { setDocumentSectionAttributes(editor, { page: { ...page, ...patch } }); }
+  function patchPage(patch: Record<string, number | string>) { setDocumentSectionAttributes(editor, { page: { ...page, ...patch } }, false); }
   return <Popover>
     <PopoverTrigger render={<button type="button" disabled={!editable} className={officeToolbarButtonClassName}>{t.pageSetup}<ChevronDown className="size-3" /></button>} />
-    <PopoverContent align="start" className="w-72">
+    <PopoverContent align="start" className="w-72 max-w-[calc(100vw-1.5rem)] max-h-[min(40rem,var(--available-height))] overflow-y-auto">
       <label className="text-xs font-medium">{t.pageSize}</label>
       <Select value={pageSizeKey(page)} onValueChange={(value) => {
         const size = value ? PAGE_SIZES[value as keyof typeof PAGE_SIZES] : null;
@@ -277,6 +283,10 @@ function PageSetupMenu({ editor, editable, section, onInsertHeaderImage }: { edi
       }}><SelectTrigger className="max-md:min-h-11 w-full"><SelectValue>{page?.orientation === "landscape" ? t.landscape : t.portrait}</SelectValue></SelectTrigger><SelectContent><SelectItem value="portrait">{t.portrait}</SelectItem><SelectItem value="landscape">{t.landscape}</SelectItem></SelectContent></Select>
       <div className="grid grid-cols-2 gap-2">
         {(["marginTopPt", "marginRightPt", "marginBottomPt", "marginLeftPt"] as const).map((key) => <label key={key} className="text-xs">{t[key]}<input type="number" min={0} max={500} value={Number(page?.[key] ?? 72)} onChange={(event) => patchPage({ [key]: Number(event.target.value) })} className={`${officeInputClassName} mt-1 w-full`} /></label>)}
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="text-xs">{t.footerDistancePt}<input type="number" min={0} max={500} step={0.05} value={Number(page?.footerDistancePt ?? 36)} onChange={(event) => patchPage({ footerDistancePt: Number(event.target.value) })} className={`${officeInputClassName} mt-1 w-full`} /></label>
+        <label className="text-xs">{t.footerIndentLeftPt}<input type="number" min={-500} max={500} step={0.05} value={Number(section?.footerIndentLeftPt ?? 0)} onChange={(event) => setDocumentSectionAttributes(editor, { footerIndentLeftPt: Number(event.target.value) }, false)} className={`${officeInputClassName} mt-1 w-full`} /></label>
       </div>
       <div className="flex gap-2">
         <button type="button" className={buttonVariants({ variant: "outline", size: "sm" })} onClick={onInsertHeaderImage}>{section?.headerImage ? t.replaceHeaderImage : t.headerImage}</button>
@@ -298,9 +308,22 @@ function PageSetupMenu({ editor, editable, section, onInsertHeaderImage }: { edi
 
 function TableMenu({ editor, editable, table }: { editor: Editor | null; editable: boolean; table: import("@tiptap/pm/model").Node }) {
   const t = useT().office;
+  const row = selectedDocumentNode(editor, "officeTableRow")?.node;
+  const cell = selectedDocumentNode(editor, "officeTableCell")?.node;
+  const cellMargins = cell?.attrs.margins ?? table.attrs.margins ?? { topPt: 0, rightPt: 2, bottomPt: 0, leftPt: 2 };
   return <DropdownMenu>
     <DropdownMenuTrigger render={<button type="button" disabled={!editable} className={`${officeToolbarButtonClassName} bg-muted`}><Table2 className="size-3.5" />{t.tableActions}</button>} />
-    <DropdownMenuContent align="start">
+    <DropdownMenuContent align="start" className="max-h-[min(40rem,var(--available-height))] max-w-[calc(100vw-1.5rem)] overflow-y-auto">
+      {row ? <div className="space-y-2 p-2" onKeyDown={(event) => { if (event.key !== "Escape") event.stopPropagation(); }}>
+        <label className="block text-xs">{t.rowHeightPt}<input type="number" min={0.1} max={2000} step={0.05} value={row.attrs.minHeightPt ?? ""} onChange={(event) => setDocumentRowAttributes(editor, event.target.value ? { minHeightPt: Number(event.target.value) } : { minHeightPt: null, heightRule: null })} className={`${officeInputClassName} mt-1 w-full`} /></label>
+        <label className="flex items-center gap-2 text-xs max-md:min-h-11"><Checkbox checked={row.attrs.heightRule === "exact"} onCheckedChange={(checked) => setDocumentRowAttributes(editor, { minHeightPt: row.attrs.minHeightPt ?? 18, heightRule: checked ? "exact" : "atLeast" })} />{t.exactRowHeight}</label>
+      </div> : null}
+      {cell ? <div className="space-y-2 p-2" onKeyDown={(event) => { if (event.key !== "Escape") event.stopPropagation(); }}>
+        <p className="text-xs font-medium">{t.cellPadding}</p>
+        <div className="grid grid-cols-2 gap-2">
+          {(["topPt", "rightPt", "bottomPt", "leftPt"] as const).map((key, index) => <label key={key} className="text-xs">{t[(["marginTopPt", "marginRightPt", "marginBottomPt", "marginLeftPt"] as const)[index]]}<input type="number" min={0} max={500} step={0.05} value={Number(cellMargins[key])} onChange={(event) => setDocumentCellAttributes(editor, { margins: { ...cellMargins, [key]: Number(event.target.value) } }, false)} className={`${officeInputClassName} mt-1 w-full`} /></label>)}
+        </div>
+      </div> : null}
       <DropdownMenuItem onClick={() => runDocumentTableAction(editor, "addRow")}>{t.addRow}</DropdownMenuItem>
       <DropdownMenuItem onClick={() => runDocumentTableAction(editor, "deleteRow")}>{t.deleteRow}</DropdownMenuItem>
       <DropdownMenuItem onClick={() => runDocumentTableAction(editor, "addColumn")}>{t.addColumn}</DropdownMenuItem>

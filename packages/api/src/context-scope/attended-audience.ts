@@ -10,10 +10,11 @@ import {readApplicationFieldAncestors} from '../application-platform/field-evide
 import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
 import {readPersistentSessionContextAncestors} from '../db/session-context-ancestry.js'
 import {pinPreparedExternalSourceAuthority,assertPreparedExternalSourceAuthorityCurrent,type PreparedExternalSourceAuthority} from '../application-platform/retained-source-authority.js'
-import {validateAudienceScopeEvidence,validateCallerScopeEvidence,scopeEvidenceFailureOf} from './caller-evidence.js'
+import {validateAudienceScopeEvidence,validateCallerScopeEvidence,tryValidateNativeScopeEvidence,scopeEvidenceFailureOf} from './caller-evidence.js'
 import {createDeliveryAudienceAuthorizer,createDeliveryAudienceEnvelopeResolver,DeliveryAudienceUnverifiedError,type AuthorizeDeliveryAudience,type DeliveryAudienceInput} from './delivery-authority.js'
 import {classifySession,isWebTransport,policyFor} from '../session-kind.js'
 import {readSessionById} from '../db/sessions.js'
+import {hasWorkspaceMcpRetainedAuthority} from '../db/session-context-revisions.js'
 import {findAssistantById} from '../db/users.js'
 
 type Prepare=(execution:ExecutionContext,sources:readonly ScopeSource[],action:'context'|'deliver')=>Promise<PreparedExternalSourceAuthority>
@@ -25,8 +26,9 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
  try{
   const evidence=new ContextScopeAccumulator(execution.security.provenance);evidence.note(structuredClone(rawEvidence))
   const recipient=structuredClone(rawRecipient),workspaceId=execution.security.access.workspaceId,actor=execution.security.access.userId
-  if(execution.ownership.kind!=='workspace'||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
-   ||execution.identity.principal.userId!==actor||recipient.workspaceId!==workspaceId||recipient.userId!==''&&recipient.userId!==actor)denied()
+  const machine=hasWorkspaceMcpRetainedAuthority(execution)
+  if(execution.ownership.kind!=='workspace'||!machine&&(execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
+   ||execution.identity.principal.userId!==actor)||recipient.workspaceId!==workspaceId||recipient.userId!==''&&recipient.userId!==actor)denied()
   await execution.security.authority.assertCurrent()
   let sources=evidence.evidence.sources??[]
   if(sources.some(source=>source.workspaceId!==workspaceId))denied()
@@ -48,15 +50,18 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
    const current=await validateAudienceScopeEvidence(evidence.evidence,recipient)
    await execution.security.authority.assertCurrent();return current
   }
+  let nativeFieldProof:ScopeSource[]=[]
   if(anonymous){
    if(hasExternal)denied()
    const ids=[...new Set(sources.filter(source=>source.resourceKind==='application_field').map(source=>source.resourceId))]
    if(ids.length){
-    // Private metadata only. This rejects member-specific field families for
-    // an anonymous destination; actual native admission still follows in SQL.
+    // Metadata is not admission. Fields outside the original session allowlist
+    // must independently complete the existing closed native reader below.
     const rows=(await getPool().query<{id:string;closed:boolean}>(`SELECT id,origin='{"kind":"native","moduleKey":"native"}'::jsonb
      AND type_key IN('session_message','session_message_annotation') AS closed FROM application_field_resources WHERE workspace_id=$1 AND id=ANY($2::uuid[])`,[workspaceId,ids])).rows
-    if(rows.length!==ids.length||rows.some(row=>!row.closed))denied()
+    if(rows.length!==ids.length)denied()
+    const unproved=new Set(rows.filter(row=>!row.closed).map(row=>row.id))
+    nativeFieldProof=sources.filter(source=>source.resourceKind==='application_field'&&unproved.has(source.resourceId))
    }
   }
   if(hasExternal&&!options.directHumanSource)denied()
@@ -81,7 +86,17 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
     FROM pg_roles r JOIN pg_class c ON c.oid='session_messages'::regclass WHERE r.rolname=current_user`)).rows[0]
    if(role?.bypass!==false)denied()
    await runWithAgentAccess({...execution.security.access,...bounded,sharedAudience:anonymous||execution.security.access.sharedAudience},()=>applyRLSGucs(client,actor))
+   if(machine)await client.query("SELECT set_config('app.v2_assistant_id',$1,true)",[execution.assistant.id])
    await client.query('SELECT id FROM workspaces WHERE id=$1 FOR SHARE',[workspaceId])
+   if(nativeFieldProof.length){
+    // This is the same source/recipient proof used for a standalone native
+    // closure, on the original actor's non-owner transaction. Null refuses;
+    // machine identity never exempts a field from proof. Keep all original
+    // roots and validate the complete mixed ancestry below under these locks.
+    const current=await tryValidateNativeScopeEvidence({sources:nativeFieldProof},recipient,client,'audience')
+    if(!current)denied()
+    evidence.note(current)
+   }
    await applyApplicationRLSContext(client,execution)
    if(contextProof){
     await pinPreparedExternalSourceAuthority(client,execution,contextProof)

@@ -101,12 +101,12 @@ export function ChatContextBar({ context, disabled }: { context: CreationContext
   const project = context.choices?.projects.find(project => project.id === context.projectId)?.name ?? copy.contextScope.addProject;
   const audience = context.intent === "private" ? t.viewPersonal : t.viewWorkspace;
   const AudienceIcon = context.intent === "private" ? LockKeyhole : UsersRound;
-  const review = context.error || context.reviewNeeded;
+  const review = context.denied || context.reviewNeeded;
   return <div ref={ref} data-chat-scope-band className="w-full px-1 pb-2">
     {compact ? <OptionsSheet open={open} onOpenChange={setOpen} title={t.contextSettingsTitle} description={t.contextSettingsDescription}
       trigger={<Dialog.Trigger data-chat-context-summary className="flex min-h-8 max-md:min-h-11 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-left text-xs text-muted-foreground hover:bg-muted">
         <FolderKanban className="size-4 shrink-0" aria-hidden />
-        <span className="min-w-0 flex-1 truncate">{review ? t.reviewContext : !context.ready ? t.chooseContext : `${audience} · ${team} · ${project}`}</span>
+        <span className="min-w-0 flex-1 truncate">{review ? t.reviewContext : !context.ready && (context.error || context.offline) ? (context.offline ? copy.modeContext.offlineDraft : copy.modeContext.reconnecting) : !context.ready ? t.chooseContext : `${audience} · ${team} · ${project}`}</span>
         <SlidersHorizontal className="size-4 shrink-0" aria-hidden />
       </Dialog.Trigger>}>
       <ModeAwareCreationContext context={context} disabled={disabled} />

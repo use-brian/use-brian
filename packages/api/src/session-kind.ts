@@ -61,7 +61,7 @@ export type Transport =
 export type Lane = 'conversation' | 'machine'
 
 /** Which machine lane a `lane='machine'` row is (D17). Null for conversations. */
-export type MachineLane = 'a2a' | 'workflow' | 'api' | 'inspection' | 'brain_edit' | 'cron' | 'programmatic' | 'internal'
+export type MachineLane = 'a2a' | 'workflow' | 'api' | 'inspection' | 'brain_edit' | 'cron' | 'programmatic' | 'workspace_mcp' | 'internal'
 
 export type SessionKind = {
   audience: Audience
@@ -163,6 +163,11 @@ export function isWebTransport(channelType: string): boolean {
   return transportOf(channelType) === 'web'
 }
 
+/** Pre-row creation policy only. Existing conversation access uses classifySession. */
+export function requiresNativeChatCreation(appOrigin: string | null | undefined): boolean {
+  return appOrigin === 'chat'
+}
+
 /** Is this a provider transport (a human on Telegram, Slack, ...)? */
 export function isExternalTransport(transport: Transport): boolean {
   return (EXTERNAL_TRANSPORTS as readonly string[]).includes(transport)
@@ -190,6 +195,14 @@ export function normalizeSessionVisibility(visibility: string | null | undefined
  * Unknown leaves a room mention-gated, the safe default.
  */
 export type SessionTurnFacts = { providerGroup?: boolean; humanCount?: number }
+const WORKSPACE_MCP_UUID = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
+const WORKSPACE_MCP_CHANNELS = { programmatic: 'brain_key', assistant_mcp: 'assistant_key' } as const
+function isWorkspaceMcpChannel(type: string, id: string | null): boolean {
+  const kind = WORKSPACE_MCP_CHANNELS[type as keyof typeof WORKSPACE_MCP_CHANNELS]
+  return !!kind && !!id && new RegExp(`^workspace-mcp:(${kind}|oauth_token):${WORKSPACE_MCP_UUID}(:${WORKSPACE_MCP_UUID})?$`).test(id)
+}
+const workspaceMcpRoomSql = (alias: string) => `${alias}.visibility='workspace' AND ${alias}.anchor_kind='none' AND (`
+  + Object.entries(WORKSPACE_MCP_CHANNELS).map(([type, kind]) => `(${alias}.channel_type='${type}' AND ${alias}.channel_id ~ '^workspace-mcp:(${kind}|oauth_token):${WORKSPACE_MCP_UUID}(:${WORKSPACE_MCP_UUID})?$')`).join(' OR ') + ')'
 
 /**
  * Classify a session row. The ONLY reader of the discriminator columns.
@@ -199,7 +212,8 @@ export type SessionTurnFacts = { providerGroup?: boolean; humanCount?: number }
 export function classifySession(row: SessionKindRow, turn: SessionTurnFacts = {}): SessionKind {
   const channelType = row.channelType
   const channelId = row.channelId ?? null
-  const machine: MachineLane | null = MACHINE_CHANNEL_TYPES[channelType]
+  const machine: MachineLane | null = row.visibility === 'workspace' && row.anchorKind === 'none' && isWorkspaceMcpChannel(channelType, channelId)
+    ? 'workspace_mcp' : MACHINE_CHANNEL_TYPES[channelType]
     ?? (row.transient === true ? 'inspection' : null)
 
   let anchor: Anchor = { kind: 'none', ref: null }
@@ -394,7 +408,8 @@ export type SessionPolicy = {
 
 /** Is this the Chat app's workspace room (web, workspace, opened from chat)? */
 function isWebRoom(kind: SessionKind): boolean {
-  return kind.audience === 'workspace' && kind.anchor.kind === 'none' && kind.transport === 'web' && kind.surface === 'chat'
+  return kind.audience === 'workspace' && kind.anchor.kind === 'none'
+    && (kind.machine === 'workspace_mcp' || kind.transport === 'web' && kind.surface === 'chat')
 }
 
 /**
@@ -407,6 +422,12 @@ function isWebRoom(kind: SessionKind): boolean {
 export function isPersonalChat(kind: SessionKind): boolean {
   return kind.audience === 'personal' && kind.anchor.kind === 'none' && kind.transport === 'web'
     && kind.lane === 'conversation' && kind.surface !== 'doc'
+}
+
+/** Closed native owner presentation purpose; SQL still authorizes the real row. */
+export function usesPrivateChatPresentation(row: SessionKindRow): boolean {
+ return row.visibility==='personal' && row.channelType==='web' && row.anchorKind==='none'
+  && row.mode==null && (row.appOrigin==null || row.appOrigin==='chat')
 }
 
 /**
@@ -627,7 +648,7 @@ export const sessionKindSql = {
    * channel room on any transport (multiplayer-chat T10).
    */
   railRoom: (alias: string): string =>
-    `${alias}.visibility = 'workspace' AND (${alias}.anchor_kind = 'channel' OR (${alias}.channel_type = 'web' AND ${alias}.anchor_kind = 'none' AND ${alias}.app_origin = 'chat'))`,
+    `(${alias}.visibility = 'workspace' AND (${alias}.anchor_kind = 'channel' OR (${alias}.channel_type = 'web' AND ${alias}.anchor_kind = 'none' AND ${alias}.app_origin = 'chat')) OR (${workspaceMcpRoomSql(alias)}))`,
   /**
    * A legacy per-user session of a provider group, the shape a channel room
    * replaces (D16): personal, unanchored, still live.

@@ -31,7 +31,7 @@ export function useWorkspaceTopbarShell() { return useContext(ShellContext); }
 
 export function WorkspaceTopbarHost({ children }: { children?: ReactNode }) {
   const shell = useWorkspaceTopbarShell();
-  return <div ref={shell?.setToolbar} data-workspace-topbar-host data-workspace-window-header data-doc-chrome className="relative z-20 h-11 shrink-0 md:h-12 [&_[data-workspace-search-fallback]]:border-transparent [&_[data-workspace-search-fallback]]:bg-transparent">{children}</div>;
+  return <div ref={shell?.setToolbar} data-workspace-topbar-host data-workspace-window-header data-doc-chrome className="relative z-20 min-h-11 shrink-0 md:min-h-10 [&_[data-workspace-search-fallback]]:border-transparent [&_[data-workspace-search-fallback]]:bg-transparent">{children}</div>;
 }
 
 export function WorkspaceAppTitleHost({ className, children }: { className?: string; children?: ReactNode }) {
@@ -51,8 +51,9 @@ type History = {
   onPhone?: boolean;
 };
 
-export function WorkspaceTopbar({ children, identity, sidebarCollapsed, history }: {
+export function WorkspaceTopbar({ children, identity, sidebarCollapsed, history, className }: {
   children: ReactNode;
+  className?: string;
   identity?: ReactNode;
   sidebarCollapsed: boolean;
   history: History;
@@ -66,9 +67,9 @@ export function WorkspaceTopbar({ children, identity, sidebarCollapsed, history 
   const frame = (
     <div data-workspace-topbar data-doc-chrome data-doc-topbar
       data-sidebar-collapsed={sidebarCollapsed ? "true" : "false"}
-      className={cn("sticky top-0 z-10 flex h-11 shrink-0 items-center gap-0.5 border-b px-2 md:h-12 md:gap-2 md:px-4", shell ? "border-transparent bg-transparent" : "border-border bg-background")}>
+      className={cn("sticky top-0 z-10 flex h-11 shrink-0 items-center gap-0.5 border-b px-2 md:h-10 md:gap-2 md:px-4", shell ? "border-transparent bg-transparent" : "border-border bg-background", className)}>
       <div className="w-10 shrink-0 md:hidden" aria-hidden />
-      <div data-workspace-window-navigation className={cn("flex shrink-0 items-center gap-1", !history.onPhone && "max-md:hidden", shell && "md:mr-2 md:border-r md:border-border/60 md:pr-2", shell && !sidebarCollapsed && "md:w-[calc(3.5rem+var(--workspace-sidebar-width,14rem)-var(--workspace-header-leading,1rem))]")}>
+      <div data-workspace-window-navigation className={cn("flex shrink-0 items-center gap-1", !history.onPhone && "max-md:hidden", shell && "md:mr-2 md:border-r md:border-border/60 md:pr-2")}>
       <div data-workspace-history className={cn("flex shrink-0 items-center gap-0.5", !history.onPhone && "max-md:hidden")}>
         <button type="button" aria-label={t.topbarBackAria} title={t.topbarBackAria} onClick={history.onBack} disabled={history.canBack === false} className={buttonClass}>
           <ChevronLeft className="size-4" aria-hidden />

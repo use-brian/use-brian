@@ -1,4 +1,5 @@
 /** Office artifact/version/source/grant/audit persistence. [COMP:api/office-store] */
+import type { ScopeSource, WorkspaceCredentialDelegation } from '@use-brian/core'
 import { queryWithRLS, getAppPool, applyRLSGucs, rollbackAndRelease } from './client.js'
 import type { PoolClient } from 'pg'
 import { usesClassicModeAdmission } from '../workspace-access/admission-policy-read.js'
@@ -68,7 +69,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
     } finally { await rollbackAndRelease(client) }
   }
   return {
-    async list(userId: string, workspaceId: string, lifecycleState: 'active' | 'archived' | 'trash' | 'retained'): Promise<OfficeArtifactRow[]> {
+    async list(userId: string, workspaceId: string, lifecycleState: 'active' | 'archived' | 'trash' | 'retained', page?: { limit: number; afterId?: string }): Promise<OfficeArtifactRow[]> {
       const result = await db<OfficeArtifactRow>(userId, `
         SELECT id, workspace_id AS "workspaceId", family, mode, title,
                creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
@@ -82,9 +83,10 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
           FROM office_artifacts
          WHERE workspace_id = $1 AND lifecycle_state = $2
            AND mode = 'artifact'
-         ORDER BY updated_at DESC
-         LIMIT 200
-      `, [workspaceId, lifecycleState])
+           ${page?.afterId ? 'AND id < $4::uuid' : ''}
+         ORDER BY ${page ? 'id DESC' : 'updated_at DESC'}
+         LIMIT $3
+      `, [workspaceId, lifecycleState, page ? Math.max(1,Math.min(page.limit,51)) : 200, ...(page?.afterId ? [page.afterId] : [])])
       return result.rows
     },
 
@@ -233,6 +235,15 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows[0] ?? null
     },
 
+    async captureObservation(userId:string, artifact:OfficeArtifactRow, canonicalHash?:string|null):Promise<ScopeSource|null> {
+      const sql=canonicalHash===undefined
+        ? "SELECT capture_office_observation($1,$2,$3::jsonb || jsonb_build_object('canonicalHash',(SELECT canonical_hash FROM office_collab_documents WHERE artifact_id=$2))) AS source"
+        : 'SELECT capture_office_observation($1,$2,$3::jsonb) AS source'
+      const result=await db<{source:ScopeSource|null}>(userId,sql,
+        [artifact.workspaceId,artifact.id,JSON.stringify({headVersion:artifact.headVersion,title:artifact.title,canonicalHash})])
+      return result.rows[0]?.source ?? null
+    },
+
     async raiseScope(params: {
       userId: string
       artifactId: string
@@ -282,10 +293,10 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       return result.rows[0] ?? null
     },
 
-    async getVersionSource(userId: string, artifactId: string, versionId: string): Promise<{ snapshotFileId: string; snapshotHash: string; workspaceId: string } | null> {
-      const result = await db<{ snapshotFileId: string; snapshotHash: string; workspaceId: string }>(userId, `
+    async getVersionSource(userId: string, artifactId: string, versionId: string): Promise<{ snapshotFileId: string; snapshotHash: string; workspaceId: string; version: number } | null> {
+      const result = await db<{ snapshotFileId: string; snapshotHash: string; workspaceId: string; version: number }>(userId, `
         SELECT v.snapshot_file_id AS "snapshotFileId", v.snapshot_hash AS "snapshotHash",
-               v.workspace_id AS "workspaceId"
+               v.workspace_id AS "workspaceId", v.version::int AS version
          FROM office_artifact_versions v
           JOIN office_artifacts a ON a.id=v.artifact_id
           JOIN workspace_files f ON f.id=v.snapshot_file_id
@@ -390,6 +401,10 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
 
     async restoreVersion(params: {
       userId: string
+      admissionObservationId?: string
+      sharedAudience?: boolean
+      actorAssistantId?: string
+      workspaceDelegation?: WorkspaceCredentialDelegation
       artifactId: string
       snapshotTitle: string
       targetVersionId: string
@@ -403,20 +418,31 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
         WITH current_head AS (
           SELECT * FROM office_artifacts
            WHERE id = $1 AND head_version = $3 AND lifecycle_state = 'active'
+             AND ($11::jsonb IS NULL OR workspace_mcp_parent_current($11::jsonb))
+             AND office_artifact_scope_allows(id,workspace_id,true)
+             AND coalesce((SELECT role FROM office_artifact_grants g WHERE g.artifact_id=office_artifacts.id
+               AND g.user_id=$4::uuid AND g.revoked_at IS NULL),
+               CASE WHEN $4::uuid IN(creator_user_id,owner_user_id) THEN 'edit' ELSE default_workspace_role END)='edit'
+             AND ($12::uuid IS NULL OR read_office_observation_authority(workspace_id,$12::uuid,
+               CASE WHEN $13::boolean THEN NULL ELSE $4::uuid END,
+               coalesce(nullif(current_setting('app.agent_visibility_assistants',true),''),'null')::jsonb))
            FOR UPDATE
         ), target AS (
           SELECT v.* FROM office_artifact_versions v
           JOIN current_head h ON h.id = v.artifact_id
-          WHERE v.id = $2
+          JOIN workspace_files f ON f.id = v.snapshot_file_id AND f.workspace_id = v.workspace_id
+          WHERE v.id = $2 AND v.snapshot_hash = $8
+          FOR SHARE OF v
         ), inserted AS (
           INSERT INTO office_artifact_versions
             (artifact_id, workspace_id, version, parent_version_id,
              snapshot_file_id, snapshot_hash, operation_clock, schema_version,
-             capability_version, author_type, author_user_id, origin, summary,
+             capability_version, author_type, author_user_id, author_assistant_id, origin, summary,
              checkpoint_kind)
           SELECT h.id, h.workspace_id, h.head_version + 1, h.head_version_id,
                  t.snapshot_file_id, t.snapshot_hash, t.operation_clock,
-                 t.schema_version, t.capability_version, 'user', $4, 'restore',
+                 t.schema_version, t.capability_version, CASE WHEN $10::uuid IS NULL THEN 'user' ELSE 'assistant' END,
+                 CASE WHEN $10::uuid IS NULL THEN $4::uuid END, $10::uuid, 'restore',
                  $5, 'restore'
             FROM current_head h CROSS JOIN target t
           RETURNING id, artifact_id, workspace_id, version
@@ -437,7 +463,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
         )
         SELECT a.id, a.version::int AS version FROM advanced a
         JOIN live l ON l.artifact_id=$1
-      `, [params.artifactId, params.targetVersionId, params.expectedVersion, params.userId, params.summary, Buffer.from(params.liveUpdate), Buffer.from(params.liveStateVector), params.liveCanonicalHash, params.snapshotTitle])
+      `, [params.artifactId, params.targetVersionId, params.expectedVersion, params.userId, params.summary, Buffer.from(params.liveUpdate), Buffer.from(params.liveStateVector), params.liveCanonicalHash, params.snapshotTitle, params.actorAssistantId ?? null, params.workspaceDelegation ? JSON.stringify(params.workspaceDelegation) : null, params.admissionObservationId ?? null, params.sharedAudience ?? false])
       return result.rows[0] ?? null
     },
 
@@ -485,7 +511,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       `, [params.artifactId, params.artifactVersionId, params.workspaceId, params.sourceArtifactId, params.sourceVersion, params.sensitivity])
     },
 
-    async transitionLifecycle(params: { userId: string; artifactId: string; action: 'archive' | 'unarchive' | 'trash' | 'restore' | 'retain' | 'purge'; reason: string }): Promise<OfficeArtifactRow | null> {
+    async transitionLifecycle(params: { userId: string; artifactId: string; action: 'archive' | 'unarchive' | 'trash' | 'restore' | 'retain' | 'purge'; reason: string; actorAssistantId?: string }): Promise<OfficeArtifactRow | null> {
       const result = await db<OfficeArtifactRow>(params.userId, `
         WITH candidate AS (
           SELECT * FROM office_artifacts
@@ -514,8 +540,8 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
           FROM candidate c WHERE a.id=c.id
           RETURNING a.*, c.lifecycle_state AS prior_state
         ), audited AS (
-          INSERT INTO office_audit_events(workspace_id,artifact_id,actor_user_id,event_type,artifact_version,reason,metadata)
-          SELECT workspace_id,id,$3,'office.lifecycle.'||$2,head_version,$4,jsonb_build_object('priorState',prior_state,'nextState',lifecycle_state)
+          INSERT INTO office_audit_events(workspace_id,artifact_id,actor_user_id,actor_assistant_id,event_type,artifact_version,reason,metadata)
+          SELECT workspace_id,id,$3,$5,'office.lifecycle.'||$2,head_version,$4,jsonb_build_object('priorState',prior_state,'nextState',lifecycle_state)
           FROM updated
         )
         SELECT id, workspace_id AS "workspaceId", family, mode, title,
@@ -525,7 +551,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                sensitivity,default_workspace_role AS "defaultWorkspaceRole",
                lifecycle_state AS "lifecycleState",updated_at AS "updatedAt"
           FROM updated
-      `, [params.artifactId, params.action, params.userId, params.reason])
+      `, [params.artifactId, params.action, params.userId, params.reason, params.actorAssistantId ?? null])
       return result.rows[0] ?? null
     },
   }

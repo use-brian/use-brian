@@ -611,7 +611,7 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
       VALUES($1,'user',$2::jsonb,1,$3,$4,$3,$5,'confidential','{}','{}',1,false) RETURNING id`,[sessionId,JSON.stringify([{type:'text',text:'immutable-evidence-token'}]),f.owner,f.workspaceId,f.assistantId])).rows[0].id
     const feedback=(await pool.query<{id:string}>(`INSERT INTO analytics_events(user_id,assistant_id,session_id,event_name,metadata,workspace_id,sensitivity,compartments,project_ids,scope_version,scope_held)
       VALUES($1,$2,$3,'feedback_negative',$4::jsonb,$5,'confidential','{}','{}',1,false) RETURNING id`,[f.owner,f.assistantId,sessionId,JSON.stringify({body:'immutable-evidence-token'}),f.workspaceId])).rows[0].id
-    await pool.query("INSERT INTO workspace_skills(id,slug,name,description,content,workspace_id) VALUES($1,$2,'Evidence skill','Fixture','immutable-evidence-token',$3)",[skillId,`evidence-${skillId}`,f.workspaceId])
+    await pool.query("INSERT INTO workspace_skills(id,slug,name,description,content,workspace_id,induction_source) VALUES($1,$2,'Evidence skill','Fixture','immutable-evidence-token',$3,'self')",[skillId,`evidence-${skillId}`,f.workspaceId])
     const skillRevision=(await pool.query<{id:string}>(`INSERT INTO workspace_skill_scope_revisions(workspace_id,skill_id,revision,user_id,assistant_id,sensitivity,compartments,project_ids)
       VALUES($1,$2,1,$3,$4,'confidential','{}','{}') RETURNING id`,[f.workspaceId,skillId,f.owner,f.assistantId])).rows[0].id
     await pool.query('UPDATE workspace_skills SET scope_revision_id=$2 WHERE id=$1',[skillId,skillRevision])

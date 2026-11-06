@@ -34,7 +34,7 @@ export async function resolveSessionTitleAuthority(input:{claims:NativeClaims|nu
   ownership:{kind:'workspace',workspaceId:assistant.workspaceId},...(command.readOnly?{surface:{readOnly:true as const}}:{}),
   lifecycle:{sessionId:session.id,sessionPersisted:true,channelType:session.channelType,channelId:session.channelId,
    transport:classifySession(session).transport,abortSignal:new AbortController().signal},
-  credentialCurrent:()=>authSessionStore.validateAccess(claims)})).executionContext
+  ...(claims.sessionId&&claims.authVersion!==undefined?{nativeSessionCredential:{userId:claims.userId,sessionId:claims.sessionId,authVersion:claims.authVersion}}:{credentialCurrent:()=>authSessionStore.validateAccess(claims)})})).executionContext
  await execution.security.authority.assertCurrent()
  return{execution,accumulator:new ContextScopeAccumulator(execution.security.provenance)}
 }

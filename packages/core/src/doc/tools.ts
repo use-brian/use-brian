@@ -192,6 +192,7 @@ export type DocPageStore = {
   getVersionedPage(
     userId: string,
     pageId: string,
+    context?: import('../tools/types.js').ToolContext,
   ): Promise<DocPageRead | null>
 
   /**
@@ -739,6 +740,7 @@ export function createPatchPageTool(deps: DocToolDeps): Tool {
       const current = await deps.docPageStore.getVersionedPage(
         context.userId,
         input.pageId,
+        context,
       )
       if (!current) {
         return {
@@ -957,7 +959,7 @@ export function createPatchPageTool(deps: DocToolDeps): Tool {
         const live = gw.page
           ? { blocks: gw.page.blocks, title: gw.title }
           : await deps.docPageStore
-              .getVersionedPage(context.userId, input.pageId)
+              .getVersionedPage(context.userId, input.pageId, context)
               .then((fresh) => ({
                 blocks: fresh?.page.blocks ?? working.blocks,
                 title: fresh?.title,
@@ -1059,6 +1061,7 @@ export function createPatchPageTool(deps: DocToolDeps): Tool {
           const fresh = await deps.docPageStore.getVersionedPage(
             context.userId,
             input.pageId,
+        context,
           )
           return {
             data: {
@@ -1150,10 +1153,7 @@ export function createGetBlockTool(deps: DocToolDeps): Tool {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
 
-      const page = await deps.savedViewStore.getPage(
-        context.userId,
-        input.pageId,
-      )
+      const page = (await deps.docPageStore.getVersionedPage(context.userId, input.pageId, context))?.page
       if (!page) {
         return {
           data: pageNotFound(input.pageId),
@@ -1234,10 +1234,7 @@ export function createQueryDataBlockTool(deps: DocToolDeps): Tool {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
 
-      const page = await deps.savedViewStore.getPage(
-        context.userId,
-        input.pageId,
-      )
+      const page = (await deps.docPageStore.getVersionedPage(context.userId, input.pageId, context))?.page
       if (!page) {
         return {
           data: pageNotFound(input.pageId),
@@ -1354,6 +1351,7 @@ export function createGetCurrentPageTool(deps: DocToolDeps): Tool {
       const current = await deps.docPageStore.getVersionedPage(
         context.userId,
         input.pageId,
+        context,
       )
       if (!current) {
         return {
@@ -1419,6 +1417,7 @@ export function createGetSectionTool(deps: DocToolDeps): Tool {
       const current = await deps.docPageStore.getVersionedPage(
         context.userId,
         input.pageId,
+        context,
       )
       if (!current) {
         return {
@@ -1485,6 +1484,7 @@ export function createGetBlockRangeTool(deps: DocToolDeps): Tool {
       const current = await deps.docPageStore.getVersionedPage(
         context.userId,
         input.pageId,
+        context,
       )
       if (!current) {
         return {
@@ -1565,7 +1565,7 @@ export function createExportPageTool(deps: DocToolDeps): Tool {
           isError: true,
         }
       }
-      const current = await deps.docPageStore.getVersionedPage(context.userId, pageId)
+      const current = await deps.docPageStore.getVersionedPage(context.userId, pageId, context)
       if (!current) {
         return {
           data: pageNotFound(pageId),

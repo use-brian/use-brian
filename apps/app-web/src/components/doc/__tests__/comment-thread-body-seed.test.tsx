@@ -50,6 +50,10 @@ vi.mock("@/lib/auth-fetch", () => ({
   ),
 }));
 
+vi.mock("@/lib/offline/application-write-authority", () => ({
+  currentOfflineWriteAuthority: () => ({ apiOrigin: "https://api.example", viewerId: "u1", workspaceId: "ws1" }),
+}));
+
 import {
   CommentThreadBody,
   claimCommentSeed,
@@ -140,6 +144,17 @@ describe("[COMP:app-web/comment-thread-body] seed one-shot across navigation", (
     await act(async () => root!.render(node));
     await act(async () => {});
   }
+
+  it("retains an unsent reply through thread history loading and a process remount", async () => {
+    const key = "brian:unsent:v1:" + ["https://api.example", "u1", "ws1", `thread:${thread.id}`].map(encodeURIComponent).join(":");
+    localStorage.setItem(key, "Unsent offline reply");
+    await mount(body(false));
+    expect(container!.querySelector("textarea")?.value).toBe("Unsent offline reply");
+    act(() => root!.unmount()); container!.remove(); root = null;
+    await mount(body(false));
+    expect(container!.querySelector("textarea")?.value).toBe("Unsent offline reply");
+    expect(localStorage.getItem(key)).toBe("Unsent offline reply"); localStorage.removeItem(key);
+  });
 
   it("a remount with a stale already-sent seed fetches the persisted comment instead of 'No comments yet'", async () => {
     // ── Mount 1: the post. The seed is brand-new, so the body auto-sends it

@@ -48,7 +48,7 @@ describe('[COMP:crm/assurance-fixture] Disposable database safety', () => {
   it('skips workspace loading only after validating both fixture database URLs', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'fixture-environment-test-'))
     const marker = join(directory, 'marker.json')
-    await writeFile(marker, JSON.stringify({ token: 'synthetic-token', port: 54329 }))
+    await writeFile(marker, JSON.stringify({ token: 'synthetic-token', port: 54329, database: 'brian_assurance' }))
     const env = { BRIAN_ASSURANCE_FIXTURE: marker, BRIAN_ASSURANCE_TOKEN: 'synthetic-token',
       DATABASE_URL: 'postgresql://owner:synthetic@127.0.0.1:54329/brian_assurance',
       DATABASE_URL_APP: 'postgresql://app:synthetic@127.0.0.1:54329/brian_assurance' }
@@ -66,6 +66,14 @@ describe('[COMP:crm/assurance-fixture] Disposable database safety', () => {
         await expect(loadMigrationEnvironment(load, altered)).rejects.toThrow()
         expect(load).not.toHaveBeenCalled()
       }
+      await writeFile(marker, JSON.stringify({ token: 'synthetic-token', port: 54329, database: 'brian_assurance_abc123' }))
+      await expect(loadMigrationEnvironment(load, env)).rejects.toThrow('outside the owned fixture')
+      const clone = { ...env,
+        DATABASE_URL: env.DATABASE_URL.replace('/brian_assurance', '/brian_assurance_abc123'),
+        DATABASE_URL_APP: env.DATABASE_URL_APP.replace('/brian_assurance', '/brian_assurance_abc123') }
+      await expect(loadMigrationEnvironment(load, clone)).resolves.toBe('fixture')
+      await expect(loadMigrationEnvironment(load, { ...clone,
+        DATABASE_URL_APP: clone.DATABASE_URL_APP.replace('abc123', 'def456') })).rejects.toThrow('outside the owned fixture')
     } finally { await rm(directory, { recursive: true }) }
   })
 })

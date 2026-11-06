@@ -458,6 +458,8 @@ export type SavedViewListFilters = {
 }
 
 export type SavedViewUpdateFields = {
+  /** Atomic offline metadata compare-and-set; never an authorization grant. */
+  expectedMetadata?: { field: "name" | "icon" | "fullWidth" | "clearance"; value: string | boolean | null }
   name?: string
   /**
    * Provenance to stamp alongside a `name` change (migration 218). A

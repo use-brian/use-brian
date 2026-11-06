@@ -1,3 +1,4 @@
+import { withOfficeWorkspaceAuthority } from './workspace-authority.js'
 /** Lease/checkpoint runner for Office generation jobs.
  * [COMP:api/office-generation] */
 import { withDepartmentOfficeGeneration } from './generation-evidence.js'
@@ -64,7 +65,7 @@ export function createOfficeGenerationWorker(deps: OfficeGenerationWorkerDeps) {
         }
         try {
           // The adapter completes the job in the same transaction as its output.
-          await deps.executePromptOnly(job,leaseToken)
+          await withOfficeWorkspaceAuthority(job,()=>deps.executePromptOnly!(job,leaseToken))
           return 'completed'
         } catch {
           // A lost commit acknowledgement is not a failed generation. Confirm
@@ -94,7 +95,18 @@ export function createOfficeGenerationWorker(deps: OfficeGenerationWorkerDeps) {
           return (await deps.store.drainSteering({ userId: deps.workerUserId, jobId: job.id, checkpointVersion: checkpointVersion + 1 })).map((row) => row.instruction)
         },
       }
-      const configured = deps.buildPipelineDeps(job, controls)
+      const native = deps.buildPipelineDeps(job, controls)
+      const configured: typeof native = { ...native,
+        resolveAuthority: (...args)=>withOfficeWorkspaceAuthority(job,()=>native.resolveAuthority(...args)),
+        selectTemplate: (...args)=>withOfficeWorkspaceAuthority(job,()=>native.selectTemplate(...args)),
+        retrieveBrain: (...args)=>withOfficeWorkspaceAuthority(job,()=>native.retrieveBrain(...args)),
+        inspectUrl: (...args)=>withOfficeWorkspaceAuthority(job,()=>native.inspectUrl(...args)),
+        planClaims: (...args)=>withOfficeWorkspaceAuthority(job,()=>native.planClaims(...args)),
+        construct: (...args)=>withOfficeWorkspaceAuthority(job,()=>native.construct(...args)),
+        processMedia: (...args)=>withOfficeWorkspaceAuthority(job,()=>native.processMedia(...args)),
+        resolveResource: (...args)=>withOfficeWorkspaceAuthority(job,()=>native.resolveResource(...args)),
+        commit: (...args)=>withOfficeWorkspaceAuthority(job,()=>native.commit(...args)),
+      }
       const pipelineDeps: OfficeGenerationPipelineDeps = {
         ...configured, ...controls,
         commit: (snapshot,params) => withDepartmentOfficeGeneration(job,()=>configured.commit(snapshot,params)),

@@ -54,6 +54,8 @@ function tokenSubject(token: string): string | null {
   } catch { return null; }
 }
 
+export class MetadataConflict extends Error {}
+
 /** This fixed native route catalog is the same metadata mutation path as online editing. */
 type NativeMetadataMutation =
   | { kind: "view.rename"; id: string; body: { name: string } }
@@ -88,15 +90,31 @@ export async function prepareQueuedMetadataWrite(op: QueuedWrite): Promise<() =>
   session.assertCurrent();
   if (!page || typeof page !== "object" || !("id" in page) || page.id !== request.id
     || !("workspaceId" in page) || page.workspaceId !== authority.workspaceId) throw offlineWriteUnavailable();
+  const field = Object.keys(request.body)[0] as NonNullable<QueuedWrite["base"]>["field"];
+  const actual = (page as Record<string, unknown>)[field] ?? null;
+  const desired = (request.body as Record<string, unknown>)[field];
+  if (op.effect === "uncertain" && actual === desired) return async () => page as ViewMetadata;
+  if (op.effect === "uncertain" && (page as Record<string, unknown>).offlineMetadataCas !== true) throw new MetadataConflict("Server cannot reconcile conditional writes");
+  if (op.effect === "uncertain" && !op.base) throw new MetadataConflict("Unbound historical write");
+  if (op.base && actual !== op.base.value) throw new MetadataConflict("Remote metadata changed");
+  op.base ??= { field, value: actual as string | boolean | null };
+  const pinned = session;
+  const conditional: PinnedOfflineSession = { ...pinned, request: async (path, init) => {
+    const headers = new Headers(init?.headers);
+    headers.set("X-Brian-Metadata-Base", encodeURIComponent(JSON.stringify(op.base)));
+    const response = await pinned.request(path, { ...init, headers });
+    if (response.status === 409) throw new MetadataConflict("Remote metadata changed");
+    return response;
+  } };
   // Resolve the fixed SDK executors before the caller durably claims an effect.
   const { renameView, setViewIcon, setViewFullWidth, setViewClearance } = await import("@/lib/api/views");
   session.assertCurrent();
   return async () => {
     session.assertCurrent();
-    const result = request.kind === "view.rename" ? await renameView(request.id, request.body.name, session)
-      : request.kind === "view.icon" ? await setViewIcon(request.id, request.body.icon, session)
-      : request.kind === "view.fullWidth" ? await setViewFullWidth(request.id, request.body.fullWidth, session)
-      : await setViewClearance(request.id, request.body.clearance, session);
+    const result = request.kind === "view.rename" ? await renameView(request.id, request.body.name, conditional)
+      : request.kind === "view.icon" ? await setViewIcon(request.id, request.body.icon, conditional)
+      : request.kind === "view.fullWidth" ? await setViewFullWidth(request.id, request.body.fullWidth, conditional)
+      : await setViewClearance(request.id, request.body.clearance, conditional);
     session.assertCurrent();
     if (result.id !== request.id || result.workspaceId !== authority.workspaceId) throw offlineWriteUnavailable();
     return result;
@@ -130,7 +148,7 @@ export async function pinOfflineWriteSession(raw: OfflineWriteAuthority): Promis
       if (!path.startsWith("/api/") || url.origin !== new URL(authority.apiOrigin).origin) throw offlineWriteUnavailable();
       const headers = new Headers(init?.headers);
       headers.set("Authorization", `Bearer ${token}`);
-      const response = await fetch(url.href, { ...init, headers, credentials, redirect: "error", cache: "no-store" });
+      const response = await fetch(url.href, { ...init, signal: init?.signal ?? AbortSignal.timeout(15_000), headers, credentials, redirect: "error", cache: "no-store" });
       assertCurrent();
       return response;
     },

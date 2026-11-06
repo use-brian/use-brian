@@ -50,6 +50,20 @@ function makeDeps(overrides: Partial<InterAssistantDeps> = {}): InterAssistantDe
 }
 
 describe('[COMP:tools/ask-assistant] Inter-assistant tools', () => {
+  it('captures a host-owned workspace parent without accepting it from tool arguments', async () => {
+    const parent = { kind: 'oauth_token' as const, credentialId: 'fictional-grant', revision: 'server-revision', userId: ctx.userId,
+      workspaceId: ctx.workspaceId!, assistantId: ctx.assistantId, sessionId: ctx.sessionId };
+    const capture = vi.fn().mockResolvedValue(parent);
+    const deps = makeDeps({ captureWorkspaceDelegation: capture, getFollowing: vi.fn().mockResolvedValue([{ followingAssistantId: 'a_target', followingWorkspaceId: 'ws_caller' }]) });
+    const ask = createInterAssistantTools(deps).find(t => t.name === 'askAssistant')!;
+    await ask.execute({ targetAssistantId: 'a_target', question: 'Consult the specialist.' }, ctx);
+    expect(capture).toHaveBeenCalledWith(ctx);
+    expect(vi.mocked(deps.consultTransport.send).mock.calls[0][0].callerWorkspaceDelegation).toEqual(parent);
+    capture.mockRejectedValueOnce(new Error('workspace_mcp_parent_unavailable'));
+    expect((await ask.execute({ targetAssistantId: 'a_target', question: 'Consult again.' }, ctx)).isError).toBe(true);
+    expect(deps.consultTransport.send).toHaveBeenCalledTimes(1);
+  });
+
   describe('listConnectedAssistants', () => {
     it('surfaces bio as `purpose` and the caller note', async () => {
       const deps = makeDeps({
@@ -156,6 +170,11 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools', () => {
   })
 
   describe('askAssistant', () => {
+    it('classifies model delegation as effectful while discovery remains read-only', () => {
+      const tools = createInterAssistantTools({} as never)
+      expect(tools.find(tool => tool.name === 'askAssistant')?.isReadOnly).toBe(false)
+      expect(tools.find(tool => tool.name === 'listConnectedAssistants')?.isReadOnly).toBe(true)
+    })
     it('carries a detached source floor and never retries rejected source context',async()=>{
       const deps=makeDeps({getFollowing:vi.fn().mockResolvedValue([{followingAssistantId:'a_target',followingWorkspaceId:'ws_caller'}])})
       const ask=createInterAssistantTools(deps).find(t=>t.name==='askAssistant')!

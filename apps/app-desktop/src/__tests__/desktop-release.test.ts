@@ -151,6 +151,34 @@ describe('[COMP:app-desktop/release] automated delivery', () => {
     expect(f.readState().calls.some((a: string[]) => a.includes('create'))).toBe(false);
   });
 
+  it('plans builds before CI finishes but still refuses publication and obsolete inputs', () => {
+    const f = fixture({ ci: null });
+    expect(f.run('plan-build', sha).status).toBe(0);
+    expect(f.readState().calls.some((a: string[]) => a.includes('create'))).toBe(false);
+    expect(f.prepare().status).toBe(0);
+    expect(f.run('publish', '0.0.13', sha).status).not.toBe(0);
+    expect(f.readState().releases).toEqual([]);
+    f.patchState({ main: older });
+    expect(f.run('plan-build', sha).status).not.toBe(0);
+  });
+
+  it('waits through absent, queued and running CI, then accepts only success', async () => {
+    const modulePath = fileURLToPath(new URL('../../scripts/release.mjs', import.meta.url));
+    const { waitForProductionCi } = await import(modulePath);
+    const states = [undefined, { status: 'queued' }, { status: 'in_progress' },
+      { status: 'completed', conclusion: 'success' }];
+    let pauses = 0;
+    await waitForProductionCi(sha, { inspect: () => states.shift(), pause: async () => { pauses++; }, log: () => {} });
+    expect(pauses).toBe(3);
+    for (const conclusion of ['failure', 'cancelled', 'skipped', 'timed_out', 'neutral', null]) {
+      await expect(waitForProductionCi(sha, { inspect: () => ({ status: 'completed', conclusion }),
+        pause: async () => { throw new Error('must not poll terminal failure'); }, log: () => {} }))
+        .rejects.toThrow('Production CI did not succeed');
+    }
+    await expect(waitForProductionCi(sha, { inspect: () => { throw new Error('Production moved'); }, log: () => {} }))
+      .rejects.toThrow('Production moved');
+  });
+
   it('repairs only the post-signing DMG hash and detects a tampered ZIP', () => {
     const f = fixture();
     const prepared = f.prepare();
@@ -228,15 +256,23 @@ describe('[COMP:app-desktop/release] automated delivery', () => {
 
   it('keeps workflow credentials and artifacts behind the production CI gate', () => {
     const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/desktop-release.yml'), 'utf8'));
-    expect(workflow.on.workflow_run).toEqual({ workflows: ['CI'], branches: ['main'], types: ['completed'] });
-    expect(workflow.jobs.plan.if).toContain("head_repository.full_name == github.repository");
-    expect(workflow.jobs.plan.if).toContain("workflow_run.event == 'push'");
+    expect(workflow.on.push).toEqual({ branches: ['main'] });
+    expect(workflow.on.workflow_run).toBeUndefined();
+    expect(workflow.jobs.plan.if).toContain("github.repository == 'use-brian/use-brian'");
+    expect(workflow.jobs.plan.if).toContain("github.ref == 'refs/heads/main'");
+    expect(workflow.jobs.plan.if).toContain("github.event_name == 'push'");
+    expect(workflow.jobs.plan.steps.find((s: any) => s.id === 'plan').run).toContain(' plan-build ');
+    expect(workflow.jobs.build_macos.needs).toBe('plan');
+    expect(workflow.jobs.build_windows.needs).toBe('plan');
+    expect(workflow.jobs.await_ci.needs).toBe('plan');
+    expect(workflow.jobs.await_ci.permissions).toEqual({ contents: 'read', actions: 'read' });
+    expect(workflow.jobs.await_ci.steps.some((s: any) => s.run?.includes(' wait-ci '))).toBe(true);
     expect(workflow.concurrency['cancel-in-progress']).toBe(false);
     expect(workflow.jobs.build_macos.environment).toBe('desktop-release');
     expect(workflow.jobs.build_macos.permissions.contents).toBe('read');
     expect(workflow.jobs.build_windows.permissions.contents).toBe('read');
     expect(workflow.jobs.publish.permissions.contents).toBe('write');
-    expect(workflow.jobs.publish.needs).toEqual(['plan', 'build_macos', 'build_windows']);
+    expect(workflow.jobs.publish.needs).toEqual(['plan', 'build_macos', 'build_windows', 'await_ci']);
     expect(JSON.stringify(workflow.jobs.build_windows)).not.toContain('secrets.');
     expect(JSON.stringify(workflow.jobs.publish)).not.toContain('secrets.');
     expect(JSON.stringify(workflow)).not.toContain('pull_request_target');

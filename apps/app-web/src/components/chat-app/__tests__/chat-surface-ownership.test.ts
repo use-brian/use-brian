@@ -79,7 +79,6 @@ function base() {
     stream: { inFlight: () => false },
     transcriptRequestRef: { current: 0 }, transcriptAbortRef: { current: null as AbortController | null },
     setTranscriptCold: vi.fn(),
-    refreshDisplayHistory: vi.fn(), invalidateDisplayHistory: vi.fn(), setCanonicalHistoryIds: vi.fn(),
     workspaceId: "fictional-workspace",
     createChatStreamObserver: () => ({ observe: vi.fn(), release: vi.fn() }),
     directObserver: { observe: vi.fn(), release: vi.fn() },
@@ -118,26 +117,22 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
     expect(scope.evictTranscriptCache).not.toHaveBeenCalled();
     expect(scope.setError).not.toHaveBeenCalled();
-    expect(scope.setCanonicalHistoryIds).not.toHaveBeenCalled();
-    expect(scope.invalidateDisplayHistory).not.toHaveBeenCalled();
     scope.fetchChatTranscript.mockResolvedValue(["old prompt", "old answer", "new prompt", "new answer"]);
     await load("A", { force: true });
     expect(scope.chat.loadMessages).toHaveBeenCalledExactlyOnceWith(["old prompt", "old answer", "new prompt", "new answer"]);
   });
 
-  it("keeps display-only history separate after a successful partial canonical fetch", async () => {
-    const persisted = [{ id: "human-1" }, { id: "human-3" }];
-    const canonicalRows = [{ id: "human-1", text: "First prompt" }, { id: "human-3", text: "Next prompt" }];
+  it("hydrates ordinary history once from the primary response", async () => {
+    const persisted = [{ id: "human-1" }, { id: "answer-2" }, { id: "human-3" }];
+    const canonicalRows = [{ id: "human-1", text: "First prompt" }, { id: "answer-2", text: "Earlier answer" }, { id: "human-3", text: "Next prompt" }];
     const scope = {
       ...base(), fetchChatTranscript: vi.fn().mockResolvedValue(persisted),
       mapTranscriptRows: vi.fn(() => canonicalRows), writeTranscriptCache: vi.fn(), chat: { loadMessages: vi.fn() },
     };
     await evaluate(callback("loadTranscript"), scope)("A");
-    expect(scope.refreshDisplayHistory).toHaveBeenCalledOnce();
-    expect(scope.setCanonicalHistoryIds).toHaveBeenCalledWith({ sessionId: "A", ids: new Set(["human-1", "human-3"]) });
+    expect(scope.fetchChatTranscript).toHaveBeenCalledOnce();
     expect(scope.chat.loadMessages).toHaveBeenCalledExactlyOnceWith(canonicalRows);
     expect(scope.writeTranscriptCache).toHaveBeenCalledExactlyOnceWith("A", canonicalRows);
-    expect(scope.invalidateDisplayHistory).not.toHaveBeenCalled();
   });
 
   it("defers history replacement while the direct reply owns the transcript", async () => {
@@ -171,8 +166,6 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     expect(scope.chat.loadMessages).toHaveBeenCalledWith([]);
     expect(scope.writeTranscriptCache).not.toHaveBeenCalled();
     expect(scope.setError).toHaveBeenCalledWith("History unavailable. Start a new chat.");
-    expect(scope.invalidateDisplayHistory).toHaveBeenCalledOnce();
-    expect(scope.setCanonicalHistoryIds).toHaveBeenCalledWith({ sessionId: "A", ids: new Set() });
   });
 
   it.each([false, true])("offers recovery only for the current denied transcript (switched: %s)", async switched => {
@@ -190,9 +183,6 @@ describe("[COMP:app-web/chat-sessions-cache] surface async ownership", () => {
     await pending;
     expect(scope.setHistoryRecoverySessionId).toHaveBeenCalledTimes(switched ? 0 : 1);
     if (!switched) expect(scope.setHistoryRecoverySessionId).toHaveBeenCalledWith("A");
-    // A separate display admission can succeed despite canonical model-context refusal.
-    expect(scope.invalidateDisplayHistory).not.toHaveBeenCalled();
-    expect(scope.setCanonicalHistoryIds).toHaveBeenCalledTimes(switched ? 0 : 1);
   });
 
   it.each([false, true])("reports failed history without erasing cache or changing another session (switched: %s)", async (switched) => {

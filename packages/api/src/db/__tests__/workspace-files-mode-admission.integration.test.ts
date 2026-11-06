@@ -9,16 +9,19 @@ import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease } from '../client
 import { runWithAgentAccess } from '../agent-access-context.js'
 import { createWorkspaceFile, supersedeWorkspaceFile, updateWorkspaceFileMeta, getWorkspaceFileById } from '../workspace-files.js'
 import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'
+import { createDbFileStore } from '../file-store.js'
 import { insertFileSegments } from '../file-segments-store.js'
 import { searchFileSegments, readFileSegmentRange } from '../retrieval-store.js'
 import { captureRecordingIntakeParent } from '../recording-intake-admission.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { createEntity } from '../entities-store.js'
+import { createDbEntityLinksStore } from '../entity-links-store.js'
+import { createDbProvenanceStore } from '../provenance-store.js'
 import { admitFileCreate } from '../../workspace-access/file-create-admission.js'
 
 const { assertLocalFixture } = await import(new URL('../../../../../scripts/crm/local-fixture.mjs', import.meta.url).href)
-// This suite asserts the legacy (pre-v2) model, which workspaces.department_read_v2=false still
-// serves as the cutover's rollback path (migration 650, decision D22); its workspaces are pinned to it.
+// Root fixtures use the pre-v2 rollback model (migration 650, decision D22).
+// Source-inheritance cases explicitly enable v2 after creating their source.
 await assertLocalFixture()
 const pool = getPool()
 afterAll(async () => { await getAppPool().end(); await pool.end() })
@@ -43,7 +46,7 @@ async function fixture(mode: 'simple' | 'departments' | 'legacy' = 'simple') {
   return { workspaceId, userId, member, projectId, groups, team, key: team.compartmentKey!, otherKey: other.compartmentKey!, input, create, rows }
 }
 
-describe('canonical root workspace-file mode admission', () => {
+describe('[COMP:api/file-derived-admission] canonical workspace-file admission', () => {
 
   it('defaults omitted Simple roots through the canonical store, retaining Project and sensitivity', async () => {
     const f = await fixture()
@@ -367,6 +370,51 @@ describe('canonical root workspace-file mode admission', () => {
     expect(file).toMatchObject({userId:f.userId,assistantId,sensitivity:'confidential',projectIds:[f.projectId],compartments:[f.key]})
   })
 
+  it.each(['general', 'department'] as const)('preserves validated v2 %s source scope instead of appending the author home Department', async destination => {
+    const f = await fixture(), assistantId = randomUUID()
+    await pool.query("INSERT INTO assistants(id,workspace_id,owner_user_id,name,kind) VALUES($1,$2,$3,'Derived writer','standard')", [assistantId,f.workspaceId,f.userId])
+    const compartments = destination === 'general' ? [] : [f.otherKey]
+    const source = await f.create({userId:f.userId,assistantId,sensitivity:'confidential',projectIds:[f.projectId],compartments})
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.workspaceId])
+    await pool.query('UPDATE assistants SET home_department_id=$2 WHERE id=$1', [assistantId,f.team.id])
+    const derived = () => createWorkspaceFile(f.userId, f.input({createdByAssistantId:assistantId,source:'extracted'}), {
+      derivation:{producer:'v2-source-inheritance',sources:[boundScopeSource(source)!]},
+    })
+    const file = await derived()
+    expect(file).toMatchObject({userId:f.userId,assistantId,sensitivity:'confidential',projectIds:[f.projectId],compartments})
+    expect((await pool.query('SELECT s.source_id FROM scope_derivations d JOIN scope_derivation_sources s ON s.derivation_id=d.id WHERE d.resource_id=$1', [file.id])).rows)
+      .toEqual([{source_id:source.id}])
+    // Source-derived admission must not disable the ordinary home default on
+    // the next writer or permit reuse of a held canonical source.
+    expect(await f.create({createdByAssistantId:assistantId})).toMatchObject({compartments:[f.key]})
+    await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1', [source.id])
+    await expect(derived()).rejects.toThrow()
+    expect(await f.rows()).toHaveLength(3)
+  })
+
+  it('promotes a personal General chat attachment without introducing an unreadable assistant home Department', async () => {
+    const f = await fixture(), assistantId = randomUUID(), sessionId = randomUUID()
+    await pool.query("INSERT INTO assistants(id,workspace_id,owner_user_id,name,kind) VALUES($1,$2,$3,'Attachment writer','standard')", [assistantId,f.workspaceId,f.member])
+    await pool.query("INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,status,visibility) VALUES($1,$2,$3,'web','web:derived-fixture','idle','personal')", [sessionId,assistantId,f.member])
+    const cached = await createDbFileStore().cache({sessionId,workspaceId:f.workspaceId,userId:f.member,fileName:'source.pdf',mimeType:'application/pdf',content:'data:application/pdf;base64,c291cmNl',sizeBytes:6})
+    const source = await createWorkspaceFile(f.member, f.input({createdByUserId:f.member,userId:f.member,compartments:[]}))
+    const scopeAccumulator = new ContextScopeAccumulator()
+    scopeAccumulator.noteSource(boundScopeSource(source)!)
+    await pool.query('UPDATE workspaces SET department_read_v2=true WHERE id=$1', [f.workspaceId])
+    await pool.query('UPDATE assistants SET home_department_id=$2 WHERE id=$1', [assistantId,f.team.id])
+    const writeBlob = vi.fn(async (_key: string, _bytes: Buffer) => {})
+    const api = createFilesApi({store:createDbWorkspaceFilesStore(),gcs:{writeBlob} as never,bucket:'fixture',auditStore:{append:vi.fn()} as never})
+    const context: ToolContext = {userId:f.member,workspaceId:f.workspaceId,assistantId,assistantKind:'standard',
+      appId:'fixture',sessionId,channelType:'web',channelId:'fixture',abortSignal:new AbortController().signal,
+      clearance:'internal',compartments:[],mutationCompartments:[],projectIds:[],scopeAccumulator}
+    const result = await createFileTools(api,{readCachedFile:async () => cached}).saveFileToBrain.execute({fileId:cached.id,path:'/saved.pdf'},context)
+    expect(result.isError).not.toBe(true)
+    const file = (await f.rows()).find(row => row.path === '/saved.pdf')
+    expect(file).toMatchObject({user_id:f.member,compartments:[],sensitivity:'internal'})
+    expect(writeBlob.mock.calls[0]?.[1]).toEqual(Buffer.from('source'))
+    expect((await getWorkspaceFileById({workspaceId:f.workspaceId,userId:f.member,assistantId,assistantKind:'standard',clearance:'internal'},file.id))?.id).toBe(file.id)
+  })
+
   it.each(['held','stale','forged','foreign','ambient','empty'] as const)('rejects %s source evidence without a derived row or lineage', async kind => {
     const f=await fixture(),source=await f.create(),snapshot=boundScopeSource(source)!
     if(kind==='held')await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[source.id])
@@ -397,7 +445,40 @@ describe('canonical root workspace-file mode admission', () => {
     expect(row).toMatchObject({user_id:f.userId,assistant_id:assistantId,sensitivity:'confidential',compartments:[f.key],project_ids:[f.projectId]})
     expect((await pool.query("SELECT producer FROM scope_derivations WHERE resource_id=$1",[row.id])).rows).toEqual([{producer:'workspace-file-tool'}])
   })
+})
 
+describe('[COMP:retrieval/provenance] schema-safe primitive probes', () => {
+  it('returns no provenance for missing and inaccessible rows without probing nonexistent edge author columns', async () => {
+    const f = await fixture(), file = await f.create({userId:f.userId})
+    const store = createDbProvenanceStore()
+    const actor = {workspaceId:f.workspaceId,userId:f.member,assistantId:'',assistantKind:'primary' as const,clearance:'internal' as const}
+    expect(await store.provenance(actor,{row_id:randomUUID()})).toBeNull()
+    expect(await store.provenance(actor,{row_id:file.id})).toBeNull()
+    expect((await store.provenance({...actor,userId:f.userId},{row_id:file.id}))?.data.authorship.created_by_user_id).toBe(f.userId)
+    expect(await store.provenance({...actor,userId:f.userId,workspaceId:randomUUID()},{row_id:file.id})).toBeNull()
+    expect(await store.provenance({...actor,userId:f.userId,clearance:'public'},{row_id:file.id})).toBeNull()
+  })
+
+  it('enforces Department, Project and assistant bounds without ambient agent context', async () => {
+    const f = await fixture(), assistantId = randomUUID()
+    await pool.query("INSERT INTO assistants(id,workspace_id,owner_user_id,name,kind) VALUES($1,$2,$3,'Provenance fixture','standard')", [assistantId,f.workspaceId,f.userId])
+    const file = await f.create({userId:f.userId,assistantId,compartments:[f.key],projectIds:[f.projectId]})
+    const actor = {workspaceId:f.workspaceId,userId:f.userId,assistantId,assistantKind:'standard' as const,clearance:'internal' as const,compartments:[f.key],projectIds:[f.projectId]}
+    const store = createDbProvenanceStore()
+    expect((await store.provenance(actor,{row_id:file.id}))?.data.row_id).toBe(file.id)
+    expect(await store.provenance({...actor,compartments:[]},{row_id:file.id})).toBeNull()
+    expect(await store.provenance({...actor,projectIds:[]},{row_id:file.id})).toBeNull()
+    expect(await store.provenance({...actor,assistantId:randomUUID()},{row_id:file.id})).toBeNull()
+  })
+
+  it('keeps edge authorship unknown instead of inventing it from ownership', async () => {
+    const f = await fixture()
+    const source = await createEntity({workspaceId:f.workspaceId,createdByUserId:f.userId,kind:'person',displayName:'Source',source:'user'})
+    const target = await createEntity({workspaceId:f.workspaceId,createdByUserId:f.userId,kind:'company',displayName:'Target',source:'user'})
+    const link = await createDbEntityLinksStore().create({workspaceId:f.workspaceId,sourceKind:'entity',sourceId:source.id,targetKind:'entity',targetId:target.id,edgeType:'works_at',source:'user',userId:f.userId})
+    const result = await createDbProvenanceStore().provenance({workspaceId:f.workspaceId,userId:f.userId,assistantId:'',assistantKind:'primary',clearance:'confidential'}, {row_id:link.id})
+    expect(result?.data).toMatchObject({primitive:'entity_links',authorship:{created_by_user_id:'',created_by_assistant_id:null},supersession:{preceded_by:null,superseded_by:null}})
+  })
 })
 
 describe('[COMP:files/upload-identity] canonical upload identity', () => {

@@ -76,16 +76,22 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
       oauth_required: false,
     })
     expect(OFFICIAL_CONNECTOR_TOOLS.office?.map((tool) => tool.name)).toEqual([
+      'listOfficeTemplates',
       'proposeOfficeEvidenceFill',
       'createOfficeArtifact',
       'getOfficeClassification',
       'restrictOfficeClassification',
       'retryOfficeTemplateImport', 'resumeOfficeGeneration',
+      'restoreOfficeVersion', 'assignOfficeComment', 'resolveOfficeComment', 'exportOfficeArtifact', 'changeOfficeLifecycle', 'cancelOfficeJob', 'applyOfficeCommands', 'getOfficeHistory', 'getOfficeComments', 'getOfficeSuggestions', 'listOfficeArtifacts',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
       'openPdfEditingSession',
       'placePdfSignature',
     ])
+    expect(OFFICIAL_CONNECTOR_TOOLS.office?.find((tool) => tool.name === 'listOfficeTemplates')).toMatchObject({
+      classification: 'read',
+      defaultPolicy: 'allow',
+    })
     expect(OFFICIAL_CONNECTOR_TOOLS.office?.find((tool) => tool.name === 'placePdfSignature')).toMatchObject({
       classification: 'write',
       defaultPolicy: 'ask',

@@ -12,7 +12,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../types.js'
+import { buildTool, type Tool, type ToolContext } from '../types.js'
 import { NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
 import { toolFailure } from '../tool-failure.js'
 import { INITIAL_BUDGET, type ConsultRequest, type ConsultTransport } from '../../a2a/index.js'
@@ -21,6 +21,8 @@ import { pinAccessCeiling } from '../../security/access-ceiling.js'
 // ── Dependency types ───────────────────────────────────────────
 
 export type InterAssistantDeps = {
+  /** Host-only capture from the actual caller, outside the public input schema. */
+  captureWorkspaceDelegation?: (context: ToolContext) => Promise<ConsultRequest['callerWorkspaceDelegation']>
   /** Check if caller follows callee (accepted status). */
   isFollowing: (followerAssistantId: string, followingAssistantId: string) => Promise<boolean>
 
@@ -152,7 +154,7 @@ If unsure whether to call this, do not call it. Answer with your own tools first
       question: z.string().describe('The question or request to send. Be specific and self-contained — the other assistant has no context about your conversation.'),
     }),
     isConcurrencySafe: false,
-    isReadOnly: true,
+    isReadOnly: false,
     // No per-tool wall-clock (2026-08-19): the callee's consult loop is
     // progress-bounded by its own stall watchdog and cost-bounded by its
     // budget, so a slow-but-alive consult returns its real answer instead of
@@ -177,6 +179,7 @@ If unsure whether to call this, do not call it. Answer with your own tools first
 
         // 3. Build the A2A ConsultRequest. Free-mode (no capabilityId).
         const request: ConsultRequest = {
+          callerWorkspaceDelegation: await deps.captureWorkspaceDelegation?.(context),
           callerScopeEvidence: context.scopeAccumulator?.evidence,
           callerAccessCeiling: pinAccessCeiling({
             workspaceId: context.workspaceId ?? '', userId: context.userId,

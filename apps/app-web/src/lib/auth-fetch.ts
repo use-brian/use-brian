@@ -282,13 +282,13 @@ export async function authFetch(
     const outcome = await tryRefreshToken();
     if (outcome.kind === "ok") {
       token = outcome.token;
-    } else if (outcome.kind === "transient") {
+    } else if (outcome.kind === "transient" || outcome.kind === "redirecting") {
       // Offline / transient: surface a network error like any failed fetch
       // (`fetch(url)` below throws the same way when offline with a live token).
       // The session stays intact and callers degrade + retry — never a logout.
       throw new AuthRefreshUnavailableError();
     } else {
-      // `unauthenticated` → send to login; `redirecting` → page is unloading.
+      // Only definitive rejection reaches the shared account recovery flow.
       if (outcome.kind === "unauthenticated") redirectToLogin(requestIdentity);
       return new Response(null, { status: 401 });
     }
@@ -305,9 +305,9 @@ export async function authFetch(
     if (response.status === 401) redirectToLogin(requestIdentity);
     return response;
   }
-  if (outcome.kind === "transient") throw new AuthRefreshUnavailableError();
-  // Keep the session while the browser refresh redirect is in progress;
-  // redirecting → page is unloading; unauthenticated → the session is dead.
+  if (outcome.kind === "transient" || outcome.kind === "redirecting") throw new AuthRefreshUnavailableError();
+  // A pending browser handoff above is availability, not rejected authority.
+  // Only definitive rejection can invalidate the shared admission cache.
   if (outcome.kind === "unauthenticated") redirectToLogin(requestIdentity);
   return response;
 }

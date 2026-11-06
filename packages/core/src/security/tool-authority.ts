@@ -1,3 +1,4 @@
+import { workspaceCredentialDelegation } from './workspace-delegation.js'
 import type { ToolContext } from '../tools/types.js'
 import { intersectAccessCeilings, parseAuthoringAuthority, pinAuthoringAuthority, type AuthoringAuthority } from './access-ceiling.js'
 
@@ -20,7 +21,8 @@ export function pinToolAuthoringAuthority(context: ToolContext): AuthoringAuthor
       const frozen = parseAuthoringAuthority({ version: 1, assistantId: context.assistantId,
         ceiling: execution.security.ceiling })
       if (!frozen) throw new Error('execution_ceiling_missing')
-      return { ...frozen, ceiling: intersectAccessCeilings(frozen.ceiling, pinAuthoringAuthority(access).ceiling) }
+      const workspaceDelegation = workspaceCredentialDelegation(execution)
+      return { ...frozen, ...(workspaceDelegation ? { workspaceDelegation } : {}), ceiling: intersectAccessCeilings(frozen.ceiling, pinAuthoringAuthority(access).ceiling) }
     } catch {
       throw Object.assign(new Error('The current turn has no trusted workspace authoring authority.'), {
         reason: 'authoring_authority_unavailable',

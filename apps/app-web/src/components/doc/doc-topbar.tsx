@@ -1,5 +1,7 @@
 "use client";
 
+import type { ReactNode } from "react";
+import { cn } from "@/lib/utils";
 import { WorkspaceTopbar } from "@/components/chrome/workspace-topbar";
 
 /** Page tabs inside the shared workspace top bar. Active-tab browse history,
@@ -16,6 +18,7 @@ import {
   ChevronRight,
   FileText,
   Plus,
+  PanelsTopLeft,
   Sparkles,
   Target,
   X,
@@ -37,7 +40,7 @@ import { type PanelId } from "@/lib/doc-page-url";
 import { format, useT } from "@/lib/i18n/client";
 
 /** Label chips the phone strip keeps before collapsing into the tabs menu. */
-export const PHONE_TAB_CHIPS = 2;
+export const PHONE_TAB_CHIPS = 1;
 
 /**
  * The phone strip's collapse rule (pure). Up to `max` tabs render as label
@@ -82,6 +85,7 @@ export type TabView = {
 };
 
 type DocTopBarProps = {
+  pageHeader?: ReactNode;
   tabs: TabView[];
   canBack: boolean;
   canForward: boolean;
@@ -95,6 +99,7 @@ type DocTopBarProps = {
 };
 
 export function DocTopBar({
+  pageHeader,
   tabs,
   canBack,
   canForward,
@@ -110,12 +115,14 @@ export function DocTopBar({
   const appIdentity = <div data-workspace-app-identity className="flex min-w-0 items-center gap-2"><FileText className="size-4 shrink-0" aria-hidden /><span className="truncate">{copy.operatorBar.page}</span></div>;
 
   return (
-    <WorkspaceTopbar identity={appIdentity} sidebarCollapsed={sidebarCollapsed} history={{ onBack, onForward, canBack, canForward }}>
-      {/* Real page tabs retain their behavior as flat, centered selections.
-          Titles shrink and fade rather than pushing trailing controls out. */}
-      <div className="flex min-w-0 flex-1 items-center self-stretch gap-1">
+    <WorkspaceTopbar identity={appIdentity} sidebarCollapsed={sidebarCollapsed} history={{ onBack, onForward, canBack, canForward }}
+      className={pageHeader ? "h-auto flex-wrap gap-y-0 border-b-0 md:h-10 md:flex-nowrap [&>[data-workspace-search-slot]]:order-2 md:[&>[data-workspace-search-slot]]:order-3" : undefined}>
+      {pageHeader && <div data-doc-page-toolbar className="order-3 w-full min-w-0 md:order-1 md:w-auto md:flex-1">{pageHeader}</div>}
+      {/* A loaded desktop Page uses the tabs menu; blank/panel states keep
+          the strip. New tab stays beside the tabs in either presentation. */}
+      <div data-doc-tabs className={cn("flex min-w-0 flex-1 items-center self-stretch gap-1", pageHeader && "order-1 md:order-2 md:flex-none md:border-l md:border-border/60 md:pl-1")}>
         {/* Desktop strip: one chip per tab. */}
-        <div className="hidden min-w-0 flex-1 items-center gap-1 self-stretch md:flex">
+        <div className={cn("hidden min-w-0 items-end gap-1 self-stretch", !pageHeader && "md:flex")}>
           {tabs.map((tab) => (
             <TabChip
               key={tab.key}
@@ -132,6 +139,7 @@ export function DocTopBar({
         {/* Phone strip: label chips up to PHONE_TAB_CHIPS, then the active chip
             + an "N tabs" menu (responsive contract M8). */}
         <PhoneTabStrip
+          desktopMenu={!!pageHeader}
           history={{ onBack, onForward, canBack, canForward }}
           tabs={tabs}
           onSwitchTab={onSwitchTab}
@@ -166,10 +174,12 @@ function tabLabel(tab: TabView, untitledLabel: string, newTabLabel: string): str
 }
 
 /**
- * The below-`md` strip. Hidden on desktop by CSS (`md:hidden`), so the two
- * strips coexist in the markup and hydration never depends on a media query.
+ * Phone tab chips with a menu for history and every open tab. Loaded desktop
+ * Pages reuse only the menu, leaving room for location and actions in one row.
+ * CSS handles the breakpoint without remounting page controls.
  */
 function PhoneTabStrip({
+  desktopMenu = false,
   history,
   tabs,
   onSwitchTab,
@@ -180,6 +190,7 @@ function PhoneTabStrip({
   menuLabel,
   menuAria,
 }: {
+  desktopMenu?: boolean;
   history: { onBack: () => void; onForward: () => void; canBack: boolean; canForward: boolean };
   tabs: TabView[];
   onSwitchTab: (key: string) => void;
@@ -195,21 +206,23 @@ function PhoneTabStrip({
   return (
     <div
       data-doc-tab-strip="phone"
-      className="flex min-w-0 flex-1 items-center gap-1 self-stretch md:hidden"
+      className={cn("flex min-w-0 flex-1 items-center gap-1 self-stretch", !desktopMenu && "md:hidden")}
     >
-      {chips.map((tab) => (
-        <TabChip
-          key={tab.key}
-          tab={tab}
-          compact
-          closable={tabs.length > 1}
-          onSwitch={() => onSwitchTab(tab.key)}
-          onClose={() => onCloseTab(tab.key)}
-          untitledLabel={untitledLabel}
-          newTabLabel={newTabLabel}
-          closeAria={closeAria}
-        />
-      ))}
+      <div className="flex min-w-0 flex-1 items-center gap-1 md:hidden">
+        {chips.map((tab) => (
+          <TabChip
+            key={tab.key}
+            tab={tab}
+            compact
+            closable={tabs.length > 1}
+            onSwitch={() => onSwitchTab(tab.key)}
+            onClose={() => onCloseTab(tab.key)}
+            untitledLabel={untitledLabel}
+            newTabLabel={newTabLabel}
+            closeAria={closeAria}
+          />
+        ))}
+      </div>
       {(
         <DropdownMenu>
           <DropdownMenuTrigger
@@ -223,7 +236,9 @@ function PhoneTabStrip({
                 className="inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-1 self-center rounded-md px-2 md:h-7 md:min-w-7 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent"
               >
                 <span className="sr-only">{menuLabel}</span>
-                <ChevronDown className="size-4" aria-hidden />
+                {desktopMenu && <PanelsTopLeft className="hidden size-4 md:block" aria-hidden />}
+                {desktopMenu && tabs.length > 1 && <span className="hidden text-xs md:inline" aria-hidden>{tabs.length}</span>}
+                <ChevronDown className={cn("size-4", desktopMenu && "md:hidden")} aria-hidden />
               </button>
             }
           />
@@ -298,6 +313,8 @@ function TabChip({
       // In the desktop shell the whole top bar is an OS window-drag handle; a tab
       // chip must stay clickable (switch / close), so it opts out of the drag.
       data-no-drag
+      data-doc-tab
+      data-active={tab.isActive ? "true" : "false"}
       className={[
         // Every desktop tab is the SAME fixed width (`w-[200px]`) regardless of
         // title length — short and long names get identical chips, the title
@@ -306,11 +323,12 @@ function TabChip({
         // crowded. The phone chip shares the row instead (`flex-1`), capped so a
         // lone active chip does not stretch across the whole bar.
         compact
-          ? "group/tab flex h-9 md:h-8 min-w-0 flex-1 basis-0 max-w-[14rem] items-center gap-1.5 rounded-lg pl-2.5 pr-1 text-sm"
-          : "group/tab flex h-9 md:h-8 w-[200px] min-w-0 items-center gap-1.5 rounded-lg pl-3 pr-1.5 text-sm",
+          ? "group/tab flex h-11 md:h-8 min-w-0 flex-1 basis-0 max-w-[14rem] items-center gap-1.5 rounded-lg pl-2.5 pr-1 text-sm"
+          : "group/tab flex h-11 md:h-[34px] w-[200px] min-w-0 items-center gap-1.5 rounded-lg md:rounded-b-none pl-3 pr-1.5 text-sm",
+        "ring-1 ring-inset ring-border",
         tab.isActive
-          ? "bg-muted font-medium text-foreground"
-          : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+          ? "bg-background font-medium text-foreground"
+          : "bg-foreground/5 text-muted-foreground hover:bg-foreground/10 hover:text-foreground",
       ].join(" ")}
     >
       <span className="grid size-4 shrink-0 place-items-center text-[14px] leading-none">
@@ -319,8 +337,9 @@ function TabChip({
       <button
         type="button"
         onClick={onSwitch}
+        aria-current={tab.isActive ? "page" : undefined}
         title={label}
-        className="min-w-0 flex-1 overflow-hidden whitespace-nowrap text-left"
+        className="min-w-0 flex-1 self-stretch overflow-hidden whitespace-nowrap text-left"
         style={{ maskImage: TITLE_FADE_MASK, WebkitMaskImage: TITLE_FADE_MASK }}
       >
         {label}
@@ -335,11 +354,11 @@ function TabChip({
             onClose();
           }}
           className={[
-            // 32px on a phone (a secondary chip control, report B row 51), the
+            // 44px on a phone, the
             // desktop 20px glyph from `md`. An INACTIVE tab's ✕ is dimmed on
             // touch rather than hidden (responsive contract M2: the hover
             // reveal stays behind `md:`), so it is always tappable.
-            "grid size-8 shrink-0 place-items-center rounded text-muted-foreground hover:bg-foreground/10 hover:text-foreground focus-visible:opacity-100 md:size-5",
+            "grid size-11 shrink-0 place-items-center rounded text-muted-foreground hover:bg-foreground/10 hover:text-foreground focus-visible:opacity-100 md:size-5",
             tab.isActive
               ? "opacity-100"
               : "opacity-60 md:opacity-0 md:group-hover/tab:opacity-100",
@@ -377,7 +396,7 @@ function TabIcon({ tab }: { tab: TabView }) {
   // A pageless tab is the Suggested-for-you home → the AI sparkle (palette
   // primary), matching the sidebar entry.
   if (!tab.pageId) {
-    return <Sparkles className="size-4 text-primary" aria-hidden />;
+    return <Sparkles className="size-4 text-muted-foreground" aria-hidden />;
   }
   // A page whose type metadata hasn't resolved yet → generic doc glyph.
   if (!tab.entity || !tab.viewType) {

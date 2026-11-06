@@ -1,3 +1,5 @@
+import type { PinnedOfflineSession } from "../offline/application-write-authority";
+import { captureUploadJournal, type UploadPlan } from "../recordings/upload-journal";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Recordings SDK (app-web) — the 3-step long-recording upload flow
@@ -98,6 +100,7 @@ export async function startLiveRecordingPage(params: {
   folderName?: string;
 }): Promise<LiveRecordingPage> {
   const res = await authFetch(`${API_URL}/api/recordings/live/start`, {
+    signal: AbortSignal.timeout(5_000),
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
@@ -172,8 +175,9 @@ export async function listLiveTranscriptWindows(
  * fails, so the page can state that status honestly instead of losing the
  * recording entirely. Callers treat failure as non-fatal.
  */
-export async function linkLiveRecordingPage(pageId: string, recordingId: string): Promise<void> {
-  const res = await authFetch(`${API_URL}/api/recordings/live/link`, {
+export async function linkLiveRecordingPage(pageId: string, recordingId: string, session?: PinnedOfflineSession): Promise<void> {
+  const request = session ? session.request : (path: string, init?: RequestInit) => authFetch(`${API_URL}${path}`, init);
+  const res = await request("/api/recordings/live/link", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ pageId, recordingId }),
@@ -261,6 +265,8 @@ async function putWithUploadProgress(input: {
         input.onProgress(Math.min(input.body.size, event.loaded));
       }
     };
+    xhr.timeout = 120_000;
+    xhr.ontimeout = () => reject(new RecordingApiError("Upload timed out", 408));
     xhr.onload = () => resolve(xhr.status);
     xhr.onerror = () => reject(new RecordingApiError("Upload to storage failed (network error)", 0));
     xhr.onabort = () => reject(new RecordingApiError("Upload to storage was cancelled", 0));
@@ -275,17 +281,20 @@ export async function startRecordingUpload(params: {
   file: File;
   onProgress?: (progress: number) => void;
   kind?: "memo" | "meeting";
+  recoveryId?: string;
 }): Promise<{ recordingId: string }> {
+  const journal = params.recoveryId ? await captureUploadJournal(params.workspaceId, params.recoveryId) : null;
+  if (journal?.state.recordingId) return { recordingId: journal.state.recordingId };
+  const session = journal ? await journal.session() : null;
   const prepareCode = "recording_upload_prepare_failed";
   const completeCode = "recording_upload_complete_failed";
   const storageCode = "recording_upload_storage_failed";
   async function post(path: string, body: unknown, code: string): Promise<Response> {
     try {
-      const res = await authFetch(`${API_URL}/api/recordings/${path}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      journal?.assertCurrent();
+      const init = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) };
+      const res = await (session ? session.request(`/api/recordings/${path}`, init) : authFetch(`${API_URL}/api/recordings/${path}`, init));
+      journal?.assertCurrent();
       if (!res.ok) {
         const error = await asError(res, "Recording upload failed");
         throw new RecordingApiError(error.message, error.status,
@@ -305,17 +314,13 @@ export async function startRecordingUpload(params: {
     assistantId: params.assistantId,
     ...(params.kind ? { kind: params.kind } : {}),
   };
-  const mint = await post("upload-url", {
-    ...scope, fileName: params.file.name, mime, sizeBytes: params.file.size,
-  }, prepareCode);
-  const start = await mint.json().catch(() => null) as {
-    uploadId: string;
-    fileId: string;
-    chunkSizeBytes: number;
-    expiresAt: string;
-    parts: Array<{ index: number; offset: number; sizeBytes: number; url: string }>;
-    uploadHeaders?: Record<string, string>;
-  } | null;
+  let start: UploadPlan | null = journal?.state.plan ?? null;
+  let completing = journal?.state.completing ?? false;
+  if (start && !completing && Date.parse(start.expiresAt) <= Date.now()) start = null;
+  if (!start) {
+    const mint = await post("upload-url", { ...scope, fileName: params.file.name, mime, sizeBytes: params.file.size }, prepareCode);
+    start = await mint.json();
+  }
   // Reject incomplete plans before sending any bytes or asking for adoption.
   let plannedBytes = 0;
   if (!start?.uploadId || !Array.isArray(start.parts) || !start.parts.length ||
@@ -327,12 +332,14 @@ export async function startRecordingUpload(params: {
       }) || plannedBytes !== params.file.size) {
     throw new RecordingApiError("Invalid recording upload plan", 502, prepareCode);
   }
+  if (journal) await journal.save({ plan: start, completing });
   let progress = 0;
   const report = (bytes: number) => {
     progress = Math.max(progress, Math.min(1, bytes / params.file.size));
     params.onProgress?.(progress);
   };
-  for (const part of start.parts) {
+  for (const part of completing ? [] : start.parts) {
+    journal?.assertCurrent();
     const body = params.file.slice(part.offset, part.offset + part.sizeBytes);
     for (let attempt = 0; ; attempt += 1) {
       try {
@@ -346,6 +353,7 @@ export async function startRecordingUpload(params: {
             })
           : (await fetch(part.url, {
               method: "PUT",
+              signal: AbortSignal.timeout(120_000),
               headers: { "Content-Type": "application/octet-stream", ...start.uploadHeaders },
               body,
             })).status;
@@ -363,15 +371,25 @@ export async function startRecordingUpload(params: {
     }
     report(part.offset + part.sizeBytes);
   }
-  const completion = await post("complete-upload", { ...scope, uploadId: start.uploadId }, completeCode);
+  if (journal) await journal.save({ plan: start, completing: true });
+  let completion: Response;
+  try { completion = await post("complete-upload", { ...scope, uploadId: start.uploadId }, completeCode); }
+  catch (error) {
+    // The service checks completed publication before declaring expiry. Only a
+    // definitive 410 releases an incomplete plan; timeouts/404 never do.
+    if (journal && error instanceof RecordingApiError && error.status === 410) await journal.save({});
+    throw error;
+  }
   const result = await completion.json().catch(() => null) as { recordingId?: string } | null;
   if (!result?.recordingId) throw new RecordingApiError("Invalid recording completion", 502, completeCode);
+  if (journal) await journal.save({ recordingId: result.recordingId });
   return { recordingId: result.recordingId };
 }
 
 /** Server-authoritative duration + surcharge estimate. Throws `too_long` / `could_not_read_duration`. */
-export async function estimateRecording(recordingId: string): Promise<RecordingEstimate> {
-  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/estimate`, { method: "POST" });
+export async function estimateRecording(recordingId: string, session?: PinnedOfflineSession): Promise<RecordingEstimate> {
+  const path = `/api/recordings/${recordingId}/estimate`;
+  const res = await (session ? session.request(path, { method: "POST" }) : authFetch(`${API_URL}${path}`, { method: "POST" }));
   if (!res.ok) throw await asError(res, "Could not read the recording");
   return res.json();
 }
@@ -402,8 +420,11 @@ export async function processRecording(
    * a first-time run neither needs it nor should send it.
    */
   opts?: { confirm?: boolean },
+  session?: PinnedOfflineSession,
 ): Promise<RecordingQueued> {
-  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/process`, {
+  const path = `/api/recordings/${recordingId}/process`;
+  const request = session ? session.request : (path: string, init?: RequestInit) => authFetch(`${API_URL}${path}`, init);
+  const res = await request(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -479,8 +500,9 @@ export async function listRecordings(
   return body.recordings;
 }
 
-export async function getRecording(recordingId: string): Promise<RecordingSummary> {
-  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}`);
+export async function getRecording(recordingId: string, session?: PinnedOfflineSession): Promise<RecordingSummary> {
+  const path = `/api/recordings/${recordingId}`;
+  const res = await (session ? session.request(path) : authFetch(`${API_URL}${path}`));
   if (!res.ok) throw await asError(res, "Could not load the recording");
   return (await res.json()) as RecordingSummary;
 }
@@ -493,8 +515,9 @@ export async function getRecording(recordingId: string): Promise<RecordingSummar
  */
 export async function getRecordingMediaUrl(
   recordingId: string,
+  signal?: AbortSignal,
 ): Promise<{ url: string; expiresAt: string; mime: string; durationMs: number | null }> {
-  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/media-url`);
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/media-url`, { signal });
   if (!res.ok) throw await asError(res, "Could not load the audio");
   return (await res.json()) as {
     url: string;

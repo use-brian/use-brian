@@ -171,6 +171,16 @@ function wrapApproveBand(
       if (!ctx.workspaceId) {
         return workspaceGateFailure(tool.name, 'stage this call against')
       }
+      // A workspace connection installs a host-owned parent-bound approval
+      // port. Keep its credential ceiling through the human decision instead
+      // of sending the request through the legacy owner-based apply path.
+      if (ctx.executionContext?.identity.kind === 'programmatic' && ctx.createToolInvocationApproval) {
+        const approvalId = await ctx.createToolInvocationApproval({
+          toolName: tool.name, toolInput: (input ?? {}) as Record<string, unknown>,
+          description: tool.description, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        })
+        return { continuation: { kind: 'approval', approvalId }, data: `Waiting for human approval (${approvalId}).` }
+      }
       const origin = deps.resolveOrigin(ctx)
       const approverUserId = await deps.resolveApprover(ctx)
       const approval = await deps.approvalsStore.createStagedWrite({
@@ -184,6 +194,7 @@ function wrapApproveBand(
         originLabel: origin.originLabel,
       })
       return {
+        continuation: { kind: 'approval', approvalId: approval.id },
         data:
           `Staged for human approval (approval ${approval.id}). The ${tool.name} call will ` +
           'execute after a workspace member approves it in the Approvals inbox; check back later.',

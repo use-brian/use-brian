@@ -10,6 +10,43 @@ const userMessage = (id: string, text: string): Message => ({
 })
 
 describe('[COMP:chat-ui/chat-reducer] chat reducer', () => {
+  it('keeps unchanged refresh snapshots and row identities stable', () => {
+    const first = { ...userMessage('m1', 'hello'), userAttachments: [{ id: 'file', name: 'notes.txt' }] }
+    const second = userMessage('m2', 'reply')
+    const state = { ...initialChatState, sessionId: 'session', messages: [first, second], streamingText: 'partial', isStreaming: true }
+    expect(chatReducer(state, { type: 'messages/load', messages: structuredClone(state.messages) })).toBe(state)
+    const refreshed = structuredClone(state.messages)
+    refreshed[1].text = 'updated reply'
+    const next = chatReducer(state, { type: 'messages/load', messages: refreshed })
+    expect(next.messages[0]).toBe(first)
+    expect(next.messages[1]).toBe(refreshed[1])
+    expect(next.streamingText).toBe('partial')
+    expect(next.isStreaming).toBe(true)
+    expect(next.pendingConfirmations).toBe(state.pendingConfirmations)
+  })
+
+  it('reconciles additions, removals, ordering and attachment changes without retaining stale data', () => {
+    const first = { ...userMessage('m1', 'hello'), userAttachments: [{ id: 'file', name: 'old.txt' }] }
+    const second = userMessage('m2', 'reply')
+    const state = { ...initialChatState, messages: [first, second] }
+    const moved = chatReducer(state, { type: 'messages/load', messages: [structuredClone(second), structuredClone(first)] })
+    expect(moved.messages[0]).toBe(second)
+    expect(moved.messages[1]).toBe(first)
+    const updated = { ...structuredClone(first), userAttachments: [{ id: 'file', name: 'new.txt' }] }
+    const next = chatReducer(state, { type: 'messages/load', messages: [updated, userMessage('m3', 'new')] })
+    expect(next.messages).toEqual([updated, userMessage('m3', 'new')])
+    expect(next.messages[0]).not.toBe(first)
+    expect(chatReducer(next, { type: 'messages/load', messages: [] }).messages).toEqual([])
+  })
+
+  it('keeps unknown timestamps stable but applies corrected timestamps', () => {
+    const message = { ...userMessage('m1', 'hello'), timestamp: new Date(NaN) }
+    const state = { ...initialChatState, messages: [message] }
+    expect(chatReducer(state, { type: 'messages/load', messages: structuredClone(state.messages) })).toBe(state)
+    const next = chatReducer(state, { type: 'messages/load', messages: [userMessage('m1', 'hello')] })
+    expect(next.messages[0].timestamp.getTime()).toBe(0)
+  })
+
   it('separates finished text and saved text from foreground completion', () => {
     const started = chatReducer(initialChatState, { type: 'stream/start' })
     const writing = chatReducer(started, { type: 'stream/append', text: 'Hello.' })

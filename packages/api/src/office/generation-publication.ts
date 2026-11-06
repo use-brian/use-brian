@@ -12,6 +12,7 @@ import { admitWorkspaceResource } from '../workspace-access/resource-admission.j
 import type { FilesClientResolver } from '../files/files-api.js'
 import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
 import { validateDepartmentOfficeGeneration } from './generation-evidence.js'
+import { assertOfficeGenerationOrigin } from './generation-origin.js'
 import { promptOnlyBrief, constructPromptOnlyDocument } from './prompt-only.js'
 import { OfficeGenerationBriefSchema } from '@use-brian/core'
 import type { LLMProvider } from '@use-brian/core'
@@ -42,9 +43,7 @@ async function authorize(client:PoolClient, expected:OfficeGenerationJobRow, lea
   if(!department && (b?.protocol!=='office_prompt_only_v1' || b.actorUserId!==actor || b.workspaceId!==job.workspaceId || b.implicitContext!=='disabled'
     || !equal(b.sources,[]) || !equal(p.sourceHandles,[]) || !Array.isArray(p.compartments) || !Array.isArray(p.projectIds)
     || !equal(p.compartmentGrant,p.compartments) || !equal(p.projectGrant,p.projectIds) || job.templateVersionId || job.baseArtifactVersion!==0)) throw denied()
-  const session=await client.query(`SELECT s.id FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.user_id=$2
-    AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp() AND s.auth_version=u.auth_version FOR SHARE OF s,u`,[b.authSessionId,actor])
-  if(!session.rows.length) throw denied()
+  await assertOfficeGenerationOrigin(client,job)
   const a=(await client.query(`SELECT * FROM office_artifacts WHERE id=$1 AND workspace_id=$2 AND family=$3 AND mode='artifact'
     AND lifecycle_state='active' AND head_version=0 AND head_version_id IS NULL
     AND NOT scope_review_state_held('office_artifact',id) AND office_generation_artifact_allows(id,workspace_id,true) FOR UPDATE`,[job.artifactId,job.workspaceId,department?OfficeGenerationBriefSchema.parse(job.brief).family:'document'])).rows[0]
@@ -94,16 +93,20 @@ async function publishGenerationSnapshot(params:{job:OfficeGenerationJobRow;leas
     }
     // Inherited artifact envelope, with current mutation authority. Visibility is
     // additionally constrained by the live parent binding for every generic read.
+    // A canonical v2 General artifact is already placed: do not reapply the
+    // executing assistant's root-file home Department default to its backing file.
+    const inheritedGeneral=department && a.compartments.length===0
     const admitted=await admitWorkspaceResource(client,job.workspaceId,actor,{writerKind:'workspace_file',rowVisibility:{userId:null,assistantId:null},visibility:'workspace',sensitivity:a.sensitivity,
       inherited:{visibility:'workspace',sensitivity:a.sensitivity,compartments:a.compartments,projectIds:a.project_ids},
-      requestedLabels:{compartments:a.compartments,projectIds:a.project_ids}})
+      ...(inheritedGeneral?{destination:{kind:'general'},requestedLabels:{projectIds:a.project_ids}}
+        :{requestedLabels:{compartments:a.compartments,projectIds:a.project_ids}})})
     if(!equal(admitted.envelope.compartments,a.compartments)||!equal(admitted.envelope.projectIds,a.project_ids)||admitted.envelope.sensitivity!==a.sensitivity) throw denied()
     const parent=`/office/artifacts/${job.artifactId}/versions`, name=`1-${hash}.json`
     await client.query(`INSERT INTO workspace_files(id,workspace_id,path,parent_path,name,mime,size_bytes,storage_uri,sensitivity,compartments,project_ids,created_by_user_id,metadata)
       VALUES($1,$2,$3,$4,$5,'application/json',$6,$7,$8,$9,$10,$11,$12::jsonb)`,[fileId,job.workspaceId,`${parent}/${name}`,parent,name,bytes.length,buildStorageUri(storage.bucket,job.workspaceId,fileId,storage.uriScheme),a.sensitivity,a.compartments,a.project_ids,actor,JSON.stringify({noIndex:true,contentSha256:hash,officeGenerationJobId:job.id})])
     await client.query('INSERT INTO office_generation_file_bindings(file_id,artifact_id,workspace_id,job_id,snapshot_hash) VALUES($1,$2,$3,$4,$5)',[fileId,job.artifactId,job.workspaceId,job.id,hash])
     const version=await createOfficeArtifactStore(queryFor(client,actor)).commitVersion({userId:actor,artifactId:job.artifactId,snapshotTitle:snapshot.title,expectedVersion:0,snapshotFileId:fileId,snapshotHash:hash,
-      operationClock:officeStateVector(snapshotToYDoc(snapshot)),schemaVersion:snapshot.schemaVersion,capabilityVersion:snapshot.capabilityVersion,origin:'generation',authorType:'system',summary:department?'Office artifact generated':'Prompt-only generation',checkpointKind:'generation'})
+      operationClock:officeStateVector(snapshotToYDoc(snapshot)),schemaVersion:snapshot.schemaVersion,capabilityVersion:snapshot.capabilityVersion,origin:'generation',authorType:job.assistantId?'assistant':'system',authorAssistantId:job.assistantId??undefined,summary:department?'Office artifact generated':'Prompt-only generation',checkpointKind:'generation'})
     if(!version) throw denied()
     // Publish an immediately usable editing document, not just a historical
     // snapshot. Never overwrite a concurrent draft; roll back the whole output.
@@ -119,10 +122,10 @@ async function publishGenerationSnapshot(params:{job:OfficeGenerationJobRow;leas
     }
     const done=await client.query(`UPDATE office_generation_jobs SET status='completed',stage='completed',completed_at=now(),updated_at=now(),lease_token=NULL,lease_expires_at=NULL,error_code=NULL,error_detail=NULL
       WHERE id=$1 AND status='running' AND lease_token=$2 AND lease_expires_at>clock_timestamp() AND cancel_requested_at IS NULL
-      AND EXISTS(SELECT 1 FROM auth_sessions s JOIN users u ON u.id=s.user_id
+      AND (workspace_mcp_parent_current(authority_projection->'workspaceDelegation') OR EXISTS(SELECT 1 FROM auth_sessions s JOIN users u ON u.id=s.user_id
         WHERE s.id::text=office_generation_jobs.authority_projection->'creationBinding'->>'authSessionId'
         AND s.user_id=office_generation_jobs.initiated_by_user_id AND s.revoked_at IS NULL
-        AND s.expires_at>clock_timestamp() AND s.auth_version=u.auth_version) RETURNING id`,[job.id,leaseToken])
+        AND s.expires_at>clock_timestamp() AND s.auth_version=u.auth_version)) RETURNING id`,[job.id,leaseToken])
     if(!done.rows.length) throw denied()
     await createOfficeGenerationStore(queryFor(client,actor)).appendEvent({userId:actor,jobId:job.id,workspaceId:job.workspaceId,
       code:'office.job.completed',values:{artifactId:job.artifactId,version:version.version},actorType:'system',safeNarration:'Completed'})

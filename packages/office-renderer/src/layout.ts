@@ -142,6 +142,7 @@ function documentTableRowHeights(table: OfficeTable, availableWidthPt: number): 
   const widths = officeTableResolvedColumnWidthsPt(table, availableWidthPt)
   const placements = officeTableCellPlacements(table)
   return table.rows.map((row, rowIndex) => {
+    if (row.heightRule === 'exact' && row.minHeightPt !== undefined) return row.minHeightPt
     const contentHeight = placements.filter((placement) => placement.rowIndex === rowIndex).reduce((height, placement) => {
       const margins = placement.cell.margins ?? table.margins
       const horizontalMargins = (margins?.leftPt ?? 2) + (margins?.rightPt ?? 2)
@@ -171,7 +172,7 @@ function textInkBounds(object: Extract<PresentationObject, { kind: 'text' }>): O
 function documentNodeHeight(node: DocumentFlowNode, widthPt: number): number {
   if (node.kind === 'paragraph' || node.kind === 'heading') return (node.spacingBeforePt ?? 0) + textHeight(node.runs, widthPt, node) + (node.spacingAfterPt ?? 8)
   if (node.kind === 'list') return node.items.reduce((height, item) => height + textHeight(item.runs, widthPt - 24), 0) + 8
-  if (node.kind === 'table') return Math.max(12, documentTableRowHeights(node, widthPt).reduce((sum, height) => sum + height, 0))
+  if (node.kind === 'table') return documentTableRowHeights(node, widthPt).reduce((sum, height) => sum + height, 0)
   if (node.kind === 'image') return node.heightPt
   if (node.kind === 'chart') return 240
   if (node.kind === 'video') return 270
@@ -206,9 +207,10 @@ function layoutDocument(snapshot: DocumentSnapshot): OfficeLayoutResult {
     let page: OfficeDisplayPage = { id: `${section.id}:${pages.length}`, widthPt: width, heightPt: height, primitives: [] }
     pages.push(page)
     if (section.headerImage) page.primitives.push({ id: `${section.id}:header-image`, kind: 'image', xPt: section.page.marginLeftPt, yPt: Math.max(0, section.page.marginTopPt - section.headerImage.heightPt - 12), widthPt: section.headerImage.widthPt, heightPt: section.headerImage.heightPt, resourceId: section.headerImage.resourceId, sourceKind: 'header', z: -3 })
-    if (section.header.length) page.primitives.push({ id: `${section.id}:header`, kind: 'text', xPt: section.page.marginLeftPt + (section.headerImage?.widthPt ?? 0) + (section.headerImage ? 8 : 0), yPt: Math.max(0, section.page.marginTopPt - 28), widthPt: bodyWidth - (section.headerImage?.widthPt ?? 0), heightPt: textHeight(section.header, bodyWidth), text: textOf(section.header), runs: section.header, alignment: section.headerAlignment, sourceKind: 'header', z: -2 })
+    if (section.header.length) page.primitives.push({ id: `${section.id}:header`, kind: 'text', xPt: section.page.marginLeftPt + (section.headerImage?.widthPt ?? 0) + (section.headerImage ? 8 : 0), yPt: section.page.headerDistancePt ?? Math.max(0, section.page.marginTopPt - 28), widthPt: bodyWidth - (section.headerImage?.widthPt ?? 0), heightPt: textHeight(section.header, bodyWidth), text: textOf(section.header), runs: section.header, alignment: section.headerAlignment, sourceKind: 'header', z: -2 })
     if (section.headerBorderBottom) page.primitives.push({ id: `${section.id}:header-border`, kind: 'line', xPt: section.page.marginLeftPt, yPt: Math.max(0, section.page.marginTopPt - 8), widthPt: bodyWidth, heightPt: 0, strokeColor: section.headerBorderBottom.color, strokeWidthPt: section.headerBorderBottom.widthPt, sourceKind: 'header', z: -1 })
-    if (section.footer.length) page.primitives.push({ id: `${section.id}:footer`, kind: 'text', xPt: section.page.marginLeftPt, yPt: height - section.page.marginBottomPt + 14, widthPt: bodyWidth, heightPt: textHeight(section.footer, bodyWidth), text: textOf(section.footer), runs: section.footer, alignment: section.footerAlignment, sourceKind: 'footer', z: -1 })
+    const footerWidth = Math.max(1, bodyWidth - (section.footerIndentLeftPt ?? 0))
+    if (section.footer.length) page.primitives.push({ id: `${section.id}:footer`, kind: 'text', xPt: section.page.marginLeftPt + (section.footerIndentLeftPt ?? 0), yPt: section.page.footerDistancePt === undefined ? height - section.page.marginBottomPt + 14 : height - section.page.footerDistancePt - textHeight(section.footer, footerWidth), widthPt: footerWidth, heightPt: textHeight(section.footer, footerWidth), text: textOf(section.footer), runs: section.footer, alignment: section.footerAlignment, sourceKind: 'footer', z: -1 })
     if (section.footerBorderTop) page.primitives.push({ id: `${section.id}:footer-border`, kind: 'line', xPt: section.page.marginLeftPt, yPt: height - section.page.marginBottomPt + 6, widthPt: bodyWidth, heightPt: 0, strokeColor: section.footerBorderTop.color, strokeWidthPt: section.footerBorderTop.widthPt, sourceKind: 'footer', z: -2 })
     let y = section.page.marginTopPt
     for (const node of section.nodes) {
@@ -492,10 +494,16 @@ function renderTableHtml(primitive: OfficeDisplayPrimitive): string {
     const widths = officeTableResolvedColumnWidthsPt(table, primitive.widthPt)
     const totalWidth = widths.reduce((sum, width) => sum + width, 0)
     const cellStyles = officeDocumentCellStyles(table)
+    const rowHeights = documentTableRowHeights(table, primitive.widthPt)
     const columns = widths.map((width) => `<col style="width:${totalWidth > 0 ? width / totalWidth * 100 : 100 / widths.length}%"/>`).join('')
     const body = table.rows.map((row, rowIndex) => `<tr style="${row.minHeightPt ? `height:${row.minHeightPt}px` : ''}">${row.cells.map((cell) => {
       const style = cellStyles.get(cell.id)
-      return `<td data-office-table-cell="${escapeXml(cell.id)}" rowspan="${cell.rowSpan}" colspan="${cell.colSpan}" style="${style}">${officeCellParagraphs(cell).map(({ format, runs }) => `<p style="margin:0;${officeParagraphCss(format, 'px', Math.max(1, ...runs.map((run) => run.style.fontSizePt)))}">${numberMarkerHtml(format, runs, primitive.numberLabels?.[runs[0]?.paragraphStart?.id ?? cell.id])}${richTextHtml(runs, '') || '<br/>'}</p>`).join('')}</td>`
+      const span = table.rows.slice(rowIndex, rowIndex + cell.rowSpan)
+      const fixed = span.every(part => part.heightRule === 'exact' && part.minHeightPt !== undefined)
+      const margins = cell.margins ?? table.margins
+      const contentHeight = Math.max(0, rowHeights.slice(rowIndex, rowIndex + cell.rowSpan).reduce((sum, height) => sum + height, 0) - (margins?.topPt ?? 2) - (margins?.bottomPt ?? 2))
+      const paragraphs = officeCellParagraphs(cell).map(({ format, runs }) => `<p style="margin:0;${officeParagraphCss(format, 'px', Math.max(1, ...runs.map((run) => run.style.fontSizePt)))}">${numberMarkerHtml(format, runs, primitive.numberLabels?.[runs[0]?.paragraphStart?.id ?? cell.id])}${richTextHtml(runs, '') || '<br/>'}</p>`).join('')
+      return `<td data-office-table-cell="${escapeXml(cell.id)}" rowspan="${cell.rowSpan}" colspan="${cell.colSpan}" style="${style}">${fixed ? `<div style="max-height:${contentHeight}px;overflow:hidden">${paragraphs}</div>` : paragraphs}</td>`
     }).join('')}</tr>`).join('')
     return `<table xmlns="http://www.w3.org/1999/xhtml" style="box-sizing:border-box;width:100%;height:100%;border-collapse:collapse;table-layout:${table.layout === 'autofit' && !table.columnWidthsPt ? 'auto' : 'fixed'};font-family:Arial,sans-serif;font-size:10px;line-height:1.15;color:#0f172a"><colgroup>${columns}</colgroup><tbody>${body}</tbody></table>`
   }

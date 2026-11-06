@@ -100,3 +100,28 @@ describe('[COMP:app-web/use-offline-sync] Reconnecting status', () => {
     }
   });
 });
+
+
+describe('[COMP:app-web/use-offline-sync] API availability', () => {
+  it('queues supported writes during server unavailability and wakes sync after readmission', async () => {
+    const { setOnline, flushWriteQueue } = await import('../offline-writes');
+    const { flushLocalPages } = await import('../offline-pages');
+    const { flushFeedWorkingCopies } = await import('../feed-offline');
+    vi.clearAllMocks();
+    (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement('div'); const root = createRoot(container);
+    function Probe({ available }: { available: boolean }) {
+      const value = useOfflineSync(available); return createElement('span', null, value.connectivity);
+    }
+    try {
+      await act(async () => root.render(createElement(Probe, { available: false })));
+      expect(container.textContent).toBe('degraded'); expect(setOnline).toHaveBeenLastCalledWith(false);
+      expect(flushLocalPages).not.toHaveBeenCalled(); expect(flushWriteQueue).not.toHaveBeenCalled();
+      expect(flushFeedWorkingCopies).not.toHaveBeenCalled();
+      await act(async () => root.render(createElement(Probe, { available: true })));
+      expect(container.textContent).toBe('online'); expect(setOnline).toHaveBeenLastCalledWith(true);
+      expect(flushLocalPages).toHaveBeenCalledOnce(); expect(flushWriteQueue).toHaveBeenCalledOnce();
+      expect(flushFeedWorkingCopies).toHaveBeenCalledOnce();
+    } finally { await act(async () => root.unmount()); }
+  });
+});

@@ -139,3 +139,16 @@ describe("[COMP:app-web/recording-chrome] page timestamps", () => {
     expect(container.querySelector('[role="status"]')?.textContent).toBe(en.recordings.timestampCopyFailed);
   });
 });
+
+
+describe("[COMP:app-web/recording-chrome] playback retry control", () => {
+  it("recovers a failed source using a labelled in-place button", async () => {
+    getRecordingMediaUrl.mockRejectedValueOnce(new TypeError("offline"));
+    await mount();
+    const retry = [...container.querySelectorAll("button")].find(button => button.textContent === en.recordings.retryPlayback);
+    expect(retry).toBeDefined();
+    await act(async () => retry!.click());
+    expect(container.querySelector('[aria-label="Play"]')).not.toBeNull();
+    expect(container.textContent).not.toContain(en.recordings.detailAudioError);
+  });
+});

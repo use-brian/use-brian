@@ -27,7 +27,7 @@ export type DelegatedExecutionIdentity = {
 export type ProgrammaticExecutionIdentity = {
   kind: 'programmatic'
   principal:
-    | { kind: 'brain_key' | 'oauth_token' | 'home_app'; credentialId: string; actorUserId?: string }
+    | { kind: 'brain_key' | 'assistant_key' | 'oauth_token' | 'home_app'; credentialId: string; actorUserId?: string }
     | { kind: 'public_share'; credentialId: string; actorUserId: string }
     | { kind: 'application'; credentialId: string; actorUserId: string; applicationId: string;
         subjectKind: 'member' | 'external_user' | 'service'; serviceUserId?: string }

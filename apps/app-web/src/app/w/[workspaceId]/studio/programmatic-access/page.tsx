@@ -1,4 +1,5 @@
 "use client";
+import { Checkbox } from "@/components/ui/checkbox";
 
 /**
  * Studio ▸ Programmatic access (app-web).
@@ -472,7 +473,7 @@ function ConnectedAppRow({
       <details className="group w-full border-t border-border pt-1">
         <summary className="flex min-h-8 max-sm:min-h-11 cursor-pointer items-center text-sm font-medium focus-visible:outline-2 focus-visible:outline-ring">{t.programmaticAccess.navigation.manage}<ChevronDown aria-hidden className="ml-auto size-4 transition-transform group-open:rotate-180" /></summary>
         <div className="flex flex-wrap items-center gap-3 pb-2">
-          <CaptureBindingControl assistantId={auth.captureAssistantId} profileId={auth.captureProfileId} assistants={assistants} profiles={captureProfiles} onChange={onChangeCaptureBinding} />
+          <CaptureBindingControl assistantId={auth.captureAssistantId} profileId={auth.captureProfileId} assistants={assistants} profiles={captureProfiles} onChange={auth.workspaceAccess ? undefined : onChangeCaptureBinding} />
       <button
         onClick={onRevoke}
         className="min-h-8 max-sm:min-h-11 text-xs font-medium border border-border px-2.5 py-1 focus-visible:outline-2 focus-visible:outline-ring rounded-lg text-muted-foreground hover:text-destructive hover:border-destructive/30 transition-colors shrink-0"
@@ -745,7 +746,7 @@ function KeyRow({
           </span>
           <ScopeBadge scope={row.scope} t={t} />
           <ClearanceCapControl
-            value={row.maxClearance}
+            value={row.workspaceMcpConsent?.maxClearance ?? row.maxClearance}
             t={t}
           />
           {isRevoked && (
@@ -772,11 +773,12 @@ function KeyRow({
       />
       <MetaCell value={relative(row.lastUsedAt, t)} label={t.programmaticAccess.lastUsedLabel} />
       <MetaCell value={formatDate(row.createdAt)} label={t.programmaticAccess.createdLabel} />
+      {row.workspaceMcpConsent && <MetaCell value={formatDate(row.workspaceMcpConsent.expiresAt)} label={t.apiKeys.expiresAtLabel} />}
       {!isRevoked && <details className="group w-full border-t border-border pt-1">
         <summary className="flex min-h-8 max-sm:min-h-11 cursor-pointer items-center text-sm font-medium focus-visible:outline-2 focus-visible:outline-ring">{t.programmaticAccess.navigation.manage}<ChevronDown aria-hidden className="ml-auto size-4 transition-transform group-open:rotate-180" /></summary>
         <div className="flex flex-wrap items-center gap-3 pb-2">
-          <ClearanceCapControl value={row.maxClearance} t={t} onChange={onChangeMaxClearance} />
-          <CaptureBindingControl assistantId={row.captureAssistantId} profileId={row.captureProfileId} assistants={assistants} profiles={captureProfiles} onChange={onChangeCaptureBinding} />
+          <ClearanceCapControl value={row.workspaceMcpConsent?.maxClearance ?? row.maxClearance} t={t} onChange={row.workspaceMcpConsent ? undefined : onChangeMaxClearance} />
+          <CaptureBindingControl assistantId={row.captureAssistantId} profileId={row.captureProfileId} assistants={assistants} profiles={captureProfiles} onChange={row.workspaceMcpConsent ? undefined : onChangeCaptureBinding} />
       {!isRevoked && onRevoke && (
         <button
           onClick={onRevoke}
@@ -807,6 +809,7 @@ function CreateKeyForm({
   const t = useT();
   const [name, setName] = useState("");
   const [scope, setScope] = useState<BrainKeyScope>("read_write");
+  const [workspaceAccess, setWorkspaceAccess] = useState(true);
   const [maxClearance, setMaxClearance] = useState<BrainKeyClearance | null>(null);
   const [contextGroupId, setContextGroupId] = useState<string | null>(null);
   const [contextProjectId, setContextProjectId] = useState<string | null>(null);
@@ -823,6 +826,7 @@ function CreateKeyForm({
         await createBrainKey(workspaceId, {
           name: name.trim(),
           scope,
+          workspaceAccess,
           maxClearance,
           contextGroupId,
           contextProjectId,
@@ -866,6 +870,11 @@ function CreateKeyForm({
           />
         </label>
 
+        <label className="flex min-h-8 max-sm:min-h-11 items-start gap-3 rounded-lg border border-border p-3">
+          <Checkbox checked={workspaceAccess} onCheckedChange={setWorkspaceAccess} disabled={submitting} />
+          <span><span className="text-sm font-medium">{t.apiKeys.workspaceAccessLabel}</span>
+            <span className="mt-1 block text-xs text-muted-foreground">{t.apiKeys.workspaceAccessDescription}</span></span>
+        </label>
         <fieldset>
           <legend className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground mb-1.5">
             {t.programmaticAccess.create.scopeLabel}

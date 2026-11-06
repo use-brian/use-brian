@@ -199,6 +199,42 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     await expect(assertModelOutputAuthority(ctx,combined)).rejects.toMatchObject({reason:'authority_changed'})
     expect(combined).not.toHaveBeenCalled()
   })
+  it.each([false, true])('preserves the destination refusal and latches output denial (combined=%s)', async combined => {
+    const refusal = Object.assign(new Error('The current destination is not authorized for this response.'), {
+      reason: 'delivery_audience_unverified', retrySafe: false, diagnostic: 'teams',
+    })
+    const output = vi.fn(async () => { throw refusal })
+    const ctx = context(async () => {})
+    ctx.assertModelOutputAuthority = output
+    const check = combined ? async () => { throw refusal } : undefined
+    await expect(assertModelOutputAuthority(ctx, check)).rejects.toBe(refusal)
+    ctx.assertModelOutputAuthority = async () => {}
+    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(output).toHaveBeenCalledTimes(combined ? 0 : 1)
+  })
+  it('does not expose a destination-shaped refusal from model input preparation', async () => {
+    const p = provider()
+    const refusal = Object.assign(new Error('Fictional private input refusal'), { reason: 'delivery_audience_unverified' })
+    await expect(run(p.value, context(async () => { throw refusal }))).rejects.toMatchObject({
+      message: 'The model context is unavailable.', reason: 'authority_changed', retrySafe: false, cause: refusal,
+    })
+    expect(p.createSession).not.toHaveBeenCalled()
+    expect(p.send).not.toHaveBeenCalled()
+  })
+  it('propagates a delivery refusal before emitting any loop event', async () => {
+    const p = provider(), events: QueryEvent[] = []
+    const refusal = Object.assign(new Error('The current destination is not authorized for this response.'), {
+      reason: 'delivery_audience_unverified', retrySafe: false, diagnostic: 'teams',
+    })
+    const ctx = { ...context(async () => {}), assertModelOutputAuthority: async () => { throw refusal } }
+    const collect = async () => {
+      for await (const event of queryLoop({ provider: p.value, model: 'mock-model', systemPrompt: 'Fictional context',
+        messages: [{ role: 'user', content: 'Read the input' }], tools: new Map(), ledger: NOOP_TURN_LEDGER,
+        maxTurns: 2, context: ctx })) events.push(event)
+    }
+    await expect(collect()).rejects.toBe(refusal)
+    expect(events).toEqual([])
+  })
   it('refuses final output if the lease changes during the combined proof',async()=>{
     let revoked=false
     const ctx={...context(async()=>{}),authority:{assertCurrent:async()=>{if(revoked)throw new Error('Fictional revoked lease')},execute:async<T>(operation:()=>Promise<T>)=>operation()}}

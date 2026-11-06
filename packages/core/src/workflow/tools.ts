@@ -1,3 +1,4 @@
+import { WorkspaceCredentialDelegationSchema } from '../security/workspace-delegation.js'
 /**
  * Chat tools for the workflow primitive.
  *
@@ -463,6 +464,7 @@ const updateProposalInputSchema = z.object({
 
 const scopeGrantSchema = z.union([z.null(), z.array(z.string().min(1))])
 const authoringAuthoritySchema: z.ZodType<AuthoringAuthority> = z.object({
+  workspaceDelegation: WorkspaceCredentialDelegationSchema.optional(),
   version: z.literal(1),
   assistantId: z.string().min(1),
   ceiling: z.object({
@@ -3003,6 +3005,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       }
 
       const run = await deps.runStore.createRun({
+        executionContext: context.executionContext,
         workflowId: workflow.id,
         workspaceId: workflow.workspaceId,
         triggeredBy: context.userId,

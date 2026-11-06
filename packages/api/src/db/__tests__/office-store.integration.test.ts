@@ -36,8 +36,8 @@ describe('[COMP:api/office-store] Office stores', () => {
     expect(db.calls[0]?.params[5]).toBe(JSON.stringify({ assistantId: APP_LEVEL_ASSISTANT_ID }))
   })
 
-  it('qualifies the leased job projection against the update target', async () => {
-    const db = fakeDb({ 'RETURNING j.id': [{ id: 'j1' }] })
+  it('projects the leased job after atomically recording its started transition', async () => {
+    const db = fakeDb({ 'RETURNING j.*': [{ id: 'j1' }] })
     const claimed = await createOfficeGenerationStore(db.query).claim({
       userId: 'u1',
       leaseToken: '30000000-0000-4000-8000-000000000001',
@@ -45,8 +45,11 @@ describe('[COMP:api/office-store] Office stores', () => {
       jobKinds: ['template_compile'],
     })
     expect(claimed).toEqual({ id: 'j1' })
-    expect(db.calls[0]?.sql).toContain('RETURNING j.id')
-    expect(db.calls[0]?.sql).toContain('j.created_at AS "createdAt"')
+    expect(db.calls[1]?.sql).toContain('RETURNING j.*')
+    expect(db.calls[1]?.sql).toContain('INSERT INTO office_generation_events')
+    expect(db.calls[1]?.sql).toContain("'office.job.started'")
+    expect(db.calls[1]?.sql).toContain('FROM claimed')
+    expect(db.calls[1]?.sql).toContain('created_at AS "createdAt"')
   })
 
   it('deletes only a still-empty shell with no generation job', async () => {
@@ -161,7 +164,9 @@ describe('[COMP:api/office-store] Office stores', () => {
     const store = createOfficeTemplateStore(db.query)
     await expect(store.getDraftRouting('u1', 't1')).resolves.toEqual(routing)
     await expect(store.saveDraftRouting({ userId: 'u1', templateId: 't1', routing })).resolves.toBe(true)
-    expect(db.calls[1]?.sql).toContain("lifecycle_state='draft'")
+    expect(db.calls[0]?.sql).toContain("lifecycle_state IN ('draft','admitted')")
+    expect(db.calls[1]?.sql).toContain("lifecycle_state IN ('draft','admitted')")
+    expect(db.calls[1]?.sql).toContain("a.mode='template' AND a.lifecycle_state='active'")
     expect(db.calls[1]?.params).toEqual(['t1', JSON.stringify(routing)])
   })
 

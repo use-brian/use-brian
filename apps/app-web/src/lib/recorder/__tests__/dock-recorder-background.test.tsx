@@ -21,6 +21,11 @@ vi.mock("../webm-duration", () => ({ patchRecordingBlob: async (blob: Blob) => b
 vi.mock("../voice-clip", () => ({ uploadVoiceClip: mocks.uploadVoiceClip }));
 vi.mock("@/lib/desktop-auth-source", () => ({ desktopBridge: mocks.desktopBridge }));
 
+const owner = { viewerId: "viewer-a", workspaceId: "workspace-1", applicationId: "native", apiOrigin: "https://api.example" };
+vi.mock("@/lib/offline/application-write-authority", () => ({
+  currentOfflineWriteAuthority: () => owner,
+  sameOfflineWriteAuthority: (a: unknown, b: unknown) => !!a && JSON.stringify(a) === JSON.stringify(b),
+}));
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: Error) => void;
@@ -131,9 +136,9 @@ describe("[COMP:app-web/dock-recorder] non-blocking saves", () => {
     makeEngine(180_000, windows.promise);
     await render(); act(() => api.setLivePageEnabled(true)); await start(); await stop();
     expect(api.interactionAvailable).toBe(false);
-    expect(options.onMeetingCapture).toHaveBeenCalledWith(expect.any(File), {
+    expect(options.onMeetingCapture).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({
       pageId: "page", sessionId: "live", liveWindowsDone: windows.promise,
-    });
+    }));
     expect(api.phase.kind).toBe("idle");
     expect(api.savingCount).toBe(0);
     await act(async () => state === "failed" ? windows.reject(new Error("ASR unavailable")) : windows.resolve());
@@ -357,17 +362,17 @@ describe("[COMP:app-web/dock-recorder] non-blocking saves", () => {
     await mocks.createEngine.mock.calls[0][0].onLiveWindow(window);
     expect(options.streamLiveWindow).toHaveBeenLastCalledWith(window, pages[0]);
     await act(async () => windowsDone.resolve());
-    expect(originalUpload).toHaveBeenCalledWith(expect.any(File), { pageId: "page-a", sessionId: "session-a", liveWindowsDone: windowsDone.promise });
+    expect(originalUpload).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({ pageId: "page-a", sessionId: "session-a", liveWindowsDone: windowsDone.promise }));
     expect(replacementUpload).not.toHaveBeenCalled();
     expect(api.phase.kind).toBe("latched");
     await stop();
-    expect(replacementUpload).toHaveBeenCalledWith(expect.any(File), { pageId: "page-b", sessionId: "session-b" });
+    expect(replacementUpload).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({ pageId: "page-b", sessionId: "session-b" }));
   });
 
   it("serializes recovery saves and blocks same-tick duplicate Save/Discard", async () => {
     const pending = deferred<MeetingCaptureOutcome>();
     options.onMeetingCapture = vi.fn().mockReturnValue(pending.promise);
-    const meta: SpoolSessionMeta = { id: "recovery-1", workspaceId: "workspace-1", assistantId: "assistant-1", startedAt: 0, updatedAt: 0, elapsedMs: 180_000, chunkCount: 0, mime: "audio/webm" };
+    const meta: SpoolSessionMeta = { id: "recovery-1", owner: owner as any, workspaceId: "workspace-1", assistantId: "assistant-1", startedAt: 0, updatedAt: 0, elapsedMs: 180_000, chunkCount: 0, mime: "audio/webm" };
     await mocks.store!.createSession(meta);
     await render();
     let saving!: Promise<void>;
@@ -383,4 +388,31 @@ describe("[COMP:app-web/dock-recorder] non-blocking saves", () => {
     expect(api.recovery).toHaveLength(1);
     expect(api.savingCount).toBe(0);
   });
+  it("restarts offline, then automatically transfers only authorized captures to their original destination", async () => {
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    const base: SpoolSessionMeta = { id: "authorized", owner: { ...owner } as any, autoUpload: true,
+      workspaceId: "workspace-1", assistantId: "original-assistant", startedAt: 0, updatedAt: 0,
+      elapsedMs: 180_000, chunkCount: 0, mime: "audio/webm" };
+    for (const meta of [base, { ...base, id: "unfinished", autoUpload: false },
+      { ...base, id: "other-account", owner: { ...owner, viewerId: "other" } as any },
+      { ...base, id: "legacy", owner: undefined }]) {
+      await mocks.store!.createSession(meta);
+      await mocks.store!.appendChunk(meta.id, 0, new Blob([meta.id]), 180_000);
+      await mocks.store!.createSession({ ...meta, chunkCount: 1 });
+    }
+    await render(); await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(options.onMeetingCapture).not.toHaveBeenCalled();
+    act(() => root.unmount()); root = createRoot(container); await render();
+    expect(api.recovery.map(row => row.id)).toEqual(["authorized", "unfinished"]);
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(true);
+    await act(async () => window.dispatchEvent(new Event("online")));
+    expect(options.onMeetingCapture).toHaveBeenCalledTimes(1);
+    expect(options.onMeetingCapture).toHaveBeenCalledWith(expect.any(File), expect.objectContaining({
+      recoveryId: "authorized", assistantId: "original-assistant",
+    }));
+    expect((await mocks.store!.listSessions()).map(row => row.id)).toEqual(["unfinished", "other-account", "legacy"]);
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(options.onMeetingCapture).toHaveBeenCalledTimes(1);
+  });
+
 });

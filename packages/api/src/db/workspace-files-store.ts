@@ -32,7 +32,7 @@ import {
 export type DerivedWorkspaceFilesStore = WorkspaceFilesStore & {
   prepareSessionOwned(userId: string, workspaceId: string, path: string, access?: AccessContext): Promise<FileSessionBinding>
   createSessionOwned(userId: string, input: WorkspaceFileCreateInput, binding: FileSessionBinding, access?: AccessContext): Promise<WorkspaceFile>
-  finalizeUpload(userId: string, input: WorkspaceFileCreateInput, uploadId: string, access?: AccessContext): Promise<WorkspaceFile>
+  finalizeUpload(userId: string, input: WorkspaceFileCreateInput, uploadId: string, access?: AccessContext, derivation?: import('@use-brian/core').DerivedWriteEvidence): Promise<WorkspaceFile>
   createDerived(userId: string, input: WorkspaceFileCreateInput, evidence: DerivedWriteEvidence, access?: AccessContext): Promise<WorkspaceFile>
 }
 
@@ -47,7 +47,7 @@ export function createDbWorkspaceFilesStore(): DerivedWorkspaceFilesStore {
       } finally { await rollbackAndRelease(client) }
     },
     createSessionOwned(userId,input,binding,access) { return createWorkspaceFile(userId,input,{access,sessionBinding:binding}) },
-    finalizeUpload(userId,input,uploadId,access) { return createWorkspaceFile(userId,input,{access,uploadId}) },
+    finalizeUpload(userId,input,uploadId,access,derivation) { return createWorkspaceFile(userId,input,{access,uploadId,derivation}) },
     createDerived(userId, input, evidence, access) {
       return createWorkspaceFile(userId, input, { access, derivation: evidence })
     },

@@ -78,7 +78,7 @@ export type Recording = {
 const COLS = `
   id,
   workspace_id       AS "workspaceId",
-  title,
+  COALESCE(generated_title, title) AS title,
   kind,
   status,
   file_name          AS "fileName",
@@ -248,7 +248,7 @@ export async function listRecordings(
   }
   if (filters.q?.trim()) {
     values.push(`%${filters.q.trim()}%`)
-    where.push(`(title ILIKE $${values.length} OR file_name ILIKE $${values.length})`)
+    where.push(`(COALESCE(generated_title, title) ILIKE $${values.length} OR file_name ILIKE $${values.length})`)
   }
 
   const limit = Math.min(

@@ -26,12 +26,15 @@
  * [COMP:api/doc-page-store]
  */
 
-import type { DocPageRead, DocPageStore, NameOrigin, Page } from '@use-brian/core'
+import type { DocPageRead, DocPageStore, NameOrigin, Page, ScopeSource, ToolContext } from '@use-brian/core'
+import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
+import { runWithAgentAccess } from './agent-access-context.js'
 import { queryWithRLS } from './client.js'
 
 // ── Row projections ────────────────────────────────────────────────────
 
 type VersionedPageRow = {
+  source?: (ScopeSource & { requiredSources: ScopeSource[] }) | null
   page: Page | null
   version: number
   name: string | null
@@ -48,7 +51,7 @@ type VersionedPageRow = {
  */
 export function createDbDocPageStore(): DocPageStore {
   return {
-    async getVersionedPage(userId, pageId): Promise<DocPageRead | null> {
+    async getVersionedPage(userId, pageId, context?: ToolContext): Promise<DocPageRead | null> {
       // Prefer the live collaborative snapshot. Once a page goes live in
       // Yjs (a human opened it, or the AI patched it), `documents`
       // is authoritative and `saved_views.page` is frozen — reading the
@@ -57,7 +60,12 @@ export function createDbDocPageStore(): DocPageStore {
       // column for pages that have never been opened collaboratively. The
       // version becomes the Yjs `seq` when live (so the outline reflects
       // the merged state). See doc.md → "Real-time collaboration".
-      const result = await queryWithRLS<VersionedPageRow>(
+      const execution = context?.executionContext
+      if (execution) {
+        if (execution.security.ceiling.userId !== userId || !context?.scopeAccumulator) throw new Error('page_source_authority_required')
+        await execution.security.authority.assertCurrent()
+      }
+      const read = () => queryWithRLS<VersionedPageRow>(
         userId,
         // `name_origin` + `icon` live only on `saved_views` (not the Yjs
         // snapshot), so they're read straight from `sv` — no COALESCE.
@@ -72,13 +80,25 @@ export function createDbDocPageStore(): DocPageStore {
                 COALESCE(cd.snapshot_title, sv.name)  AS name,
                 sv.name_origin                        AS "nameOrigin",
                 sv.icon                               AS icon
+                ${execution ? ",read_entity_derivation_source(sv.workspace_id,'page_event_changed',sv.page_event_revision) AS source" : ''}
            FROM saved_views sv
            LEFT JOIN documents cd ON cd.page_id = sv.id
           WHERE sv.id = $1`,
         [pageId],
       )
+      const result = execution ? await runWithAgentAccess(execution.security.access, read) : await read()
       const row = result.rows[0]
       if (!row) return null
+      if (execution) {
+        if (!row.source || !Array.isArray(row.source.requiredSources)) throw new Error('page_source_unavailable')
+        const { requiredSources, ...source } = row.source
+        const evidence = { sources: [source, ...requiredSources] }
+        if (execution.security.access.sharedAudience && evidence.sources.some(value => value.userId !== null)) throw new Error('page_source_unavailable')
+        const checked = await validateCallerScopeEvidence(evidence, execution.security.ceiling)
+        await validateAudienceScopeEvidence(checked, execution.security.ceiling)
+        await execution.security.authority.assertCurrent()
+        context!.scopeAccumulator!.note(checked)
+      }
       if (!row.page) {
         // A pre-doc-redesign row that's never been opened in the
         // editor — `page` JSONB is null. The chat tools treat this as

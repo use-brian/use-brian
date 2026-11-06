@@ -63,7 +63,9 @@ export function createTranscriptArtifactWriter(deps: {
         path,
         bytes,
         mime: 'text/markdown',
-        title: input.title ? `Transcript - ${input.title}` : 'Transcript',
+        title: input.title
+          ? /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} · /.test(input.title) ? `${input.title} · Transcript` : `Transcript - ${input.title}`
+          : 'Transcript',
         sensitivity: parent.sensitivity,
       })
       if (!stored.ok) {

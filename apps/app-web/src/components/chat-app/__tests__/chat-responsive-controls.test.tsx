@@ -52,6 +52,17 @@ describe("[COMP:app-web/chat-responsive-controls] narrow-pane controls", () => {
     expect(host.textContent).toContain(en.chatApp.chooseContext);
   });
 
+  it('shows connectivity status instead of a review prompt on phone and desktop', async () => {
+    const value = context({ready:false,error:new TypeError('Failed to fetch'),choices:undefined});
+    await render(<ChatContextBar context={value} />);
+    expect(host.textContent).toContain(en.modeContext.reconnecting);
+    expect(host.textContent).not.toContain(en.chatApp.reviewContext);
+    await resize(800);
+    expect(host.querySelector('[role="status"]')?.textContent).toBe(en.modeContext.reconnecting);
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(host.textContent).not.toContain(en.workspaceAccess.reload);
+  });
+
   it('keeps the desktop context row compact, explains it on demand, and retains optional project selection', async () => {
     width = 800;
     await render(<ChatContextBar context={context()} />);

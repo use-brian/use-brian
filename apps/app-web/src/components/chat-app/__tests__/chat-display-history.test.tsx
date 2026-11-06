@@ -9,6 +9,7 @@ import type { PersonalDisplayHistory } from '@/lib/api/sessions'
 const mocks = vi.hoisted(() => ({ read: vi.fn(), actor: 'owner', listener: null as null | ((value: { id: string } | null) => void) }))
 vi.mock('@/lib/api/sessions', () => ({ readPersonalDisplayHistory: mocks.read }))
 vi.mock('@/lib/user', () => ({ getUserInfo: () => ({ id: mocks.actor }), subscribeUserInfo: (fn: typeof mocks.listener) => { mocks.listener = fn; return () => { mocks.listener = null } } }))
+import { computeTranscriptRowMeta } from '../chat-transcript'
 import { ChatDisplayHistoryRow, ChatDisplayHistoryStatus, mergeDisplayTimeline, usePersonalDisplayHistory } from '../chat-display-history'
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
 let root: Root, container: HTMLDivElement
@@ -23,7 +24,7 @@ function Harness({ sessionId = 'chat', enabled = true, messages = canonical }: {
   return <><div data-canonical-count={messages.length} />{timeline.map(entry => entry.historicalDisplayOnly
     ? <ChatDisplayHistoryRow key={entry.row.id} row={entry.row} />
     : <article key={entry.message.id} data-message-id={entry.message.id}>{entry.message.text}<button>Reply</button></article>)}
-    <ChatDisplayHistoryStatus history={history} hasHistoricalRows={timeline.some(entry => entry.historicalDisplayOnly)} /></>
+    <ChatDisplayHistoryStatus history={history} /></>
 }
 async function render(props: Parameters<typeof Harness>[0] = {}) {
   await act(async () => root.render(<I18nProvider locale="en" dict={en as unknown as Dictionary}><Harness {...props} /></I18nProvider>))
@@ -41,13 +42,32 @@ describe('[COMP:app-web/chat-display-history] independent human timeline', () =>
     expect(container.querySelectorAll('[data-message-id]')).toHaveLength(2)
     for (const historical of container.querySelectorAll('[data-historical-display-only]')) expect(historical.querySelector('button,a,img,iframe,textarea,[data-message-id]')).toBeNull()
     expect(canonical).toHaveLength(2)
-    expect(container.textContent).toContain(en.chatApp.displayHistory.notice)
+    expect(container.textContent).not.toContain(en.chatApp.displayHistory.notice)
+    expect(container.textContent).not.toContain(en.chatApp.displayHistory.label)
+  })
+  it('renders historical answers as ordinary formatted chat text without executing HTML or fetching images', async () => {
+    mocks.read.mockResolvedValue({ ...page, rows: [{ ...row(2), text: '**A previous answer**\n\n- First point\n- Second point\n\n<script>bad()</script>\n\n![private image](https://example.invalid/image)' }] })
+    await render({ messages: [] })
+    expect(container.querySelector('[data-brian-chat-answer] strong')?.textContent).toBe('A previous answer')
+    expect(container.querySelectorAll('[data-brian-chat-answer] li')).toHaveLength(2)
+    expect(container.querySelector('script,img,iframe,[data-message-id]')).toBeNull()
+    expect(container.textContent).not.toContain(en.chatApp.displayHistory.label)
+    expect(container.textContent).not.toContain(en.chatApp.displayHistory.notice)
   })
   it('keeps canonical objects, action indexes and coalesced admission identities', () => {
     const final = { ...canonical[0], id: 'row-4' }
     const entries = mergeDisplayTimeline([canonical[0], final], page.rows, new Set(['row-1', 'row-2', 'row-3', 'row-4']))
     expect(entries).toEqual([{ historicalDisplayOnly: false, message: canonical[0], canonicalIndex: 0 }, { historicalDisplayOnly: false, message: final, canonicalIndex: 1 }])
     expect(entries[1].historicalDisplayOnly ? null : entries[1].message).toBe(final)
+  })
+  it('uses historical replies as sender and day boundaries without changing canonical action indexes', () => {
+    const timeline = mergeDisplayTimeline(canonical, page.rows)
+    const meta = computeTranscriptRowMeta(timeline.map(entry => entry.historicalDisplayOnly
+      ? { role: entry.row.role, timestamp: new Date(entry.row.timestamp) }
+      : { ...entry.message, role: 'user' }))
+    expect(meta.map(row => row.startsGroup)).toEqual([true, true, true, true])
+    expect(meta.map(row => Boolean(row.daySeparator))).toEqual([true, false, false, false])
+    expect(timeline.flatMap(entry => entry.historicalDisplayOnly ? [] : [entry.canonicalIndex])).toEqual([0, 1])
   })
   it('orders equal-timestamp historical rows by saved sequence and keeps unavailable markers', async () => {
     mocks.read.mockResolvedValue({ ...page, rows: [row(1), { ...row(2, false), timestamp: row(1).timestamp }, row(3), row(4)] })

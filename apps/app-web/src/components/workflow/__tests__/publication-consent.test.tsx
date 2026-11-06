@@ -36,6 +36,38 @@ function button(label: string) { return [...document.querySelectorAll("button")]
 async function click(label: string) { expect(button(label)).toBeDefined(); await act(async () => button(label)!.click()); }
 
 describe("[COMP:app-web/workflow-publication-consent] explicit publication", () => {
+  it("shows compact review only for eligible steps and routes to the exact step", async () => {
+    const review = vi.fn();
+    await act(async () => root.render(<WorkflowPublicationConsent workflow={workflow} dirty={false} mode="summary" onReview={review} />));
+    expect(host.textContent).toContain(c.reviewSummary);
+    expect(host.textContent).not.toContain(c.warning);
+    await click(c.review);
+    expect(review).toHaveBeenCalledWith("step");
+    expect(api.approve).not.toHaveBeenCalled();
+  });
+  it("does not replace known metadata with a skeleton during refresh", async () => {
+    metadata.consents = [grant]; await render();
+    api.get.mockImplementation(() => new Promise(() => {}));
+    await act(async () => requestWorkflowRefresh("ws"));
+    expect(host.textContent).toContain(grant.channelId);
+    expect(host.textContent).toContain(c.checking);
+    expect(host.querySelector('.animate-pulse')).toBeNull();
+    expect(button(c.reapprove)?.disabled).toBe(true);
+    expect(button(c.revoke)?.disabled).toBe(true);
+  });
+  it("keeps a confirmed ineligible panel out of the way during background refresh", async () => {
+    metadata.eligibleStepIds = []; await render();
+    api.get.mockImplementation(() => new Promise(() => {}));
+    await act(async () => requestWorkflowRefresh("ws"));
+    expect(host.querySelector("section")).toBeNull();
+    expect(api.approve).not.toHaveBeenCalled();
+  });
+  it("limits step review to the selected delivery", async () => {
+    metadata.eligibleStepIds = ["step", "other"];
+    await act(async () => root.render(<WorkflowPublicationConsent workflow={workflow} dirty={false} stepId="step" />));
+    expect(host.textContent).not.toContain("other");
+    expect(button(c.approve)?.disabled).toBe(false);
+  });
   it("never auto-grants, cancel sends no write, and confirmation warns of disclosure", async () => {
     await render(); expect(api.approve).not.toHaveBeenCalled();
     await click(c.approve);
@@ -79,7 +111,7 @@ describe("[COMP:app-web/workflow-publication-consent] explicit publication", () 
   });
   it("uses server eligibility, not destination presence alone", async () => {
     metadata.eligibleStepIds = []; await render();
-    expect(button(c.approve)).toBeUndefined(); expect(host.textContent).toContain(c.empty);
+    expect(button(c.approve)).toBeUndefined(); expect(host.querySelector("section")).toBeNull();
   });
   it("cancels an open confirmation when unsaved edits appear", async () => {
     await render(); await click(c.approve); await render(true);
@@ -105,7 +137,7 @@ describe("[COMP:app-web/workflow-publication-consent] explicit publication", () 
   it("blocks revocation when the authority read fails even with cached own consent", async () => {
     metadata.consents = [grant]; await render();
     api.get.mockRejectedValue(new Error("unavailable"));
-    await click(c.refresh);
+    await act(async () => requestWorkflowRefresh("ws"));
     expect(button(c.revoke)?.disabled).toBe(true);
     await click(c.revoke); expect(api.revoke).not.toHaveBeenCalled();
   });
@@ -117,7 +149,7 @@ describe("[COMP:app-web/workflow-publication-consent] explicit publication", () 
     api.get.mockRejectedValue(new Error("SECRET SERVER DETAILS")); await render();
     expect(host.textContent).toContain(c.error); expect(host.textContent).not.toContain("SECRET");
     expect(button(c.approve)).toBeUndefined();
-    api.get.mockResolvedValue(metadata); await click(c.refresh);
+    api.get.mockResolvedValue(metadata); await click(c.retry);
     expect(button(c.approve)?.disabled).toBe(false);
   });
   it("blocks after a failed write without painting a successful approval", async () => {
@@ -125,7 +157,7 @@ describe("[COMP:app-web/workflow-publication-consent] explicit publication", () 
     await render(); await click(c.approve); await click(c.confirm);
     expect(host.textContent).toContain(c.error); expect(host.textContent).not.toContain("SECRET");
     expect(button(c.approve)?.disabled).toBe(true); expect(button(c.revoke)).toBeUndefined();
-    await click(c.refresh); expect(button(c.approve)?.disabled).toBe(false);
+    await click(c.retry); expect(button(c.approve)?.disabled).toBe(false);
   });
   it("does not claim expired consent is active", async () => {
     metadata.consents = [{ ...grant, expiresAt: "2000-01-01T00:00:00Z" }]; await render();

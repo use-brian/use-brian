@@ -69,6 +69,7 @@ import {
   type HomeAppEntry,
 } from "@/lib/operator-apps";
 import { useDocChatOthersRun } from "@/lib/doc-chat-relay";
+import { useOptionalAppSession } from "@/components/app-session";
 import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { useWorkspaceEvents } from "@/lib/workspace-events";
 import { useSurfaceCacheInvalidation } from "@/lib/surface-cache-invalidation";
@@ -158,7 +159,8 @@ export function WorkspaceChrome({
   // so the global offline flag + write-queue flush run app-wide, not just on
   // the doc page. The collab socket signal reaches it via the module store
   // (`publishCollabConnected`, published by doc-shell).
-  const offlineState = useOfflineSync();
+  const appSession = useOptionalAppSession();
+  const offlineState = useOfflineSync(!appSession || appSession.state.connection === "online");
   // The ONE workspace realtime EventSource per tab (realtime-sync). Routes
   // server change signals to per-domain CustomEvents; surfaces refetch via
   // their existing listeners. Mounted on the chrome so every surface —

@@ -39,6 +39,7 @@ export const ja: Dictionary = {
     "edit": "設定を編集"
 },
 
+  workspaceConsent: {"title": "ワークスペースへのアクセスを確認", "explanation": "現在のワークスペース権限で、このアプリを Brian または選択したアシスタントに接続します。", "noWorkspaces": "利用可能なワークスペースがありません"},
   applicationConsent: {
     "title": "アプリのアクセス権を確認",
     "loading": "現在のアクセス権を確認中...",
@@ -316,6 +317,12 @@ export const ja: Dictionary = {
     "editorRationale": "ワークフロー編集画面からの定型業務設定の提案。"
 },
   workflowPublicationConsent: {
+    retry: "再試行",
+    unavailableSummary: "送信権限を確認できませんでした。",
+    checking: "送信権限を確認中",
+    reviewSummary: "一部の送信ステップに有効な公開承認がありません。",
+    review: "権限を確認",
+    sharingDetails: "プライベート情報の共有について",
     "title": "生成済み出力の公開",
     "intro": "保存済みのこのステップが、あなたのプライベートなコンテキストから生成したテキストを固定のTelegram宛先に公開することを許可します。ワークフローの保存とは別の操作です。",
     "warning": "生成済み出力によって、宛先の閲覧者にあなたの個人情報が開示される可能性があります。秘密の保持を保証するものでも、購読者にあなたのメモリへのアクセス権を与えるものでもありません。他のユーザーのプライベートな情報源は許可されません。宛先の機密区分とチーム・プロジェクトの制限は引き続き適用されます。同意は30日後に失効し、ワークフローの更新でも無効になります。承認・再承認は新しい実行にのみ適用されます。",
@@ -579,7 +586,9 @@ export const ja: Dictionary = {
     "choose": "作成前に部門または全般を明示的に選択してください。",
     "boundaries": "非公開の所有権、プロジェクト、機密レベルの制約は引き続き適用されます。共有で管理権限や公開アクセスは付与されません。",
     "stale": "アクセスコンテキストが変更されたか期限切れです。更新して保存先を確認してください。下書きは送信されていません。",
-    "unavailable": "保存先とアクセス設定を読み込めません。接続を確認して再試行してください。下書きは送信されていません。",
+    "unavailable": "保存先を利用できません。",
+    "reconnecting": "再接続中…",
+    "offlineDraft": "オフラインです。下書きは続けられます。",
     "review": "更新した保存先を確認",
     "setup": "ワークスペース設定は変更されません。ここではアクセスモードを有効化できません。",
     "migration": "管理者は保存済みの移行計画を確認し、Brian に明示的な提案を依頼できます。バッチの適用でモードは有効化されません。"
@@ -3360,6 +3369,13 @@ export const ja: Dictionary = {
     },
   },
   docPage: {
+    localMetadataValue: "自分の変更",
+    remoteMetadataValue: "現在のサーバーの値",
+    metadataConflict: "このページは別の場所で変更されました。残す情報を選んでください。両方の版は端末の復元履歴に保持されます。",
+    keepLocalMetadata: "自分の変更を残す",
+    keepRemoteMetadata: "サーバーの変更を残す",
+    metadataConflictRetry: "変更を解決できませんでした。再接続してお試しください。",
+
     sidebarSaved: "保存済み",
     sidebarDrafts: "下書き",
     sidebarNewDraft: "新規",
@@ -5619,6 +5635,7 @@ export const ja: Dictionary = {
     fallbackDesc: "既定ではオフです。オンにすると、このエンドポイントが応答できなかったメッセージは該当ティアの組み込みモデルが応答し、その旨が返信に表示され、通常の Brian 利用として課金されます。",
   },
   comments: {
+    localDraftFailed: "この下書きを端末に保存できませんでした。保存できるようになるまで、このウィンドウを開いたままにしてください。",
     toolbarButton: "コメント",
     toolbarButtonAria: "選択範囲にコメントを追加",
     badgeAria: "コメント {count} 件",
@@ -6057,6 +6074,21 @@ export const ja: Dictionary = {
       },
     },
     detail: {
+      showCanvas: "接続を表示",
+      hideCanvas: "接続を非表示",
+      flow: "フロー",
+      runs: "実行履歴",
+      settings: "設定",
+      navigation: "ワークフローの表示",
+      saved: "保存済み",
+      runsSavedVersion: "今すぐ実行では保存済みの版を使用します。",
+      editContext: "部門とプロジェクトを編集",
+      latestRun: "直近の実行",
+      runStatusUnknown: "実行状況はまだ取得できていません",
+      routineHandoff: "定型業務の受付では、これらのステップを実行せずタスクを作成します。",
+      configureRoutine: "定型業務を設定",
+      stepDetails: "ステップの詳細",
+      closeInspector: "完了",
       backToList: "すべてのワークフロー",
       notFound: "ワークフローが見つかりません",
       unavailableTitle: "このワークフローは現在利用できません",
@@ -8465,6 +8497,14 @@ export const ja: Dictionary = {
     marginBottomPt: "下余白 (pt)",
     marginLeftPt: "左余白 (pt)",
     showPageNumbers: "ページ番号を表示",
+    footerDistancePt: "フッターの下端からの距離 (pt)",
+    footerIndentLeftPt: "フッターの左インデント (pt)",
+    cellPadding: "セルの余白",
+    lineHeightPt: "行の高さ (pt)",
+    paragraphBeforePt: "段落前の間隔 (pt)",
+    paragraphAfterPt: "段落後の間隔 (pt)",
+    rowHeightPt: "行の高さ (pt)",
+    exactRowHeight: "行の高さを固定",
     headerFooterAlignment: "ヘッダーとフッターの配置",
     headerBorder: "ヘッダー罫線",
     footerBorder: "フッター罫線",
@@ -9012,8 +9052,8 @@ export const ja: Dictionary = {
       "label": "保存済みメッセージ",
       "notice": "これらの保存済みメッセージは参照専用です。アシスタントには送信されません。",
       "unavailableMessage": "現在のアクセス権ではこのメッセージを表示できません。",
-      "failed": "一部の保存済みメッセージを確認できませんでした。再試行して会話全体を読み込んでください。",
-      "more": "保存済みメッセージをさらに表示",
+      "failed": "会話全体を読み込めませんでした。もう一度お試しください。",
+      "more": "さらにメッセージを表示",
       "retry": "履歴を再読み込み"
     },
     legacyHistory: {
@@ -13794,6 +13834,9 @@ export const ja: Dictionary = {
     },
   },
   apiKeys: {
+    workspaceAccessLabel: "ワークスペースへのアクセス",
+    workspaceAccessDescription: "選択したアクセス権とコンテキストの範囲で、アシスタントが現在利用できるワークスペース操作を許可します。共有データのみが対象で、30日後に期限切れになります。",
+    expiresAtLabel: "有効期限",
     title: "API キー",
     description:
       "公開 API 経由でこのアシスタントを呼び出すためのキーを発行します。キーは利用元のサーバから外には出しません。",
@@ -13809,7 +13852,7 @@ export const ja: Dictionary = {
       "このアシスタントのチャットを自社プロダクトに組み込むためのキーです。messages エンドポイントのみ呼び出せます。",
     scopeAgentLabel: "内部エージェント",
     scopeAgentDesc:
-      "フルのプログラマティック アクセス。チャットに加えて MCP エンドポイントも利用できます。設定の変更には「エージェント設定」機能も必要です。",
+      "このアシスタントにエージェントを接続します。ワークスペースへのアクセスにはMCPを使用します。従来のキーはチャットにも対応します。",
     scopeBadgeChat: "チャット",
     scopeBadgeAgent: "エージェント",
     audienceLabel: "利用対象",
@@ -14019,7 +14062,8 @@ export const ja: Dictionary = {
     detailPlay: "再生",
     detailPause: "一時停止",
     detailLoadingAudio: "メディアを読み込んでいます...",
-    detailAudioError: "このメディアを読み込めませんでした。ページを再読み込みしてください。",
+    retryPlayback: "再生を再試行",
+    detailAudioError: "現在再生できません。このページで再試行できます。",
     detailTranscript: "文字起こし",
     visualMomentLabel: "画面",
     detailNoTranscript: "この録音はまだ文字起こしされていません。",
@@ -14118,6 +14162,9 @@ export const ja: Dictionary = {
     retry: "再試行",
   },
   recorder: {
+    pendingUpload: "この端末に保存しました。接続が回復すると自動でアップロードを再開します。",
+    pendingUploadFrom: "{time} の録音はこの端末に保存され、同期待ちです。",
+    storageFailed: "端末への保存に失敗したため、録音はメモリ内にのみあります。再試行中はウィンドウを開いたままにしてください。",
     start: "録音",
     audioOptions: "録音の音声オプション",
     includeComputerAudio: "コンピューター音声を含める",

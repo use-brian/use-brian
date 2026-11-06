@@ -42,7 +42,7 @@
  * [COMP:app-web/recording-chrome]
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { formatStamp } from "@use-brian/shared";
 import { useT } from "@/lib/i18n/client";
 import { useRecordingPlayer } from "@/lib/recordings/recording-player-context";
@@ -88,6 +88,8 @@ export function ActionItemsRail({
   const [roster, setRoster] = useState<FeedWorkspaceMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const requestEpoch = useRef(0);
+  const requestFlight = useRef(false);
   const [busy, setBusy] = useState<string | null>(null);
   /**
    * The task open in the brain drawer, or null. Opened IN PLACE rather than
@@ -122,18 +124,30 @@ export function ActionItemsRail({
   /** Re-read the list. Called on mount and after the drawer closes, since the
    *  drawer can rename, retitle, verify or delete the task behind our back. */
   const reload = useCallback(async () => {
+    if (requestFlight.current) return;
+    requestFlight.current = true;
+    const epoch = requestEpoch.current;
     try {
-      setTasks(await listRecordingTasks(recordingId));
+      const rows = await listRecordingTasks(recordingId);
+      if (epoch !== requestEpoch.current) return;
+      setTasks(rows);
       setError(false);
-    } catch {
+    } catch (failure) {
+      if (epoch !== requestEpoch.current) return;
+      const status = failure && typeof failure === "object" && "status" in failure ? failure.status : undefined;
+      if (status === 401 || status === 403 || status === 404) setTasks([]);
       setError(true);
     } finally {
-      setLoading(false);
+      if (epoch === requestEpoch.current) { requestFlight.current = false; setLoading(false); }
     }
   }, [recordingId]);
 
   useEffect(() => {
+    setTasks([]); setLoading(true); setError(false);
     void reload();
+    const recover = () => { if (document.visibilityState !== "hidden") void reload(); };
+    window.addEventListener("online", recover);
+    window.addEventListener("focus", recover);
     // A roster failure only costs the owner chips - never the list.
     let live = true;
     loadWorkspaceRoster(workspaceId)
@@ -141,8 +155,17 @@ export function ActionItemsRail({
       .catch(() => {});
     return () => {
       live = false;
+      requestEpoch.current++; requestFlight.current = false;
+      window.removeEventListener("online", recover);
+      window.removeEventListener("focus", recover);
     };
   }, [reload, workspaceId]);
+
+  useEffect(() => {
+    if (!error) return;
+    const timer = setInterval(() => { if (navigator.onLine && document.visibilityState !== "hidden") void reload(); }, 30_000);
+    return () => clearInterval(timer);
+  }, [error, reload]);
 
   /** Confirm: the model heard this right. Marks the row verified. */
   const confirm = useCallback(
@@ -206,7 +229,7 @@ export function ActionItemsRail({
   if (loading) {
     return <p className="text-sm text-muted-foreground">{t.recordings.actionItemsLoading}</p>;
   }
-  if (error) {
+  if (error && tasks.length === 0) {
     return <p className="text-sm text-muted-foreground">{t.recordings.actionItemsError}</p>;
   }
   if (tasks.length === 0) {

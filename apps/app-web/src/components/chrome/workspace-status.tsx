@@ -18,6 +18,7 @@ import type { OfflineSyncState } from "@/lib/offline/use-offline-sync";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { MetadataConflicts } from "./metadata-conflicts";
 import styles from "./workspace-status.module.css";
 
 export function WorkspaceStatus({ offlineState, sidebarOpen }: {
@@ -25,7 +26,7 @@ export function WorkspaceStatus({ offlineState, sidebarOpen }: {
   sidebarOpen: boolean;
 }) {
   const admission = useOptionalAppSession();
-  if (admission?.state.connection === "offline") offlineState = { ...offlineState, offline: true };
+  if (admission && admission.state.connection !== "online") offlineState = { ...offlineState, offline: true };
   const t = useT().docPage;
   const [status, setStatus] = useState<DesktopUpdateStatus | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -135,6 +136,7 @@ export function WorkspaceStatus({ offlineState, sidebarOpen }: {
               <p className="font-medium">{syncTitle}</p>
               {syncDescription ? <p className="text-muted-foreground">{syncDescription}</p> : null}
             </div>
+            <MetadataConflicts />
             {status ? <div className="space-y-2 border-t border-border pt-3">
               <p className="font-medium">{updateTitle}</p>
               <p className="text-muted-foreground">{updateDescription}</p>

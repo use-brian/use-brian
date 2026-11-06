@@ -61,7 +61,7 @@ describe('[COMP:doc/tools] exportPage', () => {
     const d = deps()
     const tool = createExportPageTool(d)
     await tool.execute({ pageId: PAGE_ID }, ctx())
-    expect((d.docPageStore.getVersionedPage as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(USER_ID, PAGE_ID)
+    expect((d.docPageStore.getVersionedPage as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(USER_ID, PAGE_ID, expect.objectContaining({ userId: USER_ID }))
   })
 
   it('errors when no page is open and none is given', async () => {

@@ -162,7 +162,8 @@ describe("[COMP:app-web/dock-recorder] recorder stickiness coverage", () => {
     expect(dock).toContain('<DockRecorderStrip rec={recorder} className="mb-1.5" />');
     expect(dock).toContain("<DockRecorderStrip rec={recorder} />");
     const composer = dock.slice(dock.indexOf("<ChatComposer"), dock.indexOf("{/* Live-recording chrome (collapsed mode)"));
-    expect(composer).toContain("disabled={!!pendingQuestion || offline}");
+    // Offline drafts remain editable; only dispatch waits for connectivity.
+    expect(composer).toContain("disabled={!!pendingQuestion}");
     expect(composer).not.toMatch(/disabled=\{[^}]*recorder\./);
     expect(dock).not.toContain("captureUpload.busy");
   });

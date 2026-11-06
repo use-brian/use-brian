@@ -2,25 +2,49 @@
 # runs before typecheck because some script-level typechecks reference their
 # package's built dist. The largest test suites run on isolated workers so
 # Turbo's package fan-out cannot multiply Vitest's own worker fan-out on one
-# runner. Integration tests are intentionally excluded because they require
-# provider credentials and self-skip on a secret-less runner.
+# runner. Credential-free database acceptance stays required; exhaustive
+# historical upgrades run on database changes, nightly and manual dispatch.
 name: CI
 
 on:
   pull_request:
   push:
     branches: [main, develop]
+  schedule:
+    - cron: '17 18 * * *' # 02:17 Asia/Singapore
+  workflow_dispatch:
 
 # A newer push to the same ref cancels an in-flight run. Push and PR refs differ,
 # so the job guards below separately suppress the duplicate develop -> main run.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'schedule' && 'nightly' || github.event_name == 'workflow_dispatch' && 'manual' || 'change' }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
+  ci-scope:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.head_ref != 'develop' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      historical: ${{ steps.scope.outputs.historical }}
+      profile: ${{ steps.scope.outputs.profile }}
+      shards: ${{ steps.scope.outputs.shards }}
+      total: ${{ steps.scope.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: scope
+        run: node scripts/testing/ci-scope.mjs
+
   build-typecheck:
     if: >-
       github.event_name != 'pull_request' ||
@@ -51,10 +75,10 @@ jobs:
         run: pnpm smoke
 
       - name: Test release-evidence checks
-        run: node --test scripts/__tests__/test-evidence.test.mjs
+        run: node --test scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs
 
       # Discovery is report-only until complete journeys qualify ten candidates.
-      # Keep the existing build-test dependency graph and unit lanes unchanged.
+      # The required build-test gate depends on complete selected-scope coverage.
       - name: Inventory selected test files (report-only)
         continue-on-error: true
         run: node scripts/testing/inventory.mjs --report "$RUNNER_TEMP/test-inventory.json"
@@ -127,6 +151,60 @@ jobs:
       - name: Unit tests
         run: pnpm --filter app-web exec vitest run --shard=${{ matrix.shard }}
 
+  offline-continuity:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.head_ref != 'develop' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    name: Offline and unstable-network continuity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build test dependencies
+        run: pnpm exec turbo run build --filter="app-web^..."
+      - name: Shared app continuity
+        run: >-
+          pnpm --filter app-web exec vitest run --maxWorkers=2
+          src/lib/__tests__/app-session.test.ts
+          src/components/__tests__/app-session.test.tsx
+          src/components/context/__tests__/mode-aware-context.test.tsx
+          src/components/chat-app/__tests__/chat-responsive-controls.test.tsx
+          src/lib/__tests__/auth-fetch.test.ts
+          desktop/__tests__/offline-bootstrap.test.ts
+          src/lib/offline/__tests__/offline-pages.test.ts
+          src/contexts/__tests__/primary-assistant-offline.test.tsx
+          src/lib/offline/__tests__/durable-draft.test.tsx
+          src/components/doc/__tests__/comment-thread-body-seed.test.tsx
+          src/components/doc/__tests__/page-comments.test.tsx
+          src/lib/offline/__tests__/metadata-recovery.test.ts
+          src/lib/offline/__tests__/application-authority-cache.test.ts
+          src/lib/recordings/__tests__/offline-media.test.ts
+          src/lib/recordings/__tests__/upload-journal.test.ts
+          src/lib/recordings/__tests__/upload-restart.test.ts
+          src/lib/recordings/__tests__/use-recording-upload.test.tsx
+          src/lib/recorder/__tests__/recorder-spool.test.ts
+          src/lib/recorder/__tests__/dock-recorder-background.test.tsx
+          src/lib/offline/__tests__/offline-writes.test.ts
+          src/lib/offline/__tests__/use-offline-sync.test.ts
+          src/lib/recorder/__tests__/recorder-engine-live.test.ts
+          src/lib/recordings/__tests__/recording-player-context.test.tsx
+          src/components/recordings/__tests__/recording-player-bar.test.tsx
+      - name: Native shell continuity
+        run: >-
+          pnpm --filter @use-brian/app-desktop exec vitest run --maxWorkers=2
+          src/__tests__/desktop-auth.test.ts
+          src/__tests__/window-policy.test.ts
+          src/__tests__/desktop-token-store.test.ts
+          src/__tests__/desktop-packaging.test.ts
+
   heavyweight-tests:
     if: >-
       github.event_name != 'pull_request' ||
@@ -184,15 +262,64 @@ jobs:
           --filter='!@use-brian/core'
           --filter='!app-web'
           --filter='!@use-brian/app-desktop'
+          --filter='!@use-brian/api-open'
           --concurrency=4
 
-  department-isolation:
+  embedded-current-tests:
+    needs: ci-scope
+    if: needs.ci-scope.outputs.historical == 'false'
+    name: Embedded database current schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec turbo run build --filter="@use-brian/api-open^..."
+      - run: node scripts/testing/embedded-database-tests.mjs current
+      - run: pnpm --filter @use-brian/api-open exec vitest run src/runtime.test.ts
+
+  embedded-database-tests:
+    needs: ci-scope
+    if: needs.ci-scope.outputs.historical == 'true'
+    name: Embedded database tests (${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build test dependencies
+        run: pnpm exec turbo run build --filter="@use-brian/api-open^..."
+      - name: Embedded database tests
+        run: node scripts/testing/embedded-database-tests.mjs ${{ matrix.shard }}
+      - name: Runtime unit tests
+        if: matrix.shard == 3
+        run: pnpm --filter @use-brian/api-open exec vitest run src/runtime.test.ts
+
+  department-isolation-shards:
+    needs: ci-scope
     if: >-
       github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
       github.event.pull_request.head.repo.full_name != github.repository
-    name: Department isolation acceptance
+    name: Department isolation (${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.ci-scope.outputs.shards) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -204,6 +331,7 @@ jobs:
           cache: pnpm
 
       - name: Install PostgreSQL 18 with required extensions
+        if: needs.ci-scope.outputs.profile == 'current' || matrix.shard != 1
         run: |
           sudo apt-get update
           sudo apt-get install -y ca-certificates curl
@@ -227,8 +355,47 @@ jobs:
         run: >-
           node scripts/test-department-isolation.mjs
           --pg-bin /usr/lib/postgresql/18/bin
-          --report /tmp/department-isolation-report.json
+          --profile ${{ needs.ci-scope.outputs.profile }}
+          --shard ${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }}
+          --report /tmp/department-isolation-${{ matrix.shard }}.json
 
+      - name: Upload acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: department-isolation-shard-${{ matrix.shard }}
+          path: /tmp/department-isolation-${{ matrix.shard }}.json
+          if-no-files-found: error
+
+  department-isolation:
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+      github.head_ref != 'develop' ||
+      github.event.pull_request.head.repo.full_name != github.repository)
+    name: Department isolation acceptance
+    needs: [ci-scope, department-isolation-shards]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: department-isolation-shard-*
+          path: ${{ runner.temp }}/department-isolation
+          merge-multiple: true
+      - name: Verify complete acceptance evidence
+        run: >-
+          node scripts/test-department-isolation.mjs
+          --profile ${{ needs.ci-scope.outputs.profile }}
+          --merge "${{ runner.temp }}/department-isolation"
+          --report /tmp/department-isolation-report.json
       - name: Upload acceptance report
         if: always()
         uses: actions/upload-artifact@v4
@@ -236,6 +403,11 @@ jobs:
           name: department-isolation-report
           path: /tmp/department-isolation-report.json
           if-no-files-found: error
+      - name: Require every acceptance shard
+        if: always()
+        env:
+          SHARD_RESULT: ${{ needs.department-isolation-shards.result }}
+        run: test "$SHARD_RESULT" = success
 
   # Preserve the historical required-check context while making it depend on
   # every parallel lane. `always()` turns a failed dependency into a red
@@ -246,24 +418,37 @@ jobs:
       (github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
       github.event.pull_request.head.repo.full_name != github.repository)
-    needs: [build-typecheck, api-tests, app-web-tests, heavyweight-tests, remaining-tests, department-isolation]
+    needs: [ci-scope, embedded-current-tests, build-typecheck, api-tests, app-web-tests, offline-continuity, heavyweight-tests, remaining-tests, embedded-database-tests, department-isolation]
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane
         env:
+          SCOPE_RESULT: ${{ needs.ci-scope.result }}
+          HISTORICAL: ${{ needs.ci-scope.outputs.historical }}
+          EMBEDDED_CURRENT_RESULT: ${{ needs.embedded-current-tests.result }}
           BUILD_TYPECHECK_RESULT: ${{ needs.build-typecheck.result }}
           API_TESTS_RESULT: ${{ needs.api-tests.result }}
           APP_WEB_TESTS_RESULT: ${{ needs.app-web-tests.result }}
+          OFFLINE_CONTINUITY_RESULT: ${{ needs.offline-continuity.result }}
           HEAVYWEIGHT_TESTS_RESULT: ${{ needs.heavyweight-tests.result }}
           REMAINING_TESTS_RESULT: ${{ needs.remaining-tests.result }}
+          EMBEDDED_DATABASE_TESTS_RESULT: ${{ needs.embedded-database-tests.result }}
           DEPARTMENT_ISOLATION_RESULT: ${{ needs.department-isolation.result }}
         run: |
+          if [[ "$SCOPE_RESULT" != success ]]; then exit 1; fi
+          if [[ "$HISTORICAL" == true ]]; then
+            [[ "$EMBEDDED_DATABASE_TESTS_RESULT" == success && "$EMBEDDED_CURRENT_RESULT" == skipped ]] || exit 1
+          elif [[ "$HISTORICAL" == false ]]; then
+            [[ "$EMBEDDED_CURRENT_RESULT" == success && "$EMBEDDED_DATABASE_TESTS_RESULT" == skipped ]] || exit 1
+          else exit 1
+          fi
           if [[ "$BUILD_TYPECHECK_RESULT" != "success" ||
                 "$API_TESTS_RESULT" != "success" ||
                 "$APP_WEB_TESTS_RESULT" != "success" ||
+                "$OFFLINE_CONTINUITY_RESULT" != "success" ||
                 "$HEAVYWEIGHT_TESTS_RESULT" != "success" ||
                 "$REMAINING_TESTS_RESULT" != "success" ||
                 "$DEPARTMENT_ISOLATION_RESULT" != "success" ]]; then
-            echo "CI lane failure: build=$BUILD_TYPECHECK_RESULT api=$API_TESTS_RESULT app_web=$APP_WEB_TESTS_RESULT heavy=$HEAVYWEIGHT_TESTS_RESULT remaining=$REMAINING_TESTS_RESULT isolation=$DEPARTMENT_ISOLATION_RESULT"
+            echo "CI lane failure: build=$BUILD_TYPECHECK_RESULT api=$API_TESTS_RESULT app_web=$APP_WEB_TESTS_RESULT offline=$OFFLINE_CONTINUITY_RESULT heavy=$HEAVYWEIGHT_TESTS_RESULT remaining=$REMAINING_TESTS_RESULT embedded=$EMBEDDED_DATABASE_TESTS_RESULT isolation=$DEPARTMENT_ISOLATION_RESULT"
             exit 1
           fi

@@ -110,7 +110,7 @@ const PRIMITIVE_TABLES: readonly BrainInboxPrimitive[] = [
  *  assistant (the frontend then offers a preview link for the skill). */
 function edgeEndpointLabelSql(kindCol: string, idCol: string): string {
   return `(CASE ${kindCol}
-             WHEN 'file' THEN (SELECT name FROM workspace_files WHERE id = ${idCol})
+             WHEN 'file' THEN (SELECT COALESCE(generated_title,title,name) FROM workspace_files WHERE id = ${idCol})
              WHEN 'entity' THEN (SELECT display_name FROM entities WHERE id = ${idCol})
              WHEN 'memory' THEN (SELECT summary FROM memories WHERE id = ${idCol})
              WHEN 'task' THEN (SELECT title FROM tasks WHERE id = ${idCol})
@@ -488,7 +488,7 @@ export async function listBrainInbox(params: {
              updated_at,
              created_by_assistant_id,
              jsonb_build_object(
-               'name', name,
+               'name', COALESCE(generated_title,title,name),
                -- the column is mime, not mime_type; keep the body key the frontend
                -- reads (mime_type) but source it from the real mime column so the
                -- inbox UNION doesn't throw.
@@ -768,7 +768,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
            verified_at AS "verifiedAt",
            jsonb_build_object(
              -- column is mime, not mime_type (keep the body key the UI reads).
-             'name', name, 'mime_type', mime,
+             'name', COALESCE(generated_title,title,name), 'mime_type', mime,
              'size_bytes', size_bytes, 'tags', tags,
              'sensitivity', sensitivity,
              'source_episode_id', source_episode_id

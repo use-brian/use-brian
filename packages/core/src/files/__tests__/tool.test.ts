@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest'
+import { bindScopeSource } from '../../security/source-evidence.js'
+import { describe, it, expect, vi } from 'vitest'
 import { createReadFileTool } from '../tool.js'
 import type { FileStore, CachedFile } from '../types.js'
 
@@ -27,6 +28,7 @@ function makeFakeFileStore(files: CachedFile[] = []): FileStore {
 }
 
 const ctx = {
+  workspaceId: 'w1',
   assistantId: 'a1',
   userId: 'u1',
   sessionId: 's1',
@@ -72,6 +74,19 @@ describe('[COMP:files/tool] readFileContent', () => {
     expect(data).toContain('<attached_file id="…">')
     expect(data).toContain('no tool that lists cached uploads')
     expect(data).toContain('Do NOT retry this exact id')
+  })
+
+  it('passes the caller ceiling and retains canonical source evidence', async () => {
+    const source = { resourceKind: 'workspace_file' as const, resourceId: 'f1', version: '2', workspaceId: 'w1',
+      userId: null, assistantId: null, sensitivity: 'internal' as const, compartments: [], projectIds: [] }
+    const file = bindScopeSource({ id: 'cache1', sessionId: 's1', fileName: 'report.txt', mimeType: 'text/plain',
+      content: 'Fictional report', summary: null, sizeBytes: 16 }, source)
+    const store = makeFakeFileStore([file]); store.get = vi.fn(store.get)
+    const result = await createReadFileTool(store).execute({ fileId: 'cache1' }, { ...ctx, clearance: 'internal', compartments: [], projectIds: [] })
+    expect(store.get).toHaveBeenCalledWith('cache1', expect.objectContaining({ workspaceId: 'w1', userId: 'u1', clearance: 'internal', compartments: [], projectIds: [] }))
+    expect(result.scopeEvidence?.sources).toEqual([source])
+    expect((await createReadFileTool(store).execute({ fileId: 'cache1' }, { ...ctx, workspaceId: undefined })).isError).toBe(true)
+    expect(store.get).toHaveBeenCalledTimes(1)
   })
 
   it('is read-only and concurrency-safe', () => {

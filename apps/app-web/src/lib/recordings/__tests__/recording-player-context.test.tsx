@@ -19,6 +19,12 @@ vi.mock("@/lib/api/recordings", () => ({
   getRecordingMediaUrl: (...a: unknown[]) => getRecordingMediaUrl(...a),
 }));
 
+const cache = vi.hoisted(() => ({ owner: null as any, read: vi.fn(), remove: vi.fn() }));
+vi.mock("../offline-media", () => ({
+  mediaOwner: () => cache.owner, ownsMedia: (owner: unknown) => owner === cache.owner,
+  readOfflineMedia: cache.read, removeOfflineMedia: cache.remove, downloadOfflineMedia: vi.fn(),
+}));
+
 import {
   RecordingPlayerProvider,
   RecordingVideoStage,
@@ -44,6 +50,10 @@ async function mount(node: React.ReactNode) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  cache.owner = null; cache.read.mockReset().mockResolvedValue(null); cache.remove.mockResolvedValue(undefined);
+  vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
   api = null;
   getRecordingMediaUrl.mockResolvedValue({
     url: "https://gcs.example/signed",
@@ -58,6 +68,8 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("[COMP:recordings/player] no recording", () => {
@@ -87,7 +99,7 @@ describe("[COMP:recordings/player] playback URL", () => {
         <Probe />
       </RecordingPlayerProvider>,
     );
-    expect(getRecordingMediaUrl).toHaveBeenCalledWith("rec-1");
+    expect(getRecordingMediaUrl).toHaveBeenCalledWith("rec-1", expect.any(AbortSignal));
     expect(document.querySelector("video")?.getAttribute("src")).toBe("https://gcs.example/signed");
     expect(api!.recordingId).toBe("rec-1");
   });
@@ -189,5 +201,127 @@ describe("[COMP:recordings/player] seek", () => {
       const el = document.querySelector("video");
       expect(el?.className).toContain("hidden");
     });
+  });
+});
+
+
+describe("[COMP:recordings/player] connection recovery", () => {
+  const player = () => <RecordingPlayerProvider recordingId="rec-1"><Probe /></RecordingPlayerProvider>;
+  it("retries an initial failure automatically and joins simultaneous recovery signals", async () => {
+    vi.useFakeTimers();
+    getRecordingMediaUrl.mockRejectedValueOnce(new TypeError("offline"));
+    await mount(player()); expect(api!.error).toBeTruthy();
+    await act(async () => { window.dispatchEvent(new Event("online")); window.dispatchEvent(new Event("focus")); });
+    expect(getRecordingMediaUrl).toHaveBeenCalledTimes(2);
+    expect(api!.error).toBeNull(); expect(document.querySelector("video")?.src).toContain("signed");
+  });
+  it("releases a stalled request, retries, and ignores its late completion", async () => {
+    vi.useFakeTimers();
+    let resolve!: (value: unknown) => void;
+    getRecordingMediaUrl.mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    await mount(player());
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(api!.isLoading).toBe(false); expect(api!.error).toBeTruthy();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(api!.error).toBeNull();
+    await act(async () => resolve({ url: "https://media.example/late", expiresAt: new Date(Date.now() + 360_000).toISOString() }));
+    expect(document.querySelector("video")?.src).not.toContain("late");
+  });
+  it("recovers through backoff without an online event", async () => {
+    vi.useFakeTimers(); getRecordingMediaUrl.mockRejectedValueOnce(new TypeError("reset"));
+    await mount(player());
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(api!.error).toBeNull(); expect(getRecordingMediaUrl).toHaveBeenCalledTimes(2);
+  });
+  it("keeps usable media and controls after proactive refresh fails", async () => {
+    vi.useFakeTimers();
+    getRecordingMediaUrl.mockResolvedValueOnce({ url: "https://media.example/first", expiresAt: new Date(Date.now() + 360_000).toISOString() });
+    await mount(player());
+    getRecordingMediaUrl.mockRejectedValue(new TypeError("offline"));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(api!.error).toBeNull(); expect(document.querySelector("video")?.src).toBe("https://media.example/first");
+  });
+  it("preserves paused playhead when renewing the source", async () => {
+    vi.useFakeTimers();
+    getRecordingMediaUrl.mockResolvedValueOnce({ url: "https://media.example/first", expiresAt: new Date(Date.now() + 360_000).toISOString() });
+    await mount(player()); const el = document.querySelector("video")!;
+    el.currentTime = 42;
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    el.currentTime = 0;
+    await act(async () => el.dispatchEvent(new Event("loadedmetadata")));
+    expect(el.currentTime).toBe(42); expect(el.play).not.toHaveBeenCalled();
+  });
+  it("restores a requested citation when the source arrives later", async () => {
+    let resolve!: (value: unknown) => void;
+    getRecordingMediaUrl.mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    await mount(player());
+    await act(async () => api!.seekTo(17_000));
+    await act(async () => resolve({ url: "https://media.example/citation", expiresAt: new Date(Date.now() + 360_000).toISOString() }));
+    const el = document.querySelector("video")!;
+    await act(async () => el.dispatchEvent(new Event("loadedmetadata")));
+    expect(el.currentTime).toBe(17); expect(el.play).toHaveBeenCalledOnce();
+  });
+  it("resumes an actively playing source after URL renewal", async () => {
+    vi.useFakeTimers();
+    getRecordingMediaUrl.mockResolvedValueOnce({ url: "https://media.example/first", expiresAt: new Date(Date.now() + 360_000).toISOString() });
+    await mount(player()); const el = document.querySelector("video")!;
+    Object.defineProperty(el, "paused", { configurable: true, value: false }); el.currentTime = 12;
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    el.currentTime = 0;
+    await act(async () => el.dispatchEvent(new Event("loadedmetadata")));
+    expect(el.currentTime).toBe(12); expect(el.play).toHaveBeenCalledOnce();
+  });
+  it("reloads identical signed URLs on in-place retry", async () => {
+    await mount(player()); const el = document.querySelector("video")!;
+    await act(async () => el.dispatchEvent(new Event("error")));
+    await act(async () => api!.retry());
+    expect(el.load).toHaveBeenCalledOnce(); expect(api!.error).toBeNull();
+  });
+  it("bounds repeated codec/storage failures rather than minting in a loop", async () => {
+    vi.useFakeTimers(); await mount(player()); const el = document.querySelector("video")!;
+    for (let n = 0; n < 8; n++) {
+      await act(async () => el.dispatchEvent(new Event("error")));
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    }
+    expect(getRecordingMediaUrl).toHaveBeenCalledTimes(6);
+    expect(api!.error).toBeTruthy();
+  });
+  it.each([401, 403, 404])("clears media and stops automatic retries after API %s", async status => {
+    vi.useFakeTimers(); await mount(player());
+    getRecordingMediaUrl.mockRejectedValue(Object.assign(new Error("rejected"), { status }));
+    await act(async () => api!.retry());
+    expect(document.querySelector("video")?.hasAttribute("src")).toBe(false);
+    await act(async () => { window.dispatchEvent(new Event("online")); });
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(getRecordingMediaUrl).toHaveBeenCalledTimes(2);
+  });
+  it("ignores a late response from the previous recording", async () => {
+    let resolve!: (v: unknown) => void;
+    getRecordingMediaUrl.mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    await mount(player());
+    await act(async () => root!.render(<RecordingPlayerProvider recordingId="rec-2"><Probe /></RecordingPlayerProvider>));
+    await act(async () => resolve({ url: "https://media.example/old", expiresAt: new Date(Date.now() + 360_000).toISOString() }));
+    expect(api!.recordingId).toBe("rec-2"); expect(document.querySelector("video")?.src).not.toContain("old");
+  });
+});
+
+describe("[COMP:recordings/player] offline copy and denial races", () => {
+  it("plays a local copy through network failure without restarting paused playback", async () => {
+    cache.owner = { viewerId: "viewer" }; cache.read.mockResolvedValue(new Blob(["audio"], { type: "audio/wav" }));
+    vi.stubGlobal("URL", class extends URL { static createObjectURL = vi.fn(() => "blob:local-audio"); static revokeObjectURL = vi.fn(); });
+    getRecordingMediaUrl.mockRejectedValue(new TypeError("offline"));
+    await mount(<RecordingPlayerProvider recordingId="local"><Probe /></RecordingPlayerProvider>);
+    expect(document.querySelector("video")?.getAttribute("src")).toBe("blob:local-audio");
+    expect(api!.error).toBeNull(); expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+    act(() => root?.unmount()); root = null; vi.unstubAllGlobals();
+  });
+  it("does not resurrect cached media when its read finishes after an authoritative denial", async () => {
+    cache.owner = { viewerId: "viewer" }; let finish!: (value: Blob) => void;
+    cache.read.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    getRecordingMediaUrl.mockRejectedValue(Object.assign(new Error("Access denied"), { status: 403 }));
+    await mount(<RecordingPlayerProvider recordingId="denied"><Probe /></RecordingPlayerProvider>);
+    await act(async () => finish(new Blob(["audio"])));
+    expect(cache.remove).toHaveBeenCalled();
+    expect(document.querySelector("video")?.getAttribute("src")).toBeNull(); expect(api!.error).toBeTruthy();
   });
 });

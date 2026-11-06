@@ -1,3 +1,4 @@
+import type { WorkspaceMcpProfile } from '../workspace-mcp/profile.js'
 import { withExternalKeyActor } from '../db/external-key-admission.js'
 /**
  * Edition-neutral per-assistant API key management.
@@ -11,13 +12,17 @@ type AssistantParams = { assistantId: string }
 
 const createSchema = z.object({
   name: z.string().min(1).max(120),
+  workspaceAccess: z.boolean().optional(),
+  expiresInDays: z.number().int().min(1).max(90).optional(),
+  contextGroupId: z.string().uuid().nullable().optional(),
+  contextProjectId: z.string().uuid().nullable().optional(),
   scope: z.enum(['chat', 'agent']).default('chat'),
   audience: z.enum(['external', 'internal']).default('external'),
   anonymousContext: z.enum(['thin', 'full']).default('thin'),
   toolPolicy: z.enum(['assistant', 'public_research']).optional(),
 }).strict()
 
-export function apiKeyRoutes(store: ApiKeyStore): Router {
+export function apiKeyRoutes(store: ApiKeyStore, workspaceProfile?: WorkspaceMcpProfile): Router {
   const router = Router({ mergeParams: true })
 
   router.post<AssistantParams>('/', async (req, res) => {
@@ -50,7 +55,20 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
         detail: 'toolPolicy "public_research" applies to chat-scope keys only',
       })
     }
+    if (!parsed.data.workspaceAccess && (parsed.data.expiresInDays !== undefined
+      || parsed.data.contextGroupId !== undefined || parsed.data.contextProjectId !== undefined)) {
+      res.status(400).json({ error: 'workspace_mcp_consent_required' }); return
+    }
+    if (parsed.data.workspaceAccess && parsed.data.scope !== 'agent') {
+      res.status(400).json({ error: 'workspace_mcp_requires_agent_scope' }); return
+    }
     try {
+      if (parsed.data.workspaceAccess && !workspaceProfile) throw new Error('workspace_mcp_profile_unavailable')
+      const workspaceMcpConsent = parsed.data.workspaceAccess ? await workspaceProfile!.issue({
+        actorUserId: userId, authSessionId: req.authSessionId, assistantId: req.params.assistantId,
+        readOnly: false, contextGroupId: parsed.data.contextGroupId ?? null,
+        contextProjectId: parsed.data.contextProjectId ?? null, expiresInDays: parsed.data.expiresInDays,
+      }) : undefined
       const created = await withExternalKeyActor(req.userId!, req.authSessionId, () => store.create({
         assistantId: req.params.assistantId,
         name: parsed.data.name,
@@ -59,9 +77,11 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
         audience: parsed.data.audience,
         anonymousContext: parsed.data.anonymousContext,
         toolPolicy,
+        ...(workspaceMcpConsent ? { workspaceMcpConsent } : {}),
       }))
       res.json({
         id: created.id,
+        workspaceMcpConsent: created.workspaceMcpConsent,
         name: created.name,
         key: created.plaintext,
         prefix: created.prefix,
@@ -74,6 +94,9 @@ export function apiKeyRoutes(store: ApiKeyStore): Router {
         lastUsedAt: created.lastUsedAt,
       })
     } catch (err) {
+      if ((err as Error).message.startsWith('workspace_mcp_')) {
+        res.status(409).json({ error: (err as Error).message }); return
+      }
       if ((err as Error).message.includes('Not authorized')) {
         res.status(403).json({ error: 'Not authorized to modify this assistant' })
         return

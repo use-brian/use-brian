@@ -46,18 +46,19 @@ function openDb(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
-/** Read a value by key, or `null` (missing / any failure). */
+/** Required durable state: a read failure must never look like an absent checkpoint. */
+export async function idbReadRequired<T>(key: string): Promise<T | null> {
+  const db = await openDb();
+  return new Promise<T | null>((resolve, reject) => {
+    const req = db.transaction(STORE, "readonly").objectStore(STORE).get(key);
+    req.onsuccess = () => resolve((req.result ?? null) as T | null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** Read an optional cache value; storage failure is a cache miss. */
 export async function idbGet<T>(key: string): Promise<T | null> {
-  try {
-    const db = await openDb();
-    return await new Promise<T | null>((resolve, reject) => {
-      const req = db.transaction(STORE, "readonly").objectStore(STORE).get(key);
-      req.onsuccess = () => resolve((req.result ?? null) as T | null);
-      req.onerror = () => reject(req.error);
-    });
-  } catch {
-    return null;
-  }
+  try { return await idbReadRequired<T>(key); } catch { return null; }
 }
 
 /** Write a value by key. Best-effort (no-op on failure). */
@@ -134,6 +135,8 @@ function deleteDb(name: string): Promise<void> {
  * "leave this device" act).
  */
 export async function clearLocalDocCaches(timeoutMs = 1500): Promise<void> {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("brian:local-data-cleared"));
+  try { for (const key of Object.keys(localStorage)) if ((key.startsWith("brian:unsent:v1:") || key.startsWith("brian:offline-routing:v1:"))) localStorage.removeItem(key); } catch { /* unavailable */ }
   if (typeof indexedDB === "undefined") return;
   const sweep = (async () => {
     // `indexedDB.databases()` is missing on some older engines; without it the
@@ -143,7 +146,7 @@ export async function clearLocalDocCaches(timeoutMs = 1500): Promise<void> {
       .map((d) => d.name)
       .filter(
         (n): n is string =>
-          !!n && (n.startsWith(DOC_STORE_PREFIX) || n === DB_NAME),
+          !!n && (n.startsWith(DOC_STORE_PREFIX) || n === DB_NAME || n === "brian-recorder-spool"),
       );
     // Close our own cached KV connection so its delete isn't blocked by us.
     if (dbPromise) {

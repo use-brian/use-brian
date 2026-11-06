@@ -729,3 +729,14 @@ describe('[COMP:api/saved-views-store] SELECT-only capability projection', () =>
     expect(sql).toContain('saved_view_edit_operation_scope_allows')
   })
 })
+
+describe('[COMP:api/saved-views-store] offline metadata compare and set', () => {
+  it('compares the original field in the mutation itself, not an earlier read', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [] } as any)
+    expect(await store.update(USER_ID, VIEW_ID, { name: 'Local', expectedMetadata: { field: 'name', value: 'Original' } })).toBeNull()
+    const [actor, sql, values] = mockQueryWithRLS.mock.calls[0]
+    expect(actor).toBe(USER_ID)
+    expect(sql).toContain('AND name IS NOT DISTINCT FROM $3')
+    expect(values).toEqual(['Local', VIEW_ID, 'Original'])
+  })
+})

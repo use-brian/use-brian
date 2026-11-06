@@ -192,6 +192,17 @@ export function isolateDocEditToolContext(parent: ToolContext): ToolContext {
     channelType: parent.channelType,
     channelId: parent.channelId,
     workspaceId: parent.workspaceId,
+    executionContext: parent.executionContext,
+    authority: parent.authority,
+    scopeAccumulator: parent.scopeAccumulator,
+    assertModelInputAuthority: parent.assertModelInputAuthority,
+    assertModelOutputAuthority: parent.assertModelOutputAuthority,
+    sessionPersisted: parent.sessionPersisted,
+    mutationCompartments: parent.mutationCompartments,
+    projectIds: parent.projectIds,
+    activeGroupId: parent.activeGroupId,
+    activeProjectId: parent.activeProjectId,
+    attended: parent.attended,
     assistantKind: parent.assistantKind,
     activeCapabilities: parent.activeCapabilities,
     docViewId: parent.docViewId,
@@ -236,7 +247,11 @@ async function runAttempt(
   model: string,
   attempt: DocEditAttemptUsage['attempt'],
 ): Promise<AttemptResult> {
+  await options.context.authority?.assertCurrent()
+  await options.context.assertModelInputAuthority?.(options.context)
   const pageContext = await options.loadPageContext(options.instruction)
+  await options.context.authority?.assertCurrent()
+  await options.context.assertModelInputAuthority?.(options.context)
   const mutationTools = new Set<string>()
   const pageIds = new Set<string>()
   let latestText = ''
@@ -454,6 +469,7 @@ export type CreateDelegateDocEditToolOptions = Omit<
   loadPageContext: (
     instruction: string,
     targetPageId?: string | null,
+    context?: ToolContext,
   ) => Promise<string>
 }
 
@@ -546,7 +562,7 @@ export function createDelegateDocEditTool(
         instruction: input.instruction,
         tools,
         context,
-        loadPageContext: (instruction) => options.loadPageContext(instruction, selectedPageId),
+        loadPageContext: (instruction) => options.loadPageContext(instruction, selectedPageId, context),
         onUsage: options.onUsage,
         onToolResult: options.onToolResult,
         maxTurns: options.maxTurns,

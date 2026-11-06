@@ -118,7 +118,7 @@ export function setDocumentBlockStyle(editor: Editor | null, style: DocumentBloc
   editor.commands.focus();
 }
 
-export function setDocumentBlockAttributes(editor: Editor | null, patch: Record<string, unknown>): void {
+export function setDocumentBlockAttributes(editor: Editor | null, patch: Record<string, unknown>, focusEditor = true): void {
   if (!editor) return;
   const current = ancestor(editor, ["paragraph", "heading", "officeList", "officeTableCellText", "officeTableCell"]);
   if (!current) return;
@@ -128,15 +128,15 @@ export function setDocumentBlockAttributes(editor: Editor | null, patch: Record<
     ? { paragraphStart: true, ...(!current.node.attrs.paragraphStart || current.node.attrs.id === cell?.node.attrs.id ? { id: uuid() } : {}) }
     : {};
   editor.view.dispatch(editor.state.tr.setNodeMarkup(current.pos, undefined, { ...current.node.attrs, ...spacing, ...paragraph, ...patch }).scrollIntoView());
-  editor.commands.focus();
+  if (focusEditor) editor.commands.focus();
 }
 
-export function setDocumentSectionAttributes(editor: Editor | null, patch: Record<string, unknown>): void {
+export function setDocumentSectionAttributes(editor: Editor | null, patch: Record<string, unknown>, focusEditor = true): void {
   if (!editor) return;
   const section = ancestor(editor, ["officeSection"]);
   if (!section) return;
   editor.view.dispatch(editor.state.tr.setNodeMarkup(section.pos, undefined, { ...section.node.attrs, ...patch }).scrollIntoView());
-  editor.commands.focus();
+  if (focusEditor) editor.commands.focus();
 }
 
 export function currentDocumentSectionAttributes(editor: Editor | null): Record<string, unknown> | null {
@@ -305,12 +305,19 @@ export function setDocumentTableAttributes(editor: Editor | null, patch: Record<
   editor.commands.focus();
 }
 
-export function setDocumentCellAttributes(editor: Editor | null, patch: Record<string, unknown>): void {
+export function setDocumentRowAttributes(editor: Editor | null, patch: Record<string, unknown>): void {
+  if (!editor) return;
+  const row = ancestor(editor, ["officeTableRow"]);
+  if (!row) return;
+  editor.view.dispatch(editor.state.tr.setNodeMarkup(row.pos, undefined, { ...row.node.attrs, ...patch }));
+}
+
+export function setDocumentCellAttributes(editor: Editor | null, patch: Record<string, unknown>, focusEditor = true): void {
   if (!editor) return;
   const cell = ancestor(editor, ["officeTableCell"]);
   if (!cell) return;
   editor.view.dispatch(editor.state.tr.setNodeMarkup(cell.pos, undefined, { ...cell.node.attrs, ...patch }).scrollIntoView());
-  editor.commands.focus();
+  if (focusEditor) editor.commands.focus();
 }
 
 export function selectedDocumentNode(editor: Editor | null, type: string): { node: ProseMirrorNode; pos: number } | null {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   injectSkills,
   isSkillOfferable,
@@ -6,6 +6,7 @@ import {
   type SkillOfferableViewer,
 } from '../route-helpers.js'
 import type { Tool } from '@use-brian/core'
+import type { ConnectorStore } from '../../db/connector-store.js'
 import type { SkillStore } from '../../db/skill-store.js'
 
 /**
@@ -176,5 +177,25 @@ describe('[COMP:api/skill-injection-gate] injectSkills restrictToSlugs', () => {
     const after = await read.execute({ skill: 'finance', path: 'references/margins.md' }, context)
     expect(after.isError).toBeFalsy()
     expect(after.data).toMatchObject({ content: 'Gross margin method.' })
+  })
+})
+
+
+describe('[COMP:api/skill-injection-gate] admitted connector envelope', () => {
+  it('does not consult personal accounts when a host supplied an empty admitted set', async () => {
+    const personalList = vi.fn(async () => [{ connectorId: 'gmail', connected: true }])
+    const options = { skillStore: { listOwned: async () => [], listForAssistant: async () => [{ skillId: 'fictional-mail', enabled: true }] } as unknown as SkillStore,
+      connectorUserId: 'u1', assistantId: 'a1', unavailableCapabilities: [], channel: 'workspace_mcp',
+      connectorStore: { list: personalList } as unknown as ConnectorStore,
+      restrictToSlugs: ['fictional-mail'], communitySkills: [{ id: 'fictional-mail', name: 'Fictional mail', description: 'Fictional workflow.', content: 'Read mail.',
+        source: 'community' as const, category: 'research' as const, requiresConnectors: ['gmail'] }] }
+    const refused = new Map<string, Tool>()
+    await injectSkills({ ...options, tools: refused, availableConnectorIds: new Set() })
+    expect(personalList).not.toHaveBeenCalled()
+    expect(refused.has('useSkill')).toBe(false)
+    const admitted = new Map<string, Tool>()
+    await injectSkills({ ...options, tools: admitted, availableConnectorIds: new Set(['gmail']) })
+    expect(admitted.has('useSkill')).toBe(true)
+    expect(personalList).not.toHaveBeenCalled()
   })
 })

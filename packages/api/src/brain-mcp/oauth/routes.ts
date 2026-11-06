@@ -1,3 +1,5 @@
+import { withExternalKeyActor } from '../../db/external-key-admission.js'
+import type { WorkspaceMcpProfile } from '../../workspace-mcp/profile.js'
 /**
  * OAuth 2.1 routes mounted at `/api/brain/oauth`.
  *
@@ -38,6 +40,8 @@ import {
 } from './codes.js'
 
 export type OAuthRoutesOptions = {
+  workspaceProfile?: WorkspaceMcpProfile
+  assistantId?: string
   clientStore: OAuthClientStore
   authorizationStore: OAuthAuthorizationStore
   workspaceStore: WorkspaceStore
@@ -87,6 +91,7 @@ const ConsentDecisionBody = z
      * (preserving the client's ask).
      */
     grantedScope: z.enum(['read', 'read_write']).optional(),
+    workspaceAccess: z.boolean().optional(),
     review: z.string().max(32768).optional(),
   })
   .strict()
@@ -239,12 +244,14 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
       scope,
       state,
       exp: Math.floor(Date.now() / 1000) + CONSENT_REQUEST_TTL_SECONDS,
+      ...(opts.assistantId ? { audience: 'assistant' as const, assistantId: opts.assistantId } : {}),
       ...(opts.applicationConsent ? { audience: 'application' as const, applicationId: opts.applicationConsent.applicationId, applicationRevision: application!.revision } : {}),
     }
     const signed = signConsentRequest(consentReq, opts.signingSecret)
 
     const consentUrl = new URL('/oauth/authorize', opts.webAppUrl)
     consentUrl.searchParams.set('req', signed)
+    if (opts.assistantId) consentUrl.searchParams.set('assistant', opts.assistantId)
     if (opts.applicationConsent) consentUrl.searchParams.set('application', opts.applicationConsent.applicationId)
     res.redirect(consentUrl.toString())
   })
@@ -260,7 +267,7 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
     }
     const signed = String(req.query.req ?? '')
     const consentReq = verifyConsentRequest(signed, opts.signingSecret)
-    if (!consentReq || (consentReq.audience === 'application') !== !!opts.applicationConsent
+    if (!consentReq || (consentReq.audience === 'assistant') !== !!opts.assistantId || consentReq.assistantId !== opts.assistantId || (consentReq.audience === 'application') !== !!opts.applicationConsent
       || opts.applicationConsent && consentReq.applicationId !== opts.applicationConsent.applicationId) {
       res.status(400).json({ error: 'invalid_or_expired_request' })
       return
@@ -284,15 +291,17 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
       `SELECT w.id, w.name
        FROM workspaces w
        JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = $1
-       WHERE wm.role IN ('owner', 'admin')
+       WHERE wm.role IN ('owner', 'admin') AND ($2::uuid IS NULL OR EXISTS(SELECT 1 FROM assistants a WHERE a.id=$2 AND a.workspace_id=w.id))
        ORDER BY w.created_at ASC, w.id ASC`,
-      [userId],
+      [userId, opts.assistantId ?? null],
     )
     res.json({
       clientName: client.clientName,
       clientUri: client.clientUri,
       scope: consentReq.scope,
       workspaces: eligible.rows,
+      workspaceAccessAvailable: !!opts.workspaceProfile,
+      ...(opts.assistantId ? { assistantId: opts.assistantId, workspaceAccessRequired: true } : {}),
     })
   })
 
@@ -309,7 +318,7 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
       return
     }
     const consentReq = verifyConsentRequest(parsed.data.req, opts.signingSecret)
-    if (!consentReq || (consentReq.audience === 'application') !== !!opts.applicationConsent
+    if (!consentReq || (consentReq.audience === 'assistant') !== !!opts.assistantId || consentReq.assistantId !== opts.assistantId || (consentReq.audience === 'application') !== !!opts.applicationConsent
       || opts.applicationConsent && consentReq.applicationId !== opts.applicationConsent.applicationId) {
       res.status(400).json({ error: 'invalid_or_expired_request' })
       return
@@ -349,14 +358,22 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
         res.json({ redirectUrl: buildSuccessRedirect(consentReq.redirectUri, issued.codePlaintext, consentReq.state) })
         return
       }
-      const { codePlaintext } = await opts.authorizationStore.createGrantWithCode({
+      if (opts.assistantId && parsed.data.workspaceAccess !== true || parsed.data.workspaceAccess && !opts.workspaceProfile) {
+        res.status(400).json({ error: 'workspace_consent_required' }); return
+      }
+      const workspaceMcpConsent = parsed.data.workspaceAccess ? await opts.workspaceProfile!.issue({
+        actorUserId: userId, authSessionId: req.authSessionId, workspaceId: parsed.data.workspaceId,
+        assistantId: opts.assistantId, readOnly: grantedScope === 'read', contextGroupId: null, contextProjectId: null,
+      }) : undefined
+      const { codePlaintext } = await withExternalKeyActor(userId, req.authSessionId, () => opts.authorizationStore.createGrantWithCode({
+        ...(workspaceMcpConsent ? { workspaceMcpConsent } : {}),
         clientId: consentReq.clientId,
         userId,
         workspaceId: parsed.data.workspaceId,
         scope: grantedScope,
         codeChallenge: consentReq.codeChallenge,
         redirectUri: consentReq.redirectUri,
-      })
+      }))
       const url = buildSuccessRedirect(consentReq.redirectUri, codePlaintext, consentReq.state)
       res.json({ redirectUrl: url })
     } catch (err) {

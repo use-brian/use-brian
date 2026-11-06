@@ -102,7 +102,7 @@ function OfficeReviewContent({ artifact, artifactId, workspaceId, snapshot, onLi
     (projection === undefined || officeMetadataRemaining(projection, viewerId) > 0);
 
   const releaseInput = (format: "native" | "pdf"): OfficeReleaseInput => {
-    const input: OfficeReleaseInput = { expectedVersion: artifact.version, action: "export", destination: { sensitivity: "internal", external: false }, format };
+    const input: OfficeReleaseInput = { expectedVersion: artifact.version, action: "export", destination: { sensitivity: artifact.sensitivity ?? "confidential", external: false }, format };
     if (format !== "pdf" || snapshot?.family !== "spreadsheet") return input;
     const sheet = invoiceSheet(snapshot);
     return { ...input, spreadsheetPdf: { sheetId: sheet.id, printArea: sheet.print.printArea ?? usedPrintArea(snapshot, sheet.id), calculationMode: "automatic", expectedPageCount: 1, preset: sheet.name.toLocaleLowerCase() === "invoice" ? "invoice" : "worksheet" } };

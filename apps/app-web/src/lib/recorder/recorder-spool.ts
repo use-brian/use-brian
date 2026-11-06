@@ -11,9 +11,9 @@
  *
  * The session meta carries `elapsedMs`, refreshed on every append — the
  * crash also kills the recorder's clock, so recovery bills/forks off the
- * last written elapsed (at most one timeslice stale). Spool writes are
- * best-effort by contract: an IndexedDB failure must degrade to
- * in-memory-only capture, never break the recording (callers swallow).
+ * last written elapsed (at most one timeslice stale). Failed writes retain
+ * their chunks in memory and retry in order; the UI reports that closing
+ * is unsafe until durable storage catches up.
  *
  * `SpoolStore` is an interface with two implementations: IndexedDB for the
  * browser, and an in-memory twin the node tests exercise the contract
@@ -23,6 +23,9 @@
  */
 
 export type SpoolSessionMeta = {
+  owner?: import("../offline/application-write-authority").OfflineWriteAuthority;
+  /** Only a deliberate long-recording Stop authorizes automatic transfer. */
+  autoUpload?: boolean;
   /** Session id — `crypto.randomUUID()` at latch time. */
   id: string;
   workspaceId: string;
@@ -125,7 +128,7 @@ export function memorySpoolStore(): SpoolStore {
   return {
     async createSession(meta) {
       sessions.set(meta.id, { ...meta });
-      chunks.set(meta.id, []);
+      if (!chunks.has(meta.id)) chunks.set(meta.id, []);
     },
     async appendChunk(sessionId, index, chunk, elapsedMs) {
       const meta = sessions.get(sessionId);
@@ -195,7 +198,10 @@ function tx<T>(db: IDBDatabase, stores: string[], mode: IDBTransactionMode, run:
  */
 export function openRecorderSpool(): SpoolStore {
   let dbPromise: Promise<IDBDatabase> | null = null;
-  const db = () => (dbPromise ??= openDb());
+  const db = () => (dbPromise ??= openDb().then(database => {
+    database.onversionchange = () => { database.close(); dbPromise = null; };
+    return database;
+  }).catch(error => { dbPromise = null; throw error; }));
   return {
     async createSession(meta) {
       await tx(await db(), [SESSIONS], "readwrite", (t) => void t.objectStore(SESSIONS).put(meta));

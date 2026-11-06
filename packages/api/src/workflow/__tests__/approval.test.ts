@@ -221,6 +221,7 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
       const row = rows.find(r => r.id === id && r.status === 'pending')
       if (row) row.status = 'expired'
     },
+    async recordExternalQuestionAnswer() { return null },
     async recordAnswer() {
       throw new Error('recordAnswer not used in workflow approval tests')
     },
@@ -475,6 +476,7 @@ describe('[COMP:workflow/approval] deterministic tool notifications', () => {
     expect(await resumeFromApproval(f.deps, f.approvals.rows[0].id, 'approved', USER_ID)).toMatchObject({ status: 'completed' })
     expect(f.execute).toHaveBeenCalledOnce()
     expect(delivery).toHaveBeenCalledOnce()
+    expect(f.runs.get(f.run.id)?.vars.__deliveryMsg_read).toBe('123.456')
     expect(delivery.mock.calls[0][0]).toMatchObject({ channelId: 'C_REVIEWED', text: 'Website: Enquiry / saved-enquiry',
       publication: { runId: f.run.id, stepId: 'read' }, scopeEvidence: { sensitivity: 'confidential', compartments: ['finance', 'legal', 'product'], sources: expect.arrayContaining([
         ...f.inputEvidence.sources!, ...f.savedEvidence.sources!, ...f.resultEvidence.sources!,

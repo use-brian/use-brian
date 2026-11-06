@@ -72,8 +72,8 @@ export async function saveScopeReview(workspaceId:string,command:ScopeReviewComm
 }
 async function scopeReviewRequest<T extends {validForMs:number}>(workspaceId:string,path:string,command?:ScopeReviewCommand):Promise<ProtectedProjection<T>> {
   const started=performance.now(),root=publicRuntimeConfig().apiUrl??'http://localhost:4000';
-  const response=await authFetch(`${root}/api/workspaces/${encodeURIComponent(workspaceId)}/${path}`,{cache:'no-store',...(command?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(command)}:{})});
-  if(!response.ok){const body=await response.json().catch(()=>({})) as {error?:string};const error=new Error(body.error??'scope_review_unavailable');if(!command&&([401,403,404].includes(response.status)||body.error==='access_history_changed'))throw new SurfaceCacheEvictionError(error);throw error;}
+  const response=await authFetch(`${root}/api/workspaces/${encodeURIComponent(workspaceId)}/${path}`,{cache:'no-store',...(!command?{signal:AbortSignal.timeout(15000)}:{}),...(command?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(command)}:{})});
+  if(!response.ok){const body=await response.json().catch(()=>({})) as {error?:string};const error=Object.assign(new Error(body.error??'scope_review_unavailable'),{status:response.status});if(!command&&([401,403,404].includes(response.status)||body.error==='access_history_changed'))throw new SurfaceCacheEvictionError(error);throw error;}
   return protectProjection(await response.json() as T,started);
 }
 
@@ -186,13 +186,13 @@ export async function setMigrationPlanState(workspaceId:string,planId:string,sta
 export async function fetchWorkspaceCreationContext(workspaceId:string){
   const started=performance.now(),root=publicRuntimeConfig().apiUrl??'http://localhost:4000';
   async function choices<T>(path:string):Promise<T>{
-    const response=await authFetch(`${root}/api/workspaces/${encodeURIComponent(workspaceId)}/${path}`,{cache:'no-store'});
+    const response=await authFetch(`${root}/api/workspaces/${encodeURIComponent(workspaceId)}/${path}`,{cache:'no-store',signal:AbortSignal.timeout(15000)});
     const body=await response.json();
-    if(!response.ok){const error=new Error(body.error??'context_unavailable');if([401,403,404].includes(response.status))throw new SurfaceCacheEvictionError(error);throw error;}
+    if(!response.ok){const error=Object.assign(new Error(body.error??'context_unavailable'),{status:response.status});if([401,403,404].includes(response.status))throw new SurfaceCacheEvictionError(error);throw error;}
     return body as T;
   }
   const {listAssistants}=await import('./studio');
-  const [mode,teams,projects,assistants,authority]=await Promise.all([fetchWorkspaceAccessMode(workspaceId),choices<{groups:import('./context-scopes').ContextTeam[]}>('groups'),choices<{projects:import('./context-scopes').ContextProject[]}>('projects?includeArchived=false'),listAssistants(workspaceId),fetchWorkspaceAccessExplanation(workspaceId,{})]);
+  const [mode,teams,projects,assistants,authority]=await Promise.all([fetchWorkspaceAccessMode(workspaceId),choices<{groups:import('./context-scopes').ContextTeam[]}>('groups'),choices<{projects:import('./context-scopes').ContextProject[]}>('projects?includeArchived=false'),listAssistants(workspaceId,{signal:AbortSignal.timeout(15000),requireSuccess:true}).catch(error=>{if([401,403,404].includes(error?.status))throw new SurfaceCacheEvictionError(error);throw error;}),fetchWorkspaceAccessExplanation(workspaceId,{})]);
   if(mode.policyRevision!==authority.policyRevision)throw new SurfaceCacheEvictionError(new Error('access_policy_conflict'));
   // A directory listing or read-only grant is not a creation destination.
   return protectProjection({teams:teams.groups.filter(team=>authority.mutationTeamIds===null||authority.mutationTeamIds.includes(team.id)),projects:projects.projects.filter(project=>authority.projectIds===null||authority.projectIds.includes(project.id)),assistants:assistants.filter(assistant=>assistant.workspaceId===workspaceId),policyRevision:mode.policyRevision,validForMs:Math.min(mode.validForMs,authority.validForMs)},started);

@@ -2,6 +2,8 @@ import {randomUUID} from 'node:crypto'
 import {afterAll,describe,it,expect} from 'vitest'
 import {getPool,getAppPool,queryWithRLS} from '../../db/client.js'
 import {resumeOfficeGeneration,readOfficeGenerationRecovery} from '../generation-recovery.js'
+import {createOfficeTemplateDiscovery} from '../template-discovery.js'
+import type {ToolContext} from '@use-brian/core'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -58,5 +60,32 @@ describe('[COMP:api/office-generation-recovery] real PostgreSQL template recover
     if(reason==='ready')await pool.query("UPDATE workspace_access_policies SET setup_state='ready' WHERE workspace_id=$1",[f.workspace])
     await expect(resumeOfficeGeneration(reason==='noninitiator'?f.other:f.user,f.input)).rejects.toBeTruthy()
     expect((await pool.query('SELECT status,template_version_id FROM office_generation_jobs WHERE id=$1',[f.job])).rows[0]).toEqual({status:'needs_input',template_version_id:null})
+  })
+})
+
+describe('[COMP:api/office-template-discovery] real PostgreSQL chat discovery',()=>{
+  it('returns the current published version and excludes held, deprecated and out-of-turn templates',async()=>{
+    const f=await fixture(), discover=createOfficeTemplateDiscovery()
+    const context={userId:f.user,workspaceId:f.workspace,clearance:'internal',compartments:null,projectIds:null} as ToolContext
+    const input={family:'spreadsheet' as const,query:'Quarterly'}
+    expect((await discover(context,input)).templates).toEqual([{templateId:f.template,templateVersionId:f.version,name:'Quarterly worksheet',description:'',family:'spreadsheet',version:1}])
+    expect((await discover({...context,clearance:'public'},input)).templates).toEqual([])
+    expect((await discover({...context,workspaceId:randomUUID()},input)).templates).toEqual([])
+    await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[f.file])
+    expect((await discover(context,input)).templates).toEqual([])
+    await pool.query('UPDATE workspace_files SET scope_held=false WHERE id=$1',[f.file])
+    const resource=randomUUID(),resourceFile=randomUUID()
+    await pool.query(`INSERT INTO workspace_files(id,workspace_id,path,parent_path,name,mime,size_bytes,storage_uri,sensitivity,created_by_user_id)
+      VALUES($1,$2,$3,'/','logo.png','image/png',2,'local://fixture','confidential',$4)`,[resourceFile,f.workspace,`/resource-${resourceFile}.png`,f.user])
+    await pool.query(`INSERT INTO office_resources(id,workspace_id,kind,name,file_id,content_hash,mime,licence,provenance,embedding_rights,sensitivity,created_by)
+      VALUES($1,$2,'brand_media','Logo',$3,$4,'image/png','{}','{}','allowed','internal',$5)`,[resource,f.workspace,resourceFile,'a'.repeat(64),f.user])
+    await pool.query("INSERT INTO office_template_resource_refs(template_version_id,resource_id,workspace_id,usage) VALUES($1,$2,$3,'bundle')",[f.version,resource,f.workspace])
+    expect((await discover(context,input)).templates).toEqual([])
+    expect((await discover({...context,clearance:'confidential'},input)).templates).toHaveLength(1)
+    await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[resourceFile])
+    expect((await discover({...context,clearance:'confidential'},input)).templates).toEqual([])
+    await pool.query('UPDATE workspace_files SET scope_held=false WHERE id=$1',[resourceFile])
+    await pool.query("UPDATE office_templates SET lifecycle_state='deprecated' WHERE id=$1",[f.template])
+    expect((await discover(context,input)).templates).toEqual([])
   })
 })

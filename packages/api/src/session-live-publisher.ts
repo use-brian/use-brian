@@ -41,7 +41,7 @@ export const STREAM_REASONING_CAP = 1_500
 /** Tool-input JSON cap for mirrored activity events. */
 const ROOM_ACTIVITY_INPUT_CAP = 4_000
 
-export type TurnStreamAttribution = { senderUserId: string; assistantId: string }
+export type TurnStreamAttribution = { senderUserId: string | null; assistantId: string }
 
 export type TurnStreamPublisher = {
   /** Reply text flowed: accumulate, clear the activity label, publish throttled. */
@@ -160,7 +160,7 @@ export function createTurnStreamPublisher(params: {
 export function publishRoomTurnActivity(params: {
   mirror: boolean
   sessionId: string
-  senderUserId: string
+  senderUserId: string | null
   event: string
   data: Record<string, unknown>
   publishSessionEvent: PublishSessionEvent
@@ -199,7 +199,7 @@ export function publishRoomTurnActivity(params: {
  */
 export function publishTurnCompleted(params: {
   sessionId: string
-  senderUserId: string
+  senderUserId: string | null
   publishSessionEvent: PublishSessionEvent
   reason?: 'stopped_by_user' | 'stalled_reclaimed' | 'timeout'
 }): void {

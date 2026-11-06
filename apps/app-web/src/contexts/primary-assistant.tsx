@@ -35,6 +35,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { currentOfflineWriteAuthority } from "@/lib/offline/application-write-authority";
 import { listWorkspaceAssistants } from "@/lib/api/views";
 import { pickPrimaryAssistant } from "@/lib/primary-assistant";
 import {
@@ -62,33 +63,33 @@ export function PrimaryAssistantProvider({
   workspaceId: string;
   children: React.ReactNode;
 }) {
-  const [assistantId, setAssistantId] = useState<string | null>(null);
-  const [resolved, setResolved] = useState(false);
-
+  const owner = currentOfflineWriteAuthority(workspaceId);
+  const ownerKey = owner ? `brian:offline-routing:v1:${[owner.apiOrigin, owner.viewerId, workspaceId].map(encodeURIComponent).join(":")}` : null;
+  const [selection, setSelection] = useState<{ key: string | null; id: string | null; resolved: boolean }>({ key: ownerKey, id: null, resolved: false });
+  const assistantId = selection.key === ownerKey ? selection.id : null;
+  const resolved = selection.key === ownerKey && selection.resolved;
   const refresh = useCallback(() => {
     if (!workspaceId) return;
-    listWorkspaceAssistants(workspaceId)
-      .then((list) => {
-        // Repair-only: seed when we have no interlocutor yet, or when the one
-        // we picked has left the workspace. Re-picking unconditionally would
-        // yank a live conversation to a different assistant whenever the
-        // roster reorders.
-        setAssistantId((current) =>
-          current && list.some((a) => a.id === current)
-            ? current
-            : (pickPrimaryAssistant(list)?.id ??
-              // Data drift (no assistant flagged primary): fall back to the
-              // first accessible one so the surface still has an interlocutor
-              // rather than stranding the user with no chat at all.
-              list[0]?.id ??
-              null),
-        );
-        setResolved(true);
-      })
-      .catch(() => {
-        /* no list → no dock this load; a later workspace change retries */
+    const stillCurrent = () => JSON.stringify(currentOfflineWriteAuthority(workspaceId)) === JSON.stringify(owner);
+    try {
+      const cached = ownerKey ? localStorage.getItem(ownerKey) : null;
+      if (cached) setSelection(current => current.key === ownerKey && current.id ? current : { key: ownerKey, id: cached, resolved: true });
+    } catch { /* optional routing cache */ }
+    listWorkspaceAssistants(workspaceId).then(list => {
+      if (!stillCurrent()) return;
+      setSelection(current => {
+        const id = current.key === ownerKey && list.some(a => a.id === current.id) ? current.id : pickPrimaryAssistant(list)?.id ?? list[0]?.id ?? null;
+        try { if (ownerKey) { if (id) localStorage.setItem(ownerKey, id); else localStorage.removeItem(ownerKey); } } catch { /* cache only */ }
+        return { key: ownerKey, id, resolved: true };
       });
-  }, [workspaceId]);
+    }).catch(error => {
+      if (!stillCurrent()) return;
+      if (error?.status === 401 || error?.status === 403 || error?.status === 404) {
+        try { if (ownerKey) localStorage.removeItem(ownerKey); } catch {}
+        setSelection({ key: ownerKey, id: null, resolved: true });
+      }
+    });
+  }, [workspaceId, ownerKey]);
 
   useEffect(() => {
     refresh();
@@ -104,7 +105,13 @@ export function PrimaryAssistantProvider({
       refresh();
     };
     window.addEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
-    return () => window.removeEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
+    window.addEventListener("online", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.removeEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
+      window.removeEventListener("online", refresh);
+      window.removeEventListener("focus", refresh);
+    };
   }, [workspaceId, refresh]);
 
   const value = useMemo(

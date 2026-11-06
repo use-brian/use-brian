@@ -1,3 +1,4 @@
+import { hasWorkspaceMcpRetainedAuthority } from './session-context-revisions.js'
 import { prepareMemoryLearning, recordMemoryLearning } from './memory-learning.js'
 import { memoryLearningSchema, type MemoryLearning, type MemoryLearningProposal, type MemoryObservation } from '@use-brian/core'
 import {queryLegacyCanonicalCrmSql} from './crm-reader.js'
@@ -714,7 +715,7 @@ async function queryMemoryCollection<T extends pg.QueryResultRow>(ctx:AccessCont
  if(ctx.systemRead||currentApplicationReadTransaction(ctx)||!ctx.userId)throw new DerivedScopeError('scope_evidence_missing')
  ctx=structuredClone(ctx);params=structuredClone(params)
  const e=authority.execution
-  if(!(e.identity.kind==='delegated'||e.identity.kind==='attended'&&e.identity.principal.kind==='workspace_member')||e.ownership.kind!=='workspace'||e.security.access.userId!==ctx.userId
+  if(!(e.identity.kind==='delegated'||e.identity.kind==='attended'&&e.identity.principal.kind==='workspace_member'||hasWorkspaceMcpRetainedAuthority(e))||e.ownership.kind!=='workspace'||e.security.access.userId!==ctx.userId
    ||e.security.access.workspaceId!==ctx.workspaceId||e.assistant.id!==ctx.assistantId)throw new DerivedScopeError('scope_evidence_missing')
  await e.security.authority.assertCurrent()
  const discover=async(client?:pg.PoolClient)=>{
@@ -955,7 +956,7 @@ export async function getIdentityMemories(ctx: AccessContext,authority?:SessionC
       &&!e.surface.clientSelfMemory&&!getApplicationExecutionBinding(e)
     if(ctx.systemRead||currentApplicationReadTransaction(ctx)||ctx.userId!==e.security.access.userId
       ||ctx.workspaceId!==e.security.access.workspaceId||ctx.assistantId!==e.assistant.id
-      ||!nativeAttended&&!nativeDelegated||e.ownership.kind!=='workspace'
+      ||!nativeAttended&&!nativeDelegated&&!hasWorkspaceMcpRetainedAuthority(e)||e.ownership.kind!=='workspace'
       ||e.ownership.workspaceId!==e.security.access.workspaceId)throw new DerivedScopeError('scope_evidence_missing')
     await e.security.authority.assertCurrent()
     // Discover only canonical identity/scope metadata. Self/attribute predicates

@@ -1,3 +1,4 @@
+import { admitDerivedFile } from '../workspace-access/file-derived-admission.js'
 import { assertCurrentFileAssistant } from '../workspace-access/file-publication-admission.js'
 import { readAdmissionPolicy } from '../workspace-access/admission-policy-read.js'
 /**
@@ -17,7 +18,10 @@ import { assertExecutionResourceScope } from './access-predicate.js'
 
 export type WorkspaceFileUploadStatus = 'pending' | 'assembling' | 'completed' | 'aborted'
 
+export type FileTransferBinding = { sessionId?: string; parent?: import('@use-brian/core').WorkspaceCredentialDelegation;
+  derivation?: import('@use-brian/core').DerivedWriteEvidence; sha256?: string }
 export type WorkspaceFileUpload = {
+  transferBinding?: FileTransferBinding | null
   admissionBinding?: ResourceScope
   id: string
   workspaceId: string
@@ -48,7 +52,7 @@ export type CreateWorkspaceFileUpload = Omit<
 type UploadRow = Omit<WorkspaceFileUpload, 'sizeBytes'> & { sizeBytes: number | string }
 
 const SELECT = `
-  id, admission_binding AS "admissionBinding",
+  id, admission_binding AS "admissionBinding", transfer_binding AS "transferBinding",
   workspace_id AS "workspaceId",
   acting_user_id AS "actingUserId",
   assistant_id AS "assistantId",
@@ -93,9 +97,12 @@ export function createWorkspaceFileUploadsStore(): WorkspaceFileUploadsStore {
       try {
         await client.query('BEGIN'); await applyRLSGucs(client,userId)
         if (input.actingUserId!==userId || (input.access && (input.access.userId!==userId || input.access.workspaceId!==input.workspaceId))) throw new Error('scope_operation_denied')
-        const admitted=await admitFileCreate(client,userId,{workspaceId:input.workspaceId,path:input.path,parentPath:'/uploads',name:input.name,mime:input.mime,
+        const candidate={workspaceId:input.workspaceId,path:input.path,parentPath:'/uploads',name:input.name,mime:input.mime,
           sizeBytes:input.sizeBytes,storageUri:input.storageUri,createdByUserId:userId,sensitivity:input.sensitivity,
-          compartments:input.requestedCompartments,projectIds:input.requestedProjectIds})
+          compartments:input.requestedCompartments,projectIds:input.requestedProjectIds}
+        const admitted=input.transferBinding?.derivation
+          ? await admitDerivedFile(client,userId,{...candidate,createdByAssistantId:input.assistantId},input.transferBinding.derivation,input.access)
+          : await admitFileCreate(client,userId,candidate)
         const binding:ResourceScope={workspaceId:input.workspaceId,userId:null,assistantId:null,sensitivity:admitted.sensitivity??'internal',
           compartments:admitted.compartments??[],projectIds:admitted.projectIds??[]}
         await assertCurrentFileAssistant(client,binding,input.access)
@@ -105,8 +112,8 @@ export function createWorkspaceFileUploadsStore(): WorkspaceFileUploadsStore {
           `INSERT INTO workspace_file_uploads (
              id, workspace_id, acting_user_id, assistant_id, file_id,
              path, name, mime, size_bytes, chunk_size_bytes, part_count,
-             storage_uri, quota_exempt, expires_at, admission_binding
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
+             storage_uri, quota_exempt, expires_at, admission_binding, transfer_binding
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb)
            RETURNING ${SELECT}`,
           [
             input.id,
@@ -123,6 +130,7 @@ export function createWorkspaceFileUploadsStore(): WorkspaceFileUploadsStore {
             input.storageUri,
             input.quotaExempt,
             input.expiresAt, JSON.stringify({...binding,ready,executingAssistantId:input.assistantId}),
+            input.transferBinding ? JSON.stringify(input.transferBinding) : null,
           ],
         )
         await client.query('COMMIT')
@@ -203,7 +211,7 @@ export function createWorkspaceFileUploadsStore(): WorkspaceFileUploadsStore {
       const result = await query<UploadRow>(
         `SELECT ${SELECT}
          FROM workspace_file_uploads
-         WHERE status IN ('pending', 'assembling') AND expires_at <= now()
+         WHERE status IN ('pending', 'assembling', 'aborted') AND expires_at <= now() AND parts_deleted_at IS NULL
          ORDER BY expires_at ASC
          LIMIT $1`,
         [Math.min(Math.max(limit, 1), 200)],
@@ -215,7 +223,7 @@ export function createWorkspaceFileUploadsStore(): WorkspaceFileUploadsStore {
       const result = await query<UploadRow>(
         `SELECT ${SELECT}
          FROM workspace_file_uploads
-         WHERE status = 'completed' AND parts_deleted_at IS NULL
+         WHERE status = 'completed' AND parts_deleted_at IS NULL AND expires_at <= now()
          ORDER BY completed_at ASC NULLS FIRST
          LIMIT $1`,
         [Math.min(Math.max(limit, 1), 200)],

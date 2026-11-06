@@ -21,6 +21,163 @@ vi.mock('../templates/compiler.js', async (importOriginal) => {
 const context = { userId: id(80), assistantId: id(81), workspaceId: id(2), sessionId: id(82), appId: 'chat', channelType: 'web', channelId: 'web', abortSignal: new AbortController().signal }
 
 describe('[COMP:office/tools] Office tools', () => {
+  it('passes host context to atomic creation without falling through to legacy creation', async () => {
+    const createFromContext = vi.fn(async () => ({artifactId:id(1),jobId:id(90)}))
+    const create = vi.fn()
+    const tool = createOfficeTools({port:{createFromContext,create,get:vi.fn(),revise:vi.fn()}}).find(t=>t.name==='createOfficeArtifact')!
+    expect((await tool.execute({family:'document',outcome:'Quotation',audience:'Client',sourceHandles:[],idempotencyKey:'native-chat-test'},context)).data).toMatchObject({status:'queued'})
+    expect(createFromContext).toHaveBeenCalledWith(context,expect.objectContaining({userId:context.userId,workspaceId:context.workspaceId}))
+    expect(create).not.toHaveBeenCalled()
+  })
+  it('discovers a named published template and binds its version when creating from chat', async () => {
+    const template = { templateId: id(10), templateVersionId: id(11), name: 'Waterman', description: 'Photography', family: 'document' as const, version: 4 }
+    const listTemplates = vi.fn(async () => ({ templates: [template], scopeEvidence: { sensitivity: 'internal' as const, compartments: [], projectIds: [] } }))
+    const create = vi.fn(async () => ({ artifactId: id(1), jobId: id(90) }))
+    const tools = new Map(createOfficeTools({ port: { listTemplates, create, get: vi.fn(), revise: vi.fn() } }).map(tool => [tool.name, tool]))
+    const found = await tools.get('listOfficeTemplates')!.execute({ family: 'document', query: 'Waterman' }, context)
+    expect(found.data).toEqual({ templates: [template] })
+    expect(found.scopeEvidence).toMatchObject({ sensitivity: 'internal' })
+    const result = await tools.get('createOfficeArtifact')!.execute({ family: 'document', outcome: 'Test quotation', audience: 'Client', sourceHandles: [], templateId: template.templateVersionId, idempotencyKey: 'waterman-test-123' }, context)
+    expect(result.data).toMatchObject({ artifactId: id(1), status: 'queued' })
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ templateId: id(11), sourceHandles: [] }))
+    const blocked = createOfficeTools({ port: { listTemplates, create, get: vi.fn(), revise: vi.fn() }, resolvePolicy: async () => 'block' }).find(tool => tool.name === 'listOfficeTemplates')!
+    expect((await blocked.execute({}, context)).isError).toBe(true)
+    expect(listTemplates).toHaveBeenCalledTimes(1)
+    expect((await tools.get('listOfficeTemplates')!.execute({}, { ...context, workspaceId: undefined })).isError).toBe(true)
+    expect(listTemplates).toHaveBeenCalledTimes(1)
+  })
+  it('explains how to recover an unavailable template binding without claiming creation', async () => {
+    const create = vi.fn(async () => { throw new Error('office_source_unavailable') })
+    const tool = createOfficeTools({ port: { create, get: vi.fn(), revise: vi.fn() } }).find(tool => tool.name === 'createOfficeArtifact')!
+    const result = await tool.execute({ family: 'document', outcome: 'Test quotation', audience: 'Client', sourceHandles: [], templateId: id(10), idempotencyKey: 'waterman-test-123' }, context)
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('No generation job was queued')
+    expect(result.data).toContain('listOfficeTemplates')
+    expect(result.data).toContain('templateVersionId')
+  })
+  it('assigns comments with explicit clearing, validated due dates and native policy', async () => {
+    const assignComment = vi.fn<NonNullable<OfficeToolPort['assignComment']>>().mockResolvedValue({ scopeEvidence: { sensitivity: 'internal' } })
+    const port: OfficeToolPort = { create: vi.fn(), get: vi.fn(), revise: vi.fn(), assignComment }
+    const tool = createOfficeTools({ port }).find(t => t.name === 'assignOfficeComment')!
+    const input = { artifactId: id(1), threadId: id(3), assignedUserId: null, assignedToBrian: true, dueAt: '2026-12-01T12:00:00+08:00' }
+    expect(tool.inputSchema.safeParse(input).success).toBe(true)
+    expect(tool.inputSchema.safeParse({ ...input, dueAt: 'tomorrow' }).success).toBe(false)
+    expect(tool.inputSchema.safeParse({ ...input, assignedUserId: undefined }).success).toBe(false)
+    expect(tool.inputSchema.safeParse({ ...input, actorAssistantId: id(99) }).success).toBe(false)
+    expect(await tool.execute(input, context)).toMatchObject({ data: input, scopeEvidence: { sensitivity: 'internal' } })
+    expect(assignComment).toHaveBeenCalledWith(context, input)
+    const blocked = createOfficeTools({ port, resolvePolicy: async () => 'block' }).find(t => t.name === tool.name)!
+    expect((await blocked.execute(input, context)).isError).toBe(true)
+    expect(assignComment).toHaveBeenCalledOnce()
+    assignComment.mockResolvedValueOnce(null)
+    expect(await tool.execute({ ...input, dueAt: null }, context)).toMatchObject({ isError: true })
+  })
+  it('resolves comments through the native port with policy and host identity', async () => {
+    const resolveComment = vi.fn<NonNullable<OfficeToolPort['resolveComment']>>().mockResolvedValue({ scopeEvidence: { sensitivity: 'internal' } })
+    const port: OfficeToolPort = { create: vi.fn(), get: vi.fn(), revise: vi.fn(), resolveComment }
+    const tool = createOfficeTools({ port }).find(t => t.name === 'resolveOfficeComment')!
+    const input = { artifactId: id(1), threadId: id(3), resolved: true }
+    expect(tool.inputSchema.safeParse({ ...input, actorAssistantId: id(99) }).success).toBe(false)
+    expect(await tool.execute(input, context)).toEqual({ data: input, scopeEvidence: { sensitivity: 'internal' } })
+    expect(resolveComment).toHaveBeenCalledWith(context, input)
+    resolveComment.mockResolvedValueOnce(null)
+    expect(await tool.execute(input, context)).toMatchObject({ isError: true, data: { code: 'office_comment_unavailable' } })
+    const blocked = createOfficeTools({ port, resolvePolicy: async () => 'block' }).find(t => t.name === tool.name)!
+    expect((await blocked.execute(input, context)).isError).toBe(true)
+    expect(resolveComment).toHaveBeenCalledTimes(2)
+    expect(tool.isReadOnly).toBe(false)
+  })
+  it('restores saved history with conflict and policy handling and no caller attribution', async () => {
+    const restoreVersion = vi.fn<NonNullable<OfficeToolPort['restoreVersion']>>().mockResolvedValue({ id: id(9), version: 3 })
+    const port: OfficeToolPort = { create: vi.fn(), get: vi.fn(), revise: vi.fn(), restoreVersion }
+    const tool = createOfficeTools({ port }).find(t => t.name === 'restoreOfficeVersion')!
+    const input = { artifactId: id(1), targetVersionId: id(8), expectedVersion: 2 }
+    expect(tool.inputSchema.safeParse({ ...input, actorAssistantId: id(99) }).success).toBe(false)
+    expect((await tool.execute(input, context)).data).toEqual({ artifactId: id(1), versionId: id(9), version: 3 })
+    restoreVersion.mockResolvedValueOnce('version_conflict')
+    expect(await tool.execute(input, context)).toMatchObject({ isError: true, data: { code: 'version_conflict' } })
+    const blocked = createOfficeTools({ port, resolvePolicy: async () => 'block' }).find(t => t.name === tool.name)!
+    expect((await blocked.execute(input, context)).isError).toBe(true)
+    expect(restoreVersion).toHaveBeenCalledTimes(2)
+    const ask = createOfficeTools({ port, resolvePolicy: async () => 'ask' }).find(t => t.name === tool.name)!
+    expect(await ask.resolveConfirmation!(context, input)).toBe(true)
+  })
+  it('exports through native release and requires host-authenticated acknowledgement', async () => {
+    const exportArtifact = vi.fn(async () => ({ status: 201, body: { fileId: id(9), releaseId: id(10) } }))
+    const port: OfficeToolPort = { create: vi.fn(), get: vi.fn(), revise: vi.fn(), exportArtifact }
+    const tool = createOfficeTools({ port }).find(t => t.name === 'exportOfficeArtifact')!
+    const input = { artifactId: id(1), expectedVersion: 2, format: 'pdf' }
+    expect(tool.inputSchema.safeParse({ ...input, approved: true }).success).toBe(false)
+    expect(await tool.resolveConfirmation!(context, input)).toBe(false)
+    expect((await tool.execute(input, context)).data).toEqual({ fileId: id(9), releaseId: id(10) })
+    const acknowledged = { ...input, acknowledgeCodes: ['claim.unverified'] }
+    expect(await tool.resolveConfirmation!(context, acknowledged)).toBe(true)
+    expect((await tool.execute(acknowledged, context)).isError).toBe(true)
+    expect(exportArtifact).toHaveBeenCalledOnce()
+    expect((await tool.execute(acknowledged, { ...context, approvedToolInvocation: {
+      toolName: tool.name, approvalId: id(11), approverUserId: context.userId,
+    } })).isError).toBe(false)
+    const blocked = createOfficeTools({ port, resolvePolicy: async () => 'block' }).find(t => t.name === tool.name)!
+    expect((await blocked.execute(input, context)).isError).toBe(true)
+    expect(exportArtifact).toHaveBeenCalledTimes(2)
+  })
+
+  it('requires human review for trash and purge while preserving allow, ask and block policy', async () => {
+    const changeLifecycle = vi.fn(async () => ({ artifactId: id(1), lifecycleState: 'archived' }))
+    const port: OfficeToolPort = { create: vi.fn(), get: vi.fn(), revise: vi.fn(), changeLifecycle }
+    const tool = createOfficeTools({ port }).find(t => t.name === 'changeOfficeLifecycle')!
+    expect(await tool.resolveConfirmation!(context, { artifactId: id(1), action: 'archive' })).toBe(false)
+    for (const action of ['trash', 'purge']) expect(await tool.resolveConfirmation!(context, { artifactId: id(1), action })).toBe(true)
+    expect((await tool.execute({ artifactId: id(1), action: 'archive' }, context)).data).toEqual({ artifactId: id(1), lifecycleState: 'archived' })
+    const blocked = createOfficeTools({ port, resolvePolicy: async () => 'block' }).find(t => t.name === 'changeOfficeLifecycle')!
+    expect((await blocked.execute({ artifactId: id(1), action: 'archive' }, context)).isError).toBe(true)
+    expect(changeLifecycle).toHaveBeenCalledOnce()
+    const ask = createOfficeTools({ port, resolvePolicy: async () => 'ask' }).find(t => t.name === 'changeOfficeLifecycle')!
+    expect(await ask.resolveConfirmation!(context, { artifactId: id(1), action: 'archive' })).toBe(true)
+  })
+
+  it('cancels only through the canonical job port and honors policy',async()=>{
+    const cancelJob=vi.fn(async()=>true)
+    const port:OfficeToolPort={create:vi.fn(),get:vi.fn(),revise:vi.fn(),cancelJob}
+    const input={artifactId:id(1),jobId:id(90)}
+    const tool=createOfficeTools({port}).find(t=>t.name==='cancelOfficeJob')!
+    expect((await tool.execute(input,context)).data).toEqual({cancellationRequested:true})
+    expect(cancelJob).toHaveBeenCalledWith(context,input)
+    const blocked=createOfficeTools({port,resolvePolicy:async()=>'block'}).find(t=>t.name==='cancelOfficeJob')!
+    expect((await blocked.execute(input,context)).isError).toBe(true)
+    expect(cancelJob).toHaveBeenCalledOnce()
+  })
+
+  it('exposes native review reads with bounded input, hidden evidence and policy gates',async()=>{
+    const evidence={sensitivity:'internal' as const,compartments:[],projectIds:[]}
+    const inspectReview=vi.fn(async()=>({items:[{id:id(9)}],nextOffset:1,windowLimit:200,windowLimitReached:false,scopeEvidence:evidence}))
+    const port:OfficeToolPort={create:vi.fn(),get:vi.fn(),revise:vi.fn(),inspectReview}
+    for(const name of ['getOfficeHistory','getOfficeComments','getOfficeSuggestions']){
+      const tool=createOfficeTools({port}).find(tool=>tool.name===name)!
+      expect(tool.inputSchema.safeParse({artifactId:id(1),limit:51}).success).toBe(false)
+      const result=await tool.execute({artifactId:id(1),limit:1,offset:0},context)
+      expect(result.data).toMatchObject({items:[{id:id(9)}],nextOffset:1})
+      expect(result.data).not.toHaveProperty('scopeEvidence');expect(result.scopeEvidence).toEqual(evidence)
+      const blocked=createOfficeTools({port,resolvePolicy:async()=>'block'}).find(tool=>tool.name===name)!
+      expect((await blocked.execute({artifactId:id(1)},context)).isError).toBe(true)
+    }
+    expect(inspectReview).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps library observations internal and enforces the read policy',async()=>{
+    const evidence={sensitivity:'internal' as const,compartments:['team:fictional']}
+    const list=vi.fn(async()=>({artifacts:[{artifactId:id(1),family:'document' as const,title:'Fictional plan',version:2,lifecycleState:'active' as const,role:'view' as const,scopeEvidence:evidence}],nextCursor:id(2)}))
+    const port:OfficeToolPort={create:vi.fn(),get:vi.fn(),revise:vi.fn(),list}
+    const tool=createOfficeTools({port}).find(tool=>tool.name==='listOfficeArtifacts')!
+    const input={view:'active',limit:20}
+    const result=await tool.execute(input,context)
+    expect(result.scopeEvidence).toMatchObject(evidence)
+    expect((result.data as {artifacts:unknown[]}).artifacts[0]).not.toHaveProperty('scopeEvidence')
+    expect(list).toHaveBeenCalledWith(context,input)
+    const blocked=createOfficeTools({port,resolvePolicy:async()=>'block'}).find(tool=>tool.name==='listOfficeArtifacts')!
+    expect((await blocked.execute(input,context)).isError).toBe(true)
+    expect(list).toHaveBeenCalledTimes(1)
+  })
   it('offers template recovery through the same typed selection and enforces tool policy',async()=>{
     const resumeGeneration=vi.fn(async()=>({artifactId:id(1),jobId:id(90)}))
     const port:OfficeToolPort={create:vi.fn(),get:vi.fn(),revise:vi.fn(),resumeGeneration}
@@ -66,6 +223,7 @@ describe('[COMP:office/tools] Office tools', () => {
     const tools = new Map(createOfficeTools({ port }).map((tool) => [tool.name, tool]))
     await tools.get('getOfficeArtifact')!.execute({ artifactId: id(1), targetOffset: 1_000 }, context)
     expect(port.get).toHaveBeenCalledWith({
+      context,
       userId: id(80),
       artifactId: id(1),
       targetOffset: 1_000,

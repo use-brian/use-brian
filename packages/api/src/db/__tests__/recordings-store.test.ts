@@ -132,7 +132,7 @@ describe('[COMP:recordings/recordings-store] reads', () => {
     expect(sql).toMatch(/kind = \$2/)
     expect(sql).toMatch(/created_at >= \$3/)
     expect(sql).toMatch(/created_at < \$4/)
-    expect(sql).toMatch(/title ILIKE \$5 OR file_name ILIKE \$5/)
+    expect(sql).toMatch(/COALESCE\(generated_title, title\) ILIKE \$5 OR file_name ILIKE \$5/)
     expect(values).toEqual(['ws-1', 'meeting', since, until, '%client%', expect.any(Number)])
   })
 

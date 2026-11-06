@@ -1,4 +1,5 @@
 "use client";
+import { currentOfflineWriteAuthority, sameOfflineWriteAuthority, type OfflineWriteAuthority } from "@/lib/offline/application-write-authority";
 import { InteractionSessionUnavailable } from "./dock-recorder-bridge";
 
 /**
@@ -23,8 +24,9 @@ import { InteractionSessionUnavailable } from "./dock-recorder-bridge";
  *
  * Durability: latching arms the `beforeunload` guard and starts the
  * IndexedDB spool; on mount the hook lists orphaned spool sessions and
- * exposes them as `recovery` for the banner (save re-runs the same stop
- * fork off the spooled `elapsedMs`; discard confirmation is the UI's job).
+ * exposes them as `recovery`. Authorized stopped captures resume transfer
+ * automatically with bounded backoff. Unfinished captures require Save;
+ * discard confirmation is the UI's job.
  *
  * `?record=1` (the desktop `usebrian://record` deep link's landing) auto
  * starts a latched capture on mount; the param is stripped so a reload
@@ -251,6 +253,8 @@ export function recorderTransition(
 export type RecorderNotice =
   | {
       kind:
+        | "pendingUpload"
+        | "storageFailed"
         | "micHint"
         | "kept"
         | "autoStopped"
@@ -275,7 +279,7 @@ export type RecorderNotice =
 export type MeetingCaptureOutcome =
   | { outcome: "queued"; message: string; recordingId: string }
   | { outcome: "cancelled" }
-  | { outcome: "failed"; message: string };
+  | { outcome: "failed"; message: string; retryable?: boolean };
 
 /**
  * Pure fork of a long-lane hand-off result into (notice, spool verdict).
@@ -299,7 +303,7 @@ export function handOffVerdict(result: MeetingCaptureOutcome): {
     case "cancelled":
       return { notice: { kind: "kept" }, safeToDrop: false };
     case "failed":
-      return { notice: { kind: "handOffFailed", text: result.message }, safeToDrop: false };
+      return { notice: result.retryable ? { kind: "pendingUpload" } : { kind: "handOffFailed", text: result.message }, safeToDrop: false };
   }
 }
 
@@ -402,7 +406,7 @@ export function useDockRecorder(opts: {
    */
   onMeetingCapture: (
     file: File,
-    live?: { pageId: string; sessionId?: string; liveWindowsDone?: Promise<void> },
+    live?: { pageId?: string; sessionId?: string; liveWindowsDone?: Promise<void>; recoveryId?: string; assistantId?: string },
   ) => Promise<MeetingCaptureOutcome>;
   /** Pre-flight confirm + destination creation; null means the user cancelled. */
   prepareLivePage?: (navigate?: boolean) => Promise<LiveRecordingPage | null>;
@@ -417,6 +421,10 @@ export function useDockRecorder(opts: {
     opts;
   const [phase, setPhase] = useState<RecorderPhase>(IDLE);
   const [notice, setNotice] = useState<RecorderNotice | null>(null);
+  const captureOwnerRef = useRef<OfflineWriteAuthority | null>(null);
+  const retryAt = useRef(new Map<string, { at: number; delay: number }>());
+  const [storageUnsafe, setStorageUnsafe] = useState(false);
+  const volatileSaves = useRef(new Map<string, () => Promise<boolean>>());
   const [recovery, setRecovery] = useState<SpoolSessionMeta[]>([]);
   const [savingCount, setSavingCount] = useState(0);
   const pendingSavesRef = useRef(new Set<string>());
@@ -509,12 +517,13 @@ export function useDockRecorder(opts: {
   const refreshRecovery = useCallback(async () => {
     try {
       const sessions = await spool().listSessions();
-      setRecovery(recoverableSessions(sessions, engineRef.current?.spoolSessionId() ?? null)
-        .filter((session) => !pendingSavesRef.current.has(session.id)));
+      const next = recoverableSessions(sessions, engineRef.current?.spoolSessionId() ?? null)
+        .filter((session) => sameOfflineWriteAuthority(session.owner, currentOfflineWriteAuthority(workspaceId)) && !pendingSavesRef.current.has(session.id));
+      setRecovery(current => JSON.stringify(current) === JSON.stringify(next) ? current : next);
     } catch {
-      setRecovery([]);
+      setRecovery(current => current.length ? [] : current);
     }
-  }, []);
+  }, [workspaceId, assistantId]);
 
   // One uploader/confirmation at a time, without owning the capture phase.
   // The job closure snapshots its destination and callback at enqueue time.
@@ -527,7 +536,12 @@ export function useDockRecorder(opts: {
     const next = (serial ? saveTailRef.current : Promise.resolve()).then(async () => {
       try {
         // Unmount retains the spooled work; never open a new confirm after exit.
-        if (mountedRef.current) await job();
+        if (mountedRef.current) {
+          if (navigator.locks) await navigator.locks.request(`recording-save:${id}`, { ifAvailable: true }, async lock => {
+            if (lock) await job();
+          });
+          else await job();
+        }
       } catch {
         if (mountedRef.current) setNotice({ kind: "failed" });
       } finally {
@@ -562,6 +576,7 @@ export function useDockRecorder(opts: {
         capture,
         Date.now(),
       );
+      meta.owner = captureOwnerRef.current ?? undefined;
       await spool().createSession(meta);
       await spool().appendChunk(meta.id, 0, capture.blob, capture.durationMs);
       return true;
@@ -597,8 +612,9 @@ export function useDockRecorder(opts: {
       blob: Blob,
       mime: string,
       durationMs: number,
-      recoveredLive?: { pageId?: string; sessionId?: string; liveWindowsDone?: Promise<void> },
+      recoveredLive?: { pageId?: string; sessionId?: string; liveWindowsDone?: Promise<void>; recoveryId?: string; owner?: OfflineWriteAuthority; assistantId?: string },
     ): Promise<boolean> => {
+      if (!sameOfflineWriteAuthority(recoveredLive?.owner ?? captureOwnerRef.current, currentOfflineWriteAuthority(workspaceId))) return false;
       // Never consult the current capture here: an older save may be queued
       // behind another upload while a different live page is recording.
       const livePageId = recoveredLive?.pageId;
@@ -623,17 +639,20 @@ export function useDockRecorder(opts: {
       // cancelled (the user closed the cost confirm — a deferral, "kept"),
       // or failed (upload / estimate / queue broke — the notice carries the
       // step-aware reason). Either non-queued branch retains the audio.
-      const { notice: verdict, safeToDrop } = handOffVerdict(
-        await onMeetingCapture(
+      const outcome = await onMeetingCapture(
           file,
-          livePageId ? { pageId: livePageId, ...(liveSessionId ? { sessionId: liveSessionId } : {}),
-            ...(recoveredLive?.liveWindowsDone ? { liveWindowsDone: recoveredLive.liveWindowsDone } : {}) } : undefined,
-        ),
-      );
+          { ...(livePageId ? { pageId: livePageId } : {}), ...(liveSessionId ? { sessionId: liveSessionId } : {}),
+            ...(recoveredLive?.liveWindowsDone ? { liveWindowsDone: recoveredLive.liveWindowsDone } : {}), recoveryId: recoveredLive?.recoveryId, assistantId: recoveredLive?.assistantId },
+        );
+      if (outcome.outcome === "cancelled" && recoveredLive?.recoveryId) {
+        const meta = (await spool().listSessions()).find(row => row.id === recoveredLive.recoveryId);
+        if (meta?.autoUpload) await spool().createSession({ ...meta, autoUpload: false });
+      }
+      const { notice: verdict, safeToDrop } = handOffVerdict(outcome);
       setNotice(verdict);
       return safeToDrop;
     },
-    [captureNamePrefix, sendVoiceClip, getSessionId, onMeetingCapture],
+    [captureNamePrefix, sendVoiceClip, getSessionId, onMeetingCapture, workspaceId],
   );
 
   const runEffect = useCallback(
@@ -641,32 +660,35 @@ export function useDockRecorder(opts: {
       const engine = engineRef.current;
       switch (effect) {
         case "start-capture":
+          captureOwnerRef.current = currentOfflineWriteAuthority(workspaceId);
           void (async () => {
             const attempt = ++armAttemptRef.current;
             try {
               // Resolve the ORIGINAL destination before opening the page picker.
               let interactionChatId: string | undefined;
-              if (interactionEnabledRef.current) {
+              if (interactionEnabledRef.current && navigator.onLine) {
                 try {
                   interactionChatId = await ensureInteractionSessionRef.current?.();
                   if (!interactionChatId) throw new InteractionSessionUnavailable();
                 }
                 catch (error) {
                   setInteractionStatus(error instanceof InteractionSessionUnavailable ? "unavailable" : "gap");
-                  dispatchRef.current({ type: "arm-failed" });
-                  return;
+                  if (error instanceof InteractionSessionUnavailable) { dispatchRef.current({ type: "arm-failed" }); return; }
+                  interactionChatId = undefined;
                 }
               }
               let livePage: LiveRecordingPage | null = null;
-              if (livePageEnabledRef.current) {
-                livePage = livePageRef.current ?? (await prepareLivePage?.(!interactionEnabledRef.current)) ?? null;
-                if (!livePage) {
+              if (livePageEnabledRef.current && navigator.onLine && (!interactionEnabledRef.current || interactionChatId)) {
+                let preparationFailed = false;
+                try { livePage = livePageRef.current ?? (await prepareLivePage?.(!interactionEnabledRef.current)) ?? null; }
+                catch { preparationFailed = true; setInteractionStatus("gap"); }
+                if (!livePage && !preparationFailed) {
                   dispatchRef.current({ type: "arm-failed" });
                   return;
                 }
                 // Rollover may reuse a destination, never its mutable interaction
                 // binding: old final windows can still be draining in parallel.
-                livePage = { ...livePage, interactionCaptureId: undefined, onInteractionGap: undefined };
+                if (livePage) livePage = { ...livePage, interactionCaptureId: undefined, onInteractionGap: undefined };
                 livePageRef.current = livePage;
               }
               // A new desktop shell resolves every video source BEFORE the
@@ -758,6 +780,8 @@ export function useDockRecorder(opts: {
                 // instead of ticking a zombie clock: a latched meeting stops-
                 // and-forks with whatever was captured (the confirm dialog
                 // surfaces it); an unresolved press has nothing worth keeping.
+                onStorageFailure: () => { setStorageUnsafe(true); setNotice({ kind: "storageFailed" }); },
+                onStorageRecovered: () => { setStorageUnsafe(false); setNotice(current => current?.kind === "storageFailed" ? null : current); },
                 onUnexpectedEnd: () => {
                   const kind = phaseRef.current.kind;
                   if (kind === "latched") dispatchRef.current({ type: "stop" });
@@ -816,6 +840,7 @@ export function useDockRecorder(opts: {
             requestPersistentStorage();
             engine.latch(spool(), {
               id: crypto.randomUUID(),
+              owner: captureOwnerRef.current ?? undefined,
               workspaceId,
               assistantId,
               startedAt: Date.now(),
@@ -873,6 +898,24 @@ export function useDockRecorder(opts: {
               stopInteraction(stopping.then((capture) => capture.liveWindowsDone));
               const capture = await stopping;
               engineRef.current = null;
+              const owner = captureOwnerRef.current;
+              const recordingLane = (live && capture.durationMs >= 2_000) || stopLane(capture.durationMs, undefined, capture.mime.startsWith("video/")) === "recording";
+              if (sessionId && !skipHandOff && recordingLane) {
+                const authorize = async () => {
+                  try {
+                  if (capture.retryLocalSave && !await capture.retryLocalSave()) return false;
+                  const meta = (await spool().listSessions()).find(row => row.id === sessionId);
+                  if (!meta) return false;
+                  await spool().createSession({ ...meta, autoUpload: true }); return true;
+                  } catch { return false; }
+                };
+                if (!await authorize()) {
+                  volatileSaves.current.set(sessionId, authorize);
+                  setStorageUnsafe(true);
+                  setNotice({ kind: "storageFailed" }); return;
+                }
+              }
+              if (!capture.localSaveFailed) setStorageUnsafe(false);
               const save = async () => {
                 let safeToDrop = false;
                 try {
@@ -881,7 +924,7 @@ export function useDockRecorder(opts: {
                       // Full-file upload is independent of provisional ASR/notes.
                       // Only window-based fallback needs to await the final window.
                       safeToDrop = await handOff(capture.blob, capture.mime, capture.durationMs,
-                        live ? { ...live, liveWindowsDone: capture.liveWindowsDone } : undefined);
+                        { ...live, liveWindowsDone: capture.liveWindowsDone, recoveryId: sessionId ?? undefined, owner: owner ?? undefined });
                     }
                   }
                 } catch {
@@ -1061,14 +1104,14 @@ export function useDockRecorder(opts: {
   // ── beforeunload while capturing or saving ──────────────────────────
   const finishing = phase.kind === "finishing";
   useEffect(() => {
-    if (!latched && !finishing && savingCount === 0) return;
+    if (!latched && !finishing && savingCount === 0 && !storageUnsafe) return;
     const guard = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
-  }, [latched, finishing, savingCount]);
+  }, [latched, finishing, savingCount, storageUnsafe]);
 
   // ── recovery listing on mount ────────────────────────────────────────
   // Twice: once immediately, once past the live-session grace window — a
@@ -1186,24 +1229,58 @@ export function useDockRecorder(opts: {
   const saveRecovery = useCallback(
     async (sessionId: string) => {
       const meta = recovery.find((s) => s.id === sessionId);
-      if (!meta) return;
+      if (!meta || !sameOfflineWriteAuthority(meta.owner, currentOfflineWriteAuthority(workspaceId))) return;
       await enqueueSave(sessionId, async () => {
+        if (!(await spool().listSessions()).some(row => row.id === sessionId)) return;
+        const automatic = meta.autoUpload || (meta.livePageId && meta.elapsedMs >= 2_000)
+          || stopLane(meta.elapsedMs, undefined, meta.mime.startsWith("video/")) === "recording";
+        if (automatic && !meta.autoUpload) await spool().createSession({ ...meta, autoUpload: true });
         const chunks = await spool().readChunks(sessionId);
+        if (!sameOfflineWriteAuthority(meta.owner, currentOfflineWriteAuthority(workspaceId))) return;
         const safeToDrop = await handOff(
           assembleSpooledBlob(meta, chunks),
           meta.mime,
           meta.elapsedMs,
-          meta.livePageId || meta.liveSessionId
-            ? { pageId: meta.livePageId, sessionId: meta.liveSessionId }
-            : undefined,
+          { pageId: meta.livePageId, sessionId: meta.liveSessionId, recoveryId: meta.id, owner: meta.owner, assistantId: meta.assistantId },
         );
         // Same retention contract as a live stop: a cancelled confirm or a
         // failed upload keeps the session so Save can be retried.
         if (safeToDrop) await spool().deleteSession(sessionId);
       });
     },
-    [recovery, handOff, enqueueSave],
+    [recovery, handOff, enqueueSave, workspaceId],
   );
+
+  useEffect(() => {
+    if (!enabled) return;
+    let stopped = false, busy = false;
+    let delay = 5_000;
+    let timer: ReturnType<typeof setTimeout>;
+    const recover = async () => {
+      if (stopped || busy) return;
+      busy = true;
+      try {
+        for (const [id, persist] of volatileSaves.current) if (await persist()) volatileSaves.current.delete(id);
+        if (volatileSaves.current.size === 0 && !engineRef.current) setStorageUnsafe(false);
+        await refreshRecovery();
+        if (navigator.onLine) for (const meta of recovery) {
+          if (meta.autoUpload && !stopped && Date.now() >= (retryAt.current.get(meta.id)?.at ?? 0)
+            && sameOfflineWriteAuthority(meta.owner, currentOfflineWriteAuthority(workspaceId))) {
+            const delay = Math.min((retryAt.current.get(meta.id)?.delay ?? 2_500) * 2, 60_000);
+            retryAt.current.set(meta.id, { at: Date.now() + delay, delay });
+            await saveRecovery(meta.id);
+          }
+        }
+      } finally {
+        busy = false;
+        if (!stopped) { timer = setTimeout(() => void recover(), delay); delay = Math.min(delay * 2, 60_000); }
+      }
+    };
+    const wake = () => { delay = 5_000; clearTimeout(timer); void recover(); };
+    timer = setTimeout(() => void recover(), 1_000);
+    window.addEventListener("online", wake); window.addEventListener("focus", wake);
+    return () => { stopped = true; clearTimeout(timer); window.removeEventListener("online", wake); window.removeEventListener("focus", wake); };
+  }, [enabled, recovery, saveRecovery, refreshRecovery, workspaceId]);
 
   const discardRecovery = useCallback(
     async (sessionId: string) => {

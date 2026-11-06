@@ -971,3 +971,25 @@ describe('[COMP:files/upload-identity] upload reuse orchestration', () => {
     expect(store.findReusableUpload).not.toHaveBeenCalled()
   })
 })
+
+
+describe('[COMP:files/api] short-lived exact-head downloads',()=>{
+  it('returns a 60-second signed URL without loading bytes into the API process',async()=>{
+    const gcs=makeFakeGcs(),store=makeFakeStore(),api=createFilesApi({gcs,store,auditStore:makeFakeAudit(),bucket:'b'})
+    const saved=await api.writeBytes(ctx,{path:'/large.bin',bytes:Buffer.from([0,255]),mime:'application/octet-stream'})
+    expect(saved.ok).toBe(true)
+    const read=vi.spyOn(gcs,'readBlob'),sign=vi.spyOn(gcs,'signedReadUrl')
+    const result=await api.download!(ctx,'/large.bin')
+    expect(result.ok).toBe(true)
+    expect(sign).toHaveBeenCalledWith(expect.any(String),60)
+    expect(read).not.toHaveBeenCalled()
+    if(result.ok)expect(Date.parse(result.value.expiresAt)-Date.now()).toBeLessThanOrEqual(60_000)
+  })
+  it('withholds a signed URL if the file head changes while it is being signed',async()=>{
+    const gcs=makeFakeGcs(),store=makeFakeStore(),api=createFilesApi({gcs,store,auditStore:makeFakeAudit(),bucket:'b'})
+    const saved=await api.writeBytes(ctx,{path:'/changed.bin',bytes:Buffer.from([1]),mime:'application/octet-stream'})
+    if(!saved.ok)throw new Error('fixture')
+    gcs.signedReadUrl=async()=>{store.rows.get(saved.value.id)!.scopeVersion='2';return 'https://storage.example/temporary'}
+    await expect(api.download!(ctx,'/changed.bin')).resolves.toMatchObject({ok:false,error:{kind:'not_found'}})
+  })
+})

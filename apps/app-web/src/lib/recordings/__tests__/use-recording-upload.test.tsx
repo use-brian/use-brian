@@ -16,6 +16,8 @@ const api = vi.hoisted(() => ({
   startRecordingUpload: vi.fn(),
   estimateRecording: vi.fn(),
   finalizeLiveRecording: vi.fn(),
+  link: vi.fn(async()=>{}),
+  get: vi.fn(async()=>({status:"processed"})),
 }));
 vi.mock("../confirm-and-process", () => ({
   confirmAndProcessRecording: vi.fn(async () => ({ outcome: "cancelled" })),
@@ -25,7 +27,8 @@ vi.mock("@/lib/api/recordings", () => ({
   startRecordingUpload: api.startRecordingUpload,
   estimateRecording: api.estimateRecording,
   processRecording: vi.fn(),
-  linkLiveRecordingPage: vi.fn(async () => {}),
+  linkLiveRecordingPage: api.link,
+  getRecording: api.get,
   finalizeLiveRecording: api.finalizeLiveRecording,
   recordingMimeForFile: (file: File) => file.type || "audio/webm",
   RecordingApiError: class RecordingApiError extends Error {
@@ -62,6 +65,11 @@ vi.mock("@/lib/i18n/client", () => ({
   }),
 }));
 
+vi.mock("@/lib/offline/offline-pages",()=>({readCachedPage:vi.fn(async()=>({id:"original-page",workspaceId:"workspace-1"})),cachePage:vi.fn(async()=>{})}));
+vi.mock("../offline-media",()=>({saveOfflineMedia:vi.fn(async()=>{})}));
+vi.mock("@/lib/offline/application-write-authority",()=>({currentOfflineWriteAuthority:()=>({workspaceId:"workspace-1"}),pinOfflineWriteSession:async()=>({assertCurrent:()=>{}})}));
+
+import {cachePage} from "@/lib/offline/offline-pages";
 import { RecordingApiError } from "@/lib/api/recordings";
 import { useRecordingUpload } from "../use-recording-upload";
 import { confirmAndProcessRecording } from "../confirm-and-process";
@@ -135,6 +143,24 @@ describe("[COMP:web/recording-upload] operation ownership", () => {
     await act(async () => { expect(await latest!.stage(new File(["audio"], "recording.webm"))).toBeNull(); });
     expect(latest!.message).toBe(code.includes("prepare") ? "Admission failed." : "Completion failed.");
     expect(api.estimateRecording).not.toHaveBeenCalled();
+  });
+
+  it("keeps recovery pending until the original page link is acknowledged, even when processing already completed", async () => {
+    api.startRecordingUpload.mockResolvedValue({recordingId:"same-recording"});
+    api.link.mockRejectedValueOnce(new TypeError("link response lost"));
+    const onLinked=vi.fn();window.addEventListener("brian:recording-linked",onLinked);
+    const options={recoveryId:"saved-capture",existingPageId:"original-page",automatic:true};
+    await act(async()=>{
+      expect(await capture.run(new File(["audio"],"capture.wav"),options)).toMatchObject({outcome:"failed",retryable:true});
+    });
+    expect(onLinked).not.toHaveBeenCalled();expect(api.get).not.toHaveBeenCalled();
+    await act(async()=>{
+      expect(await capture.run(new File(["audio"],"capture.wav"),options)).toMatchObject({outcome:"queued",recording:{recordingId:"same-recording"}});
+    });
+    expect(api.link.mock.calls.map(call=>call.slice(0,2))).toEqual([["original-page","same-recording"],["original-page","same-recording"]]);
+    expect(cachePage).toHaveBeenCalledWith(expect.objectContaining({id:"original-page",linkedRecordingId:"same-recording"}),expect.any(Object));
+    expect(onLinked).toHaveBeenCalledOnce();expect(confirmAndProcessRecording).not.toHaveBeenCalled();
+    window.removeEventListener("brian:recording-linked",onLinked);
   });
 
   it("uploads the full file without waiting for live transcription", async () => {

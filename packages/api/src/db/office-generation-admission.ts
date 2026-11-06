@@ -1,3 +1,5 @@
+import { pinToolAuthoringAuthority, workspaceCredentialDelegation, type ToolContext } from '@use-brian/core'
+import { captureOfficeWorkspaceAuthority } from '../office/workspace-authority.js'
 /** Bounded authenticated prompt-only request admission; not derived output admission. */
 import { APP_LEVEL_ASSISTANT_ID, type ResourceDestination } from '@use-brian/shared'
 import type { OfficeToolPort } from '@use-brian/core'
@@ -27,7 +29,20 @@ export type OfficeGenerationRequest = Parameters<OfficeToolPort['create']>[0]
  * loaders. The dedicated prompt-only worker publishes through artifact-bound admission.
  */
 export async function createHumanOfficeGeneration(input: OfficeGenerationRequest, proof: OfficeHumanGenerationOptions) {
-  if (proof.actorUserId !== input.userId || proof.workspaceId !== input.workspaceId || !proof.sessionId) {
+  return createAdmittedOfficeGeneration(input,proof)
+}
+export async function createWorkspaceOfficeGeneration(input: OfficeGenerationRequest,context:ToolContext) {
+  if (!workspaceCredentialDelegation(context.executionContext)) throw new WorkspaceAccessError('office_admission_provenance_required',409)
+  await context.executionContext!.security.authority.assertCurrent()
+  return createAdmittedOfficeGeneration(input,{context})
+}
+async function createAdmittedOfficeGeneration(input: OfficeGenerationRequest, origin: OfficeHumanGenerationOptions | {context:ToolContext}) {
+  const context='context' in origin ? origin.context : undefined
+  const proof: Partial<OfficeHumanGenerationOptions> = context
+    ? {actorUserId:context.userId,workspaceId:context.workspaceId!}
+    : origin as OfficeHumanGenerationOptions
+  const workspaceOrigin=await captureOfficeWorkspaceAuthority(context)
+  if (proof.actorUserId !== input.userId || proof.workspaceId !== input.workspaceId || (!context && !proof.sessionId)) {
     throw new WorkspaceAccessError('office_admission_provenance_required', 409)
   }
   const client = await getAppPool().connect()
@@ -35,9 +50,9 @@ export async function createHumanOfficeGeneration(input: OfficeGenerationRequest
     await client.query('BEGIN')
     await applyRLSGucs(client, input.userId)
     const policy = await officeCreationPolicy(client, input.workspaceId)
-    if (policy?.departmentReadV2 && (input.family !== 'document' || input.sourceHandles.length
+    if (context || policy?.departmentReadV2 && (input.family !== 'document' || input.sourceHandles.length
       || input.templateId || input.additionalContext || input.compartments.length || input.projectIds.length)) {
-      const live = await client.query(`SELECT s.id FROM auth_sessions s JOIN users u ON u.id=s.user_id
+      const live = context ? {rows:[{}]} : await client.query(`SELECT s.id FROM auth_sessions s JOIN users u ON u.id=s.user_id
         WHERE s.id=$1 AND s.user_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
           AND s.auth_version=u.auth_version FOR SHARE OF s,u`,[proof.sessionId,input.userId])
       if (!live.rows.length) throw new WorkspaceAccessError('authenticated_session_required',401)
@@ -49,7 +64,7 @@ export async function createHumanOfficeGeneration(input: OfficeGenerationRequest
       const admitted = await admitWorkspaceResource(client,input.workspaceId,input.userId,{
         visibility:source.private?'private':'workspace',sensitivity:input.sensitivity,destination:proof.destination,
         inherited:source.sources.length?{...source.scope,visibility:source.private?'private':'workspace'}:undefined,
-        inheritedAuthority:'read',requestedLabels:{compartments:input.compartments.length?input.compartments:undefined,projectIds:input.projectIds},
+        inheritedAuthority:source.sources.length?'read':undefined,requestedLabels:{compartments:input.compartments.length?input.compartments:undefined,projectIds:input.projectIds},
       })
       const query: OfficeDbQuery = async <T>(actor: string, sql: string, params: unknown[]) => {
         if (actor !== input.userId) throw new Error('office_generation_actor_mismatch')
@@ -65,15 +80,15 @@ export async function createHumanOfficeGeneration(input: OfficeGenerationRequest
         requestedSensitivityFloor:artifact.sensitivity,...(input.templateId?{templateId:input.templateId}:{}),
         ...(input.additionalContext?{additionalContext:input.additionalContext}:{}),idempotencyKey:input.idempotencyKey}
       const departments=artifact.compartments.filter(key=>key.startsWith('team:')).map(key=>key.slice(5))
-      const authoringAuthority=await captureAuthoringAuthoritySystem({userId:input.userId,workspaceId:input.workspaceId,
+      const authoringAuthority=context ? pinToolAuthoringAuthority(context) : await captureAuthoringAuthoritySystem({userId:input.userId,workspaceId:input.workspaceId,
         assistantId:assistant.id,contextGroupId:departments.length===1?departments[0]!:null,
         contextProjectId:artifact.projectIds.length===1?artifact.projectIds[0]!:null},client)
       const requestHash=createHash('sha256').update(JSON.stringify({brief,destination:proof.destination??null})).digest('hex')
       const binding={protocol:'office_department_v2',actorUserId:input.userId,workspaceId:input.workspaceId,
-        authSessionId:proof.sessionId,requestHash,sourceFingerprint:source.fingerprint,sources:source.sources,authoringAuthority}
+        ...(proof.sessionId ? {authSessionId:proof.sessionId} : {}),requestHash,sourceFingerprint:source.fingerprint,sources:source.sources,authoringAuthority}
       const job = await createOfficeGenerationStore(query).create({userId:input.userId,workspaceId:input.workspaceId,
         artifactId:artifact.id,assistantId:assistant.id,jobKind:'create',brief,idempotencyKey:input.idempotencyKey,
-        templateVersionId:input.templateId,authorityProjection:{sensitivity:artifact.sensitivity,
+        templateVersionId:input.templateId,authorityProjection:{...workspaceOrigin,sensitivity:artifact.sensitivity,
           visibilityUserIds:source.private?[input.userId]:[],compartments:artifact.compartments,projectIds:artifact.projectIds,
           compartmentGrant:artifact.compartments,projectGrant:artifact.projectIds,sourceHandles:input.sourceHandles,creationBinding:binding}})
       if (job.artifactId !== artifact.id) {

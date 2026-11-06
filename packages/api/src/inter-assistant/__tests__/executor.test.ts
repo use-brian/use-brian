@@ -27,6 +27,8 @@ vi.mock('../../context-scope/execution-context.js', async importOriginal => {
 })
 import { z } from 'zod'
 
+const restoreWorkspaceParent = vi.hoisted(() => vi.fn())
+vi.mock('../../workspace-mcp/delegation.js', () => ({ restoreWorkspaceMcpDelegation: restoreWorkspaceParent }))
 const mockQueryLoop = vi.fn()
 const mockRunPreflight = vi.fn()
 const mockLoadDecisionPlaybookContext = vi.fn()
@@ -282,6 +284,32 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
+  it('retains the originating workspace grant and filters callee operations and connector accounts', async () => {
+    const ceiling = { workspaceId: '10000000-0000-4000-8000-000000000011', userId: '10000000-0000-4000-8000-000000000012', clearance: 'internal' as const,
+      compartments: ['product'], mutationCompartments: ['product'], projectIds: null, visibilityAssistantIds: ['10000000-0000-4000-8000-000000000013'] };
+    const parent = { kind: 'oauth_token' as const, credentialId: '10000000-0000-4000-8000-000000000014', revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      userId: '10000000-0000-4000-8000-000000000012', workspaceId: '10000000-0000-4000-8000-000000000011', assistantId: '10000000-0000-4000-8000-000000000013', sessionId: '10000000-0000-4000-8000-000000000015' };
+    const authority = { assertCurrent: vi.fn().mockResolvedValue(undefined) };
+    restoreWorkspaceParent.mockResolvedValue({ context: { executionContext: { security: { ceiling, authority } } },
+      consent: { operationNames: ['permittedRead'], connectorBindings: { 'fictional-account': 'fingerprint' } } });
+    const primary = { ...calleeAssistant, workspaceId: '10000000-0000-4000-8000-000000000011', kind: 'primary', clearance: 'confidential', compartments: null };
+    mockFindAssistant.mockImplementation(async id => ({ ...primary, id, ...(id === '10000000-0000-4000-8000-000000000013' ? { kind: 'standard', clearance: 'internal', compartments: ['product'] } : {}) }) as never);
+    const allowed = buildTool({ name: 'permittedRead', description: 'Read a fictional record', inputSchema: z.object({}), isReadOnly: true, execute: async () => ({ data: 'ok' }) });
+    const forbidden = { ...allowed, name: 'unconsentedRead' };
+    const run = createCalleeExecutor({ provider: {} as never, tools: new Map([[allowed.name,allowed],[forbidden.name,forbidden]]),memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,connectorStore: {} as never,mcpSettingsStore: {} as never });
+    yieldsText('bounded');
+    await expect(run({ ...baseParams,callerUserId:parent.userId,callerAssistantId:parent.assistantId,expectedWorkspaceId: '10000000-0000-4000-8000-000000000011',callerAccessCeiling: ceiling,callerWorkspaceDelegation: parent })).resolves.toBe('bounded');
+    const loop = mockQueryLoop.mock.calls.at(-1)![0];
+    expect([...loop.tools.keys()]).toEqual(['permittedRead']);
+    expect(vi.mocked(injectMcpTools)).toHaveBeenCalledWith(expect.objectContaining({ bindingMaximum: { 'fictional-account': 'fingerprint' },keepBuiltinsDirect: true,keepDynamicToolsDirect: true }));
+    expect(authority.assertCurrent).toHaveBeenCalled();
+    restoreWorkspaceParent.mockRejectedValueOnce(new Error('workspace_mcp_parent_unavailable'));
+    const calls = mockQueryLoop.mock.calls.length;
+    await expect(run({ ...baseParams,callerUserId:parent.userId,callerAssistantId:parent.assistantId,expectedWorkspaceId: '10000000-0000-4000-8000-000000000011',callerAccessCeiling: ceiling,callerWorkspaceDelegation: parent })).rejects.toThrow('workspace_mcp_parent_unavailable');
+    expect(mockQueryLoop).toHaveBeenCalledTimes(calls);
+  });
+
   it('refuses an incompatible delivery audience before session creation or model spend', async () => {
     const workspaceCallee = {
       ...calleeAssistant,

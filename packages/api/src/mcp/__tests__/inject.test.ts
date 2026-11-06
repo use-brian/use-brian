@@ -2462,6 +2462,32 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     expect(result.unavailable.join('\n')).toMatch(/GitHub: not connected/)
   })
 
+  it('pins the issued connector account and refuses replacement before loading credentials', async () => {
+    const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
+    let instance = { ...exposedInstance, id: 'ci-ms-team', scope: 'workspace', userId: null,
+      workspaceId: 'ws-1', connectedEmail: 'first@example.com' }
+    const bindings: Record<string, string> = {}
+    async function inject(bindingMaximum?: Record<string, string>) {
+      connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue(explicitConnectorBindings([instance]))
+      const tools = new Map()
+      await injectMcpTools({ userId: 'owner-1', assistantId: 'a-1', tools,
+        connectorStore: connectorStore as never, settingsStore: settingsStoreStub() as never,
+        connectorInstanceStore: connectorInstanceStore as never, connectorGrantStore: connectorGrantStore as never,
+        assistantTeamId: 'ws-1', keepBuiltinsDirect: true, bindingMaximum,
+        onAdmittedBinding: (key, fingerprint) => { if (!bindingMaximum) bindings[key] = fingerprint },
+      })
+      return tools
+    }
+    expect((await inject()).has(PROBE_TOOLS[0])).toBe(true)
+    expect(Object.keys(bindings)).toEqual(['instance:ci-ms-team'])
+    expect((await inject(bindings)).has(PROBE_TOOLS[0])).toBe(true)
+    connectorInstanceStore.getCredentialsSystem.mockClear()
+    instance = { ...instance, connectedEmail: 'replacement@example.com' }
+    expect((await inject(bindings)).has(PROBE_TOOLS[0])).toBe(false)
+    expect(connectorInstanceStore.getCredentialsSystem).not.toHaveBeenCalled()
+    expect((await inject({})).has(PROBE_TOOLS[0])).toBe(false)
+  })
+
   it('injects Teams tools for a team-native (workspace-scoped) msgraph instance', async () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()

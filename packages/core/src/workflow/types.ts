@@ -200,11 +200,12 @@ export type WorkflowDelivery =
       replyToTrigger: true
     }
 
-/** Fixed deterministic delivery: no dynamic recipient, thread, or question. */
+/** Fixed deterministic delivery, optionally replying to a prior delivery. */
 export type ToolCallDelivery = {
   channelType: Exclude<Extract<WorkflowDelivery, { channelId: string }>['channelType'], 'web'>
   channelId: string
   channelIntegrationId?: string
+  thread?: { fromStep: string }
 }
 
 export type ToolCallStep = WorkflowStepCommon & {
@@ -1008,6 +1009,8 @@ export type PageWorkflowRunSummary = {
 export type WorkflowRunStore = {
   /** Insert a new run row in `pending` state. */
   createRun(params: {
+    /** Host context only, never accepted from workflow input or HTTP JSON. */
+    executionContext?: import('../security/execution-context.js').ExecutionContext
     /** Internal queue proof, never workflow input or a user-supplied actor. */
     scheduledJob?: { id: string; claimId: string }
     workflowId: string

@@ -9,7 +9,7 @@ const DOCX='application/vnd.openxmlformats-officedocument.wordprocessingml.docum
 const read=vi.fn(),convert=vi.fn()
 const store={get:vi.fn(),getOriginalContent:vi.fn()}
 const source=(mime='image/png',content='data:image/png;base64,aW1hZ2U=',originalContent:string|null=null):FileCachePreviewProjection=>({
- file:{id:'file',sessionId:'session',fileName:mime===DOCX?'fixture.docx':'fixture.png',mimeType:mime,content,summary:null,sizeBytes:5,artifactFileId:null,artifactSegmentCount:null,sensitivity:'internal',compartments:[],projectIds:[]},
+ file:{workspaceId:'workspace',userId:null,assistantId:null,sourceFileId:null,sourceFileVersion:null,id:'file',sessionId:'session',fileName:mime===DOCX?'fixture.docx':'fixture.png',mimeType:mime,content,summary:null,sizeBytes:5,artifactFileId:null,artifactSegmentCount:null,sensitivity:'internal',compartments:[],projectIds:[]},
  originalContent,revision:'source-1',validForMs:30000,
 })
 const app=(userId:string|null='viewer',secret:string|null=null)=>createTestApp('/api/files',fileRoutes(store as never,null,null,secret,null,convert,read),userId?{userId}:undefined)

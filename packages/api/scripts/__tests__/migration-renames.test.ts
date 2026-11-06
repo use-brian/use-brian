@@ -2,6 +2,16 @@ import { describe, expect, it } from 'vitest'
 import { findAppliedMigrationRenames } from '../migration-renames.js'
 
 describe('[COMP:api/migration-order] Migration filename compatibility', () => {
+  it('preserves applied workspace attachments without skipping private transcript authority', () => {
+    const previousName = '8231_workspace_file_attachments.sql'
+    const currentName = '8233_workspace_file_attachments.sql'
+    const transcriptAuthority = '8231_private_transcript_read_authority.sql'
+    expect(findAppliedMigrationRenames(new Set([previousName, transcriptAuthority])))
+      .toEqual([{ previousName, currentName }])
+    expect(findAppliedMigrationRenames(new Set([transcriptAuthority]))).toEqual([])
+    expect(findAppliedMigrationRenames(new Set([previousName, currentName, transcriptAuthority]))).toEqual([])
+  })
+
   it('preserves staged Association financial evidence without confusing the saved-page repair', () => {
     const previousName = '537_association_order_financial_evidence.sql'
     const currentName = '552_association_order_financial_evidence.sql'

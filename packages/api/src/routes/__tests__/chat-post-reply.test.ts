@@ -148,6 +148,7 @@ function titleScheduling(accepted: boolean, failure?: Error) {
   const enqueue = vi.fn(async () => { if (failure) throw failure; return accepted })
   const readTitle = vi.fn(async () => null)
   const scope = {
+    programmatic: undefined,
     options: { enqueueSessionTitleJob: enqueue }, nativeTranscriptAuthority: {}, turnReleased: true,
     postReply: { isPublishedReply: () => true },
     classifySession: () => ({ anchor: { kind: 'none' }, transport: 'web', lane: 'conversation' }),
@@ -204,6 +205,7 @@ function routeBoundary(released: boolean, grouped = false, writtenPages: string[
   const bus: unknown[] = []
   const releaseTurn = vi.fn(async () => released)
   const scope = {
+    programmatic: undefined,
     session: { id: 'session' }, user: { id: 'actor' }, releaseTurn,
     activeResolvers: new Map(), abortRegistryToken: null,
     unregisterTurnAbort: vi.fn(), roomTurnAddressers: new Map(), approvalResolverIndex: new Map(),
@@ -257,6 +259,7 @@ describe('[COMP:api/chat-post-reply] nonblocking commitment analysis', () => {
   function setup() {
     const events: string[] = []
     const scope = {
+    programmatic: undefined,
       classifySession: () => ({ anchor: { kind: 'none' }, transport: 'web', lane: 'conversation' }),
       session: { id: 'session', assistantId: 'assistant' }, assistant: { id: 'assistant' }, user: { id: 'actor' },
       nativeTranscriptAuthority: {}, roomResponseGroupContext: null, docToolsTurn: false, docWrittenPageIds: new Set(),

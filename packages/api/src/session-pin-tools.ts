@@ -82,7 +82,7 @@ export function createSessionPinTools(deps: SessionPinToolsDeps): {
     inputSchema: addPinInputSchema,
     isReadOnly: false,
     isConcurrencySafe: false,
-    async execute(input) {
+    async execute(input, context) {
       const payload = validateSessionPinPayload(input)
       if (!payload.ok) return { data: payload.error, isError: true }
 
@@ -102,7 +102,7 @@ export function createSessionPinTools(deps: SessionPinToolsDeps): {
           addedByAssistantId: null,
           createdAt: new Date(),
         }
-        const labels = await resolveSessionPinLabels([candidate], deps.workspaceId, deps.clearance)
+        const labels = await resolveSessionPinLabels([candidate], deps.workspaceId, deps.clearance, context)
         label = labels.get('candidate') ?? null
         if (label === null) {
           return {
@@ -151,7 +151,7 @@ export function createSessionPinTools(deps: SessionPinToolsDeps): {
     }),
     isReadOnly: false,
     isConcurrencySafe: true,
-    async execute(input) {
+    async execute(input, context) {
       const removed = await removeSessionPin(deps.sessionId, input.pinId)
       if (!removed) {
         return { data: `No pin ${input.pinId} in this room. Check listPins for current pin ids.`, isError: true }
@@ -172,10 +172,10 @@ export function createSessionPinTools(deps: SessionPinToolsDeps): {
     inputSchema: z.object({}),
     isReadOnly: true,
     isConcurrencySafe: true,
-    async execute() {
+    async execute(_input, context) {
       const pins = await listSessionPins(deps.sessionId)
       if (pins.length === 0) return { data: 'This room has no pins.' }
-      const labels = await resolveSessionPinLabels(pins, deps.workspaceId, deps.clearance)
+      const labels = await resolveSessionPinLabels(pins, deps.workspaceId, deps.clearance, context)
       const lines = pins.map((pin) => {
         const label = labels.get(pin.id) ?? null
         const body =

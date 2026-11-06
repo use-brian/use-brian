@@ -48,7 +48,7 @@ async function fixture(partition?:InitialPartition) {
   const workspaceId = randomUUID(), owner = randomUUID(), userId = randomUUID(), assistantId = randomUUID(), teamId = randomUUID()
   const compartment = `team:${teamId}`
   for (const id of [owner, userId]) await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)', [id])
-  await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Single connection workflow',$2)", [workspaceId, owner])
+  await pool.query("INSERT INTO workspaces(id,name,owner_user_id,department_read_v2) VALUES($1,'Single connection workflow',$2,false)", [workspaceId, owner])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential'),($1,$3,'member','internal')", [workspaceId, owner, userId])
   await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1,$2,'Team',$3,'team',$1::uuid::text,$4)", [teamId, workspaceId, owner, compartment])
   await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,created_by,managed_by,managed_ref_id) VALUES($1,$2,'Team',$3,'team',$4)", [workspaceId, compartment, owner, teamId])
@@ -65,8 +65,12 @@ async function fixture(partition?:InitialPartition) {
     await pool.query("INSERT INTO workspace_projects(id,workspace_id,name,normalized_name,created_by) VALUES($1,$2,'Project','project',$3)",[projectId,workspaceId,owner])
     await pool.query('INSERT INTO workspace_project_members(project_id,user_id) VALUES($1,$2)',[projectId,userId])
   }
-  const otherCompartment=partition==='multi-department'?'fixture:second-department':undefined
-  if(otherCompartment)await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,created_by) VALUES($1,$2,'Second department',$3)",[workspaceId,otherCompartment,owner])
+  const otherTeam=partition==='multi-department'?randomUUID():undefined
+  const otherCompartment=otherTeam?`team:${otherTeam}`:undefined
+  if(otherCompartment){
+    await pool.query("INSERT INTO workspace_groups(id,workspace_id,name,created_by,kind,key,compartment_key) VALUES($1,$2,'Second department',$3,'team','second-department',$4)",[otherTeam,workspaceId,owner,otherCompartment])
+    await pool.query("INSERT INTO workspace_compartments(workspace_id,key,label,created_by) VALUES($1,$2,'Second department',$3)",[workspaceId,otherCompartment,owner])
+  }
   const access = { workspaceId, userId, clearance: 'internal' as const, compartments: [compartment], mutationCompartments: [compartment], projectIds: projectId?[projectId]:[] as string[], visibilityAssistantIds: [assistantId] }
   // Automatic triage follows the selected executor (migration 753), so the
   // fixture task is executed by the fixture assistant.
