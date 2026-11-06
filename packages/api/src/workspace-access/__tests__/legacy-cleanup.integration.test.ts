@@ -1,4 +1,3 @@
-import {runMigrations} from '../../../scripts/migrate.js'
 import {randomUUID} from 'node:crypto'
 import {ContextScopeAccumulator} from '@use-brian/core'
 import express from 'express'
@@ -14,6 +13,7 @@ import {addSessionMessage,createWorkspaceChatSession} from '../../db/sessions.js
 import {sessionContextGeneration,writeSessionContextRevision} from '../../db/session-context-revisions.js'
 import {workspaceAccessRoutes} from '../../routes/workspace-access.js'
 import {previewLegacyCleanup as preview,applyLegacyCleanup as apply} from '../legacy-cleanup.js'
+const {runMigrations}=await import(new URL('../../../scripts/migrate.ts',import.meta.url).href)
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 const pool=getPool()
@@ -75,7 +75,7 @@ describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selectiv
    await pool.query('DELETE FROM public._migrations WHERE name=ANY($1::text[])',[names])
    for(const [previous] of pairs)await pool.query('INSERT INTO public._migrations(name,applied_at) VALUES($1,$2)',[previous,timestamp])
    for(let attempt=0;attempt<2;attempt++){
-    const result=await runMigrations({databaseUrl:process.env.DATABASE_URL!,beforeApply:({file})=>{throw new Error('Released migration would rerun: '+file)}})
+    const result=await runMigrations({databaseUrl:process.env.DATABASE_URL!,beforeApply:({file}:{file:string})=>{throw new Error('Released migration would rerun: '+file)}})
     expect(result.appliedCount).toBe(0)
    }
    const rows=(await pool.query('SELECT name,applied_at FROM public._migrations WHERE name=ANY($1::text[])',[names])).rows
