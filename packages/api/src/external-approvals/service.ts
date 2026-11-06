@@ -15,9 +15,14 @@ export interface ExternalApprovalStore {
   decide(source: ExternalApprovalSource, approvalId: string, userId: string, decision: 'approved' | 'rejected'): Promise<ExternalApprovalState | null>
   sourceForApproval(id: string): Promise<{ sourceId: string; binding: string } | null>
 }
+/** Live workspace registration lookup; implementations must not cache authority. */
+export interface ExternalApprovalSourceRegistry {
+  get(id: string): Promise<ExternalApprovalSource | null>
+  authenticate(header?: string): Promise<ExternalApprovalSource | null>
+}
 export type HumanApprovalActor = { userId: string; human: boolean; origin: 'ui' | 'channel' | 'model' | 'delegated'; grantAlways?: boolean; channelId?: string; channelIntegrationId?: string }
 export class ExternalApprovalService {
-  constructor(public sources: ExternalApprovalSource[], public store: ExternalApprovalStore,
+  constructor(public sources: ExternalApprovalSourceRegistry, public store: ExternalApprovalStore,
     private notify?: (source: ExternalApprovalSource, state: ExternalApprovalState) => Promise<void>) {}
   async create(source: ExternalApprovalSource, raw: unknown) {
     const { input, payloadHash } = normalizeExternalInput(raw)
@@ -29,8 +34,8 @@ export class ExternalApprovalService {
   async resolve(id: string, decision: 'approved' | 'rejected', actor: HumanApprovalActor) {
     if (!actor.human || !['ui', 'channel'].includes(actor.origin) || actor.grantAlways) throw new ExternalApprovalError(403, 'Human one-time decision required')
     const binding = await this.store.sourceForApproval(id)
-    const source = binding && this.sources.find(s => s.id === binding.sourceId && sourceBinding(s) === binding.binding)
-    if (!source || source.approverUserId !== actor.userId) throw new ExternalApprovalError(404, 'Approval unavailable')
+    const source = binding && await this.sources.get(binding.sourceId)
+    if (!source || !binding || sourceBinding(source) !== binding.binding || source.approverUserId !== actor.userId) throw new ExternalApprovalError(404, 'Approval unavailable')
     if (actor.origin === 'channel' && (source.channelType === 'web' || !source.channelIntegrationId
       || actor.channelId !== source.channelId || actor.channelIntegrationId !== source.channelIntegrationId)) {
       throw new ExternalApprovalError(404, 'Approval unavailable')

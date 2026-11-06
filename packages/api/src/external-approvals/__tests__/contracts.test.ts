@@ -1,21 +1,14 @@
 import { describe,it,expect } from 'vitest'
 import { createHash } from 'node:crypto'
-import { parseExternalApprovalSources,authenticateSource,normalizeExternalInput,sourceBinding } from '../contracts.js'
-const source = { id:'pi',tokenSha256:createHash('sha256').update('unit-test-bearer-only').digest('hex'),workspaceId:'00000000-0000-4000-8000-000000000001',assistantId:'00000000-0000-4000-8000-000000000002',approverUserId:'00000000-0000-4000-8000-000000000003',channelType:'web',channelId:'queue' }
+import { normalizeExternalInput,sourceBinding,type ExternalApprovalSource } from '../contracts.js'
+const source:ExternalApprovalSource = { id:'pi',tokenSha256:createHash('sha256').update('unit-test-bearer-only').digest('hex'),workspaceId:'00000000-0000-4000-8000-000000000001',assistantId:'00000000-0000-4000-8000-000000000002',approverUserId:'00000000-0000-4000-8000-000000000003',channelType:'web',channelId:'queue' }
 const input = { externalRequestId:'request-1',taskId:'task-1',sessionId:'session-1',request:{method:'confirm',title:'Allow this?'},expiresAt:'2030-01-01T00:00:00Z' }
 describe('external approvals display protocol',()=>{
-  it('defaults disabled and fails closed without leaking malformed configuration',()=>{
-    expect(parseExternalApprovalSources()).toEqual([])
-    for(const raw of ['', '{}', JSON.stringify([{...source,token:'secret'}]), JSON.stringify([source,source]), JSON.stringify([{...source,tokenSha256:'bad'}])]) {
-      expect(()=>parseExternalApprovalSources(raw)).toThrow('Invalid BRIAN_EXTERNAL_APPROVAL_SOURCES configuration')
-    }
-  })
-  it('authenticates only hashed bearer sources and permits token rotation with unchanged binding',()=>{
-    const sources = parseExternalApprovalSources(JSON.stringify([source]))
-    expect(authenticateSource(sources,'Bearer unit-test-bearer-only')?.id).toBe('pi')
-    for(const header of [undefined,'unit-test-bearer-only','Bearer wrong-test-bearer','bearer unit-test-bearer-only']) expect(authenticateSource(sources,header)).toBeNull()
-    expect(sourceBinding(sources[0])).toBe(sourceBinding({...sources[0],tokenSha256:'f'.repeat(64)}))
-    expect(sourceBinding(sources[0])).not.toBe(sourceBinding({...sources[0],channelId:'elsewhere'}))
+  it('permits token rotation without changing the immutable authority binding',()=>{
+    expect(sourceBinding(source)).toBe(sourceBinding({...source,tokenSha256:'f'.repeat(64)}))
+    expect(sourceBinding(source)).not.toBe(sourceBinding({...source,channelId:'elsewhere'}))
+    expect(sourceBinding(source)).not.toBe(sourceBinding({...source,approverUserId:source.assistantId}))
+    expect(sourceBinding(source)).not.toBe(sourceBinding({...source,workspaceId:source.assistantId}))
   })
   it('canonicalizes exact relay field order and equivalent ISO expiry',()=>{
     const result=normalizeExternalInput(input)

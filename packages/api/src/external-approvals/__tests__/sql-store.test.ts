@@ -5,8 +5,9 @@ import { beforeAll,afterAll,describe,it,expect,vi } from 'vitest'
 import { createHash } from 'node:crypto'
 vi.mock('../../db/client.js',()=>({getPool:()=>pool}))
 vi.mock('../../brain-stream/notify.js',()=>({notifyWorkspaceChange:vi.fn()}))
-import { createExternalApprovalSqlStore } from '../sql-store.js'
-import { ExternalApprovalService } from '../service.js'
+import { createExternalApprovalSqlStore, canReadExternalApproval } from '../sql-store.js'
+import { ExternalApprovalService, configureExternalApprovals } from '../service.js'
+import { createExternalApprovalSourceRegistry } from '../source-registry.js'
 import { normalizeExternalInput,type ExternalApprovalSource } from '../contracts.js'
 const db = new PGlite()
 // PGlite is one connection: serialize transactions like a pool with max=1.
@@ -17,15 +18,21 @@ const pool = {
     return {query:(sql:string,args?:unknown[])=>db.query(sql,args),release}
   },
 }
-const source:ExternalApprovalSource = {id:'unit',tokenSha256:createHash('sha256').update('unit-test-token').digest('hex'),workspaceId:'00000000-0000-4000-8000-000000000001',assistantId:'00000000-0000-4000-8000-000000000002',approverUserId:'00000000-0000-4000-8000-000000000003',channelType:'web',channelId:'queue'}
+const source:ExternalApprovalSource = {id:'00000000-0000-4000-8000-000000000004',tokenSha256:createHash('sha256').update('unit-test-token').digest('hex'),workspaceId:'00000000-0000-4000-8000-000000000001',assistantId:'00000000-0000-4000-8000-000000000002',approverUserId:'00000000-0000-4000-8000-000000000003',channelType:'web',channelId:'queue'}
 const store=createExternalApprovalSqlStore()
 const notify=vi.fn(async(_source:ExternalApprovalSource,_state:import('../service.js').ExternalApprovalState)=>{})
-const service=new ExternalApprovalService([source],store,notify)
+const sources=createExternalApprovalSourceRegistry({notify:()=>{}})
+const service=new ExternalApprovalService(sources,store,notify)
+const sessionId='00000000-0000-4000-8000-000000000007'
+const siblingId='00000000-0000-4000-8000-000000000005'
 let sequence=0
 const input=()=>({externalRequestId:`external-${++sequence}`,taskId:'external-task',sessionId:'external-session',request:{method:'confirm' as const,title:'Allow?'},expiresAt:new Date(Date.now()+600_000).toISOString()})
 const actor={userId:source.approverUserId,human:true,origin:'ui' as const}
 beforeAll(async()=>{
-  await db.exec(`CREATE TABLE workspace_members(workspace_id uuid,user_id uuid);
+  await db.exec(`CREATE TABLE users(id uuid PRIMARY KEY,auth_version integer DEFAULT 0);
+    CREATE TABLE workspaces(id uuid PRIMARY KEY);
+    CREATE TABLE auth_sessions(id uuid PRIMARY KEY,user_id uuid,auth_version integer DEFAULT 0,expires_at timestamptz,revoked_at timestamptz);
+    CREATE TABLE workspace_members(workspace_id uuid,user_id uuid,role text DEFAULT 'admin');
     CREATE TABLE assistants(id uuid PRIMARY KEY,workspace_id uuid);
     CREATE FUNCTION assistant_placement_visible(uuid,uuid) RETURNS boolean LANGUAGE sql AS 'SELECT true';
     CREATE FUNCTION pg_advisory_xact_lock(bigint) RETURNS void LANGUAGE sql AS 'SELECT';
@@ -33,9 +40,18 @@ beforeAll(async()=>{
       tool_name text,arguments jsonb,approval_payload jsonb,delivery_channel_type text,delivery_channel_id text,expires_at timestamptz,
       status text DEFAULT 'pending',responded_at timestamptz,responded_by uuid,resolution_origin text);
   `)
-  await db.query('INSERT INTO workspace_members VALUES($1,$2)',[source.workspaceId,source.approverUserId])
+  await db.query('INSERT INTO users(id) VALUES($1)',[source.approverUserId])
+  await db.query('INSERT INTO workspaces VALUES($1)',[source.workspaceId])
+  await db.query('INSERT INTO auth_sessions(id,user_id,expires_at) VALUES($1,$2,clock_timestamp()+interval \'1 hour\')',[sessionId,source.approverUserId])
+  await db.query('INSERT INTO workspace_members(workspace_id,user_id) VALUES($1,$2)',[source.workspaceId,source.approverUserId])
   await db.query('INSERT INTO assistants VALUES($1,$2)',[source.assistantId,source.workspaceId])
   await db.exec(readFileSync(new URL('../../../migrations/8240_external_human_approvals.sql',import.meta.url),'utf8'))
+  await db.exec(readFileSync(new URL('../../../migrations/8241_workspace_external_approval_sources.sql',import.meta.url),'utf8'))
+  for(const id of [source.id,siblingId]) await db.query(`INSERT INTO workspace_external_approval_sources
+    (id,workspace_id,name,assistant_id,approver_user_id,channel_type,channel_id,token_sha256,prefix,created_by)
+    VALUES($1,$2,'Fixture source',$3,$4,'web','queue',$5,'test-prefix',$4)`,
+    [id,source.workspaceId,source.assistantId,source.approverUserId,id===source.id?source.tokenSha256:'f'.repeat(64)])
+  configureExternalApprovals(service)
 },30_000)
 afterAll(()=>db.close())
 describe('external approval durable SQL lifecycle',()=>{
@@ -55,11 +71,12 @@ describe('external approval durable SQL lifecycle',()=>{
   })
   it('isolates source IDs and invalidates authority/destination changes',async()=>{
     const raw=input();const a=await service.create(source,raw)
-    expect(await store.read({...source,id:'foreign'},raw.externalRequestId)).toBeNull()
-    expect(await store.read({...source,channelId:'foreign'},raw.externalRequestId)).toBeNull()
-    await expect(service.create({...source,channelId:'foreign'},raw)).rejects.toMatchObject({status:409})
+    await expect(store.read({...source,id:'foreign'},raw.externalRequestId)).rejects.toMatchObject({status:404})
+    await expect(store.read({...source,channelId:'foreign'},raw.externalRequestId)).rejects.toMatchObject({status:404})
+    await expect(service.create({...source,channelId:'foreign'},raw)).rejects.toMatchObject({status:404})
     await expect(service.resolve(a.approvalId,'approved',{...actor,userId:source.assistantId})).rejects.toMatchObject({status:404})
-    const sibling=await service.create({...source,id:'sibling'},raw);expect(sibling.approvalId).not.toBe(a.approvalId)
+    const siblingSource=(await sources.get(siblingId))!
+    const sibling=await service.create(siblingSource,raw);expect(sibling.approvalId).not.toBe(a.approvalId)
   })
   it('forbids model, delegated, unattended and permanent decisions',async()=>{
     const raw=input();const a=await service.create(source,raw)
@@ -112,9 +129,40 @@ describe('external approval durable SQL lifecycle',()=>{
     expect((await db.query<{status:string}>('SELECT status FROM pending_approvals WHERE id=$1',[a.approvalId])).rows[0].status).toBe('approved')
   })
   it('blocks sidecar reads for non-owner runtime role even with table SELECT',async()=>{
-    await db.exec('CREATE ROLE unit_app_user; GRANT SELECT ON external_approval_requests TO unit_app_user; SET ROLE unit_app_user;')
-    try { expect((await db.query('SELECT * FROM external_approval_requests')).rows).toHaveLength(0) }
+    await db.exec('CREATE ROLE unit_app_user; GRANT SELECT ON external_approval_requests,workspace_external_approval_sources TO unit_app_user; SET ROLE unit_app_user;')
+    try {
+      expect((await db.query('SELECT * FROM external_approval_requests')).rows).toHaveLength(0)
+      expect((await db.query('SELECT * FROM workspace_external_approval_sources')).rows).toHaveLength(0)
+    }
     finally { await db.exec('RESET ROLE') }
+  })
+  it('uses workspace-issued credentials live, preserves human evidence across rotation and revokes applicability',async()=>{
+    const manager={userId:source.approverUserId,sessionId}
+    const issued=await sources.create(manager,source.workspaceId,{name:'Live registration',assistantId:source.assistantId,approverUserId:source.approverUserId,notification:'web'})
+    const registered=(await sources.authenticate(`Bearer ${issued.token}`))!
+    const raw=input();const approval=await service.create(registered,raw)
+    expect(await canReadExternalApproval(actor.userId,approval.approvalId)).toBe(true)
+    await service.resolve(approval.approvalId,'approved',actor)
+    const rotated=await sources.rotate(manager,source.workspaceId,registered.id)
+    expect(await sources.authenticate(`Bearer ${issued.token}`)).toBeNull()
+    await expect(store.ack(registered,raw.externalRequestId,'applied')).rejects.toMatchObject({status:404})
+    const current=(await sources.authenticate(`Bearer ${rotated.token}`))!
+    expect((await store.read(current,raw.externalRequestId))?.status).toBe('approved')
+    await sources.revoke(manager,source.workspaceId,current.id)
+    expect(await sources.authenticate(`Bearer ${rotated.token}`)).toBeNull()
+    expect(await canReadExternalApproval(actor.userId,approval.approvalId)).toBe(false)
+    await expect(service.resolve(approval.approvalId,'approved',actor)).rejects.toMatchObject({status:404})
+    await expect(store.ack(current,raw.externalRequestId,'applied')).rejects.toMatchObject({status:404})
+    expect((await db.query<{status:string}>('SELECT status FROM pending_approvals WHERE id=$1',[approval.approvalId])).rows[0].status).toBe('approved')
+  })
+  it('blocks a stale human card when its registration is revoked while pending',async()=>{
+    const manager={userId:source.approverUserId,sessionId}
+    const issued=await sources.create(manager,source.workspaceId,{name:'Pending registration',assistantId:source.assistantId,approverUserId:source.approverUserId,notification:'web'})
+    const registered=(await sources.get(issued.source.id))!
+    const approval=await service.create(registered,input())
+    await sources.revoke(manager,source.workspaceId,registered.id)
+    await expect(service.resolve(approval.approvalId,'approved',actor)).rejects.toMatchObject({status:404})
+    expect(await canReadExternalApproval(actor.userId,approval.approvalId)).toBe(false)
   })
   it('rechecks current membership at poll, human response and ingest',async()=>{
     const raw=input();const a=await service.create(source,raw)
@@ -122,7 +170,7 @@ describe('external approval durable SQL lifecycle',()=>{
     await expect(store.read(source,raw.externalRequestId)).rejects.toMatchObject({status:404})
     await expect(service.resolve(a.approvalId,'approved',actor)).rejects.toMatchObject({status:404})
     await expect(service.create(source,input())).rejects.toMatchObject({status:404})
-    await db.query('INSERT INTO workspace_members VALUES($1,$2)',[source.workspaceId,source.approverUserId])
+    await db.query('INSERT INTO workspace_members(workspace_id,user_id) VALUES($1,$2)',[source.workspaceId,source.approverUserId])
     await db.query('DELETE FROM assistants WHERE id=$1',[source.assistantId])
     await expect(store.read(source,raw.externalRequestId)).rejects.toMatchObject({status:404})
     await db.query('INSERT INTO assistants VALUES($1,$2)',[source.assistantId,source.workspaceId])

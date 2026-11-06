@@ -3,9 +3,11 @@ import { getPool } from '../db/client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { sourceBinding, type ExternalApprovalSource, type ExternalApprovalInput, type AckStatus } from './contracts.js'
 import { ExternalApprovalError, externalApprovals, type ExternalApprovalStore, type ExternalApprovalState } from './service.js'
+import { lockExternalApprovalSource } from './source-registry.js'
 
 /** Current membership AND assistant placement, never an assertion from the external payload. */
 async function authorize(client: PoolClient, source: ExternalApprovalSource): Promise<void> {
+  await lockExternalApprovalSource(client, source)
   const member = await client.query(`SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE`, [source.workspaceId, source.approverUserId])
   const assistant = await client.query(`SELECT id FROM assistants WHERE workspace_id=$1 AND id=$2 FOR SHARE`, [source.workspaceId, source.assistantId])
   if (!member.rows.length || !assistant.rows.length || !(await client.query('SELECT public.assistant_placement_visible($1,$2) AS admitted', [source.approverUserId, source.assistantId])).rows[0]?.admitted) {
@@ -132,8 +134,8 @@ export async function canReadExternalApproval(userId: string, id: string): Promi
   try {
     const service = externalApprovals()
     const binding = await service.store.sourceForApproval(id)
-    const source = binding && service.sources.find(s => s.id === binding.sourceId && sourceBinding(s) === binding.binding && s.approverUserId === userId)
-    if (!source) return false
+    const source = binding && await service.sources.get(binding.sourceId)
+    if (!source || !binding || sourceBinding(source) !== binding.binding || source.approverUserId !== userId) return false
     return !!await transaction(source, c => locked(c, source, id, true))
   } catch { return false }
 }

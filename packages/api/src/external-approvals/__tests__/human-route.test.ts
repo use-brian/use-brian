@@ -6,15 +6,17 @@ import { approvalsRoutes } from '../../routes/approvals.js'
 import { resumeFromApproval, enqueueToolInvocationResume } from '../../workflow/approval.js'
 import { sourceBinding, type ExternalApprovalSource } from '../contracts.js'
 import { configureExternalApprovals, ExternalApprovalService, type ExternalApprovalStore } from '../service.js'
+import { testSources } from './test-sources.js'
 
 const source:ExternalApprovalSource={id:'human',tokenSha256:'a'.repeat(64),workspaceId:'00000000-0000-4000-8000-000000000001',assistantId:'00000000-0000-4000-8000-000000000002',approverUserId:'00000000-0000-4000-8000-000000000003',channelType:'web',channelId:'queue'}
 function fixture() {
  const store:ExternalApprovalStore={create:vi.fn(),read:vi.fn(),ack:vi.fn(),cancel:vi.fn(),sourceForApproval:vi.fn(async()=>({sourceId:source.id,binding:sourceBinding(source)})),decide:vi.fn<ExternalApprovalStore['decide']>(async(_source,_id,_user,decision)=>({approvalId:'approval',externalRequestId:'external',status:decision,expiresAt:'2030-01-01T00:00:00.000Z',payloadHash:'b'.repeat(64)}))}
- configureExternalApprovals(new ExternalApprovalService([source],store))
+ const sources=testSources(source)
+ configureExternalApprovals(new ExternalApprovalService(sources,store))
  const respond=vi.fn()
  const app=express().use(express.json()).use((req,_res,next)=>{Object.assign(req,{userId:source.approverUserId});next()})
  app.use('/api/approvals',approvalsRoutes({approvalsStore:{getById:vi.fn(async()=>({id:'approval',kind:'external_action',approverUserId:source.approverUserId,status:'pending'})),respond} as never,workspaceStore:{} as never,bridgeDeps:{} as never,emailReviewContext:vi.fn() as never}))
- return {app,store,respond}
+ return {app,store,respond,sources}
 }
 describe('[COMP:api/external-approvals] human respond boundary',()=>{
  it.each(['approved','rejected'] as const)('records %s only through external service, not a Brian executor or generic response',async decision=>{
@@ -23,6 +25,12 @@ describe('[COMP:api/external-approvals] human respond boundary',()=>{
    expect(res.body).toMatchObject({kind:'external_action',status:decision})
    expect(store.decide).toHaveBeenCalledWith(source,'approval',source.approverUserId,decision)
    expect(respond).not.toHaveBeenCalled();expect(resumeFromApproval).not.toHaveBeenCalled();expect(enqueueToolInvocationResume).not.toHaveBeenCalled();expect(store.ack).not.toHaveBeenCalled()
+ })
+ it('rejects a revoked source even when the queue card was already loaded',async()=>{
+   const {app,store,sources}=fixture()
+   sources.entries.delete(source.id)
+   await request(app).post('/api/approvals/approval/respond').send({decision:'approved'}).expect(404)
+   expect(store.decide).not.toHaveBeenCalled()
  })
  it('rejects permanent approval and changed source authority even if a stale queue row was read',async()=>{
    const {app,store,respond}=fixture()

@@ -1,29 +1,13 @@
 /** Display-only protocol. No callbacks, tool names or caller-supplied authority. */
-import { createHash, timingSafeEqual } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { PROACTIVE_DELIVERY_TRANSPORTS } from '../session-kind.js'
 
 const bounded = (max: number) => z.string().min(1).max(max).refine(s => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(s))
-const sourceSchema = z.object({
-  id: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
-  tokenSha256: z.string().regex(/^[a-f0-9]{64}$/),
-  workspaceId: z.string().uuid(), assistantId: z.string().uuid(), approverUserId: z.string().uuid(),
-  channelType: z.enum(['web', ...PROACTIVE_DELIVERY_TRANSPORTS]), channelId: bounded(512),
-  channelIntegrationId: z.string().uuid().optional(),
-}).strict()
-export type ExternalApprovalSource = z.infer<typeof sourceSchema>
-export function parseExternalApprovalSources(raw?: string): ExternalApprovalSource[] {
-  if (raw === undefined) return []
-  try {
-    const sources = z.array(sourceSchema).max(100).parse(JSON.parse(raw))
-    if (new Set(sources.map(s => s.id)).size !== sources.length || new Set(sources.map(s => s.tokenSha256)).size !== sources.length) throw new Error()
-    return sources
-  } catch { throw new Error('Invalid BRIAN_EXTERNAL_APPROVAL_SOURCES configuration') }
-}
-export function authenticateSource(sources: ExternalApprovalSource[], header?: string): ExternalApprovalSource | null {
-  if (!header || !/^Bearer [!-~]{16,4096}$/.test(header)) return null
-  const digest = createHash('sha256').update(header.slice(7)).digest()
-  return sources.find(s => timingSafeEqual(Buffer.from(s.tokenSha256, 'hex'), digest)) ?? null
+export type ExternalApprovalSource = {
+  id: string; tokenSha256: string; workspaceId: string; assistantId: string; approverUserId: string
+  channelType: 'web' | (typeof PROACTIVE_DELIVERY_TRANSPORTS)[number]
+  channelId: string; channelIntegrationId?: string
 }
 const requestSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('confirm'), title: bounded(16384), message: bounded(32768).optional() }).strict(),

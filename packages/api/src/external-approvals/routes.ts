@@ -1,11 +1,11 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { authenticateSource, ackSchema, externalRequestIdSchema } from './contracts.js'
+import { ackSchema, externalRequestIdSchema } from './contracts.js'
 import { ExternalApprovalError, type ExternalApprovalService } from './service.js'
 export function externalApprovalRoutes(service: ExternalApprovalService): Router {
   const router = Router()
   router.use(async (req,res,next) => {
-    const source = authenticateSource(service.sources,req.headers.authorization)
+    const source = await service.sources.authenticate(req.headers.authorization)
     if (!source) { res.status(401).json({ error: 'Unauthorized' }); return }
     res.locals.externalSource = source
     next()

@@ -1,13 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
 import { query } from '../../db/client.js'
-import { resolveRecentApprovalChannel } from '../recent-approval-channel.js'
+import { createRecentApprovalChannelResolver, resolveRecentApprovalChannel } from '../recent-approval-channel.js'
 const db = vi.mocked(query)
 const scope = { workspaceId: 'workspace', assistantId: 'assistant', approverUserId: 'approver' }
 beforeEach(() => db.mockReset())
 
 function rows(value: unknown[]) { return { rows: value } as Awaited<ReturnType<typeof query>> }
 describe('[COMP:workflow/recent-approval-channel] recent approval channel', () => {
+  it('uses the existing transaction connection for both target and integration queries', async () => {
+    const transactionQuery = vi.fn<typeof query>()
+      .mockResolvedValueOnce(rows([{ channelType: 'telegram', channelId: '123' }]))
+      .mockResolvedValueOnce(rows([{ id: 'pinned', observed: true }]))
+    // Vitest erases generic result-row inference; the two synthetic shapes are supplied above.
+    const resolve = createRecentApprovalChannelResolver(transactionQuery as typeof query)
+    expect(await resolve(scope)).toMatchObject({ channelId: '123', channelIntegrationId: 'pinned' })
+    expect(transactionQuery).toHaveBeenCalledTimes(2)
+    expect(db).not.toHaveBeenCalled()
+  })
+
   it('returns no target when there is no eligible inbound history', async () => {
     db.mockResolvedValueOnce(rows([]))
     expect(await resolveRecentApprovalChannel(scope)).toBeNull()

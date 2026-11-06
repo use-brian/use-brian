@@ -20,8 +20,14 @@ export type RecentApprovalResolver = (scope: {
 }) => Promise<RecentApprovalTarget | null>
 
 /** Only inbound human messages count. Session activity also includes outbound pushes. */
-export const resolveRecentApprovalChannel: RecentApprovalResolver = async (scope) => {
-  const result = await query<RecentApprovalTarget & { messageId: string | null }>(
+export const resolveRecentApprovalChannel: RecentApprovalResolver = createRecentApprovalChannelResolver()
+
+/** Allows credential registration to derive its target on the existing transaction connection. */
+export function createRecentApprovalChannelResolver(runQuery: typeof query = query): RecentApprovalResolver {
+  return scope => resolveWithQuery(scope, runQuery)
+}
+async function resolveWithQuery(scope: Parameters<RecentApprovalResolver>[0], runQuery: typeof query): Promise<RecentApprovalTarget | null> {
+  const result = await runQuery<RecentApprovalTarget & { messageId: string | null }>(
     `SELECT s.channel_type AS "channelType", s.channel_id AS "channelId",
             m.channel_message_id AS "messageId"
      FROM session_messages m
@@ -47,7 +53,7 @@ export const resolveRecentApprovalChannel: RecentApprovalResolver = async (scope
   // Prefer an observed chat; ambiguous bindings are not safe notification destinations.
   // Match the credential resolver's winning binding across ALL assistants.
   // Retain inactive integrations: the adapter will reject them without switching bots.
-  const integrations = await query<{ id: string; observed: boolean }>(
+  const integrations = await runQuery<{ id: string; observed: boolean }>(
     `SELECT DISTINCT ci.id,
        EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(ci.config->'seenChats', '[]'::jsonb)) chat
                WHERE chat->>'chatId' IN ($4, $5)) AS observed
