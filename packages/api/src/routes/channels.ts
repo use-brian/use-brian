@@ -1,4 +1,5 @@
 import { listChannelRecordings, changeChannelRecording, confirmChannelRecordingOwner } from '../channel-recording.js'
+import { recoverTelegramRecordingOwner } from '../channel-recording-owner.js'
 /**
  * Workspace channels management routes — the Phase D operator surface.
  *
@@ -1072,6 +1073,12 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     if (!await loadChannel(actorId, workspaceId, channelId, res)) return
     const row = (await query<{ id: string; ownerId: string | null }>(`SELECT id,recording_owner_user_id AS "ownerId" FROM channel_integrations WHERE channel_id=$1 AND channel_type='telegram'`, [channelId])).rows[0]
     if (!row) { res.status(404).json({ error: 'not_found' }); return }
+    if (!row.ownerId) {
+      await recoverTelegramRecordingOwner(row.id)
+      row.ownerId = (await query<{ ownerId: string | null }>(
+        'SELECT recording_owner_user_id AS "ownerId" FROM channel_integrations WHERE id=$1', [row.id],
+      )).rows[0]?.ownerId ?? null
+    }
     const ownership = row.ownerId === actorId ? 'mine' : row.ownerId ? 'other' : 'needs_confirmation'
     res.json({ ownership, recordings: ownership === 'mine' ? await listChannelRecordings(row.id, actorId) : [] })
   })

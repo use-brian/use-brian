@@ -50,7 +50,8 @@ export const DEPARTMENT_ISOLATION_SUITES: readonly DepartmentIsolationSuite[] = 
     'src/db/__tests__/reader-source-evidence.integration.test.ts']},
   {id:'operation-stores',packageDir:'packages/api',integration:true,testFiles:[
     'src/db/__tests__/entity-mutation-scope.integration.test.ts','src/db/__tests__/file-mutation-scope.integration.test.ts',
-    'src/db/__tests__/execution-read-ceiling.integration.test.ts','src/db/__tests__/external-principal-scope.test.ts']},
+    'src/db/__tests__/execution-read-ceiling.integration.test.ts','src/db/__tests__/external-principal-scope.test.ts',
+    'src/routes/__tests__/custom-connectors.integration.test.ts']},
   {id:'workflow-authority',packageDir:'packages/api',integration:true,testFiles:[
     'src/context-scope/__tests__/workflow-authority.integration.test.ts',
     'src/context-scope/__tests__/workflow-input-evidence.integration.test.ts',
@@ -94,6 +95,10 @@ export const DEPARTMENT_ISOLATION_SUITES: readonly DepartmentIsolationSuite[] = 
     'src/routes/__tests__/home-apps.test.ts']},
   {id:'migration-lifecycle',packageDir:'apps/api',integration:false,testFiles:[
     'src/__tests__/context-scope-security-matrix.test.ts']},
+  {id:'migration-upgrade-591',packageDir:'apps/api',integration:false,testFiles:[
+    'src/__tests__/context-scope-upgrade-591.test.ts']},
+  {id:'migration-upgrade-602',packageDir:'apps/api',integration:false,testFiles:[
+    'src/__tests__/context-scope-upgrade-602.test.ts']},
 ])
 
 const selector = (suiteId: string, testFile: string, titleIncludes: string): DepartmentIsolationAssertionSelector =>
@@ -159,7 +164,8 @@ export const DEPARTMENT_ISOLATION_CASES: ReadonlyArray<{
     selector('access-store','src/workspace-access/__tests__/read-grants.integration.test.ts','revocation'),
   ]},
   {id:'A12',assertions:[
-    selector('migration-lifecycle','src/__tests__/context-scope-security-matrix.test.ts','fresh, 591 and predecessor migration lifecycles'),
+    selector('migration-upgrade-591','src/__tests__/context-scope-upgrade-591.test.ts','fresh, 591 and predecessor migration lifecycles'),
+    selector('migration-upgrade-602','src/__tests__/context-scope-upgrade-602.test.ts','fresh, 591 and predecessor migration lifecycles'),
     selector('organization','src/workspace-access/__tests__/org-chart.integration.test.ts','A12 rejects unit and reporting cycles'),
     selector('organization','src/workspace-access/__tests__/org-chart.integration.test.ts','A12 rejects same-workspace violations'),
   ]},

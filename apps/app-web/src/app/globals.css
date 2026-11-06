@@ -490,6 +490,11 @@
        area clickable to place the caret at the document end. */
     padding-bottom: 30vh;
   }
+  /* Empty drafts keep original starters directly below the writing line. */
+  .doc-collab-editor[data-blank-draft] .ProseMirror {
+    min-height: 44px;
+    padding-bottom: 1.5rem;
+  }
   /* Remote presence (remote-focus.ts). Quiet on purpose: a 2px caret with no
      inline label, a faint wash on the block a peer is working in, and that
      peer's face in the right gutter. `--doc-remote-color` is the peer's

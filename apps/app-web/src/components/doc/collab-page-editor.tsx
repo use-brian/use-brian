@@ -138,6 +138,8 @@ export type CollabPageEditorProps = {
   /** Shared Yjs doc + provider, owned by `doc-shell`. */
   collab: CollabHandle;
   canEdit?: boolean;
+  /** Keep the empty writing line close to the original starter controls. */
+  blankDraft?: boolean;
   /** Display name + stable id for this user's collaboration cursor; `avatarUrl`
    *  rides along for the comment-thread author rows. */
   user?: { id: string; name: string; avatarUrl?: string | null };
@@ -188,6 +190,7 @@ export type CollabPageEditorProps = {
 export function CollabPageEditor({
   collab,
   canEdit,
+  blankDraft,
   user,
   viewId,
   findOwnerId,
@@ -245,6 +248,7 @@ export function CollabPageEditor({
       doc={doc}
       provider={provider}
       canEdit={canEdit !== false && !collab.writeDenied}
+      blankDraft={blankDraft}
       synced={synced}
       status={status}
       user={user}
@@ -269,6 +273,7 @@ function CollabEditorInner({
   doc,
   provider,
   canEdit,
+  blankDraft,
   synced,
   status,
   user,
@@ -286,6 +291,7 @@ function CollabEditorInner({
   doc: Y.Doc;
   provider: HocuspocusProvider;
   canEdit: boolean;
+  blankDraft?: boolean;
   synced: boolean;
   status: CollabStatus;
   user?: { id: string; name: string; avatarUrl?: string | null };
@@ -1246,7 +1252,7 @@ function CollabEditorInner({
   const railExpandsActive = railHasRoom && activeAnchored;
 
   return (
-    <div ref={setEditorWrap} className="doc-collab-editor relative">
+    <div ref={setEditorWrap} data-blank-draft={blankDraft ? "" : undefined} className="doc-collab-editor relative">
       {/* Page-level comment index — hides itself on a page with no comments
           (it owns its right-aligned flow row above the composer band, so an
           empty page leaves no gap). `hasOpenThreads` lets it appear in sync

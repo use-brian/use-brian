@@ -710,8 +710,10 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
       const result = await queryWithRLS<CiRow>(
         params.actingUserId,
         `INSERT INTO channel_integrations
-           (channel_id, channel_type, team_id, team_name, bot_user_id, bot_username, credentials, recording_owner_user_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
+           (channel_id, channel_type, team_id, team_name, bot_user_id, bot_username, credentials, recording_owner_user_id,
+            connected_by_user_id, connected_workspace_id, connected_bot_user_id, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+           $8, (SELECT workspace_id FROM channels WHERE id=$1), $5, 'active')
          ON CONFLICT (channel_id)
          DO UPDATE SET
            channel_type = EXCLUDED.channel_type,

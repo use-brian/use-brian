@@ -1,5 +1,41 @@
 # Office template export fidelity
 
+## Library actions and navigation
+
+Published templates expose a full read-only viewer and a Create template from
+published version action. Both bind an explicit admitted version belonging to
+the selected registry, never the mutable authoring draft. Copying creates an
+independent unpublished registry and editable draft, retaining source resources,
+reviewed fields, slide recipes, and classification floors through normal Office
+admission. Source access is checked again before the copy is initialized.
+Published-template media reads bind the resource to the admitted version rather
+than requiring it to remain in the mutable authoring draft.
+
+Files and Templates expose accessible per-card selection, select all eligible
+visible items, clear selection, and a single Move to Trash action. Trash uses
+the existing authorized lifecycle endpoints. Successful items leave selection;
+failed items remain selected with an error for retry. Selection belongs to the
+current viewer, workspace, filters and currently authorized collection and clears
+when that ownership changes. Trashed and retained items are not trash candidates.
+The Templates/Trash switch keeps trashed templates out of the active grid while
+retaining their restore path.
+Selection uses the shared neutral checkbox at 14px, with no filled backing tile
+over the preview. Card controls retain a transparent 44px target on phones and
+tablets and a compact 28px target on desktop; keyboard focus stays visible.
+
+File and template Trash views support the same per-card and select-all selection.
+Their bulk actions are Restore and Delete permanently, including retained items.
+Permanent deletion requires a dialog that lists the selected names and an exact
+typed confirmation of the localized Delete permanently label. Changing viewer,
+workspace, filter, selection or collection authority invalidates that confirmation.
+Both actions use the existing authorized lifecycle endpoints and preserve failed
+items for retry, including items protected by holds or template dependencies.
+
+The presentation thumbnail rail has a bounded grid row and independent vertical
+scrolling on desktop. Its horizontal phone filmstrip retains native touch panning.
+Selecting slides through keyboard or canvas navigation keeps the active thumbnail
+visible without scrolling the surrounding Office shell.
+
 The existing Office workflow imports editable DOCX templates into the canonical
 document model, fills their placeholders, and exports through the existing DOCX
 and LibreOffice PDF generators. Reference PDFs are comparison inputs only.

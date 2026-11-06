@@ -90,7 +90,7 @@ import { SetupChecklist } from "./setup-checklist";
 import { RecordingUploadStatus } from "@/components/recordings/recording-upload-status";
 
 type BuildOptions = {
-  model: ModelTier;
+  model?: ModelTier;
   researchMode: boolean;
   /** Ready (`done`) attachment ids for the first Chat turn, in chip order. */
   fileIds: string[];
@@ -140,6 +140,30 @@ type Props = {
    */
   studioSetupIncomplete?: boolean | null;
 };
+
+/** Drafts reuse starter links; the Page comment is their only request box. */
+export function DraftPageStarters({ active, ...props }: Props & { active: boolean }) {
+  const t = useT().docPage.landing;
+  if (!active) return null;
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <div className="flex flex-wrap justify-center gap-2">
+        {t.suggestions.map(text => <button type="button" key={text}
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground md:min-h-0"
+          onClick={() => props.onSubmitPrompt(text, {
+            researchMode: false, fileIds: [], attachedRecordingIds: [],
+            assistantId: readActiveAssistantId(props.workspaceId) ?? props.assistantId,
+          })}>
+          <Sparkles className="size-3" aria-hidden />{text}
+        </button>)}
+      </div>
+      <button type="button" onClick={props.onStartFromTemplate}
+        className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground md:min-h-8">
+        <LayoutTemplate className="size-3.5" aria-hidden />{t.startFromTemplate}
+      </button>
+    </div>
+  );
+}
 
 export function EmptyPageLanding({
   workspaceId,

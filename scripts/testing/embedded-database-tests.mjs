@@ -1,9 +1,10 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { DEPARTMENT_ISOLATION_SUITES } from '../../packages/shared/src/department-isolation-coverage.ts'
+import { MIGRATION_OWNER_GROUPS, MIGRATION_OWNER_SCENARIOS } from '../../apps/api/src/__tests__/migration-owner-groups.ts'
 
 // [COMP:ci/execution-topology] The acceptance gate already executes its registered
 // Node files. Keep the other full-chain replays on separate runners; round-robin
@@ -45,11 +46,23 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     } finally { rmSync(directory, { recursive: true, force: true }) }
     process.exit(0)
   }
-  const files = embeddedTestFiles(readdirSync(new URL('../../apps/api/src/__tests__/', import.meta.url)), Number(process.argv[2]))
+  const group = process.argv[2]
+  const ownerGroup = group?.startsWith('owner-') ? group.slice('owner-'.length) : undefined
+  if (ownerGroup && !MIGRATION_OWNER_GROUPS.includes(ownerGroup)) throw new Error('Unknown migration owner group')
+  const shard = ownerGroup ? 1 : group === 'session' ? 2 : group === 'remaining' ? 3 : NaN
+  if (!Number.isInteger(shard)) throw new Error(`Expected current, ${MIGRATION_OWNER_GROUPS.map(group => `owner-${group}`).join(', ')}, session or remaining`)
+  const files = embeddedTestFiles(readdirSync(new URL('../../apps/api/src/__tests__/', import.meta.url)), shard)
+  if (ownerGroup) {
+    const source = readFileSync(new URL('../../apps/api/src/__tests__/migration-owner-role.test.ts', import.meta.url), 'utf8')
+    for (const [title, target] of Object.entries(MIGRATION_OWNER_SCENARIOS)) {
+      if (target === ownerGroup && !source.includes(title)) throw new Error(`Missing migration owner scenario: ${title}`)
+    }
+  }
   if (!files.length) throw new Error('Embedded database shard has no tests')
-  console.log(`Embedded database shard ${process.argv[2]}/3: ${files.join(', ')}`)
+  console.log(`Embedded database group ${group}: ${files.join(', ')}`)
   const result = spawnSync(process.execPath, ['--import', 'tsx', '--test', '--test-concurrency=1',
-    ...files.map(file => `src/__tests__/${file}`)], { cwd, stdio: 'inherit' })
+    ...files.map(file => `src/__tests__/${file}`)], { cwd, stdio: 'inherit',
+    env: { ...process.env, ...(ownerGroup ? { BRIAN_TEST_MIGRATION_OWNER_GROUP: ownerGroup } : {}) } })
   if (result.error) throw result.error
   process.exitCode = result.status ?? 1
 }

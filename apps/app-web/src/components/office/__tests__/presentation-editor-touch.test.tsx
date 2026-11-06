@@ -80,7 +80,7 @@ describe("[COMP:app-web/office-presentation-editor] touch and phone layout", () 
     expect(rail.className).toContain("md:block");
     const handle = host.querySelector<HTMLElement>("[data-slide-thumbnail] button")!;
     expect(handle.className).toContain("touch-pan-x");
-    expect(handle.className).toContain("md:touch-none");
+    expect(handle.className).toContain("md:touch-pan-y");
   });
 
   it("hosts the formatting, accessibility and geometry toolbars in one strip under the canvas below md (row 21)", () => {

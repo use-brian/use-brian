@@ -45,9 +45,9 @@
  * is PAT-only and needs neither.
  *
  * Custom MCP connectors (`POST/PATCH/DELETE /custom`, `POST /custom/:id/test`)
- * are mounted from the shared `customConnectorRoutes` factory in
- * `./custom-connectors.ts` — the same factory the closed edition mounts, so the
- * feature has one implementation across both editions.
+ * are mounted from `customConnectorRoutes` in `./custom-connectors.ts`.
+ * The hosted edition currently implements these endpoints independently and
+ * retains its own behavioral tests.
  *
  * Google Drive Picker authorization mounts from the open shared
  * `gdrive-authorized-files.ts` factory; hosted consumes the same router.

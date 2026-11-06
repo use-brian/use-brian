@@ -54,6 +54,20 @@ describe("[COMP:app-web/office-presentation-editor] Presentation interaction loo
     field.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
+  it("reveals a thumbnail activated by keyboard without scrolling the Office shell", () => {
+    const snapshot = presentationFixture();
+    snapshot.slides.push({ ...structuredClone(snapshot.slides[0]), id: "slide-b", title: "Second slide" });
+    mount(snapshot);
+    const rail = host.querySelector<HTMLElement>("[data-slide-rail]")!;
+    const thumbnail = host.querySelector<HTMLElement>('[data-slide-index="1"]')!;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
+    Object.defineProperty(rail, "getBoundingClientRect", { value: () => ({ top: 0, bottom: 100 }) });
+    Object.defineProperty(thumbnail, "getBoundingClientRect", { value: () => ({ top: 150, bottom: 230 }) });
+    act(() => thumbnail.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 0 })));
+    expect(rail.scrollTop).toBe(130);
+    expect(host.querySelector('[data-office-editor="presentation"]')?.className).toContain("md:grid-rows-[minmax(0,1fr)]");
+  });
+
   it("shift-selects exact object targets and deletes them in one batch", () => {
     const snapshot = presentationFixture();
     const { onCommand, onSelectTargets } = mount(snapshot);

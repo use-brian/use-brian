@@ -34,7 +34,7 @@
  */
 
 import * as React from "react";
-import { ArrowRight, ArrowUp, MessageSquare, Paperclip } from "lucide-react";
+import { ArrowRight, ArrowUp, MessageSquare, Paperclip, X } from "lucide-react";
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import { useDurableDraft } from "@/lib/offline/use-durable-draft";
 import { useT } from "@/lib/i18n/client";
@@ -52,6 +52,7 @@ import { useFileAttachments } from "@/lib/use-file-attachments";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
 import { RecordingUploadStatus } from "@/components/recordings/recording-upload-status";
+import { CommentAssistantPicker, useCommentAssistant } from "./comment-assistant-picker";
 import { useAutoGrowTextarea } from "@/lib/use-auto-grow-textarea";
 
 type Props = {
@@ -91,6 +92,10 @@ export function PageComments({
   const tRec = useT().recordings;
   const [draft, setDraft, draftStorageFailed] = useDurableDraft(workspaceId, `page:${pageId}`, currentUser?.id);
   const [busy, setBusy] = React.useState(false);
+  const voice = useCommentAssistant(workspaceId, assistantId);
+  const targetAssistantId = assistantId ? voice.selectedId ?? assistantId : undefined;
+  const targetIdentity = voice.selected ?? (assistant?.id === targetAssistantId ? assistant :
+    targetAssistantId ? { id: targetAssistantId, name: t.assistantName, iconSeed: null } : assistant);
   const composerRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const cardRef = React.useRef<HTMLDivElement>(null);
@@ -98,7 +103,7 @@ export function PageComments({
   // not transcribed) and rides the seeded first turn as attachedRecordingIds —
   // the same contract a thread reply has. Only wired when the page has a doc
   // assistant to bind the recording to; without one, video keeps rejecting.
-  const rec = useRecordingUpload(workspaceId, assistantId ?? "");
+  const rec = useRecordingUpload(workspaceId, targetAssistantId ?? "");
   const [pendingRecordings, setPendingRecordings] = React.useState<
     { recordingId: string; title: string }[]
   >([]);
@@ -155,8 +160,8 @@ export function PageComments({
   const offline = useIsOffline();
   const canComment = !!assistantId;
   const canDraft = canComment || offline || !!draft;
-  const drop = useFileDrop((files) => void att.upload(files), {
-    disabled: !canComment || !aiReply || rec.busy,
+  const drop = useFileDrop((files) => { setAiReply(true); void att.upload(files); }, {
+    disabled: !canComment || rec.busy,
   });
 
   // Collapse the running thread on Escape / an outside click (mirrors the rail +
@@ -191,9 +196,9 @@ export function PageComments({
 
   async function post() {
     const body = draft.trim();
-    const aid = assistantId;
-    // Attachments only feed an AI turn — ignored with AI reply off, where the
-    // comment must carry text.
+    if (!aiReply && (att.attachments.length > 0 || pendingRecordings.length > 0)) return;
+    const aid = targetAssistantId;
+    // Attachments feed AI turns. The guard above retains them when AI is off.
     const hasFiles = aiReply && att.hasReady;
     const attachedRecordingIds = aiReply ? pendingRecordings.map((r) => r.recordingId) : [];
     const hasRecordings = attachedRecordingIds.length > 0;
@@ -271,9 +276,11 @@ export function PageComments({
             thread={runningThread}
             pageId={pageId}
             workspaceId={workspaceId}
-            assistantId={assistantId ?? ""}
+            assistantId={targetAssistantId ?? ""}
+            assistantRoster={voice.roster}
+            renderAssistantPicker={assistantId ? (disabled, enableAi) => <CommentAssistantPicker roster={voice.roster} selectedId={voice.selectedId} disabled={disabled} onSelect={id => { voice.choose(id); enableAi(); }} /> : undefined}
             currentUser={currentUser}
-            assistant={assistant}
+            assistant={targetIdentity}
             seed={seed?.threadId === runningThread.id ? seed.seed : undefined}
             onSeedAccepted={() => {
               if (seed?.threadId === runningThread.id) {
@@ -328,14 +335,12 @@ export function PageComments({
               disabled={rec.busy}
               className="hidden"
               onChange={(e) => {
-                if (!rec.busy && e.target.files) void att.upload(e.target.files);
+                if (!rec.busy && e.target.files?.length) { setAiReply(true); void att.upload(e.target.files); }
                 e.target.value = "";
               }}
             />
-            {aiReply ? (
-              <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
-            ) : null}
-            {aiReply && pendingRecordings.length > 0 ? (
+            <AttachmentChips attachments={att.attachments} onRemove={att.remove} className="[&_button]:size-11 md:[&_button]:size-4" />
+            {pendingRecordings.length > 0 ? (
               <div className="mt-1 flex flex-wrap gap-1.5">
                 {pendingRecordings.map((r) => (
                   <span
@@ -344,6 +349,7 @@ export function PageComments({
                   >
                     <span aria-hidden>◉</span>
                     {tRec.chatStagedChip.replace("{name}", r.title)}
+                    <button type="button" aria-label={`${tAttach.remove} ${r.title}`} className="inline-flex size-11 items-center justify-center rounded hover:bg-muted md:size-6" onClick={() => setPendingRecordings(rows => rows.filter(row => row.recordingId !== r.recordingId))}><X className="size-3" aria-hidden /></button>
                   </span>
                 ))}
               </div>
@@ -355,8 +361,9 @@ export function PageComments({
                 message={rec.message}
               />
             ) : null}
-            <div className="mt-1 flex flex-wrap items-center gap-1.5 md:flex-nowrap">
-              {aiReply ? (
+            {!aiReply && (att.attachments.length > 0 || pendingRecordings.length > 0) ? <p role="status" className="text-xs text-muted-foreground">{t.attachmentsNeedAi}</p> : null}
+            <div className="mt-1 flex flex-wrap items-center gap-1.5">
+              {canComment ? (
                 <button
                   type="button"
                   aria-label={tAttach.attach}
@@ -367,6 +374,7 @@ export function PageComments({
                   <Paperclip className="size-[18px]" />
                 </button>
               ) : null}
+              {canComment ? <CommentAssistantPicker roster={voice.roster} selectedId={voice.selectedId} disabled={busy} onSelect={id => { voice.choose(id); setAiReply(true); }} /> : null}
               <ComposerControls
                 phoneTargets
                 model={controls.model}
@@ -388,6 +396,7 @@ export function PageComments({
                 onClick={() => void post()}
                 disabled={
                   !canComment || offline || busy ||
+                  (!aiReply && (att.attachments.length > 0 || pendingRecordings.length > 0)) ||
                   att.uploading ||
                   rec.busy ||
                   (!draft.trim() && !(aiReply && (att.hasReady || pendingRecordings.length > 0)))

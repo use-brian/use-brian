@@ -10,6 +10,8 @@
  * [COMP:api/pglite-migration-sql]
  */
 
+import { toMigrationExecutionSql } from './execution-sql.js'
+
 function withoutOuterTransaction(sql: string, file: string): string {
   const begins = sql.match(/^BEGIN;\s*$/gm)?.length ?? 0
   const commits = sql.match(/^COMMIT;\s*$/gm)?.length ?? 0
@@ -21,6 +23,7 @@ function withoutOuterTransaction(sql: string, file: string): string {
 }
 
 export function toPgliteMigrationSql(sql: string, file: string): string {
+  sql = toMigrationExecutionSql(sql, file)
   // These immutable guards pin a reviewed int4 DEFAULT 0 expression. PostgreSQL
   // prints sizeof(Datum) bytes: native 64-bit emits eight; PGlite wasm32 emits four.
   // Translate only this full literal at these two known prerequisite boundaries.

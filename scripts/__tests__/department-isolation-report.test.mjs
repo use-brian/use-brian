@@ -11,7 +11,7 @@ const metadata = { revision: 'fixture-revision', sourceHashes: { 'fixture.ts': '
   migration: { latest: 'fixture.sql', count: 1, ledgerHash: 'fixture-ledger' } }
 
 function receipts(profile = 'full') {
-  const total = profile === 'current' ? 3 : 4
+  const total = profile === 'current' ? 4 : 7
   return Array.from({ length: total }, (_, index) => index + 1).map(index => {
     const shard = parseShard(`${index}/${total}`)
     const suites = suitesForShard(shard, profile).map(suite => ({ id: suite.id, testFiles: [...suite.testFiles], executionError: null }))
@@ -37,7 +37,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     const partitions = [1, 2, 3].map(shard => embeddedTestFiles(files, shard))
     assert.ok(partitions.slice(0, 2).every(files => files.length === 1))
     assert.ok(partitions[2].includes('future-fixture.test.ts'))
-    const acceptanceFiles = [1, 2, 3, 4].flatMap(index => suitesForShard(parseShard(`${index}/4`)))
+    const acceptanceFiles = [1, 2, 3, 4, 5, 6].flatMap(index => suitesForShard(parseShard(`${index}/6`)))
       .filter(suite => suite.packageDir === 'apps/api')
       .flatMap(suite => suite.testFiles.map(file => file.replace(/^src\/__tests__\//, '')))
     assert.deepEqual([...partitions.flat(), ...acceptanceFiles].sort(), files.filter(file => file.endsWith('.test.ts')).sort())
@@ -45,9 +45,10 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     assert.throws(() => embeddedTestFiles([], 1), /Missing/)
   })
   it('partitions every registered suite once and isolates embedded migration replay', () => {
-    for (let total = 2; total <= DEPARTMENT_ISOLATION_SUITES.length; total++) {
+    for (let total = 4; total <= DEPARTMENT_ISOLATION_SUITES.length; total++) {
       const partitions = Array.from({ length: total }, (_, i) => suitesForShard(parseShard(`${i + 1}/${total}`)))
-      assert.deepEqual(partitions[0].map(suite => suite.id), ['migration-lifecycle'])
+      assert.deepEqual(partitions.slice(0, 3).map(suites => suites.map(suite => suite.id)),
+        [['migration-lifecycle'], ['migration-upgrade-591'], ['migration-upgrade-602']])
       assert.ok(partitions.every(suites => suites.length > 0))
       assert.deepEqual(partitions.flat().map(suite => suite.id).sort(), DEPARTMENT_ISOLATION_SUITES.map(suite => suite.id).sort())
     }
@@ -67,7 +68,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
   it('accepts current scope explicitly without certifying deferred historical coverage', () => {
     const parts = receipts('current')
     assert.deepEqual(parts.flatMap(part => part.suites.map(suite => suite.id)).sort(),
-      DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.id !== 'migration-lifecycle').map(suite => suite.id).sort())
+      DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.packageDir !== 'apps/api').map(suite => suite.id).sort())
     const merged = mergeAcceptanceReports(parts, metadata, 'current')
     assert.equal(merged.profileAccepted, true)
     assert.equal(merged.fullMatrixAccepted, false)
@@ -76,7 +77,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     assert.throws(() => mergeAcceptanceReports(parts.slice(1), metadata, 'current'), /Missing/)
     parts[0].assertions[0].status = 'failed'
     assert.throws(() => mergeAcceptanceReports(parts, metadata, 'current'), /incomplete or failed/)
-    assert.throws(() => suitesForShard(parseShard('1/4'), 'current'), /three shards/)
+    assert.throws(() => suitesForShard(parseShard('1/3'), 'current'), /four shards/)
   })
 
   it('rejects missing, duplicate, stale and mixed-migration receipts', () => {

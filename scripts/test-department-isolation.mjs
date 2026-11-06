@@ -43,6 +43,13 @@ const relevantPaths = new Set([
   'scripts/testing/department-isolation-report.mjs',
   'scripts/crm/local-fixture.mjs',
   'apps/api/src/__tests__/prepared-pglite.ts',
+  'apps/api/src/__tests__/context-scope-migration-upgrade.ts',
+  'apps/api/src/migrate-pglite.ts',
+  'packages/api/src/migrations/execution-sql.ts',
+  'packages/api/src/migrations/pglite-sql.ts',
+  'packages/api/scripts/migrate.ts',
+  'packages/api/scripts/migration-diagnostics.ts',
+  'scripts/__tests__/migration-diagnostics.integration.test.mjs',
   'packages/shared/src/department-isolation-coverage.ts',
   ...DEPARTMENT_ISOLATION_BOUNDARIES.flatMap(boundary => boundary.sourcePaths),
   ...DEPARTMENT_ISOLATION_SUITES.flatMap(suite => suite.testFiles.map(file => relTest(suite,file))),
@@ -149,10 +156,13 @@ async function run() {
     ? DEPARTMENT_ISOLATION_SUITES.filter(suite=>!['review-lifecycle','ui','compatibility'].includes(suite.id))
     : suitesForShard(shard, profile)
   const native = selectedSuites.some(suite => suite.packageDir !== 'apps/api')
-  const fixture = native ? await createLocalFixture({ pgBin, prepareTemplate: true }) : {
+  const preparationStarted = Date.now()
+  console.log(`Preparing ${native ? 'native PostgreSQL' : 'embedded acceptance'} fixture`)
+  const fixture = native ? await createLocalFixture({ pgBin, prepareTemplate: true, migrationProgress: true }) : {
     directory: await mkdtemp(join(tmpdir(), 'brian-isolation-report-')), env: {},
     async dispose() { await rm(this.directory, { recursive: true, force: true }) },
   }
+  console.log(`Prepared fixture in ${Math.round((Date.now() - preparationStarted) / 1000)}s`)
   try {
     if(reportPath&&resolve(reportPath).startsWith(`${resolve(fixture.directory)}/`))throw new Error('--report must be outside the disposable fixture')
     const reports = join(fixture.directory, 'reports')
@@ -162,11 +172,13 @@ async function run() {
       ...runtime,...fixture.env,...(fixture.adminUrl ? { CONTEXT_SCOPE_TEST_DATABASE_URL:fixture.adminUrl } : {}),
       CI:'true',GEMINI_API_KEY:'',OPENAI_API_KEY:'',ANTHROPIC_API_KEY:'',BRIAN_TEST_NO_PAID:'1',
     }
-    if (native) await runCommand('node', ['--test', 'scripts/__tests__/prepared-fixture.integration.test.mjs'], { cwd: root, env, inherit: true })
+    if (native) await runCommand('node', ['--test', 'scripts/__tests__/prepared-fixture.integration.test.mjs',
+      'scripts/__tests__/migration-diagnostics.integration.test.mjs'], { cwd: root, env, inherit: true })
     const suiteResults=[]
     const assertions=[]
     for (const suite of selectedSuites) {
       const startedAt = Date.now()
+      console.log(`Starting acceptance suite ${suite.id} (${suite.testFiles.length} files)`)
       const nodeSuite=suite.packageDir==='apps/api'
       const outputFile = join(reports, suite.id+(nodeSuite?'.xml':'.json'))
       const executionErrors=[]
@@ -211,6 +223,7 @@ async function run() {
         }
       }
       const executionError=executionErrors.length?executionErrors.join('; '):null
+      console.log(`Finished acceptance suite ${suite.id} in ${Math.round((Date.now() - startedAt) / 1000)}s`)
       assertions.push(...actual)
       const passed=actual.filter(assertion=>assertion.status==='passed').length
       const failed=actual.filter(assertion=>assertion.status==='failed').length

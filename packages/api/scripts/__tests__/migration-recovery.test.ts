@@ -17,15 +17,21 @@ import { runMigrations } from '../migrate.js'
 describe('[COMP:api/migration-recovery] serialized migration recovery', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    db.query.mockResolvedValue({ rows: [] })
+    db.connect.mockResolvedValue(undefined)
+    db.end.mockResolvedValue(undefined)
+    db.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('pg_backend_pid()') ? [{ pid: 123 }] : [] }))
   })
 
   it('waits for the migration lock before reading or recovering the ledger', async () => {
     let release!: () => void
-    db.query.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve }))
+    db.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('pg_advisory_lock')) await new Promise<void>(resolve => { release = resolve })
+      return { rows: sql.includes('pg_backend_pid()') ? [{ pid: 123 }] : [] }
+    })
     const running = runMigrations({ databaseUrl: 'postgresql://fixture@localhost/fixture' })
-    await vi.waitFor(() => expect(db.query).toHaveBeenCalledTimes(1))
-    expect(db.query.mock.calls[0][0]).toContain("pg_advisory_lock(hashtextextended('use-brian:migrations', 0))")
+    await vi.waitFor(() => expect(db.query).toHaveBeenCalledTimes(2))
+    expect(db.query.mock.calls[1][0]).toContain("pg_advisory_lock(hashtextextended('use-brian:migrations', 0))")
+    expect(db.query.mock.calls.some(([sql]) => String(sql).includes('_migrations'))).toBe(false)
     release()
     await running
     const calls = db.query.mock.calls.map(([sql]) => String(sql))
@@ -39,11 +45,21 @@ describe('[COMP:api/migration-recovery] serialized migration recovery', () => {
   it('closes the lock-owning session and never continues after failed authentication', async () => {
     db.query.mockImplementation(async (sql: string) => {
       if (sql.startsWith('DO $recover_page_completion$')) throw new Error('canonical successor changed')
-      return { rows: [] }
+      return { rows: sql.includes('pg_backend_pid()') ? [{ pid: 123 }] : [] }
     })
     await expect(runMigrations({ databaseUrl: 'postgresql://fixture@localhost/fixture' })).rejects.toThrow('canonical successor changed')
     expect(db.end).toHaveBeenCalledOnce()
     expect(db.query.mock.calls.some(([sql]) => sql === 'SELECT name FROM public._migrations ORDER BY name')).toBe(false)
+  })
+
+  it('preserves the original database error if connection cleanup also fails', async () => {
+    const original = Object.assign(new Error('canonical successor changed'), { code: '55000' })
+    db.query.mockImplementation(async (sql: string) => {
+      if (sql.startsWith('DO $recover_page_completion$')) throw original
+      return { rows: sql.includes('pg_backend_pid()') ? [{ pid: 123 }] : [] }
+    })
+    db.end.mockRejectedValueOnce(new Error('connection cleanup failed'))
+    await expect(runMigrations({ databaseUrl: 'postgresql://fixture@localhost/fixture' })).rejects.toBe(original)
   })
 
   it('uses all five immutable successor authentication blocks without successor installation', async () => {

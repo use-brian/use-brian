@@ -6,6 +6,9 @@ import pg from 'pg'
 import { orderMigrationFiles } from './migration-order.js'
 import { findAppliedMigrationRenames } from './migration-renames.js'
 import { nativePageCompletionRecoverySql } from './migration-recovery.js'
+import { toMigrationExecutionSql } from '../src/migrations/execution-sql.js'
+import { performance } from 'node:perf_hooks'
+import { MigrationDiagnostics } from './migration-diagnostics.js'
 
 export type MigrationOptions = {
   databaseUrl: string
@@ -17,11 +20,24 @@ export type MigrationOptions = {
 export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApply }: MigrationOptions) {
   if (!databaseUrl) throw new Error('DATABASE_URL is required')
   const client = new pg.Client({ connectionString: databaseUrl })
-  await client.connect()
+  const started = performance.now()
+  let diagnostics: MigrationDiagnostics | undefined
+  let failed = false
+  let lockWaitMs = 0
+  console.log('[migration] connecting')
   try {
+    await client.connect()
+    console.log(`[migration] connected elapsed_ms=${Math.round(performance.now() - started)}`)
+    const { rows: backend } = await client.query<{ pid: number }>(
+      "SELECT set_config('application_name','use-brian-migrate',false),pg_backend_pid() AS pid",
+    )
+    diagnostics = new MigrationDiagnostics(databaseUrl, backend[0].pid)
     // Session-scoped: migration files commit independently. Serialize before
     // reading the ledger so another runner cannot retain a stale applied set.
+    diagnostics.start('migration_lock')
     await client.query("SELECT pg_advisory_lock(hashtextextended('use-brian:migrations', 0))")
+    lockWaitMs = diagnostics.finish('acquired')
+    diagnostics.start('ledger')
     // Create migrations tracking table if it doesn't exist
     await client.query(`
       CREATE TABLE IF NOT EXISTS public._migrations (
@@ -29,12 +45,16 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
         applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )
     `)
+    diagnostics.finish()
 
     // Historical SQL may have committed before its separate ledger insertion.
     // Recognize only the independently authenticated, known completed boundary.
+    diagnostics.start('recovery')
     await client.query(await nativePageCompletionRecoverySql())
+    diagnostics.finish()
 
     // Get already-applied migrations after serialized recovery.
+    diagnostics.start('ledger')
     const { rows: applied } = await client.query('SELECT name FROM public._migrations ORDER BY name')
     const appliedSet = new Set(applied.map((r) => r.name))
 
@@ -51,6 +71,8 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
       appliedSet.add(currentName)
       console.log(`  alias: ${previousName} -> ${currentName}`)
     }
+    diagnostics.finish()
+    diagnostics.start('prepare')
 
     // Migration source dirs. The open submodule's own migrations dir is always
     // included; the platform injects its closed overlay dir(s) via
@@ -82,15 +104,21 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
         dirs.map(async (dir) => ({ dir, files: await readdir(dir) })),
       ),
     )
+    diagnostics.finish()
 
     let count = 0
+    let skipped = 0
     for (const { dir, file } of ordered) {
       if (appliedSet.has(file)) {
+        skipped++
         console.log(`  skip: ${file} (already applied)`)
         continue
       }
-      const sql = await readFile(join(dir, file), 'utf-8')
+      diagnostics.start('prepare', file)
+      const sql = toMigrationExecutionSql(await readFile(join(dir, file), 'utf-8'), file)
       await beforeApply?.({ file, dir, appliedCount: count })
+      diagnostics.finish()
+      diagnostics.start('apply', file)
       console.log(`  apply: ${file}`)
       // `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block. The
       // node-postgres simple-query protocol wraps a MULTI-statement string in an
@@ -119,6 +147,7 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
         await client.query(sql)
       }
       await client.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
+      diagnostics.finish('applied')
       appliedSet.add(file)
       count++
     }
@@ -129,8 +158,17 @@ export async function runMigrations({ databaseUrl, migrationDirs = [], beforeApp
       console.log(`Applied ${count} migration(s).`)
     }
 
+    console.log(`[migration] complete elapsed_ms=${Math.round(performance.now() - started)} lock_wait_ms=${lockWaitMs} applied=${count} skipped=${skipped}`)
     return { appliedCount: count, edition: migrationEdition }
-  } finally { await client.end() }
+  } catch (error) {
+    failed = true
+    diagnostics?.fail(error)
+    throw error
+  } finally {
+    await diagnostics?.stop()
+    if (failed) await client.end().catch(() => {})
+    else await client.end()
+  }
 }
 
 async function main() {

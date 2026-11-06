@@ -75,7 +75,18 @@ jobs:
         run: pnpm smoke
 
       - name: Test release-evidence checks
-        run: node --test scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs
+        run: node --test scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs scripts/__tests__/migration-owner-groups.test.mjs
+
+      - name: Archive database test dependencies
+        run: tar -czf "$RUNNER_TEMP/database-test-dependencies.tgz" packages/*/dist
+
+      - name: Retain database test dependencies
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-test-dependencies-${{ github.sha }}
+          path: ${{ runner.temp }}/database-test-dependencies.tgz
+          if-no-files-found: error
+          retention-days: 1
 
       # Discovery is report-only until complete journeys qualify ten candidates.
       # The required build-test gate depends on complete selected-scope coverage.
@@ -270,6 +281,7 @@ jobs:
     if: needs.ci-scope.outputs.historical == 'false'
     name: Embedded database current schema
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -285,12 +297,13 @@ jobs:
   embedded-database-tests:
     needs: ci-scope
     if: needs.ci-scope.outputs.historical == 'true'
-    name: Embedded database tests (${{ matrix.shard }}/3)
+    name: Embedded database tests (${{ matrix.group }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        group: [owner-legacy, owner-fresh, owner-cutover, owner-successor, owner-prerequisites, session, remaining]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -303,19 +316,20 @@ jobs:
       - name: Build test dependencies
         run: pnpm exec turbo run build --filter="@use-brian/api-open^..."
       - name: Embedded database tests
-        run: node scripts/testing/embedded-database-tests.mjs ${{ matrix.shard }}
+        run: node scripts/testing/embedded-database-tests.mjs ${{ matrix.group }}
       - name: Runtime unit tests
-        if: matrix.shard == 3
+        if: matrix.group == 'remaining'
         run: pnpm --filter @use-brian/api-open exec vitest run src/runtime.test.ts
 
   department-isolation-shards:
-    needs: ci-scope
+    needs: [ci-scope, build-typecheck]
     if: >-
       github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
       github.event.pull_request.head.repo.full_name != github.repository
     name: Department isolation (${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }})
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -331,7 +345,7 @@ jobs:
           cache: pnpm
 
       - name: Install PostgreSQL 18 with required extensions
-        if: needs.ci-scope.outputs.profile == 'current' || matrix.shard != 1
+        if: needs.ci-scope.outputs.profile == 'current' || matrix.shard > 3
         run: |
           sudo apt-get update
           sudo apt-get install -y ca-certificates curl
@@ -348,8 +362,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build test dependencies
-        run: pnpm exec turbo run build --filter="@use-brian/api-open^..." --filter="app-web^..."
+      - name: Download database test dependencies
+        uses: actions/download-artifact@v4
+        with:
+          name: database-test-dependencies-${{ github.sha }}
+          path: ${{ runner.temp }}
+
+      - name: Restore database test dependencies
+        run: tar -xzf "$RUNNER_TEMP/database-test-dependencies.tgz"
 
       - name: Run no-credential acceptance
         run: >-
