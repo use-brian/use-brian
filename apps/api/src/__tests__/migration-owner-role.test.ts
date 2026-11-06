@@ -78,7 +78,7 @@ async function assertOrdinaryOwner(db: PGlite): Promise<void> {
   )
 }
 
-async function assertNothingLeftBypassed(db: PGlite): Promise<void> {
+async function assertNothingLeftBypassed(db: PGlite, skillScopeForced: boolean): Promise<void> {
   assert.deepEqual(
     (await db.query(
       `SELECT tgrelid::regclass::text AS "table", tgname FROM pg_trigger
@@ -88,11 +88,50 @@ async function assertNothingLeftBypassed(db: PGlite): Promise<void> {
   )
   assert.deepEqual(
     (await db.query(
-      `SELECT relforcerowsecurity FROM pg_class WHERE oid = 'public.workspace_skill_scope_revisions'::regclass`,
+      `SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE oid = 'public.workspace_skill_scope_revisions'::regclass`,
     )).rows,
-    [{ relforcerowsecurity: true }],
+    // 650 must restore FORCE; 82200 deliberately restores ordinary-owner access.
+    // Application-role RLS must remain enabled at both migration checkpoints.
+    [{ relrowsecurity: true, relforcerowsecurity: skillScopeForced }],
   )
 }
+
+describe('[COMP:api/migration-owner-role] RLS checkpoint assertions', () => {
+  it('tracks forced and owner-access checkpoints without weakening application-role RLS', async () => {
+    const db = new PGlite()
+    try {
+      await db.waitReady
+      await db.exec(`
+        CREATE ROLE checkpoint_owner NOSUPERUSER NOBYPASSRLS;
+        CREATE ROLE checkpoint_app NOSUPERUSER NOBYPASSRLS;
+        CREATE TABLE public.workspace_skill_scope_revisions(id integer PRIMARY KEY);
+        ALTER TABLE public.workspace_skill_scope_revisions OWNER TO checkpoint_owner;
+        ALTER TABLE public.workspace_skill_scope_revisions ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.workspace_skill_scope_revisions FORCE ROW LEVEL SECURITY;
+        GRANT SELECT ON public.workspace_skill_scope_revisions TO checkpoint_app;
+        SET ROLE checkpoint_owner;
+      `)
+      await assertOrdinaryOwner(db)
+      await assertNothingLeftBypassed(db, true)
+      await assert.rejects(assertNothingLeftBypassed(db, false), assert.AssertionError)
+      await assert.rejects(db.exec('INSERT INTO public.workspace_skill_scope_revisions VALUES(1)'), /row-level security/)
+
+      await db.exec(await readFile(`${migrationsDir}/82200_skill_scope_owner_access.sql`, 'utf8'))
+      await assertOrdinaryOwner(db)
+      await assertNothingLeftBypassed(db, false)
+      await assert.rejects(assertNothingLeftBypassed(db, true), assert.AssertionError)
+      await db.exec('INSERT INTO public.workspace_skill_scope_revisions VALUES(1)')
+      assert.deepEqual((await db.query('SELECT id FROM public.workspace_skill_scope_revisions')).rows, [{ id: 1 }])
+      await db.exec('RESET ROLE; SET ROLE checkpoint_app')
+      assert.deepEqual((await db.query('SELECT id FROM public.workspace_skill_scope_revisions')).rows, [])
+
+      await db.exec('RESET ROLE; SET ROLE checkpoint_owner; ALTER TABLE public.workspace_skill_scope_revisions DISABLE ROW LEVEL SECURITY')
+      await assert.rejects(assertNothingLeftBypassed(db, false), assert.AssertionError)
+    } finally {
+      await db.close()
+    }
+  })
+})
 
 describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner role', () => {
   it('repairs historical function defaults atomically and replays the complete upgrade', async (t) => {
@@ -554,7 +593,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       assert.ok((await migratePglite(db, migrationsDir)) > 0)
       assert.equal(await migratePglite(db, migrationsDir), 0)
       await assertOrdinaryOwner(db)
-      await assertNothingLeftBypassed(db)
+      await assertNothingLeftBypassed(db, false)
       if (snapshot && identity) await savePreparedPglite(db, snapshot, identity)
     } finally {
       await db.close()
@@ -602,7 +641,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       // Timestamp preservation belongs to this relabel, before later backfills.
       assert.equal(await migratePglite(db, migrationsDir, { through: '650_department_read_cutover.sql' }), 1)
       await assertOrdinaryOwner(db)
-      await assertNothingLeftBypassed(db)
+      await assertNothingLeftBypassed(db, true)
 
       await db.exec('RESET ROLE')
       assert.deepEqual(
@@ -646,13 +685,13 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
         files.map(name => ({ name })))
       assert.equal(await migratePglite(db, migrationsDir), 0)
       await assertOrdinaryOwner(db)
-      await assertNothingLeftBypassed(db)
+      await assertNothingLeftBypassed(db, false)
       assert.deepEqual((await db.query(`SELECT relname, relrowsecurity, relforcerowsecurity
         FROM pg_class WHERE oid IN ('public.tasks'::regclass,
           'public.workspace_skill_scope_revisions'::regclass) ORDER BY relname`)).rows,
       [
         { relname: 'tasks', relrowsecurity: true, relforcerowsecurity: false },
-        { relname: 'workspace_skill_scope_revisions', relrowsecurity: true, relforcerowsecurity: true },
+        { relname: 'workspace_skill_scope_revisions', relrowsecurity: true, relforcerowsecurity: false },
       ])
       assert.deepEqual((await db.query(`SELECT tgname, tgenabled FROM pg_trigger
         WHERE tgrelid='public.tasks'::regclass
@@ -834,7 +873,7 @@ describe('[COMP:api/migration-owner-role] Native transcript read prerequisite po
      }else assert.deepEqual(current,prior)
     }
     assert.equal(changed,3);proof.changedBodies=changed;proof.replay=0
-    await assertOrdinaryOwner(db);await assertNothingLeftBypassed(db);proof.status='pass'
+    await assertOrdinaryOwner(db);await assertNothingLeftBypassed(db,false);proof.status='pass'
    }catch(error){proof.status='blocked';proof.error={message:(error as Error).message,stack:(error as Error).stack};throw error}
    finally{
     await db.close();proof.closed=true
