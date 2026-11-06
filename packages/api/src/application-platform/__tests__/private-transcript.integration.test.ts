@@ -20,6 +20,7 @@ import {createDbMemoryStore} from '../../db/memory-store.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
 import {readPrivateTranscript} from '../../db/private-transcript.js'
+import * as privateTranscripts from '../../db/private-transcript.js'
 import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
 import {readAttendedSessionHistory,captureAttendedSessionClassification,assessAttendedSessionMessage,readClassifiedSessionHistory} from '../../routes/attended-session-context.js'
 import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../model-source-authority.js'
@@ -226,7 +227,7 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
   expect(summary?.summary).toContain('amber notebook')
   expect(summary?.boundarySequence).toBe(next.sequenceNum)
  },120_000)
- it.each(['ordinary','greeting','compacted','history-timeout','summary-timeout'])('passes old dialogue to the actual web provider: %s',async mode=>{
+ it.each(['ordinary','greeting','retry','channel-retry','compacted','history-timeout','summary-timeout'])('passes old dialogue to the actual web provider: %s',async mode=>{
   const compacted=mode==='compacted'||mode==='summary-timeout'
   const c=await setup()
   if(compacted)expect(await setCompactSummaryAndBoundary(c.session.id,'The office opens at nine; amber notebook selected.',c.reply.sequenceNum,null,
@@ -260,13 +261,33 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
   })
   app.use('/chat',chatRoutes({provider,systemPrompt:'Continue the fictional private conversation.',tools:new Map(),
    memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore(),pendingApprovalsStore:createPendingApprovalsStore()}))
-  const response=await request(app).post('/chat').send({sessionId:c.session.id,assistantId:c.f.assistantId,workspaceId:c.f.workspaceId,
-   message:mode==='greeting'?'hi?':'Which notebook did we choose earlier?',mode:'default',model:'pro'})
+  const replay=mode==='retry'||mode==='channel-retry'
+  const resume=vi.spyOn(privateTranscripts,'resumePrivateLegacySession')
+  const failedInput=replay?await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'hi?'}],senderUserId:c.userId,scope:c.scope}):undefined
+  const target=mode==='channel-retry'?{channelId:c.session.channelId}:{sessionId:c.session.id}
+  const response=await request(app).post('/chat').send({...target,assistantId:c.f.assistantId,workspaceId:c.f.workspaceId,
+   ...(failedInput?{truncateFromMessageId:failedInput.id}:{}),
+   message:mode==='greeting'||replay?'hi?':'Which notebook did we choose earlier?',mode:'default',model:'pro'})
   expect(response.status,response.text).toBe(200)
   expect(response.text).not.toContain('event: error')
+  expect(resume).not.toHaveBeenCalled()
   expect(calls.length,response.text).toBeGreaterThan(0)
   expect(JSON.stringify(calls[0])).toContain('We chose the amber notebook. The office opens at nine.')
-  expect((await readAttendedSessionHistory(await c.fresh(),c.session.id)).at(-1)?.content).toEqual([{type:'text',text:'We chose the amber notebook.'}])
+  const history=await readAttendedSessionHistory(await c.fresh(),c.session.id)
+  expect(history.at(-1)?.content).toEqual([{type:'text',text:'We chose the amber notebook.'}])
+  if(failedInput){
+   expect(history.map(row=>row.id)).not.toContain(failedInput.id)
+   expect(history.map(row=>row.id)).toContain(c.reply.id)
+   const replacement=history.at(-2)!
+   const replayed=await request(app).post('/chat').send({...target,assistantId:c.f.assistantId,workspaceId:c.f.workspaceId,
+    truncateFromMessageId:replacement.id,message:'hi?',mode:'default',model:'pro'})
+   expect(replayed.text).not.toContain('event: error')
+   expect(resume).not.toHaveBeenCalled()
+   const after=await readAttendedSessionHistory(await c.fresh(),c.session.id)
+   expect(after.map(row=>row.id)).not.toContain(replacement.id)
+   expect(after.map(row=>row.id)).toContain(c.reply.id)
+   expect(after.at(-1)?.content).toEqual([{type:'text',text:'We chose the amber notebook.'}])
+  }
  },120_000)
 
 })
