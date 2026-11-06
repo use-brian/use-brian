@@ -64,6 +64,7 @@ function app() {
   }
   const jobs = { get: vi.fn(async () => job), events: vi.fn(async () => [{ seq: 1, code: 'office.job.queued' } as never]), steer: vi.fn(async () => ({ id: 'steer-1' })), cancel: vi.fn(async () => true) }
   const templates = {
+    readPublished: vi.fn(async () => null),
     list: vi.fn(async () => []),
     getTemplate: vi.fn(async () => ({ id: 'template-1', workspaceId: WORKSPACE, family: 'document' as const, name: 'Pitch', lifecycleState: 'draft' as const, draftArtifactId: ARTIFACT })),
     getArtifact: vi.fn(async () => ({ id: ARTIFACT, workspaceId: WORKSPACE, family: 'document', mode: 'template', title: 'Pitch', headVersion: 0, headVersionId: null, lifecycleState: 'active' } as never)),

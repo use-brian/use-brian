@@ -1,5 +1,8 @@
 "use client";
 
+import { officeMetadataRemaining } from "@/lib/office/metadata";
+import { PublishedTemplateViewer } from "./published-template-viewer";
+import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
 import { officeInputClassName, officeTextareaClassName, officeDialogBackdropClassName, officeDialogClassName, officeFamilyBadgeClassName } from "@/components/office/office-chrome";
 
@@ -14,7 +17,7 @@ import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { awaitOfficeJob } from "@/lib/office/job-stream";
-import { createOfficeTemplate, retryOfficeTemplateImport, type OfficeImportDiagnostic, importOfficeTemplateDraft, listOfficeTemplates, transitionOfficeTemplateLifecycle, uploadOfficeSource, type OfficeArtifact, type OfficeFamily, type OfficeTemplate } from "@/lib/office/api";
+import { copyPublishedOfficeTemplate, createOfficeTemplate, retryOfficeTemplateImport, type OfficeImportDiagnostic, importOfficeTemplateDraft, listOfficeTemplates, transitionOfficeTemplateLifecycle, uploadOfficeSource, type OfficeArtifact, type OfficeFamily, type OfficeTemplate } from "@/lib/office/api";
 import { invalidateSurfaceCache, markSurfaceCacheStale } from "@/lib/surface-cache";
 import { invalidateOfficeList, officeArtifactCacheKey, officeSnapshotCacheKey, officeTemplateListCacheKey } from "@/lib/surface-prefetch";
 import { useOfficeMetadataResource } from "@/lib/office/surface-cache";
@@ -101,6 +104,8 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
   const [uploadName, setUploadName] = useState("");
   const [uploadGuidance, setUploadGuidance] = useState("");
   const [uploadState, setUploadState] = useState<"idle" | "working" | "invalid" | "failed">("idle");
+  const [viewPublished, setViewPublished] = useState(false);
+  const [copyName, setCopyName] = useState<string | null>(null);
   const [purgeConfirmation, setPurgeConfirmation] = useState("");
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const templatesHref = `/w/${workspaceId}/office/templates`;
@@ -128,6 +133,8 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
     creationScope.current = {};
     mutationLock.current = false;
     setMutationPending(false);
+    setViewPublished(false);
+    setCopyName(null);
     setPurgeConfirmation("");
     setMutationFailed(false);
     return () => { mutationScope.current = null; creationScope.current = null; };
@@ -139,6 +146,8 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
       mutationScope.current = null;
       mutationLock.current = false;
       setMutationPending(false);
+      setViewPublished(false);
+      setCopyName(null);
       setPurgeConfirmation("");
       setMutationFailed(false);
     } else if (!mutationScope.current) mutationScope.current = {};
@@ -181,6 +190,19 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
 
   const selected = templateId ? templates?.find((template) => template.id === templateId) : undefined;
   const selectedName = selected?.name ?? null;
+
+  async function copyPublished() {
+    const scope = mutationScope.current;
+    if (!scope || officeMetadataRemaining(templates, viewerId) <= 0 || !selected?.currentVersionId || selected.lifecycleState !== "admitted" || !copyName?.trim() || mutationLock.current) return;
+    mutationLock.current = true; setMutationPending(true); setMutationFailed(false);
+    try {
+      const created = await copyPublishedOfficeTemplate(selected.id, selected.currentVersionId, copyName.trim());
+      markSurfaceCacheStale(cacheKey);
+      if (mutationScope.current !== scope || officeMetadataRemaining(templates, viewerId) <= 0) return;
+      router.push(`/w/${workspaceId}/office/${created.draftArtifactId}?templateId=${created.id}`);
+    } catch { if (mutationScope.current === scope) setMutationFailed(true); }
+    finally { if (mutationScope.current === scope) { mutationLock.current = false; setMutationPending(false); } }
+  }
 
   function applyStarter(starter: OfficeStarterTemplate) {
     if (starter === "general-presentation") {
@@ -353,19 +375,21 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
       <Dialog.Root open={Boolean(selected) && !uploadOpen} onOpenChange={(open) => { if (!open) router.replace(templatesHref, { scroll: false }); }}>
         <Dialog.Portal>
           <Dialog.Backdrop className={officeDialogBackdropClassName} />
-          <Dialog.Popup className={`${officeDialogClassName} sm:max-w-lg`}>
+          <Dialog.Popup className={`${officeDialogClassName} ${viewPublished ? "sm:max-w-5xl" : "sm:max-w-lg"}`}>
             {selected ? <>
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0"><Dialog.Title className="break-words text-lg font-semibold">{selected.name}</Dialog.Title><Dialog.Description className="mt-1 text-sm text-muted-foreground">{selected.description || t.templateDescription}</Dialog.Description></div>
                 <Button variant="ghost" size="icon" className="max-sm:size-11" aria-label={t.closeTemplateAria} onClick={() => router.replace(templatesHref, { scroll: false })}><X aria-hidden /></Button>
               </div>
-              <div className="mt-5 overflow-hidden rounded-xl border bg-muted/20"><OfficeCardPreview workspaceId={workspaceId} artifact={{ artifactId: selected.draftArtifactId ?? "", family: selected.family, mode: "template", title: selected.name, version: selected.currentVersionId ? 1 : 0, lifecycleState: "active", role: "edit" }} /></div>
+              {viewPublished && selected.lifecycleState === "admitted" && selected.currentVersionId ? <div className="mt-5"><PublishedTemplateViewer workspaceId={workspaceId} viewerId={viewerId} templateId={selected.id} versionId={selected.currentVersionId} /></div> : <div className="mt-5 overflow-hidden rounded-xl border bg-muted/20"><OfficeCardPreview workspaceId={workspaceId} artifact={{ artifactId: selected.draftArtifactId ?? "", family: selected.family, mode: "template", title: selected.name, version: selected.currentVersionId ? 1 : 0, lifecycleState: "active", role: "edit" }} /></div>}
               <p className="mt-3 text-xs text-muted-foreground">{familyLabel(t, selected.family)}</p>
               {selected.importState?.status === "failed" || selected.importState?.status === "cancelled" ? <div role="alert" className="mt-3 space-y-2"><p className="text-destructive">{t.importTemplateFailed}</p><Button onClick={() => openTemplateRecovery(selected)}>{t.retryTemplateImport}</Button></div> : null}
               <div className="mt-4 flex flex-wrap gap-2">
+                {selected.lifecycleState === "admitted" && selected.currentVersionId ? <><Button variant="outline" onClick={() => setViewPublished(value => !value)} aria-pressed={viewPublished}>{t.viewPublishedTemplate}</Button><Button variant="outline" disabled={mutationPending} onClick={() => setCopyName(format(t.templateCopyName, { name: selected.name }).slice(0, 255))}>{t.createFromPublishedTemplate}</Button></> : null}
                 {selected.lifecycleState === "admitted" && selected.currentVersionId ? <Link className={buttonVariants()} href={`/w/${workspaceId}/office/new?templateId=${encodeURIComponent(selected.id)}&templateVersionId=${encodeURIComponent(selected.currentVersionId)}`}>{t.useTemplate}</Link> : selected.lifecycleState === "draft" && selected.draftArtifactId ? <Link className={buttonVariants()} href={`/w/${workspaceId}/office/${selected.draftArtifactId}?templateId=${selected.id}`}>{t.editTemplate}</Link> : null}
                 {selected.lifecycleState === "deprecated" || selected.lifecycleState === "trash" || selected.lifecycleState === "retained" ? <Button disabled={mutationPending} onClick={() => void transition("restore", "Restored from template library")}>{t.restore}</Button> : null}
               </div>
+              {copyName !== null ? <form className="mt-4 flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); void copyPublished(); }}><label className="grid flex-1 gap-1 text-sm"><span>{t.templateName}</span><input required maxLength={255} className={officeInputClassName} value={copyName} disabled={mutationPending} onChange={event => setCopyName(event.target.value)} /></label><Button type="submit" disabled={mutationPending || !copyName.trim()}>{t.createFromPublishedTemplate}</Button><Button type="button" variant="ghost" disabled={mutationPending} onClick={() => setCopyName(null)}>{copy.common.cancel}</Button></form> : null}
               <div className="mt-5 space-y-3 border-t pt-4">
                 <div className="flex flex-wrap gap-2">
                   {selected.lifecycleState === "admitted" ? <Button variant="outline" disabled={mutationPending} onClick={() => void transition("deprecate", "Deprecated from template library")}>{t.deprecateTemplate}</Button> : null}

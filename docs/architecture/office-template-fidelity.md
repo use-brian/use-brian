@@ -1,5 +1,16 @@
 # Office template export fidelity
 
+## Library actions and navigation
+
+Published templates expose a full read-only viewer and a Create template from
+published version action. Both bind an explicit admitted version belonging to
+the selected registry, never the mutable authoring draft. Copying creates an
+independent unpublished registry and editable draft, retaining source resources,
+reviewed fields, slide recipes, and classification floors through normal Office
+admission. Source access is checked again before the copy is initialized.
+Published-template media reads bind the resource to the admitted version rather
+than requiring it to remain in the mutable authoring draft.
+
 The existing Office workflow imports editable DOCX templates into the canonical
 document model, fills their placeholders, and exports through the existing DOCX
 and LibreOffice PDF generators. Reference PDFs are comparison inputs only.

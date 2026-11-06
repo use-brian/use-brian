@@ -23,7 +23,7 @@ type ResourceContext = {
 }
 
 export type OfficeResourceRouteDeps = {
-  load(userId: string, artifactId: string): Promise<ResourceContext | null>
+  load(userId: string, artifactId: string, published?: { templateId: string; versionId: string }): Promise<ResourceContext | null>
   readUpload(userId: string, workspaceId: string, fileId: string): Promise<{ bytes: Uint8Array; binding: OfficeFileBinding; validForMs: number } | null>
   normalizeImage?(bytes: Uint8Array): Promise<NormalizedOfficeImage>
   persistImage(params: {
@@ -47,14 +47,18 @@ export function officeResourceRoutes(deps: OfficeResourceRouteDeps): Router {
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
     const artifactId = String(req.params.artifactId)
     const resourceId = String(req.params.resourceId)
-    const context = await deps.load(userId, artifactId)
+    const publishedQuery = z.object({ templateId: z.string().uuid(), versionId: z.string().uuid() }).safeParse(req.query)
+    const published = req.query.templateId !== undefined || req.query.versionId !== undefined
+      ? publishedQuery.success ? publishedQuery.data : null : undefined
+    if (published === null) return void res.status(400).json({ error: 'Invalid published template resource query' })
+    const context = await deps.load(userId, artifactId, published)
     if (!context || (req.query.workspaceId !== undefined && req.query.workspaceId !== context.artifact.workspaceId)) return void res.status(404).json({ error: 'Office resource not found' })
     const ref = context.snapshot.resources.find((resource) => resource.id === resourceId)
     if (!ref) return void res.status(404).json({ error: 'Office resource not found' })
     const referenceRevision = JSON.stringify(ref)
     const started = performance.now()
     const resource = await deps.readResource(userId, context.artifact.workspaceId, resourceId)
-    const current = await deps.load(userId, artifactId)
+    const current = await deps.load(userId, artifactId, published)
     const currentRef = current?.snapshot.resources.find((entry) => entry.id === resourceId)
     if (!resource || !current || current.artifact.workspaceId !== context.artifact.workspaceId ||
       !currentRef || JSON.stringify(currentRef) !== referenceRevision) {

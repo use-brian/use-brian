@@ -85,18 +85,18 @@ export function useFileRefSrc(ref:FileRef|null,workspaceId:string):string|null {
 }
 
 /** All Office renderers use cache-owned URLs with the same protected lifetime. */
-export function useOfficeResourceUrls(artifactId:string|null,resourceIds:readonly string[]) {
+export function useOfficeResourceUrls(artifactId:string|null,resourceIds:readonly string[],published?:{templateId:string;versionId:string}) {
   const workspace=useOptionalWorkspaceContext();
   const ids=[...new Set(resourceIds)].sort();
   const key=workspace?.workspaceId&&workspace.me.id&&artifactId&&ids.length
-    ?officeMediaCacheKey(workspace.workspaceId,workspace.me.id,artifactId,ids):null;
+    ?officeMediaCacheKey(workspace.workspaceId,workspace.me.id,artifactId,ids)+(published?`:template:${published.templateId}:${published.versionId}`:""):null;
   const previous=useRef(key);
   useLayoutEffect(()=>{
     if(previous.current&&previous.current!==key)invalidateSurfaceCache(previous.current);
     previous.current=key;
   },[key]);
   const cache=useCachedResource(key,async()=>{
-    const results=await Promise.allSettled(ids.map(id=>fetchOfficeMediaProjection(workspace!.workspaceId,artifactId!,id)));
+    const results=await Promise.allSettled(ids.map(id=>fetchOfficeMediaProjection(workspace!.workspaceId,artifactId!,id,published)));
     const admitted=results.flatMap((result,index)=>result.status==='fulfilled'?[{id:ids[index],value:result.value}]:[]);
     // A partial image set is allowed, but failed or expired entries retain no URL.
     const usable=admitted.filter(({value})=>lifecycle.expiresInMs(value)>0);
