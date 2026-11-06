@@ -2,29 +2,41 @@
 
 External approvals are display-only, one-time decisions in Brian's existing approval queue. They never execute a Brian tool or resume a workflow. A separate relay consumes the decision and acknowledges its own attempt; an approval, notification, or receipt is not proof of tool execution.
 
-## Provisioning (no live actions required)
+## Workspace setup
 
-The API process accepts `BRIAN_EXTERNAL_APPROVAL_SOURCES`, a JSON array. Unset or `[]` disables ingestion. Invalid configuration (including duplicate source IDs or token digests, unknown fields, invalid UUIDs or channel types) prevents startup. Do not put raw tokens in this configuration or log authorization headers.
+A workspace owner or administrator opens **Workspace settings > External approvals**:
 
-Each entry has exactly:
+1. Name the external application, choose an assistant and a human workspace member.
+2. Choose **Web inbox**, or the approver's **verified recent channel**. The latter requires an existing inbound human interaction and an unambiguous pinned channel integration. Missing verification fails closed; arbitrary destination IDs are not accepted.
+3. Select **Register application**. Copy the newly issued credential into the external application's approved secret storage, then dismiss it. Brian shows plaintext only once and persists only its SHA-256 digest and display prefix.
+4. Configure the external application to use that credential for the relay endpoints below. No Brian server allowlist, environment-variable change or API restart is required.
 
-```json
-{
-  "id": "sandbox-relay",
-  "tokenSha256": "<64 lowercase hexadecimal characters: SHA-256 of the separately provisioned bearer>",
-  "workspaceId": "<workspace UUID>",
-  "assistantId": "<assistant UUID>",
-  "approverUserId": "<assigned human UUID>",
-  "channelType": "web",
-  "channelId": "queue"
-}
-```
+The assistant must be in this workspace and visible to both the administrator and the approver. Registration does not delegate approval authority to the administrator or external application: only the designated human may decide a request.
 
-`channelType` supports `web`, `telegram`, `slack`, `whatsapp`, `feishu`, `msteams`, `custom`; `channelIntegrationId` is an optional UUID. Use a verified human destination and pin its owning integration for channel delivery. The existing delivery dispatcher applies its destination-audience gate; notifications contain only a generic deep link, never external task/session IDs, title, message or options. Delivery failures leave the authenticated web queue available and are not evidence of delivery.
+The screen lists source IDs, credential prefixes, assistant, approver, notification destination and revocation state. **Rotate credential** immediately invalidates the old bearer without changing the source binding or existing human evidence. **Revoke credential** permanently disables ingestion, polling, decisions and unconsumed receipts for that registration. To change the assistant, approver or destination, revoke and create a new registration. Revocation does not undo actions already taken by an external application.
 
-Provision the bearer separately through your approved secret-management mechanism. This document does not generate or retrieve credentials. Limit network access to the relay as well as authenticating it. Source IDs are durable namespaces: do not repurpose an ID. Changing configured workspace, assistant, human, channel or integration invalidates prior requests. Token rotation alone preserves them. Removing a source disables its outstanding requests. Current workspace membership and assistant placement admission are checked on ingestion, reads and decisions, not trusted from a source payload.
+Credentials live only in the one-time response and the mounted reveal component, never in the surface cache or browser storage. Switching workspace/viewer or closing the screen discards the reveal. On an ambiguous network failure, refresh the source list before retrying; if issuance succeeded but its response was lost, rotate that source to obtain a new credential. Do not automatically replay credential mutations.
 
-Apply migration `8240_external_human_approvals.sql` using the normal offline/reviewed migration process before enabling the source. It adds only `external_approval_requests`: a unique `(source_id, external_request_id)` sidecar linked to `pending_approvals`, binding hash, immutable input/hash, external correlation IDs, effective expiry and acknowledgement. It enables RLS without tenant policies: transport data is owner/service-only. The implementation uses `getPool()` (`DATABASE_URL`, the schema owner), not `getAppPool()` (`DATABASE_URL_APP`, non-owner `app_user`). Do not grant tenant access to the sidecar or disable RLS to make a misconfigured service role work. Existing queue projections use their usual tenant RLS plus the assigned human/current-source check.
+The existing delivery dispatcher applies its destination-audience gate; notifications contain only a generic deep link, never external task/session IDs, title, message or options. A failed notification leaves web review available and is not evidence of delivery. Web-only sources cannot grant channel consent.
+
+### Workspace management API
+
+These endpoints require ordinary Brian user authentication, not the source bearer. They are owner/admin-only and are not exposed as model/MCP tools. Mutations additionally require a live authenticated human session; the session ledger, current administrator role, approver membership and assistant visibility are revalidated in the write transaction.
+
+Base: `/api/workspaces/:workspaceId/external-approval-sources`.
+
+- `GET /`: `{sources:[...]}` containing public metadata only, never a digest or bearer.
+- `POST /`: strict `{name,assistantId,approverUserId,notification:'web'|'verified_channel'}`; returns HTTP 201 `{source,token}` once. Notification defaults to `web`.
+- `POST /:sourceId/rotate`: exactly `{}`; returns `{source,token}` once.
+- `DELETE /:sourceId`: revokes the registration; returns HTTP 204.
+
+Issuance responses use `Cache-Control: no-store`. Authority identifiers and source IDs are server-bound, not incoming request metadata. Registry reads are live and approval transactions lock and revalidate the current registration, so stale snapshots cannot survive rotation or revocation. Source bindings cannot be edited or revived. Creation, last rotation and revocation retain actor/timestamp metadata. Removing an assistant/member makes the source inapplicable; it does not block their deletion. Workspace erasure removes its credential metadata.
+
+### Database rollout
+
+Apply `8240_external_human_approvals.sql` and then `8241_workspace_external_approval_sources.sql` through the normal reviewed migration process. The first adds the immutable transport sidecar; the second adds workspace registrations. Previously provisioned server allowlist entries are not automatically imported: register applications through workspace settings and replace their caller credentials.
+
+Both sidecars enable RLS without tenant policies: transport data and credential digests are owner/service-only. The controlled implementation uses `getPool()` (`DATABASE_URL`, schema owner), not `getAppPool()` (`DATABASE_URL_APP`, non-owner `app_user`). Do not grant tenant access to these tables or disable RLS. Existing queue projections retain tenant RLS plus the assigned human and current-source checks. No live migration or credential provisioning is implied by these implementation instructions.
 
 ## Authenticated relay contract
 
@@ -59,17 +71,17 @@ Receipts are separate from human decisions. Both approval and denial can be ackn
 
 ## Focused verification
 
-From `packages/api`, with existing dependencies (88 focused tests):
+From `packages/api`, with existing dependencies (130 focused protocol, management, SQL, channel-routing and migration-order tests):
 
 ```sh
-NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/vitest run src/external-approvals/__tests__ src/workflow/__tests__/approval-replies.test.ts src/workflow/__tests__/approval-deliveries.test.ts src/routes/__tests__/approvals.test.ts src/routes/__tests__/channel-workflow-replies.test.ts --maxWorkers=1
+NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/vitest run src/external-approvals/__tests__ src/workflow/__tests__/approval-replies.test.ts src/workflow/__tests__/approval-deliveries.test.ts src/workflow/__tests__/recent-approval-channel.test.ts src/routes/__tests__/approvals.test.ts src/routes/__tests__/channel-workflow-replies.test.ts scripts/__tests__/migration-order.test.ts --maxWorkers=1
 NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/tsc --noEmit
 ```
 
-From `apps/app-web` (37 focused tests, including the existing cache/filter regressions):
+From `apps/app-web` (58 focused tests, including workspace registration and existing cache/filter regressions):
 
 ```sh
-NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/vitest run src/lib/__tests__/approvals-filter.test.ts src/lib/__tests__/external-approvals-api.test.ts src/components/doc/panels/__tests__/approvals-cache.test.tsx --maxWorkers=1
+NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/vitest run src/lib/__tests__/approvals-filter.test.ts src/lib/__tests__/external-approvals-api.test.ts src/components/doc/panels/__tests__/approvals-cache.test.tsx src/lib/api/__tests__/external-approval-sources.test.ts src/components/settings-modal/sections/__tests__/external-approvals-section.test.tsx src/components/settings-modal/__tests__/settings-modal.test.ts --maxWorkers=1
 NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/tsc --noEmit --incremental false
 ```
 
