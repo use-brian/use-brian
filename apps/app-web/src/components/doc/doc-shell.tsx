@@ -110,7 +110,7 @@ import {
   yDocToSnapshot,
   type CustomPageTemplateSummary,
 } from "@use-brian/doc-model";
-import { EmptyPageLanding } from "./empty-page-landing";
+import { DraftPageStarters, EmptyPageLanding } from "./empty-page-landing";
 import { TemplateGallery } from "./template-gallery";
 import { SaveAsTemplateDialog, type SaveAsTemplateInput } from "./save-as-template-dialog";
 import { templateExtractionFromBlocks } from "@/lib/blueprints";
@@ -273,11 +273,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     return () => publishCollabLive(true);
   }, [collab.status, collab.synced]);
 
-  // Whether the active page's body is empty, recomputed live off the synced Yjs
-  // doc. Gates the draft landing (alongside the placeholder title): a fresh
-  // draft is the "what do you want to see?" surface only while it has no content
-  // — the instant a build (the landing prompt, or a corner-chat turn) adds a
-  // block, the editor takes over, so nothing is ever stranded behind the prompt.
+  // Synced Yjs content controls empty-draft assistance, never editor mounting.
   const [docEmpty, setDocEmpty] = useState(false);
   useEffect(() => {
     const doc = collab.doc;
@@ -292,14 +288,8 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     return () => frag.unobserveDeep(recompute);
   }, [collab.doc, collab.synced]);
 
-  // The just-created draft (set by "+ New draft" / add-child). It forces the
-  // landing through the create → navigate → sync window — before `pageView`
-  // resolves (`getView` round-trip) and before the doc syncs — so opening a new
-  // draft paints the prompt instantly instead of flashing the editor skeleton +
-  // comment band. We do NOT optimistically set `activeView` for this: that would
-  // mismatch the lagging URL (`activeView` = new id, `urlViewId` = old page) and
-  // blink the previous page under a skeleton. Cleared the moment the draft syncs,
-  // from which point the normal placeholder + `docEmpty` gate takes over.
+  // Keep assistance available through creation and initial sync. The editor
+  // keeps its own normal loading/readiness UI throughout.
   const [newDraftId, setNewDraftId] = useState<string | null>(null);
   useEffect(() => {
     if (newDraftId && newDraftId === urlViewId && collab.synced) {
@@ -307,12 +297,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     }
   }, [newDraftId, urlViewId, collab.synced]);
 
-  // Drafts the user chose to write by hand — the landing's "Start with a blank
-  // page" escape hatch. Membership forces the editor (not the prompt) for that
-  // page even while it's still an empty placeholder, so an explicit "skip AI"
-  // choice isn't undone by the placeholder gate. A Set so reopening one of these
-  // still-empty drafts doesn't bounce back to the landing, and so multiple
-  // blanked drafts coexist across a session.
+  // Explicit blank/template actions dismiss assistance for this session.
   const [blankDraftIds, setBlankDraftIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -596,26 +581,9 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     pageHasComments && pageView && !pageView.fullWidth
       ? commentGutterWidth(viewportWidth)
       : 0;
-  // A brand-new, untouched draft (placeholder title) shows
-  // the same "What do you want to see?" prompt as a blank tab — an empty draft
-  // and an empty tab are the same "haven't decided what this page is" state,
-  // except the draft already has an id. A submit hands the prompt to Chat (see
-  // `handleLandingSubmit`); once the page gains a block or a real title (Chat
-  // can edit it, or the user types), the editor takes over.
-  //
-  // Emptiness: while the doc is still syncing a placeholder draft is *presumed
-  // empty* (a freshly-created one is — this is what kills the open-flicker where
-  // the title + comment band + editor skeleton flashed before the prompt). The
-  // instant it syncs, the real `docEmpty` check takes over, so a placeholder page
-  // that somehow has content (e.g. a build whose auto-title failed) is never
-  // stranded behind the prompt — it just resolves to the editor a frame later.
-  //
-  // The `newDraftId` latch covers the earlier window still: right after "+ New
-  // draft", `pageView` is null (its `getView` is in flight), so the placeholder
-  // gate can't fire yet — the latch forces the landing until the draft syncs.
-  // "Start with a blank page" wins over every landing trigger: once the user
-  // opts to write the page by hand, the editor must hold even though the draft
-  // is still an empty placeholder (which would otherwise re-assert the prompt).
+  // Empty placeholder drafts offer compact assistance below the live editor.
+  // This gate never replaces the editor: typing or incoming content must not
+  // remount it or disturb its selection. Unsent starter work remains visible while writing.
   const startedBlank = urlViewId !== null && blankDraftIds.has(urlViewId);
   const isDraftLanding =
     !startedBlank &&
@@ -758,11 +726,8 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     }
   }, []);
 
-  // Landing's "Start with a blank page" on a blank tab (no page open): mint a
-  // draft and open it straight in the editor, skipping the AI prompt. Same
-  // create/navigate as `handleNewDraft`, minus the `newDraftId` latch (which
-  // exists to *hold* the landing) and plus a `blankDraftIds` entry so the
-  // placeholder gate doesn't re-assert the prompt once the draft syncs.
+  // The blank index creates a draft and dismisses optional assistance so the
+  // user's explicit choice to write opens only the editor.
   async function handleStartBlankNew() {
     setTopError(null);
     try {
@@ -856,8 +821,8 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // fresh ids. Then navigate to the new page.
   // "Start from a template" on the empty-page landing. The landing is only
   // shown over an existing empty draft (`urlViewId` — see `isDraftLanding`), so
-  // we fill THAT draft in place rather than minting a second page: drop the
-  // landing (mounts the live editor on the current draft) and hand the template
+  // we fill THAT draft in place rather than minting a second page: dismiss
+  // assistance (the live editor stays mounted on the current draft) and hand the template
   // to the editor via `seedTemplate`, which inserts its blocks at the top once
   // it goes live (the same Yjs insert path the "/template" slash item uses).
   // This is the fix for "a template made a new page and stranded the blank one".
@@ -911,8 +876,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   }, [landingGalleryOpen, workspaceId]);
 
   // Landing's "Start with a blank page" on an already-open empty draft: the
-  // page exists, so just drop its landing. Mark it blank (mounts the editor)
-  // and release the `newDraftId` latch so it can't snap the prompt back.
+  // page exists, so dismiss assistance and release the new-draft latch.
   function handleStartBlankDraft(viewId: string) {
     setNewDraftId((cur) => (cur === viewId ? null : cur));
     setBlankDraftIds((prev) => new Set(prev).add(viewId));
@@ -1261,25 +1225,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
           />
         )}
         {!suggestedOpen && urlViewId && !activeError && (
-          <>
-            {isDraftLanding ? (
-              // Empty, untouched draft → the blank-tab "What do you want to
-              // see?" prompt instead of a title + comment band + bare editor.
-              // A submit opens the Chat app with the prompt
-              // (`handleLandingSubmit`); the draft stays an empty placeholder
-              // and auto-prunes like any untouched draft.
-              <div className="flex-1 min-h-0 overflow-y-auto">
-                <EmptyPageLanding
-                  workspaceId={workspaceId}
-                  assistantId={assistantId}
-                  cards={landingCards}
-                  onOpenCard={navigateToView}
-                  onSubmitPrompt={handleLandingSubmit}
-                  onStartBlank={() => handleStartBlankDraft(urlViewId)}
-                  onStartFromTemplate={() => setLandingGalleryOpen(true)}
-                />
-              </div>
-            ) : (
               <div
                 data-comment-gutter={commentGutter > 0 ? "" : undefined}
                 style={
@@ -1430,6 +1375,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     : null}
                   <CollabPageEditor
                     collab={collab}
+                    blankDraft={isDraftLanding}
                     findOwnerId={findOwnerId}
                     canEdit
                     user={user}
@@ -1445,11 +1391,20 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     onTemplateSeeded={() => setSeedTemplate(null)}
                     onContentChange={handleDraftContentChange}
                   />
+                  <DraftPageStarters
+                    key={urlViewId}
+                    active={isDraftLanding}
+                    workspaceId={workspaceId}
+                    assistantId={assistantId}
+                    cards={[]}
+                    onOpenCard={navigateToView}
+                    onSubmitPrompt={handleLandingSubmit}
+                    onStartBlank={() => handleStartBlankDraft(urlViewId)}
+                    onStartFromTemplate={() => setLandingGalleryOpen(true)}
+                  />
                   </RecordingPlayerProvider>
                 </div>
               </div>
-            )}
-          </>
         )}
       </main>
       {/* The assistant chat dock is no longer mounted here — it lives once in
