@@ -28,6 +28,11 @@ workspace, filter, selection or collection authority invalidates that confirmati
 Both actions use the existing authorized lifecycle endpoints and preserve failed
 items for retry, including items protected by holds or template dependencies.
 
+The presentation thumbnail rail has a bounded grid row and independent vertical
+scrolling on desktop. Its horizontal phone filmstrip retains native touch panning.
+Selecting slides through keyboard or canvas navigation keeps the active thumbnail
+visible without scrolling the surrounding Office shell.
+
 The existing Office workflow imports editable DOCX templates into the canonical
 document model, fills their placeholders, and exports through the existing DOCX
 and LibreOffice PDF generators. Reference PDFs are comparison inputs only.
