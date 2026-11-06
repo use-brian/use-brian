@@ -2,6 +2,7 @@
 
 import { officeMetadataRemaining } from "@/lib/office/metadata";
 import { PublishedTemplateViewer } from "./published-template-viewer";
+import { OfficeLibrarySelectionBar, useOfficeLibrarySelection } from "./office-library-selection";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
 import { officeInputClassName, officeTextareaClassName, officeDialogBackdropClassName, officeDialogClassName, officeFamilyBadgeClassName } from "@/components/office/office-chrome";
@@ -190,6 +191,12 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
 
   const selected = templateId ? templates?.find((template) => template.id === templateId) : undefined;
   const selectedName = selected?.name ?? null;
+  const trashView = searchParams.get("view") === "trash";
+  const visibleTemplates = (templates ?? []).filter(item => trashView === ["trash", "retained"].includes(item.lifecycleState));
+  const eligibleIds = visibleTemplates.filter(item => (trashView ? ["trash", "retained"] : ["draft", "admitted", "deprecated"]).includes(item.lifecycleState)).map(item => item.id);
+  const selection = useOfficeLibrarySelection(`${workspaceId}:${viewerId}:${pathname}:${routeSearch}`, eligibleIds, templates !== null,
+    (id, action) => transitionOfficeTemplateLifecycle(id, action, `Bulk ${action} from template library`),
+    () => { markSurfaceCacheStale(cacheKey); invalidateOfficeList(workspaceId); void list.refresh(); }, () => officeMetadataRemaining(templates, viewerId) > 0);
 
   async function copyPublished() {
     const scope = mutationScope.current;
@@ -355,10 +362,13 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
         <h1 className="text-2xl font-semibold">{choosingForArtifact ? t.chooseTemplateTitle : t.templateTitle}</h1>
         <p className="mt-1 text-sm text-muted-foreground">{choosingForArtifact ? t.chooseTemplateDescription : t.templateDescription}</p>
 
+        <div className="my-3 flex gap-2"><Link className={buttonVariants({ variant: trashView ? "ghost" : "outline", size: "sm" })} href={templatesHref}>{t.templates}</Link><Link className={buttonVariants({ variant: trashView ? "outline" : "ghost", size: "sm" })} href={`${templatesHref}?view=trash`}>{t.trash}</Link></div>
+        <OfficeLibrarySelectionBar selection={selection} total={eligibleIds.length} trashView={trashView} itemNames={Object.fromEntries(visibleTemplates.map(item => [item.id, item.name]))} />
+
         {templates === null ? list.error ? <div className="py-16 text-center text-sm">
           <p role="alert" className="text-destructive">{t.loadFailed}</p>
           <button type="button" disabled={list.revalidating} onClick={() => void list.refresh()} className={buttonVariants({ variant: "outline", size: "sm", className: "mt-3" })}>{copy.chat.retry}</button>
-        </div> : <GridSurfaceSkeleton chrome={false} padded={false} /> : templates.length === 0 ? (
+        </div> : <GridSurfaceSkeleton chrome={false} padded={false} /> : visibleTemplates.length === 0 ? (
           <section className="mt-8 rounded-xl border border-dashed p-8 text-center">
             <h2 className="font-medium">{t.noTemplates}</h2>
             <p className="mt-1 text-sm text-muted-foreground">{t.templateEmptyBody}</p>
@@ -368,7 +378,7 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
             </div>
           </section>
         ) : (
-          <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{templates.map((template) => <OfficeTemplateCard key={template.id} workspaceId={workspaceId} template={template} />)}</div>
+          <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{visibleTemplates.map((template) => <div key={template.id} className="relative">{eligibleIds.includes(template.id) ? <label className="absolute right-2 top-2 z-10 flex size-11 cursor-pointer items-center justify-center rounded-lg bg-background/90"><Checkbox aria-label={format(t.selectItem, { name: template.name })} checked={selection.selected.includes(template.id)} disabled={selection.pending} onCheckedChange={checked => selection.toggle(template.id, checked)} /></label> : null}<OfficeTemplateCard workspaceId={workspaceId} template={template} /></div>)}</div>
         )}
       </main>
 

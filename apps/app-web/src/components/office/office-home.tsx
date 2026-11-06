@@ -5,10 +5,14 @@ import { useMemo } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { FileSpreadsheet, FileText, Presentation, Plus } from "lucide-react";
+import { officeMetadataRemaining } from "@/lib/office/metadata";
+import { Checkbox } from "@/components/ui/checkbox";
+import { OfficeLibrarySelectionBar, useOfficeLibrarySelection } from "./office-library-selection";
+import { markSurfaceCacheStale } from "@/lib/surface-cache";
 import { buttonVariants } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { isOfficeStartFailed, listOfficeArtifacts, officeJobFailureKind, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
+import { isOfficeStartFailed, listOfficeArtifacts, transitionOfficeLifecycle, officeJobFailureKind, type OfficeArtifact, type OfficeFamily } from "@/lib/office/api";
 import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 import { officeListCacheKey, type OfficeListView } from "@/lib/surface-prefetch";
 import { useOfficeMetadataResource } from "@/lib/office/surface-cache";
@@ -38,6 +42,11 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
     () => (artifacts ?? []).filter((artifact) => artifact.mode !== "template" && (filter === "all" || artifact.family === filter)),
     [artifacts, filter],
   );
+  const trashView = view === "trash" || view === "retained";
+  const eligibleIds = visible.filter(item => item.role === "edit" && (trashView ? ["trash", "retained"] : ["active", "archived"]).includes(item.lifecycleState)).map(item => item.artifactId);
+  const selection = useOfficeLibrarySelection(`${workspaceId}:${viewerId}:${view}:${filter}`, eligibleIds, artifacts !== null,
+    (id, action) => transitionOfficeLifecycle(id, action, `Bulk ${action} from file library`),
+    () => { markSurfaceCacheStale(`office:${workspaceId}:`); void list.refresh(); }, () => officeMetadataRemaining(artifacts, viewerId) > 0);
   const breadcrumbs = [
     { label: view === "active" ? t.files : t[view] },
     ...(filter === "all" ? [] : [{ label: filter === "document" ? t.documents : filter === "presentation" ? t.presentations : t.spreadsheets }]),
@@ -68,6 +77,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
       />
       <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 p-4 sm:p-6 lg:p-8">
         <h1 className="sr-only">{t.homeTitle}</h1>
+        <OfficeLibrarySelectionBar selection={selection} total={eligibleIds.length} trashView={trashView} itemNames={Object.fromEntries(visible.map(item => [item.artifactId, item.title]))} />
 
         {artifacts === null ? failed ? <p className="py-16 text-center text-sm text-destructive">{t.loadFailed}</p> : <div data-office-home-skeleton="true" aria-busy="true"><GridSurfaceSkeleton chrome={false} padded={false} /></div> : visible.length === 0 ? view === "active" && filter === "all" ? (
           <section className="rounded-2xl border border-dashed px-6 py-14 text-center">
@@ -94,7 +104,9 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
                   ? officeJobStateLabel(t, artifact.job.status, artifact.job.latestEvent)
                   : null;
               return (
-                <Link key={artifact.artifactId} data-office-file-card={artifact.family} href={`/w/${workspaceId}/office/${artifact.artifactId}`} className="group min-w-0 overflow-hidden rounded-xl border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.03)] transition-[border-color,box-shadow] hover:border-foreground/25 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
+                <article key={artifact.artifactId} className="relative min-w-0">
+                  {eligibleIds.includes(artifact.artifactId) ? <label className="absolute right-2 top-2 z-10 flex size-11 cursor-pointer items-center justify-center rounded-lg bg-background/90"><Checkbox aria-label={format(t.selectItem, { name: artifact.title })} checked={selection.selected.includes(artifact.artifactId)} disabled={selection.pending} onCheckedChange={checked => selection.toggle(artifact.artifactId, checked)} /></label> : null}
+                <Link data-office-file-card={artifact.family} href={`/w/${workspaceId}/office/${artifact.artifactId}`} className="group block min-w-0 overflow-hidden rounded-xl border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.03)] transition-[border-color,box-shadow] hover:border-foreground/25 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
                   <OfficeCardPreview workspaceId={workspaceId} artifact={artifact} />
                   <div className="flex min-h-32 flex-col p-3.5">
                     <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
@@ -108,6 +120,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
                     </div>
                   </div>
                 </Link>
+                </article>
               );
             })}
           </div>

@@ -184,6 +184,33 @@ describe("[COMP:app-web/office-surface-cache] Office home", () => {
   });
 });
 
+describe("[COMP:app-web/office-library-selection] Trash view lifecycle wiring", () => {
+  it.each(["file", "template"] as const)("restores selected %s rows from Trash using the matching lifecycle endpoint", async family => {
+    navigation.search = "view=trash";
+    if (family === "file") {
+      api.listOfficeArtifacts.mockResolvedValue([{ ...ROW, lifecycleState: "trash" }, { ...ROW, artifactId: "retained-file", title: "Retained file", lifecycleState: "retained" }, { ...ROW, artifactId: "view-only", role: "view", lifecycleState: "trash" }]);
+      api.transitionOfficeLifecycle.mockResolvedValue({});
+      render(<OfficeHome workspaceId={WORKSPACE} />);
+    } else {
+      api.listOfficeTemplates.mockReset().mockResolvedValue([
+        { id: "template-trash", family: "document", name: "Trashed template", description: "Fixture", lifecycleState: "trash", draftArtifactId: "draft-a", currentVersionId: null },
+        { id: "template-retained", family: "document", name: "Retained template", description: "Fixture", lifecycleState: "retained", draftArtifactId: "draft-b", currentVersionId: null },
+      ]);
+      api.transitionOfficeTemplateLifecycle.mockReset().mockResolvedValue({});
+      render(<OfficeTemplateLibrary workspaceId={WORKSPACE} />);
+    }
+    await act(async () => { await settle(); });
+    const bar = container.querySelector('[data-office-library-selection]')!;
+    act(() => (bar.querySelector('[role="checkbox"]') as HTMLButtonElement).click());
+    expect(bar.textContent).toContain('2 selected');
+    await act(async () => { [...bar.querySelectorAll('button')].find(item => item.textContent === en.office.restore)!.click(); await settle(); });
+    const mutate = family === "file" ? api.transitionOfficeLifecycle : api.transitionOfficeTemplateLifecycle;
+    expect(mutate).toHaveBeenCalledTimes(2);
+    expect(mutate.mock.calls.every(call => call[1] === "restore")).toBe(true);
+    expect(bar.textContent).toContain('0 selected');
+  });
+});
+
 describe("[COMP:app-web/office-surface-cache] Office editor shell", () => {
   it("paints the chrome from the home's list row before the snapshot resolves, and fetches row + snapshot in parallel (N7)", async () => {
     await loadSurfaceCache(officeListCacheKey(WORKSPACE, "active"), async () => bounded([ROW]));
@@ -521,6 +548,10 @@ describe("[COMP:app-web/office-surface-cache] template lifecycle", () => {
     expect(document.querySelector("[role=alert]")).toBeNull();
     expect(button(en.chat.retry)).toBeUndefined();
     expect(button(en.office.restore)).toBeDefined();
+    expect(document.querySelector("[data-office-template-card]")).toBeNull();
+    navigation.search = "view=trash";
+    render(<OfficeTemplateLibrary workspaceId={WORKSPACE} templateId={template.id} />);
+    await act(async () => { await settle(); });
     expect(document.querySelector("[data-office-template-card]")).not.toBeNull();
   });
 

@@ -11,6 +11,23 @@ admission. Source access is checked again before the copy is initialized.
 Published-template media reads bind the resource to the admitted version rather
 than requiring it to remain in the mutable authoring draft.
 
+Files and Templates expose accessible per-card selection, select all eligible
+visible items, clear selection, and a single Move to Trash action. Trash uses
+the existing authorized lifecycle endpoints. Successful items leave selection;
+failed items remain selected with an error for retry. Selection belongs to the
+current viewer, workspace, filters and currently authorized collection and clears
+when that ownership changes. Trashed and retained items are not trash candidates.
+The Templates/Trash switch keeps trashed templates out of the active grid while
+retaining their restore path.
+
+File and template Trash views support the same per-card and select-all selection.
+Their bulk actions are Restore and Delete permanently, including retained items.
+Permanent deletion requires a dialog that lists the selected names and an exact
+typed confirmation of the localized Delete permanently label. Changing viewer,
+workspace, filter, selection or collection authority invalidates that confirmation.
+Both actions use the existing authorized lifecycle endpoints and preserve failed
+items for retry, including items protected by holds or template dependencies.
+
 The existing Office workflow imports editable DOCX templates into the canonical
 document model, fills their placeholders, and exports through the existing DOCX
 and LibreOffice PDF generators. Reference PDFs are comparison inputs only.
