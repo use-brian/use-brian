@@ -5,7 +5,7 @@ import { PublishedTemplateViewer } from "./published-template-viewer";
 import { OfficeLibrarySelectionBar, useOfficeLibrarySelection } from "./office-library-selection";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
-import { officeInputClassName, officeTextareaClassName, officeDialogBackdropClassName, officeDialogClassName, officeFamilyBadgeClassName } from "@/components/office/office-chrome";
+import { officeInputClassName, officeTextareaClassName, officeDialogBackdropClassName, officeDialogClassName, officeFamilyBadgeClassName, officeCardSelectionTargetClassName, officeSelectionCheckboxClassName } from "@/components/office/office-chrome";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -378,7 +378,7 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
             </div>
           </section>
         ) : (
-          <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{visibleTemplates.map((template) => <div key={template.id} className="relative">{eligibleIds.includes(template.id) ? <label className="absolute right-2 top-2 z-10 flex size-11 cursor-pointer items-center justify-center rounded-lg bg-background/90"><Checkbox aria-label={format(t.selectItem, { name: template.name })} checked={selection.selected.includes(template.id)} disabled={selection.pending} onCheckedChange={checked => selection.toggle(template.id, checked)} /></label> : null}<OfficeTemplateCard workspaceId={workspaceId} template={template} /></div>)}</div>
+          <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">{visibleTemplates.map((template) => <div key={template.id} className="relative">{eligibleIds.includes(template.id) ? <label className={officeCardSelectionTargetClassName}><Checkbox className={officeSelectionCheckboxClassName} aria-label={format(t.selectItem, { name: template.name })} checked={selection.selected.includes(template.id)} disabled={selection.pending} onCheckedChange={checked => selection.toggle(template.id, checked)} /></label> : null}<OfficeTemplateCard workspaceId={workspaceId} template={template} /></div>)}</div>
         )}
       </main>
 

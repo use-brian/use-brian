@@ -19,6 +19,9 @@ current viewer, workspace, filters and currently authorized collection and clear
 when that ownership changes. Trashed and retained items are not trash candidates.
 The Templates/Trash switch keeps trashed templates out of the active grid while
 retaining their restore path.
+Selection uses the shared neutral checkbox at 14px, with no filled backing tile
+over the preview. Card controls retain a transparent 44px target on phones and
+tablets and a compact 28px target on desktop; keyboard focus stays visible.
 
 File and template Trash views support the same per-card and select-all selection.
 Their bulk actions are Restore and Delete permanently, including retained items.

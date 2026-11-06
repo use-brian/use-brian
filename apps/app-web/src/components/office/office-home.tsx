@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { FileSpreadsheet, FileText, Presentation, Plus } from "lucide-react";
 import { officeMetadataRemaining } from "@/lib/office/metadata";
+import { officeCardSelectionTargetClassName, officeSelectionCheckboxClassName } from "./office-chrome";
 import { Checkbox } from "@/components/ui/checkbox";
 import { OfficeLibrarySelectionBar, useOfficeLibrarySelection } from "./office-library-selection";
 import { markSurfaceCacheStale } from "@/lib/surface-cache";
@@ -105,7 +106,7 @@ export function OfficeHome({ workspaceId, initialArtifacts }: { workspaceId: str
                   : null;
               return (
                 <article key={artifact.artifactId} className="relative min-w-0">
-                  {eligibleIds.includes(artifact.artifactId) ? <label className="absolute right-2 top-2 z-10 flex size-11 cursor-pointer items-center justify-center rounded-lg bg-background/90"><Checkbox aria-label={format(t.selectItem, { name: artifact.title })} checked={selection.selected.includes(artifact.artifactId)} disabled={selection.pending} onCheckedChange={checked => selection.toggle(artifact.artifactId, checked)} /></label> : null}
+                  {eligibleIds.includes(artifact.artifactId) ? <label className={officeCardSelectionTargetClassName}><Checkbox className={officeSelectionCheckboxClassName} aria-label={format(t.selectItem, { name: artifact.title })} checked={selection.selected.includes(artifact.artifactId)} disabled={selection.pending} onCheckedChange={checked => selection.toggle(artifact.artifactId, checked)} /></label> : null}
                 <Link data-office-file-card={artifact.family} href={`/w/${workspaceId}/office/${artifact.artifactId}`} className="group block min-w-0 overflow-hidden rounded-xl border bg-card shadow-[0_1px_2px_rgb(0_0_0/0.03)] transition-[border-color,box-shadow] hover:border-foreground/25 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
                   <OfficeCardPreview workspaceId={workspaceId} artifact={artifact} />
                   <div className="flex min-h-32 flex-col p-3.5">

@@ -3,7 +3,7 @@
 /** Scoped selection and retryable lifecycle actions. [COMP:app-web/office-library-selection] */
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
-import { officeDialogBackdropClassName, officeDialogClassName, officeInputClassName } from "./office-chrome";
+import { officeDialogBackdropClassName, officeDialogClassName, officeInputClassName, officeSelectionCheckboxClassName } from "./office-chrome";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n/client";
@@ -55,7 +55,7 @@ export function OfficeLibrarySelectionBar({ selection, total, trashView = false,
   if (!total) return null;
   return <>
     <div className="flex flex-wrap items-center gap-3" data-office-library-selection="true">
-      <label className="flex min-h-11 cursor-pointer items-center gap-2 text-sm"><Checkbox checked={selection.selected.length === total} indeterminate={selection.selected.length > 0 && selection.selected.length < total} disabled={selection.pending} onCheckedChange={selection.selectAll} /><span>{t.selectAllItems}</span></label>
+      <label className="flex min-h-11 cursor-pointer items-center gap-2 text-sm"><Checkbox className={officeSelectionCheckboxClassName} checked={selection.selected.length === total} indeterminate={selection.selected.length > 0 && selection.selected.length < total} disabled={selection.pending} onCheckedChange={selection.selectAll} /><span>{t.selectAllItems}</span></label>
       <span className="text-sm text-muted-foreground" role="status">{format(t.selectedItems, { count: selection.selected.length })}</span>
       {selection.selected.length ? <>
         <Button variant="ghost" disabled={selection.pending} onClick={() => selection.selectAll(false)}>{t.clearSelection}</Button>
