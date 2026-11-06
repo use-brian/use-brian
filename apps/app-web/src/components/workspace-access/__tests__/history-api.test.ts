@@ -10,14 +10,14 @@ describe('[COMP:app-web/workspace-access] history transport and protected lifeti
   it('uses the no-store registry endpoint and rejects expired authority',async()=>{
     mocks.fetch.mockResolvedValueOnce({ok:true,json:async()=>({validForMs:30000,teams:[]})});
     const result=await fetchWorkspaceDepartmentRegistry('workspace');expect(result.teams).toEqual([]);
-    expect(mocks.fetch).toHaveBeenCalledWith('https://api.example/api/workspaces/workspace/access/registry',{cache:'no-store'});
+    expect(mocks.fetch).toHaveBeenCalledWith('https://api.example/api/workspaces/workspace/access/registry',expect.objectContaining({cache:'no-store',signal:expect.any(AbortSignal)}));
     mocks.fetch.mockResolvedValueOnce({ok:false,status:403,json:async()=>({error:'not_found'})});
     await expect(fetchWorkspaceDepartmentRegistry('workspace')).rejects.toBeInstanceOf(SurfaceCacheEvictionError);
   });
   it.each(['requests','grants'] as const)('binds %s history to its cursor and policy revision without cache reuse',async kind=>{
     mocks.fetch.mockResolvedValue({ok:true,json:async()=>({kind,requests:[],grants:[],nextCursor:null,validForMs:30000})});
     const value=await fetchWorkspaceAccessHistory('workspace',kind,'anchor','14');
-    expect(mocks.fetch).toHaveBeenCalledWith(`https://api.example/api/workspaces/workspace/access/${kind}?after=anchor&expectedPolicyRevision=14`,{cache:'no-store'});
+    expect(mocks.fetch).toHaveBeenCalledWith(`https://api.example/api/workspaces/workspace/access/${kind}?after=anchor&expectedPolicyRevision=14`,expect.objectContaining({cache:'no-store',signal:expect.any(AbortSignal)}));
     expect(value.projectionDeadline).toBeLessThanOrEqual(Date.now()+30000);
     expect(value.projectionMonotonicDeadline).toBeGreaterThan(performance.now());
   });
