@@ -1150,3 +1150,8 @@ export function projectContentCacheKey(workspaceId: string, projectId: string, v
 export function engineeringHistoryCacheKey(workspaceId: string, selection: string): string {
   return `engineering-history:${workspaceId}${viewerSuffix()}:${selection}`;
 }
+
+/** Metadata only. Issued credentials must never be stored under this key. */
+export function externalApprovalSourcesCacheKey(workspaceId: string, viewerId: string): string {
+  return `external-approval-sources:${workspaceId}:${viewerId}`;
+}
