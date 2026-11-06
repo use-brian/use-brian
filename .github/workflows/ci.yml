@@ -77,6 +77,17 @@ jobs:
       - name: Test release-evidence checks
         run: node --test scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs scripts/__tests__/migration-owner-groups.test.mjs
 
+      - name: Archive database test dependencies
+        run: tar -czf "$RUNNER_TEMP/database-test-dependencies.tgz" packages/*/dist
+
+      - name: Retain database test dependencies
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-test-dependencies-${{ github.sha }}
+          path: ${{ runner.temp }}/database-test-dependencies.tgz
+          if-no-files-found: error
+          retention-days: 1
+
       # Discovery is report-only until complete journeys qualify ten candidates.
       # The required build-test gate depends on complete selected-scope coverage.
       - name: Inventory selected test files (report-only)
@@ -311,7 +322,7 @@ jobs:
         run: pnpm --filter @use-brian/api-open exec vitest run src/runtime.test.ts
 
   department-isolation-shards:
-    needs: ci-scope
+    needs: [ci-scope, build-typecheck]
     if: >-
       github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
@@ -351,13 +362,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build test dependencies
-        run: |
-          pnpm exec turbo run build --filter="@use-brian/api-open^..."
-          if [[ ( "${{ needs.ci-scope.outputs.profile }}" == current && "${{ matrix.shard }}" == 1 ) ||
-                ( "${{ needs.ci-scope.outputs.profile }}" == full && "${{ matrix.shard }}" == 4 ) ]]; then
-            pnpm exec turbo run build --filter="app-web^..."
-          fi
+      - name: Download database test dependencies
+        uses: actions/download-artifact@v4
+        with:
+          name: database-test-dependencies-${{ github.sha }}
+          path: ${{ runner.temp }}
+
+      - name: Restore database test dependencies
+        run: tar -xzf "$RUNNER_TEMP/database-test-dependencies.tgz"
 
       - name: Run no-credential acceptance
         run: >-
