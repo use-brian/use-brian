@@ -82,7 +82,39 @@ const unavailable = (promise: Promise<unknown>) => expect(promise).rejects.toMat
   reason: 'permission_snapshot_unavailable', operationMayHaveExecuted: false,
 })
 
-describe('request permission context', () => {
+describe('[COMP:api/private-transcript] request permission context', () => {
+  it('revalidates private dialogue for every output without repeating native field admission', async () => {
+    const f = fixture()
+    const transcript = { ...f.accumulator.evidence.sources![0], resourceKind: 'private_transcript' as const, resourceId: 'dialogue' }
+    f.accumulator.note({ sources: [transcript] })
+    for (let i = 0; i < 3; i++) await f.permissions.authorizeDelivery(f.context())
+    expect(destinationQuery).not.toHaveBeenCalled()
+    expect(admit.mock.calls.map(call => call[1].sources?.map(source => source.resourceKind))).toEqual([
+      ['memory'], ['private_transcript'], ['private_transcript'], ['private_transcript'],
+    ])
+    admit.mockRejectedValueOnce(new Error('Dialogue held'))
+    await expect(f.permissions.authorizeDelivery(f.context())).rejects.toThrow('Dialogue held')
+    await expect(f.permissions.authorizeDelivery(f.context())).rejects.toThrow()
+    expect(admit).toHaveBeenCalledTimes(5)
+  })
+
+  it('refuses evidence changed while the final transcript proof is pending', async () => {
+    const f = fixture()
+    f.accumulator.note({ sources: [{ ...f.accumulator.evidence.sources![0], resourceKind: 'private_transcript', resourceId: 'dialogue' }] })
+    await f.permissions.authorizeDelivery(f.context())
+    let finish!: () => void
+    admit.mockImplementationOnce(async (_execution, evidence) => {
+      await new Promise<void>(resolve => { finish = resolve })
+      return evidence
+    })
+    const pending = expect(f.permissions.authorizeDelivery(f.context())).rejects.toThrow()
+    f.accumulator.note({ sensitivity: 'confidential' })
+    finish()
+    await pending
+    await expect(f.permissions.authorizeDelivery(f.context())).rejects.toThrow()
+    expect(destinationQuery).not.toHaveBeenCalled()
+  })
+
   it('shares lazy action permissions, coalesces event bursts, and never refreshes at delivery', async () => {
     const f = fixture()
     expect(f.createActionSnapshots).toHaveBeenCalledOnce()

@@ -70,13 +70,11 @@ export function createResponseDeliveryAdmission(
     async assertOutputAuthority(context: ToolContext) {
       try {
         assertIdentity(context)
-        const evidence = accumulator.evidence
-        const footprint = JSON.stringify(evidence)
-        // Text/reasoning chunks do not change source evidence. They need no new
-        // destination lookup or accumulated-source admission. This receipt belongs
-        // to this response, destination, execution and exact evidence footprint.
-        if (!independentDelivery && footprint === admittedFootprint) return
-        if (independentDelivery || !nativeEvidence(evidence)) {
+        let evidence = accumulator.evidence
+        let footprint = JSON.stringify(evidence)
+        const transcripts = (evidence.sources ?? []).filter(source => source.resourceKind === 'private_transcript')
+        const native = { ...evidence, sources: (evidence.sources ?? []).filter(source => source.resourceKind !== 'private_transcript') }
+        if (independentDelivery || !nativeEvidence(native)) {
           independentDelivery = true
           const decision = await fallback({ ...destination, scopeEvidence: evidence })
           if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
@@ -85,26 +83,45 @@ export function createResponseDeliveryAdmission(
           accumulator.note(decision.evidence)
           return
         }
-        // Admit new observations only. Keep the complete label floor, but do not
-        // repeatedly submit every previously admitted source with each tool result.
-        const sources = (evidence.sources ?? []).filter(source => !admittedSources.has(JSON.stringify(source)))
-        const admitted = await validateAttendedAudienceEvidence(execution, { ...evidence, sources }, recipient,
-          { directHumanSource: !shared })
-        assertIdentity(context)
-        if (JSON.stringify(accumulator.evidence) !== footprint) refuse()
-        if (!nativeEvidence(admitted)) {
-          // Native fields can carry independent connector ancestry. Such sources
-          // retain their separate live delivery protocol, never a cached allow.
-          independentDelivery = true
-          const decision = await fallback({ ...destination, scopeEvidence: evidence })
-          if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
+        if (footprint !== admittedFootprint) {
+          // Admit new observations only. Keep the complete label floor, but do not
+          // repeatedly submit every previously admitted source with each tool result.
+          const sources = (evidence.sources ?? []).filter(source => source.resourceKind !== 'private_transcript'
+            && !admittedSources.has(JSON.stringify(source)))
+          const admitted = await validateAttendedAudienceEvidence(execution, { ...evidence, sources }, recipient,
+            { directHumanSource: !shared })
           assertIdentity(context)
           if (JSON.stringify(accumulator.evidence) !== footprint) refuse()
-          accumulator.note(decision.evidence)
-          return
+          if (!nativeEvidence(admitted)) {
+            // Native fields can carry independent connector ancestry. Such sources
+            // retain their separate live delivery protocol, never a cached allow.
+            independentDelivery = true
+            const decision = await fallback({ ...destination, scopeEvidence: evidence })
+            if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
+            assertIdentity(context)
+            if (JSON.stringify(accumulator.evidence) !== footprint) refuse()
+            accumulator.note(decision.evidence)
+            return
+          }
+          accumulator.note(admitted)
+          for (const source of accumulator.evidence.sources ?? []) {
+            if (source.resourceKind !== 'private_transcript') admittedSources.add(JSON.stringify(source))
+          }
         }
-        accumulator.note(admitted)
-        for (const source of accumulator.evidence.sources ?? []) admittedSources.add(JSON.stringify(source))
+        if (transcripts.length) {
+          // Finish native admission first, then freshly validate the dialogue.
+          // An unchanged stream still observes transcript edits/holds, including
+          // changes made while native admission awaited the database. Transcript
+          // locks are confined to this short, independent canonical proof.
+          evidence = accumulator.evidence
+          footprint = JSON.stringify(evidence)
+          const admitted = await validateAttendedAudienceEvidence(execution, { ...evidence, sources: transcripts }, recipient,
+            { directHumanSource: !shared })
+          assertIdentity(context)
+          if (JSON.stringify(accumulator.evidence) !== footprint) refuse()
+          if ((admitted.sources ?? []).some(source => source.resourceKind !== 'private_transcript')) refuse()
+          accumulator.note(admitted)
+        }
         admittedFootprint = JSON.stringify(accumulator.evidence)
       } catch (error) {
         invalid = true
