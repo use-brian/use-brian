@@ -21,7 +21,8 @@
     "test:integration": "turbo run test:integration",
     "smoke": "pnpm --filter @use-brian/core smoke",
     "release:browser-extension": "scripts/publish-browser-extension.sh",
-    "eval": "pnpm --filter @use-brian/api eval"
+    "eval": "pnpm --filter @use-brian/api eval",
+    "preflight:push": "node scripts/testing/preflight-push.mjs"
   },
   "devDependencies": {
     "@types/pg": "^8.11.10",
