@@ -17,7 +17,8 @@ import { PGlite } from '@electric-sql/pglite'
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm'
 import { vector } from '@electric-sql/pglite-pgvector'
 import assert from 'node:assert/strict'
-import { describe, it } from 'node:test'
+import { describe } from 'node:test'
+import { migrationOwnerTest as it } from './migration-owner-groups.js'
 import { fileURLToPath } from 'node:url'
 import { readFile, readdir } from 'node:fs/promises'
 import { toPgliteMigrationSql } from '@use-brian/api/migrations/pglite-sql.js'
@@ -78,7 +79,7 @@ async function assertOrdinaryOwner(db: PGlite): Promise<void> {
   )
 }
 
-async function assertNothingLeftBypassed(db: PGlite): Promise<void> {
+async function assertNothingLeftBypassed(db: PGlite, skillReceiptOwnerAccess = false): Promise<void> {
   assert.deepEqual(
     (await db.query(
       `SELECT tgrelid::regclass::text AS "table", tgname FROM pg_trigger
@@ -88,9 +89,10 @@ async function assertNothingLeftBypassed(db: PGlite): Promise<void> {
   )
   assert.deepEqual(
     (await db.query(
-      `SELECT relforcerowsecurity FROM pg_class WHERE oid = 'public.workspace_skill_scope_revisions'::regclass`,
+      `SELECT relrowsecurity,relforcerowsecurity FROM pg_class WHERE oid = 'public.workspace_skill_scope_revisions'::regclass`,
     )).rows,
-    [{ relforcerowsecurity: true }],
+    // 82200 restores owner receipt writes; app-role RLS stays enabled.
+    [{ relrowsecurity: true, relforcerowsecurity: !skillReceiptOwnerAccess }],
   )
 }
 
@@ -554,7 +556,7 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
       assert.ok((await migratePglite(db, migrationsDir)) > 0)
       assert.equal(await migratePglite(db, migrationsDir), 0)
       await assertOrdinaryOwner(db)
-      await assertNothingLeftBypassed(db)
+      await assertNothingLeftBypassed(db, true)
       if (snapshot && identity) await savePreparedPglite(db, snapshot, identity)
     } finally {
       await db.close()
@@ -646,13 +648,13 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
         files.map(name => ({ name })))
       assert.equal(await migratePglite(db, migrationsDir), 0)
       await assertOrdinaryOwner(db)
-      await assertNothingLeftBypassed(db)
+      await assertNothingLeftBypassed(db, true)
       assert.deepEqual((await db.query(`SELECT relname, relrowsecurity, relforcerowsecurity
         FROM pg_class WHERE oid IN ('public.tasks'::regclass,
           'public.workspace_skill_scope_revisions'::regclass) ORDER BY relname`)).rows,
       [
         { relname: 'tasks', relrowsecurity: true, relforcerowsecurity: false },
-        { relname: 'workspace_skill_scope_revisions', relrowsecurity: true, relforcerowsecurity: true },
+        { relname: 'workspace_skill_scope_revisions', relrowsecurity: true, relforcerowsecurity: false },
       ])
       assert.deepEqual((await db.query(`SELECT tgname, tgenabled FROM pg_trigger
         WHERE tgrelid='public.tasks'::regclass

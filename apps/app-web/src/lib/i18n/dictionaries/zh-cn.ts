@@ -5575,6 +5575,7 @@ export const zhCN: Dictionary = {
     fallbackDesc: "默认为关闭。开启后，此端点无法回应的消息会改由该层级的内置模型回复，回复中会注明此事，并以一般 Brian 用量计费。",
   },
   comments: {
+    attachmentsNeedAi: "开启 AI 回复以发送附件。",
     localDraftFailed: "无法在此设备保存草稿。请保持此窗口打开，直到存储空间可用。",
     toolbarButton: "留言",
     toolbarButtonAria: "对所选内容加上评论",

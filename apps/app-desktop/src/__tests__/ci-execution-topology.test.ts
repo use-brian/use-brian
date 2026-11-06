@@ -67,11 +67,12 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(remainingCommand).toContain("--filter='!@use-brian/api-open'");
     expect(remainingCommand).toContain('--concurrency=4');
     const embedded = workflow.jobs['embedded-database-tests'];
-    expect(embedded.strategy.matrix.shard).toEqual([1, 2, 3]);
+    expect(embedded.strategy.matrix.group).toEqual(['owner-legacy', 'owner-fresh', 'owner-cutover', 'owner-successor', 'owner-prerequisites', 'session', 'remaining']);
+    expect(embedded['timeout-minutes']).toBe(10);
     expect(embedded.strategy['fail-fast']).toBe(false);
     const nodeTests = embedded.steps.find((step: { name?: string }) => step.name === 'Embedded database tests');
-    expect(nodeTests.run).toContain('scripts/testing/embedded-database-tests.mjs ${{ matrix.shard }}');
-    expect(embedded.steps.find((step: { name?: string }) => step.name === 'Runtime unit tests').if).toBe('matrix.shard == 3');
+    expect(nodeTests.run).toContain('scripts/testing/embedded-database-tests.mjs ${{ matrix.group }}');
+    expect(embedded.steps.find((step: { name?: string }) => step.name === 'Runtime unit tests').if).toBe("matrix.group == 'remaining'");
     const acceptance = workflow.jobs['department-isolation-shards'];
     expect(acceptance.strategy.matrix.shard).toContain('fromJSON(needs.ci-scope.outputs.shards)');
     expect(workflow.jobs['embedded-current-tests'].if).toBe("needs.ci-scope.outputs.historical == 'false'");

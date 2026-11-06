@@ -5846,6 +5846,7 @@ export const en = {
     fallbackDesc: "Off by default. When on, a message this endpoint cannot answer is answered by the built-in model for that tier, the reply says it happened, and the turn is billed as normal Brian usage.",
   },
   comments: {
+    attachmentsNeedAi: "Turn on AI reply to send attachments.",
     localDraftFailed: "This draft could not be saved on this device. Keep this window open until storage is available.",
     toolbarButton: "Comment",
     toolbarButtonAria: "Add a comment on the selection",

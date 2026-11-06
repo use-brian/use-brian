@@ -1,11 +1,9 @@
 /**
  * Custom MCP connector CRUD — the `/custom` slice of `/api/connectors`.
  *
- * This is the OPEN home of the custom-connector feature. It used to live only
- * in the closed `@use-brian/api-platform` connectors route; it now lives here so
- * BOTH editions share one implementation. The open `connectorRoutes` mounts it,
- * and the closed route imports and mounts the SAME factory instead of carrying a
- * duplicate (the import boundary allows closed→open, never open→closed).
+ * The OSS `connectorRoutes` mounts this factory. The hosted
+ * `@use-brian/api-platform` connectors route currently implements its custom
+ * endpoints independently, so it requires separate behavioral coverage.
  *
  * It depends only on open primitives — the `ConnectorStore` (custom rows live in
  * the same `connector_instance` table the rest of the connector surface reads,
@@ -18,7 +16,7 @@
  *   POST   /custom/:id/test — probe (MCP initialize + tools/list), set `connected`
  *   DELETE /custom/:id      — remove one
  *
- * Mounted behind requireAuth by both editions — no guest access. Secrets are
+ * Every handler requires authenticated user context — no guest access. Secrets are
  * validated at this boundary (size caps + no CR/LF, the header-injection vector)
  * and never echoed back in any response.
  *
@@ -140,8 +138,8 @@ type CustomConnectorRouteOptions = {
 }
 
 /**
- * Build the `/custom` sub-router. Both editions mount it on `/api/connectors`
- * (`router.use(customConnectorRoutes({ connectorStore }))`), so it must be
+ * Build the `/custom` sub-router mounted by the OSS connector router on
+ * `/api/connectors`. It must be
  * mounted BEFORE any `/:param` catch-all route or `/custom/:id` would be
  * swallowed by `/:id`.
  */

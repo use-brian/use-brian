@@ -21,23 +21,29 @@ export function parseShard(value) {
 
 export function suitesForShard(shard, profile = 'full') {
   if (!['full', 'current'].includes(profile)) throw new Error('Unknown acceptance profile')
+  const nativeGroups = [
+    ['derived-store', 'kernel', 'strict-intake', 'ui', 'compatibility'],
+    ['access-store', 'entrypoints', 'ingest-application-replay'],
+    ['workflow-authority', 'operation-stores', 'access-policy', 'review-lifecycle'],
+    ['organization'],
+  ]
   if (profile === 'current') {
-    const suites = DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.id !== 'migration-lifecycle')
+    const suites = DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.packageDir !== 'apps/api')
     if (!shard) return suites
-    const groups = [
-      ['derived-store', 'kernel', 'strict-intake', 'ui', 'compatibility'],
-      ['organization', 'access-store', 'entrypoints', 'ingest-application-replay'],
-      ['workflow-authority', 'operation-stores', 'access-policy', 'review-lifecycle'],
-    ]
-    if (shard.total !== 3) throw new Error('Current acceptance uses three shards')
-    return suites.filter(suite => groups[shard.index - 1].includes(suite.id))
+    if (shard.total !== 4) throw new Error('Current acceptance uses four shards')
+    return suites.filter(suite => nativeGroups[shard.index - 1].includes(suite.id))
   }
   if (!shard) return [...DEPARTMENT_ISOLATION_SUITES]
-  // The embedded migration replay is the dominant suite and gets a runner alone.
-  return shard.index === 1
-    ? DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.id === 'migration-lifecycle')
-    : DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.id !== 'migration-lifecycle')
-      .filter((_, index) => index % (shard.total - 1) === shard.index - 2)
+  // Each complete embedded upgrade owns a runner; no runner repeats three chains.
+  const historical = DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.packageDir === 'apps/api')
+  if (shard.total <= historical.length) throw new Error('Full acceptance needs historical and native shards')
+  if (shard.total === historical.length + nativeGroups.length && shard.index > historical.length) {
+    return DEPARTMENT_ISOLATION_SUITES.filter(suite => nativeGroups[shard.index - historical.length - 1].includes(suite.id))
+  }
+  return shard.index <= historical.length
+    ? [historical[shard.index - 1]]
+    : DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.packageDir !== 'apps/api')
+      .filter((_, index) => index % (shard.total - historical.length) === shard.index - historical.length - 1)
 }
 
 function evidenceFor(selectors, assertions) {
@@ -58,7 +64,8 @@ function evidenceFor(selectors, assertions) {
 export function createAcceptanceReport({ metadata, suites, assertions, foundation = false, shard = null, profile = 'full' }) {
   const manifestCoverage = departmentIsolationManifestCoverage()
   suitesForShard(shard, profile)
-  const applicable = selectors => selectors.filter(selector => profile === 'full' || selector.suiteId !== 'migration-lifecycle')
+  const historicalIds = new Set(DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.packageDir === 'apps/api').map(suite => suite.id))
+  const applicable = selectors => selectors.filter(selector => profile === 'full' || !historicalIds.has(selector.suiteId))
   const deferred = selectors => selectors.filter(selector => !applicable(selectors).includes(selector))
   const partial = foundation || shard !== null
   const cases = partial ? [] : DEPARTMENT_ISOLATION_CASES.map(entry => {

@@ -41,7 +41,7 @@ import { PreviewMarkdown } from "@/components/doc/preview-markdown";
 import { type ModelTier } from "@/lib/chat-model";
 import { setThreadResolved, addCommentMessage, type CommentThread } from "@/lib/api/comments";
 import { recordDocMention } from "@/lib/api/inbox";
-import { type AssistantIdentity } from "@/lib/api/views";
+import { type WorkspaceAssistantSummary, type AssistantIdentity } from "@/lib/api/views";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
 import { pinnedToBottom } from "@/components/doc/comment-scroll";
 import { shouldReconnectToTurn } from "@/components/doc/comment-reconnect";
@@ -73,13 +73,18 @@ export type { CommentAuthor } from "./comment-primitives";
  *  rare deleted/unknown sender. Before `senderName` existed, the non-viewer
  *  branch had no name at all, so every teammate's comment rendered as "?". */
 export function resolveCommentAuthor(
-  m: Pick<DocSessionMessage, "role" | "senderUserId" | "senderName" | "senderAvatarUrl">,
+  m: Pick<DocSessionMessage, "role" | "senderUserId" | "senderName" | "senderAvatarUrl" | "senderAssistantId">,
   ctx: {
     currentUser?: { id: string; name: string; avatarUrl?: string | null };
     assistant: CommentAuthor;
+    assistants?: WorkspaceAssistantSummary[];
   },
 ): CommentAuthor {
-  if (m.role === "assistant") return ctx.assistant;
+  if (m.role === "assistant") {
+    if (!m.senderAssistantId || m.senderAssistantId === ctx.assistant.id) return ctx.assistant;
+    const voice = ctx.assistants?.find(row => row.id === m.senderAssistantId);
+    return { id: m.senderAssistantId, name: voice?.name ?? m.senderName ?? "", iconSeed: voice?.iconSeed, isAssistant: true };
+  }
   // The viewer's own rows take their photo from the freshest source — the
   // `user` cookie — so an avatar the viewer just changed reflects immediately,
   // even before the server-side `senderAvatarUrl` catches up.
@@ -234,6 +239,8 @@ type Props = {
   /** Expand the collapsed preview — fired by clicking it or focusing the
    *  composer, so the host can flip `collapsed` off. */
   onExpand?: () => void;
+  assistantRoster?: WorkspaceAssistantSummary[];
+  renderAssistantPicker?: (disabled: boolean, enableAi: () => void) => React.ReactNode;
 };
 
 export function CommentThreadBody({
@@ -252,6 +259,8 @@ export function CommentThreadBody({
   inline,
   collapsed,
   onExpand,
+  assistantRoster,
+  renderAssistantPicker,
 }: Props) {
   const t = useT().comments;
   const tAttach = useT().attachments;
@@ -289,7 +298,7 @@ export function CommentThreadBody({
       }
     },
   });
-  const drop = useFileDrop((files) => void att.upload(files), { disabled: rec.busy });
+  const drop = useFileDrop((files) => { if (renderAssistantPicker) setAiReply(true); void att.upload(files); }, { disabled: rec.busy });
   // Model tier + research toggle for the reply turn — shared with the floating
   // chat and the page-comments band via <ComposerControls>.
   const controls = useComposerControls(workspaceId);
@@ -517,7 +526,7 @@ export function CommentThreadBody({
   };
 
   const authorOf = (m: DocSessionMessage): CommentAuthor =>
-    resolveCommentAuthor(m, { currentUser, assistant: assistantAuthor });
+    resolveCommentAuthor(m, { currentUser, assistant: assistantAuthor, assistants: assistantRoster });
 
   const visible = visibleComments(messages);
 
@@ -539,6 +548,7 @@ export function CommentThreadBody({
     aiReply?: boolean;
   }) {
     const body = (override?.body ?? draft).trim();
+    if (!override && renderAssistantPicker && !aiReply && (att.attachments.length > 0 || pendingRecordings.length > 0)) return;
     // A manual reply carries the reader's optional quote-reply (the seed/override
     // path is a brand-new thread, so there's nothing to quote). The quote rides
     // as a leading Markdown blockquote so it persists in the plain message body,
@@ -1028,9 +1038,7 @@ export function CommentThreadBody({
             placeholder={t.composerPlaceholder}
             className="max-h-32 min-h-[24px] w-full resize-none border-0 bg-transparent p-0 text-[16px] leading-relaxed outline-none focus-visible:shadow-none placeholder:text-muted-foreground/70 md:text-[14px]"
           />
-          {aiReply ? (
-            <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
-          ) : null}
+          {aiReply || renderAssistantPicker ? <AttachmentChips attachments={att.attachments} onRemove={att.remove} className={renderAssistantPicker ? "[&_button]:size-11 md:[&_button]:size-4" : undefined} /> : null}
           {pendingRecordings.length > 0 ? (
             <div className="mt-1 flex flex-wrap gap-1.5">
               {pendingRecordings.map((r) => (
@@ -1049,8 +1057,9 @@ export function CommentThreadBody({
             uploadProgress={rec.uploadProgress}
             message={rec.message}
           />
-          <div className={`mt-1 flex items-center gap-1.5${inline ? " flex-wrap md:flex-nowrap" : ""}`}>
-            {aiReply ? (
+          {!aiReply && renderAssistantPicker && (att.attachments.length > 0 || pendingRecordings.length > 0) ? <p role="status" className="text-xs text-muted-foreground">{t.attachmentsNeedAi}</p> : null}
+          <div className={`mt-1 flex items-center gap-1.5${inline ? " flex-wrap" : ""}`}>
+            {aiReply || renderAssistantPicker ? (
               <button
                 type="button"
                 aria-label={tAttach.attach}
@@ -1061,6 +1070,7 @@ export function CommentThreadBody({
                 <Paperclip className="size-[18px]" />
               </button>
             ) : null}
+            {renderAssistantPicker?.(busy || streaming !== null, () => setAiReply(true))}
             <ComposerControls
               phoneTargets
               model={controls.model}
@@ -1085,6 +1095,7 @@ export function CommentThreadBody({
               disabled={
                 busy ||
                 streaming !== null ||
+                (!!renderAssistantPicker && !aiReply && (att.attachments.length > 0 || pendingRecordings.length > 0)) ||
                 att.uploading ||
                 rec.busy ||
                 (!draft.trim() && !(aiReply && (att.hasReady || pendingRecordings.length > 0)))
@@ -1102,7 +1113,7 @@ export function CommentThreadBody({
             disabled={rec.busy}
             className="hidden"
             onChange={(e) => {
-              if (!rec.busy && e.target.files) void att.upload(e.target.files);
+              if (!rec.busy && e.target.files?.length) { if (renderAssistantPicker) setAiReply(true); void att.upload(e.target.files); }
               e.target.value = "";
             }}
           />

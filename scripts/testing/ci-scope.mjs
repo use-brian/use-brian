@@ -32,5 +32,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     args => execFileSync('git', args, { encoding: 'utf8' }))
   console.log(JSON.stringify(scope))
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT,
-    `historical=${scope.historical}\nprofile=${scope.historical ? 'full' : 'current'}\nshards=${scope.historical ? '[1,2,3,4]' : '[1,2,3]'}\ntotal=${scope.historical ? 4 : 3}\n`)
+    `historical=${scope.historical}\nprofile=${scope.historical ? 'full' : 'current'}\nshards=${scope.historical ? '[1,2,3,4,5,6,7]' : '[1,2,3,4]'}\ntotal=${scope.historical ? 7 : 4}\n`)
 }

@@ -90,7 +90,7 @@ import { SetupChecklist } from "./setup-checklist";
 import { RecordingUploadStatus } from "@/components/recordings/recording-upload-status";
 
 type BuildOptions = {
-  model: ModelTier;
+  model?: ModelTier;
   researchMode: boolean;
   /** Ready (`done`) attachment ids for the first Chat turn, in chip order. */
   fileIds: string[];
@@ -139,16 +139,30 @@ type Props = {
    * undefined (no checklist) so a non-cold-start caller never shows it.
    */
   studioSetupIncomplete?: boolean | null;
-  /** Reuse original starters beneath the document header and live editor. */
-  inPage?: boolean;
-  onPendingInputChange?: (pending: boolean) => void;
 };
 
-/** Keep unsent starter work available when the user begins writing the page. */
+/** Drafts reuse starter links; the Page comment is their only request box. */
 export function DraftPageStarters({ active, ...props }: Props & { active: boolean }) {
-  const [pending, setPending] = useState(false);
-  if (!active && !pending) return null;
-  return <EmptyPageLanding {...props} inPage onPendingInputChange={setPending} />;
+  const t = useT().docPage.landing;
+  if (!active) return null;
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <div className="flex flex-wrap justify-center gap-2">
+        {t.suggestions.map(text => <button type="button" key={text}
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground md:min-h-0"
+          onClick={() => props.onSubmitPrompt(text, {
+            researchMode: false, fileIds: [], attachedRecordingIds: [],
+            assistantId: readActiveAssistantId(props.workspaceId) ?? props.assistantId,
+          })}>
+          <Sparkles className="size-3" aria-hidden />{text}
+        </button>)}
+      </div>
+      <button type="button" onClick={props.onStartFromTemplate}
+        className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground md:min-h-8">
+        <LayoutTemplate className="size-3.5" aria-hidden />{t.startFromTemplate}
+      </button>
+    </div>
+  );
 }
 
 export function EmptyPageLanding({
@@ -160,8 +174,6 @@ export function EmptyPageLanding({
   onStartBlank,
   onStartFromTemplate,
   studioSetupIncomplete,
-  inPage = false,
-  onPendingInputChange,
 }: Props) {
   const t = useT().docPage;
   const tAttach = useT().attachments;
@@ -203,11 +215,6 @@ export function EmptyPageLanding({
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const drop = useFileDrop((files) => void att.upload(files), { disabled: rec.busy });
-  const hasPendingInput = prompt.length > 0 || att.attachments.length > 0 ||
-    pendingRecordings.length > 0 || att.uploading || rec.busy;
-  useEffect(() => {
-    onPendingInputChange?.(hasPendingInput);
-  }, [hasPendingInput, onPendingInputChange]);
 
   // ── Draft-assistant picker ─────────────────────────────────────────────
   // Which workspace assistant drafts the page. Defaults to the dock's
@@ -274,12 +281,11 @@ export function EmptyPageLanding({
   }
 
   return (
-    <div className={inPage ? "w-full" : "@container mx-auto w-full max-w-[1240px] px-5 py-10 md:px-8 md:py-16"}>
+    <div className="@container mx-auto w-full max-w-[1240px] px-5 py-10 md:px-8 md:py-16">
       <div className="grid grid-cols-1 items-start gap-10 @min-[960px]:has-[aside>section]:grid-cols-[minmax(0,1fr)_288px] @min-[960px]:gap-12">
-      <div className={cn("mx-auto flex w-full min-w-0 flex-col gap-12", !inPage && "max-w-2xl @min-[960px]:pt-8")}>
+      <div className="mx-auto flex w-full min-w-0 max-w-2xl flex-col gap-12 @min-[960px]:pt-8">
       {/* ── Chatter ──────────────────────────────────────────── */}
       <section className="flex flex-col items-center text-center">
-        {!inPage && <>
         <span className="animate-pop-in mb-5 inline-flex size-12 items-center justify-center rounded-2xl border border-border bg-muted/50 text-muted-foreground shadow-sm">
           <Sparkles className="size-6" aria-hidden />
         </span>
@@ -290,7 +296,6 @@ export function EmptyPageLanding({
         <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
           {t.landing.subtitle}
         </p>
-        </>}
 
         {/* Composer — one unified "prompt window": the border + focus ring live
             on the whole card (`focus-within`), wrapping the input row AND the
@@ -304,8 +309,7 @@ export function EmptyPageLanding({
             uploads are ready. */}
         <div
           className={cn(
-            "relative w-full rounded-[1.05rem] border border-border bg-card p-2 shadow-sm",
-            !inPage && "mt-6",
+            "relative mt-6 w-full rounded-[1.05rem] border border-border bg-card p-2 shadow-sm",
             "transition-[border-color,box-shadow] focus-within:border-ring [&_:focus-visible]:shadow-none",
           )}
           {...drop.dropProps}
@@ -522,7 +526,7 @@ export function EmptyPageLanding({
               type="button"
               onClick={() => submit(s)}
               className={cn(
-                "press group/chip inline-flex min-h-11 items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 md:min-h-0",
+                "press group/chip inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5",
                 "text-xs font-medium text-muted-foreground",
                 "transition-colors hover:border-muted-foreground/30 hover:bg-muted/60 hover:text-foreground",
               )}
@@ -540,7 +544,7 @@ export function EmptyPageLanding({
             text button (not a CTA, not a sparkle chip) so it reads as the
             opposite of the build-it-for-me chatter above: open an empty editor
             and author the page by hand. The shell mints/opens the draft. */}
-        {!inPage && <button
+        <button
           type="button"
           onClick={onStartBlank}
           className={cn(
@@ -550,12 +554,12 @@ export function EmptyPageLanding({
         >
           <PencilLine className="size-3.5" aria-hidden />
           {t.landing.startBlank}
-        </button>}
+        </button>
         <button
           type="button"
           onClick={onStartFromTemplate}
           className={cn(
-            "press mt-2 inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium md:min-h-0",
+            "press mt-2 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium",
             "text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
           )}
         >
@@ -565,7 +569,7 @@ export function EmptyPageLanding({
       </section>
 
       {/* ── Recents ──────────────────────────────────────────── */}
-      {!inPage && cards.length > 0 ? (
+      {cards.length > 0 ? (
         <section>
           <div className="mb-3 flex items-center gap-2 px-0.5">
             <Clock3 className="size-3.5 text-muted-foreground" aria-hidden />

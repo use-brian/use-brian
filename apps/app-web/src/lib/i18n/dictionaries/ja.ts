@@ -5635,6 +5635,7 @@ export const ja: Dictionary = {
     fallbackDesc: "既定ではオフです。オンにすると、このエンドポイントが応答できなかったメッセージは該当ティアの組み込みモデルが応答し、その旨が返信に表示され、通常の Brian 利用として課金されます。",
   },
   comments: {
+    attachmentsNeedAi: "添付ファイルを送信するには AI 返信をオンにしてください。",
     localDraftFailed: "この下書きを端末に保存できませんでした。保存できるようになるまで、このウィンドウを開いたままにしてください。",
     toolbarButton: "コメント",
     toolbarButtonAria: "選択範囲にコメントを追加",
