@@ -873,7 +873,10 @@ describe('[COMP:api/migration-owner-role] Native transcript read prerequisite po
      }else assert.deepEqual(current,prior)
     }
     assert.equal(changed,3);proof.changedBodies=changed;proof.replay=0
-    await assertOrdinaryOwner(db);await assertNothingLeftBypassed(db,false);proof.status='pass'
+    await assertOrdinaryOwner(db)
+    // This fixture stops at 8133, before 82200 restores ordinary-owner access.
+    await assertNothingLeftBypassed(db,true)
+    proof.status='pass'
    }catch(error){proof.status='blocked';proof.error={message:(error as Error).message,stack:(error as Error).stack};throw error}
    finally{
     await db.close();proof.closed=true
