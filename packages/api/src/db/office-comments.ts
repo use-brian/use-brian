@@ -1,5 +1,7 @@
 /** Office semantic/spatial discussion and suggestion store. [COMP:api/office-store] */
 import { defaultOfficeDbQuery, type OfficeDbQuery } from './office-artifacts.js'
+import type { WorkspaceCredentialDelegation } from '@use-brian/core'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 export type OfficeCommentAnchor = {
   kind: 'text_range' | 'block' | 'table_cell' | 'slide' | 'object' | 'chart_datum' | 'note_range' | 'point' | 'region'
@@ -9,7 +11,56 @@ export type OfficeCommentAnchor = {
   geometry?: { x: number; y: number; width?: number; height?: number }
 }
 
+type CommentMutationAuthority = {
+  userId: string; threadId: string; artifactId?: string; actorAssistantId?: string;
+  workspaceDelegation?: WorkspaceCredentialDelegation; admissionObservationId?: string; sharedAudience?: boolean;
+}
+
 export function createOfficeCommentStore(db: OfficeDbQuery = defaultOfficeDbQuery) {
+  async function mutateThread(params: CommentMutationAuthority & ({ resolved: boolean } | { assignedUserId: string | null; assignedToBrian: boolean; dueAt: string | null })): Promise<boolean> {
+    const result = await db<{ id: string; workspace_id: string; artifact_id: string }>(params.userId, `
+      WITH root AS (
+        SELECT a.id,a.workspace_id,a.head_version FROM office_artifacts a
+        JOIN office_comment_threads t ON t.artifact_id=a.id AND t.workspace_id=a.workspace_id
+        WHERE t.id=$1 AND ($4::uuid IS NULL OR a.id=$4) AND a.lifecycle_state='active'
+          AND ($9::text <> 'assign' OR $10::uuid IS NULL OR EXISTS (
+            SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=a.workspace_id AND wm.user_id=$10::uuid))
+          AND office_artifact_scope_allows(a.id,a.workspace_id,true)
+          AND coalesce((SELECT role FROM office_artifact_grants g WHERE g.artifact_id=a.id
+            AND g.user_id=$3::uuid AND g.revoked_at IS NULL),
+            CASE WHEN $3::uuid IN(a.creator_user_id,a.owner_user_id) THEN 'edit' ELSE a.default_workspace_role END) IN('comment','edit')
+          AND ($6::jsonb IS NULL OR workspace_mcp_parent_current($6::jsonb))
+          AND ($7::uuid IS NULL OR read_office_observation_authority(a.workspace_id,$7::uuid,
+            CASE WHEN $8::boolean THEN NULL ELSE $3::uuid END,
+            coalesce(nullif(current_setting('app.agent_visibility_assistants',true),''),'null')::jsonb))
+        FOR SHARE OF a
+      ), updated AS (
+        UPDATE office_comment_threads t
+           SET status=CASE WHEN $9='resolve' THEN $2 ELSE t.status END,
+               resolved_by=CASE WHEN $9='resolve' THEN CASE WHEN $2='resolved' AND $5::uuid IS NULL THEN $3::uuid END ELSE t.resolved_by END,
+               resolved_at=CASE WHEN $9='resolve' THEN CASE WHEN $2='resolved' THEN now() END ELSE t.resolved_at END,
+               assigned_user_id=CASE WHEN $9='assign' THEN $10::uuid ELSE t.assigned_user_id END,
+               assigned_to_brian=CASE WHEN $9='assign' THEN $11::boolean ELSE t.assigned_to_brian END,
+               due_at=CASE WHEN $9='assign' THEN $12::timestamptz ELSE t.due_at END,updated_at=now()
+          FROM root a WHERE t.id=$1 AND t.artifact_id=a.id AND t.status<>'detached'
+          RETURNING t.id,t.artifact_id,t.workspace_id
+      ), audited AS (
+        INSERT INTO office_audit_events(workspace_id,artifact_id,actor_user_id,actor_assistant_id,event_type,artifact_version,metadata)
+        SELECT t.workspace_id,t.artifact_id,CASE WHEN $5::uuid IS NULL THEN $3::uuid END,$5::uuid,
+          'office.comment.'||$9::text,a.head_version,CASE WHEN $9='resolve'
+            THEN jsonb_build_object('threadId',t.id,'status',$2::text)
+            ELSE jsonb_build_object('threadId',t.id,'assignedUserId',$10::uuid,'assignedToBrian',$11::boolean,'dueAt',$12::timestamptz) END
+        FROM updated t JOIN root a ON a.id=t.artifact_id
+      ) SELECT id,workspace_id,artifact_id FROM updated
+    `, [params.threadId, 'resolved' in params ? (params.resolved ? 'resolved' : 'open') : null, params.userId, params.artifactId ?? null,
+      params.actorAssistantId ?? null, params.workspaceDelegation ? JSON.stringify(params.workspaceDelegation) : null,
+      params.admissionObservationId ?? null, params.sharedAudience ?? false, 'resolved' in params ? 'resolve' : 'assign',
+      'assignedUserId' in params ? params.assignedUserId : null,
+      'assignedToBrian' in params ? params.assignedToBrian : null, 'dueAt' in params ? params.dueAt : null])
+    const changed = result.rows[0]
+    if (changed) notifyWorkspaceChange(changed.workspace_id, 'office', 'update', changed.artifact_id)
+    return !!changed
+  }
   return {
     async listThreads(userId: string, artifactId: string): Promise<Array<Record<string, unknown>>> {
       const result = await db<Record<string, unknown>>(userId, `
@@ -91,30 +142,9 @@ export function createOfficeCommentStore(db: OfficeDbQuery = defaultOfficeDbQuer
       return result.rows[0] ?? null
     },
 
-    async resolve(params: { userId: string; threadId: string; resolved: boolean }): Promise<boolean> {
-      const result = await db<{ id: string }>(params.userId, `
-        UPDATE office_comment_threads
-           SET status = $2, resolved_by = CASE WHEN $2 = 'resolved' THEN $3::uuid END,
-               resolved_at = CASE WHEN $2 = 'resolved' THEN now() END,
-               updated_at = now()
-         WHERE id = $1 RETURNING id
-      `, [params.threadId, params.resolved ? 'resolved' : 'open', params.userId])
-      return result.rows.length === 1
-    },
+    resolve: (params: CommentMutationAuthority & { resolved: boolean }) => mutateThread(params),
 
-    async updateThread(params: { userId: string; threadId: string; assignedUserId: string | null; assignedToBrian: boolean; dueAt: string | null }): Promise<boolean> {
-      const result = await db<{ id: string }>(params.userId, `
-        UPDATE office_comment_threads
-           SET assigned_user_id=$2,assigned_to_brian=$3,due_at=$4::timestamptz,updated_at=now()
-         WHERE id=$1 AND status <> 'detached'
-           AND ($2::uuid IS NULL OR EXISTS (
-             SELECT 1 FROM workspace_members wm
-              WHERE wm.workspace_id=office_comment_threads.workspace_id AND wm.user_id=$2::uuid
-           ))
-         RETURNING id
-      `, [params.threadId, params.assignedUserId, params.assignedToBrian, params.dueAt])
-      return result.rows.length === 1
-    },
+    updateThread: (params: CommentMutationAuthority & { assignedUserId: string | null; assignedToBrian: boolean; dueAt: string | null }) => mutateThread(params),
 
     async react(params: { userId: string; messageId: string; reaction: 'thumbs_up' | 'heart' | 'check'; active: boolean }): Promise<boolean> {
       const result = await db<{ id: string }>(params.userId, `

@@ -195,3 +195,22 @@ describe("[COMP:app-web/recording-chrome] action items rail", () => {
     expect(container?.textContent).toContain("No action items were captured");
   });
 });
+
+
+describe("[COMP:app-web/recording-chrome] action item connection recovery", () => {
+  it("recovers the initial list after reconnect without reloading the page", async () => {
+    listRecordingTasks.mockRejectedValueOnce(new TypeError("offline"));
+    await mount([CONFIRMED]); expect(container!.textContent).toContain("could not load");
+    await act(async () => { window.dispatchEvent(new Event("online")); });
+    expect(container!.textContent).toContain(CONFIRMED.title);
+  });
+  it("keeps loaded action items during transient failures but clears a live denial", async () => {
+    await mount([CONFIRMED]);
+    listRecordingTasks.mockRejectedValueOnce(new TypeError("offline"));
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    expect(container!.textContent).toContain(CONFIRMED.title);
+    listRecordingTasks.mockRejectedValueOnce(Object.assign(new Error("denied"), { status: 403 }));
+    await act(async () => { window.dispatchEvent(new Event("online")); });
+    expect(container!.textContent).not.toContain(CONFIRMED.title);
+  });
+});

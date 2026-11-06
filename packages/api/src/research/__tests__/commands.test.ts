@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs'
 import express, { type RequestHandler } from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ToolContext } from '@use-brian/core'
+import { createExecutionContext, executionToolContext, type ToolContext } from '@use-brian/core'
+import { createAuthorityLease } from '../../context-scope/authority-lease.js'
 
 const store = vi.hoisted(() => ({
   getResearchFeedbackForViewer: vi.fn(),
@@ -54,7 +55,26 @@ const ctx = (over: Partial<ToolContext> = {}): ToolContext => ({
   userId: MEMBER, assistantId: 'a', sessionId: 's', appId: 'x', channelType: 'web', channelId: 'c', workspaceId: WS,
   abortSignal: new AbortController().signal, attended: true, workspaceActorUserId: MEMBER, ...over,
 }) as ToolContext
-const mcp = (name: keyof typeof tools, context: ToolContext) => bridgeCoreTool(tools[name], async () => context, WS)
+const mcp = (name: keyof typeof tools, context: ToolContext) => {
+  // MCP production now requires canonical unattended authority. Keep the
+  // command-store boundary mocked, while exercising the real lease/executor.
+  const access = { workspaceId: WS, userId: context.userId, assistantId: context.assistantId,
+    assistantKind: 'standard' as const, clearance: 'confidential' as const,
+    compartments: null, mutationCompartments: null, projectIds: null,
+    visibilityAssistantIds: [context.assistantId] }
+  const credentialId = context.programmaticPrincipal?.credentialId ?? 'fixture-key'
+  const execution = createExecutionContext({
+    identity: { kind: 'programmatic', principal: { kind: 'brain_key', credentialId, actorUserId: context.userId }, credentialOwnerUserId: context.userId },
+    ownership: { kind: 'workspace', workspaceId: WS }, access,
+    authority: createAuthorityLease(access, async () => access),
+    writeDefaults: { compartments: [], projectIds: [] },
+    lifecycle: { sessionId: context.sessionId, sessionPersisted: false,
+      channelType: 'programmatic', channelId: credentialId, abortSignal: context.abortSignal },
+  })
+  const admitted = { ...context, ...executionToolContext(execution, { appId: context.appId }),
+    programmaticPrincipal: { kind: 'brain_key' as const, credentialId, userId: context.userId } }
+  return bridgeCoreTool(tools[name], async () => admitted, WS)
+}
 const body = (r: { content: Array<{ text: string }> }) => r.content.map((c) => c.text).join('')
 
 const feedback = { id: FB, actorUserId: MEMBER, activityId: ACT, sensitivity: 'internal', version: 1 }
@@ -214,7 +234,8 @@ describe('[COMP:api/research-commands] One research command service across REST,
     store.getResearchActivityForViewer.mockResolvedValue(detail)
     expect((await request(app()).get(`/api/workspaces/${WS}/research/activities/${ACT}`)).body).toMatchObject({ artifacts: [{ kind: 'page' }], lessons: [] })
     expect((await tools.getResearchActivity.execute({ activity_id: ACT }, ctx())).data).toMatchObject({ artifacts: [{ kind: 'page' }] })
-    expect(body(await mcp('getResearchActivity', ctx()).handler({ activity_id: ACT }) as never)).toMatch(/"artifactId": "p"/)
+    expect((await mcp('getResearchActivity', ctx()).handler({ activity_id: ACT })).structuredContent)
+      .toMatchObject({ status: 'succeeded', data: { artifacts: [{ kind: 'page', artifactId: 'p' }] } })
     expect(store.getResearchActivityForViewer.mock.calls.map((c) => c[0])).toEqual([MEMBER, MEMBER, MEMBER])
   })
 })

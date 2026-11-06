@@ -1,3 +1,6 @@
+import type { WorkspaceMcpProfile } from '../workspace-mcp/profile.js'
+import { buildWorkspaceMcpCatalog } from '../workspace-mcp/catalog.js'
+import { workspaceDiscoveryNames } from '../workspace-mcp/discovery.js'
 import type { ToolContext } from '@use-brian/core'
 import type { CaptureConfiguration,EngineeringHistoryCommand } from '@use-brian/shared'
 /**
@@ -35,6 +38,7 @@ import type { Sensitivity } from '@use-brian/core'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
 import {
   buildBrainTools,
+  makeBrainContextResolver,
   resolveAgentCapabilities,
   type BrainCrmTools,
   type BrainDocTools,
@@ -46,6 +50,7 @@ import {
 } from './tools.js'
 
 type Options = {
+  workspaceProfile?: WorkspaceMcpProfile
   brainKeyStore: BrainKeyStore
   /**
    * Optional OAuth 2.1 authorization store. When set, the MCP endpoint also
@@ -211,14 +216,14 @@ export function brainMcpRoutes(opts: Options): Router {
       return
     }
 
-    // One McpServer per request — stateless. The tool list is scope-gated:
+    // One SDK Server per request, stateless. The tool list is scope-gated:
     // a `read` key never sees `ingestToBrain` in `tools/list`, and the
     // agent write tools appear only when the bound primary assistant holds
     // the `configure` capability (resolved fresh per request so a revoked
     // grant takes effect immediately).
-    const agentActiveCapabilities = opts.agentTools || opts.associationTools || opts.crmTools
-      ? await resolveAgentCapabilities(auth.workspaceId)
-      : new Set<string>()
+    // All native bridges carry capability metadata, including tasks and files
+    // in compositions that omit the control-plane/CRM toolsets.
+    const agentActiveCapabilities = await resolveAgentCapabilities(auth.workspaceId)
     const agentWritesEnabled =
       opts.agentTools && auth.scope === 'read_write'
         ? agentActiveCapabilities.has('configure')
@@ -262,7 +267,7 @@ export function brainMcpRoutes(opts: Options): Router {
         ? opts.agentTask
         : undefined
 
-    const tools = buildBrainTools({
+    let tools = auth.workspaceMcpConsent ? [] : buildBrainTools({
       workspaceId: auth.workspaceId,
       scope: auth.scope,
       keyId: auth.keyId,
@@ -310,17 +315,28 @@ export function brainMcpRoutes(opts: Options): Router {
         : {}),
     })
     try {
-      await serveStatelessMcp(req, res, [...tools, ...(application?.tools ?? [])])
+      if (auth.workspaceMcpConsent) {
+        const consent = auth.workspaceMcpConsent
+        if (!opts.workspaceProfile) throw new Error('workspace_mcp_profile_unavailable')
+        const resolveContext = makeBrainContextResolver(auth.workspaceId, auth.keyId, auth.maxClearance,
+          'programmatic', { kind: auth.authKind === 'oauth_token' ? 'oauth_token' : 'brain_key', credentialId: auth.keyId, userId: auth.actingUserId },
+          getAuthenticatedBrainCredentialCurrent(auth), getAuthenticatedCrmCredentialParent(auth))
+        tools = await buildWorkspaceMcpCatalog(async () => {
+          const base = await resolveContext()
+          if ('error' in base) throw new Error(base.error)
+          const context = await opts.workspaceProfile!.prepareContext(base, consent, req.body?.params?._meta?.['usebrian.ai/context-id'])
+          return { context, executeOperation: opts.workspaceProfile!.executeOperation, tools: await opts.workspaceProfile!.toolsFor(context, consent),
+            operationNames: new Set(consent.operationNames), readOnly: auth.scope === 'read' }
+        })
+      }
+      await serveStatelessMcp(req, res, [...tools, ...(application?.tools ?? [])], 'use-brian-brain', auth.workspaceMcpConsent ? workspaceDiscoveryNames : undefined)
     } catch (err) {
       console.error('[brain-mcp] request failed:', err)
       if (!res.headersSent) {
         res.status(500).json({
           error: 'brain_mcp_error',
-          message:
-            'The MCP transport failed while handling this request. Authentication and tool-surface ' +
-            'construction had already succeeded, so the credential is fine and changing it will not ' +
-            'help. The cause is server-side and may be transient: retry the same request once after ' +
-            'a short wait, and if it persists report it rather than looping.',
+          retrySafe: false,
+          message: 'The MCP request could not be completed. Check the operation outcome before retrying a write; a missing response does not mean no effect occurred.',
         })
       }
     }

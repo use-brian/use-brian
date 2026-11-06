@@ -706,6 +706,7 @@ export function DockRecorderNotice({ rec, className }: { rec: DockRecorderApi; c
   const pendingCount = Math.max(0, rec.savingCount - (activeSave ? 1 : 0));
   if (!notice && !activeSave && pendingCount === 0) return null;
   const informational =
+    notice?.kind === "pendingUpload" ||
     notice?.kind === "micHint" ||
     notice?.kind === "kept" ||
     notice?.kind === "autoStopped" ||
@@ -713,6 +714,8 @@ export function DockRecorderNotice({ rec, className }: { rec: DockRecorderApi; c
   const text =
     !notice ? "" : notice.kind === "queued" || notice.kind === "handOffFailed"
       ? notice.text
+      : notice.kind === "pendingUpload" ? t.pendingUpload
+      : notice.kind === "storageFailed" ? t.storageFailed
       : notice.kind === "micHint"
         ? t.micHint
         : notice.kind === "kept"
@@ -801,21 +804,21 @@ export function DockRecorderRecovery({ rec, className }: { rec: DockRecorderApi;
           key={s.id}
           className="flex items-center gap-2 rounded-md border border-border bg-background/95 px-2.5 py-1.5 text-xs shadow-sm backdrop-blur"
         >
-          <span aria-hidden className="size-2 shrink-0 rounded-full bg-destructive/70" />
-          <span className="min-w-0 flex-1 truncate text-foreground/80">
-            {format(t.recoveryFrom, { time: timeOf(s) })}
+          <span aria-hidden className={cn("size-2 shrink-0 rounded-full", s.autoUpload ? "bg-muted-foreground/50" : "bg-destructive/70")} />
+          <span className="min-w-0 flex-1 break-words text-foreground/80">
+            {format(s.autoUpload ? t.pendingUploadFrom : t.recoveryFrom, { time: timeOf(s) })}
           </span>
-          <button
+          {!s.autoUpload && <button
             type="button"
             disabled={busy === s.id}
             onClick={() => {
               setBusy(s.id);
               void rec.saveRecovery(s.id).finally(() => setBusy(null));
             }}
-            className="shrink-0 rounded-md bg-action px-2 py-1 font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50"
+            className="min-h-8 max-md:min-h-11 shrink-0 rounded-md bg-action px-2 py-1 font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50"
           >
             {busy === s.id ? t.recoverySaving : t.recoverySave}
-          </button>
+          </button>}
           <button
             type="button"
             disabled={busy === s.id}
@@ -828,7 +831,7 @@ export function DockRecorderRecovery({ rec, className }: { rec: DockRecorderApi;
                 if (ok) void rec.discardRecovery(s.id);
               });
             }}
-            className="shrink-0 rounded-md px-2 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            className="min-h-8 max-md:min-h-11 shrink-0 rounded-md px-2 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
           >
             {t.recoveryDiscard}
           </button>

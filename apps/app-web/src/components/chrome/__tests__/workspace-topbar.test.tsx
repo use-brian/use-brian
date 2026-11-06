@@ -43,6 +43,46 @@ describe("[COMP:app-web/workspace-topbar] common frame", () => {
     } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
   });
 
+  it("keeps loaded-page actions in the shell and preserves tab switching, closing and new tabs", async () => {
+    const host = document.createElement("div"); document.body.append(host);
+    const root = createRoot(host), switched = vi.fn(), closed = vi.fn(), created = vi.fn();
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    function PageActions() {
+      const [count, setCount] = React.useState(0);
+      return <button data-page-action onClick={() => setCount(count + 1)}>Page action: {count}</button>;
+    }
+    const tabs = [
+      { key: "tab-a", pageId: "page-a", title: "First page", icon: null, isActive: true },
+      { key: "tab-b", pageId: "page-b", title: "Second page", icon: null, isActive: false },
+    ];
+    const render = (collapsed: boolean) => wrap(<WorkspaceTopbarProvider>
+      <WorkspaceTopbarHost /><main><DocTopBar tabs={tabs} pageHeader={<PageActions />}
+        sidebarCollapsed={collapsed} canBack canForward={false} onBack={noop} onForward={noop}
+        onSwitchTab={switched} onCloseTab={closed} onNewTab={created} /></main>
+    </WorkspaceTopbarProvider>);
+    try {
+      await act(async () => root.render(render(false)));
+      expect(host.querySelector("main")?.textContent).toBe("");
+      expect(host.querySelectorAll("[data-page-action]")).toHaveLength(1);
+      const action = host.querySelector<HTMLButtonElement>("[data-page-action]")!;
+      expect(action.closest("[data-workspace-topbar-host]")).not.toBeNull();
+      await act(async () => action.click());
+      await act(async () => root.render(render(true)));
+      expect(host.querySelector("[data-page-action]")).toBe(action);
+      expect(action.textContent).toBe("Page action: 1");
+      const trigger = host.querySelector<HTMLButtonElement>("[data-doc-tabs-menu]")!;
+      await act(async () => trigger.click());
+      const second = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent?.includes("Second page"))!;
+      await act(async () => second.querySelector<HTMLButtonElement>("button")!.click());
+      expect(closed).toHaveBeenCalledWith("tab-b");
+      expect(switched).not.toHaveBeenCalled();
+      await act(async () => second.click());
+      expect(switched).toHaveBeenCalledWith("tab-b");
+      await act(async () => host.querySelector<HTMLButtonElement>(`[aria-label="${en.docPage.topbarNewTabAria}"]`)!.click());
+      expect(created).toHaveBeenCalledOnce();
+    } finally { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); }
+  });
+
   it("uses the same frame and one search slot for every app, breadcrumbs and real Page tabs", () => {
     const bars = [
       ...OPERATOR_APP_KEYS.map(app => <OperatorTopbar key={app} app={app} center={<button>View control</button>} right={<button>App action</button>} />),
@@ -63,7 +103,7 @@ describe("[COMP:app-web/workspace-topbar] common frame", () => {
       frameClass ??= frame.className;
       expect(frame.className).toBe(frameClass);
       expect(frame.className).toContain("h-11");
-      expect(frame.className).toContain("md:h-12");
+      expect(frame.className).toContain("md:h-10");
       expect(frame.className).toContain("border-b");
       expect(frame.className).toContain("border-border bg-background");
       expect(frame.querySelectorAll("[data-workspace-search-slot]")).toHaveLength(1);

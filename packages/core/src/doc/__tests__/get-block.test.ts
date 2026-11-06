@@ -56,14 +56,14 @@ function ctx(overrides: { workspaceId?: string | null } = {}) {
   }
 }
 
-/** Minimal dep bag — `getBlock` only ever touches `savedViewStore.getPage`. */
+/** Minimal dep bag — `getBlock` only ever touches `docPageStore.getVersionedPage`. */
 function deps(page: Page | null): DocToolDeps {
   return {
     savedViewStore: {
       getPage: vi.fn().mockResolvedValue(page),
     } as unknown as SavedViewStore,
     docPageStore: {
-      getVersionedPage: vi.fn(),
+      getVersionedPage: vi.fn().mockResolvedValue(page ? { page, version: 1, title: 'Current page', nameOrigin: 'user', icon: null } : null),
       applyPatch: vi.fn(),
     },
     taskStore: {} as TaskStore,
@@ -180,7 +180,7 @@ describe('[COMP:doc/drawing-read] visual evidence', () => {
     const block = await drawing()
     const store = deps({ blocks: [block] })
     const result = await createGetBlockTool(store).execute({ pageId: PAGE_ID, blockId: 'd1' }, ctx())
-    expect(store.savedViewStore.getPage).toHaveBeenCalledWith(USER_ID, PAGE_ID)
+    expect(store.docPageStore.getVersionedPage).toHaveBeenCalledWith(USER_ID, PAGE_ID, expect.objectContaining({ userId: USER_ID }))
     expect(result.images).toEqual([{ mimeType: 'image/png', data: expect.any(String) }])
     expect(await sharp(Buffer.from(result.images![0].data, 'base64')).raw().toBuffer()).toEqual(Buffer.from([255, 255, 255, 255]))
     expect(JSON.stringify(result.data)).not.toContain(png)
@@ -191,7 +191,7 @@ describe('[COMP:doc/drawing-read] visual evidence', () => {
     const gated = await createGetBlockTool(store).execute({ pageId: PAGE_ID, blockId: 'd1' }, ctx({ workspaceId: null }))
     expect(gated.isError).toBe(true)
     expect(gated.images).toBeUndefined()
-    expect(store.savedViewStore.getPage).toHaveBeenCalledTimes(1)
+    expect(store.docPageStore.getVersionedPage).toHaveBeenCalledTimes(1)
   })
   it('reports missing, invalid and stale exports without exposing bytes or rejecting the editable scene', async () => {
     const block = await drawing()

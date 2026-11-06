@@ -350,7 +350,7 @@ async function metadataFixture() {
     brief:{outcome:'Department outcome'},authorityProjection:{},idempotencyKey:randomUUID()})
   await jobs.appendEvent({userId:f.owner,jobId:job.id,workspaceId:f.workspaceId,code:'office.job.queued',values:{},actorType:'user',actorUserId:f.owner})
   await pool.query("UPDATE office_templates SET lifecycle_state='draft',draft_routing=NULL WHERE id=$1",[f.template.id])
-  const service=createOfficeService({generationAvailable:()=>false,createShell:artifacts.createShell,deleteEmptyShell:artifacts.deleteEmptyShell,
+  const service=createOfficeService({captureObservation:artifacts.captureObservation,generationAvailable:()=>false,createShell:artifacts.createShell,deleteEmptyShell:artifacts.deleteEmptyShell,
     getArtifact:artifacts.get,raiseScope:artifacts.raiseScope,resolveAccess:resolveOfficeAccess,createJob:jobs.create,latestJob:jobs.latestForArtifact,getSnapshot:f.live.get})
   let change:(()=>Promise<unknown>)|undefined
   const after=async<T>(pending:Promise<T>):Promise<T>=>{const result=await pending;const fn=change;change=undefined;await fn?.();return result}

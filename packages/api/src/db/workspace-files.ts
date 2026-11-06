@@ -293,13 +293,14 @@ export async function createWorkspaceFile(
     await applyRLSGucs(client, userId)
     const renewAdmission = await admitFileTransaction(client, userId, input)
     await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[input.workspaceId])
-    if(derivation&&!opts.sessionBinding&&!opts.uploadId)derivation=await expandDerivedFileEvidence(client,derivation)
+    if(derivation&&!opts.sessionBinding)derivation=await expandDerivedFileEvidence(client,derivation)
     input = currentArchivePublication() ? await admitProgrammaticFile(client,userId,input,access)
       : opts.sessionBinding ? await admitSessionFile(client,userId,input,opts.sessionBinding,access)
       : opts.uploadId ? await admitUploadedFile(client,userId,input,opts.uploadId,access)
       : opts.derivation
       ? await admitDerivedFile(client, userId, input, derivation!, access, opts.expectedPolicyRevision)
       : await admitFileCreate(client, userId, input, opts.expectedPolicyRevision)
+    if (opts.uploadId && derivation) input = await admitDerivedFile(client,userId,input,derivation,access)
     // Recheck the resolved destination, not only the caller's pre-default labels.
     if (!opts.derivation) assertExecutionResourceScope({ workspaceId: input.workspaceId,
       userId: input.userId ?? null, assistantId: input.assistantId ?? null,

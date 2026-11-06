@@ -76,3 +76,5 @@ export type {
 } from './execution-context.js'
 
 export { AuthoritySourceSchema, type AuthoritySource } from './authority-source.js'
+
+export { WorkspaceCredentialDelegationSchema, intersectWorkspaceCredentialDelegations, bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from './workspace-delegation.js'

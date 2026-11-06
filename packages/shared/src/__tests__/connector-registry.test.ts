@@ -82,6 +82,7 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
       'getOfficeClassification',
       'restrictOfficeClassification',
       'retryOfficeTemplateImport', 'resumeOfficeGeneration',
+      'restoreOfficeVersion', 'assignOfficeComment', 'resolveOfficeComment', 'exportOfficeArtifact', 'changeOfficeLifecycle', 'cancelOfficeJob', 'applyOfficeCommands', 'getOfficeHistory', 'getOfficeComments', 'getOfficeSuggestions', 'listOfficeArtifacts',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
       'openPdfEditingSession',

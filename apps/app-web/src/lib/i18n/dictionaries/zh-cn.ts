@@ -50,6 +50,7 @@ export const zhCN: Dictionary = {
     "edit": "编辑设置"
 },
 
+  workspaceConsent: {"title": "确认工作区访问权限", "explanation": "使用您当前的工作区权限，将此应用连接至 Brian 或所选助手。", "noWorkspaces": "没有可用的工作区"},
   applicationConsent: {
     "title": "审核应用访问权限",
     "loading": "正在读取当前权限...",
@@ -596,7 +597,9 @@ export const zhCN: Dictionary = {
     "choose": "创建前请选择部门或明确选择通用范围。",
     "boundaries": "私有所有权、项目和保密级别限制仍然适用。共享不会授予管理权限或公开访问。",
     "stale": "访问上下文已变更或过期。请刷新并审核目标位置后再创建。草稿尚未提交。",
-    "unavailable": "无法加载目标位置和访问设置。请检查连接后重试。草稿尚未提交。",
+    "unavailable": "无法使用此保存位置。",
+    "reconnecting": "正在重新连接…",
+    "offlineDraft": "当前离线，可继续编写草稿。",
     "review": "审核刷新后的目标位置",
     "setup": "工作区设置保持不变。此处无法激活访问模式。",
     "migration": "管理员可以查看已保存的迁移计划，并请 Brian 准备明确的提案。应用批次不会激活模式。"
@@ -3363,6 +3366,13 @@ export const zhCN: Dictionary = {
     },
   },
   docPage: {
+    localMetadataValue: "你的更改",
+    remoteMetadataValue: "服务器当前的值",
+    metadataConflict: "此页面已在其他地方更改。请选择保留的数据，两个版本均会保留在本地恢复记录中。",
+    keepLocalMetadata: "保留我的更改",
+    keepRemoteMetadata: "保留服务器更改",
+    metadataConflictRetry: "无法解决此更改，请重新连接后重试。",
+
     sidebarSaved: "已保存",
     sidebarDrafts: "草稿",
     sidebarNewDraft: "添加",
@@ -5565,6 +5575,7 @@ export const zhCN: Dictionary = {
     fallbackDesc: "默认为关闭。开启后，此端点无法回应的消息会改由该层级的内置模型回复，回复中会注明此事，并以一般 Brian 用量计费。",
   },
   comments: {
+    localDraftFailed: "无法在此设备保存草稿。请保持此窗口打开，直到存储空间可用。",
     toolbarButton: "留言",
     toolbarButtonAria: "对所选内容加上评论",
     badgeAria: "{count} 则评论",
@@ -13908,6 +13919,9 @@ export const zhCN: Dictionary = {
     },
   },
   apiKeys: {
+    workspaceAccessLabel: "工作区访问",
+    workspaceAccessDescription: "在所选权限与上下文范围内，允许使用助手当前可用的工作区操作。仅限共享数据，30 天后到期。",
+    expiresAtLabel: "到期日",
     title: "API 密钥",
     description: "为第三方服务发行密钥，让它们透过公开 API 调用此助理。密钥绝不会离开使用方的服务器。",
     newKey: "添加密钥",
@@ -13920,7 +13934,7 @@ export const zhCN: Dictionary = {
     scopeChatLabel: "外部聊天",
     scopeChatDesc: "用于将此助理的聊天功能嵌入你的产品。此密钥只能调用 messages 端点。",
     scopeAgentLabel: "内部代理",
-    scopeAgentDesc: "完整的程序化访问：除聊天外也开放 MCP 端点。变更设置还需要“代理设置”功能。",
+    scopeAgentDesc: "将代理连接到此助手。工作区访问使用 MCP；旧版密钥也支持聊天。",
     scopeBadgeChat: "聊天",
     scopeBadgeAgent: "代理",
     audienceLabel: "服务对象",
@@ -14110,7 +14124,8 @@ export const zhCN: Dictionary = {
     detailPlay: "播放",
     detailPause: "暂停",
     detailLoadingAudio: "正在加载媒体...",
-    detailAudioError: "无法加载此媒体。请刷新页面重试。",
+    retryPlayback: "重试播放",
+    detailAudioError: "暂时无法播放。你可以在此重试，无需离开页面。",
     detailTranscript: "转录",
     visualMomentLabel: "屏幕",
     detailNoTranscript: "此录音尚未转录。",
@@ -14204,6 +14219,9 @@ export const zhCN: Dictionary = {
     retry: "重试",
   },
   recorder: {
+    pendingUpload: "已保存在此设备。连接恢复后会自动继续上传。",
+    pendingUploadFrom: "{time} 的录音已保存在此设备，等待同步。",
+    storageFailed: "本地保存失败，录音目前仅保留在内存中。重试期间请保持窗口打开。",
     start: "录音",
     audioOptions: "录音音频选项",
     includeComputerAudio: "包含电脑音频",

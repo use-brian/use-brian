@@ -35,6 +35,8 @@
 
 import * as React from "react";
 import { ArrowRight, ArrowUp, MessageSquare, Paperclip } from "lucide-react";
+import { useIsOffline } from "@/lib/offline/use-offline-sync";
+import { useDurableDraft } from "@/lib/offline/use-durable-draft";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { isInsideComposerPopup } from "@/lib/comment-dismiss";
@@ -87,7 +89,7 @@ export function PageComments({
   const t = useT().comments;
   const tAttach = useT().attachments;
   const tRec = useT().recordings;
-  const [draft, setDraft] = React.useState("");
+  const [draft, setDraft, draftStorageFailed] = useDurableDraft(workspaceId, `page:${pageId}`, currentUser?.id);
   const [busy, setBusy] = React.useState(false);
   const composerRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -150,7 +152,9 @@ export function PageComments({
   // resolve / a new post.
   const [seed, setSeed] = React.useState<{ threadId: string; seed: CommentSeed } | null>(null);
 
+  const offline = useIsOffline();
   const canComment = !!assistantId;
+  const canDraft = canComment || offline || !!draft;
   const drop = useFileDrop((files) => void att.upload(files), {
     disabled: !canComment || !aiReply || rec.busy,
   });
@@ -212,7 +216,7 @@ export function PageComments({
         researchMode: aiReply ? controls.researchMode : false,
         aiReply,
       };
-      setDraft("");
+      // Keep the page draft until the seeded message is confirmed by the server.
       att.clear();
       setPendingRecordings([]);
       rec.dismiss();
@@ -229,7 +233,7 @@ export function PageComments({
   }
 
   // Nothing to show: no composer (read-only) and no threads of either kind.
-  if (!canComment && overall.length === 0 && specific.length === 0) return null;
+  if (!canDraft && overall.length === 0 && specific.length === 0) return null;
 
   const nudgeLabel =
     specific.length === 1
@@ -271,6 +275,11 @@ export function PageComments({
             currentUser={currentUser}
             assistant={assistant}
             seed={seed?.threadId === runningThread.id ? seed.seed : undefined}
+            onSeedAccepted={() => {
+              if (seed?.threadId === runningThread.id) {
+                setDraft(current => current.trim() === seed.seed.message ? "" : current);
+              }
+            }}
             inline
             collapsed={!expanded}
             onExpand={() => setExpanded(true)}
@@ -282,7 +291,7 @@ export function PageComments({
             }}
           />
         </div>
-      ) : canComment ? (
+      ) : canDraft ? (
         // Starter composer — only while no page thread is open. Once the first
         // comment lands, the running thread's own composer (above) takes over.
         <div className="flex items-center gap-2.5">
@@ -296,7 +305,8 @@ export function PageComments({
                 AI-reply / Research toggles, send next to the model picker), so a
                 grown multi-line comment isn't flanked by controls drifting in its
                 vertical centre (mirrors the landing + floating-dock composers). */}
-            <textarea
+            {draftStorageFailed && <p role="status" className="text-xs text-muted-foreground">{t.localDraftFailed}</p>}
+          <textarea
               ref={composerRef}
               rows={1}
               value={draft}
@@ -377,7 +387,7 @@ export function PageComments({
                 type="button"
                 onClick={() => void post()}
                 disabled={
-                  busy ||
+                  !canComment || offline || busy ||
                   att.uploading ||
                   rec.busy ||
                   (!draft.trim() && !(aiReply && (att.hasReady || pendingRecordings.length > 0)))

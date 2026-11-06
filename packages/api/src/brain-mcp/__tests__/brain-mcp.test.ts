@@ -69,7 +69,7 @@ vi.mock('../../db/client.js', async (importOriginal) => ({
   queryWithRLS: vi.fn(),
   query: vi.fn().mockImplementation(async (sql: string) => {
     if (sql.includes('assistant_capabilities')) {
-      return { rows: [{ capability: 'tasks' }, { capability: 'crm' }] }
+      return { rows: ['tasks', 'crm', 'home_app:tasks:read', 'home_app:tasks:write', 'home_app:crm:read', 'home_app:crm:write'].map(capability => ({ capability })) }
     }
     return {
       rows: [
@@ -400,7 +400,7 @@ describe('[COMP:api/brain-mcp] recording discovery before transcription', () => 
       query: 'Team meeting', kind: 'meeting', since: '2026-01-12T00:00:00Z',
       until: '2026-01-13T00:00:00Z', limit: 10,
     })
-    expect(result.isError).toBeUndefined()
+    expect(result.isError).not.toBe(true)
     expect(JSON.parse(textBody(result))).toEqual(states.map((status) => ({
       recordingId: `recording-${status}`, title: 'Team meeting.m4a', kind: 'meeting',
       status, occurredAt: '2026-01-12T10:00:00.000Z', durationMs: 120000,
@@ -450,7 +450,7 @@ describe('[COMP:api/brain-mcp] buildBrainTools — scope gating', () => {
     // The per-call resolver's database grants omit Association, simulating revocation.
     const result = await tools.find(tool => tool.name === 'getAssociationModuleStatus')!.handler({})
     expect(result).toMatchObject({ isError: true })
-    expect(JSON.stringify(result)).toContain('not_authorized')
+    expect(JSON.stringify(result)).toContain('no longer available')
     expect(execute).not.toHaveBeenCalled()
   })
 
@@ -1228,7 +1228,7 @@ describe('[COMP:api/brain-mcp] bridgeCoreTool — failure copy reaches the exter
     const result = await saveMemory.handler({ summary: 'hi' })
     expect(result.isError).toBe(true)
     const body = (result.content[0] as { text: string }).text
-    expect(body).toMatch(/^Validation failed:\ntags: /)
+    expect(body).toMatch(/^Error: Validation failed:\ntags: /)
     expect(body).not.toMatch(/"code":\s*"/)
   })
 })
@@ -2062,7 +2062,7 @@ describe('[COMP:api/brain-mcp] HTTP error bodies reach the external agent with a
     expect(revoked.body).toEqual(malformed.body)
   })
 
-  it('a transport failure returns 500 with the credential explicitly cleared and a bounded retry verdict', async () => {
+  it('a transport failure reports an uncertain outcome instead of authorizing a blind retry', async () => {
     const { plaintext, store } = await fakeBrainKey()
     const res = await request(makeApp(store))
       .post('/api/brain/mcp')
@@ -2070,10 +2070,9 @@ describe('[COMP:api/brain-mcp] HTTP error bodies reach the external agent with a
       .send({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
     expect(res.status).toBe(500)
     expect(res.body.error).toBe('brain_mcp_error')
-    // Tells the agent NOT to go hunting in its own arguments or credential.
-    expect(res.body.message).toContain('the credential is fine')
-    expect(res.body.message).toContain('retry the same request once')
-    expect(res.body.message).toContain('rather than looping')
+    expect(res.body.retrySafe).toBe(false)
+    expect(res.body.message).toContain('Check the operation outcome')
+    expect(res.body.message).toContain('missing response does not mean no effect')
   })
 })
 
@@ -2126,14 +2125,15 @@ describe('[COMP:api/brain-mcp] task responsibility parity with the core tools', 
       maxClearance: null,
       ...ALL_STUBS,
       taskTools: { ...TASK_TOOLS_STUB, saveTask: core.saveTask, updateTask: core.updateTask },
+      agentActiveCapabilities: new Set(['tasks', 'home_app:tasks:write']),
     })
     const save = tools.find((t) => t.name === 'saveTask')!
     const update = tools.find((t) => t.name === 'updateTask')!
     for (const key of ['executor_assistant_id', 'follow_up_member_id', 'home']) {
-      expect(Object.keys(save.inputSchema)).toContain(key)
-      expect(Object.keys(update.inputSchema)).toContain(key)
+      expect(Object.keys((save.inputSchema as z.ZodObject<z.ZodRawShape>).shape)).toContain(key)
+      expect(Object.keys((update.inputSchema as z.ZodObject<z.ZodRawShape>).shape)).toContain(key)
     }
-    expect(Object.keys(update.inputSchema)).toContain('if_unassigned')
+    expect(Object.keys((update.inputSchema as z.ZodObject<z.ZodRawShape>).shape)).toContain('if_unassigned')
     const assistant = '55555555-5555-5555-5555-555555555555', dept = '66666666-6666-6666-6666-666666666666'
     await save.handler({ title: 'Bridged', executor_assistant_id: assistant, home: { kind: 'department', id: dept } })
     expect(created[0]).toMatchObject({ executorAssistantId: assistant, home: { kind: 'department', id: dept } })

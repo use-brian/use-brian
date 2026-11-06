@@ -32,6 +32,7 @@ import {
   subscribeOnline,
   flushWriteQueue,
   subscribePendingCount,
+  readPendingWrites,
 } from "./offline-writes";
 
 import { FEED_LOCAL_CHANGED, flushFeedWorkingCopies, readLocalFeedPosts } from "./feed-offline";
@@ -133,11 +134,12 @@ export function useIsOffline(): boolean {
  * + the published collab-socket signal, reflects the classification into the
  * module flag, and retries writes while the network is available.
  */
-export function useOfflineSync(): OfflineSyncState {
+export function useOfflineSync(sessionAvailable = true): OfflineSyncState {
   const [navOnline, setNavOnline] = useState(initialNavigatorOnline);
   const [pending, setPending] = useState(0);
   const [localPending, setLocalPending] = useState(0);
   const [feedPending, setFeedPending] = useState(0);
+  const [metadataPaused, setMetadataPaused] = useState(0);
   const [feedPaused, setFeedPaused] = useState(0);
   const collabUp = useSyncExternalStore(
     subscribeCollabConnected,
@@ -178,7 +180,7 @@ export function useOfflineSync(): OfflineSyncState {
 
   const connectivity: Connectivity = classifyConnectivity({
     navigatorOnline: navOnline,
-    collabConnected: collabUp,
+    collabConnected: collabUp && sessionAvailable,
   });
 
   // Reflect into the module flag + flush queued writes on recovery.
@@ -191,11 +193,13 @@ export function useOfflineSync(): OfflineSyncState {
   useEffect(() => {
     let cancelled = false;
     const count = async () => {
+      const writes = await readPendingWrites();
+      if (!cancelled) setMetadataPaused(writes.filter(row => row.conflict).length);
       const pages = await readLocalPages();
       if (!cancelled) setLocalPending(pages.length);
     };
     const replay = async () => {
-      if (navigator.onLine) {
+      if (navigator.onLine && sessionAvailable) {
         await flushLocalPages();
         await flushWriteQueue();
       }
@@ -209,7 +213,7 @@ export function useOfflineSync(): OfflineSyncState {
       clearInterval(timer);
       window.removeEventListener(LOCAL_PAGES_CHANGED, count);
     };
-  }, [navOnline]);
+  }, [navOnline, sessionAvailable]);
 
   useEffect(() => {
     let cancelled = false;
@@ -221,7 +225,7 @@ export function useOfflineSync(): OfflineSyncState {
         setFeedPaused(posts.filter(p => p.dirty && p.error).length);
       }
     };
-    const replay = async () => { await flushFeedWorkingCopies(); await count(); };
+    const replay = async () => { if (sessionAvailable) await flushFeedWorkingCopies(); await count(); };
     const onChange = () => {
       void count();
       clearTimeout(idle);
@@ -234,13 +238,13 @@ export function useOfflineSync(): OfflineSyncState {
       cancelled = true; clearTimeout(idle); clearInterval(timer);
       window.removeEventListener(FEED_LOCAL_CHANGED, onChange);
     };
-  }, [navOnline]);
+  }, [navOnline, sessionAvailable]);
 
   return {
     connectivity,
     offline: isEffectivelyOffline(connectivity),
     reconnecting: reconnecting && connectivity === "online",
     pending: pending + localPending + feedPending,
-    paused: feedPaused,
+    paused: feedPaused + metadataPaused,
   };
 }

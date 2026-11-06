@@ -138,6 +138,19 @@ describe("[COMP:app-web/auth-fetch] shared session recovery", () => {
     });
     return { signIn, showAccounts };
   };
+  it.each([true, false])("does not report a pending browser refresh as rejection (has token: %s)", async hasToken => {
+    const { subscribeSessionEvents } = await import("../session-events");
+    const { AuthRefreshUnavailableError } = await import("../auth-fetch");
+    const location = { href: "https://app.example.com/w/one", origin: "https://app.example.com", pathname: "/w/one", search: "", hash: "" };
+    vi.stubGlobal("window", { location }); vi.stubGlobal("navigator", { onLine: true });
+    vi.stubGlobal("document", { cookie: hasToken ? `access_token=${tokenWithExp(1)}` : "" });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 401 })));
+    const events = vi.fn(); const stop = subscribeSessionEvents(events);
+    try {
+      await expect(authFetch("https://api.example.com/api/workspaces")).rejects.toBeInstanceOf(AuthRefreshUnavailableError);
+      expect(events).not.toHaveBeenCalled(); expect(location.href).toContain("refresh-and-return");
+    } finally { stop(); }
+  });
   it("joins the app recovery flow after the retry is also rejected, without starting OAuth", async () => {
     const { subscribeSessionEvents } = await import("../session-events");
     const bridge = native({ kind: "ok", tokens: { accessToken: tokenWithExp(Math.floor(Date.now()/1000)+3600), refreshToken: "rotated" } });

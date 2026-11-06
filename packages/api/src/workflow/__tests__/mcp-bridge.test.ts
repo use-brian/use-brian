@@ -42,6 +42,17 @@ beforeEach(() => {
 })
 
 describe('[COMP:workflow/mcp-bridge] buildWorkflowToolRegistry', () => {
+  it('retains the originating connection operation and account maximum after every injector',async()=>{
+    const consent={operationNames:['permitted'],connectorBindings:{'fictional-account':'fingerprint'}} as never;
+    mockInject.mockImplementationOnce(async params=>{
+      params.tools.set('unconsentedConnector',{} as Tool);
+      return {unavailable:[],searchableSources:[],enrichConfirmation:async (_name,input)=>input};
+    });
+    const registry=await buildWorkflowToolRegistry(makeDeps(new Map([['permitted',{} as Tool],['unconsented',{} as Tool]])),{...scope,workspaceConsent:consent});
+    expect([...registry.keys()]).toEqual(['permitted']);
+    expect(mockInject).toHaveBeenCalledWith(expect.objectContaining({bindingMaximum:{'fictional-account':'fingerprint'},restrictSearchToToolNames:['permitted']}));
+  });
+
   it('enforces the supplied run ceiling during a deterministic tool invocation',async()=>{
     const probe=buildTool({name:'scopeProbe',description:'Fixture scope probe',inputSchema:z.object({}),execute:async()=>({data:currentAgentAccess()})})
     const turnScope={access:{workspaceId:'ws-1',userId:'u-1',assistantId:'a-1',assistantKind:'primary' as const,

@@ -24,6 +24,7 @@ import { captureHumanDecisionSupport } from '../approval-review/patterns.js'
 
 /** Approval projections retain the current authority of every persisted parent. */
 async function canReadApprovalSource(userId: string, approval: PendingApproval): Promise<boolean> {
+  if ((approval.approvalPayload.workspaceMcpOperation === true || typeof approval.approvalPayload.workspaceMcpRunId === 'string') && approval.approverUserId !== userId) return false
   if (approval.workflowRunId) {
     if (!approval.workflowStepRunId) return false
     const parent = await queryWithRLS(userId,
@@ -221,6 +222,8 @@ export type CreateToolInvocationParams = {
   arguments: Record<string, unknown>
   /** Description, displayLines, allowPersistentApproval — what the queue UI renders. */
   approvalPayload: {
+    /** Routes to the parent-bound workspace executor, never legacy chat replay. */
+    workspaceMcpOperation?: boolean
     description?: string
     displayLines?: string[]
     allowPersistentApproval?: boolean
@@ -445,6 +448,8 @@ export type CreateStagedWriteParams = {
  * See docs/architecture/engine/askquestion-suspend-resume.md.
  */
 export type CreateQuestionParams = {
+  /** Host-only link for an ordinary question in a parent-bound MCP run. */
+  workspaceMcpRunId?: string
   workspaceId: string
   blockingSessionId: string
   originatingAssistantId: string
@@ -578,6 +583,8 @@ export type PendingApprovalsStore = {
     answerText: string,
     responderUserId: string,
   ): Promise<PendingApproval | null>
+  /** Ordinary machine answer, never human approval or connector authorization. */
+  recordExternalQuestionAnswer(id: string, answerText: string, runId: string): Promise<PendingApproval | null>
 
   /** RLS-gated — pending skill approvals (both kinds) for a workspace. */
   listSkillApprovals(userId: string, workspaceId: string): Promise<PendingApproval[]>
@@ -1129,6 +1136,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       // Strip undefined keys so JSONB queries stay symmetric — `{}` vs
       // `{description: undefined}` are different at the wire layer.
       const payload: Record<string, unknown> = {}
+      if (params.approvalPayload.workspaceMcpOperation === true) payload.workspaceMcpOperation = true
       if (params.approvalPayload.description !== undefined) {
         payload.description = params.approvalPayload.description
       }
@@ -1243,6 +1251,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       const payload = {
         question: params.question,
         toolUseId: params.toolUseId,
+        ...(params.workspaceMcpRunId ? { workspaceMcpRunId: params.workspaceMcpRunId } : {}),
         ...(params.actionId !== undefined ? { actionId: params.actionId } : {}),
         ...(params.version !== undefined ? { version: params.version } : {}),
         ...(params.context !== undefined ? { context: params.context } : {}),
@@ -1284,6 +1293,19 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       return approval
     },
 
+    async recordExternalQuestionAnswer(id, answerText, runId) {
+      const result = await query(`UPDATE pending_approvals p SET status='approved',responded_at=now(),responded_by=NULL,
+        answer_text=$2,resolution_origin='system'
+        WHERE p.id=$1 AND p.kind='question' AND p.status='pending' AND (p.expires_at IS NULL OR p.expires_at>now())
+        AND p.approval_payload->>'workspaceMcpRunId'=$3 AND NOT(p.approval_payload ? 'actionId')
+        AND EXISTS(SELECT 1 FROM workspace_mcp_runs r JOIN workspace_mcp_contexts c ON c.id=r.context_id
+          WHERE r.id=$3::uuid AND r.session_id=p.blocking_session_id AND c.workspace_id=p.workspace_id
+          AND c.user_id=p.approver_user_id AND NOT c.invalidated AND r.status='waiting_input' AND NOT r.cancel_requested)
+        RETURNING ${COLS}`, [id, answerText, runId])
+      const approval = result.rows[0] ? rowToApproval(result.rows[0] as Record<string, unknown>) : null
+      if (approval) notifyWorkspaceChange(approval.workspaceId, 'approval', 'update', approval.id)
+      return approval
+    },
     async recordAnswer(id, answerText, responderUserId) {
       // Atomic: only flip if pending AND kind='question'. The second guard
       // is paranoia — the route already checks kind, but a transient

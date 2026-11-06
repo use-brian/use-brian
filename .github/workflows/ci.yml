@@ -151,6 +151,60 @@ jobs:
       - name: Unit tests
         run: pnpm --filter app-web exec vitest run --shard=${{ matrix.shard }}
 
+  offline-continuity:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.head_ref != 'develop' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    name: Offline and unstable-network continuity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build test dependencies
+        run: pnpm exec turbo run build --filter="app-web^..."
+      - name: Shared app continuity
+        run: >-
+          pnpm --filter app-web exec vitest run --maxWorkers=2
+          src/lib/__tests__/app-session.test.ts
+          src/components/__tests__/app-session.test.tsx
+          src/components/context/__tests__/mode-aware-context.test.tsx
+          src/components/chat-app/__tests__/chat-responsive-controls.test.tsx
+          src/lib/__tests__/auth-fetch.test.ts
+          desktop/__tests__/offline-bootstrap.test.ts
+          src/lib/offline/__tests__/offline-pages.test.ts
+          src/contexts/__tests__/primary-assistant-offline.test.tsx
+          src/lib/offline/__tests__/durable-draft.test.tsx
+          src/components/doc/__tests__/comment-thread-body-seed.test.tsx
+          src/components/doc/__tests__/page-comments.test.tsx
+          src/lib/offline/__tests__/metadata-recovery.test.ts
+          src/lib/offline/__tests__/application-authority-cache.test.ts
+          src/lib/recordings/__tests__/offline-media.test.ts
+          src/lib/recordings/__tests__/upload-journal.test.ts
+          src/lib/recordings/__tests__/upload-restart.test.ts
+          src/lib/recordings/__tests__/use-recording-upload.test.tsx
+          src/lib/recorder/__tests__/recorder-spool.test.ts
+          src/lib/recorder/__tests__/dock-recorder-background.test.tsx
+          src/lib/offline/__tests__/offline-writes.test.ts
+          src/lib/offline/__tests__/use-offline-sync.test.ts
+          src/lib/recorder/__tests__/recorder-engine-live.test.ts
+          src/lib/recordings/__tests__/recording-player-context.test.tsx
+          src/components/recordings/__tests__/recording-player-bar.test.tsx
+      - name: Native shell continuity
+        run: >-
+          pnpm --filter @use-brian/app-desktop exec vitest run --maxWorkers=2
+          src/__tests__/desktop-auth.test.ts
+          src/__tests__/window-policy.test.ts
+          src/__tests__/desktop-token-store.test.ts
+          src/__tests__/desktop-packaging.test.ts
+
   heavyweight-tests:
     if: >-
       github.event_name != 'pull_request' ||
@@ -364,7 +418,7 @@ jobs:
       (github.event_name != 'pull_request' ||
       github.head_ref != 'develop' ||
       github.event.pull_request.head.repo.full_name != github.repository)
-    needs: [ci-scope, embedded-current-tests, build-typecheck, api-tests, app-web-tests, heavyweight-tests, remaining-tests, embedded-database-tests, department-isolation]
+    needs: [ci-scope, embedded-current-tests, build-typecheck, api-tests, app-web-tests, offline-continuity, heavyweight-tests, remaining-tests, embedded-database-tests, department-isolation]
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane
@@ -375,6 +429,7 @@ jobs:
           BUILD_TYPECHECK_RESULT: ${{ needs.build-typecheck.result }}
           API_TESTS_RESULT: ${{ needs.api-tests.result }}
           APP_WEB_TESTS_RESULT: ${{ needs.app-web-tests.result }}
+          OFFLINE_CONTINUITY_RESULT: ${{ needs.offline-continuity.result }}
           HEAVYWEIGHT_TESTS_RESULT: ${{ needs.heavyweight-tests.result }}
           REMAINING_TESTS_RESULT: ${{ needs.remaining-tests.result }}
           EMBEDDED_DATABASE_TESTS_RESULT: ${{ needs.embedded-database-tests.result }}
@@ -390,9 +445,10 @@ jobs:
           if [[ "$BUILD_TYPECHECK_RESULT" != "success" ||
                 "$API_TESTS_RESULT" != "success" ||
                 "$APP_WEB_TESTS_RESULT" != "success" ||
+                "$OFFLINE_CONTINUITY_RESULT" != "success" ||
                 "$HEAVYWEIGHT_TESTS_RESULT" != "success" ||
                 "$REMAINING_TESTS_RESULT" != "success" ||
                 "$DEPARTMENT_ISOLATION_RESULT" != "success" ]]; then
-            echo "CI lane failure: build=$BUILD_TYPECHECK_RESULT api=$API_TESTS_RESULT app_web=$APP_WEB_TESTS_RESULT heavy=$HEAVYWEIGHT_TESTS_RESULT remaining=$REMAINING_TESTS_RESULT embedded=$EMBEDDED_DATABASE_TESTS_RESULT isolation=$DEPARTMENT_ISOLATION_RESULT"
+            echo "CI lane failure: build=$BUILD_TYPECHECK_RESULT api=$API_TESTS_RESULT app_web=$APP_WEB_TESTS_RESULT offline=$OFFLINE_CONTINUITY_RESULT heavy=$HEAVYWEIGHT_TESTS_RESULT remaining=$REMAINING_TESTS_RESULT embedded=$EMBEDDED_DATABASE_TESTS_RESULT isolation=$DEPARTMENT_ISOLATION_RESULT"
             exit 1
           fi

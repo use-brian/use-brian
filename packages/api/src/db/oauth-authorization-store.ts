@@ -1,3 +1,5 @@
+import { createExternalKey } from './external-key-admission.js'
+import { readWorkspaceMcpConsent, type WorkspaceMcpConsent } from '../workspace-mcp/consent.js'
 /**
  * OAuth authorization store — active grants + issued tokens.
  *
@@ -44,7 +46,9 @@ export type OAuthAuthorizationRow = {
   workspaceId: string
   scope: OAuthScope
   /** Legacy mocks/rows without the discriminator retain the Brain audience only. */
-  audience?: 'brain' | 'application'
+  audience?: 'brain' | 'application' | 'assistant'
+  boundAssistantId?: string | null
+  workspaceMcpConsent?: WorkspaceMcpConsent | null
   applicationClientId?: string | null
   createdAt: Date
   lastUsedAt: Date | null
@@ -91,6 +95,7 @@ export type OAuthAuthorizationStore = {
     codeChallenge: string
     redirectUri: string
     /** Only the explicit application audience accepts a reviewed maximum. */
+    workspaceMcpConsent?: WorkspaceMcpConsent
     applicationConsent?: { grantIds: string[]; maximumHash: string; clientRevision: string;activationVersion?:string|null }
   }): Promise<{ row: OAuthAuthorizationRow; codePlaintext: string }>
 
@@ -160,6 +165,8 @@ const COLS_ROW = `
   scope,
   coalesce(to_jsonb(oauth_authorizations)->>'audience','brain') AS audience,
   (to_jsonb(oauth_authorizations)->>'application_client_id')::uuid AS "applicationClientId",
+  (to_jsonb(oauth_authorizations)->>'bound_assistant_id')::uuid AS "boundAssistantId",
+  to_jsonb(oauth_authorizations)->'workspace_mcp_consent' AS "workspaceMcpConsent",
   created_at               AS "createdAt",
   last_used_at             AS "lastUsedAt",
   revoked_at               AS "revokedAt",
@@ -207,23 +214,29 @@ export function parseOAuthBearerToken(
   return { id, secret }
 }
 
-export type OAuthAuthorizationAudience = { audience: 'brain' } | { audience: 'application'; applicationClientId: string }
+export type OAuthAuthorizationAudience = { audience: 'brain' } | { audience: 'application'; applicationClientId: string } | { audience: 'assistant'; assistantId: string }
 
 /** One code/PKCE/refresh implementation, pinned to an explicit credential audience. */
 export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudience = { audience: 'brain' }): OAuthAuthorizationStore {
-  if (profile.audience !== 'brain' && profile.audience !== 'application'
-    || profile.audience === 'application' && !UUID_RE.test(profile.applicationClientId)) throw new Error('Invalid OAuth audience profile')
+  if (profile.audience !== 'brain' && profile.audience !== 'application' && profile.audience !== 'assistant'
+    || profile.audience === 'application' && !UUID_RE.test(profile.applicationClientId)
+    || profile.audience === 'assistant' && !UUID_RE.test(profile.assistantId)) throw new Error('Invalid OAuth audience profile')
   const applicationClientId = profile.audience === 'application' ? profile.applicationClientId : null
+  const assistantId = profile.audience === 'assistant' ? profile.assistantId : null
   // Both pieces are enum/UUID validated above; callers cannot supply SQL vocabulary.
   const audienceSql = (alias = '') => {
     const row = alias ? alias.slice(0,-1) : 'oauth_authorizations'
-    return `coalesce(to_jsonb(${row})->>'audience','brain')='${profile.audience}' AND (to_jsonb(${row})->>'application_client_id') ${applicationClientId ? `='${applicationClientId}'` : 'IS NULL'}`
+    return `coalesce(to_jsonb(${row})->>'audience','brain')='${profile.audience}' AND (to_jsonb(${row})->>'application_client_id') ${applicationClientId ? `='${applicationClientId}'` : 'IS NULL'} AND (to_jsonb(${row})->>'bound_assistant_id') ${assistantId ? `='${assistantId}'` : 'IS NULL'}`
   }
   const applicationCurrentSql = () => applicationClientId
-    ? ` AND application_oauth_binding_current(oauth_authorizations.id,'${applicationClientId}'::uuid)` : ''
+    ? ` AND application_oauth_binding_current(oauth_authorizations.id,'${applicationClientId}'::uuid)`
+    : ` AND (to_jsonb(oauth_authorizations)->>'workspace_mcp_consent' IS NULL OR (
+      (to_jsonb(oauth_authorizations)->'workspace_mcp_consent'->>'expiresAt')::timestamptz>clock_timestamp()
+      AND EXISTS(SELECT 1 FROM workspace_members m WHERE m.workspace_id=oauth_authorizations.workspace_id AND m.user_id=oauth_authorizations.user_id)))`
   return {
     async createGrantWithCode(params) {
       if (!applicationClientId && params.applicationConsent) throw new Error('Application consent requires its application audience')
+      if (applicationClientId && params.workspaceMcpConsent) throw new Error('Workspace consent cannot address an application')
       if (applicationClientId) {
         const admitted = await query<{id:string}>(`SELECT id FROM application_clients WHERE id=$1 AND workspace_id=$2
           AND oauth_client_id=$3 AND status='active' AND (application_runtime_qualified(workspace_id,'application_data') OR application_scoped_qualified(workspace_id,id))`,
@@ -259,6 +272,21 @@ export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudie
         [id,params.clientId,params.userId,params.workspaceId,params.scope,codeHash,codeExpiresAt,params.codeChallenge,params.redirectUri,
           applicationClientId,consent.grantIds,consent.clientRevision,consent.maximumHash,consent.activationVersion??null])
         if (!result.rows[0]) throw new Error('Application consent changed or is not qualified')
+        return { row: result.rows[0], codePlaintext: code.plaintext }
+      }
+
+      if (params.workspaceMcpConsent || assistantId) {
+        const consent = readWorkspaceMcpConsent(params.workspaceMcpConsent)
+        if (!consent || assistantId && consent.assistantId !== assistantId) throw new Error('workspace_mcp_consent_required')
+        const result = await createExternalKey<OAuthAuthorizationRow>(params.userId, { workspaceId: params.workspaceId },
+          `WITH revoked AS (UPDATE oauth_authorizations SET revoked_at=now(),access_token_hash=NULL,refresh_token_hash=NULL,code_hash=NULL
+            WHERE client_id=$2 AND user_id=$3 AND workspace_id=$4 AND revoked_at IS NULL AND ${audienceSql()} RETURNING id)
+           INSERT INTO oauth_authorizations(id,client_id,user_id,workspace_id,scope,code_hash,code_expires_at,code_challenge,code_redirect_uri,
+             audience,bound_assistant_id,workspace_mcp_consent)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING ${COLS_ROW}`,
+          [id,params.clientId,params.userId,params.workspaceId,params.scope,codeHash,codeExpiresAt,params.codeChallenge,params.redirectUri,
+            profile.audience,assistantId,JSON.stringify(consent)], true)
+        if (!result.rows[0]) throw new Error('workspace_mcp_consent_unavailable')
         return { row: result.rows[0], codePlaintext: code.plaintext }
       }
 
@@ -428,6 +456,8 @@ export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudie
                 a.scope,
                 coalesce(to_jsonb(a)->>'audience','brain') AS audience,
                 (to_jsonb(a)->>'application_client_id')::uuid AS "applicationClientId",
+                (to_jsonb(a)->>'bound_assistant_id')::uuid AS "boundAssistantId",
+                to_jsonb(a)->'workspace_mcp_consent' AS "workspaceMcpConsent",
                 a.created_at               AS "createdAt",
                 a.last_used_at             AS "lastUsedAt",
                 a.revoked_at               AS "revokedAt",
@@ -439,7 +469,7 @@ export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudie
                 c.client_uri               AS "clientUri"
          FROM oauth_authorizations a
          JOIN oauth_clients c ON c.client_id = a.client_id
-         WHERE a.workspace_id = $1 AND ${audienceSql('a.')}
+         WHERE a.workspace_id = $1 AND ${profile.audience === 'brain' ? "a.audience IN ('brain','assistant') AND a.application_client_id IS NULL" : audienceSql('a.')}
          ORDER BY a.created_at DESC`,
         [workspaceId],
       )
@@ -454,7 +484,7 @@ export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudie
              access_token_hash  = NULL,
              refresh_token_hash = NULL,
              code_hash          = NULL
-         WHERE id = $1 AND revoked_at IS NULL AND ${audienceSql()}
+         WHERE id = $1 AND revoked_at IS NULL AND ${profile.audience === 'brain' ? "audience IN ('brain','assistant') AND application_client_id IS NULL" : audienceSql()}
          RETURNING id`,
         [id],
       )
@@ -475,7 +505,7 @@ export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudie
             SET capture_assistant_id = $3,
                 capture_profile_id = $4
           WHERE oa.id = $1 AND oa.workspace_id = $2 AND ${audienceSql('oa.')}
-            AND oa.revoked_at IS NULL
+            AND oa.revoked_at IS NULL AND oa.workspace_mcp_consent IS NULL
             AND ($3::uuid IS NOT NULL OR $4::uuid IS NULL)
             AND (
               $3::uuid IS NULL

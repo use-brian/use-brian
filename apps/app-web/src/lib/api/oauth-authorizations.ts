@@ -18,6 +18,10 @@ import { authFetch } from "@/lib/auth-fetch";
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type OAuthAuthorization = {
+  audience?: "brain" | "assistant";
+  boundAssistantId?: string | null;
+  workspaceAccess?: boolean;
+  expiresAt?: string | null;
   id: string;
   clientId: string;
   clientName: string | null;

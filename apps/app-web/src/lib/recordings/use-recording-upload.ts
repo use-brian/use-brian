@@ -12,9 +12,14 @@
  */
 
 import { useState, useCallback, useRef } from "react";
+import { cachePage, readCachedPage } from "@/lib/offline/offline-pages";
+import { dispatchRecordingLinked } from "./live-transcript-events";
+import { saveOfflineMedia } from "./offline-media";
+import { currentOfflineWriteAuthority, pinOfflineWriteSession } from "@/lib/offline/application-write-authority";
 import { useT } from "@/lib/i18n/client";
 import {
   startRecordingUpload,
+  getRecording,
   estimateRecording,
   linkLiveRecordingPage,
   finalizeLiveRecording,
@@ -54,7 +59,7 @@ export type StagedRecording = {
 export type RecordingRunOutcome =
   | { outcome: "queued"; recording: RecordingQueued; message: string }
   | { outcome: "cancelled" }
-  | { outcome: "failed"; message: string };
+  | { outcome: "failed"; message: string; retryable?: boolean };
 
 export function useRecordingUpload(workspaceId: string, assistantId: string) {
   const t = useT();
@@ -131,7 +136,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      */
     async (
       file: File,
-      opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string; liveWindowsDone?: Promise<void>; automatic?: boolean },
+      opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string; liveWindowsDone?: Promise<void>; automatic?: boolean; recoveryId?: string; assistantId?: string },
     ): Promise<RecordingRunOutcome> => {
       if (operationActiveRef.current) {
         return { outcome: "failed", message: t.recordings.uploadInProgress };
@@ -149,23 +154,44 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
       // server-persisted windows were assembled instead.
       let assembled = false;
       try {
+        const owner = opts?.recoveryId ? currentOfflineWriteAuthority(workspaceId) : null;
+        const pinned = owner ? await pinOfflineWriteSession(owner) : undefined;
+        if (opts?.recoveryId && !pinned) throw new Error("Capture owner unavailable");
         setStatus("uploading");
         let recordingId: string;
         try {
           ({ recordingId } = await startRecordingUpload({
             workspaceId,
-            assistantId,
+            assistantId: opts?.assistantId ?? assistantId,
             file,
+            recoveryId: opts?.recoveryId,
             onProgress: (progress) => {
               setUploadProgress((current) => Math.max(current, progress));
             },
             ...(opts?.kind ? { kind: opts.kind } : {}),
           }));
+          pinned?.assertCurrent();
+          if (owner) await saveOfflineMedia(owner, recordingId, file).catch(() => {});
           // A live meeting page is linked the moment the recording id exists —
           // not after processing succeeds — so a later failure leaves the page
           // carrying its recording (and its honest status) instead of nothing.
           if (opts?.existingPageId) {
-            await linkLiveRecordingPage(opts.existingPageId, recordingId).catch(() => {});
+            const link = async () => {
+              await linkLiveRecordingPage(opts.existingPageId!, recordingId, ...(pinned ? [pinned] as const : []));
+              pinned?.assertCurrent();
+              if (owner) {
+                const cached = await readCachedPage(opts.existingPageId!, workspaceId);
+                pinned?.assertCurrent();
+                if (cached) await cachePage({...cached,linkedRecordingId:recordingId},owner);
+              }
+              pinned?.assertCurrent();
+              dispatchRecordingLinked({workspaceId,pageId:opts.existingPageId!,recordingId});
+            };
+            // Recovery owns a durable checkpoint: a missing acknowledgement
+            // keeps the spool and retries this same recording, including when
+            // processing was already queued before the interruption.
+            if (opts.recoveryId) await link();
+            else await link().catch(() => {});
           }
         } catch (uploadError) {
           // The lossless upload could not complete. A live session's ~30s
@@ -173,7 +199,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           // those into a usable (re-encoded, small-seam) recording rather
           // than losing the meeting — the spool still keeps the lossless copy
           // for a later retry.
-          if (!opts?.liveSessionId) throw uploadError;
+          if (!opts?.liveSessionId || opts.recoveryId) throw uploadError;
           // Only assembly depends on provisional uploads. Never hold the full
           // recording upload behind slow live transcription or rolling notes.
           await opts.liveWindowsDone;
@@ -190,6 +216,14 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           recordingId = fallback.recordingId;
           assembled = true;
         }
+        if (opts?.recoveryId) {
+          const existing = await getRecording(recordingId, pinned);
+          if (["queued", "processing", "processed"].includes(existing.status)) {
+            const recording: RecordingQueued = { recordingId, status: "queued", jobId: null };
+            setResult(recording); setStatus("done"); setMessage(t.recordings.queued);
+            return { outcome: "queued", recording, message: t.recordings.queued };
+          }
+        }
         setUploadProgress(1);
         setStatus("estimating");
 
@@ -201,6 +235,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           recordingId,
           t,
           automatic: opts?.automatic,
+          session: pinned,
           isVideo: recordingMimeForFile(file)?.startsWith("video/") ?? false,
           ...(opts?.existingPageId ? { pinnedPage: true } : {}),
           ...(assembled ? { assembled: true } : {}),
@@ -216,11 +251,12 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           setStatus("idle");
           return { outcome: "cancelled" };
         }
+        pinned?.assertCurrent();
         const res = confirmed.result;
         let liveLinkFailed = false;
-        if (opts?.existingPageId) {
+        if (opts?.existingPageId && !opts.recoveryId) {
           try {
-            await setPageLinkedRecording(opts.existingPageId, res.recordingId);
+            await setPageLinkedRecording(opts.existingPageId, res.recordingId, ...(pinned ? [pinned] as const : []));
           } catch {
             // The 202 queue hand-off already succeeded, so never report the
             // whole capture as failed (and retain/re-upload its spool) merely
@@ -241,7 +277,9 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         setStatus("error");
         const message = recordingFailureMessage(e, stage, t);
         setMessage(message);
-        return { outcome: "failed", message };
+        const status = e && typeof e === "object" && "status" in e ? Number(e.status) : undefined;
+        const retryable = !!opts?.recoveryId && (e instanceof TypeError || e instanceof DOMException && ["TimeoutError", "AbortError"].includes(e.name) || status === 0 || status === 408 || status === 429 || (status !== undefined && status >= 500));
+        return { outcome: "failed", message, ...(retryable ? { retryable: true } : {}) };
       } finally {
         operationActiveRef.current = false;
       }

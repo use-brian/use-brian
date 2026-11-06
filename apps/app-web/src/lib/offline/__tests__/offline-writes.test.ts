@@ -23,13 +23,17 @@ vi.mock("../offline-pages", () => ({ readLocalPage: async () => null, readCached
 vi.mock("../application-write-authority", async () => {
   const { renameView } = await import("@/lib/api/views");
   const authority = { viewerId: "viewer-fixture", workspaceId: "workspace-fixture", applicationId: "native", apiOrigin: "https://api.example" };
+  class MetadataConflict extends Error {}
   return {
+    MetadataConflict,
     currentOfflineWriteAuthority: () => authority,
     sameOfflineWriteAuthority: (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b),
     offlineWriteQueueKey: () => "offline:write-queue:fixture",
     offlineWriteUnavailable: () => new Error("Unavailable"),
-    prepareQueuedMetadataWrite: async (op: { payload: { id: string; name: string } }) =>
-      () => renameView(op.payload.id, op.payload.name),
+    prepareQueuedMetadataWrite: async (op: { effect?: string; payload: { id: string; name: string } }) => {
+      if (op.effect === "uncertain") throw new MetadataConflict("Unconfirmed legacy server");
+      return () => renameView(op.payload.id, op.payload.name);
+    },
   };
 });
 

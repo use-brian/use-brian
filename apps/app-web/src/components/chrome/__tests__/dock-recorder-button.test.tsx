@@ -47,6 +47,11 @@ vi.mock("@/lib/i18n/client", () => ({
     },
     recorder: {
       start: "Record",
+      pendingUpload: "Saved on this device. Upload resumes automatically.",
+      pendingUploadFrom: "Recording from {time} is saved, waiting to sync.",
+      recoveryFrom: "Unfinished recording from {time}",
+      recoverySave: "Save",
+      recoveryDiscard: "Discard",
       audioOptions: "Recording audio options",
       includeComputerAudio: "Include computer audio",
       streamToPage: "Stream transcript and notes to a page",
@@ -115,6 +120,7 @@ import {
   DockRecorderButton,
   DockRecorderOptions,
   DockRecorderNotice,
+  DockRecorderRecovery,
   pickCaptureSource,
 } from "../dock-recorder";
 
@@ -433,5 +439,22 @@ describe("[COMP:app-web/dock-recorder-options] rehosted next-capture preferences
     expect(rec.setIncludeComputerAudio).not.toHaveBeenCalled();
     expect(rec.setLivePageEnabled).not.toHaveBeenCalled();
     expect(rec.setInteractionEnabled).not.toHaveBeenCalled();
+  });
+});
+
+describe("[COMP:app-web/dock-recorder] durable pending recovery", () => {
+  it("distinguishes authorized transfer from an unfinished capture without asking for Save again", () => {
+    const base = { id: "capture", workspaceId: "workspace-1", assistantId: "assistant-1", startedAt: 0,
+      updatedAt: 0, elapsedMs: 180_000, chunkCount: 1, mime: "audio/webm" };
+    const rec = recorder({ recovery: [{ ...base, autoUpload: true }], notice: { kind: "pendingUpload" } });
+    mount(rec);
+    act(() => root!.render(<><DockRecorderRecovery rec={rec} /><DockRecorderNotice rec={rec} /></>));
+    expect(container!.textContent).toContain("waiting to sync");
+    expect(container!.textContent).toContain("Upload resumes automatically");
+    expect([...container!.querySelectorAll("button")].some(b => b.textContent === "Save")).toBe(false);
+    expect(container!.textContent).not.toContain("Unfinished");
+    act(() => root!.render(<DockRecorderRecovery rec={{ ...rec, recovery: [base] }} />));
+    expect(container!.textContent).toContain("Unfinished");
+    expect([...container!.querySelectorAll("button")].some(b => b.textContent === "Save")).toBe(true);
   });
 });

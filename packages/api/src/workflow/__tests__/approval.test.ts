@@ -221,6 +221,7 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
       const row = rows.find(r => r.id === id && r.status === 'pending')
       if (row) row.status = 'expired'
     },
+    async recordExternalQuestionAnswer() { return null },
     async recordAnswer() {
       throw new Error('recordAnswer not used in workflow approval tests')
     },

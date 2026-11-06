@@ -47,6 +47,7 @@ export function createDrawingTools(deps: DocToolDeps) {
       const denied = gate(deps, input.pageId, context)
       if (denied) return failure(denied)
       try {
+        if (context.executionContext && !await deps.docPageStore.getVersionedPage(context.userId, input.pageId, context)) return failure('Page not found or unavailable')
         const result = await deps.docGateway!.drawing!({ userId: context.userId, ...input, actions: [] })
         if ('error' in result) return failure(result.error)
         const elements = describeDrawing(result.scene)
@@ -76,6 +77,7 @@ export function createDrawingTools(deps: DocToolDeps) {
       const denied = gate(deps, input.pageId, context)
       if (denied) return failure(denied)
       try {
+        if (context.executionContext && !await deps.docPageStore.getVersionedPage(context.userId, input.pageId, context)) return failure('Page not found or unavailable')
         const loaded = new Map<string, DrawingLibraryItem[]>()
         const actions: DrawingAction[] = []
         for (const action of input.actions) {

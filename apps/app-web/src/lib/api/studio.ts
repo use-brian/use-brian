@@ -36,6 +36,7 @@ export type StudioAssistantSummary = {
 
 export async function listAssistants(
   workspaceId: string,
+  options?: {signal?: AbortSignal; requireSuccess?: boolean},
 ): Promise<StudioAssistantSummary[]> {
   // `?workspaceId=` scopes the list server-side, so the response already
   // contains only this workspace's assistants — no client-side filter.
@@ -43,8 +44,12 @@ export async function listAssistants(
   // contract here so consumers don't crash on undefined.
   const res = await authFetch(
     `${API_URL}/api/assistants?workspaceId=${encodeURIComponent(workspaceId)}`,
+    {signal:options?.signal},
   );
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if(options?.requireSuccess)throw Object.assign(new Error("assistants_unavailable"),{status:res.status});
+    return [];
+  }
   const data = (await res.json()) as {
     assistants?: Array<
       Partial<StudioAssistantSummary> & { id: string; name: string }

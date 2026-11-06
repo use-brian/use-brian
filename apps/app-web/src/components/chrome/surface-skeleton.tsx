@@ -117,12 +117,12 @@ export function SurfaceSkeletonFor({
 
 /**
  * The chrome row every folded-in surface opens with (Brain / Studio topbars,
- * the operator topbar): 44px phone / 48px desktop, bottom-bordered, history on
+ * the operator topbar): 44px phone / 40px desktop, bottom-bordered, history on
  * the left, a breadcrumb, and trailing controls.
  */
 function SurfaceChromeSkeleton({ trailing = 2 }: { trailing?: number }) {
   return (
-    <div data-surface-chrome-skeleton className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background px-2 md:h-12 md:px-4">
+    <div data-surface-chrome-skeleton className="flex h-11 shrink-0 items-center gap-1.5 border-b border-border bg-background px-2 md:h-10 md:px-4">
       <Skeleton className="size-5 rounded-md" />
       <Skeleton className="size-5 rounded-md" />
       <Skeleton className="ml-1.5 h-3.5 w-28" />

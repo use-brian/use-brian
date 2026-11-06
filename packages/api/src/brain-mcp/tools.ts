@@ -1,3 +1,4 @@
+import { readWorkspaceMcpConsent, workspaceMcpMaximum, type WorkspaceMcpConsent } from '../workspace-mcp/consent.js'
 import { ProgrammaticCaptureError } from '../ingest/programmatic-capture.js'
 import { EngineeringHistoryCommandSchema,type EngineeringHistoryCommand,type CaptureConfiguration } from '@use-brian/shared'
 import { EngineeringHistoryError,ARCHIVE_TEXT_LIMIT } from '../engineering-history/contracts.js'
@@ -50,6 +51,7 @@ import type { CrmCredentialParent } from '@use-brian/core'
  */
 
 import { randomUUID } from 'node:crypto'
+import { buildWorkspaceMcpCatalog } from '../workspace-mcp/catalog.js'
 import {
   describeAppStatus,
   writeHomeAppBundle,
@@ -310,9 +312,13 @@ const MAX_INGEST_CHARS = 16_000
 export type BrainTool = {
   name: string
   description: string
-  inputSchema: z.ZodRawShape
-  handler: (args: Record<string, unknown>) => Promise<CallToolResult>
+  inputSchema: z.ZodRawShape | z.ZodTypeAny
+  handler: (args: Record<string, unknown>, invocation?: { operationId?: string; schemaRevision?: string }) => Promise<CallToolResult>
 }
+
+// Preserve native registration metadata through legacy aliases without
+// copying capability lists into another transport-owned registry.
+const nativeBridgeSources = new WeakMap<BrainTool, Tool>()
 
 type BuildOpts = {
   workspaceId: string
@@ -2091,7 +2097,11 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
   // Ready external keys have a shared-only finite ceiling. Carry it through
   // legacy tool projections as well as native handlers, and check the live
   // credential before execution and again before delivering the result.
-  return exposed.map(tool => ({
+  return exposed.filter(tool => {
+    const native = nativeBridgeSources.get(tool)
+    return !native || filterToolsByCapabilities(new Map([[native.name, native]]),
+      opts.agentActiveCapabilities ?? new Set()).has(native.name)
+  }).map(tool => ({
     ...tool,
     handler: async args => {
       if(tool.name==='getCaptureConfiguration'||tool.name==='ingestToBrain'&&args.captureMode==='routed'){
@@ -2101,12 +2111,12 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       const ctx = await resolveCtx()
       if ('error' in ctx) return text(ctx.error, true)
       const security = ctx.executionContext?.security
-      if (!security || !security.access.sharedAudience && !['fileReadBytes','saveChatMedia','listCrmDeliveryCommitments','getCrmDeliveryAssessment','refreshCrmDeliveryAssessment','recordCrmDeliveryRecognition','reviewCrmDeliveryRecognition','appendCrmDeliveryObservation','withdrawCrmDeliveryObservation'].includes(tool.name)) return tool.handler(args)
+      if (!security) return text('Workspace authority unavailable.', true)
       try {
         return await security.authority.execute(() =>
           runWithAgentAccess(security.access, () => tool.handler(args)))
       } catch {
-        return text('Credential or context unavailable. Start a new request.', true)
+        return text('Credential or context unavailable. Check the operation outcome before retrying.', true)
       }
     },
   }))
@@ -2390,7 +2400,10 @@ export function makeBrainContextResolver(
 ): () => Promise<ToolContext | { error: string }> {
   let cached: ToolContext | { error: string } | undefined
   return async () => {
-    if (cached !== undefined) return cached
+    if (cached !== undefined) {
+      if (!('error' in cached)) cached.activeCapabilities = await loadActiveCapabilities(cached.assistantId)
+      return cached
+    }
     const target = await resolveWriteTarget(workspaceId)
     if (!target) {
       cached = { error: 'This workspace has no assistant to bind the call to.' }
@@ -2412,16 +2425,26 @@ export function makeBrainContextResolver(
       configurationSessionId: string | null
       admittedCompartments: string[] | null
       admittedProjectIds: string[] | null
+      workspaceMcpConsent: WorkspaceMcpConsent | null
     }>(
+      programmaticPrincipal?.kind === 'oauth_token' ? `SELECT
+        (workspace_mcp_consent->>'contextGroupId')::uuid AS "contextGroupId",
+        (workspace_mcp_consent->>'contextProjectId')::uuid AS "contextProjectId",
+        created_at AS "createdAt", NULL::uuid AS "configurationSessionId", NULL::text[] AS "admittedCompartments",
+        NULL::uuid[] AS "admittedProjectIds", workspace_mcp_consent AS "workspaceMcpConsent"
+        FROM oauth_authorizations WHERE id=$1 AND workspace_id=$2 AND audience='brain' AND revoked_at IS NULL` :
       `SELECT context_group_id AS "contextGroupId",
               context_project_id AS "contextProjectId",
               created_at AS "createdAt", configuration_session_id AS "configurationSessionId",
-              admitted_compartments AS "admittedCompartments", admitted_project_ids AS "admittedProjectIds"
+              admitted_compartments AS "admittedCompartments", admitted_project_ids AS "admittedProjectIds",
+              workspace_mcp_consent AS "workspaceMcpConsent"
          FROM brain_keys
         WHERE id = $1 AND workspace_id = $2`,
       [keyId, workspaceId],
     )
     const admitted = binding.rows[0]?.configurationSessionId ? binding.rows[0] : undefined
+    const workspaceConsent = readWorkspaceMcpConsent(binding.rows[0]?.workspaceMcpConsent)
+    if (workspaceConsent && workspaceConsent.assistantId !== target.assistantId) return { error: 'Bound assistant unavailable.' }
     // A ready key must carry the proof from the actual authentication. A
     // current key row is not proof that this request authenticated its secret.
     const credentialCurrent = authenticatedCredentialCurrent
@@ -2434,7 +2457,9 @@ export function makeBrainContextResolver(
     try {
       const resolved = await resolveExecutionContextSystem({
         credentialCurrent,
-        ...(admitted ? {
+        ...(workspaceConsent ? {
+          sharedAudience: true, maximumAccess: workspaceMcpMaximum(workspaceConsent, workspaceId, actingUserId),
+        } : admitted ? {
           sharedAudience: true,
           maximumAccess: {
             workspaceId, userId: actingUserId, clearance,
@@ -2533,15 +2558,15 @@ type BridgeOverrides = {
  * Adapt a core `Tool<z.ZodObject>` to a `BrainTool`. Extracts the Zod
  * `.shape` for `tools/list`, then on call re-parses the args (defaults +
  * coercions are load-bearing — many tool schemas rely on Zod defaults),
- * resolves the per-request context, runs `execute`, and maps `ToolResult`
- * → `CallToolResult`.
+ * resolves the per-request context, invokes the native policy-aware executor,
+ * and maps `ToolResult` to `CallToolResult`.
  *
  * `nameOverride` / `descriptionOverride` let the brain-MCP surface present a
  * tool under a different label than the chat catalog uses (e.g. chat's
  * `search` is exposed here as `searchBrain` for namespace clarity).
  *
- * Exported for the assistant MCP endpoint (`routes/assistant-mcp.ts`),
- * which bridges the same agent toolset with an assistant-bound context.
+ * Assistant MCP projects the same native adapter directly; this bridge keeps
+ * the Brain endpoint's compatible aliases and realtime notifications.
  */
 export function bridgeCoreTool(
   coreTool: Tool,
@@ -2549,22 +2574,20 @@ export function bridgeCoreTool(
   workspaceId: string,
   overrides?: BridgeOverrides,
 ): BrainTool {
-  const shape = (coreTool.inputSchema as unknown as z.ZodObject<z.ZodRawShape>).shape
   // Resolve the realtime-stream signal once at build time. The `nameOverride`
   // (e.g. `search` → `searchBrain`) is a label change for `tools/list`; the
   // signal still keys off the underlying core tool's name, so a renamed read
   // tool stays absent from the write map and never notifies.
   const notifySignal = BRAIN_WRITE_TOOL_SIGNALS[coreTool.name]
-  return {
+  const bridge: BrainTool = {
     name: overrides?.nameOverride ?? coreTool.name,
     description: overrides?.descriptionOverride ?? coreTool.description,
-    inputSchema: shape,
+    inputSchema: coreTool.inputSchema,
     async handler(args) {
       const ctx = await resolveCtx()
       if ('error' in ctx) return text(ctx.error, true)
-      let parsed: unknown
       try {
-        parsed = coreTool.inputSchema.parse(args)
+        coreTool.inputSchema.parse(args)
       } catch (err) {
         // Same renderer as the chat executor: `path: message` lines, union
         // branches bounded — never `ZodError.message`, which is the full
@@ -2572,34 +2595,29 @@ export function bridgeCoreTool(
         // ~245k chars). External agents pay for every token of this too.
         return text(`Invalid input for \`${overrides?.nameOverride ?? coreTool.name}\`. ${formatToolError(err)}`, true)
       }
-      let result: Awaited<ReturnType<Tool['execute']>>
       try {
-        result = await coreTool.execute(parsed, ctx)
-      } catch (err) {
-        // A thrown error (a ZodError from a tool's own re-parse, a provider
-        // client throw) would otherwise reach the MCP SDK's catch-all, which
-        // returns `err.message` raw. Route it through the same chokepoint so
-        // the external agent sees the compact, actionable rendering.
-        return text(formatToolError(err), true)
-      }
-      ctx.scopeAccumulator?.note(result.scopeEvidence)
-      const body =
-        typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2)
-      if (notifySignal && !result.isError) {
-        // Fire-and-forget — a NOTIFY hiccup must not break a successful
-        // write. The web reads the row via the existing brain endpoints,
-        // so a missed signal degrades gracefully (no realtime ping; the
-        // change still appears on the next refresh / event).
-        void notifyBrainChange({
-          workspaceId,
-          primitive: notifySignal.primitive,
-          rowId: extractRowId(result.data),
-          action: notifySignal.action,
+        const [operation] = await buildWorkspaceMcpCatalog(async () => {
+          const current = await resolveCtx()
+          if ('error' in current) throw new Error('context_unavailable')
+          return { context: current, tools: new Map([[coreTool.name, coreTool]]),
+            operationNames: new Set([coreTool.name]), readOnly: false }
         })
+        if (!operation) return text('This operation is no longer available to the assistant.', true)
+        // The native executor owns confirmation, write ceilings and errors.
+        // Pass the original arguments: schema transforms must run only once.
+        const result = await operation.handler(args)
+        if (notifySignal && !result.isError && result.structuredContent?.status === 'succeeded') {
+          void notifyBrainChange({ workspaceId, primitive: notifySignal.primitive,
+            rowId: extractRowId(result.structuredContent?.data), action: notifySignal.action })
+        }
+        return result
+      } catch {
+        return text('Credential or context unavailable. Check the operation outcome before retrying.', true)
       }
-      return result.isError ? text(body, true) : text(body)
     },
   }
+  nativeBridgeSources.set(bridge, coreTool)
+  return bridge
 }
 
 /** First non-empty line of `s`, truncated to a memory-summary length. */

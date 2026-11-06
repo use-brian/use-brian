@@ -7,9 +7,10 @@
  * before the model sees them. See docs/architecture/features/builtin-primitives.md.
  */
 import { z } from 'zod'
+import { AssistantOfficePlanSchema } from './command-input.js'
 import { canEnableOfficeCreation } from './templates/compiler.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
-import { resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '../security/context-scope.js'
+import { ContextScopeAccumulator, resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '../security/context-scope.js'
 
 export const OfficeGenerationTemplateSelection = z.object({
   artifactId: z.string().uuid(), jobId: z.string().uuid(), templateVersionId: z.string().uuid(),
@@ -29,6 +30,8 @@ export type OfficeArtifactToolProjection = {
   title: string
   version: number
   sensitivity?: 'public' | 'internal' | 'confidential'
+  currentVersion?: number
+  versionId?: string
   expiresAt?: string
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained'
   role: 'view' | 'comment' | 'edit'
@@ -47,6 +50,7 @@ export type OfficeArtifactToolProjection = {
     rotation?: number
     resourceId?: string
   }>
+  selection?: { targets: Array<{ id: string; content: unknown }>; missingTargetIds: string[]; oversizedTargetIds: string[] }
   targetsTruncated?: boolean
   nextTargetOffset?: number
   job?: { id: string; status: string; stage: string; errorCode: string | null; inputQuestion?: string; canResumeTemplate?: boolean; templateChoices?: OfficeTemplateChoice[]; importDiagnostics?: Array<{ reason: string; part?: string }> }
@@ -54,17 +58,38 @@ export type OfficeArtifactToolProjection = {
   scopeEvidence?: ScopeEvidence
 }
 
+export const OfficeExportInput = z.object({
+  artifactId: z.string().uuid(), expectedVersion: z.number().int().min(0),
+  format: z.enum(['native', 'pdf']).default('native'),
+  spreadsheetPdf: z.object({ sheetId: z.string().uuid(), printArea: z.string().min(3).max(64),
+    calculationMode: z.enum(['automatic', 'stored']), expectedPageCount: z.number().int().min(1).max(1000),
+    preset: z.enum(['invoice', 'worksheet']) }).strict().optional(),
+  acknowledgeCodes: z.array(z.string().min(1).max(200)).max(100).optional(),
+}).strict()
+export type OfficeExportInput = z.infer<typeof OfficeExportInput>
+
 export type OfficeToolPort = {
   createFromContext?(context: ToolContext, input: Parameters<OfficeToolPort['create']>[0]): Promise<{ artifactId: string; jobId: string }>
   listTemplates?(context: ToolContext, input: { family?: OfficePublishedTemplate['family']; query?: string }): Promise<{ templates: OfficePublishedTemplate[]; scopeEvidence?: ScopeEvidence }>
+  restoreVersion?(context: ToolContext, input: { artifactId: string; targetVersionId: string; expectedVersion: number }): Promise<{ id: string; version: number } | 'version_conflict' | null>
+  assignComment?(context: ToolContext, input: { artifactId: string; threadId: string; assignedUserId: string | null; assignedToBrian: boolean; dueAt: string | null }): Promise<{ scopeEvidence: ScopeEvidence } | null>
+  resolveComment?(context: ToolContext, input: { artifactId: string; threadId: string; resolved: boolean }): Promise<{ scopeEvidence: ScopeEvidence } | null>
+  exportArtifact?(context: ToolContext, input: OfficeExportInput): Promise<{ status: number; body: Record<string, unknown>; scopeEvidence?: ScopeEvidence } | null>
+  changeLifecycle?(context: ToolContext, input: { artifactId: string; action: 'archive' | 'unarchive' | 'trash' | 'restore' | 'purge' }): Promise<{ artifactId: string; lifecycleState: string } | null>
+
+  cancelJob?(context: ToolContext, input: { artifactId: string; jobId: string }): Promise<boolean>
+  inspectReview?(context:ToolContext,input:{artifactId:string;kind:'history'|'comments'|'suggestions';offset:number;limit:number}):Promise<{items:Record<string,unknown>[];nextOffset?:number;windowLimit:number;windowLimitReached:boolean;scopeEvidence:ScopeEvidence}|null>
+
+  list?(context:ToolContext,input:{view:'active'|'archived';limit:number;cursor?:string}):Promise<{artifacts:OfficeArtifactToolProjection[];nextCursor?:string}>
+
   resumeGeneration?(context: ToolContext, input: z.infer<typeof OfficeGenerationTemplateSelection>): Promise<{artifactId:string;jobId:string}>
   retryTemplateImport?(input: { userId: string; workspaceId: string; artifactId: string; failedJobId: string; fileId?: string; assistantId?: string; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<{ jobId: string } | null>
   inspectClassification?(context:ToolContext, artifactId:string): Promise<unknown>;
   restrictClassification?(context:ToolContext, input:{artifactId:string;expectedRevision:string;departmentId?:string;sensitivity:'public'|'internal'|'confidential'}): Promise<unknown>;
 
-  create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; additionalContext?: string; sourceHandles: string[]; templateId?: string; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ artifactId: string; jobId: string }>
-  get(params: { userId: string; artifactId: string; targetOffset?: number; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<OfficeArtifactToolProjection | null>
-  revise(params: { userId: string; assistantId: string; artifactId: string; instruction: string; targetIds: string[]; expectedVersion: number; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ jobId: string; mode: 'direct' | 'proposal' } | 'version_conflict' | null>
+  create(params: { context?: ToolContext; userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; additionalContext?: string; sourceHandles: string[]; templateId?: string; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ artifactId: string; jobId: string }>
+  get(params: { context?: ToolContext; userId: string; artifactId: string; versionId?: string; targetOffset?: number; targetIds?: string[]; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<OfficeArtifactToolProjection | null>
+  revise(params: { context?: ToolContext; userId: string; assistantId: string; artifactId: string; instruction: string; commandOperations?: unknown[]; targetIds: string[]; expectedVersion: number; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ jobId: string; mode: 'direct' | 'proposal' } | 'version_conflict' | null>
   openPdfSession?(params: { userId: string; workspaceId: string; sessionId: string; sourceAttachmentId: string; signatureAttachmentId?: string; title: string; idempotencyKey: string; signal?: AbortSignal }): Promise<{ artifactId: string; version: number; expiresAt: string; editorUrl: string; targets: Array<{ targetId: string; pageId: string; pageNumber: number; rect: { x: number; y: number; width: number; height: number } }>; sourceHash: string; signatureResourceId?: string }>
   describePdfSignature?(params: { userId: string; artifactId: string; targetId: string; signatureResourceId: string; expectedSourceHash: string; expectedVersion: number }): Promise<{ title: string; fileName: string; pageNumber: number; rect: { x: number; y: number; width: number; height: number }; sourceHash: string; version: number; expiresAt: string } | null>
   placePdfSignature?(params: { userId: string; assistantId: string; approverUserId: string; approvalId: string; artifactId: string; targetId: string; signatureResourceId: string; expectedSourceHash: string; expectedVersion: number; idempotencyKey: string }): Promise<{ artifactId: string; version: number } | 'pdf_signature_approval_stale' | null>
@@ -82,19 +107,18 @@ function link(origin: string | undefined, workspaceId: string, artifactId: strin
  * said which id, never explained that ineligibility and absence are
  * deliberately indistinguishable here (the tool returns no existence signal to
  * an ineligible caller), never named where a real id comes from, and never
- * told the model to stop. There is no artifact list tool to point at — an Office id
- * reaches a session from a createOfficeArtifact result, an editor URL, or the
- * user — so the discovery pointer names those instead.
+ * told the model to stop. Office ids are discovered through admitted library metadata, creation
+ * results, or editor links. Never infer existence from an unreachable id.
  */
 function artifactUnreachable(tool: string, verb: string, artifactId: string): string {
   return (
     `${tool} could not ${verb} Office artifact ${artifactId}: no artifact with that id is reachable for this caller. ` +
-    'Either nothing has that id, or it exists and this session is not eligible to see it — the two are deliberately ' +
+    'Either nothing has that id, or it exists and this session is not eligible to see it. The two are deliberately ' +
     `indistinguishable, because an existence signal would leak the artifact. ${
       verb === 'revise' ? 'Nothing was changed and no job was queued. ' : ''
     }` +
-    'Artifact ids come from a createOfficeArtifact result, the /office/<artifactId> editor URL, or the user — ask for ' +
-    'the link if you do not have one. Do NOT retry this exact id.'
+    'Discover admitted artifact ids in the Office library, a createOfficeArtifact result, or the /office/<artifactId> editor URL. ' +
+    'Ask for the link if you do not have one. Do NOT retry this exact id.'
   )
 }
 
@@ -231,7 +255,7 @@ export function createOfficeTools(params: {
       })
       let result: { artifactId: string; jobId: string }
       try {
-        const request = { userId: context.userId, assistantId: context.assistantId, workspaceId: context.workspaceId, ...input, ...writeScope, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null }
+        const request = { context, userId: context.userId, assistantId: context.assistantId, workspaceId: context.workspaceId, ...input, ...writeScope, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null }
         result = params.port.createFromContext ? await params.port.createFromContext(context, request) : await params.port.create(request)
       } catch (error) {
         if (error instanceof Error && (error.message === 'office_source_unavailable' || (error as Error & { code?: string }).code === 'office_source_unavailable')) {
@@ -249,15 +273,18 @@ export function createOfficeTools(params: {
     resolveConfirmation: askGate('getOfficeArtifact'),
     isConcurrencySafe: true,
     isReadOnly: true,
-    description: 'Read current permission-filtered metadata, collaboration role, version, lifecycle, generation state and semantic targets for a Brian-native Office artifact. Inspecting mode=template does not create a document: use listOfficeTemplates to obtain its published templateVersionId for createOfficeArtifact. A draft paused for template selection includes job.inputQuestion and permission-filtered job.templateChoices. Use stable target IDs with reviseOfficeArtifact. Follow nextTargetOffset for more targets. Returns no existence signal for ineligible callers and never returns binary resources or the full canonical snapshot.',
-    inputSchema: z.object({ artifactId: z.string().uuid(), targetOffset: z.number().int().min(0).optional() }),
+    description: 'Inspecting mode=template does not create a document: use listOfficeTemplates to obtain its published templateVersionId for createOfficeArtifact. Read the current permission-filtered metadata, collaboration role, version, lifecycle, generation state, and one bounded page of the semantic target outline for a Brian-native Office artifact. A draft paused for template selection includes job.inputQuestion and permission-filtered job.templateChoices with published version IDs. Use the returned stable target IDs with reviseOfficeArtifact. When nextTargetOffset is present, call again with that targetOffset to continue discovery. Returns no existence signal when the caller is ineligible and never returns binary resources or the complete canonical snapshot. Supply versionId from getOfficeHistory to inspect a saved version; currentVersion remains the current head. Supply targetIds to read exact canonical selected content for typed commands. Missing and oversized target IDs are explicit; select smaller descendants when oversized.',
+    inputSchema: z.object({ artifactId: z.string().uuid(), versionId: z.string().uuid().optional(), targetOffset: z.number().int().min(0).optional(), targetIds: z.array(z.string().uuid()).min(1).max(50).optional() }),
     async execute(input, context) {
       const blocked = await blockGate('getOfficeArtifact', context)
       if (blocked) return blocked
       const artifact = await params.port.get({
+        context,
         userId: context.userId,
         artifactId: input.artifactId,
+        versionId: input.versionId,
         targetOffset: input.targetOffset,
+        targetIds: input.targetIds,
         clearance: context.clearance,
         compartmentGrant: context.compartments ?? null,
         projectGrant: context.projectIds ?? null,
@@ -296,7 +323,7 @@ export function createOfficeTools(params: {
         compartmentGrant: context.assistantCompartments,
         projectGrant: context.assistantProjectIds,
       })
-      const result = await params.port.revise({ userId: context.userId, assistantId: context.assistantId, ...input, ...writeScope, clearance: context.clearance, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null })
+      const result = await params.port.revise({ context, userId: context.userId, assistantId: context.assistantId, ...input, ...writeScope, clearance: context.clearance, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null })
       if (result === 'version_conflict') {
         return {
           data:
@@ -461,5 +488,134 @@ export function createOfficeTools(params: {
       return {data:{...data,editorUrl:context.workspaceId ? link(params.appOrigin,context.workspaceId,data.artifactId) : undefined}}
     },
   })] : []
-  return [...(listOfficeTemplates ? [listOfficeTemplates] : []), createOfficeArtifact, getOfficeArtifact, reviseOfficeArtifact, openPdfEditingSession, placePdfSignature,...classificationTools, ...recoveryTools,...generationRecoveryTools]
+  const libraryTools = params.port.list ? [buildTool({
+    name:'listOfficeArtifacts',requiresCapability:'office',isReadOnly:true,resolveConfirmation:askGate('listOfficeArtifacts'),
+    description:'Find Office documents, presentations and spreadsheets in the admitted workspace library. Returns titles, roles and version IDs without full content. Follow nextCursor even after an empty page. Read a returned artifact with getOfficeArtifact for semantic targets and job progress.',
+    inputSchema:z.object({view:z.enum(['active','archived']).default('active'),limit:z.number().int().min(1).max(50).default(20),cursor:z.string().uuid().optional()}).strict(),
+    async execute(input,context){
+      const blocked=await blockGate('listOfficeArtifacts',context);if(blocked)return blocked
+      const result=await params.port.list!(context,input),evidence=new ContextScopeAccumulator()
+      const artifacts=result.artifacts.map(({scopeEvidence,...artifact})=>{evidence.note(scopeEvidence);return artifact})
+      return {data:{...result,artifacts},scopeEvidence:evidence.evidence}
+    },
+  })] : []
+  function reviewTool(name:string,kind:'history'|'comments'|'suggestions',description:string) { return buildTool({
+    name, requiresCapability:'office',
+    isReadOnly:true,resolveConfirmation:askGate(name),
+    description:description+' Follow nextOffset for more entries. windowLimitReached identifies the native history window; this response does not claim older entries do not exist.',
+    inputSchema:z.object({artifactId:z.string().uuid(),offset:z.number().int().min(0).max(500).default(0),limit:z.number().int().min(1).max(50).default(20)}).strict(),
+    async execute(input:{artifactId:string;offset:number;limit:number},context:ToolContext){
+      const blocked=await blockGate(name,context);if(blocked)return blocked
+      const result=await params.port.inspectReview!(context,{...input,kind})
+      if(!result)return{data:artifactUnreachable(name,'read',input.artifactId),isError:true}
+      const {scopeEvidence,...data}=result
+      return{data,scopeEvidence}
+    },
+  }) }
+  const commentTools = params.port.resolveComment ? [buildTool({
+    name: 'resolveOfficeComment', requiresCapability: 'office', isReadOnly: false, isConcurrencySafe: false,
+    resolveConfirmation: askGate('resolveOfficeComment'),
+    description: 'Resolve or reopen an existing native Office comment thread. Obtain threadId from getOfficeComments. Requires current Comment or Edit access. Preserves messages and anchors, records assistant attribution, and cannot reopen a detached anchor.',
+    inputSchema: z.object({ artifactId: z.string().uuid(), threadId: z.string().uuid(), resolved: z.boolean() }).strict(),
+    async execute(input, context) {
+      const blocked = await blockGate('resolveOfficeComment', context); if (blocked) return blocked
+      const result = await params.port.resolveComment!(context, input)
+      return result ? { data: { artifactId: input.artifactId, threadId: input.threadId, resolved: input.resolved }, scopeEvidence: result.scopeEvidence }
+        : { isError: true, data: { code: 'office_comment_unavailable' } }
+    },
+  })] : []
+  const assignmentTools = params.port.assignComment ? [buildTool({
+    name: 'assignOfficeComment', requiresCapability: 'office', isReadOnly: false, isConcurrencySafe: false,
+    resolveConfirmation: askGate('assignOfficeComment'),
+    description: 'Assign an existing Office comment thread to a workspace member or Brian and set its due date. Obtain threadId from getOfficeComments. Supply all assignment fields; null clears the member or due date. Requires current Comment or Edit access. Does not start a Brian run, edit messages or reopen detached anchors.',
+    inputSchema: z.object({ artifactId: z.string().uuid(), threadId: z.string().uuid(), assignedUserId: z.string().uuid().nullable(), assignedToBrian: z.boolean(), dueAt: z.string().datetime({ offset: true }).nullable() }).strict(),
+    async execute(input, context) {
+      const blocked = await blockGate('assignOfficeComment', context); if (blocked) return blocked
+      const result = await params.port.assignComment!(context, input)
+      return result ? { data: input, scopeEvidence: result.scopeEvidence }
+        : { isError: true, data: { code: 'office_comment_unavailable' } }
+    },
+  })] : []
+  const versionTools = params.port.restoreVersion ? [buildTool({
+    name: 'restoreOfficeVersion', requiresCapability: 'office', isReadOnly: false, isConcurrencySafe: false,
+    resolveConfirmation: askGate('restoreOfficeVersion'),
+    description: 'Restore one saved Office version as a new current head using native history and collaboration. Discover targetVersionId with getOfficeHistory; inspect its selected content with getOfficeArtifact(versionId). Requires current Edit authority and expectedVersion. Preserves history and source restrictions. On version_conflict, inspect the new head before deciding to retry.',
+    inputSchema: z.object({ artifactId: z.string().uuid(), targetVersionId: z.string().uuid(), expectedVersion: z.number().int().min(0) }).strict(),
+    async execute(input, context) {
+      const blocked = await blockGate('restoreOfficeVersion', context); if (blocked) return blocked
+      const result = await params.port.restoreVersion!(context, input)
+      if (!result || result === 'version_conflict') return { isError: true, data: { code: result ?? 'office_version_unavailable' } }
+      return { data: { artifactId: input.artifactId, versionId: result.id, version: result.version } }
+    },
+  })] : []
+  const exportTools = params.port.exportArtifact ? [buildTool({
+    name: 'exportOfficeArtifact', requiresCapability: 'office', isReadOnly: false, isConcurrencySafe: false,
+    description: 'Export the current Office version as a validated native file or PDF. Returns a workspace file ID or a validation receipt. Warning acknowledgement codes require verified human review. Does not send, share or publish externally.',
+    inputSchema: OfficeExportInput,
+    resolveConfirmation: async (context, input: unknown) => Boolean((input as { acknowledgeCodes?: string[] } | undefined)?.acknowledgeCodes?.length)
+      || Boolean(params.resolvePolicy && await params.resolvePolicy('exportOfficeArtifact', context) === 'ask'),
+    async execute(input, context) {
+      const blocked = await blockGate('exportOfficeArtifact', context); if (blocked) return blocked
+      if (input.acknowledgeCodes?.length && context.approvedToolInvocation?.toolName !== 'exportOfficeArtifact')
+        return { isError: true, data: { code: 'office_export_human_acknowledgement_required' } }
+      const result = await params.port.exportArtifact!(context, input)
+      return result ? { data: result.body, scopeEvidence: result.scopeEvidence, isError: result.status >= 400 } : { isError: true, data: { code: 'office_export_unavailable' } }
+    },
+  })] : []
+  const lifecycleTools = params.port.changeLifecycle ? [buildTool({
+    name: 'changeOfficeLifecycle', requiresCapability: 'office', isReadOnly: false, isConcurrencySafe: false,
+    description: 'Archive, unarchive, trash, restore or permanently purge an admitted Office artifact. Trash and purge require verified human confirmation. Native legal holds, template ownership and restore/purge roles apply. Returns the resulting lifecycle state; does not edit artifact content.',
+    inputSchema: z.object({ artifactId: z.string().uuid(), action: z.enum(['archive', 'unarchive', 'trash', 'restore', 'purge']) }).strict(),
+    resolveConfirmation: async (context, input: unknown) => {
+      const action = (input as { action?: string } | undefined)?.action
+      return action === 'trash' || action === 'purge' || Boolean(params.resolvePolicy && await params.resolvePolicy('changeOfficeLifecycle', context) === 'ask')
+    },
+    async execute(input, context) {
+      if (params.resolvePolicy && await params.resolvePolicy('changeOfficeLifecycle', context) === 'block') return { isError: true, data: 'Office lifecycle changes are blocked by the current tool policy.' }
+      const result = await params.port.changeLifecycle!(context, input)
+      return result ? { data: result } : { isError: true, data: { code: 'office_lifecycle_unavailable_or_blocked' } }
+    },
+  })] : []
+  const jobTools = params.port.cancelJob ? [buildTool({
+    name: 'cancelOfficeJob', requiresCapability: 'office', isReadOnly: false, isConcurrencySafe: false,
+    resolveConfirmation: askGate('cancelOfficeJob'),
+    description: 'Cancel a specific Office job on an artifact you can edit. Queued or input-waiting jobs stop immediately; running jobs stop cooperatively. Inspect getOfficeArtifact for the final state. Does not delete completed work.',
+    inputSchema: z.object({ artifactId: z.string().uuid(), jobId: z.string().uuid() }).strict(),
+    async execute(input, context) {
+      const blocked = await blockGate('cancelOfficeJob', context)
+      if (blocked) return blocked
+      const accepted = await params.port.cancelJob!(context, input)
+      return accepted ? { data: { cancellationRequested: true } } : { isError: true, data: { code: 'office_job_unavailable_or_terminal' } }
+    },
+  })] : []
+  const reviewTools=params.port.inspectReview?[
+    reviewTool('getOfficeHistory','history','Inspect native version history, including checkpoint and author metadata.'),
+    reviewTool('getOfficeComments','comments','Read native comment threads and replies with stable selection anchors.'),
+    reviewTool('getOfficeSuggestions','suggestions','Read native edit suggestions and their current review state.'),
+  ]:[]
+  return [...(listOfficeTemplates ? [listOfficeTemplates] : []), createOfficeArtifact, getOfficeArtifact, reviseOfficeArtifact, createApplyOfficeCommandsTool(params.port,params.resolvePolicy), openPdfEditingSession, placePdfSignature,...classificationTools, ...recoveryTools,...generationRecoveryTools,...libraryTools,...reviewTools,...commentTools,...assignmentTools,...jobTools,...versionTools,...exportTools, ...lifecycleTools]
+}
+
+/** Shared native tool: explicit commands enter the same revision worker. */
+export function createApplyOfficeCommandsTool(port:OfficeToolPort,resolvePolicy?:ResolveOfficeToolPolicy){
+  const name='applyOfficeCommands'
+  return buildTool({name:'applyOfficeCommands',requiresCapability:'office',isReadOnly:false,isConcurrencySafe:false,
+    resolveConfirmation:resolvePolicy?async(context)=>(await resolvePolicy(name,context))==='ask':undefined,
+    description:'Apply explicit typed Office operations to selected targets using the native revision pipeline. Obtain target IDs and the current version from getOfficeArtifact. Returns a durable revision job; comment-only access or concurrent edits produces a proposal. Commands preserve locks, validate rendering and record native history. No second model rewrites the submitted plan. PDF signatures require their separate authorization.',
+    inputSchema:z.object({artifactId:z.string().uuid(),targetIds:z.array(z.string().uuid()).min(1).max(1000),expectedVersion:z.number().int().min(0),
+      idempotencyKey:z.string().min(8).max(255),commands:AssistantOfficePlanSchema.shape.commands}).strict(),
+    async execute(input,context){
+      if(resolvePolicy&&(await resolvePolicy(name,context))==='block')return{isError:true,data:'Office commands are blocked by the current tool policy.'}
+      if(!context.workspaceId)return{isError:true,data:'A workspace context is required.'}
+      const scope=resolveWriteScope({sensitivity:'internal',baseCompartments:context.assistantDefaultCompartments,
+        baseProjectIds:context.assistantDefaultProjectIds,evidence:context.scopeAccumulator,
+        compartmentGrant:context.assistantCompartments,projectGrant:context.assistantProjectIds})
+      const result=await port.revise({context,userId:context.userId,assistantId:context.assistantId,artifactId:input.artifactId,
+        instruction:'Apply the submitted explicit operations to the selected content.',commandOperations:input.commands,targetIds:input.targetIds,
+        expectedVersion:input.expectedVersion,idempotencyKey:input.idempotencyKey,...scope,clearance:context.clearance,
+        compartmentGrant:context.compartments??null,projectGrant:context.projectIds??null})
+      if(!result||result==='version_conflict')return{isError:true,data:{code:result??'office_artifact_unavailable'}}
+      return{data:result}
+    },
+  })
 }

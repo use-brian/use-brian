@@ -50,6 +50,8 @@ const AUDIO_BITS_PER_SECOND = 64_000;
 const VIDEO_BITS_PER_SECOND = 1_000_000;
 
 type CaptureResult = {
+  localSaveFailed?: boolean;
+  retryLocalSave?: () => Promise<boolean>;
   blob: Blob;
   mime: string;
   durationMs: number;
@@ -101,6 +103,8 @@ export interface RecorderEngine {
 export async function createRecorderEngine(opts?: {
   isSupported?: (mime: string) => boolean;
   onUnexpectedEnd?: () => void;
+  onStorageFailure?: () => void;
+  onStorageRecovered?: () => void;
   /** Advertised only by new macOS/Windows desktop shells. */
   includeSystemAudio?: boolean;
   /** Record the screen/window video track alongside the audio. */
@@ -342,21 +346,23 @@ export async function createRecorderEngine(opts?: {
   let spool: SpoolStore | null = null;
   let spoolId: string | null = null;
   let spooledCount = 0;
-  // Serialized best-effort writes: order preserved, failures swallowed
-  // (degrade to in-memory-only, never break the capture).
+  let spoolMeta: SpoolSessionMeta | null = null;
+  let spoolCreated = false;
+  let spoolFailed = false;
   let spoolQueue: Promise<void> = Promise.resolve();
-  const spoolFrom = (start: number) => {
-    if (!spool || !spoolId) return;
-    const s = spool;
-    const id = spoolId;
-    for (let i = start; i < chunks.length; i++) {
-      const index = i;
-      const chunk = chunks[i];
-      const at = elapsedMs();
-      spoolQueue = spoolQueue.then(() => s.appendChunk(id, index, chunk, at)).catch(() => {});
-    }
-    spooledCount = chunks.length;
+  const flushSpool = async () => {
+    if (!spool || !spoolMeta) return;
+    try {
+      if (!spoolCreated) { await spool.createSession(spoolMeta); spoolCreated = true; }
+      while (spooledCount < chunks.length) {
+        await spool.appendChunk(spoolMeta.id, spooledCount, chunks[spooledCount], elapsedMs());
+        spooledCount++;
+      }
+      if (spoolFailed) opts?.onStorageRecovered?.();
+      spoolFailed = false;
+    } catch { spoolFailed = true; opts?.onStorageFailure?.(); }
   };
+  const spoolFrom = (_start: number) => { spoolQueue = spoolQueue.then(flushSpool); };
 
   recorder.ondataavailable = (e) => {
     if (e.data.size > 0) {
@@ -449,7 +455,7 @@ export async function createRecorderEngine(opts?: {
         chunkCount: 0,
         updatedAt: Date.now(),
       };
-      spoolQueue = spoolQueue.then(() => store.createSession(full)).catch(() => {});
+      spoolMeta = full;
       spoolFrom(0);
     },
     spoolSessionId: () => spoolId,
@@ -466,7 +472,9 @@ export async function createRecorderEngine(opts?: {
           void liveStopped.then(async () => {
             release();
             await spoolQueue;
-            resolve({ blob: new Blob(chunks, { type: mime }), mime, durationMs, liveWindowsDone });
+            await flushSpool();
+            resolve({ blob: new Blob(chunks, { type: mime }), mime, durationMs, liveWindowsDone,
+              localSaveFailed: spoolFailed, retryLocalSave: async () => { await flushSpool(); return !spoolFailed; } });
           });
         };
         // A died track leaves the recorder already inactive — assemble what

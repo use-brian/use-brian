@@ -382,7 +382,7 @@ export function publishSessionEvent(event: SessionEvent): void {
     const entry = map?.get(event.payload.senderUserId)
     if (entry) entry.lastSeen = Date.now()
   }
-  if (event.kind === 'turn_started' || event.kind === 'turn_completed') {
+  if ((event.kind === 'turn_started' || event.kind === 'turn_completed') && event.payload.senderUserId) {
     const map = presence.get(event.sessionId)
     const entry = map?.get(event.payload.senderUserId)
     if (entry) entry.lastSeen = Date.now()

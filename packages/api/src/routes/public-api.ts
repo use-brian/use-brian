@@ -306,6 +306,10 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
       fail(res, 401, 'invalid_api_key')
       return null
     }
+    if (keyRow.workspaceMcpConsent) {
+      fail(res, 403, 'workspace_key_requires_mcp', 'This workspace-scoped key uses the Assistant MCP endpoint.');
+      return null
+    }
     return keyRow
   }
 

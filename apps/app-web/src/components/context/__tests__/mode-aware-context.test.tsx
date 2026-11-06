@@ -55,17 +55,18 @@ describe('[COMP:app-web/mode-aware-context] explicit creation intent',()=>{
   expect(context.ready).toBe(true);
   expect(host.querySelector(`[aria-label="${en.contextScope.project}"]`)).not.toBeNull();
  });
- it.each(['mode','choices'] as const)('shows a load failure, not changed permissions, after a failed %s read and restores admission after retry',async resource=>{
+ it.each(['mode','choices'] as const)('quietly retries a failed %s read without asking the user to refresh',async resource=>{
+  vi.useFakeTimers();
   mocks[resource].mockRejectedValueOnce(new TypeError('Failed to fetch'));
   await render('private',true);
   expect(context.ready).toBe(false);
   expect(context.snapshot()).toBeNull();
   expect(host.querySelector('[data-skeleton]')).toBeNull();
-  expect(host.querySelector('[role="alert"]')?.textContent).toBe(en.modeContext.unavailable);
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+  expect(host.querySelector('[role="status"]')?.textContent).toBe(en.modeContext.reconnecting);
+  expect(host.querySelector('button')).toBeNull();
   expect(host.textContent).not.toContain(en.modeContext.stale);
-  const retry=host.querySelector('button')!;
-  expect(retry.textContent).toBe(en.workspaceAccess.reload);
-  await act(async()=>retry.click());
+  await act(async()=>vi.advanceTimersByTimeAsync(5000));
   expect(context.ready).toBe(true);
   expect(host.querySelector('[role="alert"]')).toBeNull();
  });
@@ -99,11 +100,30 @@ describe('[COMP:app-web/mode-aware-context] explicit creation intent',()=>{
  it.each(['mode','choices'] as const)('still blocks creation when a %s refresh explicitly denies access',async resource=>{
   await render();
   await act(async()=>context.selectProject('project'));
-  mocks[resource].mockRejectedValueOnce(new SurfaceCacheEvictionError(new Error('forbidden')));
+  mocks[resource].mockRejectedValueOnce(new SurfaceCacheEvictionError(Object.assign(new Error('forbidden'),{status:403})));
   await act(async()=>context.refresh());
   expect(context.ready).toBe(false);
   expect(context.snapshot()).toBeNull();
   expect(host.querySelector('[role="alert"]')?.textContent).toBe(en.modeContext.unavailable);
+ });
+ it('retains an explicit destination through expiry and recovers on the online event without sending',async()=>{
+  vi.useFakeTimers();await render('private');await act(async()=>context.selectProject('project'));
+  mocks.mode.mockRejectedValue(new TypeError('Failed to fetch'));mocks.choices.mockRejectedValue(new TypeError('Failed to fetch'));
+  await act(async()=>context.refresh());await act(async()=>vi.advanceTimersByTimeAsync(31000));
+  expect(context.snapshot()).toBeNull();expect(context.projectId).toBe('project');expect(context.reviewNeeded).toBe(false);
+  mocks.mode.mockImplementation(async()=>projection(mode));mocks.choices.mockImplementation(async()=>projection({policyRevision:'1',teams:[],projects:[{id:'project',name:'Project A',status:'active'}]}));
+  await act(async()=>window.dispatchEvent(new Event('online')));
+  expect(context.ready).toBe(true);expect(context.snapshot()?.contextProjectId).toBe('project');expect(context.reviewNeeded).toBe(false);
+ });
+ it('bounds retries and stops continuous retry on explicit denial',async()=>{
+  vi.useFakeTimers();mocks.mode.mockRejectedValue(new TypeError('Failed to fetch'));await render('private');
+  const initial=mocks.mode.mock.calls.length;
+  await act(async()=>vi.advanceTimersByTimeAsync(4999));expect(mocks.mode).toHaveBeenCalledTimes(initial);
+  await act(async()=>vi.advanceTimersByTimeAsync(1));expect(mocks.mode).toHaveBeenCalledTimes(initial+1);
+  await act(async()=>vi.advanceTimersByTimeAsync(9999));expect(mocks.mode).toHaveBeenCalledTimes(initial+1);
+  mocks.mode.mockRejectedValue(new SurfaceCacheEvictionError(Object.assign(new Error('forbidden'),{status:403})));
+  await act(async()=>vi.advanceTimersByTimeAsync(1));const deniedCalls=mocks.mode.mock.calls.length;
+  await act(async()=>vi.advanceTimersByTimeAsync(120000));expect(mocks.mode).toHaveBeenCalledTimes(deniedCalls);expect(context.snapshot()).toBeNull();
  });
  it('admits a fresh shared Simple default, hides only department selection and keeps Project control',async()=>{await render();expect(context.ready).toBe(true);expect(context.snapshot()).toEqual({contextGroupId:'team',contextProjectId:null,expectedPolicyRevision:'1'});expect(host.textContent).toContain(en.modeContext.shared);expect(host.querySelector(`[aria-label="${en.contextScope.team}"]`)).toBeNull();expect(host.querySelector(`[aria-label="${en.contextScope.project}"]`)).not.toBeNull();});
  it('does not default or rebind existing intent',async()=>{await render('existing');expect(context.snapshot()).toBeNull();expect(mocks.choices).not.toHaveBeenCalled();expect(host.textContent).not.toContain(en.modeContext.shared);});

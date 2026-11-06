@@ -7,6 +7,7 @@ import { createOfficeArtifactStore, type OfficeDbQuery } from '../db/office-arti
 import { createOfficeGenerationStore } from '../db/office-generation.js'
 import { officeCreationPolicy } from '../workspace-access/office-create-admission.js'
 import { admitWorkspaceResource } from '../workspace-access/resource-admission.js'
+import { sessionKindSql } from '../session-kind.js'
 import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { readOfficeGenerationEvidence } from './generation-evidence.js'
 
@@ -36,20 +37,20 @@ export async function createChatOfficeGeneration(context: ToolContext, input: Re
   const origin = parsed.data.kind === 'session' ? parsed.data : null
   if (origin && (origin.id !== context.sessionId || origin.workspaceId !== input.workspaceId
     || origin.authorityUserId !== input.userId || origin.executingAssistantId !== input.assistantId
-    || origin.visibility !== 'personal' || origin.ignoreSessionBinding || origin.systemRead)) throw denied()
+    || origin.ignoreSessionBinding || origin.systemRead)) throw denied()
   return runWithAgentAccess(execution.security.access, async () => {
     const client = await getAppPool().connect()
     try {
       await client.query('BEGIN'); await applyRLSGucs(client, input.userId)
       const policy = await officeCreationPolicy(client, input.workspaceId)
       if (!policy?.departmentReadV2) { await client.query('COMMIT'); return null }
-      const session = (await client.query<{ contextGroupId: string | null; contextProjectId: string | null; contextLockedAt: Date; contextRevision: string }>(`
+      const session = (await client.query<{ contextGroupId: string | null; contextProjectId: string | null; contextLockedAt: Date; contextRevision: string; visibility: 'personal' | 'workspace' }>(`
         SELECT context_group_id AS "contextGroupId",context_project_id AS "contextProjectId",context_locked_at AS "contextLockedAt",
-          context_locked_at::text AS "contextRevision" FROM sessions
+          context_locked_at::text AS "contextRevision",s.visibility FROM sessions s
         WHERE id=$1 AND workspace_id=$2 AND user_id=$3 AND assistant_id=$4
-          AND channel_type='web' AND visibility='personal' AND anchor_kind='none' FOR SHARE`,
+          AND ${sessionKindSql.personalConversation('s')} FOR SHARE`,
       [context.sessionId,input.workspaceId,input.userId,input.assistantId])).rows[0]
-      if (!session?.contextLockedAt || origin && (session.contextGroupId !== origin.contextGroupId || session.contextProjectId !== origin.contextProjectId
+      if (!session?.contextLockedAt || origin && (origin.visibility !== session.visibility || session.contextGroupId !== origin.contextGroupId || session.contextProjectId !== origin.contextProjectId
         || session.contextLockedAt.toISOString() !== origin.contextLockedAt)) throw denied()
       await execution.security.authority.assertCurrent()
       const liveAuth = await client.query(`SELECT s.id FROM auth_sessions s JOIN users u ON u.id=s.user_id

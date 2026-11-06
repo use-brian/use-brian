@@ -182,8 +182,9 @@ describe("[COMP:app-web/application-authority-cache] actual native outbox replay
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => init?.method === "PATCH"
       ? response({}, 401) : response({ id: pageId, workspaceId: fixture.workspaceId })));
     await flushWriteQueue(); await flushWriteQueue();
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(getValidAccessToken).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
+    expect(getValidAccessToken).toHaveBeenCalledTimes(2);
     expect((await readPendingWrites())[0].effect).toBe("uncertain");
   });
 
@@ -192,7 +193,8 @@ describe("[COMP:app-web/application-authority-cache] actual native outbox replay
     vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => init?.method === "PATCH"
       ? new Response("incomplete reply", { status: 200 }) : response({ id: pageId, workspaceId: fixture.workspaceId })));
     await flushWriteQueue(); await flushWriteQueue();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
     expect((await readPendingWrites())[0].effect).toBe("uncertain");
   });
 
@@ -225,7 +227,8 @@ describe("[COMP:app-web/application-authority-cache] actual native outbox replay
     vi.resetModules();
     const reloaded = await import("../offline-writes");
     await reloaded.flushWriteQueue();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
     expect((await reloaded.readPendingWrites())[0].effect).toBe("uncertain");
   });
 
@@ -303,7 +306,8 @@ describe("[COMP:app-web/application-authority-cache] pinned online metadata effe
     expect((await readPendingWrites())[0].effect).toBe("uncertain");
     vi.resetModules(); const reloaded = await import("../offline-writes");
     await reloaded.flushWriteQueue();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
     expect((await reloaded.readPendingWrites())[0].effect).toBe("uncertain");
   });
 
@@ -314,8 +318,9 @@ describe("[COMP:app-web/application-authority-cache] pinned online metadata effe
     await expect(offlineWrite({ kind: "view.rename", coalesceKey: null,
       payload: { id: pageId, name: "Original actor" } })).rejects.toThrow();
     await flushWriteQueue();
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(getValidAccessToken).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
+    expect(getValidAccessToken).toHaveBeenCalledTimes(2);
     expect((await readPendingWrites())[0].effect).toBe("uncertain");
   });
 
@@ -331,7 +336,8 @@ describe("[COMP:app-web/application-authority-cache] pinned online metadata effe
     expect(await readPendingWrites()).toEqual([]);
     expect(JSON.parse(fixture.data.get(key) as string)).toMatchObject([{ authority: { viewerId: "viewer-a" }, effect: "uncertain" }]);
     fixture.userId = "viewer-a"; await flushWriteQueue();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
   });
 
   it("holds an online transport success whose acknowledgement names a different page", async () => {
@@ -343,7 +349,8 @@ describe("[COMP:app-web/application-authority-cache] pinned online metadata effe
     await expect(offlineWrite({ kind: "view.rename", coalesceKey: null,
       payload: { id: pageId, name: "Wrong acknowledgement" } })).rejects.toThrow();
     await flushWriteQueue();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
     expect((await readPendingWrites())[0].effect).toBe("uncertain");
   });
 

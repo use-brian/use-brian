@@ -511,6 +511,8 @@ export type ToolResultImage = { mimeType: string; data: string }
 export type ToolResult<T = unknown> = {
   data: T
   isError?: boolean
+  /** Public native continuation. Staging an effect is not completing it. */
+  continuation?: { kind: 'approval'; approvalId: string }
   meta?: ToolResultMeta
   /** Internal high-water provenance; stripped before model serialization. */
   scopeEvidence?: ScopeEvidence

@@ -1,3 +1,5 @@
+import { createOfficeService } from '../../office/service.js'
+import type { ToolContext } from '@use-brian/core'
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
@@ -37,6 +39,41 @@ function releaseServer(overrides: Partial<OfficeReleaseRouteDeps> = {}) {
 const input = { expectedVersion: 3, action: 'export', destination: { sensitivity: 'internal', external: false } }
 
 describe('[COMP:api/office-release] Presentation PDF route', () => {
+  it('uses the same release path for assistant exports, preserving scope and attribution', async () => {
+    const test = releaseServer()
+    const loaded = (await test.deps.load(USER, ARTIFACT))!
+    const artifact = { ...loaded.artifact, compartments: [], projectIds: [] }
+    const observation = { workspaceId: WORKSPACE, resourceKind: 'office_artifact' as const, resourceId: ARTIFACT,
+      version: '3', userId: null, assistantId: null, sensitivity: 'internal' as const, compartments: [], projectIds: [] }
+    const service = createOfficeService({ release: () => test.deps, getArtifact: async () => artifact,
+      captureObservation: async () => observation } as never)
+    const context = { userId: USER, assistantId: VERSION, workspaceId: WORKSPACE, clearance: 'internal',
+      compartments: [], projectIds: [] } as unknown as ToolContext
+    const result = await service.exportArtifact!(context, { artifactId: ARTIFACT, expectedVersion: 3, format: 'pdf' })
+    expect(result).toMatchObject({ status: 201, body: { fileId: 'file-1' }, scopeEvidence: { sources: [observation] } })
+    expect(test.deps.createRecord).toHaveBeenCalledWith(expect.objectContaining({ actorAssistantId: VERSION,
+      destination: { sensitivity: 'internal', external: false } }))
+    expect(await service.exportArtifact!({ ...context, workspaceId: VERSION }, { artifactId: ARTIFACT, expectedVersion: 3, format: 'pdf' })).toBeNull()
+    expect(await service.exportArtifact!(context, { artifactId: ARTIFACT, expectedVersion: 3, format: 'pdf', acknowledgeCodes: ['claim.warning'] })).toBeNull()
+    expect(test.deps.createRecord).toHaveBeenCalledOnce()
+  })
+
+  it('refuses an assistant export if its connection is revoked during validation', async () => {
+    let active = true
+    const test = releaseServer({ revalidate: vi.fn(async () => {
+      active = false; return { scope: { sensitivity: 'internal' as const, compartments: [], projectIds: [] }, validForMs: 30000 }
+    }) })
+    const loaded = (await test.deps.load(USER, ARTIFACT))!
+    const service = createOfficeService({ release: () => test.deps,
+      getArtifact: async () => ({ ...loaded.artifact, compartments: [], projectIds: [] }),
+      captureObservation: async () => ({ resourceKind: 'office_artifact', resourceId: ARTIFACT }) } as never)
+    const context = { userId: USER, assistantId: VERSION, workspaceId: WORKSPACE, clearance: 'internal', compartments: [], projectIds: [],
+      executionContext: { security: { authority: { assertCurrent: async () => { if (!active) throw new Error('connection_revoked') } } } } } as unknown as ToolContext
+    await expect(service.exportArtifact!(context, { artifactId: ARTIFACT, expectedVersion: 3, format: 'pdf' })).rejects.toThrow('connection_revoked')
+    expect(test.deps.saveReleasedFile).not.toHaveBeenCalled()
+    expect(test.deps.createRecord).not.toHaveBeenCalled()
+  })
+
   it('preflights Presentation PDF without a spreadsheet print request', async () => {
     const test = releaseServer()
     const response = await request(test.app).post(`/api/office/artifacts/${ARTIFACT}/releases/preflight`).send({ ...input, format: 'pdf' }).expect(200)

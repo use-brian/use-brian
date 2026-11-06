@@ -1,3 +1,4 @@
+import type { WorkspaceMcpConsent } from '../workspace-mcp/consent.js'
 import { createExternalKey } from './external-key-admission.js'
 /**
  * Brain key store — workspace-scoped API keys for the brain MCP server.
@@ -35,6 +36,7 @@ const UUID_RE =
 export type BrainKeyScope = 'read' | 'read_write'
 
 export type BrainKeyRow = {
+  workspaceMcpConsent?: WorkspaceMcpConsent | null
   id: string
   workspaceId: string
   name: string
@@ -127,6 +129,7 @@ export type BrainKeyStore = {
    * RLS-gated: `actingUserId` must own or admin the workspace.
    */
   create(params: {
+    workspaceMcpConsent?: WorkspaceMcpConsent | null
     workspaceId: string
     name: string
     scope: BrainKeyScope
@@ -192,6 +195,7 @@ const COLS_PUBLIC = `
   context_project_id AS "contextProjectId",
   capture_assistant_id AS "captureAssistantId",
   capture_profile_id AS "captureProfileId",
+  workspace_mcp_consent AS "workspaceMcpConsent",
   created_by   as "createdBy",
   created_at   as "createdAt",
   last_used_at as "lastUsedAt"
@@ -211,8 +215,8 @@ export function createDbBrainKeyStore(): BrainKeyStore {
         `INSERT INTO brain_keys
            (id, workspace_id, name, key_hash, key_prefix, scope,
             max_clearance, created_by, context_group_id, context_project_id,
-            capture_assistant_id, capture_profile_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            capture_assistant_id, capture_profile_id, workspace_mcp_consent)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING ${COLS_PUBLIC}, key_hash as "keyHash"`,
         [
           id,
@@ -227,6 +231,7 @@ export function createDbBrainKeyStore(): BrainKeyStore {
           params.contextProjectId ?? null,
           params.captureAssistantId ?? null,
           params.captureProfileId ?? null,
+          params.workspaceMcpConsent ? JSON.stringify(params.workspaceMcpConsent) : null,
         ],
         params.contextGroupId !== undefined && params.contextProjectId !== undefined,
       )

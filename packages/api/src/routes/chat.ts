@@ -1,4 +1,8 @@
 import {resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
+import { attachWorkspaceFiles } from '../files/workspace-attachments.js'
+import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '@use-brian/core'
+import { createWorkspaceTurnSink, type NativeChatRequest, type NativeChatSink, type WorkspaceTurnInput, type WorkspaceTurnResult, type WorkspaceTurnBinding } from '../workspace-mcp/native-turn.js'
+import { bindWorkspaceMcpPublication, hasWorkspaceMcpRetainedAuthority } from '../db/session-context-revisions.js'
 import { resolveCurrentRecordingId } from '../recordings/recovery.js'
 import { memoryActivityFromText } from '@use-brian/core'
 import {consumeHostReadObservation,combineHostReadObservations,inheritRoutineCalendarRead,type RoutineCalendarCall} from '@use-brian/core'
@@ -2114,6 +2118,12 @@ export function mayUsePersonalChatSession(session: Parameters<typeof classifySes
  * Supports both authenticated (JWT) and guest users.
  */
 export function chatRoutes(options: WebChatOptions): Router {
+  return createNativeChatRuntime(options).router
+}
+
+/** One native orchestration path, with explicit transport-owned identity. */
+export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: Router; runWorkspaceTurn(input: WorkspaceTurnInput, binding: WorkspaceTurnBinding): Promise<WorkspaceTurnResult> } {
+  const options = baseOptions
   // Host-seam injection (DI defaults). The composition root supplies the real
   // impls; the open build falls through to these inert defaults. See WebChatOptions.
   const publishSessionEvent: PublishSessionEvent = options.publishSessionEvent ?? noopPublishSessionEvent
@@ -2121,7 +2131,9 @@ export function chatRoutes(options: WebChatOptions): Router {
   const getTitleChannelPrefix = options.getTitleChannelPrefix ?? (() => null)
   const router = Router()
 
-  router.post('/', async (req, res) => {
+  const runTurn = async (req: NativeChatRequest, res: NativeChatSink, programmatic?: WorkspaceTurnBinding) => {
+    const maximum = programmatic ? new Set(programmatic.consent.operationNames) : undefined
+    const options = maximum ? { ...baseOptions, tools: new Map([...baseOptions.tools].filter(([name]) => maximum.has(name))) } : baseOptions
     // Inference wiring through the turn kernel's boot registration.
     const turnOptions = withTurnInference(options)
     const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, sessionAudience: requestedSessionAudience, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn, researchActivityId: requestedResearchActivityId } = req.body as {
@@ -2393,8 +2405,8 @@ export function chatRoutes(options: WebChatOptions): Router {
     let requestPermissions: RequestPermissionContext | undefined
 
     try {
-      const jwtUserId = (req as { userId?: string }).userId
-      const credentialClaims = jwtUserId ? Object.freeze({userId:jwtUserId,sessionId:req.authSessionId,authVersion:req.authVersion}) : undefined
+      const jwtUserId = programmatic?.context.userId ?? req.userId
+      const credentialClaims = !programmatic && jwtUserId ? Object.freeze({userId:jwtUserId,sessionId:req.authSessionId,authVersion:req.authVersion}) : undefined
       const user = await resolveUser(jwtUserId)
       if (!user) {
         sendEvent('error', { error: 'User not found' })
@@ -2682,6 +2694,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (requestedSessionId) {
         session = await findSessionById(requestedSessionId)
       }
+      if (programmatic && (!session || session.id !== programmatic.context.sessionId
+        || session.assistantId !== programmatic.context.assistantId || session.userId !== programmatic.context.userId
+        || classifySession(session).audience !== 'workspace')) throw new Error('workspace_mcp_session_unavailable')
       if (session && !policyFor(session).webTurns) {
         sendEvent('error', {
           code: 'room_on_provider',
@@ -2972,6 +2987,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Resolve the one trusted scope before this entry point performs any
       // persistent semantic write or enters the normal model path.
       const abortController = new AbortController()
+      if (programmatic?.abortSignal) {
+        if (programmatic.abortSignal.aborted) abortController.abort()
+        else programmatic.abortSignal.addEventListener('abort', () => abortController.abort(), { once: true })
+      }
       const executionInput: ResolveExecutionContextInput = {
         userId: user.id,
         assistant,
@@ -2982,7 +3001,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         session: isNewSession
           ? { ...session, contextLockedAt: null }
           : session,
-        identity: {
+        identity: programmatic?.context.executionContext!.identity ?? {
           kind: 'attended',
           principal: { kind: 'workspace_member', userId: user.id, authenticationKind: 'native_session' },
         },
@@ -2996,8 +3015,14 @@ export function chatRoutes(options: WebChatOptions): Router {
           channelId: session.channelId,
           transport: classifySession(session).transport,
         },
-        attribution: { billingUserId: user.id },
-        ...(credentialClaims?.userId===user.id&&credentialClaims.sessionId&&credentialClaims.authVersion!==undefined
+        attribution: programmatic?.context.executionContext!.attribution ?? { billingUserId: user.id },
+        ...(programmatic ? {
+          maximumAccess: programmatic.context.executionContext!.security.ceiling,
+          credentialCurrent: async () => {
+            try { await programmatic.context.authority!.assertCurrent(); return true } catch { return false }
+          },
+        } : {}),
+        ...(programmatic ? {} : credentialClaims?.userId===user.id&&credentialClaims.sessionId&&credentialClaims.authVersion!==undefined
           ?{nativeSessionCredential:{userId:credentialClaims.userId,sessionId:credentialClaims.sessionId,authVersion:credentialClaims.authVersion}}
           :{credentialCurrent:credentialClaims?()=>credentialClaims.userId===user.id
             ?authSessionStore.validateAccess(credentialClaims):Promise.resolve(false):undefined}),
@@ -3008,6 +3033,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       const turnScope = resolvedExecution.turnScope
       const executionContext = resolvedExecution.executionContext
       const authority = executionContext.security.authority
+      if (programmatic) {
+        bindWorkspaceMcpPublication(executionContext)
+        const parent = workspaceCredentialDelegation(programmatic.context.executionContext)
+        if (!parent) throw new Error('workspace_mcp_parent_required')
+        bindWorkspaceCredentialDelegation(executionContext,parent)
+      }
 
       // Giant-paste promotion writes a durable artifact, so it runs only
       // after the immutable session scope is known and stamps that scope on
@@ -3046,7 +3077,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         assistant: { id: assistant.id, ownerUserId: assistant.workspaceId ? null : user.id, workspaceId: assistant.workspaceId },
         actorUserId: user.id,
       })
-      const scopeAccumulator = new ContextScopeAccumulator({
+      const scopeAccumulator = programmatic?.context.scopeAccumulator ?? new ContextScopeAccumulator({
         compartments: turnScope.writeCompartments,
         projectIds: turnScope.writeProjectIds,
       })
@@ -3060,17 +3091,17 @@ export function chatRoutes(options: WebChatOptions): Router {
       // null (legacy personal resume before backfill) must not take that path.
       // Readers that omit the field keep the ownership-only gate.
       const nativeTranscriptAuthority = executionContext.ownership.kind === 'workspace'
-        && executionContext.identity.kind === 'attended'
-        && executionContext.identity.principal.kind === 'workspace_member'
+        && (hasWorkspaceMcpRetainedAuthority(executionContext) || executionContext.identity.kind === 'attended'
+          && executionContext.identity.principal.kind === 'workspace_member')
         && (session.workspaceId === undefined || session.workspaceId === executionContext.ownership.workspaceId)
         ? { execution: executionContext, accumulator: scopeAccumulator } : undefined
-      const permissionContext = nativeTranscriptAuthority
+      const permissionContext = nativeTranscriptAuthority && !programmatic
         ? createRequestPermissionContext(resolvedExecution, scopeAccumulator, session, {
             createActionSnapshots: () => createExecutionPermissionSnapshots(executionInput),
           })
         : undefined
       requestPermissions = permissionContext
-      const nativeOutputBoundary=!permissionContext&&nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
+      const nativeOutputBoundary=!programmatic&&!permissionContext&&nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
         &&!executionContext.security.access.sharedAudience&&classifySession(session).surface==='chat'?createNativeAttendedOutputBoundary(executionContext,scopeAccumulator,{
         workspaceId:assistant.workspaceId??'',assistantId:assistant.id,userId:user.id,channelType:'web',
         channelId:session.channelId,sessionId:session.id,recipientType:turnPolicy.deliveryCeiling.recipientType,
@@ -3118,7 +3149,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       ) => publishRoomTurnActivity({
         mirror: true,
         sessionId: session.id,
-        senderUserId: user.id,
+        senderUserId: programmatic ? null : user.id,
         event,
         data,
         publishSessionEvent,
@@ -3145,7 +3176,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         publishRoomTurnActivity({
           mirror: true,
           sessionId: session.id,
-          senderUserId: user.id,
+          senderUserId: programmatic ? null : user.id,
           event,
           data: relayData,
           publishSessionEvent,
@@ -3441,21 +3472,21 @@ export function chatRoutes(options: WebChatOptions): Router {
             role: 'user',
             content: [{ type: 'text', text: message }],
             replyToText: replyTo?.text ?? null,
-            senderUserId: user.id,
+            senderUserId: programmatic ? null : user.id,
             scope: inputMessageScope,
           })
           dispatchPersistedWebInput({
             workspaceId: assistant.workspaceId, session, userId: user.id,
             stored, text: rawMessage ?? '', replay: !!truncateFromMessageId,
           })
-          sendEvent('user_message_saved', { id: stored.id, senderUserId: user.id })
+          sendEvent('user_message_saved', { id: stored.id, senderUserId: programmatic ? null : user.id })
           publishSessionEvent({
             kind: 'user_message_saved',
             sessionId: session.id,
             payload: {
               id: stored.id,
               sequenceNum: stored.sequenceNum,
-              senderUserId: user.id,
+              senderUserId: programmatic ? null : user.id,
               content: stored.content,
             },
           })
@@ -3502,7 +3533,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           publishSessionEvent({
             kind: 'turn_completed',
             sessionId: session.id,
-            payload: { senderUserId: user.id, reason: 'stalled_reclaimed' },
+            payload: { senderUserId: programmatic ? null : user.id, reason: 'stalled_reclaimed' },
           })
         }
 
@@ -3737,16 +3768,12 @@ export function chatRoutes(options: WebChatOptions): Router {
         // workspace + user-private gate already closes the cross-tenant path
         // (uploads are stamped user_id=uploader). `assistantKind` drives the
         // predicate's visibility double.
-        const fileCtx = {
-          workspaceId: assistant.workspaceId ?? '',
-          userId: user.id,
-          assistantId: assistant.id,
-          assistantKind: assistant.kind ?? 'standard',
-        }
+        const fileCtx = executionContext.security.access
         const fetched = await Promise.all(
           fileIds!.map((id) => options.fileStore!.get(id, fileCtx).catch(() => null)),
         )
         const validFiles = fetched.filter((f): f is NonNullable<typeof f> => f !== null)
+        noteAutomaticScopeEvidence(scopeAccumulator, validFiles)
         for (const file of validFiles) currentTurnAttachmentIds.add(file.id)
 
         if (validFiles.length > 0) {
@@ -4018,7 +4045,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             sessionId: session.id,
             role: 'user',
             content: userContentBlocks.length > 0 ? userContentBlocks : [{ type: 'text', text: userMessageText }],
-            senderUserId: user.id,
+            senderUserId: programmatic ? null : user.id,
             scope: inputMessageScope,
           }))
         : undefined
@@ -4046,6 +4073,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       const preparedConnectorTools = new Map(filterToolsByCapabilities(options.tools, activeCapabilities))
       const preparedConnectors = await turnTiming.time('connector_prepare', () => applyMcpInjection({
         scope: 'chat',
+        ...(programmatic ? { bindingMaximum: programmatic.consent.connectorBindings,
+          restrictSearchToToolNames: programmatic.consent.operationNames, keepToolsDirect: true } : {}),
         connectorUserId,
         assistant,
         userTimezone: user.timezone,
@@ -4271,7 +4300,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // this also reaches the MODEL (see the sender-name resolution below):
         // without it "the user" is several people and the reply cannot tell
         // them apart.
-        senderUserId: user.id, // authenticated human attribution also survives personal-source recognition
+        senderUserId: programmatic ? null : user.id, // authenticated human attribution also survives personal-source recognition
         scope: inputMessageScope,
       })
       // Reused room rows and regenerate/edit (including seeded kickoffs) are
@@ -4293,7 +4322,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (assistant.workspaceId && !prePersistedUserMsg) {
         void captureResearchFollowupForMessage({
           workspaceId: assistant.workspaceId, sessionId: session.id, assistantId: assistant.id,
-          messageId: storedUserMsg.id, actorUserId: user.id, externalPrincipal: false,
+          messageId: storedUserMsg.id, actorUserId: user.id, externalPrincipal: Boolean(programmatic),
           selectedActivityId: typeof requestedResearchActivityId === 'string' ? requestedResearchActivityId : null,
           replyToMessageId: replyTo?.id ?? null,
           onError: (error) => console.error('[research] follow-up capture failed', { sessionId: session.id, error: error instanceof Error ? error.message : String(error) }),
@@ -4317,7 +4346,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (!prePersistedUserMsg) {
         sendEvent('user_message_saved', {
           id: storedUserMsg.id,
-          ...(turnPolicy.attribution ? { senderUserId: user.id } : {}),
+          ...(turnPolicy.attribution ? { senderUserId: programmatic ? null : user.id } : {}),
         })
         // Room human @mentions (T-H1/T-H2) — this is the single-assistant
         // addressed-and-runs-immediately case, and the FIRST POST of a
@@ -4389,7 +4418,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             payload: {
               id: storedUserMsg.id,
               sequenceNum: storedUserMsg.sequenceNum,
-              senderUserId: user.id,
+              senderUserId: programmatic ? null : user.id,
               content: storedUserMsg.content,
             },
           })
@@ -4397,7 +4426,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         publishSessionEvent({
           kind: 'turn_started',
           sessionId: session.id,
-          payload: { senderUserId: user.id, assistantId: assistant.id },
+          payload: { senderUserId: programmatic ? null : user.id, assistantId: assistant.id },
         })
       }
 
@@ -4994,7 +5023,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // tool injection + the post-turn auto-title pass; every research /
       // coordinator / outline / presence gate stays keyed to the doc-only
       // `docCtx` / `onDocSurface` so those behaviours don't change off-doc.
-      const onAppSurface = isAppSurface(session)
+      const onAppSurface = Boolean(programmatic) || isAppSurface(session)
       const docToolsTurn = (docCtx || onAppSurface) && activeCapabilities.has('page')
       let basePrompt = resolveLayer1Prompt({
         defaultPrompt: options.systemPrompt,
@@ -5056,7 +5085,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         workspaceId: assistant.workspaceId ?? null,
         assistantId: assistant.id,
         actorUserId: user.id,
-        externalPrincipal: false,
+        externalPrincipal: Boolean(programmatic),
         operationKind: 'chat_turn',
         operationId: storedUserMsg.id,
         sourceKind: 'session_message',
@@ -5220,12 +5249,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (turnPolicy.pins && assistant.workspaceId) {
         try {
           const pinnedContext = await resolvePinnedContext({
-            sessionId: session.id,
+            sessionId: session.id, context: { executionContext, scopeAccumulator },
             workspaceId: assistant.workspaceId,
             clearance: session.effectiveClearance,
           })
           if (pinnedContext.block) userVisibleContextParts.push(pinnedContext.block)
-          if (classifySession(session).surface === 'chat') {
+          if (programmatic || classifySession(session).surface === 'chat') {
             pinnedPageEditTargets = pinnedContext.pageTargets
           }
         } catch (err) {
@@ -5297,6 +5326,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           const current = await createDbDocPageStore().getVersionedPage(
             user.id,
             requestedDocViewId,
+            { ...executionToolContext(executionContext, { appId: assistant.id }), scopeAccumulator },
           )
           if (current) {
             const pageForOutline = {
@@ -5900,7 +5930,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // admit, and inject.ts re-anchors the child mutation tools to the
             // selected id after validation.
             editPageTargets:
-              classifySession(session).surface === 'chat' ? pinnedPageEditTargets : [],
+              programmatic || classifySession(session).surface === 'chat' ? pinnedPageEditTargets : [],
             anchorBlockId:
               typeof requestedDocAnchorBlockId === 'string' && requestedDocAnchorBlockId
                 ? requestedDocAnchorBlockId
@@ -6082,6 +6112,8 @@ export function chatRoutes(options: WebChatOptions): Router {
         if (tool === options.tools.get(name) || tool.deferredSchemaOnly && allTools.has(name)) continue
         allTools.set(name, tool)
       }
+      if (maximum) for (const name of preparedConnectorTools.keys()) if (!maximum.has(name)) preparedConnectorTools.delete(name)
+      if (maximum) for (const name of allTools.keys()) if (!maximum.has(name)) allTools.delete(name)
       turnTiming.mark('tools_inject')
       if (knowledgeCapturePrompt) privateRuntimeContextParts.push(knowledgeCapturePrompt)
 
@@ -6114,11 +6146,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         const skillResult = await injectSkills({
           enforceSlugs: slashCommand ? [slashCommand.name] : undefined,
           skillStore: options.skillStore,
+          executionContext, scopeAccumulator,
           connectorUserId,
           assistantId: assistant.id,
           // §5.5 governance gate: the assistant's own clearance is the
           // use-time ceiling for which workspace skills are offered.
-          assistantClearance: assistant.clearance,
+          assistantClearance: executionContext.security.access.clearance,
+          availableConnectorIds: programmatic ? preparedConnectors.admittedConnectorIds ?? new Set() : undefined,
           tools: allTools,
           connectorStore: options.connectorStore,
           unavailableCapabilities,
@@ -6222,7 +6256,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             publishSessionEvent({
               kind: 'turn_completed',
               sessionId: session.id,
-              payload: { senderUserId: user.id },
+              payload: { senderUserId: programmatic ? null : user.id },
             })
           }
           options.analytics?.logEvent({
@@ -6853,6 +6887,12 @@ export function chatRoutes(options: WebChatOptions): Router {
         coordinatorMode, researchMode, hasPreflightContext: Boolean(preflightContext),
       })
 
+      if (programmatic) {
+        const maximum = new Set(programmatic.consent.operationNames)
+        for (const name of allTools.keys()) if (!maximum.has(name)) allTools.delete(name)
+        for (const name of loopTools.keys()) if (!maximum.has(name)) loopTools.delete(name)
+      }
+
       // Coordinator-mode addendum. The base wording covers "spawn 2-3 workers,
       // synthesize, done" — adequate for the splitter-triggered parallel-research
       // path. Research mode runs a structurally distinct 4-phase protocol
@@ -6984,7 +7024,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         sessionId: session.id,
         publishSessionEvent,
         attribution: () =>
-          ({ senderUserId: user.id, assistantId: assistant.id }),
+          ({ senderUserId: programmatic ? null : user.id, assistantId: assistant.id }),
       })
 
       // ── Persistence buffer ────────────────────────────────────
@@ -7349,9 +7389,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       replyEvidence.note(userVisibleContext)
       if (typeof message === 'string') replyEvidence.note(message)
 
-      const confirmationResolver = createConfirmationResolver()
-      activeResolvers.set(session.id, confirmationResolver)
-      turnResolver = confirmationResolver
+      const confirmationResolver = programmatic ? undefined : createConfirmationResolver()
+      if (confirmationResolver) activeResolvers.set(session.id, confirmationResolver)
+      turnResolver = confirmationResolver ?? null
 
       // ── Turn lease heartbeat (migration 424) ──
       // Refreshes the lease so the sweeper and the admission-time heal can tell
@@ -7574,7 +7614,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // AND the assistant is workspace-scoped (pending_approvals.workspace_id
             // is NOT NULL). Legacy personal assistants take Path A.
             createToolInvocationApproval:
-              assistant.workspaceId
+              programmatic ? programmatic.context.createToolInvocationApproval : assistant.workspaceId
                 ? async ({
                     toolName,
                     toolInput,
@@ -7616,7 +7656,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Path B enqueue used by tool_invocation. See
             // docs/architecture/engine/askquestion-suspend-resume.md.
             createPendingQuestion:
-              assistant.workspaceId
+              programmatic ? programmatic.context.createPendingQuestion : assistant.workspaceId
                 ? async ({ question, toolUseId, actionId, version, context, allowCustom, options: questionOptions, expiresAt }) => {
                     const safeActionId = actionId?.startsWith('connector_authorization:')
                       ? activeCapabilities.has('configure') && connectorAuthorizationEntry(actionId)
@@ -7656,7 +7696,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 sessionId: session.id,
                 toolCallId: event.toolCallId,
               })
-              if (options.sessionResumeStore) {
+              if (!programmatic && options.sessionResumeStore) {
                 options.sessionResumeStore.create({
                   sessionId: session.id,
                   approvalId: event.approvalId,
@@ -7762,7 +7802,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // (above). Worker / scheduled-job / smoke contexts keep legacy
           // terminal behavior since they don't construct that hook. See
           // docs/architecture/engine/askquestion-suspend-resume.md.
-          questionResumeEnabled: !!assistant.workspaceId,
+          questionResumeEnabled: programmatic ? !!programmatic.context.createPendingQuestion : !!assistant.workspaceId,
           // Mid-turn input — a message sent while this turn runs joins it at
           // the loop's next safe boundary (or interrupts the in-flight
           // response, for a steer). In a room only an addressed message for
@@ -7790,7 +7830,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Ordinary native chat persists a small job, then releases the turn.
             // The safety-net model runs with fresh authority in the worker.
             const stateJobKind = classifySession(session)
-            if (options.enqueueSessionStateJob && nativeTranscriptAuthority
+            if (!programmatic && options.enqueueSessionStateJob && nativeTranscriptAuthority
               && executionContext.identity.kind === 'attended' && executionContext.identity.principal.kind === 'workspace_member'
               && executionContext.identity.principal.authenticationKind === 'native_session'
               && stateJobKind.anchor.kind === 'none' && stateJobKind.transport === 'web' && stateJobKind.lane === 'conversation'
@@ -8184,7 +8224,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                     role: 'user',
                     content: [{ type: 'text', text: queuedInput.text }],
                     ...(turnPolicy.attribution
-                      ? { senderUserId: user.id }
+                      ? { senderUserId: programmatic ? null : user.id }
                       : {}),
                     scope: inputMessageScope,
                   }))
@@ -8218,7 +8258,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                     payload: {
                       id: storedQueued.id,
                       sequenceNum: storedQueued.sequenceNum,
-                      senderUserId: user.id,
+                      senderUserId: programmatic ? null : user.id,
                       content: storedQueued.content,
                     },
                   })
@@ -8283,6 +8323,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             })
           }
           if (event.type === 'awaiting_approval') {
+            programmatic?.onAwaitingApproval?.(event.approvalId, event.toolName === 'askQuestion' ? 'question' : 'tool')
             // askQuestion suspensions (Phase 2) skip the live-resolver
             // index. The resolver has no pending entry for the askQuestion
             // toolCallId — `tryResolveLiveToolApproval` would treat
@@ -8307,7 +8348,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // replay the suspended tool after a Cloud Run restart. Best-
             // effort — a failed checkpoint write degrades to Path A
             // (in-memory only) rather than blocking the user.
-            if (options.sessionResumeStore) {
+            if (!programmatic && options.sessionResumeStore) {
               try {
                 await authority.execute(() => options.sessionResumeStore!.create({
                   sessionId: session.id,
@@ -8507,7 +8548,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // late approval-resolve doesn't enqueue a redundant resume job.
             // Best-effort: a leftover row is harmless (the resume worker
             // no-ops on an already-resolved approval).
-            if (options.sessionResumeStore) {
+            if (!programmatic && options.sessionResumeStore) {
               options.sessionResumeStore
                 .deleteBySessionId(session.id)
                 .catch((err) => console.debug('[chat] resume-point cleanup failed:', err))
@@ -8865,7 +8906,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         publishSessionEvent({
           kind: 'turn_completed',
           sessionId: session.id,
-          payload: { senderUserId: user.id },
+          payload: { senderUserId: programmatic ? null : user.id },
         })
         turnCompletionPublished = true
       }
@@ -8929,7 +8970,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // this request's live execution or transcript in a detached promise.
       let titleQueued = false
       const metadataKind = classifySession(session)
-      if (options.enqueueSessionTitleJob && nativeTranscriptAuthority && turnReleased && postReply.isPublishedReply()
+      if (!programmatic && options.enqueueSessionTitleJob && nativeTranscriptAuthority && turnReleased && postReply.isPublishedReply()
         && metadataKind.anchor.kind === 'none' && metadataKind.transport === 'web' && metadataKind.lane === 'conversation'
         && session.assistantId === assistant.id
         && !roomResponseGroupContext && !(docToolsTurn && docWrittenPageIds.size > 0)) {
@@ -9358,7 +9399,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // successor's inbox.
       turnInboxHandle?.close()
     }
-  })
+  }
+  router.post('/', (req, res) => runTurn(req, res))
 
   // ── POST /stop — stop the turn running in this session ──────
   //
@@ -9606,5 +9648,31 @@ export function chatRoutes(options: WebChatOptions): Router {
     res.status(404).json({ error: 'No pending confirmation for this session' })
   })
 
-  return router
+  return {
+    router,
+    async runWorkspaceTurn(input: WorkspaceTurnInput, binding: WorkspaceTurnBinding) {
+      const { context, consent } = binding, execution = context.executionContext
+      if (!execution || !hasWorkspaceMcpRetainedAuthority(execution) || !context.scopeAccumulator
+        || execution.identity.kind !== 'programmatic' || context.sessionPersisted !== true
+        || consent.assistantId !== context.assistantId || !consent.operationNames.includes('runBrian')) {
+        throw new Error('workspace_mcp_runtime_authority_required')
+      }
+      await execution.security.authority.assertCurrent()
+      if ((input.fileIds?.length ?? 0) + (input.workspaceFileIds?.length ?? 0) > 32) throw new Error('attachment_count_exceeded')
+      let fileIds = input.fileIds
+      if (input.workspaceFileIds?.length) {
+        if (!baseOptions.filesApi || !baseOptions.fileStore) throw new Error('attachment_runtime_unavailable')
+        fileIds = [...(fileIds ?? []), ...await attachWorkspaceFiles(baseOptions.filesApi, context, input.workspaceFileIds)]
+      }
+      const output = createWorkspaceTurnSink()
+      const approvals = new Set<string>()
+      const questions = new Set<string>()
+      await runTurn({ body: { ...input, fileIds, sessionId: context.sessionId, assistantId: context.assistantId,
+        workspaceId: context.workspaceId, ask: true } }, output.sink, { ...binding,
+        onAwaitingApproval: (id, kind) => { (kind === 'question' ? questions : approvals).add(id); binding.onAwaitingApproval?.(id, kind) } })
+      await execution.security.authority.assertCurrent()
+      return questions.size ? { status: 'waiting_input' as const, messageIds: output.result().messageIds, questionIds: [...questions] }
+        : approvals.size ? { status: 'waiting_approval' as const, messageIds: output.result().messageIds, approvalIds: [...approvals] } : output.result()
+    },
+  }
 }

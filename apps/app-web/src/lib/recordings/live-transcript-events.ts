@@ -26,3 +26,10 @@ export function dispatchLiveTranscriptWindow(detail: LiveTranscriptWindowDetail)
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(LIVE_TRANSCRIPT_WINDOW_EVENT, { detail }));
 }
+
+/** Acknowledged page linkage, scoped to the active workspace. */
+export const RECORDING_LINKED_EVENT = "brian:recording-linked";
+export type RecordingLinkedDetail = { workspaceId: string; pageId: string; recordingId: string };
+export function dispatchRecordingLinked(detail: RecordingLinkedDetail): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(RECORDING_LINKED_EVENT, { detail }));
+}

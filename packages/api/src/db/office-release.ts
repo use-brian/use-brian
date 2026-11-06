@@ -23,14 +23,18 @@ export function createOfficeReleaseStore(db: OfficeDbQuery = defaultOfficeDbQuer
       return result.rows
     },
 
-    async createRelease(params: { userId: string; artifactId: string; versionId: string; workspaceId: string; action: OfficeReleaseAction; destination: OfficeReleaseDestination; receipt: OfficeReleaseReceipt; acknowledgement?: OfficeReleaseAcknowledgement; releasedFileId: string }): Promise<{ id: string }> {
+    async createRelease(params: { userId: string; actorAssistantId?: string; artifactId: string; versionId: string; workspaceId: string; action: OfficeReleaseAction; destination: OfficeReleaseDestination; receipt: OfficeReleaseReceipt; acknowledgement?: OfficeReleaseAcknowledgement; releasedFileId: string }): Promise<{ id: string }> {
       const result = await db<{ id: string }>(params.userId, `
-        INSERT INTO office_release_records
+        WITH released AS (INSERT INTO office_release_records
           (artifact_id,artifact_version_id,workspace_id,action,destination_projection,
            validation_receipt,acknowledgement,released_file_id,released_by)
         VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb,$8,$9)
-        RETURNING id
-      `, [params.artifactId, params.versionId, params.workspaceId, params.action, JSON.stringify(params.destination), JSON.stringify(params.receipt), params.acknowledgement ? JSON.stringify(params.acknowledgement) : null, params.releasedFileId, params.userId])
+        RETURNING id), audit AS (
+          INSERT INTO office_audit_events(artifact_id,workspace_id,event_type,actor_user_id,actor_assistant_id,artifact_version,reason,metadata)
+          SELECT $1,$3,'office.release.created',$9,$10,($6::jsonb->>'version')::int,'Validated Office export',
+            jsonb_build_object('releaseId',id,'action',$4::text,'fileId',$8::uuid) FROM released
+        ) SELECT id FROM released
+      `, [params.artifactId, params.versionId, params.workspaceId, params.action, JSON.stringify(params.destination), JSON.stringify(params.receipt), params.acknowledgement ? JSON.stringify(params.acknowledgement) : null, params.releasedFileId, params.userId, params.actorAssistantId ?? null])
       if (!result.rows[0]) throw new Error('Office release insert returned no row')
       return result.rows[0]
     },

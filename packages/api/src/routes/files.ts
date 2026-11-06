@@ -1,3 +1,4 @@
+import { requiresNativeChatCreation } from '../session-kind.js'
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import multer, { MulterError } from 'multer'
 import { z } from 'zod'
@@ -240,11 +241,12 @@ export function fileRoutes(
         // Atomic upsert: retries and multiple attachments from a fresh pane
         // bind to the same session, which the client adopts for its first turn.
         const appOrigin = fields.appOrigin && UPLOAD_ORIGINS.has(fields.appOrigin) ? fields.appOrigin : null
-        if (appOrigin === 'chat' && (!req.userId || !req.authSessionId || req.authVersion === undefined)) {
+        const nativeChat = requiresNativeChatCreation(appOrigin)
+        if (nativeChat && (!req.userId || !req.authSessionId || req.authVersion === undefined)) {
           res.status(401).json({ error: 'Sign in to attach files to a personal chat.', code: 'personal_session_auth_required' })
           return
         }
-        const createSession = appOrigin === 'chat'
+        const createSession = nativeChat
           ? (params: Parameters<typeof findOrCreateSession>[0]) => createPersonalWebSession(
             { ...params, workspaceId: assistant.workspaceId },
             { actorUserId: req.userId!, authSessionId: req.authSessionId!, authVersion: req.authVersion! },

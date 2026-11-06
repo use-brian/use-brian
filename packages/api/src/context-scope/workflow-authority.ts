@@ -1,3 +1,9 @@
+import { isDeepStrictEqual } from 'node:util'
+import { intersectWorkspaceCredentialDelegations, bindWorkspaceCredentialDelegation } from '@use-brian/core'
+import { bindWorkspaceMcpPublication, bindWorkspaceMcpWorkflowPublication } from '../db/session-context-revisions.js'
+import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
+import { restoreWorkspaceMcpDelegation } from '../workspace-mcp/delegation.js'
+import { createDbCapabilityStore } from '../db/capability-store.js'
 import { unboundNativeTaskGoalHost,resolveRetainedGoalWorkflowRuntime,resolveRetainedTaskGoalAuthority } from '../workspace-access/goal-source-admission.js'
 import type { PoolClient } from 'pg'
 import { createDbContextScopeStore } from '../db/context-scope-store.js'
@@ -19,6 +25,7 @@ type StoredAuthority = {
   assistantId: string
   ceiling: AccessCeiling
   workflowAuthoringAuthority: AuthoringAuthority
+  invocationAuthority?: AuthoringAuthority
   sourceGoal?: GoalBinding | null
 }
 function unavailable(): Error {
@@ -73,6 +80,10 @@ async function resolveSavedAuthoringCeiling(
       workspaceId: expected.workspaceId,
       key: binding,
     }, ...(client ? [authoringDeps(client)] : []))
+    if (authority.workspaceDelegation) {
+      const restored = await restoreWorkspaceMcpDelegation(authority.workspaceDelegation,createDbCapabilityStore())
+      current = intersectAccessCeilings(current,restored.context.executionContext!.security.ceiling)
+    }
     if (!accessCeilingContains(current, authority.ceiling)) throw unavailable()
   } catch {
     throw unavailable()
@@ -178,9 +189,10 @@ async function resolveWorkflowRunSnapshot(params: {
     authority: StoredAuthority | null
     actor: string | null
     workflowAuthoringAuthority: unknown
+    invocationAuthority: unknown
   }>(
     `SELECT r.status, r.execution_authority AS authority, COALESCE(r.triggered_by,w.created_by) AS actor,
-            w.authoring_authority AS "workflowAuthoringAuthority"
+            w.authoring_authority AS "workflowAuthoringAuthority",r.invocation_authority AS "invocationAuthority"
        FROM workflow_runs r JOIN workflows w ON w.id=r.workflow_id AND w.workspace_id=r.workspace_id
       WHERE r.id=$1 AND r.workspace_id=$2`, [run.id, workspaceId],
   )).rows[0]
@@ -193,6 +205,9 @@ async function resolveWorkflowRunSnapshot(params: {
     { contextGroupId:run.contextGroupId ?? null, contextProjectId:run.contextProjectId ?? null },
     client,
   )
+  const invocation = row.invocationAuthority == null ? undefined : await resolveSavedAuthoringCeiling(
+    row.invocationAuthority, { userId, workspaceId },
+    { contextGroupId:run.contextGroupId ?? null, contextProjectId:run.contextProjectId ?? null },client)
   const assistant = await authoringAssistant(assistantId,client)
   if (!assistant || assistant.workspaceId !== workspaceId) throw unavailable()
   const sourceGoal = await readGoalBinding(run.id, workspaceId, userId,client)
@@ -219,6 +234,7 @@ async function resolveWorkflowRunSnapshot(params: {
     } catch { throw unavailable() }
   }
   let current = intersectAccessCeilings(pinAccessCeiling(scope.access), workflowAuthoring.ceiling)
+  if (invocation) current = intersectAccessCeilings(current, invocation.ceiling)
   if (sourceGoal) {
     const goalAuthoring = await resolveSavedAuthoringCeiling(
       row.authority?.sourceGoal?.authoringAuthority ?? sourceGoal.authoringAuthority,
@@ -234,6 +250,7 @@ async function resolveWorkflowRunSnapshot(params: {
       assistantId,
       ceiling:current,
       workflowAuthoringAuthority: workflowAuthoring.authority,
+      ...(invocation ? { invocationAuthority: invocation.authority } : {}),
       sourceGoal,
     }
     // Compare-and-set under the row lock: never overwrite a concurrent winner,
@@ -249,6 +266,7 @@ async function resolveWorkflowRunSnapshot(params: {
   const frozen = row?.authority
   if (row?.actor !== userId || !frozen || frozen.version !== 1 || frozen.assistantId !== assistantId
     || !sameGoalBinding(frozen.sourceGoal,sourceGoal)
+    || !isDeepStrictEqual(frozen.invocationAuthority ?? null,invocation?.authority ?? null)
     || !parseAuthoringAuthority(frozen.workflowAuthoringAuthority)
     || frozen.ceiling?.workspaceId !== workspaceId || frozen.ceiling?.userId !== userId) throw unavailable()
   let bounded: AccessCeiling
@@ -296,6 +314,25 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
     )).rows[0]?.snapshot : undefined)
   } catch { throw unavailable() }
   const resolved = await resolveWorkflowRunSnapshot(params,client)
+  const workspaceParent = intersectWorkspaceCredentialDelegations(
+    resolved.storedAuthority.invocationAuthority?.workspaceDelegation,
+    resolved.storedAuthority.workflowAuthoringAuthority.workspaceDelegation,
+    resolved.storedAuthority.sourceGoal?.authoringAuthority.workspaceDelegation)
+  let parentEvidence: import('@use-brian/core').ScopeEvidence = {}
+  if (workspaceParent) {
+    const restored = await restoreWorkspaceMcpDelegation(workspaceParent,createDbCapabilityStore())
+    // Outside publication, use the parent's native source admission. Inside a
+    // writer, qualify the same evidence on its existing transaction instead.
+    if (!client) {
+      bindWorkspaceMcpPublication(restored.context.executionContext!)
+      await assertSourceModelInputAuthority(restored.context)
+      parentEvidence = restored.context.scopeAccumulator!.evidence
+    } else {
+      parentEvidence = await validateCallerScopeEvidence(restored.context.scopeAccumulator!.evidence,
+        pinAccessCeiling(resolved.turnScope.access),client,params.run.id)
+    }
+  }
+
   const authorityQuery: typeof query = client ? (sql, values) => client.query(sql, values) : query
   const sourceAvailable = async () => {
     // Content RLS can hide an unavailable history row. Its absence must never
@@ -311,6 +348,7 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
   }
   if (!await runWithAgentAccess(pinAccessCeiling(resolved.turnScope.access), sourceAvailable)) throw unavailable()
   let inputScopeEvidence: import('@use-brian/core').ScopeEvidence
+  let runtimeInputEvidence: import('@use-brian/core').ScopeEvidence
   let persistedScopeEvidence: import('@use-brian/core').ScopeEvidence
   let initialScopeEvidence: import('@use-brian/core').ScopeEvidence
   try {
@@ -325,6 +363,8 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
       projectIds:resolved.turnScope.writeProjectIds,
     })
     combined.note(inputScopeEvidence)
+    combined.note(parentEvidence)
+    runtimeInputEvidence = combined.evidence
     combined.note(persistedScopeEvidence)
     initialScopeEvidence = combined.evidence
   } catch { throw unavailable() }
@@ -361,6 +401,12 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
         client,
       )
       current = intersectAccessCeilings(current,workflowAuthoring.ceiling)
+      if (resolved.storedAuthority.invocationAuthority) {
+        const initiating = await resolveSavedAuthoringCeiling(resolved.storedAuthority.invocationAuthority,
+          { userId:params.userId,workspaceId:params.workspaceId },
+          { contextGroupId:params.run.contextGroupId ?? null,contextProjectId:params.run.contextProjectId ?? null },client)
+        current = intersectAccessCeilings(current,initiating.ceiling)
+      }
       if (!sourceGoal) return current
       const goalCeiling = await resolveLiveAccessCeilingSystem({
         userId:params.userId,assistant,workspaceId:params.workspaceId,key:sourceGoal,
@@ -393,6 +439,7 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
     ownership: { kind:'workspace', workspaceId:params.workspaceId },
     access: {
       ...access,
+      ...(workspaceParent ? { sharedAudience: true } : {}),
       workspaceId:params.workspaceId,
       userId:params.userId,
       assistantId:params.assistantId,
@@ -408,7 +455,7 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
       compartments:resolved.turnScope.writeCompartments,
       projectIds:resolved.turnScope.writeProjectIds,
     },
-    provenance:inputScopeEvidence,
+    provenance:runtimeInputEvidence,
     authority:lease,
     lifecycle: {
       abortSignal:new AbortController().signal,
@@ -420,10 +467,14 @@ export async function resolveWorkflowRunScope(params: Parameters<typeof resolveW
     },
     attribution:{ billingUserId:params.userId },
   })
+  if (workspaceParent) {
+    bindWorkspaceCredentialDelegation(executionContext,workspaceParent)
+    bindWorkspaceMcpWorkflowPublication(executionContext)
+  }
   return {
     ...resolved,
     executionContext,
-    inputScopeEvidence,
+    inputScopeEvidence: runtimeInputEvidence,
     executeWithAuthority: <T>(operation: () => Promise<T>): Promise<T> =>
       runWithAgentAccess(pinAccessCeiling(resolved.turnScope.access), () =>
         runWithAuthorityLease(lease, () => executeWithCurrentAuthority(operation))),

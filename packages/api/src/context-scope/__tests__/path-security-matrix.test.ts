@@ -29,7 +29,7 @@ describe('[COMP:api/context-scope-entrypoints] execution entry-point parity', ()
     'packages/api/src/routes/public-turn.ts': ['resolveExecutionContextSystem', 'scopeAccumulator', 'effectiveProjectIds'],
     'packages/api/src/inter-assistant/executor.ts': ['resolveTurnScopeSystem', 'contextScope: turnScope', 'scopeAccumulator'],
     'packages/api/src/brain-mcp/tools.ts': ['resolveExecutionContextSystem', 'executionToolContext', 'scopeAccumulator'],
-    'packages/api/src/routes/assistant-mcp.ts': ['resolveTurnScopeSystem', 'scopeAccumulator', 'effectiveProjectIds'],
+    'packages/api/src/routes/assistant-mcp.ts': ['resolveExecutionContextSystem', 'executionToolContext', 'credentialCurrent', 'scopeAccumulator'],
     'packages/api/src/routes/session-resume-replay.ts': ['resolveTurnScopeSystem', 'scopeAccumulator', 'effectiveProjectIds'],
     'packages/api/src/boot.ts': ['resolveRunScope:', 'turnScope', 'contextProjectId'],
   }

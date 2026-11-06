@@ -1,3 +1,5 @@
+import { restoreWorkspaceMcpDelegation } from '../workspace-mcp/delegation.js'
+import { createDbCapabilityStore } from '../db/capability-store.js'
 /** AUTHORING only. Execution/resume must never call this default selector.
  * Caller owns the transaction through insertion. Human provenance is supplied
  * by a trusted server surface, not inferred from creator/owner or a snapshot.
@@ -29,15 +31,29 @@ export async function admitOperationalAuthoring(client: PoolClient, input: {
 }, human?: OperationalHumanAuthor) {
   const policy = await lockOperationalPolicy(client, input.workspaceId)
   if (!policy || (!policy.departmentReadV2 && !usesClassicModeAdmission(policy))) return input
-  if (!human && policy.departmentReadV2 && input.authoringAuthority) human={userId:input.userId,assistantId:input.authoringAuthority.assistantId}
+  // A verified machine delegation is an independent authoring path. It does
+  // not claim an authenticated human or replace the finite issued ceiling.
+  const parent = input.authoringAuthority?.workspaceDelegation
+  let machineAuthor: OperationalHumanAuthor | undefined
+  if (parent) {
+    if (parent.userId !== input.userId || parent.workspaceId !== input.workspaceId || parent.assistantId !== input.authoringAuthority!.assistantId) {
+      throw new WorkspaceAccessError('operational_authoring_proof_required',409)
+    }
+    const restored = await restoreWorkspaceMcpDelegation(parent,createDbCapabilityStore())
+    await restored.context.authority!.assertCurrent()
+    if (!accessCeilingContains(restored.context.executionContext!.security.ceiling,input.authoringAuthority!.ceiling)) throw new WorkspaceAccessError('operational_authoring_proof_required',409)
+    machineAuthor={userId:input.userId,assistantId:parent.assistantId}
+  }
+  if (!human && !machineAuthor && policy.departmentReadV2 && input.authoringAuthority) human={userId:input.userId,assistantId:input.authoringAuthority.assistantId}
+  const author = machineAuthor ?? human
   if (!policy.departmentReadV2 && policy.setupState !== 'ready') throw new WorkspaceAccessError('access_mode_setup_required', 409)
-  if (!human || human.userId !== input.userId) throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
-  if (human.expectedPolicyRevision !== undefined && human.expectedPolicyRevision !== policy.revision) {
+  if (!author || author.userId !== input.userId) throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
+  if (author.expectedPolicyRevision !== undefined && author.expectedPolicyRevision !== policy.revision) {
     throw new WorkspaceAccessError('access_policy_conflict', 409)
   }
   const assistant = (await client.query(`SELECT default_workspace_group_id AS "groupId",home_department_id AS "homeId",default_project_id AS "projectId"
-    FROM assistants WHERE id=$1 AND workspace_id=$2`, [human.assistantId, input.workspaceId])).rows[0]
-  const member = (await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [input.workspaceId, human.userId])).rows[0]
+    FROM assistants WHERE id=$1 AND workspace_id=$2`, [author.assistantId, input.workspaceId])).rows[0]
+  const member = (await client.query('SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [input.workspaceId, author.userId])).rows[0]
   if (!assistant || !member) throw new WorkspaceAccessError('context_not_available', 404)
   const contextGroupId = input.contextGroupId !== undefined ? input.contextGroupId
     : policy.departmentReadV2 ? assistant.homeId ?? assistant.groupId : policy.mode === 'simple' ? policy.defaultDepartmentId : assistant.groupId
@@ -47,7 +63,7 @@ export async function admitOperationalAuthoring(client: PoolClient, input: {
   if (!policy.departmentReadV2 && input.contextGroupId === undefined && !contextGroupId) {
     throw new WorkspaceAccessError(policy.mode === 'simple' ? 'access_mode_default_invalid' : 'context_selection_required', 409)
   }
-  const params = { userId: human.userId, workspaceId: input.workspaceId, assistantId: human.assistantId,
+  const params = { userId: author.userId, workspaceId: input.workspaceId, assistantId: author.assistantId,
     contextGroupId: contextGroupId ?? null, contextProjectId: contextProjectId ?? null }
   // Supplied consent is never replaced with fresh, broader consent.
   const authoringAuthority = input.authoringAuthority ?? await captureAuthoringAuthoritySystem(params, client)
@@ -57,8 +73,8 @@ export async function admitOperationalAuthoring(client: PoolClient, input: {
   if (!accessCeilingContains(pinAccessCeiling(scope.access), authoringAuthority.ceiling)) {
     throw new WorkspaceAccessError('operational_authoring_proof_required', 409)
   }
-  await admitWorkspaceResource(client, input.workspaceId, human.userId, {
-    expectedPolicyRevision: human.expectedPolicyRevision, visibility: 'workspace', sensitivity: scope.access.clearance!,
+  await admitWorkspaceResource(client, input.workspaceId, author.userId, {
+    expectedPolicyRevision: author.expectedPolicyRevision, visibility: 'workspace', sensitivity: scope.access.clearance!,
     destination: contextGroupId ? { kind: 'department', departmentId: contextGroupId, ...(contextProjectId ? { projectId: contextProjectId } : {}) }
       : { kind: 'general', ...(contextProjectId ? { projectId: contextProjectId } : {}) },
   })

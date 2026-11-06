@@ -1,3 +1,6 @@
+import { z } from 'zod'
+import { boundScopeSources, buildTool, type ExecutionContext, type ContextScopeAccumulator, type ScopeSource, type ToolContext } from '@use-brian/core'
+import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 /**
  * Shared route helpers — extracted from duplicated patterns across route files.
  *
@@ -5,7 +8,7 @@
  */
 
 import { findOrCreateUser, findUserById } from '../db/users.js'
-import { query } from '../db/client.js'
+import { query, runWithAgentAccess } from '../db/client.js'
 import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, createReadSkillResourceTool, createSearchSkillResourcesTool, expandSkillPointers, formatSkillInstructions, sha256, parseFileContent, shouldInline, isTabular, profileWorkbook, renderWorkbookProfile } from '@use-brian/core'
 import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi, TurnScope } from '@use-brian/core'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
@@ -416,6 +419,10 @@ export type ApplyMcpInjectionParams = {
   /** Newest authored request for bounded read-only schema discovery. */
   discoveryQuery?: string
   exposeLocalReadTools?: boolean
+  /** Immutable workspace-connection connector envelope, supplied by the host. */
+  bindingMaximum?: Readonly<Record<string, string>>
+  restrictSearchToToolNames?: string[]
+  keepToolsDirect?: boolean
   /** Newest human turn used by the deterministic capture-rule matcher. */
   knowledgeCaptureText?: string
   /** Trusted execution scope used to hide connectors with broader exposure. */
@@ -464,6 +471,10 @@ export async function applyMcpInjection(
       knowledgeCaptureText: params.knowledgeCaptureText,
       discoveryQuery: params.discoveryQuery,
       exposeLocalReadTools: params.exposeLocalReadTools,
+      bindingMaximum: params.bindingMaximum,
+      restrictSearchToToolNames: params.restrictSearchToToolNames,
+      keepBuiltinsDirect: params.keepToolsDirect,
+      keepDynamicToolsDirect: params.keepToolsDirect,
       knowledgeWriteAuthorization: 'capture',
       gdriveFilesStore: stores.gdriveFilesStore,
       connectorGrantStore: stores.connectorGrantStore,
@@ -542,6 +553,14 @@ export function isSkillOfferable(
 }
 
 type InjectSkillsOptions = {
+  executionContext?: ExecutionContext
+  scopeAccumulator?: ContextScopeAccumulator
+  /** Direct clients discover metadata through a governed tool, not their prompt. */
+  exposeListingTool?: boolean
+  /** Host-observed native connector bindings; empty means no admitted accounts. */
+  availableConnectorIds?: ReadonlySet<string>
+  /** Prior successful activations; current governance still gates every resource. */
+  activatedSkillSlugs?: Set<string>
   skillStore: SkillStore
   connectorUserId: string
   assistantId: string
@@ -642,6 +661,9 @@ type InjectSkillsResult = {
  * via assistant skill settings.
  */
 export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSkillsResult> {
+  return opts.executionContext ? runWithAgentAccess(opts.executionContext.security.access, () => injectScopedSkills(opts)) : injectScopedSkills(opts)
+}
+async function injectScopedSkills(opts: InjectSkillsOptions): Promise<InjectSkillsResult> {
   const { skillStore, connectorUserId, assistantId, tools, connectorStore, unavailableCapabilities, communitySkills, channel } = opts
 
   // Use-time clearance gate viewer. Clearance defaults to the
@@ -785,8 +807,8 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
     // (team-native + grants), which needs the connectorInstance/grant stores
     // threaded into injectSkills — tracked as Stage-5 cleanup. No data access
     // (the tools aren't injected); only skill *availability* may over-report.
-    const connectedIds = new Set<string>()
-    if (connectorStore) {
+    const connectedIds = new Set<string>(opts.availableConnectorIds)
+    if (opts.availableConnectorIds === undefined && connectorStore) {
       const connectors = await connectorStore.list(connectorUserId)
       for (const c of connectors) {
         if (c.connected) connectedIds.add(c.connectorId)
@@ -844,6 +866,27 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
     const availableSkills = allSkills.filter(
       (s) => passesGovernance(s) && isInScope(s) && !enforceSet?.has(s.id),
     )
+
+    const retainSkills = async (skills: readonly SkillContent[], context?: ToolContext) => {
+      const execution = context?.executionContext ?? opts.executionContext
+      const accumulator = context?.scopeAccumulator ?? opts.scopeAccumulator
+      if (!execution) return
+      if (!accumulator) throw new Error('skill_source_authority_required')
+      const sources: ScopeSource[] = []
+      for (const skill of skills) {
+        const captured = boundScopeSources(skill)
+        if (userSkills.includes(skill) && !captured.length) throw new Error('skill_source_unavailable')
+        sources.push(...captured)
+      }
+      if (!sources.length) return
+      await execution.security.authority.assertCurrent()
+      await validateCallerScopeEvidence({ sources }, execution.security.ceiling)
+      await validateAudienceScopeEvidence({ sources }, execution.security.ceiling)
+      accumulator.note({ sources })
+    }
+    // Native chat consumes the listing in its prompt; MCP asks for metadata
+    // through a command so discovery itself cannot disclose protected content.
+    if (!opts.exposeListingTool) await retainSkills(availableSkills)
 
     for (const s of allSkills) {
       if (disabledSlugs.has(s.id)) continue
@@ -908,7 +951,7 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
       promptFragment = `\n\n# Available Skills\nUse the useSkill tool to activate a skill when relevant.\nBefore answering what Use Brian (or you) can do, or how a feature works, activate the most relevant skill FIRST and answer only from it.\n${listing}`
     }
 
-    const activatedSkillSlugs = new Set<string>()
+    const activatedSkillSlugs = opts.activatedSkillSlugs ?? new Set<string>()
     if (availableSkills.length > 0) {
       tools.set(
         'useSkill',
@@ -933,6 +976,26 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
       tools.set('searchSkillResources', createSearchSkillResourcesTool(resourceParams))
     }
 
+    for (const name of ['useSkill', 'readSkillResource', 'searchSkillResources']) {
+      const tool = tools.get(name)
+      if (tool) tools.set(name, { ...tool, async execute(input, context) {
+        const picked = resourceSkillCandidates.find(skill => skill.id === input.skill)
+        await retainSkills(picked ? [picked] : availableSkills, context)
+        return tool.execute(input, context)
+      } })
+    }
+    if (opts.exposeListingTool) {
+      const list = buildTool({ name: 'listAvailableSkills', description: 'List the skills currently admitted for this assistant and work context. Use a returned skill ID with useSkill; availability is checked again when used.',
+        inputSchema: z.object({ offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict(), isReadOnly: true,
+        async execute({ offset, limit }, context) {
+          const page = availableSkills.slice(offset, offset + limit)
+          await retainSkills(page, context)
+          return { data: { skills: page.map(skill => ({ id: skill.id, name: skill.name, description: skill.description })),
+            nextOffset: offset + limit < availableSkills.length ? offset + limit : null } }
+        } })
+      tools.set(list.name, list)
+    }
+
     // Enforced skills — inject the full (pointer-expanded) instructions as a
     // mandatory system-prompt block. Each enforced slug that passes governance
     // is loaded, counted as an invocation (it IS being run), and concatenated
@@ -942,6 +1005,7 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
     let enforcedPromptFragment = ''
     if (enforceSet) {
       const enforcedSkills = allSkills.filter((s) => enforceSet.has(s.id) && passesGovernance(s))
+      await retainSkills(enforcedSkills)
       const sections: string[] = []
       for (const skill of enforcedSkills) {
         activatedSkillSlugs.add(skill.id)

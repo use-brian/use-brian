@@ -1,3 +1,7 @@
+import { authenticateWorkspaceOAuthToken, getAuthenticatedBrainCredentialCurrent } from '../brain-mcp/auth.js'
+import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
+import { readWorkspaceMcpConsent, workspaceMcpMaximum } from '../workspace-mcp/consent.js'
+import type { WorkspaceMcpProfile } from '../workspace-mcp/profile.js'
 /**
  * Assistant MCP endpoint — `POST /api/v1/assistants/:assistantId/mcp`.
  *
@@ -23,15 +27,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { actionableInputSchema } from '../brain-mcp/actionable-input-schema.js'
 import { Router } from 'express'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { serveStatelessMcp } from '../brain-mcp/stateless.js'
 import {
   SensitivityAccumulator,
   ContextScopeAccumulator,
   CONFIGURE_CAPABILITY,
-  filterToolsByCapabilities,
+  executionToolContext,
   type CapabilityStore,
   type Tool,
   type ToolContext,
@@ -39,13 +41,18 @@ import {
 import { parseAuthToken, verifySecret, type ApiKeyStore } from '../db/api-key-store.js'
 import { findAssistantById } from '../db/users.js'
 import { query } from '../db/client.js'
-import { bridgeCoreTool } from '../brain-mcp/tools.js'
+import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
+import { resolveExecutionContextSystem } from '../context-scope/execution-context.js'
+import { buildWorkspaceMcpCatalog } from '../workspace-mcp/catalog.js'
+import { workspaceDiscoveryNames } from '../workspace-mcp/discovery.js'
 import {
   ContextNotAvailableError,
-  resolveTurnScopeSystem,
 } from '../context-scope/resolve-turn-scope.js'
 
 type Options = {
+  workspaceProfile?: WorkspaceMcpProfile
+  authorizationStoreFor?: (assistantId: string) => OAuthAuthorizationStore
+  apiUrl?: string
   apiKeyStore: ApiKeyStore
   capabilityStore: CapabilityStore
   /** The shared agent capability toolset (buildAgentToolset at boot). */
@@ -89,10 +96,50 @@ export function assistantMcpRoutes(opts: Options): Router {
   const router = Router()
 
   router.post<{ assistantId: string }>('/assistants/:assistantId/mcp', async (req, res) => {
+    if (opts.apiUrl && /^[0-9a-f-]{36}$/i.test(req.params.assistantId)) {
+      res.set('WWW-Authenticate', `Bearer resource_metadata="${opts.apiUrl.replace(/\/$/,'')}/.well-known/oauth-protected-resource/api/v1/assistants/${req.params.assistantId}/mcp"`)
+    }
     // ── Auth — same posture as the public API chat endpoint.
     const header = req.headers.authorization
     if (!header?.startsWith('Bearer ')) {
       res.status(401).json({ error: 'invalid_api_key', message: INVALID_KEY_MESSAGE })
+      return
+    }
+    if (header.slice(7).startsWith('oat_')) {
+      if (!opts.authorizationStoreFor || !opts.workspaceProfile || !/^[0-9a-f-]{36}$/i.test(req.params.assistantId)) {
+        res.status(401).json({ error: 'invalid_api_key' }); return
+      }
+      const auth = await authenticateWorkspaceOAuthToken(header.slice(7), opts.authorizationStoreFor(req.params.assistantId), req.params.assistantId)
+      const consent = auth?.workspaceMcpConsent
+      const assistant = auth ? await findAssistantById(req.params.assistantId) : null
+      const current = auth ? getAuthenticatedBrainCredentialCurrent(auth) : undefined
+      if (!auth || !consent || !assistant || assistant.workspaceId !== auth.workspaceId || !auth.actingUserId || !current
+        || !await getWorkspaceRoleSystem(auth.actingUserId,auth.workspaceId)) {
+        res.status(401).json({ error: 'invalid_api_key' }); return
+      }
+      const ownerUserId = await resolveOwnerUserId(assistant)
+      if (!ownerUserId) { res.status(401).json({ error: 'invalid_api_key' }); return }
+      try {
+        const { executionContext, turnScope } = await resolveExecutionContextSystem({
+          userId: auth.actingUserId, assistant, workspaceId: auth.workspaceId, key: consent, sharedAudience: true,
+          maximumAccess: workspaceMcpMaximum(consent,auth.workspaceId,auth.actingUserId), credentialCurrent: current,
+          identity: { kind: 'programmatic', principal: { kind: 'oauth_token',credentialId: auth.keyId,actorUserId: auth.actingUserId },credentialOwnerUserId: ownerUserId },
+          ownership: { kind: 'workspace',workspaceId: auth.workspaceId },
+          lifecycle: { abortSignal: new AbortController().signal,sessionId: randomUUID(),sessionPersisted: false,channelType: 'assistant_mcp',channelId: auth.keyId },
+          attribution: { credentialOwnerUserId: ownerUserId,billingUserId: ownerUserId },
+        })
+        const base: ToolContext = { ...executionToolContext(executionContext,{ appId: assistant.id }),
+          activeCapabilities: new Set(await opts.capabilityStore.listActive(assistant.id)),activeGroupId: turnScope.activeGroupId,activeProjectId: turnScope.activeProjectId,
+          scopeAccumulator: new ContextScopeAccumulator({ compartments: turnScope.writeCompartments,projectIds: turnScope.writeProjectIds }) }
+        const tools = await buildWorkspaceMcpCatalog(async () => {
+          const context = await opts.workspaceProfile!.prepareContext(base,consent,req.body?.params?._meta?.['usebrian.ai/context-id'])
+          return { context,executeOperation: opts.workspaceProfile!.executeOperation,tools: await opts.workspaceProfile!.toolsFor(context,consent),operationNames: new Set(consent.operationNames),readOnly: auth.scope==='read' }
+        })
+        await serveStatelessMcp(req,res,tools,'use-brian-assistant',workspaceDiscoveryNames)
+      } catch (error) {
+        console.error('[assistant-mcp] OAuth request failed:',error)
+        if (!res.headersSent) res.status(500).json({ error: 'assistant_mcp_error',retrySafe: false })
+      }
       return
     }
     const parsed = parseAuthToken(header.slice('Bearer '.length))
@@ -100,7 +147,8 @@ export function assistantMcpRoutes(opts: Options): Router {
       res.status(401).json({ error: 'invalid_api_key', message: INVALID_KEY_MESSAGE })
       return
     }
-    const keyRow = await opts.apiKeyStore.getByIdSystem(parsed.keyId)
+    const storedKey = await opts.apiKeyStore.getByIdSystem(parsed.keyId)
+    const keyRow = storedKey ? structuredClone(storedKey) : null
     if (!keyRow || keyRow.assistantId !== req.params.assistantId) {
       // URL↔key binding — uniform 401, not probeable.
       res.status(401).json({ error: 'invalid_api_key', message: INVALID_KEY_MESSAGE })
@@ -141,6 +189,13 @@ export function assistantMcpRoutes(opts: Options): Router {
       return
     }
 
+    let workspaceConsent
+    try { workspaceConsent = readWorkspaceMcpConsent(keyRow.workspaceMcpConsent) } catch {
+      res.status(401).json({ error: 'invalid_api_key', message: INVALID_KEY_MESSAGE }); return
+    }
+    if (workspaceConsent && workspaceConsent.assistantId !== keyRow.assistantId) {
+      res.status(401).json({ error: 'invalid_api_key', message: INVALID_KEY_MESSAGE }); return
+    }
     const assistant = await findAssistantById(req.params.assistantId)
     if (!assistant) {
       res.status(404).json({
@@ -172,105 +227,94 @@ export function assistantMcpRoutes(opts: Options): Router {
       return
     }
 
-    // ── Authority — the keyed assistant IS the ceiling (§2).
+    // The issuer is the delegating principal. An owner fallback is allowed only
+    // for an old key with no issuer; a removed issuer never inherits ownership.
+    const issuerUserId = keyRow.issuerUserId ?? keyRow.createdBy
+    const actingUserId = issuerUserId ?? ownerUserId
+    const credentialCurrent = async () => {
+      const current = await opts.apiKeyStore.getByIdSystem(keyRow.id)
+      if (!current || current.status !== 'active' || current.keyHash !== keyRow.keyHash
+        || current.assistantId !== keyRow.assistantId || current.scope !== keyRow.scope
+        || current.createdBy !== keyRow.createdBy || current.issuerUserId !== keyRow.issuerUserId
+        || current.audience !== keyRow.audience
+        || current.anonymousContext !== keyRow.anonymousContext || current.toolPolicy !== keyRow.toolPolicy
+        || JSON.stringify(current.workspaceMcpConsent ?? null) !== JSON.stringify(keyRow.workspaceMcpConsent ?? null)
+        || workspaceConsent && Date.parse(workspaceConsent.expiresAt) <= Date.now()) return false
+      return !issuerUserId || !assistant.workspaceId
+        || await getWorkspaceRoleSystem(actingUserId, assistant.workspaceId) !== null
+    }
+    if (!await credentialCurrent()) {
+      res.status(401).json({ error: 'invalid_api_key', message: INVALID_KEY_MESSAGE })
+      return
+    }
     const activeCapabilities = new Set(await opts.capabilityStore.listActive(assistant.id))
-    const configureGranted = activeCapabilities.has(CONFIGURE_CAPABILITY)
-    const clearance = assistant.clearance
-    let turnScope
+    let resolved
     try {
-      turnScope = await resolveTurnScopeSystem({
-        userId: ownerUserId,
-        assistant,
-        workspaceId: assistant.workspaceId,
-        // Existing agent keys are explicitly company-wide on the active-context
-        // axis; assistant Team/Project ceilings still apply.
-        key: { contextGroupId: null, contextProjectId: null },
+      resolved = await resolveExecutionContextSystem({
+        userId: actingUserId, assistant, workspaceId: assistant.workspaceId,
+        key: workspaceConsent ?? { contextGroupId: null, contextProjectId: null },
+        ...(workspaceConsent && assistant.workspaceId ? { sharedAudience: true,
+          maximumAccess: workspaceMcpMaximum(workspaceConsent, assistant.workspaceId, actingUserId) } : {}),
+        credentialCurrent,
+        identity: {
+          kind: 'programmatic',
+          principal: { kind: 'assistant_key', credentialId: keyRow.id, actorUserId: actingUserId },
+          credentialOwnerUserId: ownerUserId,
+        },
+        ownership: assistant.workspaceId
+          ? { kind: 'workspace', workspaceId: assistant.workspaceId }
+          : { kind: 'personal', ownerUserId },
+        lifecycle: {
+          abortSignal: new AbortController().signal,
+          sessionId: randomUUID(), sessionPersisted: false,
+          channelType: 'assistant_mcp', channelId: keyRow.id,
+        },
+        attribution: { credentialOwnerUserId: ownerUserId, billingUserId: ownerUserId },
       })
     } catch (err) {
       if (!(err instanceof ContextNotAvailableError)) throw err
-      res.status(409).json({
-        error: err.code,
-        message: err.message,
-        axis: err.axis,
-        reason: err.reason,
-      })
+      res.status(409).json({ error: err.code, message: err.message, axis: err.axis, reason: err.reason })
       return
     }
+    const { executionContext, turnScope } = resolved
     const sensitivity = new SensitivityAccumulator()
-    sensitivity.note(clearance)
-    const scopeAccumulator = new ContextScopeAccumulator({
-      compartments: turnScope.writeCompartments,
-      projectIds: turnScope.writeProjectIds,
-    })
+    sensitivity.note(turnScope.access.clearance)
     const ctx: ToolContext = {
-      userId: ownerUserId,
-      assistantId: assistant.id,
-      sessionId: randomUUID(),
-      appId: assistant.id,
-      channelType: 'assistant_mcp',
-      channelId: keyRow.id,
-      workspaceId: assistant.workspaceId,
-      assistantKind: assistant.kind === 'primary' || assistant.kind === 'app' ? assistant.kind : 'standard',
+      ...executionToolContext(executionContext, { appId: assistant.id }),
       activeCapabilities,
-      clearance: turnScope.access.clearance,
-      assistantClearance: clearance,
-      compartments: turnScope.effectiveCompartments,
-      projectIds: turnScope.effectiveProjectIds,
       activeGroupId: turnScope.activeGroupId,
       activeProjectId: turnScope.activeProjectId,
-      assistantCompartments: turnScope.effectiveCompartments,
-      assistantDefaultCompartments: turnScope.writeCompartments,
-      assistantProjectIds: turnScope.effectiveProjectIds,
-      assistantDefaultProjectIds: turnScope.writeProjectIds,
       sensitivity,
-      scopeAccumulator,
-      abortSignal: new AbortController().signal,
+      scopeAccumulator: new ContextScopeAccumulator({
+        compartments: turnScope.writeCompartments, projectIds: turnScope.writeProjectIds,
+      }),
     }
-    const resolveCtx = async () => ctx
-
-    // ── One stateless McpServer per request, same as the brain MCP.
-    const server = new McpServer({ name: 'use-brian-assistant', version: '1.0.0' })
-    const visibleReads = filterToolsByCapabilities(opts.agentTools.reads, activeCapabilities)
-    const visibleWrites = filterToolsByCapabilities(opts.agentTools.writes, activeCapabilities)
-    const tools = [
-      ...[...visibleReads.values()].map((t) =>
-        bridgeCoreTool(t, resolveCtx, assistant.workspaceId ?? ''),
-      ),
-      ...(configureGranted
-        ? [...visibleWrites.values()].map((t) =>
-            bridgeCoreTool(t, resolveCtx, assistant.workspaceId ?? ''),
-          )
-        : []),
-    ]
-    for (const tool of tools) {
-      server.registerTool(
-        tool.name,
-        // A ZodObject whose failed parse renders compact `path: message` lines
-        // (+ retry verdict) instead of the SDK default `ZodError.message` JSON
-        // blob — see ./actionable-input-schema.ts.
-        { description: tool.description, inputSchema: actionableInputSchema(tool.inputSchema, tool.name) },
-        tool.handler,
-      )
-    }
-
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
-    res.on('close', () => {
-      void transport.close()
-      void server.close()
-    })
+    // Preserve the old credential envelope, but use the native execution gate.
+    // New workspace grants can supply a broader finite operationNames set to
+    // the same adapter without changing what an already-issued key can do.
     try {
-      await server.connect(transport)
-      await transport.handleRequest(req, res, req.body)
+      const guardedTools = await buildWorkspaceMcpCatalog(async () => {
+        ctx.activeCapabilities = new Set(await opts.capabilityStore.listActive(assistant.id))
+        if (workspaceConsent) {
+          if (!opts.workspaceProfile) throw new Error('workspace_mcp_profile_unavailable')
+          const context = await opts.workspaceProfile.prepareContext(ctx, workspaceConsent, req.body?.params?._meta?.['usebrian.ai/context-id'])
+          return { context, executeOperation: opts.workspaceProfile.executeOperation, tools: await opts.workspaceProfile.toolsFor(context, workspaceConsent),
+            operationNames: new Set(workspaceConsent.operationNames), readOnly: false }
+        }
+        const tools = new Map(opts.agentTools.reads)
+        if (ctx.activeCapabilities.has(CONFIGURE_CAPABILITY)) {
+          for (const [name, tool] of opts.agentTools.writes) tools.set(name, tool)
+        }
+        return { context: ctx, tools, operationNames: new Set(tools.keys()), readOnly: false }
+      })
+      await serveStatelessMcp(req, res, guardedTools, 'use-brian-assistant', workspaceConsent ? workspaceDiscoveryNames : undefined)
     } catch (err) {
       console.error('[assistant-mcp] request failed:', err)
       if (!res.headersSent) {
         res.status(500).json({
           error: 'assistant_mcp_error',
-          message:
-            'The MCP transport failed while handling this request. Authentication and authority ' +
-            'resolution had already succeeded, so the credential and the assistant id are fine and ' +
-            'changing them will not help. The cause is server-side and may be transient: retry the ' +
-            'same request once after a short wait, and if it persists report it rather than looping.',
+          retrySafe: false,
+          message: 'The MCP request could not be completed. Check the operation outcome before retrying a write; a missing response does not mean no effect occurred.',
         })
       }
     }

@@ -10,3 +10,5 @@ export * from './templates/brand-typography.js'
 export * from './generation/index.js'
 export * from './tools.js'
 export { fitOfficeArtifact, officeGoldenSerialization } from '@use-brian/office-renderer'
+
+export * from './command-input.js'

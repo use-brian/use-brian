@@ -2,74 +2,19 @@
  * [COMP:api/office-generation] [COMP:office/pdf-tools] */
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { z } from 'zod'
-import { collectStream, fitOfficeArtifact, repairOfficeArtifactFit, type LLMProvider, type Message } from '@use-brian/core'
+import { AssistantOfficePlanSchema, AssistantOfficeOperationSchema, type AssistantOfficeOperation, collectStream, fitOfficeArtifact, repairOfficeArtifactFit, type LLMProvider, type Message } from '@use-brian/core'
 import {
-  DocumentFlowNodeSchema,
   OfficeArtifactSnapshotSchema,
   OfficeCommandSchema,
-  OfficeRichTextRunSchema,
-  PdfFieldValueSchema,
-  PdfRectSchema,
-  PresentationObjectSchema,
-  PresentationSlideSchema,
-  SpreadsheetCellValueSchema,
   SpreadsheetRecordSchema,
   normalizeCellAddress,
   parseCellAddress,
   tableBounds,
-  SpreadsheetWorksheetSchema,
-  applyOfficeCommand,
+  applyOfficeSnapshotCommand,
   preflightOfficeCandidate,
   type OfficeArtifactSnapshot,
   type OfficeCommand,
 } from '@use-brian/office-model'
-
-const OperationBase = z.object({})
-const AssistantPdfOverlaySchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('text'), rect: PdfRectSchema, rotation: z.number().finite().min(0).lt(360), text: z.string().max(100_000), appearance: z.object({ fontSizePt: z.number().finite().min(4).max(144), color: z.string().regex(/^#[0-9A-Fa-f]{6}$/), backgroundColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(), alignment: z.enum(['start', 'center', 'end']).default('start') }).strict() }).strict(),
-  z.object({ kind: z.literal('date'), rect: PdfRectSchema, rotation: z.number().finite().min(0).lt(360), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), appearance: z.object({ fontSizePt: z.number().finite().min(4).max(144), color: z.string().regex(/^#[0-9A-Fa-f]{6}$/), backgroundColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(), alignment: z.enum(['start', 'center', 'end']).default('start') }).strict() }).strict(),
-  z.object({ kind: z.literal('checkmark'), rect: PdfRectSchema, rotation: z.number().finite().min(0).lt(360), mark: z.enum(['check', 'x']).default('check'), color: z.string().regex(/^#[0-9A-Fa-f]{6}$/), strokeWidthPt: z.number().finite().positive().max(20).default(2) }).strict(),
-  z.object({ kind: z.literal('image'), rect: PdfRectSchema, rotation: z.number().finite().min(0).lt(360), resourceId: z.string().uuid() }).strict(),
-])
-const AssistantOfficeOperationSchema = z.discriminatedUnion('kind', [
-  OperationBase.extend({ kind: z.literal('appendSpreadsheetRecords'), sheetId: z.string().uuid(), tableId: z.string().uuid(), prototypeRow: z.number().int().min(1).max(1048576).optional(), records: z.array(SpreadsheetRecordSchema).min(1).max(10000) }).strict(),
-  OperationBase.extend({ kind: z.literal('updateText'), targetId: z.string().uuid(), runs: z.array(OfficeRichTextRunSchema).max(10_000) }).strict(),
-  OperationBase.extend({ kind: z.literal('insertDocumentNode'), sectionId: z.string().uuid(), index: z.number().int().min(0).optional(), beforeNodeId: z.string().uuid().optional(), afterNodeId: z.string().uuid().optional(), node: DocumentFlowNodeSchema }).strict(),
-  OperationBase.extend({ kind: z.literal('insertSlideObject'), slideId: z.string().uuid(), index: z.number().int().min(0), object: PresentationObjectSchema }).strict(),
-  OperationBase.extend({ kind: z.literal('deleteObject'), targetId: z.string().uuid() }).strict(),
-  OperationBase.extend({ kind: z.literal('setObjectProperty'), targetId: z.string().uuid(), path: z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9]*$/)).min(1).max(8), value: z.unknown() }).strict(),
-  OperationBase.extend({ kind: z.literal('addSlide'), index: z.number().int().min(0), slide: PresentationSlideSchema }).strict(),
-  OperationBase.extend({ kind: z.literal('reorderSlide'), slideId: z.string().uuid(), index: z.number().int().min(0) }).strict(),
-  OperationBase.extend({ kind: z.literal('deleteSlide'), slideId: z.string().uuid() }).strict(),
-  OperationBase.extend({ kind: z.literal('reorderSlideObject'), slideId: z.string().uuid(), objectId: z.string().uuid(), index: z.number().int().min(0) }).strict(),
-  OperationBase.extend({
-    kind: z.literal('updateSpreadsheetImage'), sheetId: z.string().uuid(), imageId: z.string().uuid(),
-    from: z.object({ row: z.number().min(0).max(1_048_576), column: z.number().min(0).max(16_384) }).strict(),
-    to: z.object({ row: z.number().min(0).max(1_048_576), column: z.number().min(0).max(16_384) }).strict(),
-    altText: z.string().max(2_000), decorative: z.boolean(),
-  }).strict(),
-  OperationBase.extend({
-    kind: z.literal('setSpreadsheetCell'), sheetId: z.string().uuid(), cellId: z.string().uuid(), address: z.string().min(2).max(10),
-    valueType: z.enum(['blank', 'string', 'number', 'boolean', 'date']), value: SpreadsheetCellValueSchema,
-    formula: z.string().min(1).max(32_000).optional(),
-  }).strict(),
-  OperationBase.extend({ kind: z.literal('setSpreadsheetDimension'), sheetId: z.string().uuid(), axis: z.enum(['row', 'column']), index: z.number().int().min(1).max(1_048_576), size: z.number().positive().max(4_096) }).strict(),
-  OperationBase.extend({ kind: z.literal('addWorksheet'), index: z.number().int().min(0), worksheet: SpreadsheetWorksheetSchema }).strict(),
-  OperationBase.extend({ kind: z.literal('renameWorksheet'), sheetId: z.string().uuid(), name: z.string().min(1).max(31) }).strict(),
-  OperationBase.extend({ kind: z.literal('reorderWorksheet'), sheetId: z.string().uuid(), index: z.number().int().min(0) }).strict(),
-  OperationBase.extend({ kind: z.literal('deleteWorksheet'), sheetId: z.string().uuid() }).strict(),
-  OperationBase.extend({ kind: z.literal('setPdfFieldValue'), fieldId: z.string().uuid(), value: PdfFieldValueSchema }).strict(),
-  OperationBase.extend({ kind: z.literal('addPdfOverlay'), pageId: z.string().uuid(), overlay: AssistantPdfOverlaySchema }).strict(),
-  OperationBase.extend({ kind: z.literal('transformPdfOverlay'), overlayId: z.string().uuid(), rect: PdfRectSchema, rotation: z.number().finite().min(0).lt(360) }).strict(),
-  OperationBase.extend({ kind: z.literal('removePdfOverlay'), overlayId: z.string().uuid() }).strict(),
-  OperationBase.extend({ kind: z.literal('rotatePdfPage'), pageId: z.string().uuid(), rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]) }).strict(),
-  OperationBase.extend({ kind: z.literal('reorderPdfPage'), pageId: z.string().uuid(), toIndex: z.number().int().min(0).max(99) }).strict(),
-  OperationBase.extend({ kind: z.literal('deletePdfPage'), pageId: z.string().uuid() }).strict(),
-])
-type AssistantOfficeOperation = z.infer<typeof AssistantOfficeOperationSchema>
-
-const AssistantOfficePlanSchema = z.object({ commands: z.array(AssistantOfficeOperationSchema).min(1).max(200) }).strict()
 
 // Derive payload keys from the validator so new operations cannot silently
 // become names-only capabilities in the model's contract.
@@ -81,7 +26,7 @@ const operationFieldCatalog = AssistantOfficeOperationSchema.options.map((operat
 
 const SYSTEM_PROMPT = `You are Brian's command planner for a canonical Office artifact. Return one JSON object and nothing else: {"commands":[...]}.
 
-Use only these operation kinds: appendSpreadsheetRecords, updateText, insertDocumentNode, insertSlideObject, deleteObject, setObjectProperty, addSlide, reorderSlide, deleteSlide, reorderSlideObject, updateSpreadsheetImage, setSpreadsheetCell, setSpreadsheetDimension, addWorksheet, renameWorksheet, reorderWorksheet, deleteWorksheet, setPdfFieldValue, addPdfOverlay, transformPdfOverlay, removePdfOverlay, rotatePdfPage, reorderPdfPage, deletePdfPage. The server adds commandId, artifactId, baseVersion, actor, and origin; never include them. Do not return batch, attachResource, createPdfPlacementTarget, removePdfPlacementTarget, or placePdfSignature.
+Use only these operation kinds: ${operationFieldCatalog.map(operation => operation.kind).join(', ')}. The server adds commandId, artifactId, baseVersion, actor, and origin; never include them. Do not return batch, attachResource, createPdfPlacementTarget, removePdfPlacementTarget, or placePdfSignature.
 
 Operation payload fields (in addition to kind; no extra keys):
 ${JSON.stringify(operationFieldCatalog)}
@@ -305,7 +250,7 @@ const forbiddenCollectionReplacement = new Set(['nodes', 'objects', 'slides', 'w
 const spreadsheetCellValueParts = new Set(['address', 'formula', 'value', 'valueType'])
 
 function assertOperationAuthority(command: OfficeCommand, snapshot: OfficeArtifactSnapshot, scope: RevisionScope): void {
-  if (command.kind === 'batch' || command.kind === 'attachResource' || command.kind === 'replaceTextRange') throw new Error(`Brian cannot emit ${command.kind} in the command planner`)
+  if (command.kind === 'batch' || command.kind === 'attachResource') throw new Error(`Brian cannot emit ${command.kind} in the command planner`)
   if (snapshot.family === 'pdf') {
     if (command.kind === 'setPdfFieldValue') {
       if (!scope.pdfFields.has(command.fieldId)) throw new Error('PDF field command escaped the selected target boundary')
@@ -337,7 +282,8 @@ function assertOperationAuthority(command: OfficeCommand, snapshot: OfficeArtifa
     if (!table || !scope.directIds.has(table.id)) throw new Error('Office append escaped the selected table or worksheet boundary')
     return
   }
-  if (command.kind === 'updateText') {
+  if (command.kind === 'replaceTextRange' && snapshot.family !== 'document') throw new Error('Text range replacement requires a Document')
+  if (command.kind === 'updateText' || command.kind === 'replaceTextRange') {
     if (snapshot.family === 'spreadsheet') throw new Error('Spreadsheet text requires setSpreadsheetCell')
     if (!scope.directIds.has(command.targetId) || scope.lockedIds.has(command.targetId)) throw new Error('Office text command escaped the selected target boundary')
     return
@@ -422,7 +368,7 @@ function assertOperationAuthority(command: OfficeCommand, snapshot: OfficeArtifa
 
 function hydrateOperation(operation: AssistantOfficeOperation, envelope: Pick<OfficeCommand, 'artifactId' | 'baseVersion' | 'actor' | 'origin'>, existingIds: Set<string>, snapshot: OfficeArtifactSnapshot): OfficeCommand {
   let payload: Record<string, unknown> = structuredClone(operation) as Record<string, unknown>
-  if (operation.kind === 'updateText') payload = { ...operation, runs: freshenNewIds(operation.runs, existingIds) }
+  if (operation.kind === 'updateText' || operation.kind === 'replaceTextRange') payload = { ...operation, runs: freshenNewIds(operation.runs, existingIds) }
   else if (operation.kind === 'setObjectProperty') payload = { ...operation, value: freshenNewIds(operation.value, existingIds) }
   else if (operation.kind === 'insertDocumentNode') {
     if ([operation.index, operation.beforeNodeId, operation.afterNodeId].filter((value) => value !== undefined).length !== 1) throw new Error('Office insertion requires exactly one of index, beforeNodeId or afterNodeId')
@@ -507,6 +453,8 @@ export async function generateAssistantOfficeCommands(params: {
   /** Immutable template locks, including ancestor IDs absent from node.locked. */
   lockedTargetIds?: readonly string[]
   instruction: string
+  /** Validated explicit operations use the same planner without another model call. */
+  operations?: unknown[]
   brandVoice?: string | null
   /** Enabled by default for selected unlocked text; false explicitly disables repair. */
   fitRepair?: false | { eligibleTargetIds?: readonly string[]; minimumFontSizePt?: number; stepPt?: number }
@@ -526,7 +474,7 @@ export async function generateAssistantOfficeCommands(params: {
   })
   const brandVoice = params.brandVoice?.trim()
   const familyGuidance = params.snapshot.family === 'document'
-    ? 'This is a document. Use only updateText, insertDocumentNode, deleteObject, and setObjectProperty. Delete a document table row with deleteObject targeting the row ID. For header/footer text, use setObjectProperty on the selected section ID with path ["header"] or ["footer"] and value equal to the complete preserved run array. Individual header/footer run IDs are not updateText or deleteObject targets. Preserve every untouched run ID and style. Never use slide or worksheet operations.'
+    ? 'This is a document. Use only updateText, replaceTextRange, insertDocumentNode, deleteObject, and setObjectProperty. Delete a document table row with deleteObject targeting the row ID. For header/footer text, use setObjectProperty on the selected section ID with path ["header"] or ["footer"] and value equal to the complete preserved run array. Individual header/footer run IDs are not updateText or deleteObject targets. Preserve every untouched run ID and style. Never use slide or worksheet operations.'
     : params.snapshot.family === 'presentation'
       ? 'This is a presentation. Use only updateText, insertSlideObject, deleteObject, setObjectProperty, addSlide, reorderSlide, deleteSlide, and reorderSlideObject. Never use document or worksheet operations.'
       : params.snapshot.family === 'spreadsheet'
@@ -538,17 +486,17 @@ export async function generateAssistantOfficeCommands(params: {
   const envelope = { artifactId: params.snapshot.artifactId, baseVersion: params.baseVersion, actor: { type: 'assistant' as const, id: params.assistantId }, origin: 'ai' as const }
   let consumed = 0
   let failure: unknown
-  while (consumed < 3) {
+  while (consumed < (params.operations ? 1 : 3)) {
     consumed++
     try {
-      const response = await collectStream(params.provider.stream({ model: params.model, systemPrompt: brandVoice ? `${systemPrompt}\n\n${brandVoice}` : systemPrompt, messages, maxTokens: 12_000, responseFormat: 'json', temperature: 0.1 }))
-      const plan = AssistantOfficePlanSchema.parse(parseJsonObject(responseText(response)))
+      const plan = params.operations ? AssistantOfficePlanSchema.parse({commands:params.operations}) : AssistantOfficePlanSchema.parse(parseJsonObject(responseText(
+        await collectStream(params.provider.stream({ model: params.model, systemPrompt: brandVoice ? `${systemPrompt}\n\n${brandVoice}` : systemPrompt, messages, maxTokens: 12_000, responseFormat: 'json', temperature: 0.1 })))))
       const commands: OfficeCommand[] = []
       let candidate = params.snapshot
       for (const operation of plan.commands) {
         const command = hydrateOperation(operation, envelope, scope.existingIds, candidate)
         assertOperationAuthority(command, candidate, scope)
-        candidate = applyOfficeCommand(candidate, command)
+        candidate = applyOfficeSnapshotCommand(candidate, command)
         commands.push(command)
       }
       // Replacing an unlocked owner must not bypass a lock on a child run/cell.
@@ -558,7 +506,7 @@ export async function generateAssistantOfficeCommands(params: {
       })
       if ([...lockedRecords].some(([id, value]) => !isDeepStrictEqual(remainingLocks.get(id), value))) throw new Error('Office command plan changed or removed locked content')
       let fit = candidate.family === 'pdf' ? { ok: true as const, issues: [] } : fitOfficeArtifact(candidate, { readabilityReference: params.snapshot })
-      if (!fit.ok && params.fitRepair !== false && consumed < 3) {
+      if (!fit.ok && !params.operations && params.fitRepair !== false && consumed < 3) {
         const policy = params.fitRepair ?? {}
         const eligibleTargetIds = scopedFitTargets(candidate, scope, policy.eligibleTargetIds)
         const repair = repairOfficeArtifactFit(candidate, { ...policy, budget: { readabilityReference: params.snapshot }, eligibleTargetIds, lockedTargetIds: [...scope.lockedIds], maxAttempts: 1 + (3 - consumed) })
@@ -569,7 +517,7 @@ export async function generateAssistantOfficeCommands(params: {
           const command = OfficeCommandSchema.parse({ ...envelope, commandId: randomUUID(), kind: 'setObjectProperty', targetId: runId, path: ['style', 'fontSizePt'], value: fontSizePt })
           const repairScope = { ...scope, directIds: new Set([...scope.directIds, ...eligibleTargetIds]) }
           assertOperationAuthority(command, candidate, repairScope)
-          candidate = applyOfficeCommand(candidate, command)
+          candidate = applyOfficeSnapshotCommand(candidate, command)
           commands.push(command)
         }
         fit = candidate.family === 'pdf' ? { ok: true as const, issues: [] } : fitOfficeArtifact(candidate, { readabilityReference: params.snapshot })

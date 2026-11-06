@@ -421,6 +421,7 @@ export async function refreshSession(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ refreshToken }),
+    signal: AbortSignal.timeout(15_000),
   });
   if (res.status === 400 || res.status === 401) return null;
   if (!res.ok) {

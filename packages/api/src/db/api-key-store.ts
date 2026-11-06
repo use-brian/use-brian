@@ -1,3 +1,4 @@
+import type { WorkspaceMcpConsent } from '../workspace-mcp/consent.js'
 import { createExternalKey } from './external-key-admission.js'
 /**
  * API key store — per-assistant credentials for the public API surface.
@@ -87,6 +88,7 @@ export type ApiKeyAnonymousContext = 'thin' | 'full'
 export type ApiKeyToolPolicy = 'assistant' | 'public_research'
 
 export type ApiKeyRow = {
+  workspaceMcpConsent?: WorkspaceMcpConsent | null
   id: string
   assistantId: string
   name: string
@@ -102,7 +104,11 @@ export type ApiKeyRow = {
 }
 
 /** Internal — includes the hash. Never returned from public store methods. */
-type ApiKeyRowWithHash = ApiKeyRow & { keyHash: string }
+type ApiKeyRowWithHash = ApiKeyRow & {
+  keyHash: string
+  /** Trusted issuance identity; omitted only by older adapters/test doubles. */
+  issuerUserId?: string | null
+}
 
 export type CreatedApiKey = ApiKeyRow & {
   /** The plaintext API key. Returned ONCE at creation; never retrievable again. */
@@ -190,6 +196,7 @@ export type ApiKeyStore = {
    * `actingUserId` must own or admin the assistant.
    */
   create(params: {
+    workspaceMcpConsent?: WorkspaceMcpConsent | null
     assistantId: string
     name: string
     actingUserId: string
@@ -236,6 +243,7 @@ const COLS_PUBLIC = `
   anonymous_context as "anonymousContext",
   tool_policy as "toolPolicy",
   status,
+  workspace_mcp_consent AS "workspaceMcpConsent",
   created_by   as "createdBy",
   created_at   as "createdAt",
   last_used_at as "lastUsedAt"
@@ -257,8 +265,8 @@ export function createDbApiKeyStore(): ApiKeyStore {
       const result = await createExternalKey<ApiKeyRowWithHash>(
         params.actingUserId,
         { assistantId: params.assistantId },
-        `INSERT INTO api_keys (id, assistant_id, name, key_hash, key_prefix, scope, audience, anonymous_context, tool_policy, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `INSERT INTO api_keys (id, assistant_id, name, key_hash, key_prefix, scope, audience, anonymous_context, tool_policy, created_by, workspace_mcp_consent)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING ${COLS_PUBLIC}, key_hash as "keyHash"`,
         [
           id,
@@ -276,6 +284,7 @@ export function createDbApiKeyStore(): ApiKeyStore {
                 : 'public_research'
             ),
           params.actingUserId,
+          params.workspaceMcpConsent ? JSON.stringify(params.workspaceMcpConsent) : null,
         ],
       )
       if (result.rows.length === 0) {
@@ -302,7 +311,7 @@ export function createDbApiKeyStore(): ApiKeyStore {
 
     async getByIdSystem(id) {
       const result = await query<ApiKeyRowWithHash>(
-        `SELECT ${COLS_PUBLIC}, key_hash as "keyHash"
+        `SELECT ${COLS_PUBLIC}, key_hash as "keyHash", issuer_user_id AS "issuerUserId"
          FROM api_keys
          WHERE id = $1
          LIMIT 1`,

@@ -52,6 +52,7 @@ export const en = {
     "edit": "Edit setup"
 },
 
+  workspaceConsent: {"title": "Review workspace access", "explanation": "Connect this application to Brian or the selected assistant with your current workspace permissions.", "noWorkspaces": "No eligible workspaces"},
   applicationConsent: {
     "title": "Review application access",
     "loading": "Reading current access...",
@@ -598,7 +599,9 @@ export const en = {
     "choose": "Choose a department or explicitly choose General before creating.",
     "boundaries": "Private ownership, Projects and sensitivity restrictions still apply. Sharing does not grant administrative or public access.",
     "stale": "Access context changed or expired. Refresh and review the destination before creating. Your draft has not been submitted.",
-    "unavailable": "Cannot load the destination and access settings. Check your connection and retry. Your draft has not been submitted.",
+    "unavailable": "Destination unavailable.",
+    "reconnecting": "Reconnecting…",
+    "offlineDraft": "Offline. Keep drafting.",
     "review": "Review refreshed destination",
     "setup": "Workspace setup remains unchanged. Access mode activation is not available here.",
     "migration": "Administrators can inspect saved migration plans and ask Brian to prepare an explicit proposal. Applied batches do not activate a mode."
@@ -3432,6 +3435,13 @@ export const en = {
     },
   },
   docPage: {
+    localMetadataValue: "Your change",
+    remoteMetadataValue: "Current server value",
+    metadataConflict: "This page changed elsewhere. Choose which metadata to keep. Both versions are retained in local recovery history.",
+    keepLocalMetadata: "Keep my change",
+    keepRemoteMetadata: "Keep server change",
+    metadataConflictRetry: "Could not resolve this change. Reconnect and try again.",
+
     // Sidebar — section headers + actions
     sidebarSaved: "Saved",
     sidebarDrafts: "Drafts",
@@ -5836,6 +5846,7 @@ export const en = {
     fallbackDesc: "Off by default. When on, a message this endpoint cannot answer is answered by the built-in model for that tier, the reply says it happened, and the turn is billed as normal Brian usage.",
   },
   comments: {
+    localDraftFailed: "This draft could not be saved on this device. Keep this window open until storage is available.",
     toolbarButton: "Comment",
     toolbarButtonAria: "Add a comment on the selection",
     badgeAria: "{count} comments",
@@ -14072,6 +14083,9 @@ export const en = {
     },
   },
   apiKeys: {
+    workspaceAccessLabel: "Workspace access",
+    workspaceAccessDescription: "Use the assistant’s currently available workspace operations within the selected access and context. Shared data only. Expires after 30 days.",
+    expiresAtLabel: "Expires",
     title: "API keys",
     description:
       "Issue keys for third-party services to call this assistant via the public API. Keys never leave their consumer's server.",
@@ -14087,7 +14101,7 @@ export const en = {
       "For embedding this assistant's chat in your product. The key can only call the messages endpoint.",
     scopeAgentLabel: "Internal agent",
     scopeAgentDesc:
-      "Full programmatic access: opens the MCP endpoint plus chat. Configuration changes also require the Agent configuration capability.",
+      "Connect an agent to this assistant. Workspace access uses MCP; legacy keys also support chat.",
     scopeBadgeChat: "Chat",
     scopeBadgeAgent: "Agent",
     audienceLabel: "Who it serves",
@@ -14300,7 +14314,8 @@ export const en = {
     detailPlay: "Play",
     detailPause: "Pause",
     detailLoadingAudio: "Loading media...",
-    detailAudioError: "We could not load this media. Refresh the page to try again.",
+    retryPlayback: "Retry playback",
+    detailAudioError: "Playback is unavailable right now. You can retry here without leaving the page.",
     detailTranscript: "Transcript",
     visualMomentLabel: "Screen",
     detailNoTranscript: "This recording has not been transcribed yet.",
@@ -14401,6 +14416,9 @@ export const en = {
     retry: "Retry",
   },
   recorder: {
+    pendingUpload: "Saved on this device. Upload will resume automatically when the connection returns.",
+    pendingUploadFrom: "Recording from {time} is saved on this device, waiting to sync.",
+    storageFailed: "Recording is only in memory because local saving failed. Keep this window open while we retry.",
     start: "Record",
     audioOptions: "Recording audio options",
     includeComputerAudio: "Include computer audio",

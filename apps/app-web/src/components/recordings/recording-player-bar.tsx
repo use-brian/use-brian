@@ -29,7 +29,7 @@ export function RecordingPlayerBar({
   className?: string;
 }) {
   const t = useT();
-  const { currentMs, durationMs, isPlaying, togglePlay, isLoading, error, seekTo } =
+  const { currentMs, durationMs, isPlaying, togglePlay, isLoading, error, retry, seekTo } =
     useRecordingPlayer();
   const [copyStatus, setCopyStatus] = useState<"idle" | "copying" | "copied" | "failed">("idle");
 
@@ -55,7 +55,10 @@ export function RecordingPlayerBar({
   if (error) {
     return (
       <div className="rounded-md border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
-        {t.recordings.detailAudioError}
+        <span role="status">{t.recordings.detailAudioError}</span>
+        <button type="button" onClick={retry} className="ml-3 inline-flex min-h-8 max-sm:min-h-11 items-center rounded border border-border px-3 hover:bg-muted">
+          {t.recordings.retryPlayback}
+        </button>
       </div>
     );
   }

@@ -682,6 +682,9 @@ export async function enqueueToolInvocationResume(
   },
 ): Promise<ToolInvocationResumeOutcome> {
   const { approval, decision, reason } = params
+  // These continuations have a durable credential parent. Replaying them as
+  // an ordinary chat session would discard that ceiling and its revocation.
+  if (approval.approvalPayload.workspaceMcpOperation === true || typeof approval.approvalPayload.workspaceMcpRunId === 'string') return { kind: 'no_checkpoint' }
   const sessionId = approval.blockingSessionId
 
   // No suspended session recorded → nothing to resume.

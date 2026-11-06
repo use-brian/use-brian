@@ -2567,6 +2567,12 @@ html[data-vt-back="true"]::view-transition-new(root) {
 .is-canvas-desktop-win [data-doc-topbar] {
   padding-right: calc(0.5rem + var(--doc-titlebar-controls));
 }
+/* Compact web chrome must still contain Windows' native 44px controls. */
+@media (min-width: 768px) {
+  .is-canvas-desktop-win :is([data-workspace-topbar], [data-surface-chrome-skeleton], [data-workspace-search-fallback]) {
+    min-height: max(40px, env(titlebar-area-height, 44px));
+  }
+}
 
 /* Windows text cursor. The stock Windows I-beam is a monochrome INVERTING
    cursor (drawn by XOR-ing the pixels under it). Remote Desktop, Parallels,

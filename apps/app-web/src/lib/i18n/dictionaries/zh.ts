@@ -39,6 +39,7 @@ export const zh: Dictionary = {
     "edit": "編輯設定"
 },
 
+  workspaceConsent: {"title": "確認工作區存取權限", "explanation": "以您目前的工作區權限，將此應用程式連接至 Brian 或選取的助理。", "noWorkspaces": "沒有可用的工作區"},
   applicationConsent: {
     "title": "審閱應用程式存取權",
     "loading": "正在讀取目前權限...",
@@ -585,7 +586,9 @@ export const zh: Dictionary = {
     "choose": "建立前請選擇部門或明確選擇一般範圍。",
     "boundaries": "私有所有權、專案和機密等級限制仍然適用。共享不會授予管理權限或公開存取。",
     "stale": "存取上下文已變更或到期。請重新整理並審核目的地後再建立。草稿尚未提交。",
-    "unavailable": "無法載入目的地與存取設定。請檢查連線後重試。草稿尚未提交。",
+    "unavailable": "無法使用此儲存位置。",
+    "reconnecting": "正在重新連線…",
+    "offlineDraft": "目前離線，可繼續編寫草稿。",
     "review": "審核重新整理後的目的地",
     "setup": "工作區設定保持不變。此處無法啟用存取模式。",
     "migration": "管理員可以檢視已儲存的遷移計畫，並請 Brian 準備明確的提案。套用批次不會啟用模式。"
@@ -3360,6 +3363,13 @@ export const zh: Dictionary = {
     },
   },
   docPage: {
+    localMetadataValue: "你的變更",
+    remoteMetadataValue: "伺服器目前的值",
+    metadataConflict: "此頁面已在其他地方變更。請選擇保留的資料，兩個版本均會保留在本機復原記錄中。",
+    keepLocalMetadata: "保留我的變更",
+    keepRemoteMetadata: "保留伺服器變更",
+    metadataConflictRetry: "無法解決此變更，請重新連線後再試。",
+
     sidebarSaved: "已儲存",
     sidebarDrafts: "草稿",
     sidebarNewDraft: "新增",
@@ -5611,6 +5621,7 @@ export const zh: Dictionary = {
     fallbackDesc: "預設為關閉。開啟後，此端點無法回應的訊息會改由該層級的內建模型回覆，回覆中會註明此事，並以一般 Brian 用量計費。",
   },
   comments: {
+    localDraftFailed: "無法在此裝置儲存草稿。請保持此視窗開啟，直到儲存空間可用。",
     toolbarButton: "留言",
     toolbarButtonAria: "對所選內容加上評論",
     badgeAria: "{count} 則評論",
@@ -13759,6 +13770,9 @@ export const zh: Dictionary = {
     },
   },
   apiKeys: {
+    workspaceAccessLabel: "工作區存取",
+    workspaceAccessDescription: "在所選權限與情境範圍內，允許使用助理目前可用的工作區操作。僅限共享資料，30 天後到期。",
+    expiresAtLabel: "到期日",
     title: "API 金鑰",
     description:
       "為第三方服務發行金鑰，讓它們透過公開 API 呼叫此助理。金鑰絕不會離開使用方的伺服器。",
@@ -13772,7 +13786,7 @@ export const zh: Dictionary = {
     scopeChatLabel: "外部聊天",
     scopeChatDesc: "用於將此助理的聊天功能嵌入你的產品。此金鑰只能呼叫 messages 端點。",
     scopeAgentLabel: "內部代理",
-    scopeAgentDesc: "完整的程式化存取：除聊天外也開放 MCP 端點。變更設定還需要「代理設定」功能。",
+    scopeAgentDesc: "將代理程式連接到此助理。工作區存取使用 MCP；舊版金鑰亦支援聊天。",
     scopeBadgeChat: "聊天",
     scopeBadgeAgent: "代理",
     audienceLabel: "服務對象",
@@ -13980,7 +13994,8 @@ export const zh: Dictionary = {
     detailPlay: "播放",
     detailPause: "暂停",
     detailLoadingAudio: "正在加载媒体...",
-    detailAudioError: "无法加载此媒体。请刷新页面重试。",
+    retryPlayback: "重试播放",
+    detailAudioError: "暂时无法播放。你可以在此重试，无需离开页面。",
     detailTranscript: "转录",
     visualMomentLabel: "屏幕",
     detailNoTranscript: "此录音尚未转录。",
@@ -14079,6 +14094,9 @@ export const zh: Dictionary = {
     retry: "重試",
   },
   recorder: {
+    pendingUpload: "已儲存在此裝置。連線恢復後會自動繼續上傳。",
+    pendingUploadFrom: "{time} 的錄音已儲存在此裝置，等待同步。",
+    storageFailed: "本機儲存失敗，錄音目前僅保留在記憶體中。重試期間請保持視窗開啟。",
     start: "录音",
     audioOptions: "录音音频选项",
     includeComputerAudio: "包含电脑音频",

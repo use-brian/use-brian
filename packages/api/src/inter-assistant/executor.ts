@@ -1,3 +1,6 @@
+import { bindWorkspaceCredentialDelegation } from '@use-brian/core'
+import { restoreWorkspaceMcpDelegation, type WorkspaceMcpDelegation } from '../workspace-mcp/delegation.js'
+import type { WorkspaceMcpConsent } from '../workspace-mcp/consent.js'
 /**
  * Cross-assistant executor.
  *
@@ -335,6 +338,7 @@ export type CalleeQueryParams = {
   callerUserId?: string | null
   callerAccessCeiling?: import('@use-brian/core').AccessCeiling
   callerScopeEvidence?: import('@use-brian/core').ScopeEvidence
+  callerWorkspaceDelegation?: WorkspaceMcpDelegation
   calleeAssistantId: string
   /** Authoritative workspace expected by the consult transport. */
   expectedWorkspaceId?: string
@@ -501,7 +505,24 @@ function hasForbiddenExternalClientDepth(depth: ResearchDepthConfig | undefined)
 export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExecutor {
   const authorizeAudience = options.authorizeDeliveryAudience
     ?? createDeliveryAudienceAuthorizer({ integrationStore: options.integrationStore })
-  return async function executeCalleeQuery(params: CalleeQueryParams, inheritedEvidence?: import('@use-brian/core').ScopeEvidence): Promise<string> {
+  return async function executeCalleeQuery(params: CalleeQueryParams, inheritedEvidence?: import('@use-brian/core').ScopeEvidence, workspaceConsent?: WorkspaceMcpConsent, workspaceParent?: WorkspaceMcpDelegation): Promise<string> {
+    if (params.callerWorkspaceDelegation) {
+      const { callerWorkspaceDelegation: parent, ...child } = params
+      if (parent.userId !== params.callerUserId || parent.assistantId !== params.callerAssistantId
+        || parent.workspaceId !== params.expectedWorkspaceId || !params.callerAccessCeiling) throw new Error('workspace_mcp_parent_mismatch')
+      const restored = await restoreWorkspaceMcpDelegation(parent, options.capabilityStore)
+      const boundary = restored.context.executionContext!.security
+      const lease = createAuthorityLease(boundary.ceiling, async () => {
+        await boundary.authority.assertCurrent()
+        return boundary.ceiling
+      })
+      return runWithAuthorityLease(lease, async () => {
+        const result = await executeCalleeQuery({ ...child,
+          callerAccessCeiling: intersectAccessCeilings(params.callerAccessCeiling!, boundary.ceiling) }, inheritedEvidence, restored.consent, parent)
+        await lease.assertCurrent()
+        return result
+      })
+    }
     // Inference wiring through the turn kernel's boot registration.
     const turnOptions = withTurnInference(options)
     if (params.callerScopeEvidence !== undefined && !params.callerAccessCeiling && !inheritedEvidence) {
@@ -572,7 +593,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         return currentReceiver
       })
       return runWithAuthorityLease(lease, () => runWithAuthorityLease(receiverLease,
-        () => runWithAgentAccess(receiverStarting, () => executeCalleeQuery(executionParams,callerEvidence))))
+        () => runWithAgentAccess(receiverStarting, () => executeCalleeQuery(executionParams,callerEvidence,workspaceConsent,workspaceParent))))
     }
     await assertCurrentAuthority()
     // 1. Look up callee assistant and its billing/actor user.
@@ -869,9 +890,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // metadata so the read-only filter below can remove writes. Keeping
           // them behind mcp_call would hide the inner tool's effect class.
           keepBuiltinsDirect:
-            !!externalClient || (params.allowedTools?.length ?? 0) > 0,
-          keepDynamicToolsDirect: !!externalClient,
-          restrictSearchToToolNames: params.allowedTools,
+            !!workspaceConsent || !!externalClient || (params.allowedTools?.length ?? 0) > 0,
+          keepDynamicToolsDirect: !!workspaceConsent || !!externalClient,
+          bindingMaximum: workspaceConsent?.connectorBindings,
+          restrictSearchToToolNames: workspaceConsent ? workspaceConsent.operationNames.filter(name => !params.allowedTools || params.allowedTools.includes(name)) : params.allowedTools,
           connectorStore: options.connectorStore,
           settingsStore: options.mcpSettingsStore,
           assistantConnectorStore: options.assistantConnectorStore,
@@ -1198,6 +1220,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       ? [...new Set([...(pageAwareAllowedTools ?? []), 'mcp_search', 'mcp_call'])]
       : pageAwareAllowedTools
     const finalTools = filterToolsByAllowList(modeTools, effectiveAllowedTools)
+    if (workspaceConsent) {
+      const maximum = new Set(workspaceConsent.operationNames)
+      for (const name of finalTools.keys()) if (!maximum.has(name) || name === 'mcp_search' || name === 'mcp_call') finalTools.delete(name)
+    }
 
     // A principal-bound workflow is an internal drafting lane, so the model
     // receives no write or outbound tool at all. Connector tools stay direct
@@ -1517,6 +1543,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       resolveScope: async () => turnScope,
       createSessionLease: () => ambientAuthority,
     })
+    if (workspaceParent) bindWorkspaceCredentialDelegation(executionContext,workspaceParent)
 
 
     const calleeCtx = {

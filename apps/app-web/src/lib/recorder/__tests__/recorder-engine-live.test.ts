@@ -90,6 +90,25 @@ describe("[COMP:app-web/live-recording-page] rolling recorder windows", () => {
     vi.clearAllMocks();
   });
 
+  it("reports failed disk writes, retries every missing chunk, and survives a failed stop flush", async () => {
+    const { createRecorderEngine } = await import("../recorder-engine");
+    const { memorySpoolStore } = await import("../recorder-spool");
+    const store = memorySpoolStore(); const append = store.appendChunk.bind(store);
+    let available = false;
+    store.appendChunk = async (...args) => { if (!available) throw new Error("disk full"); return append(...args); };
+    const failed = vi.fn(); const engine = await createRecorderEngine({ onStorageFailure: failed });
+    engine.latch(store, { id: "capture", workspaceId: "workspace", assistantId: "assistant", startedAt: Date.now() });
+    const recorder = FakeMediaRecorder.instances[0];
+    recorder.ondataavailable?.({ data: new Blob(["first-"]) } as BlobEvent);
+    await Promise.resolve(); await Promise.resolve();
+    const result = await engine.stop();
+    expect(result.localSaveFailed).toBe(true); expect(failed).toHaveBeenCalled();
+    available = true; expect(await result.retryLocalSave!()).toBe(true);
+    const parts = await store.readChunks("capture");
+    expect(await new Blob(parts).text()).toBe(await result.blob.text());
+    expect((await store.listSessions())[0].chunkCount).toBe(parts.length);
+  });
+
   it("stop-restarts a second MediaRecorder so every transcript window is a complete file", async () => {
     const onLiveWindow = vi.fn().mockResolvedValue(undefined);
     const { createRecorderEngine } = await import("../recorder-engine");

@@ -161,7 +161,10 @@ export async function resolveExecutionContextSystem(
   // groups have separate approved maxima. Anchored Office/feed threads use their
   // anchor's audience, not the session's usually empty Team/Project labels.
   const anchored = input.session?.anchorKind && input.session.anchorKind !== 'none'
-  const room = input.sharedAudience && input.lifecycle.channelType === 'web' && !anchored
+  const workspaceMachineRoom = input.identity.kind === 'programmatic'
+    && (input.identity.principal.kind === 'brain_key' || input.identity.principal.kind === 'assistant_key')
+    && (input.lifecycle.channelType === 'programmatic' || input.lifecycle.channelType === 'assistant_mcp')
+  const room = input.sharedAudience && (input.lifecycle.channelType === 'web' || workspaceMachineRoom) && !anchored
     && (input.session || input.sessionAuthority)
     ? { ...input.session, ...input.sessionAuthority }
     : undefined

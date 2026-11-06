@@ -1,3 +1,5 @@
+import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '../workspace-delegation.js'
+import { parseAuthoringAuthority } from '../access-ceiling.js'
 import { describe, expect, it } from 'vitest'
 import { createExecutionContext, executionToolContext } from '../execution-context.js'
 import { pinToolAuthoringAuthority } from '../tool-authority.js'
@@ -21,6 +23,25 @@ function context(): ToolContext {
 }
 
 describe('[COMP:security/access-ceiling] tool authoring department consent', () => {
+  it('persists only the host-bound parent and rejects malformed durable replacements', () => {
+    const userId='10000000-0000-4000-8000-000000000001',workspaceId='10000000-0000-4000-8000-000000000002',assistantId='10000000-0000-4000-8000-000000000003';
+    const parent={kind:'oauth_token' as const,credentialId:'10000000-0000-4000-8000-000000000004',revision:'a'.repeat(64),userId,workspaceId,assistantId,sessionId:'10000000-0000-4000-8000-000000000005'};
+    const execution=createExecutionContext({identity:{kind:'programmatic',principal:{kind:'oauth_token',credentialId:parent.credentialId,actorUserId:userId},credentialOwnerUserId:userId},
+      ownership:{kind:'workspace',workspaceId},access:{userId,workspaceId,assistantId,assistantKind:'primary',clearance:'internal',compartments:[],mutationCompartments:[],projectIds:[],visibilityAssistantIds:[]},
+      writeDefaults:{compartments:[],projectIds:[]},authority:{assertCurrent:async()=>{},execute:async work=>work()},
+      lifecycle:{sessionId:parent.sessionId,sessionPersisted:true,channelType:'programmatic',channelId:parent.credentialId,abortSignal:new AbortController().signal}});
+    const tool=executionToolContext(execution,{appId:'fixture'});
+    expect(pinToolAuthoringAuthority({...tool,workspaceDelegation:parent} as ToolContext).workspaceDelegation).toBeUndefined();
+    bindWorkspaceCredentialDelegation(execution,parent);
+    const saved=pinToolAuthoringAuthority(tool);
+    expect(parseAuthoringAuthority(JSON.parse(JSON.stringify(saved)))?.workspaceDelegation).toEqual(parent);
+    expect(workspaceCredentialDelegation({...execution})).toBeUndefined();
+    expect(parseAuthoringAuthority({...saved,workspaceDelegation:{...parent,revision:'invalid'}})).toBeNull();
+    expect(parseAuthoringAuthority({...saved,workspaceDelegation:{...parent,userId:assistantId}})).toBeNull();
+    parent.revision='b'.repeat(64);
+    expect(workspaceCredentialDelegation(execution)?.revision).toBe('a'.repeat(64));
+  });
+
   it('retains the complete execution department ceiling across the compatibility projection', () => {
     const ctx = context()
     const pinned = pinToolAuthoringAuthority(ctx)

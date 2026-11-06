@@ -27,6 +27,7 @@ export interface SessionAdapter {
   read(identity: string): Promise<unknown>;
   write(identity: string, value: SessionCache | null): Promise<void>;
 }
+const transientStatus = (status: number) => status === 408 || status === 429 || status >= 500;
 const empty = (): SessionSnapshot => ({ session: "checking", connection: "online", identity: null, workspaces: [], admissions: {} });
 
 /** One single-flight authority for app entry. Spec: features/account-entry.md. [COMP:app-web/app-session] */
@@ -89,6 +90,13 @@ export class AppSessionController {
       if (epoch !== this.epoch || (before && this.adapter.identity() && before !== this.adapter.identity())) return;
       const identity = this.adapter.identity();
       if (response.status === 401) { this.invalidate(!before, before); return; }
+      if (response.status === 403 || response.status === 404) {
+        if (identity) { this.rejected.add(identity); this.persist(null, identity); }
+        this.cache = null;
+        this.publish({ ...empty(), identity, connection: "unavailable" });
+        return;
+      }
+      if (transientStatus(response.status)) { await this.restoreOffline(epoch, before, "unavailable"); return; }
       if (response.status < 200 || response.status >= 300 || !identity) {
         this.publish({ ...empty(), identity, connection: "unavailable" });
         return;
@@ -103,23 +111,33 @@ export class AppSessionController {
         admissions: same ? this.value.admissions : {} });
       this.persist(this.cache, identity);
     } catch {
-      if (!this.current(epoch, before)) return;
-      const identity = this.adapter.identity();
-      const raw = identity && !this.rejected.has(identity) && this.adapter.hasCredential() ? this.cache?.identity === identity ? this.cache : await this.adapter.read(identity).catch(() => null) : null;
-      if (!this.current(epoch, before)) return;
-      const cached = raw as Partial<SessionCache> | null;
-      if (identity && cached?.identity === identity && Array.isArray(cached.workspaces) && cached.contexts && typeof cached.contexts === "object") {
-        const subject = this.adapter.subject?.();
-        const contexts = Object.fromEntries(Object.entries(cached.contexts).filter(([id, value]) =>
-          value && value.workspaceId === id && (!subject || value.me?.id === subject)));
-        const workspaces = parseDesktopWorkspaceRows(cached.workspaces).filter(row => contexts[row.id]);
-        if (workspaces.length === 0) { this.publish({ ...empty(), identity, connection: "offline" }); return; }
-        this.cache = { identity, workspaces, contexts };
-        this.publish({ session: "authenticated", connection: "offline", identity,
-          workspaces, admissions: {} });
-      } else this.publish({ ...empty(), identity, connection: "offline" });
+      await this.restoreOffline(epoch, before, "offline");
     }
   }
+  private async restoreOffline(epoch: number, before: string | null, connection: "offline" | "unavailable"): Promise<void> {
+    if (!this.current(epoch, before)) return;
+    const identity = this.adapter.identity();
+    const raw = identity && !this.rejected.has(identity) && this.adapter.hasCredential()
+      ? this.cache?.identity === identity ? this.cache : await this.adapter.read(identity).catch(() => null) : null;
+    if (!this.current(epoch, before)) return;
+    const cached = raw as Partial<SessionCache> | null;
+    if (identity && cached?.identity === identity && Array.isArray(cached.workspaces) && cached.contexts && typeof cached.contexts === "object") {
+      const subject = this.adapter.subject?.();
+      const contexts = Object.fromEntries(Object.entries(cached.contexts).filter(([id, value]) =>
+        value && value.workspaceId === id && (!subject || value.me?.id === subject) &&
+        !["forbidden", "missing"].includes(this.value.admissions[id]?.kind)));
+      const workspaces = parseDesktopWorkspaceRows(cached.workspaces).filter(row => contexts[row.id]);
+      if (workspaces.length > 0) {
+        this.cache = { identity, workspaces, contexts };
+        const admissions: Record<string, WorkspaceAdmission> = { ...this.value.admissions };
+        for (const row of workspaces) admissions[row.id] = { kind: "allowed", value: contexts[row.id] };
+        this.publish({ session: "authenticated", connection, identity, workspaces, admissions });
+        return;
+      }
+    }
+    this.publish({ ...empty(), identity, connection });
+  }
+
   admit = (id: string, force = false): Promise<void> => {
     if (this.value.session !== "authenticated") return Promise.resolve();
     if (this.workspaceFlights.has(id)) return this.workspaceFlights.get(id)!;
@@ -146,21 +164,26 @@ export class AppSessionController {
         if (this.cache) { const contexts = { ...this.cache.contexts }; delete contexts[id]; this.cache = { ...this.cache, contexts }; this.persist(this.cache, identity!); }
         return;
       }
+      if (transientStatus(response.status)) { this.restoreWorkspace(id, "unavailable"); return; }
       const data = response.data as { id?: string; name?: string; role?: string; me?: { id?: string } } | null;
       if (response.status !== 200 || data?.id !== id || typeof data.name !== "string" || (this.adapter.subject?.() && data.me?.id !== this.adapter.subject()) || !["owner", "admin", "member"].includes(data.role ?? "")) {
         this.admission(id, { kind: "unavailable" }); return;
       }
       const value = parseDesktopWorkspaceContext(id, data)!;
-      this.admission(id, { kind: "allowed", value });
+      this.publish({ ...this.value, connection: "online", admissions: { ...this.value.admissions, [id]: { kind: "allowed", value } } });
       if (this.cache) { this.cache = { ...this.cache, contexts: { ...this.cache.contexts, [id]: value } }; this.persist(this.cache, identity!); }
     } catch {
       if (!this.current(epoch, identity)) return;
-      const cached = this.cache?.contexts[id];
-      const value = cached && cached.workspaceId === id && this.adapter.hasCredential()
-        ? parseDesktopWorkspaceContext(id, cached) : null;
-      this.publish({ ...this.value, connection: "offline" });
-      this.admission(id, value ? { kind: "allowed", value } : { kind: "unavailable" });
+      this.restoreWorkspace(id, "offline");
     }
+  }
+  private restoreWorkspace(id: string, connection: "offline" | "unavailable"): void {
+    const cached = this.cache?.identity === this.value.identity ? this.cache.contexts[id] : null;
+    const subject = this.adapter.subject?.();
+    const value = cached && cached.workspaceId === id && this.adapter.hasCredential() &&
+      (!subject || cached.me?.id === subject) ? parseDesktopWorkspaceContext(id, cached) : null;
+    this.publish({ ...this.value, connection, admissions: { ...this.value.admissions,
+      [id]: value ? { kind: "allowed", value } : { kind: "unavailable" } } });
   }
 }
 

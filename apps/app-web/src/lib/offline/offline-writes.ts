@@ -22,7 +22,7 @@ import { getUserInfo } from "@/lib/user";
 import { enqueueWrite, serializeQueue, parseQueue, type QueuedWrite } from "./write-queue";
 import {
   currentOfflineWriteAuthority, sameOfflineWriteAuthority, offlineWriteQueueKey,
-  offlineWriteUnavailable, prepareQueuedMetadataWrite, type OfflineWriteAuthority,
+  offlineWriteUnavailable, prepareQueuedMetadataWrite, MetadataConflict, type OfflineWriteAuthority,
 } from "./application-write-authority";
 
 // ── Connectivity flag (kept fresh by use-offline-sync) ─────────
@@ -64,14 +64,14 @@ export function subscribePendingCount(listener: (count: number) => void): () => 
   return () => { countListeners.delete(listener); };
 }
 
-async function ensureLoaded(authority: OfflineWriteAuthority | null): Promise<string | null> {
+async function ensureLoaded(authority: OfflineWriteAuthority | null, notify = true): Promise<string | null> {
   const key = authority ? offlineWriteQueueKey(authority) : null;
   const raw = key ? await idbGet<string>(key) : null;
   // Do not publish another account's pending state after an asynchronous read.
   if (!authority || sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) {
     queue = raw ? parseQueue(raw) : [];
     loadedKey = key;
-    emitCount();
+    if (notify) emitCount();
   }
   return key;
 }
@@ -84,7 +84,7 @@ async function updateQueue(key: string, update: (current: QueuedWrite[]) => Queu
 /** Scoped recovery port. Unbound legacy entries are never adopted by the active account. */
 export async function readPendingWrites(): Promise<QueuedWrite[]> {
   const authority = currentOfflineWriteAuthority();
-  const key = await ensureLoaded(authority);
+  const key = await ensureLoaded(authority, false);
   if (!key || !sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority())) return [];
   return structuredClone(queue);
 }
@@ -168,6 +168,8 @@ export async function offlineWrite(spec: OfflineWriteSpec): Promise<void> {
     enqueuedAt: Date.now(),
     attempts: 0,
     authority,
+    ...((local?.view ?? cached) ? { base: { field: spec.kind.slice(5) === "rename" ? "name" as const : spec.kind.slice(5) as "icon" | "fullWidth" | "clearance",
+      value: ((local?.view ?? cached) as unknown as Record<string, string | boolean | null>)[spec.kind === "view.rename" ? "name" : spec.kind.slice(5)] ?? null } } : {}),
     effect: "pending",
   }));
   if (!sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority(authority.workspaceId))) return;
@@ -194,20 +196,24 @@ async function flush(): Promise<void> {
   const key = await ensureLoaded(authority);
   if (!authority || !key) return;
   const snapshot = parseQueue((await idbGet<string>(key)) ?? "[]");
+  const blockedPages = new Set<string>();
   for (const op of snapshot) {
+    const pageId = (op.payload as { id?: string })?.id ?? "";
+    if (blockedPages.has(pageId)) continue;
+    const original = JSON.stringify(op);
     if (!sameOfflineWriteAuthority(authority, currentOfflineWriteAuthority())
-      || !sameOfflineWriteAuthority(op.authority, authority) || op.effect !== "pending") return;
+      || !sameOfflineWriteAuthority(op.authority, authority)) return;
     try {
       const { readLocalPage } = await import("./offline-pages");
       const id = (op.payload as { id?: string })?.id;
-      if (id && await readLocalPage(id)) return;
+      if (id && await readLocalPage(id)) { blockedPages.add(pageId); continue; }
       const dispatch = await prepareQueuedMetadataWrite(op);
       const claimed = { ...op, effect: "uncertain" as const };
       let acquired = false;
       // The IDB transaction is the cross-tab claim. No effect is sent unless its
       // exact payload/version was durably marked uncertain first.
       await updateQueue(key, (current) => current.map((q) => {
-        if (JSON.stringify(q) !== JSON.stringify(op)) return q;
+        if (JSON.stringify(q) !== original) return q;
         acquired = true;
         return claimed;
       }));
@@ -215,10 +221,34 @@ async function flush(): Promise<void> {
       await dispatch();
       await updateQueue(key, (current) => current.filter((q) =>
         JSON.stringify(q) !== JSON.stringify(claimed)));
-    } catch {
-      // Preserve authored intent and uncertainty. A reconnect never retries a
-      // possibly committed effect, including after reload or account change.
-      return;
+    } catch (error) {
+      blockedPages.add(pageId);
+      if (error instanceof MetadataConflict) {
+        await updateQueue(key, current => current.map(q => q.id === op.id ? { ...q, conflict: true } : q));
+      }
+      // Keep both versions on conflict, but do not block independent pages.
     }
   }
+}
+
+/** A conflict is a real user choice. Retain both versions before resolving it. */
+export async function resolveMetadataConflict(id: string, choice: "local" | "remote"): Promise<void> {
+  const authority = currentOfflineWriteAuthority();
+  const key = await ensureLoaded(authority);
+  if (!authority || !key) throw offlineWriteUnavailable();
+  const op = (await readPendingWrites()).find(row => row.id === id && row.conflict);
+  if (!op) return;
+  const { pinOfflineWriteSession } = await import("./application-write-authority");
+  const session = await pinOfflineWriteSession(authority);
+  const pageId = (op.payload as { id: string }).id;
+  const response = await session.request(`/api/views/${encodeURIComponent(pageId)}`);
+  if (!response.ok) throw offlineWriteUnavailable();
+  const remote = await response.json(); session.assertCurrent();
+  if (remote.id !== pageId || remote.workspaceId !== authority.workspaceId || remote.offlineMetadataCas !== true) throw offlineWriteUnavailable();
+  const field = op.base?.field ?? (op.kind === "view.rename" ? "name" : op.kind.slice(5)) as NonNullable<QueuedWrite["base"]>["field"];
+  await idbUpdate(`${key}:resolved-conflicts`, (rows: unknown[] | null) => [...(rows ?? []), { op, remote, choice, at: Date.now() }]);
+  session.assertCurrent();
+  await updateQueue(key, rows => rows.flatMap(row => row.id !== id ? [row] : choice === "remote" ? [] : [{ ...row,
+    base: { field, value: remote[field] ?? null }, effect: "pending" as const, conflict: false }]));
+  await flushWriteQueue();
 }

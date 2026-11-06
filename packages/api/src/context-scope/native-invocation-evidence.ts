@@ -2,6 +2,7 @@
 import {intersectAccessCeilings,type AccessCeiling,type ExecutionContext,type ScopeEvidence} from '@use-brian/core'
 import {getAppPool,applyRLSGucs,rollbackAndRelease,runWithAgentAccess} from '../db/client.js'
 import {getApplicationExecutionBinding} from '../application-platform/execution-context.js'
+import {hasWorkspaceMcpRetainedAuthority} from '../db/session-context-revisions.js'
 import {tryValidateNativeScopeEvidence,tryValidateNativeCombinedOutputEvidence} from './caller-evidence.js'
 
 /** Null requires the full original validator; it never means admitted. Callers bracket this read with their original live lease.
@@ -28,7 +29,8 @@ async function readNativeInvocationEvidence(execution:ExecutionContext,evidence:
   &&execution.identity.parentCeiling.userId===actor&&execution.identity.parentCeiling.workspaceId===workspaceId
   &&execution.security.access.assistantId===execution.assistant.id
   &&!execution.surface.readOnly&&!execution.surface.systemRead&&!execution.surface.clientSelfMemory&&!execution.security.access.systemRead
- if(execution.ownership.kind!=='workspace'||execution.ownership.workspaceId!==workspaceId||!nativeAttended&&!nativeDelegated||getApplicationExecutionBinding(execution)
+ const nativeProgrammatic=hasWorkspaceMcpRetainedAuthority(execution)
+ if(execution.ownership.kind!=='workspace'||execution.ownership.workspaceId!==workspaceId||!nativeAttended&&!nativeDelegated&&!nativeProgrammatic||getApplicationExecutionBinding(execution)
   ||recipient.workspaceId!==workspaceId||recipient.userId!==''&&recipient.userId!==actor
   ||!roots.length||roots.length>4096||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')
   ||roots.some(root=>!['application_field','session_message','session_context_revision','memory','workspace_file'].includes(root.resourceKind)))return null
@@ -42,7 +44,7 @@ async function readNativeInvocationEvidence(execution:ExecutionContext,evidence:
   if(role?.bypass!==false)throw new Error('Native proof requires an application role')
   await runWithAgentAccess({...execution.security.access,...ceiling,sharedAudience:anonymous||execution.security.access.sharedAudience},()=>applyRLSGucs(client,actor))
   // Preserve the original verified native assistant under legacy and v2 policies.
-  if(nativeDelegated||nativeVerifiedAttended)await client.query("SELECT set_config('app.v2_assistant_id',$1,true)",[execution.assistant.id])
+  if(nativeDelegated||nativeVerifiedAttended||nativeProgrammatic)await client.query("SELECT set_config('app.v2_assistant_id',$1,true)",[execution.assistant.id])
   // The SQL facade acquires its native lock only after proving eligibility.
   // Unknown/generic/independent-source closures therefore fall back unlocked.
   const admitted=combined

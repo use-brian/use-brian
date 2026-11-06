@@ -21,6 +21,16 @@ const A2A: SessionKindRow = { channelType: 'assistant-call', anchorKind: null, c
 const CRON: SessionKindRow = { channelType: 'cron', anchorKind: null, channelId: 'j' }
 
 describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
+  it.each([['programmatic', 'brain_key'], ['assistant_mcp', 'assistant_key']])('gives bound %s conversations room controls while keeping machine attribution', (channelType, keyKind) => {
+    const row = { channelType, anchorKind: 'none', visibility: 'workspace', channelId: `workspace-mcp:${keyKind}:11111111-1111-4111-8111-111111111111` }
+    expect(classifySession(row)).toMatchObject({ lane: 'machine', machine: 'workspace_mcp' })
+    expect(classifySession({ ...row, channelId: `${row.channelId}:22222222-2222-4222-8222-222222222222` }).machine).toBe('workspace_mcp')
+    expect(classifySession({ ...row, channelId: `${row.channelId}:arbitrary` }).machine).toBe('programmatic')
+    expect(policyFor(row)).toMatchObject({ post: true, pins: true, webTurns: true, humanActivity: false, context: { personalMemory: false } })
+    expect(policyFor({ ...row, channelId: 'legacy-machine' })).toMatchObject({ post: false, pins: false, humanActivity: false })
+    expect(classifySession({ ...row, channelId: `workspace-mcp:${keyKind}:not-a-uuid` }).machine).toBe('programmatic')
+  })
+
   it('L1 tool interactivity: comes from the principal, so a human in an anchored thread is attended', () => {
     for (const channelType of ['doc_thread', 'office_thread', 'feed_thread', 'notification', 'web']) {
       expect(isAttendedTurn({ attended: true, channelType } as never)).toBe(true)

@@ -285,6 +285,14 @@ async function validateScopeEvidence(
       throw scopeEvidenceFailureOf(error) ? error : unavailable(kind,'verification_error',error)
     }
   }
+  // Office roles and explicit deny grants are not representable by label floors.
+  // Recheck the actual recipient, never the originating reader's creator role.
+  for(const source of sources.filter(source=>source.resourceKind==='office_observation')) {
+    const current=(await (client ?? getPool()).query<{allowed:boolean}>(
+      'SELECT read_office_observation_authority($1,$2,$3,$4::jsonb) AS allowed',
+      [ceiling.workspaceId,source.resourceId,ceiling.userId || null,JSON.stringify(ceiling.visibilityAssistantIds)])).rows[0]
+    if(current?.allowed!==true)throw unavailable(kind,'source_unverifiable')
+  }
   const raisedPages = new ContextScopeAccumulator(snapshot)
   try {
     for (const source of sources.filter(source => pageKinds.has(source.resourceKind))) {

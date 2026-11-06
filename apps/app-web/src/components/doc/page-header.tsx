@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Page top bar — Row 2, the Notion-style **navbar** (location + actions).
+ * Page location and actions, embedded in the shared window toolbar by DocShell.
  *
  *   [ Teamspace › Ancestor › 📄 Current ]         [saved?] [avatars] [Share] [★] [⋯]
  *
@@ -26,14 +26,14 @@
  *     affordance lives here rather than as always-visible chrome in the body.
  *
  * The big editable title lives in the page *body* (`PageTitle`) — the bar is
- * chrome, the title is content. The **top "layer"** (tabs + back/forward +
- * sidebar toggle) is a SEPARATE row mounted ABOVE this by `doc-shell` —
- * `doc-topbar.tsx`. This component is only the navbar (Row 2).
+ * chrome, the title is content. DocTopBar hosts this alongside navigation on
+ * desktop and wraps it into a second 44px row on phones, without a second copy.
  *
  * [COMP:app-web/page-header]
  */
 
 import { useEffect, useRef, useState } from "react";
+import { cn } from "@/lib/utils";
 import { Check, Globe, Lock, MoreHorizontal, Star, Trash2 } from "lucide-react";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -87,6 +87,8 @@ import {
 } from "@/lib/api/context-scopes";
 
 type PageHeaderProps = {
+  /** Compact content hosted directly inside the window toolbar. */
+  embedded?: boolean;
   view: ViewMetadata;
   /** Ancestor chain root → … → active (for the breadcrumb). */
   breadcrumb: Crumb[];
@@ -138,6 +140,7 @@ const CLEARANCE_RANK: Record<Clearance, number> = {
 const CLEARANCE_ORDER: Clearance[] = ["public", "internal", "confidential"];
 
 export function PageHeader({
+  embedded = false,
   view,
   breadcrumb,
   teamspace,
@@ -355,8 +358,8 @@ export function PageHeader({
   }
 
   return (
-    <div data-doc-chrome className="flex flex-col border-b border-border">
-      <div className="flex h-12 items-center justify-between gap-2 pl-3 pr-2 md:pl-4 md:pr-3">
+    <div data-doc-chrome data-page-header className={cn("relative flex min-w-0 flex-col [&_nav_button]:min-h-11 md:[&_nav_button]:min-h-8", !embedded && "border-b border-border")}>
+      <div className={cn("flex h-11 min-w-0 items-center justify-between gap-1 md:h-10 md:gap-2", !embedded && "pl-3 pr-2 md:pl-4 md:pr-3")}>
         <div className="flex min-w-0 flex-1 items-center">
           <Breadcrumb
             crumbs={breadcrumb}
@@ -399,7 +402,7 @@ export function PageHeader({
               reported by the workspace bottom status bar, not here. */}
           {live ? (
             <span
-              className="hidden items-center gap-1 px-1.5 text-xs text-muted-foreground sm:inline-flex"
+              className="hidden items-center gap-1 px-1.5 text-xs text-muted-foreground xl:inline-flex"
               aria-label={t.headerSaved}
             >
               <Check className="h-3 w-3" aria-hidden />
@@ -416,12 +419,12 @@ export function PageHeader({
 
           {/* Schedule badge (migration 229) — the recurring "research & update
               this page" jobs the assistant set up. Only renders when the page
-              has at least one enabled schedule targeting it. Below `md` it,
+              has at least one enabled schedule targeting it. Below `xl` it,
               the page actions and the runs chip live in the `...` menu instead
               (responsive contract M8; report B row 32): together they overran
               the 332px action column and pushed the menu off-screen. */}
           {view.scheduledJobs && view.scheduledJobs.length > 0 && (
-            <ScheduleBadge jobs={view.scheduledJobs} className="hidden md:inline-flex" />
+            <ScheduleBadge jobs={view.scheduledJobs} className="hidden xl:inline-flex" />
           )}
 
           {/* Page-action buttons (mig 321) — the human approval gesture.
@@ -429,7 +432,7 @@ export function PageHeader({
           <PageActionButtons
             pageId={view.id}
             workspaceId={view.workspaceId}
-            className="hidden md:flex"
+            className="hidden xl:flex"
           />
 
           {/* Workflow runs this page triggered (migration 282) — self-fetches
@@ -437,10 +440,10 @@ export function PageHeader({
           <PageWorkflowRuns
             pageId={view.id}
             workspaceId={view.workspaceId}
-            className="hidden md:inline-flex"
+            className="hidden xl:inline-flex"
           />
 
-          <PresenceAvatars users={presence} />
+          <div className="hidden lg:contents"><PresenceAvatars users={presence} /></div>
 
           <ShareDialog
             pageId={view.id}
@@ -496,9 +499,9 @@ export function PageHeader({
               ) : null}
               {view.anchorKey === "meeting-notes-folder" && <MeetingTagRulesMenuItem workspaceId={view.workspaceId} pageId={view.id} onOpen={() => setTagRulesOpen(true)} />}
               {/* Phone home of the page actions, schedule and triggered runs
-                  (hidden from `md`, where they render as header chips). The
+                  (hidden from `xl`, where they render as header chips). The
                   sections mount with the menu, so their fetches run on open. */}
-              <div className="md:hidden" data-page-header-folded>
+              <div className="xl:hidden" data-page-header-folded>
                 <PageActionMenuItems
                   pageId={view.id}
                   workspaceId={view.workspaceId}
@@ -600,7 +603,7 @@ export function PageHeader({
         <p
           role="alert"
           aria-live="polite"
-          className="px-4 pb-2 text-xs text-destructive md:px-4"
+          className={cn("px-4 pb-2 text-xs text-destructive", embedded && "absolute top-full right-0 z-30 w-max max-w-[calc(100vw-2rem)] rounded-md border bg-background p-3 shadow-sm")}
         >
           {error}
         </p>
@@ -609,7 +612,7 @@ export function PageHeader({
         <p
           role="status"
           aria-live="polite"
-          className="px-4 pb-2 text-xs text-emerald-600 md:px-4 dark:text-emerald-400"
+          className={cn("px-4 pb-2 text-xs text-emerald-600 dark:text-emerald-400", embedded && "absolute top-full right-0 z-30 w-max max-w-[calc(100vw-2rem)] rounded-md border bg-background p-3 shadow-sm")}
         >
           {notice}
         </p>
@@ -670,14 +673,14 @@ function ClearancePill({
             type="button"
             aria-label={t.clearancePill}
             title={t.clearancePill}
-            className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors aria-expanded:bg-muted ${
+            className={`inline-flex size-11 shrink-0 items-center justify-center gap-1.5 rounded-md md:h-8 md:w-auto md:px-2 text-xs font-medium transition-colors aria-expanded:bg-muted ${
               isConfidential
                 ? "bg-destructive/10 text-destructive hover:bg-destructive/15"
                 : "text-muted-foreground hover:bg-muted hover:text-foreground"
             }`}
           >
             <Lock className="size-3.5" aria-hidden />
-            <span className="hidden sm:inline">{labelFor[clearance]}</span>
+            <span className="hidden xl:inline">{labelFor[clearance]}</span>
           </button>
         }
       />

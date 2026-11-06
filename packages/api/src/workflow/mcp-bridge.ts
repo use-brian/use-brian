@@ -1,3 +1,4 @@
+import type { WorkspaceMcpConsent } from '../workspace-mcp/consent.js'
 /**
  * Workflow MCP bridge — builds the per-run tool registry for the workflow
  * executor.
@@ -87,6 +88,7 @@ export async function buildWorkflowToolRegistry(
     userId: string | null
     /** Optional — workflow runs do not have a per-request user timezone. */
     userTimezone?: string
+    workspaceConsent?: WorkspaceMcpConsent
     turnScope?: TurnScope
   },
 ): Promise<Map<string, Tool> & { discoveryWarnings?: readonly string[] }> {
@@ -104,6 +106,7 @@ export async function buildWorkflowToolRegistry(
     // keyed by user). Skip MCP entirely; first-party tools still work.
     // Phase B's scheduled trigger always passes the workflow.created_by
     // here so this branch is a defensive no-op.
+    if (scope.workspaceConsent) for (const name of tools.keys()) if (!scope.workspaceConsent.operationNames.includes(name)) tools.delete(name)
     stripOrchestrationTools(tools)
     return tools
   }
@@ -138,6 +141,8 @@ export async function buildWorkflowToolRegistry(
     connectorInstanceStore: deps.connectorInstanceStore,
     workspaceToolPolicyStore: deps.workspaceToolPolicyStore,
     assistantTeamId: scope.workspaceId,
+    bindingMaximum: scope.workspaceConsent?.connectorBindings,
+    restrictSearchToToolNames: scope.workspaceConsent?.operationNames,
     keepBuiltinsDirect: true,
     keepDynamicToolsDirect: true,
     // KB writes ARE exposed here, and are governed by the executor's own
@@ -167,6 +172,7 @@ export async function buildWorkflowToolRegistry(
     contextScope: scope.turnScope,
   })
 
+  if (scope.workspaceConsent) for (const name of tools.keys()) if (!scope.workspaceConsent.operationNames.includes(name)) tools.delete(name)
   stripOrchestrationTools(tools)
   const registry = scope.turnScope ? bindToolsToAgentAccess(tools, {
     clearance: scope.turnScope.access.clearance,

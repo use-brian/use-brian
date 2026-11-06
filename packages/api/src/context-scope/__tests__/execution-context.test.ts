@@ -324,6 +324,17 @@ describe('[COMP:api/execution-context] stored shared web room audience', () => {
     expect(projected.assistantDefaultProjectIds).toEqual(expected.projectIds)
   })
 
+  it.each(['brain_key', 'assistant_key'] as const)('applies the stored room audience to %s without changing the actor identity', async kind => {
+    const identity = { kind: 'programmatic' as const, principal: { kind, credentialId: 'credential-1', actorUserId: 'actor-1' }, credentialOwnerUserId: 'actor-1' }
+    const result = await resolveExecutionContextSystem({
+      ...base(), identity, sharedAudience: true, session: room,
+      lifecycle: { ...base().lifecycle, channelType: kind === 'brain_key' ? 'programmatic' : 'assistant_mcp' },
+    }, { resolveScope: async () => broadScope(), createLease: () => authority })
+    expect(result.executionContext.identity).toEqual(identity)
+    expect(result.executionContext.security.ceiling).toMatchObject({ userId: 'actor-1', clearance: 'public',
+      compartments: ['project:forecast', 'team:finance'], projectIds: ['legacy-forecast'] })
+  })
+
   it('caps general v2 rooms using trusted session authority metadata, including Department and Project admissions', async () => {
     const createSessionLease = vi.fn(() => authority)
     const result = await resolveExecutionContextSystem({

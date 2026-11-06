@@ -7,8 +7,9 @@ Project-wide rules in the platform root `CLAUDE.md` (read that first); the
 per-surface specs live under `docs/architecture/features/` (start at
 `docs/architecture/features/doc.md`, the shell).
 
-## Two contracts every surface in this app is held to
+## Contracts every surface in this app is held to
 
+- **Offline and unstable-network contract** - `docs/product-roadmap/offline-and-unstable-network.md`. Preserve mounted work and local durability through transport/5xx failures; recover and sync automatically. Installed desktop must cold-start its previously verified local working environment offline. New persistent operations need a scoped local/recovery design. Verify applicable fault scenarios and the `offline-continuity` CI lane; never interpret a missing implementation as an exception to the target.
 - **Responsive contract (M1-M11)** - `docs/architecture/features/doc.md` ->
   "Responsive contract". Phone = below `md`. Reach parity, touch reveal, 44px
   targets, 16px text entry, overlay clamps, `dvh`, drawer hygiene, the top bar
@@ -27,7 +28,7 @@ per-surface specs live under `docs/architecture/features/` (start at
   `SurfaceSkeleton` (`src/components/chrome/surface-skeleton.tsx`) or the
   route's `loading.tsx`, never a "Loading..." sentence.
 
-Both are graded by `pnpm check` where a machine can see them
+These are graded by `pnpm check` where a machine can see them
 (`invariants/touch-reveal`, `mobile-input-font`, `viewport-dvh`,
 `popover-width-clamp`, `topbar-chip-gate`) and reviewed by hand where not
 (`docs/workflow/ai-native-development.md` -> rule 7, and the `/ui-debug` phone

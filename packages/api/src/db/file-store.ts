@@ -1,10 +1,20 @@
-import type { AccessContext, FileStore } from '@use-brian/core'
+import { bindScopeSource, type AccessContext, type FileStore } from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
 import { buildAccessPredicate } from './access-predicate.js'
 
-const SELECT = `id, session_id as "sessionId", file_name as "fileName", mime_type as "mimeType", content, summary, size_bytes as "sizeBytes", artifact_file_id as "artifactFileId", artifact_segment_count as "artifactSegmentCount", sensitivity, compartments, project_ids as "projectIds"`
+const SELECT = `id, session_id as "sessionId", file_name as "fileName", mime_type as "mimeType", content, summary, size_bytes as "sizeBytes", artifact_file_id as "artifactFileId", artifact_segment_count as "artifactSegmentCount", sensitivity, compartments, project_ids as "projectIds", workspace_id as "workspaceId", user_id as "userId", assistant_id as "assistantId", source_file_id as "sourceFileId", source_file_version as "sourceFileVersion"`
 
-type Row = { id: string; sessionId: string; fileName: string; mimeType: string; content: string; summary: string | null; sizeBytes: number; artifactFileId: string | null; artifactSegmentCount: number | null; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] }
+type Row = { workspaceId: string; userId: string | null; assistantId: string | null; sourceFileId: string | null; sourceFileVersion: string | null; id: string; sessionId: string; fileName: string; mimeType: string; content: string; summary: string | null; sizeBytes: number; artifactFileId: string | null; artifactSegmentCount: number | null; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] }
+
+// Retain the canonical parent on the trusted object, never as model-supplied JSON.
+function bindAttachmentSource(row: Row): Row {
+  if (row.sourceFileId && row.sourceFileVersion) bindScopeSource(row, {
+    resourceKind: 'workspace_file', resourceId: row.sourceFileId, version: String(row.sourceFileVersion),
+    workspaceId: row.workspaceId, userId: row.userId, assistantId: row.assistantId,
+    sensitivity: row.sensitivity, compartments: row.compartments, projectIds: row.projectIds,
+  })
+  return row
+}
 
 export function createDbFileStore(): FileStore {
   return {
@@ -30,43 +40,43 @@ export function createDbFileStore(): FileStore {
       return result.rows[0]
     },
 
-    // Caller-scoped reads use the universal access predicate. The unscoped
+    // Caller-scoped reads use app-role RLS plus the universal access predicate. The unscoped
     // overload is trusted-internal only; authenticated previews use the
     // app-role current-source projection below.
     async get(id, ctx?: AccessContext) {
       if (ctx) {
         const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-        const result = await query<Row>(
+        const result = await queryWithRLS<Row>(ctx.userId,
           `SELECT ${SELECT} FROM file_cache
            WHERE ${ap.sql} AND id = $${ap.nextIdx} AND expires_at > now()`,
           [...ap.params, id],
         )
-        return result.rows[0] ?? null
+        return result.rows[0] ? bindAttachmentSource(result.rows[0]) : null
       }
       const result = await query<Row>(
         `SELECT ${SELECT} FROM file_cache WHERE id = $1 AND expires_at > now()`,
         [id],
       )
-      return result.rows[0] ?? null
+      return result.rows[0] ? bindAttachmentSource(result.rows[0]) : null
     },
 
     async getBySession(sessionId, ctx?: AccessContext) {
       if (ctx) {
         const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-        const result = await query<Row>(
+        const result = await queryWithRLS<Row>(ctx.userId,
           `SELECT ${SELECT} FROM file_cache
            WHERE ${ap.sql} AND session_id = $${ap.nextIdx} AND expires_at > now()
            ORDER BY created_at DESC`,
           [...ap.params, sessionId],
         )
-        return result.rows
+        return result.rows.map(bindAttachmentSource)
       }
       const result = await query<Row>(
         `SELECT ${SELECT} FROM file_cache WHERE session_id = $1 AND expires_at > now()
          ORDER BY created_at DESC`,
         [sessionId],
       )
-      return result.rows
+      return result.rows.map(bindAttachmentSource)
     },
 
     // Reads already filter `expires_at > now()`, so expired rows are invisible
@@ -84,7 +94,7 @@ export function createDbFileStore(): FileStore {
     async getOriginalContent(id, ctx?: AccessContext) {
       if (ctx) {
         const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-        const result = await query<{ originalContent: string | null }>(
+        const result = await queryWithRLS<{ originalContent: string | null }>(ctx.userId,
           `SELECT original_content as "originalContent" FROM file_cache
            WHERE ${ap.sql} AND id = $${ap.nextIdx} AND expires_at > now()`,
           [...ap.params, id],
@@ -131,5 +141,5 @@ export async function getFileCachePreviewProjection(ctx: AccessContext, id: stri
   const row = result.rows[0]
   if (!row) return null
   const {originalContent,revision,validForMs,...file} = row
-  return {file,originalContent,revision,validForMs}
+  return {file:bindAttachmentSource(file),originalContent,revision,validForMs}
 }

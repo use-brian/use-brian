@@ -134,7 +134,7 @@ describe('A11 ready external key admission: real HTTP and app-role SQL',()=>{
   const k=await f.create();expect(k.status,k.text).toBe(200)
   const r=await f.use(k.body.key);expect(r.status,r.text).toBe(200)
   const body=r.body.result?r.body:JSON.parse(r.text.split('\n').find((l:string)=>l.startsWith('data: '))!.slice(6))
-  expect(body.result).toMatchObject({isError:true,content:[{type:'text',text:'Credential or context unavailable. Start a new request.'}]})
+  expect(body.result).toMatchObject({isError:true,content:[{type:'text',text:'Credential or context unavailable. Check the operation outcome before retrying.'}]})
   expect((await f.use(k.body.key)).status).toBe(401)
  })
  it.each(['expire','revoke','role'] as const)('checks current configuration authority: %s',async(kind)=>{

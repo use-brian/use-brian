@@ -4,7 +4,7 @@ import { prepareScheduleEdit, applyScheduleEdit, scheduleEditRow } from '../work
 import { insertWorkflowScheduleJob } from './job-store.js'
 import { isDeepStrictEqual } from 'node:util'
 import { captureScheduledWorkflowRunAuthoritySystem, captureAuthoringAuthoritySystem, resolveWorkflowAuthoringScope } from '../context-scope/workflow-authority.js'
-import { parseAuthoringAuthority, pinAccessCeiling, taskLifecycleToDispatchEvent, type TaskLifecycleEvent } from '@use-brian/core'
+import { executionToolContext, pinToolAuthoringAuthority, parseAuthoringAuthority, pinAccessCeiling, taskLifecycleToDispatchEvent, type TaskLifecycleEvent } from '@use-brian/core'
 import { parseWorkflowCopyEvidence } from '../context-scope/workflow-input-evidence.js'
 import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
 import type { PoolClient } from 'pg'
@@ -863,7 +863,11 @@ async function runSourceQuery<T extends import('pg').QueryResultRow>(runId:strin
 
 export function createDbWorkflowRunStore(): WorkflowRunStore {
   return {
-    async createRun({ workflowId, workspaceId, triggeredBy, triggerKind, input, scheduledJob }) {
+    async createRun({ workflowId, workspaceId, triggeredBy, triggerKind, input, scheduledJob, executionContext }) {
+      if (executionContext && (triggerKind !== 'manual' || executionContext.security.access.userId !== triggeredBy
+        || executionContext.security.access.workspaceId !== workspaceId)) throw new Error('workflow_invocation_authority_invalid')
+      if (executionContext) await executionContext.security.authority.assertCurrent()
+      const invocationAuthority = executionContext ? pinToolAuthoringAuthority(executionToolContext(executionContext,{ appId: executionContext.assistant.id })) : null
       if (triggerKind === 'schedule') return createScheduledRun({ workflowId, workspaceId, triggeredBy, triggerKind, input, scheduledJob })
       if (scheduledJob) throw new WorkspaceAccessError('workflow_schedule_binding_conflict', 409)
       if (input && typeof input.trigger === 'object' && input.trigger !== null
@@ -883,14 +887,14 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
         `INSERT INTO workflow_runs (
            workflow_id, workspace_id, triggered_by, trigger_kind, input,
            trigger_page_id, context_group_id, context_project_id,
-           context_compartments, context_project_ids
+           context_compartments, context_project_ids, invocation_authority
          )
          SELECT $1, $2, $3, $4, $5, $6,
                 w.context_group_id, w.context_project_id,
                 CASE WHEN g.compartment_key IS NULL THEN ARRAY[]::text[]
                      ELSE ARRAY[g.compartment_key]::text[] END,
                 CASE WHEN w.context_project_id IS NULL THEN ARRAY[]::uuid[]
-                     ELSE ARRAY[w.context_project_id]::uuid[] END
+                     ELSE ARRAY[w.context_project_id]::uuid[] END, $7::jsonb
            FROM workflows w
            LEFT JOIN workspace_groups g ON g.id = w.context_group_id
           WHERE w.id = $1 AND w.workspace_id = $2
@@ -902,6 +906,7 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
           triggerKind,
           JSON.stringify(input ?? {}),
           triggerPageId,
+          invocationAuthority ? JSON.stringify(invocationAuthority) : null,
         ],
       )
       const run = rowToRun(result.rows[0])

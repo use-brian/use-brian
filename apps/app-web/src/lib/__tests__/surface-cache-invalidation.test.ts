@@ -276,8 +276,8 @@ describe("[COMP:app-web/surface-cache-invalidation] goal primitive and brain det
     expect(SURFACE_CACHE_SPINE_EVENTS).toContain(GOAL_REFRESH_EVENT);
   });
 
-  it("OFFICE_REFRESH_EVENT marks the Office list and the template library, never an open editor's snapshot", () => {
-    expect(staleMarksFor(OFFICE_REFRESH_EVENT, "w1")).toEqual(["office:w1:", "office-templates:w1:"]);
+  it("OFFICE_REFRESH_EVENT marks the Office list, templates and panels, never an open editor's snapshot", () => {
+    expect(staleMarksFor(OFFICE_REFRESH_EVENT, "w1")).toEqual(["office:w1:", "office-templates:w1:", "office-panel:w1:"]);
     expect(SURFACE_CACHE_SPINE_EVENTS).toContain(OFFICE_REFRESH_EVENT);
   });
 

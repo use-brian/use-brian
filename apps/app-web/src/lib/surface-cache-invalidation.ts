@@ -196,12 +196,13 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // into Needs you, and its resolution moves it back.
       return [`delivery:${workspaceId}:`, `goals:${workspaceId}`, `triage:${workspaceId}`, `goal:${workspaceId}:`, `feed-collaboration:${workspaceId}`, `work:${workspaceId}`];
     case OFFICE_REFRESH_EVENT:
-      // The `office` primitive: a job changed status or recorded progress.
+      // The `office` primitive: job progress or a committed discussion change.
       // The Office list (`office:<wid>:<viewer>:<view>`) and the template
       // library (`office-templates:<wid>:<viewer>`) revalidate behind their
       // paint instead of waiting for metadata renewal. Open editors follow
-      // their own job on the per-job stream.
-      return [`office:${workspaceId}:`, `office-templates:${workspaceId}:`];
+      // their own job on the per-job stream. Panel metadata revalidates in place
+      // so cross-channel comment changes preserve local drafts and snapshots.
+      return [`office:${workspaceId}:`, `office-templates:${workspaceId}:`, `office-panel:${workspaceId}:`];
     default:
       return [];
   }

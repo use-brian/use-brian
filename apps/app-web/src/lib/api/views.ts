@@ -642,6 +642,7 @@ function transientViewResponse(status: number): boolean {
 export async function listViews(params: {
   workspaceId: string;
   state?: ViewState | "all";
+  signal?: AbortSignal;
 }): Promise<ViewListRow[]> {
   const readIdentity = pageReadIdentity(params.workspaceId);
   const owner = readIdentity.owner;
@@ -667,7 +668,7 @@ export async function listViews(params: {
   const fallback = () => withLocal((cached ?? []).map(withoutPageReadCapabilities));
   if (typeof navigator !== "undefined" && !navigator.onLine) return fallback();
   try {
-    const res = await authFetch(url);
+    const res = await authFetch(url, { signal: params.signal ?? AbortSignal.timeout(15_000) });
     assertPageReadOwner(readIdentity, params.workspaceId);
     if (transientViewResponse(res.status)) return fallback();
     if (res.status === 401 || res.status === 403 || res.status === 404) {
@@ -683,7 +684,7 @@ export async function listViews(params: {
     return withLocal(body.savedViews);
   } catch (error) {
     assertPageReadOwner(readIdentity, params.workspaceId);
-    if (error instanceof TypeError || /^HTTP 5\d\d/.test(String((error as Error).message))) return fallback();
+    if (error instanceof TypeError || error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError") || /^HTTP 5\d\d/.test(String((error as Error).message))) return fallback();
     throw error;
   }
 }
@@ -705,7 +706,7 @@ export async function getView(viewId: string, options?: { networkOnly?: boolean 
   assertPageReadOwner(readIdentity);
   if (cached && typeof navigator !== "undefined" && !navigator.onLine) return cached;
   try {
-    const res = await authFetch(`${readIdentity.apiOrigin}/api/views/${viewId}`);
+    const res = await authFetch(`${readIdentity.apiOrigin}/api/views/${viewId}`, { signal: AbortSignal.timeout(15_000) });
     assertPageReadOwner(readIdentity);
     if (cached && transientViewResponse(res.status)) return cached;
     if (res.status === 401 || res.status === 403 || res.status === 404) {
@@ -721,7 +722,7 @@ export async function getView(viewId: string, options?: { networkOnly?: boolean 
     return owner ? view : withoutPageReadCapabilities(view);
   } catch (error) {
     assertPageReadOwner(readIdentity);
-    if (cached && (error instanceof TypeError || /^HTTP 5\d\d/.test(String((error as Error).message)))) return cached;
+    if (cached && (error instanceof TypeError || error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError") || /^HTTP 5\d\d/.test(String((error as Error).message)))) return cached;
     throw error;
   }
 }
@@ -1328,8 +1329,10 @@ export async function setViewFullWidth(
 export async function setPageLinkedRecording(
   viewId: string,
   recordingId: string | null,
+  session?: PinnedOfflineSession,
 ): Promise<ViewMetadata> {
-  const res = await authFetch(`${API_URL}/api/saved-views/${viewId}`, {
+  const request = session ? session.request : (path: string, init?: RequestInit) => authFetch(`${API_URL}${path}`, init);
+  const res = await request(`/api/saved-views/${viewId}`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ linkedRecordingId: recordingId }),
@@ -1492,7 +1495,7 @@ export async function createDraft(params: DraftInput): Promise<ViewMetadata> {
   } catch (error) {
     // A lost response may already have created the page. Keep its original
     // identity/UUID and uncertainty; reconnect must not repeat that effect.
-    if (error instanceof TypeError || /^HTTP 5\d\d/.test(String((error as Error).message))) {
+    if (error instanceof TypeError || error instanceof DOMException && (error.name === "TimeoutError" || error.name === "AbortError") || /^HTTP 5\d\d/.test(String((error as Error).message))) {
       return createLocalPage(input, authority, "uncertain");
     }
     throw error;
@@ -1655,10 +1658,10 @@ export async function listWorkspaceAssistants(
   // app-kind assistants (distribution) flow through /api/assistants POST.
   const res = await authFetch(
     `${API_URL}/api/assistants?workspaceId=${encodeURIComponent(workspaceId)}`,
-    { method: "GET", headers: { "content-type": "application/json" } },
+    { method: "GET", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(15_000) },
   );
   if (!res.ok) {
-    throw new Error(`Failed to list workspace assistants: ${res.status}`);
+    throw Object.assign(new Error(`Failed to list workspace assistants: ${res.status}`), { status: res.status });
   }
   const data = (await res.json()) as { assistants?: WorkspaceAssistantSummary[] };
   return data.assistants ?? [];

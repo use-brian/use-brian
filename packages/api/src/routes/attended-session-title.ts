@@ -1,3 +1,4 @@
+import { hasWorkspaceMcpRetainedAuthority } from '../db/session-context-revisions.js'
 /** Admitted native title model and publication. [COMP:api/application-persistence] */
 import {bindScopeSources,boundScopeSources,executionToolContext,sanitizeTitle,DerivedScopeError,type LLMProvider,type Message,type SessionContextAuthority,type TokenUsage} from '@use-brian/core'
 import {getPool} from '../db/client.js'
@@ -76,8 +77,8 @@ export async function generateAttendedSessionTitle(input:{authority:SessionConte
  channelPrefix?:(title:string|null|undefined)=>string|null}):Promise<GenerateTitleResult&{written:boolean}>{
  const {authority,provider,model,channelPrefix}=input,{execution}=authority,sessionId=execution.lifecycle.sessionId
  if(!sessionId||execution.lifecycle.sessionPersisted===false||execution.surface.readOnly||execution.ownership.kind!=='workspace'
-  ||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
-  ||execution.identity.principal.userId!==execution.security.access.userId)throw new DerivedScopeError('scope_evidence_missing')
+  ||!hasWorkspaceMcpRetainedAuthority(execution)&&(execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
+  ||execution.identity.principal.userId!==execution.security.access.userId))throw new DerivedScopeError('scope_evidence_missing')
  await execution.security.authority.assertCurrent()
  const expectedRevision=await sessionTitleHead(sessionId,authority),previous=await readSessionTitle(sessionId,authority)
  if(previous?.manual)return{title:null,usage:null,model:null,written:false}

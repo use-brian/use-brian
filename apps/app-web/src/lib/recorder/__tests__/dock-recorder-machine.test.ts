@@ -197,3 +197,10 @@ describe("[COMP:app-web/dock-recorder] Computer-audio preference", () => {
     expect(shouldCaptureComputerAudio(undefined, true)).toBe(false);
   });
 });
+
+describe("[COMP:app-web/dock-recorder] automatic transfer status", () => {
+  it("keeps a transient interrupted transfer neutral and preserves its local bytes", () => {
+    expect(handOffVerdict({ outcome: "failed", message: "Network unavailable", retryable: true }))
+      .toEqual({ notice: { kind: "pendingUpload" }, safeToDrop: false });
+  });
+});

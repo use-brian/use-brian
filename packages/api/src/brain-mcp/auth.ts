@@ -1,3 +1,4 @@
+import { readWorkspaceMcpConsent, type WorkspaceMcpConsent } from '../workspace-mcp/consent.js'
 /**
  * Brain MCP server — bearer authentication (dual-mode).
  *
@@ -51,6 +52,7 @@ import { parseBridgeToken } from '../home-apps/tokens.js'
 import { storeScopeRank, type AppStoreScope, type AppAgentScope } from '@use-brian/brian-app'
 
 export type BrainAuth = {
+  workspaceMcpConsent?: WorkspaceMcpConsent
   /**
    * Identifier of the authenticating principal. For API keys this is the
    * brain_keys row id; for OAuth tokens it's the oauth_authorizations row
@@ -172,7 +174,10 @@ export async function authenticateBrainRequest(
     opts.brainKeyStore.touchLastUsedAt(row.id).catch((err) => {
       console.error('[brain-mcp] touchLastUsedAt failed:', err)
     })
+    let workspaceMcpConsent: WorkspaceMcpConsent | null
+    try { workspaceMcpConsent = readWorkspaceMcpConsent(row.workspaceMcpConsent) } catch { return null }
     const auth: BrainAuth = {
+      ...(workspaceMcpConsent ? { workspaceMcpConsent } : {}),
       keyId: row.id,
       workspaceId: row.workspaceId,
       scope: row.scope,
@@ -198,6 +203,8 @@ export async function authenticateBrainRequest(
         && current.keyHash === row.keyHash && current.scope === row.scope
         && current.maxClearance === row.maxClearance
         && current.credentialOwnerUserId === row.credentialOwnerUserId
+        && crmOperationsSha256(current.workspaceMcpConsent ?? null) === crmOperationsSha256(row.workspaceMcpConsent ?? null)
+        && (!workspaceMcpConsent || Date.parse(workspaceMcpConsent.expiresAt) > Date.now())
         && current.contextGroupId === row.contextGroupId && current.contextProjectId === row.contextProjectId
         && current.configurationSessionId === row.configurationSessionId
         && crmOperationsSha256(current.admittedCompartments ?? null) === crmOperationsSha256(row.admittedCompartments ?? null)
@@ -206,52 +213,7 @@ export async function authenticateBrainRequest(
     return auth
   }
 
-  // ── Path 2: OAuth access token (oat_*) ──────────────────────────
-  if (opts.authorizationStore) {
-    const oatParts = parseOAuthBearerToken(token, 'oat')
-    if (oatParts) {
-      const row = await opts.authorizationStore.getByIdSystem(oatParts.id)
-      if (!row) return null
-      if ((row.audience ?? 'brain') !== 'brain' || row.applicationClientId) return null
-      if (row.revokedAt) return null
-      if (!row.accessTokenHash || !row.accessTokenExpiresAt) return null
-      if (row.accessTokenExpiresAt.getTime() <= Date.now()) return null
-      const ok = await verifySecret(oatParts.secret, row.accessTokenHash)
-      if (!ok) return null
-      opts.authorizationStore.touchLastUsedAt(row.id).catch((err) => {
-        console.error('[brain-mcp] touchLastUsedAt failed:', err)
-      })
-      const auth: BrainAuth = {
-        keyId: row.id,
-        workspaceId: row.workspaceId,
-        scope: row.scope as BrainKeyScope,
-        // OAuth grants keep the historical fixed ceiling until
-        // oauth_authorizations grows a per-grant override (follow-up).
-        maxClearance: 'internal',
-        authKind: 'oauth_token',
-        storeScope: 'none',
-        agentScope: 'none',
-        actingUserId: row.userId,
-        clientId: row.clientId,
-        captureAssistantId: row.captureAssistantId ?? null,
-        captureProfileId: row.captureProfileId ?? null,
-      }
-      if (row.scope === 'read_write') authenticatedCrmParents.set(auth, {
-        version: 1, kind: 'oauth_token', credentialId: row.id, workspaceId: row.workspaceId,
-        userId: row.userId, clientId: row.clientId, expiresAt: row.accessTokenExpiresAt.toISOString(),
-        tokenFingerprint: crmOperationsSha256(row.accessTokenHash),
-      })
-      authenticatedCredentials.set(auth, async () => {
-        const current = await opts.authorizationStore!.getByIdSystem(row.id)
-        return current !== null && !current.revokedAt
-          && current.id === row.id && current.workspaceId === row.workspaceId && current.userId === row.userId
-          && current.clientId === row.clientId && current.scope === row.scope
-          && current.accessTokenHash === row.accessTokenHash
-          && current.accessTokenExpiresAt !== null && current.accessTokenExpiresAt.getTime() > Date.now()
-      })
-      return auth
-    }
-  }
+  if (opts.authorizationStore && token.startsWith('oat_')) return authenticateWorkspaceOAuthToken(token, opts.authorizationStore)
 
   // ── Path 3: custom Home app bridge token (aud: 'home-app') ──────
   if (opts.homeApps) {
@@ -317,4 +279,58 @@ export async function authenticateBrainRequest(
   }
 
   return null
+}
+
+/** Resource-bound OAuth proof shared by the two workspace transports. */
+export async function authenticateWorkspaceOAuthToken(token: string, store: OAuthAuthorizationStore, assistantId?: string): Promise<BrainAuth | null> {
+  const parts = parseOAuthBearerToken(token, 'oat')
+  if (!parts) return null
+      const row = await store.getByIdSystem(parts.id)
+      if (!row) return null
+      if ((row.audience ?? 'brain') !== (assistantId ? 'assistant' : 'brain') || row.applicationClientId
+        || (row.boundAssistantId ?? null) !== (assistantId ?? null)) return null
+      let workspaceMcpConsent: WorkspaceMcpConsent | null
+      try { workspaceMcpConsent = readWorkspaceMcpConsent(row.workspaceMcpConsent) } catch { return null }
+      if (assistantId && (!workspaceMcpConsent || workspaceMcpConsent.assistantId !== assistantId)) return null
+      if (row.revokedAt) return null
+      if (!row.accessTokenHash || !row.accessTokenExpiresAt) return null
+      if (row.accessTokenExpiresAt.getTime() <= Date.now()) return null
+      const ok = await verifySecret(parts.secret, row.accessTokenHash)
+      if (!ok) return null
+      store.touchLastUsedAt(row.id).catch((err) => {
+        console.error('[brain-mcp] touchLastUsedAt failed:', err)
+      })
+      const auth: BrainAuth = {
+        ...(workspaceMcpConsent ? { workspaceMcpConsent } : {}),
+        keyId: row.id,
+        workspaceId: row.workspaceId,
+        scope: row.scope as BrainKeyScope,
+        // OAuth grants keep the historical fixed ceiling until
+        // oauth_authorizations grows a per-grant override (follow-up).
+        maxClearance: workspaceMcpConsent?.maxClearance ?? 'internal',
+        authKind: 'oauth_token',
+        storeScope: 'none',
+        agentScope: 'none',
+        actingUserId: row.userId,
+        clientId: row.clientId,
+        captureAssistantId: row.captureAssistantId ?? null,
+        captureProfileId: row.captureProfileId ?? null,
+      }
+      if (row.scope === 'read_write') authenticatedCrmParents.set(auth, {
+        version: 1, kind: 'oauth_token', credentialId: row.id, workspaceId: row.workspaceId,
+        userId: row.userId, clientId: row.clientId, expiresAt: row.accessTokenExpiresAt.toISOString(),
+        tokenFingerprint: crmOperationsSha256(row.accessTokenHash),
+      })
+      authenticatedCredentials.set(auth, async () => {
+        const current = await store.getByIdSystem(row.id)
+        return current !== null && !current.revokedAt
+          && current.id === row.id && current.workspaceId === row.workspaceId && current.userId === row.userId
+          && current.clientId === row.clientId && current.scope === row.scope
+          && current.audience === row.audience && current.boundAssistantId === row.boundAssistantId
+          && crmOperationsSha256(current.workspaceMcpConsent ?? null) === crmOperationsSha256(row.workspaceMcpConsent ?? null)
+          && (!workspaceMcpConsent || Date.parse(workspaceMcpConsent.expiresAt) > Date.now())
+          && current.accessTokenHash === row.accessTokenHash
+          && current.accessTokenExpiresAt !== null && current.accessTokenExpiresAt.getTime() > Date.now()
+      })
+      return auth
 }

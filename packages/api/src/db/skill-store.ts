@@ -29,6 +29,7 @@ import { query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import type { SkillContent, SkillMeta } from '@use-brian/core'
 import {
+  bindScopeSource,
   SKILL_ACTIVATION_THRESHOLD,
   SKILL_USAGE_CONFIDENCE_INCREMENT,
   SKILL_USAGE_CONFIDENCE_CAP,
@@ -106,6 +107,7 @@ export type ExpectedSkillRevision = Pick<WorkspaceSkill, 'name' | 'description' 
 
 /** Full row including every V2 column — used by curator + admin paths. */
 export type WorkspaceSkillRow = {
+  runtimeSource?: import('@use-brian/core').ScopeSource | null
   id: string
   workspace_id: string
   slug: string
@@ -239,7 +241,7 @@ export type WorkspaceSkill = {
 // ── Mappers ────────────────────────────────────────────────────────
 
 function rowToSkillContent(row: WorkspaceSkillRow): SkillContent {
-  return {
+  const content: SkillContent = {
     id: row.slug,
     name: row.name,
     description: row.description,
@@ -253,6 +255,7 @@ function rowToSkillContent(row: WorkspaceSkillRow): SkillContent {
     bundleVersion: row.bundle_version ?? 1,
     sourceDigest: row.source_digest ?? undefined,
   }
+  return row.runtimeSource ? bindScopeSource(content, row.runtimeSource) : content
 }
 
 function rowToSkillMeta(row: Omit<WorkspaceSkillRow, 'content'>): SkillMeta {
@@ -326,6 +329,14 @@ function rowToWorkspaceSkill(row: WorkspaceSkillRow): WorkspaceSkill {
 // SELECT projection — wildcard is safe here because the row type lists every
 // column. Kept centralised so column-shape changes only need touching here.
 const COLS_ALL = '*'
+// Capture the revision beside the body under the same RLS snapshot. This is a
+// read receipt, not permission to publish a derived resource.
+const RUNTIME_SOURCE = `(SELECT jsonb_build_object(
+  'resourceKind','workspace_skill_revision','resourceId',sr.id,'version',sr.scope_version::text,
+  'workspaceId',sr.workspace_id,'userId',sr.user_id,'assistantId',sr.assistant_id,
+  'sensitivity',sr.sensitivity,'compartments',sr.compartments,'projectIds',sr.project_ids)
+  FROM workspace_skill_scope_revisions sr WHERE sr.id=workspace_skills.scope_revision_id AND NOT sr.scope_held)`
+
 
 // ── Public store interface (V2 canonical) ──────────────────────────
 
@@ -1185,7 +1196,7 @@ export function createDbSkillStore(): SkillStore {
       const workspaceId = await resolvePrimaryWorkspace(userId)
       const result = await queryWithRLS<WorkspaceSkillRow>(
         userId,
-        `SELECT ${COLS_ALL} FROM workspace_skills
+        `SELECT ${COLS_ALL}, ${RUNTIME_SOURCE} AS "runtimeSource" FROM workspace_skills
          WHERE workspace_id = $1 AND author_id = $2 AND valid_to IS NULL
          ORDER BY created_at DESC`,
         [workspaceId, userId],
@@ -1203,7 +1214,7 @@ export function createDbSkillStore(): SkillStore {
         // out of the chat listing even though their row is still bi-temporally
         // current (valid_to IS NULL until delete()). Matches the spec resolver
         // ('state IN (active, stale)').
-        `SELECT ${COLS_ALL} FROM workspace_skills
+        `SELECT ${COLS_ALL}, ${RUNTIME_SOURCE} AS "runtimeSource" FROM workspace_skills
          WHERE workspace_id = $1 AND valid_to IS NULL
            AND state IN ('active', 'stale')
          ORDER BY created_at DESC`,

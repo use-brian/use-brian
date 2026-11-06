@@ -11,6 +11,7 @@ export type {
   SpecialistCard,
   ConsultChain,
   ConsultRequest,
+  WorkspaceCredentialDelegation,
   ConsultResponse,
   ConsultError,
   ConsultTransport,

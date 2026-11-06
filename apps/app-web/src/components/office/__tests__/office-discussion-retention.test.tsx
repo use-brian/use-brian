@@ -10,6 +10,7 @@ import {en} from '@/lib/i18n/dictionaries/en';
 import {readSurfaceCache,resetSurfaceCache} from '@/lib/surface-cache';
 import {officePanelCacheKey,officePanelCachePrefix} from '@/lib/surface-prefetch';
 import {applySpineEventToSurfaceCache} from '@/lib/surface-cache-invalidation';
+import {OFFICE_REFRESH_EVENT} from '@/lib/workspace-events';
 import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events';
 const state=vi.hoisted(()=>({canAct:true,viewer:'viewer-a',workspace:'workspace-a',fetch:vi.fn(),journal:vi.fn<(...args:unknown[])=>Promise<OfflineJournalEntry[]>>(async()=>[])}));
 vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:state.viewer}),subscribeUserInfo:()=>()=>{}}));
@@ -34,6 +35,17 @@ async function click(label:string,last=false){await act(async()=>{const matches=
 const posts=()=>state.fetch.mock.calls.filter(([,init])=>init?.method==='POST');
 
 for(const kind of ['comments','suggestions'] as const) describe(`[COMP:app-web/office-${kind}] collection retention`,()=>{
+  it('adopts a remote resolution without losing the mounted draft or refreshing another workspace',async()=>{
+    setup('6000');await render(kind);input('Unsaved local draft');
+    const initialReads=state.fetch.mock.calls.length;
+    await act(async()=>applySpineEventToSurfaceCache(OFFICE_REFRESH_EVENT,{workspaceId:'another-workspace'},state.workspace));
+    expect(state.fetch).toHaveBeenCalledTimes(initialReads);
+    state.fetch.mockImplementation(async(url:string)=>url.endsWith('/comments')?response({threads:threads.map(thread=>({...thread,status:'resolved'}))}):response({suggestions:suggestions.map(suggestion=>({...suggestion,status:'accepted'}))}));
+    await act(async()=>applySpineEventToSurfaceCache(OFFICE_REFRESH_EVENT,{workspaceId:state.workspace},state.workspace));
+    expect(state.fetch.mock.calls.length).toBeGreaterThan(initialReads);
+    expect(host.querySelector('textarea')!.value).toBe('Unsaved local draft');
+    expect(changed.mock.lastCall?.[0]).toEqual(expect.arrayContaining([expect.objectContaining({status:kind==='comments'?'resolved':'accepted'})]));
+  });
   it('expires collection contents, drafts and parent highlights',async()=>{
     setup();await render(kind);input('Protected draft');expect(host.querySelector('textarea')).not.toBeNull();
     state.fetch.mockImplementation(pending);await act(async()=>vi.advanceTimersByTime(801));

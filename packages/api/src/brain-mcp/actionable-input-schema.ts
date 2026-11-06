@@ -12,13 +12,9 @@
  * `formatToolError` was written to cap on the chat path after the 2026-06-01
  * incident. The chat executor is protected; the MCP pre-handler path was not.
  *
- * The SDK accepts a real `ZodObject` instance in place of a raw shape
- * (`getZodSchemaObject` → `isZodSchemaInstance`), lists it through the same
- * `toJsonSchemaCompat`, and validates by calling the instance's own
- * `safeParseAsync`. So: build the object, override `safeParseAsync` on THAT
- * instance (never a shared schema) to return the compact `path: message`
- * rendering plus a retry verdict, and register the instance. No SDK fork, no
- * change to `tools/list`.
+ * The stateless MCP transport calls this validator before dispatch. It keeps
+ * the full native schema (including unions/refinements), and presents compact
+ * errors while retaining all original issues. Never mutate a shared schema.
  *
  * Component tag: [COMP:api/brain-mcp-input-validation].
  */
@@ -33,18 +29,19 @@ type FriendlyFailure = {
 }
 
 /**
- * Wrap a tool's raw shape (or an existing object schema) so a validation
+ * Wrap a tool's raw shape or native schema so a validation
  * failure reads as the chat executor's compact rendering.
  */
+export function actionableInputSchema(input: z.ZodRawShape | z.ZodObject<z.ZodRawShape>, toolName: string): z.ZodObject<z.ZodRawShape>
+export function actionableInputSchema(input: z.ZodRawShape | z.ZodTypeAny, toolName: string): z.ZodTypeAny
 export function actionableInputSchema(
-  input: z.ZodRawShape | z.ZodObject<z.ZodRawShape>,
+  input: z.ZodRawShape | z.ZodTypeAny,
   toolName: string,
-): z.ZodObject<z.ZodRawShape> {
-  const base = input instanceof z.ZodObject ? input : z.object(input)
-  // A fresh instance per registration so the override never leaks onto a
-  // schema another caller shares (`bridgeCoreTool` hands us the core tool's
-  // `.shape`, but a hand-rolled BrainTool may pass a reused ZodObject).
-  const schema = input instanceof z.ZodObject ? base.extend({}) : base
+): z.ZodTypeAny {
+  const base = input instanceof z.ZodType ? input : z.object(input)
+  // describe() returns a fresh instance of the same schema type, retaining
+  // object strictness, refinements and union branches without shared mutation.
+  const schema = base.describe(base.description ?? '')
   const parseAsync = schema.safeParseAsync.bind(schema)
   const parseSync = schema.safeParse.bind(schema)
 

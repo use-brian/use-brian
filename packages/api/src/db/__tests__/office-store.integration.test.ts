@@ -45,11 +45,11 @@ describe('[COMP:api/office-store] Office stores', () => {
       jobKinds: ['template_compile'],
     })
     expect(claimed).toEqual({ id: 'j1' })
-    expect(db.calls[0]?.sql).toContain('RETURNING j.*')
-    expect(db.calls[0]?.sql).toContain('INSERT INTO office_generation_events')
-    expect(db.calls[0]?.sql).toContain("'office.job.started'")
-    expect(db.calls[0]?.sql).toContain('FROM claimed')
-    expect(db.calls[0]?.sql).toContain('created_at AS "createdAt"')
+    expect(db.calls[1]?.sql).toContain('RETURNING j.*')
+    expect(db.calls[1]?.sql).toContain('INSERT INTO office_generation_events')
+    expect(db.calls[1]?.sql).toContain("'office.job.started'")
+    expect(db.calls[1]?.sql).toContain('FROM claimed')
+    expect(db.calls[1]?.sql).toContain('created_at AS "createdAt"')
   })
 
   it('deletes only a still-empty shell with no generation job', async () => {

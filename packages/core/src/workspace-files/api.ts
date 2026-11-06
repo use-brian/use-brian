@@ -17,6 +17,8 @@ import type {
 } from './types.js'
 
 export type FilesContext = {
+  /** Host-only origin for durable transfer admission. */
+  executionContext?: import('../security/execution-context.js').ExecutionContext
   /** Per-call trusted source snapshots from the executing tool accumulator. Never a transport field. */
   derivation?: DerivedWriteEvidence
   workspaceId: string
@@ -143,6 +145,8 @@ export type FilesSearchParams = {
  * (quota, not-found, conflict, read-only). Other failures throw.
  */
 export type FilesApi = {
+  /** Short-lived exact-head byte transfer; no storage credentials. */
+  download?(ctx: FilesContext, idOrPath: string): Promise<FilesResult<{ file: WorkspaceFile; url: string; expiresAt: string }>>
   write(ctx: FilesContext, params: FilesWriteParams): Promise<FilesResult<WorkspaceFile>>
 
   /** Write raw bytes verbatim (binary-safe). Used to persist an uploaded
@@ -169,4 +173,16 @@ export type FilesApi = {
   ): Promise<FilesResult<WorkspaceFile>>
 
   delete(ctx: FilesContext, idOrPath: string): Promise<FilesResult<{ id: string; path: string }>>
+}
+
+type FileUploadManifest = {
+  uploadId: string; fileId: string; chunkSizeBytes: number; expiresAt: string;
+  parts: { index: number; offset: number; sizeBytes: number; url: string }[];
+  uploadHeaders?: Record<string,string>; nextPart?: number; partCount?: number;
+}
+export type FileTransferService = {
+  start(ctx: FilesContext, input: {fileName:string; mime:string; sizeBytes:number; sha256?:string; partLimit?:number}):Promise<FileUploadManifest>;
+  parts(ctx: FilesContext, uploadId:string, start:number, limit:number):Promise<FileUploadManifest>;
+  complete(ctx: FilesContext, uploadId:string):Promise<WorkspaceFile>;
+  abort(ctx: FilesContext, uploadId:string):Promise<void>;
 }

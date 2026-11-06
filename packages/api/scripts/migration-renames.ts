@@ -4,6 +4,7 @@
  * both names lets old and new releases safely skip the same migration.
  */
 const migrationRenames = [
+  ['8231_workspace_file_attachments.sql', '8233_workspace_file_attachments.sql'],
   ['8148_department_mode_admission.sql', '8171_department_mode_admission.sql'],
   ['8149_organization_cutover.sql', '8172_organization_cutover.sql'],
   ['8150_department_office_publication.sql', '8173_department_office_publication.sql'],

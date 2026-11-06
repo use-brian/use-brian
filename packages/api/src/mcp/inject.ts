@@ -402,6 +402,8 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
 export type ConfirmationEnricher = (toolName: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>
 
 export type McpInjectionResult = {
+  /** Connector types with an admitted current native account binding. */
+  admittedConnectorIds?: ReadonlySet<string>
   enrichConfirmation: ConfirmationEnricher
   /** Capabilities that are unavailable (not connected, disabled, or blocked). Injected into the system prompt so the model doesn't waste turns searching for them. */
   unavailable: string[]
@@ -512,6 +514,10 @@ export async function injectMcpTools(params: {
   keepBuiltinsDirect?: boolean
   /** Emit canonical + legacy dynamic aliases for workflow tool_call lookup. */
   keepDynamicToolsDirect?: boolean
+  /** Issued account/exposure ceiling, checked before connector discovery. */
+  bindingMaximum?: Readonly<Record<string, string>>
+  /** Server-only observer of bindings admitted by current native policy. */
+  onAdmittedBinding?: (key: string, fingerprint: string) => void
   /**
    * Restrict folded custom/CLI sources to these canonical tool names. The
    * workflow callee uses this with a pinned allow-list so retaining
@@ -590,7 +596,7 @@ export async function injectMcpTools(params: {
     gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
-    keepBuiltinsDirect = false, keepDynamicToolsDirect = false, restrictSearchToToolNames,
+    keepBuiltinsDirect = false, keepDynamicToolsDirect = false, restrictSearchToToolNames, bindingMaximum, onAdmittedBinding,
     engineHooks, actorIdentity, filesApi, readCachedFile,
     introspectionTools, emailInboxProvider, contextScope, connectorSourceRuntimeFactory: suppliedSourceRuntimeFactory, executionContext, scopeAccumulator,
   } = params
@@ -627,7 +633,7 @@ export async function injectMcpTools(params: {
   let bindingsInvalid = false
   const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
   const instanceBinding = (instance: Record<string, unknown>) => digest([instance.id,instance.scope,instance.userId,instance.workspaceId,
-    instance.provider,instance.connected,instance.url,instance.sensitivity,instance.compartments,instance.projectIds,instance.config,
+    instance.provider,instance.connectedEmail,instance.connected,instance.url,instance.sensitivity,instance.compartments,instance.projectIds,instance.config,
     instance.healthStatus === 'auth_failed'])
   const exposureBinding = (grant: Record<string, unknown>) => digest([grant.id,grant.connectorInstanceId,grant.targetType,grant.targetId,
     grant.grantedByUserId,grant.compartments,grant.projectIds])
@@ -685,9 +691,20 @@ export async function injectMcpTools(params: {
   }
   // Discovery visits the same bindings in multiple lanes. Report once per
   // injection, without exposing connector identity, scope values, or counts.
+  const admittedConnectorIds = new Set<string>()
   let scopeRejectionReported = false
   const exposureAllowed = (binding: ConnectorContextBinding): boolean => {
-    const allowed = (runtimeAuthority?.allows(binding) ?? true) && connectorExposureAllowed(contextScope, binding)
+    const allowedByScope = (runtimeAuthority?.allows(binding) ?? true) && connectorExposureAllowed(contextScope, binding)
+    const row = binding as unknown as Record<string, unknown>
+    const instance = (row.instance ?? row) as Record<string, unknown>
+    const key = `${row.instance ? 'grant' : 'instance'}:${row.id}`
+    const fingerprint = digest([instanceBinding(instance), row.instance ? exposureBinding(row) : null])
+    const allowed = allowedByScope
+      && (bindingMaximum === undefined || bindingMaximum[key] === fingerprint)
+    if (allowed) {
+      onAdmittedBinding?.(key, fingerprint)
+      if (typeof instance.provider === 'string' && instance.connected === true && instance.healthStatus !== 'auth_failed') admittedConnectorIds.add(instance.provider)
+    }
     if (allowed) pinBinding(binding)
     if (!allowed && !scopeRejectionReported) {
       scopeRejectionReported = true
@@ -2292,6 +2309,7 @@ export async function injectMcpTools(params: {
     }) : enricher,
     unavailable,
     searchableSources,
+    admittedConnectorIds,
     restrictedSearchToolNames: [...restrictedSearchToolNames],
     knowledgeCapturePrompt,
     routineCalendarTools:[...routineCalendarTools].every(([name,tool])=>tools.get(name)===tool)?routineCalendarTools:undefined,

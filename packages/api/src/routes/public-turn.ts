@@ -343,6 +343,7 @@ export type PublicTurnInput = {
 export type PublicApiError =
   | 'invalid_input'
   | 'invalid_api_key'
+  | 'workspace_key_requires_mcp'
   | 'key_revoked'
   | 'link_not_found'
   | 'link_budget_exhausted'

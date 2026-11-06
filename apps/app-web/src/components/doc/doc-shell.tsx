@@ -91,6 +91,7 @@ import { DOC_FIND_OPEN_EVENT, type DocFindRequestScope } from "./find-bar";
 import { PageTitle } from "./page-title";
 import { CollabPageEditor } from "./collab-page-editor";
 import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
+import { RECORDING_LINKED_EVENT, type RecordingLinkedDetail } from "@/lib/recordings/live-transcript-events";
 import { RecordingChrome } from "@/components/recordings/recording-chrome";
 import { RecordingLinkControl } from "@/components/recordings/recording-link-control";
 import { LiveTranscriptPane, adoptLinkedRecording } from "@/components/recordings/live-transcript-pane";
@@ -442,6 +443,16 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     window.addEventListener("doc:title-updated", handler);
     return () => window.removeEventListener("doc:title-updated", handler);
   }, [applyAutoTitle]);
+
+  useEffect(() => {
+    const linked = (event: Event) => {
+      const detail = (event as CustomEvent<RecordingLinkedDetail>).detail;
+      if (detail?.workspaceId !== workspaceId) return;
+      setActiveView(view => adoptLinkedRecording(view, detail.pageId, detail.recordingId));
+    };
+    window.addEventListener(RECORDING_LINKED_EVENT, linked);
+    return () => window.removeEventListener(RECORDING_LINKED_EVENT, linked);
+  }, [workspaceId]);
 
   // Page-collab guard relay. The "another member is running on this page"
   // warning needs the page's Yjs provider (`assistantRun`), which only exists
@@ -1104,14 +1115,72 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         {/* Ambient "the assistant is working on this page" claw + status pill,
             behind the editor content. Visible only while a run is active. */}
         <AssistantRunClaw run={assistantRun} />
-        {/* Top "layer" (Row 1) — persistent across Page states (loaded page,
-            blank tab, empty selection, error). Suggested suspends Page's
-            interactive tab strip, but if it borrowed the pane from a non-Page
-            current app it keeps that app's identity-only OperatorTopbar. The
-            breadcrumb + action navbar (Row 2, PageHeader) sits BELOW this,
-            only when a page is loaded. */}
+        {/* One shell toolbar owns Page navigation and loaded-page actions.
+            Phones wrap the action row below tabs without remounting controls. */}
         {!suggestedOpen && (
           <DocTopBar
+            pageHeader={!urlPanel && urlViewId && !activeError ? pageView ? (
+              <PageHeader
+                embedded
+                view={pageView}
+                breadcrumb={breadcrumb}
+                teamspace={
+                  pageView.sharedProjectId
+                    ? { name: format(copy.contextScope.sharedProjects.pageAudience, {
+                        name: projectRegistry.data?.find((p) => p.id === pageView.sharedProjectId)?.name ?? copy.contextScope.sharedProjects.badge }),
+                        icon: projectRegistry.data?.find((p) => p.id === pageView.sharedProjectId)?.icon ?? null }
+                  : pageView.teamspaceId === null
+                    ? null
+                    : sidebar.teamspaces.find(
+                        (teamspace) => teamspace.id === pageView.teamspaceId,
+                      )
+                }
+                provider={collab.provider}
+                status={collab.status}
+                synced={collab.synced}
+                onNavigate={navigateToView}
+                onMutated={(next) => {
+                  setActiveView(next);
+                  if (next.state === "draft") {
+                    recordPrune(next.id, next.autoPruneAt);
+                  }
+                  reloadSidebar();
+                }}
+                onDeleted={handleActiveDeletedFromHeader}
+                onRenameValue={handleRenameValue}
+                onDuplicate={handleDuplicate}
+                onFind={!isDraftLanding && collab.synced && collab.doc && collab.provider ? () => {
+                  window.dispatchEvent(new CustomEvent<DocFindRequestScope>(DOC_FIND_OPEN_EVENT, {
+                    detail: { ownerId: findOwnerId, workspaceId, pageId: pageView.id },
+                  }));
+                } : undefined}
+                onSaveAsTemplate={(id) => void handleSaveAsTemplate(id)}
+                // "Link a recording" lives in the ⋯ menu, only for a page
+                // with NO recording (anchor-derived or manual) to fall back to.
+                {...(!recordingIdFromAnchorKey(pageView.anchorKey) &&
+                !pageView.linkedRecordingId
+                  ? { onLinkRecording: () => setRecordingLinkOpen(true) }
+                  : {})}
+                fullWidth={pageView.fullWidth}
+                onToggleFullWidth={(next) =>
+                  handleToggleFullWidth(pageView.id, next)
+                }
+                memberClearance={workspace.clearance}
+                onChangeClearance={(next) =>
+                  handleChangeClearance(pageView.id, next)
+                }
+                assistantId={assistantId}
+                currentUser={user}
+              />
+            ) : (
+              <div
+                data-doc-chrome
+                aria-hidden
+                className="flex h-11 items-center md:h-10"
+              >
+                <div className="h-4 w-40 animate-pulse rounded bg-muted" />
+              </div>
+            ) : undefined}
             tabs={tabViews}
             canBack={canGoBack(tabsState)}
             canForward={canGoForward(tabsState)}
@@ -1193,72 +1262,6 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         )}
         {!suggestedOpen && urlViewId && !activeError && (
           <>
-            {/* Row 2 chrome. `pageView` is the loaded metadata for THIS url; while
-                it's still in flight (the brief post-switch window) we paint a
-                height-matched skeleton instead of the real navbar — the editor
-                below stays mounted and keeps syncing, so a switch never tears the
-                whole centre pane down or flashes an empty "Loading…" state. */}
-            {pageView ? (
-              <PageHeader
-                view={pageView}
-                breadcrumb={breadcrumb}
-                teamspace={
-                  pageView.sharedProjectId
-                    ? { name: format(copy.contextScope.sharedProjects.pageAudience, {
-                        name: projectRegistry.data?.find((p) => p.id === pageView.sharedProjectId)?.name ?? copy.contextScope.sharedProjects.badge }),
-                        icon: projectRegistry.data?.find((p) => p.id === pageView.sharedProjectId)?.icon ?? null }
-                  : pageView.teamspaceId === null
-                    ? null
-                    : sidebar.teamspaces.find(
-                        (teamspace) => teamspace.id === pageView.teamspaceId,
-                      )
-                }
-                provider={collab.provider}
-                status={collab.status}
-                synced={collab.synced}
-                onNavigate={navigateToView}
-                onMutated={(next) => {
-                  setActiveView(next);
-                  if (next.state === "draft") {
-                    recordPrune(next.id, next.autoPruneAt);
-                  }
-                  reloadSidebar();
-                }}
-                onDeleted={handleActiveDeletedFromHeader}
-                onRenameValue={handleRenameValue}
-                onDuplicate={handleDuplicate}
-                onFind={!isDraftLanding && collab.synced && collab.doc && collab.provider ? () => {
-                  window.dispatchEvent(new CustomEvent<DocFindRequestScope>(DOC_FIND_OPEN_EVENT, {
-                    detail: { ownerId: findOwnerId, workspaceId, pageId: pageView.id },
-                  }));
-                } : undefined}
-                onSaveAsTemplate={(id) => void handleSaveAsTemplate(id)}
-                // "Link a recording" lives in the ⋯ menu, only for a page
-                // with NO recording (anchor-derived or manual) to fall back to.
-                {...(!recordingIdFromAnchorKey(pageView.anchorKey) &&
-                !pageView.linkedRecordingId
-                  ? { onLinkRecording: () => setRecordingLinkOpen(true) }
-                  : {})}
-                fullWidth={pageView.fullWidth}
-                onToggleFullWidth={(next) =>
-                  handleToggleFullWidth(pageView.id, next)
-                }
-                memberClearance={workspace.clearance}
-                onChangeClearance={(next) =>
-                  handleChangeClearance(pageView.id, next)
-                }
-                assistantId={assistantId}
-                currentUser={user}
-              />
-            ) : (
-              <div
-                data-doc-chrome
-                aria-hidden
-                className="flex h-12 items-center border-b border-border pl-3 pr-2 md:pl-4 md:pr-3"
-              >
-                <div className="h-4 w-40 animate-pulse rounded bg-muted" />
-              </div>
-            )}
             {isDraftLanding ? (
               // Empty, untouched draft → the blank-tab "What do you want to
               // see?" prompt instead of a title + comment band + bare editor.

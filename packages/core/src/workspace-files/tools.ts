@@ -1,3 +1,4 @@
+import type { FileTransferService } from './api.js'
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import { buildTool, type Tool } from '../tools/types.js'
@@ -82,6 +83,7 @@ export type FileToolEventContext = {
 }
 
 export type FileToolOptions = {
+  transfers?: FileTransferService
   /** Receives every primitive event with the originating tool context. Wire to AnalyticsLogger at boot. */
   onEvent?: (event: FileToolEvent, ctx: FileToolEventContext) => void
   /**
@@ -224,6 +226,11 @@ export function createFileTools(
   api: FilesApi,
   opts?: FileToolOptions,
 ): {
+  startFileUpload: Tool
+  getFileUploadParts: Tool
+  completeFileUpload: Tool
+  abortFileUpload: Tool
+  getFileDownload: Tool
   fileWrite: Tool
   fileAppend: Tool
   fileRead: Tool
@@ -397,7 +404,7 @@ export function createFileTools(
     description:
       'Download one workspace file by id or path as exact bytes encoded in base64, with metadata and a SHA-256 checksum. ' +
       'Decode the base64 in client code to save the original file; it is transport data, not extracted text or a visual inspection. ' +
-      'Maximum file size is 10 MiB. Larger files must be downloaded in the authenticated Files UI. ' +
+      'Maximum file size is 10 MiB. For larger files use getFileDownload. ' +
       'For text content use fileRead; for indexed passages use searchFileContent.',
     inputSchema: z.object({ file: idOrPathShape.describe('UUID or absolute workspace path of the file.') }),
     async execute(input, context) {
@@ -410,7 +417,7 @@ export function createFileTools(
       const stat = await api.stat(ctx, input.file)
       if (!stat.ok) return { data: errorMessage(stat.error), isError: true }
       const tooLarge = () => ({
-        data: 'This file exceeds the 10 MiB fileReadBytes export limit. Download it through the authenticated Files UI. No bytes were exported; do not retry this tool for the same oversized file.',
+        data: 'This file exceeds the 10 MiB fileReadBytes export limit. Use getFileDownload for the exact bytes. No bytes were exported.',
         isError: true as const,
       })
       if (stat.value.sizeBytes > MAX_FILE_READ_BYTES) return tooLarge()
@@ -725,7 +732,7 @@ export function createFileTools(
 
       if (input.base64.length > MAX_SAVE_FILE_BYTES_BASE64) {
         return {
-          data: `File too large: the base64 payload is ${input.base64.length} characters (limit ${MAX_SAVE_FILE_BYTES_BASE64}, about 10 MB decoded). Upload large files through the app instead of sending them as a tool argument.`,
+          data: `File too large: the base64 payload is ${input.base64.length} characters (limit ${MAX_SAVE_FILE_BYTES_BASE64}, about 10 MB decoded). Use startFileUpload for larger files.`,
           isError: true,
         }
       }
@@ -791,5 +798,59 @@ export function createFileTools(
       opts?.onEvent?.({ type: 'file_created', fileId: evt.fileId, path: evt.path, sizeBytes: evt.sizeBytes }, ctx),
   })
 
-  return { fileWrite, fileAppend, fileRead, fileReadBytes, fileSearch, fileSetMeta, fileDelete, saveFileToBrain, saveFileBytes, sendFile, renderPdf }
+  const startFileUpload = buildTool({
+    name:'startFileUpload',requiresCapability:'files',isReadOnly:false,resolveConfirmation:confirm('startFileUpload'),
+    description:'Start a byte-preserving upload up to 10 GiB. PUT exact bytes to the returned URLs outside model messages. Parts are 8 MiB. Supply a SHA-256 checksum to verify the final file. Fetch subsequent manifest pages with getFileUploadParts.',inputSchema:z.object({fileName:z.string().min(1).max(255),mime:z.string().min(1).max(255),sizeBytes:z.number().int().positive().max(10*1024*1024*1024),sha256:z.string().regex(/^[a-f0-9]{64}$/).optional()}).strict(),
+    async execute(input,context) {
+      const gate=workspaceGate(context.workspaceId);if(gate)return gate
+      const blocked=await blockedGate('startFileUpload',context);if(blocked)return blocked
+      if (!opts?.transfers) return {data:'File transfers are unavailable.',isError:true}
+      return {data:await opts.transfers.start(ctxFor(context),{...input,partLimit:20})}
+    }
+  })
+  const getFileUploadParts = buildTool({
+    name:'getFileUploadParts',requiresCapability:'files',isReadOnly:true,resolveConfirmation:confirm('getFileUploadParts'),
+    description:'Get up to 20 signed upload URLs for a pending upload. Use nextPart to fetch the next page. Expired URLs can be refreshed while the 24-hour upload remains pending.',inputSchema:z.object({uploadId:z.string().uuid(),start:z.number().int().nonnegative().default(0)}).strict(),
+    async execute(input,context) {
+      const gate=workspaceGate(context.workspaceId);if(gate)return gate
+      const blocked=await blockedGate('getFileUploadParts',context);if(blocked)return blocked
+      if (!opts?.transfers) return {data:'File transfers are unavailable.',isError:true}
+      return {data:await opts.transfers.parts(ctxFor(context),input.uploadId,input.start,20)}
+    }
+  })
+  const completeFileUpload = buildTool({
+    name:'completeFileUpload',requiresCapability:'files',isReadOnly:false,resolveConfirmation:confirm('completeFileUpload'),
+    description:'Verify and assemble uploaded parts, check the supplied checksum and publish the file with its original source restrictions. Repeating completion returns the same file.',inputSchema:z.object({uploadId:z.string().uuid()}).strict(),
+    async execute(input,context) {
+      const gate=workspaceGate(context.workspaceId);if(gate)return gate
+      const blocked=await blockedGate('completeFileUpload',context);if(blocked)return blocked
+      if (!opts?.transfers) return {data:'File transfers are unavailable.',isError:true}
+      const file=await opts.transfers.complete(ctxFor(context),input.uploadId)
+      return {data:fullFile(file),scopeEvidence:scopeEvidenceFromRows([file])}
+    }
+  })
+  const abortFileUpload = buildTool({
+    name:'abortFileUpload',requiresCapability:'files',isReadOnly:false,resolveConfirmation:confirm('abortFileUpload'),
+    description:'Abort an incomplete upload and remove staged parts. Completed files are preserved.',inputSchema:z.object({uploadId:z.string().uuid()}).strict(),
+    async execute(input,context) {
+      const gate=workspaceGate(context.workspaceId);if(gate)return gate
+      const blocked=await blockedGate('abortFileUpload',context);if(blocked)return blocked
+      if (!opts?.transfers) return {data:'File transfers are unavailable.',isError:true}
+      await opts.transfers.abort(ctxFor(context),input.uploadId)
+      return {data:{aborted:true}}
+    }
+  })
+  const getFileDownload = buildTool({
+    name:'getFileDownload',requiresCapability:'files',isReadOnly:true,resolveConfirmation:confirm('getFileDownload'),
+    description:'Get a 60-second signed URL for exact bytes of the current file revision, including large files. Fetch in client code. The URL is a temporary bearer capability; use fileRead for text or searchFileContent for passages.',inputSchema:z.object({file:idOrPathShape}).strict(),
+    async execute(input,context) {
+      const gate=workspaceGate(context.workspaceId);if(gate)return gate
+      const blocked=await blockedGate('getFileDownload',context);if(blocked)return blocked
+      if (!api.download) return {data:'File downloads are unavailable.',isError:true}
+      const result=await api.download(ctxFor(context),input.file)
+      if (!result.ok) return {data:errorMessage(result.error),isError:true}
+      return {data:{file:fullFile(result.value.file),url:result.value.url,expiresAt:result.value.expiresAt},scopeEvidence:scopeEvidenceFromRows([result.value.file])}
+    }
+  })
+  return { startFileUpload, getFileUploadParts, completeFileUpload, abortFileUpload, getFileDownload, fileWrite, fileAppend, fileRead, fileReadBytes, fileSearch, fileSetMeta, fileDelete, saveFileToBrain, saveFileBytes, sendFile, renderPdf }
 }

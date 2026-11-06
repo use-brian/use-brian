@@ -1,3 +1,4 @@
+import { scopeEvidenceFromRows } from '../security/context-scope.js'
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import type { FileStore } from './types.js'
@@ -16,8 +17,14 @@ export function createReadFileTool(store: FileStore): Tool {
     isReadOnly: true,
     maxResultSizeChars: 50_000,
 
-    async execute(input) {
-      const file = await store.get(input.fileId)
+    async execute(input, context) {
+      if (!context.workspaceId) return { data: 'Workspace attachment context unavailable.', isError: true }
+      const access = context.executionContext?.security.access ?? {
+        workspaceId: context.workspaceId, userId: context.userId, assistantId: context.assistantId,
+        assistantKind: context.assistantKind ?? 'standard', clearance: context.clearance,
+        compartments: context.compartments, projectIds: context.projectIds, sharedAudience: context.sharedAudience,
+      }
+      const file = await store.get(input.fileId, access)
       if (!file) {
         // The upload cache is time-boxed (`expires_at`) and there is
         // deliberately no listing tool over it: the ONLY source of a valid
@@ -34,6 +41,7 @@ export function createReadFileTool(store: FileStore): Tool {
       }
 
       return {
+        scopeEvidence: scopeEvidenceFromRows([file]),
         data: {
           fileName: file.fileName,
           mimeType: file.mimeType,

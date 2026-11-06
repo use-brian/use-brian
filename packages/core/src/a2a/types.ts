@@ -184,7 +184,23 @@ export type ConsultChain = {
  * input, fixed tool surface, structured artifact result). Absent = free mode
  * (free-text conversation, full tool surface, conversational reply).
  */
+/** Server-created parent reference. Never accepted by the external A2A schema. */
+export type WorkspaceCredentialParent = {
+  kind: 'brain_key' | 'assistant_key' | 'oauth_token'
+  credentialId: string
+  revision: string
+  userId: string
+  workspaceId: string
+  assistantId: string
+  sessionId: string
+  selectionId?: string
+}
+export type WorkspaceCredentialDelegation = WorkspaceCredentialParent & {
+  /** Additional host-verified origins; flat and bounded. All must remain current. */
+  constraints?: WorkspaceCredentialParent[]
+}
 export type ConsultRequest = {
+  callerWorkspaceDelegation?: WorkspaceCredentialDelegation
   /** Server-owned starting ceiling, never a model or public request argument. */
   callerAccessCeiling?: import('../security/access-ceiling.js').AccessCeiling
   /** Server-owned high-water evidence behind the question, never a tool argument. */

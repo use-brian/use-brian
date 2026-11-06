@@ -1,3 +1,4 @@
+import { createOfficeReleaseStore } from '../../db/office-release.js'
 import {bindDepartmentOfficeKnowledge,withDepartmentOfficeGeneration} from '../generation-evidence.js'
 import {readOfficeGenerationRecovery,resumeOfficeGeneration} from '../generation-recovery.js'
 import {templateBundle,completeSpreadsheetSnapshot} from '../../../../core/src/office/__tests__/fixtures.js'
@@ -32,7 +33,7 @@ const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/loca
 await assertLocalFixture()
 const pool=getPool(),secret=randomUUID()
 afterAll(async()=>{await getAppPool().end();await pool.end()})
-const service=createOfficeService({generationAvailable:()=>true,createShell:officeArtifactStore.createShell,
+const service=createOfficeService({captureObservation:officeArtifactStore.captureObservation,generationAvailable:()=>true,createShell:officeArtifactStore.createShell,
   deleteEmptyShell:officeArtifactStore.deleteEmptyShell,getArtifact:officeArtifactStore.get,
   raiseScope:officeArtifactStore.raiseScope,resolveAccess:async()=>null,createJob:officeGenerationStore.create,
   latestJob:officeGenerationStore.latestForArtifact,getSnapshot:async()=>null})
@@ -240,6 +241,15 @@ describe('[COMP:api/organization-cutover] v2 Office generation before and after 
     expect((await queryWithRLS(f.userId,'SELECT rolbypassrls,rolsuper FROM pg_roles WHERE rolname=current_user')).rows[0]).toEqual({rolbypassrls:false,rolsuper:false})
     const file=(await pool.query('SELECT f.* FROM workspace_files f JOIN office_generation_file_bindings b ON b.file_id=f.id WHERE b.job_id=$1',[created.body.jobId])).rows[0]
     expect(file.compartments).toEqual([f.department.compartmentKey])
+    const released = await createOfficeReleaseStore().createRelease({ userId: f.userId, actorAssistantId: f.assistantId,
+      artifactId: created.body.artifactId, versionId: String(versions[0]!.id), workspaceId: f.workspaceId,
+      action: 'export', destination: { sensitivity: 'internal', external: false },
+      receipt: { status: 'ready', version: 1, action: 'export', blocks: [], warnings: [], acknowledgedCodes: [] }, releasedFileId: file.id })
+    expect(released.id).toBeTruthy()
+    expect((await pool.query("SELECT actor_user_id,actor_assistant_id,artifact_version::int AS artifact_version FROM office_audit_events WHERE artifact_id=$1 AND event_type='office.release.created'", [created.body.artifactId])).rows).toEqual([
+      { actor_user_id: f.userId, actor_assistant_id: f.assistantId, artifact_version: 1 },
+    ])
+
     await expect(queryWithRLS(f.userId,"UPDATE workspace_files SET name='changed' WHERE id=$1 RETURNING id",[file.id])).resolves.toMatchObject({rows:[]})
     expect((await pool.query("SELECT id FROM office_generation_events WHERE job_id=$1 AND code='office.job.completed'",[created.body.jobId])).rows).toHaveLength(1)
   })

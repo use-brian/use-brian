@@ -15,7 +15,7 @@ describe('chat request permission ownership', () => {
   it('uses only the request owner for native cached delivery, retaining fallback boundaries', () => {
     expect(source).toContain('permissionContext, assertOutputAuthority: permissionContext.authorizeDelivery')
     expect(source).not.toContain('responsePermissionSnapshot')
-    expect(source).toContain('const nativeOutputBoundary=!permissionContext&&nativeTranscriptAuthority')
+    expect(source).toContain('const nativeOutputBoundary=!programmatic&&!permissionContext&&nativeTranscriptAuthority')
     expect(source).toContain('assertOutputAuthority:assertDeliveryAudience')
   })
 

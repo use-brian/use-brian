@@ -283,15 +283,24 @@ function applyDocumentAtomic(snapshot: DocumentSnapshot, command: AtomicOfficeCo
   return DocumentSnapshotSchema.parse(applyOfficeCommand(snapshot, command))
 }
 
+/** Pure replay through the same family-specific semantics used by collaboration.
+ * Validate the whole batch before callers publish any document mutation. */
+export function applyOfficeSnapshotCommand(snapshot: OfficeArtifactSnapshot, input: OfficeCommand): OfficeArtifactSnapshot {
+  const command = OfficeCommandSchema.parse(input)
+  if (snapshot.family !== 'document') return applyOfficeCommand(snapshot, command)
+  if (command.kind === 'batch' && command.expectedSnapshotHash && officeSnapshotPreconditionHash(snapshot) !== command.expectedSnapshotHash) throw new Error('Office snapshot precondition changed')
+  let next = snapshot
+  if (command.kind === 'batch') for (const child of command.commands) next = applyDocumentAtomic(next, child)
+  else next = applyDocumentAtomic(next, command)
+  return next
+}
+
 export function applyDocumentCommand(doc: Y.Doc, input: OfficeCommand, origin: unknown = input.origin, suggestionId?: string): DocumentSnapshot {
   const command = OfficeCommandSchema.parse(input)
   const fragment = ensureDocumentFragment(doc)
   const applied = doc.getMap<boolean>(APPLIED_SUGGESTION_IDS)
   if (suggestionId && applied.get(suggestionId)) return documentSnapshotFromFragment(fragment)
-  let next = documentSnapshotFromFragment(fragment)
-  if (command.kind === 'batch' && command.expectedSnapshotHash && officeSnapshotPreconditionHash(next) !== command.expectedSnapshotHash) throw new Error('Office snapshot precondition changed')
-  if (command.kind === 'batch') for (const child of command.commands) next = applyDocumentAtomic(next, child)
-  else next = applyDocumentAtomic(next, command)
+  const next = DocumentSnapshotSchema.parse(applyOfficeSnapshotCommand(documentSnapshotFromFragment(fragment), command))
   doc.transact(() => {
     writeDocumentSnapshotToFragment(fragment, next)
     if (suggestionId) applied.set(suggestionId, true)

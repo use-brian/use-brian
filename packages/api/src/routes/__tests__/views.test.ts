@@ -662,6 +662,30 @@ describe('[COMP:api/views-routes] saved-views CRUD', () => {
 })
 
 describe('[COMP:api/views-routes] saved-views icon', () => {
+  it('atomically conditions offline edits and reports conflicts without overwriting', async () => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    stores.savedViewStore.update.mockResolvedValueOnce(null)
+    const res = await request(app).patch('/api/saved-views/sv-icon')
+      .set('X-Brian-Metadata-Base', encodeURIComponent(JSON.stringify({ field: 'icon', value: null })))
+      .send({ icon: '🌿' })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('metadata_conflict')
+    expect(stores.savedViewStore.update).toHaveBeenCalledWith(USER_ID, 'sv-icon', {
+      icon: '🌿', expectedMetadata: { field: 'icon', value: null },
+    })
+  })
+  it.each([
+    { field: 'name', value: false }, { field: 'fullWidth', value: 'false' },
+    { field: 'icon', value: 5 }, { field: 'name; DROP TABLE saved_views', value: 'old' },
+  ])('rejects invalid offline metadata conditions: %j', async condition => {
+    const { app, stores } = makeApp({ userId: USER_ID })
+    const res = await request(app).patch('/api/saved-views/sv-icon')
+      .set('X-Brian-Metadata-Base', encodeURIComponent(JSON.stringify(condition)))
+      .send({ [condition.field]: condition.field === 'fullWidth' ? true : 'New' })
+    expect(res.status).toBe(400)
+    expect(stores.savedViewStore.update).not.toHaveBeenCalled()
+  })
+
   it('PATCH /saved-views/:id sets an emoji icon and returns it in metadata', async () => {
     const { app, stores } = makeApp({ userId: USER_ID })
     const updated: SavedView = {

@@ -1,5 +1,8 @@
-import { canRead } from '@use-brian/core'
-import { query } from './db/client.js'
+import { canRead, type ScopeSource, type ToolContext } from '@use-brian/core'
+import type { QueryResultRow } from 'pg'
+import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from './context-scope/caller-evidence.js'
+import { query, queryWithRLS, runWithAgentAccess } from './db/client.js'
+type PinAuthority = Pick<ToolContext, 'executionContext' | 'scopeAccumulator'>
 import { listSessionPins, PIN_INSTRUCTION_MAX_CHARS, type SessionPin } from './db/session-pins-store.js'
 
 /**
@@ -75,8 +78,30 @@ async function resolvePinLine(
   pin: SessionPin,
   workspaceId: string,
   clearance: Clearance,
+  context?: PinAuthority,
 ): Promise<ResolvedPinLine> {
   const unavailable: ResolvedPinLine = { full: UNAVAILABLE_LINE, short: UNAVAILABLE_LINE, label: null }
+  const execution = context?.executionContext
+  const read = async <T extends QueryResultRow>(sql: string, args: unknown[]) => {
+    if (!execution) return query<T>(sql, args)
+    if (!context?.scopeAccumulator) throw new Error('pin_source_authority_required')
+    await execution.security.authority.assertCurrent()
+    const kind = pin.kind === 'file' ? 'workspace_file' : pin.kind === 'page' ? 'page_event_changed' : pin.kind === 'task' ? 'task' : 'entity'
+    const id = pin.kind === 'page' ? 'page_event_revision' : 'id'
+    const scoped = sql.replace('SELECT ', `SELECT read_entity_derivation_source(workspace_id,'${kind}',${id}) AS "pinSource", `)
+    const result = await runWithAgentAccess(execution.security.access, () => queryWithRLS<T & { pinSource: (ScopeSource & { requiredSources?: ScopeSource[] }) | null }>(execution.security.ceiling.userId, scoped, args))
+    if (!result.rows.length) return result
+    const source = result.rows[0].pinSource
+    if (!source) return { ...result, rows: [] }
+    const { requiredSources, ...root } = source
+    const evidence = { sources: [root, ...requiredSources ?? []] }
+    if (execution.security.access.sharedAudience && evidence.sources.some(value => value.userId !== null)) return { ...result, rows: [] }
+    const checked = await validateCallerScopeEvidence(evidence, execution.security.ceiling)
+    await validateAudienceScopeEvidence(checked, execution.security.ceiling)
+    await execution.security.authority.assertCurrent()
+    context.scopeAccumulator.note(checked)
+    return result
+  }
   try {
     switch (pin.kind) {
       case 'instruction': {
@@ -88,7 +113,7 @@ async function resolvePinLine(
         return { full: line, short: line, label: pin.url ?? '' }
       }
       case 'task': {
-        const r = await query<{ title: string; status: string; due: Date | null; sensitivity: string }>(
+        const r = await read<{ title: string; status: string; due: Date | null; sensitivity: string }>(
           `SELECT title, status, due, sensitivity FROM tasks
             WHERE id = $1 AND workspace_id = $2 AND retracted_at IS NULL`,
           [pin.refId, workspaceId],
@@ -111,7 +136,7 @@ async function resolvePinLine(
         // `listCompanies` both `SELECT e.id … FROM entities e`), so the id the
         // picker handed over is the id looked up here.
         const entityKind = pin.kind === 'contact' ? 'person' : 'company'
-        const r = await query<{ name: string; sensitivity: string }>(
+        const r = await read<{ name: string; sensitivity: string }>(
           `SELECT display_name AS name, sensitivity FROM entities
             WHERE id = $1 AND workspace_id = $2 AND kind = $3
               AND valid_to IS NULL AND retracted_at IS NULL`,
@@ -129,7 +154,7 @@ async function resolvePinLine(
         // `close_date` is read as TEXT and formatted in JS on purpose: a
         // malformed stored value must degrade this one pin, not throw a cast
         // error that takes the whole resolution with it.
-        const r = await query<{
+        const r = await read<{
           name: string
           stage: string
           amount: string | null
@@ -160,7 +185,7 @@ async function resolvePinLine(
       }
       case 'page': {
         if (!pin.refId) return unavailable
-        const r = await query<{ name: string; clearance: string }>(
+        const r = await read<{ name: string; clearance: string }>(
           `SELECT name, clearance FROM saved_views
             WHERE id = $1 AND workspace_id = $2`,
           [pin.refId, workspaceId],
@@ -177,7 +202,7 @@ async function resolvePinLine(
         }
       }
       case 'file': {
-        const r = await query<{ name: string; title: string | null; sensitivity: string }>(
+        const r = await read<{ name: string; title: string | null; sensitivity: string }>(
           `SELECT name, title, sensitivity FROM workspace_files
             WHERE id = $1 AND workspace_id = $2 AND retracted_at IS NULL`,
           [pin.refId, workspaceId],
@@ -216,6 +241,7 @@ export async function resolvePinnedContext(params: {
   workspaceId: string
   /** The session's `effective_clearance` — the resolution ceiling. */
   clearance: string | null
+  context?: PinAuthority
 }): Promise<ResolvedPinnedContext> {
   const pins = await listSessionPins(params.sessionId)
   if (pins.length === 0) return { block: null, pageTargets: [] }
@@ -225,7 +251,7 @@ export async function resolvePinnedContext(params: {
       : 'internal'
 
   const resolved = await Promise.all(
-    pins.map((pin) => resolvePinLine(pin, params.workspaceId, clearance)),
+    pins.map((pin) => resolvePinLine(pin, params.workspaceId, clearance, params.context)),
   )
   const pageTargets = [
     ...new Map(
@@ -281,12 +307,13 @@ export async function resolveSessionPinLabels(
   pins: SessionPin[],
   workspaceId: string,
   clearance: string | null,
+  context?: PinAuthority,
 ): Promise<Map<string, string | null>> {
   const ceiling: Clearance =
     clearance === 'public' || clearance === 'confidential' ? clearance : 'internal'
   const entries = await Promise.all(
     pins.map(async (pin) => {
-      const line = await resolvePinLine(pin, workspaceId, ceiling)
+      const line = await resolvePinLine(pin, workspaceId, ceiling, context)
       return [pin.id, line.label] as const
     }),
   )

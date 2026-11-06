@@ -1009,6 +1009,8 @@ export type PageWorkflowRunSummary = {
 export type WorkflowRunStore = {
   /** Insert a new run row in `pending` state. */
   createRun(params: {
+    /** Host context only, never accepted from workflow input or HTTP JSON. */
+    executionContext?: import('../security/execution-context.js').ExecutionContext
     /** Internal queue proof, never workflow input or a user-supplied actor. */
     scheduledJob?: { id: string; claimId: string }
     workflowId: string

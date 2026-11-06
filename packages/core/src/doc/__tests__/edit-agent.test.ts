@@ -557,6 +557,25 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     expect(toolsForDocEditIntent(tools, 'create')).toBe(tools)
   })
 
+  it('retains live parent authority and refuses a changed source before starting the child model', async () => {
+    const requests: ProviderRequest[] = []
+    const input = vi.fn(async () => { throw new Error('fictional source revoked') })
+    const load = vi.fn(async () => 'Protected page')
+    const context: ToolContext = { ...parentContext, assertModelInputAuthority: input,
+      authority: { assertCurrent: vi.fn(async () => {}), execute: async effect => effect() },
+      mutationCompartments: ['team:operations'], projectIds: ['fictional-project'], sessionPersisted: true }
+    const child = isolateDocEditToolContext(context)
+    expect(child.authority).toBe(context.authority)
+    expect(child.assertModelInputAuthority).toBe(input)
+    expect(child.mutationCompartments).toEqual(['team:operations'])
+    expect(child.projectIds).toEqual(['fictional-project'])
+    await expect(runDocEditAgent({ provider: providerFrom(() => textTurn('Must not run'), requests), model: 'cheap',
+      fallbackModel: 'standard', systemPrompt: 'Editor', instruction: 'Edit the page.', tools: new Map(), context,
+      loadPageContext: load })).rejects.toThrow('fictional source revoked')
+    expect(load).not.toHaveBeenCalled()
+    expect(requests).toHaveLength(0)
+  })
+
   it('the allow-list helper never carries nested execution surfaces', () => {
     const isolated = isolateDocEditToolContext(parentContext)
     expect(isolated.userId).toBe(parentContext.userId)

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import type { DerivedWorkspaceFilesStore } from '../db/workspace-files-store.js'
 /**
  * Direct-to-storage multipart upload orchestration for large durable files.
@@ -9,7 +10,8 @@ import type { DerivedWorkspaceFilesStore } from '../db/workspace-files-store.js'
  * [COMP:files/chunked-upload]
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { workspaceCredentialDelegation, ContextScopeAccumulator } from '@use-brian/core'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type {
@@ -72,6 +74,8 @@ export type ChunkedUploadStart = {
   fileId: string
   chunkSizeBytes: number
   expiresAt: string
+  nextPart?: number
+  partCount?: number
   parts: ChunkedUploadPart[]
   /** Extra headers every part PUT must carry (Azure Blob: `x-ms-blob-type`). */
   uploadHeaders?: Record<string, string>
@@ -80,8 +84,9 @@ export type ChunkedUploadStart = {
 export type ChunkedFileUploadService = {
   start(
     ctx: FilesContext,
-    input: { fileName: string; mime: string; sizeBytes: number },
+    input: { fileName: string; mime: string; sizeBytes: number; partLimit?: number; sha256?: string },
   ): Promise<ChunkedUploadStart>
+  parts(ctx: FilesContext, uploadId: string, start: number, limit: number): Promise<ChunkedUploadStart>
   complete(ctx: FilesContext, uploadId: string): Promise<WorkspaceFile>
   abort(ctx: FilesContext, uploadId: string): Promise<void>
   sweepExpired(): Promise<number>
@@ -168,6 +173,13 @@ export function createChunkedFileUploadService(
     if (!upload || upload.workspaceId !== ctx.workspaceId || upload.actingUserId !== ctx.userId) {
       throw new ChunkedUploadError('not_found', 'Upload not found')
     }
+    if (upload.assistantId !== (ctx.assistantId ?? null)) throw new ChunkedUploadError('not_found','Upload not found')
+    const binding = upload.transferBinding
+    if (binding?.sessionId && (ctx.executionContext?.lifecycle.sessionId !== binding.sessionId
+      || !isDeepStrictEqual(workspaceCredentialDelegation(ctx.executionContext) ?? null,binding.parent ?? null))) {
+      throw new ChunkedUploadError('not_found','Upload not found')
+    }
+    await ctx.executionContext?.security.authority.assertCurrent()
     return upload
   }
 
@@ -177,7 +189,7 @@ export function createChunkedFileUploadService(
     await mapConcurrent(indexes, 8, async (index) => {
       await gcs.deleteBlob(chunkedUploadPartKey(upload, index))
     })
-    await deps.uploadsStore.markPartsDeletedSystem(upload.id)
+    if (upload.expiresAt.getTime() <= now().getTime()) await deps.uploadsStore.markPartsDeletedSystem(upload.id)
   }
 
   async function repairCompleted(ctx: FilesContext, upload: WorkspaceFileUpload): Promise<WorkspaceFile | null> {
@@ -190,8 +202,26 @@ export function createChunkedFileUploadService(
     return file
   }
 
+  async function manifest(upload: WorkspaceFileUpload, start: number, limit: number): Promise<ChunkedUploadStart> {
+    if (!Number.isInteger(start) || start < 0 || start >= upload.partCount || !Number.isInteger(limit) || limit < 1) throw new ChunkedUploadError('invalid','Invalid upload part range')
+    if (upload.status !== 'pending' || upload.expiresAt.getTime() <= now().getTime()) throw new ChunkedUploadError('expired','Upload is no longer pending')
+    const gcs = await deps.resolver.forUri(upload.workspaceId,upload.storageUri)
+    const end = Math.min(upload.partCount,start+limit)
+    const indexes = Array.from({length:end-start},(_,i)=>start+i)
+    const parts = await mapConcurrent(indexes,16,async index=>({index,offset:index*upload.chunkSizeBytes,sizeBytes:expectedPartSize(upload,index),
+      url:await gcs.signedWriteUrl(chunkedUploadPartKey(upload,index),{contentType:'application/octet-stream',ttlSec:Math.min(upload.transferBinding?.sessionId ? 900 : CHUNKED_UPLOAD_TTL_MS/1000,Math.max(1,Math.floor((upload.expiresAt.getTime()-now().getTime())/1000)))})}))
+    return { uploadId:upload.id,fileId:upload.fileId,chunkSizeBytes:upload.chunkSizeBytes,expiresAt:upload.expiresAt.toISOString(),parts,partCount:upload.partCount,
+      ...(end < upload.partCount ? {nextPart:end} : {}),...(gcs.signedWriteHeaders ? {uploadHeaders:{...gcs.signedWriteHeaders}} : {}) }
+  }
   return {
+    async parts(ctx,uploadId,start,limit) {
+      if (limit > 20) throw new ChunkedUploadError('invalid','At most 20 parts may be requested')
+      return manifest(await getOwned(ctx,uploadId),start,limit)
+    },
     async start(ctx, input) {
+      await ctx.executionContext?.security.authority.assertCurrent()
+      if (input.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(input.sha256)) throw new ChunkedUploadError('invalid','sha256 must be a lowercase SHA-256 digest')
+      if (input.partLimit !== undefined && (!Number.isInteger(input.partLimit) || input.partLimit < 1 || input.partLimit > 20)) throw new ChunkedUploadError('invalid','At most 20 parts may be requested')
       if (!Number.isSafeInteger(input.sizeBytes) || input.sizeBytes <= 0) {
         throw new ChunkedUploadError('invalid', 'sizeBytes must be a positive integer')
       }
@@ -238,28 +268,13 @@ export function createChunkedFileUploadService(
         ),
         quotaExempt: resolved.byo ?? false,
         expiresAt,
+        transferBinding: { ...(ctx.executionContext ? {sessionId:ctx.executionContext.lifecycle.sessionId,parent:workspaceCredentialDelegation(ctx.executionContext)} : {}),
+          ...(ctx.derivation ? {derivation:ctx.derivation} : {}),...(input.sha256 ? {sha256:input.sha256} : {}) },
         access: ac, requestedCompartments:ctx.writeCompartments, requestedProjectIds:ctx.writeProjectIds, sensitivity:ctx.writeSensitivity,
       })
 
       try {
-        const indexes = Array.from({ length: partCount }, (_, index) => index)
-        const parts = await mapConcurrent(indexes, 16, async (index) => ({
-          index,
-          offset: index * CHUNKED_UPLOAD_PART_BYTES,
-          sizeBytes: expectedPartSize(upload, index),
-          url: await resolved.gcs.signedWriteUrl(chunkedUploadPartKey(upload, index), {
-            contentType: 'application/octet-stream',
-            ttlSec: Math.ceil(CHUNKED_UPLOAD_TTL_MS / 1000),
-          }),
-        }))
-        return {
-          uploadId,
-          fileId,
-          chunkSizeBytes: CHUNKED_UPLOAD_PART_BYTES,
-          expiresAt: expiresAt.toISOString(),
-          parts,
-          ...(resolved.gcs.signedWriteHeaders ? { uploadHeaders: { ...resolved.gcs.signedWriteHeaders } } : {}),
-        }
+        return await manifest(upload,0,input.partLimit ?? upload.partCount)
       } catch (err) {
         await deps.uploadsStore.markAborted(ctx.userId, uploadId).catch(() => undefined)
         throw err
@@ -314,12 +329,15 @@ export function createChunkedFileUploadService(
           }
         }
 
+        const digest = createHash('sha256')
         const source = Readable.from((async function* () {
           for (const index of indexes) {
+            await ctx.executionContext?.security.authority.assertCurrent()
             const part = await gcs.readBlob(chunkedUploadPartKey(upload, index))
             if (!part || part.bytes.length !== expectedPartSize(upload, index)) {
               throw new ChunkedUploadError('incomplete', `Upload part ${index + 1} changed during assembly`)
             }
+            digest.update(part.bytes)
             yield part.bytes
           }
         })())
@@ -334,11 +352,22 @@ export function createChunkedFileUploadService(
           },
         }))
         finalWritten = true
+        const sha256 = digest.digest('hex')
+        if (upload.transferBinding?.sha256 && sha256 !== upload.transferBinding.sha256) {
+          await gcs.deleteBlob(finalKey)
+          finalWritten = false
+          throw new ChunkedUploadError('conflict','Uploaded bytes do not match the expected SHA-256 checksum')
+        }
+        await ctx.executionContext?.security.authority.assertCurrent()
+        const evidence = new ContextScopeAccumulator()
+        evidence.note({sources:upload.transferBinding?.derivation?.sources ?? []})
+        evidence.note({sources:ctx.derivation?.sources ?? []})
+        const derivation = evidence.evidence.sources?.length ? {producer:'workspace-file-tool',sources:evidence.evidence.sources} : undefined
 
         // Assembled bytes are still staging: only the canonical finalizer can
         // publish the row after re-reading current actor and pinned admission.
         const file = await (deps.filesStore.finalizeUpload
-          ? (actor: string, input: Parameters<WorkspaceFilesStore['create']>[1]) => deps.filesStore.finalizeUpload!(actor,input,upload.id,ac)
+          ? (actor: string, input: Parameters<WorkspaceFilesStore['create']>[1]) => deps.filesStore.finalizeUpload!(actor,input,upload.id,ac,derivation)
           : (actor: string, input: Parameters<WorkspaceFilesStore['create']>[1]) => deps.filesStore.create(actor,input,ac))(ctx.userId, {
           id: upload.fileId,
           workspaceId: upload.workspaceId,
@@ -349,9 +378,11 @@ export function createChunkedFileUploadService(
           sizeBytes: upload.sizeBytes,
           storageUri: upload.storageUri,
           title: upload.name,
-          sensitivity: 'internal',
+          sensitivity: upload.admissionBinding?.sensitivity ?? 'internal',
+          compartments: upload.admissionBinding?.compartments,projectIds:upload.admissionBinding?.projectIds,
+          metadata: {sha256},
           createdByUserId: upload.actingUserId,
-          createdByAssistantId: null,
+          createdByAssistantId: upload.transferBinding?.sessionId ? upload.assistantId : null,
         })
         fileCreated = true
         if (!deps.filesStore.finalizeUpload) await deps.uploadsStore.markCompleted(ctx.userId, upload.id)

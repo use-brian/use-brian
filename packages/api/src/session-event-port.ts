@@ -61,7 +61,7 @@ export type SessionEvent =
         replyPhase?: 'generating' | 'saving' | 'finishing'
         activity: string | null
         reasoning?: string | null
-        senderUserId?: string
+        senderUserId?: string | null
         /** The ANSWERING assistant (multi-assistant rooms, T9) — viewers
          *  render the right avatar for the live turn. */
         assistantId?: string
@@ -81,12 +81,12 @@ export type SessionEvent =
        */
       kind: 'turn_activity'
       sessionId: string
-      payload: { event: string; senderUserId?: string } & Record<string, unknown>
+      payload: { event: string; senderUserId?: string | null } & Record<string, unknown>
     }
   | {
       kind: 'turn_started'
       sessionId: string
-      payload: { senderUserId: string; assistantId?: string }
+      payload: { senderUserId: string | null; assistantId?: string }
     }
   | {
       kind: 'turn_completed'
@@ -100,7 +100,7 @@ export type SessionEvent =
        * sanitized failure signal; arbitrary exception details are not persisted.
        */
       payload: {
-        senderUserId: string
+        senderUserId: string | null
         reason?: 'stopped_by_user' | 'stalled_reclaimed' | 'timeout' | 'failed'
         /** Display name of whoever pressed stop, when `reason` is a stop. */
         stoppedByName?: string | null

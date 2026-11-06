@@ -3,7 +3,7 @@ import { z } from 'zod'
 import {
   OfficeArtifactSnapshotSchema,
   OfficeCommandSchema,
-  applyOfficeCommand,
+  applyOfficeSnapshotCommand,
   preflightOfficeCandidate,
   type OfficeArtifactSnapshot,
   type OfficeCommand,
@@ -49,7 +49,7 @@ export async function runOfficeEdit(
   const affectedObjectIds = [...new Set(commands.flatMap(commandTargets))]
   if (affectedObjectIds.length === 0) throw new Error('Office edit commands have no semantic targets')
   let snapshot = brief.snapshot
-  for (const command of commands) snapshot = applyOfficeCommand(snapshot, command)
+  for (const command of commands) snapshot = applyOfficeSnapshotCommand(snapshot, command)
   const preflight = preflightOfficeCandidate(snapshot)
   if (!preflight.ok) throw new Error(`Office edit failed preflight: ${preflight.diagnostics.map((item) => `${item.path}: ${item.message}`).join('; ')}`)
   const fit = snapshot.family === 'pdf'

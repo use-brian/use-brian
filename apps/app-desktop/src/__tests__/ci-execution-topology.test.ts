@@ -16,6 +16,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       workflow.jobs['build-typecheck'],
       workflow.jobs['api-tests'],
       workflow.jobs['app-web-tests'],
+      workflow.jobs['offline-continuity'],
       workflow.jobs['heavyweight-tests'],
       workflow.jobs['remaining-tests'],
       workflow.jobs['ci-scope'],
@@ -94,12 +95,39 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
       'build-typecheck',
       'api-tests',
       'app-web-tests',
+      'offline-continuity',
       'heavyweight-tests',
       'remaining-tests',
       'embedded-database-tests',
       'department-isolation',
     ]);
     expect(workflow.jobs['build-test'].if).toContain('always()');
+  });
+
+  it('keeps offline regressions mandatory and executable in the focused lane', () => {
+    const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
+    const lane = workflow.jobs['offline-continuity'];
+    expect(lane['continue-on-error']).not.toBe(true);
+    const commands = lane.steps.filter((step: { run?: string }) => step.run?.includes('vitest run'));
+    expect(commands).toHaveLength(2);
+    for (const step of commands) {
+      expect(step.if).toBeUndefined();
+      expect(step['continue-on-error']).not.toBe(true);
+      expect(step.run).not.toMatch(/--passWithNoTests|--testNamePattern|\|\|\s*true/);
+      const directory = step.run.includes('--filter app-web ') ? 'apps/app-web' : 'apps/app-desktop';
+      const files = step.run.match(/(?:src|desktop)\/[^\s]+\.test\.tsx?/g) ?? [];
+      expect(files.length).toBeGreaterThan(0);
+      for (const file of files) expect(readFileSync(join(sourceRoot, directory, file), 'utf8')).toContain('[COMP:');
+    }
+    const app = commands[0].run;
+    for (const suite of ['app-session.test', 'auth-fetch.test', 'offline-bootstrap.test',
+      'offline-pages.test', 'offline-writes.test', 'use-offline-sync.test',
+      'recorder-engine-live.test', 'recording-player-context.test']) expect(app).toContain(suite);
+    for (const suite of ['desktop-auth.test', 'window-policy.test', 'desktop-token-store.test', 'desktop-packaging.test']) {
+      expect(commands[1].run).toContain(suite);
+    }
+    expect(workflow.jobs['build-test'].steps[0].env.OFFLINE_CONTINUITY_RESULT)
+      .toBe('${{ needs.offline-continuity.result }}');
   });
 
   it('fails the aggregate for every unsuccessful selected lane and unknown selection', () => {

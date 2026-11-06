@@ -51,6 +51,7 @@ const MAX_REVIEWED_EMAIL_BODY_CHARS = 100_000
 const REVIEWED_EMAIL_ARGUMENT_KEYS = new Set(['to', 'subject', 'body', 'inReplyTo', 'account'])
 
 export type UnifiedApprovalRouteOptions = {
+  workspaceMcpReview?: (input: import('../workspace-mcp/approvals.js').WorkspaceApprovalDecision) => Promise<import('@modelcontextprotocol/sdk/types.js').CallToolResult>
   approvalsStore: PendingApprovalsStore
   workspaceStore: WorkspaceStore
   bridgeDeps: ApprovalBridgeDeps
@@ -365,6 +366,15 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
         if(error instanceof WorkspaceAccessError) res.status(error.status).json({error:error.code,nativeSurface:'workspace-access'})
         else throw error
       }
+      return
+    }
+
+    if (approval.approvalPayload.workspaceMcpOperation === true) {
+      if (!opts.workspaceMcpReview) { res.status(503).json({ error: 'workspace_review_unavailable' }); return }
+      const outcome = await opts.workspaceMcpReview({ approval, userId, authSessionId: req.authSessionId,
+        authVersion: req.authVersion, decision, reason })
+      res.status(outcome.isError ? 409 : 200).json({ kind: approval.kind,
+        status: outcome.structuredContent?.status, result: outcome.structuredContent })
       return
     }
 

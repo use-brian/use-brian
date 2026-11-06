@@ -309,6 +309,7 @@ function buildBindingDeps(
 
 function viewMetadata(view: SavedView, includeCapabilities = false) {
   return {
+    offlineMetadataCas: true,
     ...(includeCapabilities ? { effectiveRole: view.effectiveRole, canEdit: view.canEdit } : {}),
     id: view.id,
     workspaceId: view.workspaceId,
@@ -740,8 +741,23 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       parsed.data.name !== undefined
         ? { ...parsed.data, nameOrigin: 'user' as NameOrigin }
         : parsed.data
-    const updated = await opts.savedViewStore.update(userId, req.params.id, fields)
-    if (!updated) return notFound(res, 'Saved view not found')
+    let expectedMetadata: import('@use-brian/core').SavedViewUpdateFields['expectedMetadata']
+    const condition = req.get('X-Brian-Metadata-Base')
+    if (condition) {
+      try {
+        const base = JSON.parse(decodeURIComponent(condition))
+        const field = base.field as 'name' | 'icon' | 'fullWidth' | 'clearance'
+        if (!['name', 'icon', 'fullWidth', 'clearance'].includes(field)
+          || Object.keys(parsed.data).length !== 1 || !(field in parsed.data)
+          || !(field === 'fullWidth' ? typeof base.value === 'boolean' : field === 'icon' ? base.value === null || typeof base.value === 'string' : typeof base.value === 'string')) throw new Error()
+        expectedMetadata = { field, value: base.value }
+      } catch { return badRequest(res, 'Invalid metadata condition') }
+    }
+    const updated = await opts.savedViewStore.update(userId, req.params.id, { ...fields, ...(expectedMetadata ? { expectedMetadata } : {}) })
+    if (!updated) {
+      if (expectedMetadata) return res.status(409).json({ error: 'metadata_conflict' })
+      return notFound(res, 'Saved view not found')
+    }
     res.json({
       ...viewMetadata(updated),
       binding: updated.binding,

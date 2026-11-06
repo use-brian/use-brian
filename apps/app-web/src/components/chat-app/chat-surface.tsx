@@ -1,4 +1,5 @@
 "use client";
+import { useDurableDraft } from "@/lib/offline/use-durable-draft";
 
 import styles from "./chat-surface.module.css";
 import { RoutineChatPickup } from "@/components/workflow/routine-intake";
@@ -502,7 +503,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  rail refetch lands. */
   const sessionAssistantRef = useRef<Map<string, string>>(new Map());
   const sharedSessions: WorkspaceSession[] = cachedSharedSessions ?? EMPTY_SHARED;
-  const [input, setInput] = useState("");
+  const [input, setInput, draftStorageFailed] = useDurableDraft(workspaceId, `chat:${searchParams?.get("s") ?? "new"}`);
+  const draftWarning = useT().comments.localDraftFailed;
   const [error, setError] = useState<string | null>(null);
   const [startingShared, setStartingShared] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
@@ -3574,6 +3576,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           const assistantId = activeAssistant.id;
           const channelId = freshChannelIdRef.current ??= crypto.randomUUID();
           const response = await authFetch(`${API_URL}/api/sessions/personal`, {
+            signal: AbortSignal.timeout(5_000),
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ workspaceId, assistantId, channelId, contextGroupId: pickedContextGroupId, contextProjectId: pickedContextProjectId }),
           });
@@ -4176,6 +4179,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           "focus-within:border-ring [&_:focus-visible]:shadow-none",
         )}
       >
+      {draftStorageFailed && <p role="status" className="text-xs text-muted-foreground">{draftWarning}</p>}
       <ChatComposer
           value={editingText}
           onChange={setEditingText}

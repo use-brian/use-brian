@@ -507,10 +507,18 @@ export function createDbSavedViewStore(
       }
 
       values.push(id)
+      let condition = ''
+      if (fields.expectedMetadata) {
+        const columns = { name: 'name', icon: 'icon', fullWidth: 'full_width', clearance: 'clearance' } as const
+        const column = columns[fields.expectedMetadata.field]
+        if (!column) throw new Error('Invalid metadata condition')
+        values.push(fields.expectedMetadata.value)
+        condition = ` AND ${column} IS NOT DISTINCT FROM $${idx + 1}`
+      }
       const result = await queryWithRLS<FullRow>(
         userId,
         `UPDATE saved_views SET ${sets.join(', ')}
-         WHERE id = $${idx}
+         WHERE id = $${idx}${condition}
          RETURNING ${FULL_SELECT}`,
         values,
       )

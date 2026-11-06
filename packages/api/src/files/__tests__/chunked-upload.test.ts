@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import { createExecutionContext, bindWorkspaceCredentialDelegation } from '@use-brian/core'
 import { Writable } from 'node:stream'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AccessContext, FilesContext, WorkspaceFile, WorkspaceFilesStore } from '@use-brian/core'
@@ -101,10 +103,10 @@ function fakeUploadsStore(): WorkspaceFileUploadsStore & { rows: Map<string, Wor
     },
     async listExpiredSystem() {
       return [...rows.values()].filter((row) =>
-        row.status !== 'completed' && row.status !== 'aborted' && row.expiresAt.getTime() <= Date.now())
+        row.status !== 'completed' && !row.partsDeletedAt && row.expiresAt.getTime() <= Date.now())
     },
     async listCompletedWithPartsSystem() {
-      return [...rows.values()].filter((row) => row.status === 'completed' && !row.partsDeletedAt)
+      return [...rows.values()].filter((row) => row.status === 'completed' && !row.partsDeletedAt && row.expiresAt.getTime() <= Date.now())
     },
   }
 }
@@ -283,6 +285,56 @@ describe('[COMP:files/chunked-upload] durable direct upload', () => {
     }, () => service().start(caller, { fileName: 'recording.webm', mime: 'audio/webm', sizeBytes: 3 }))
   })
 
+  it('pages bulk manifests and refreshes only the requested exact part range',async()=>{
+    const uploader=service()
+    const started=await uploader.start(human,{fileName:'large.bin',mime:'application/octet-stream',sizeBytes:45*CHUNKED_UPLOAD_PART_BYTES+3,partLimit:20})
+    expect(started.parts).toHaveLength(20)
+    expect(started.nextPart).toBe(20)
+    const middle=await uploader.parts(human,started.uploadId,20,20)
+    expect(middle.parts[0]).toMatchObject({index:20,offset:20*CHUNKED_UPLOAD_PART_BYTES})
+    expect(middle.nextPart).toBe(40)
+    const last=await uploader.parts(human,started.uploadId,40,20)
+    expect(last.parts).toHaveLength(6)
+    expect(last.parts.at(-1)?.sizeBytes).toBe(3)
+    expect(last.nextPart).toBeUndefined()
+    await expect(uploader.parts(human,started.uploadId,46,20)).rejects.toMatchObject({kind:'invalid'})
+    await expect(uploader.parts(human,started.uploadId,0,21)).rejects.toMatchObject({kind:'invalid'})
+  })
+
+  it('verifies exact binary bytes before publication and permits repairing a failed part',async()=>{
+    const uploader=service(),bytes=Buffer.from([0,255,1,128,0]),sha256=createHash('sha256').update(bytes).digest('hex')
+    const started=await uploader.start(human,{fileName:'exact.bin',mime:'application/octet-stream',sizeBytes:bytes.length,sha256})
+    const upload=uploads.rows.get(started.uploadId)!,part=chunkedUploadPartKey(upload,0)
+    gcs.blobs.set(part,Buffer.alloc(bytes.length))
+    await expect(uploader.complete(human,started.uploadId)).rejects.toMatchObject({kind:'conflict'})
+    expect(files.rows.size).toBe(0)
+    gcs.blobs.set(part,bytes)
+    const file=await uploader.complete(human,started.uploadId)
+    expect(file.metadata.sha256).toBe(sha256)
+    expect(gcs.blobs.get(`${human.workspaceId}/${file.id}`)).toEqual(bytes)
+  })
+
+  it('binds machine uploads to the original conversation and rechecks authority before publication',async()=>{
+    let active=true
+    const execution=createExecutionContext({identity:{kind:'programmatic',principal:{kind:'brain_key',credentialId:projectId,actorUserId:human.userId},credentialOwnerUserId:human.userId},
+      ownership:{kind:'workspace',workspaceId:human.workspaceId},access:{...human,assistantId,assistantKind:'primary',clearance:'internal',compartments:[],mutationCompartments:[],projectIds:[],visibilityAssistantIds:[]},
+      writeDefaults:{compartments:[],projectIds:[]},authority:{assertCurrent:async()=>{if(!active)throw new Error('revoked')},execute:async work=>work()},
+      lifecycle:{sessionId:assistantId,sessionPersisted:true,channelType:'programmatic',channelId:'fixture',abortSignal:new AbortController().signal}})
+    bindWorkspaceCredentialDelegation(execution,{kind:'brain_key',credentialId:projectId,revision:'a'.repeat(64),...human,assistantId,sessionId:assistantId})
+    const caller:FilesContext={...human,assistantId,executionContext:execution},uploader=service()
+    const started=await uploader.start(caller,{fileName:'machine.bin',mime:'application/octet-stream',sizeBytes:1})
+    const upload=uploads.rows.get(started.uploadId)!
+    gcs.blobs.set(chunkedUploadPartKey(upload,0),Buffer.from([5]))
+    await expect(uploader.complete({...caller,executionContext:undefined},started.uploadId)).rejects.toMatchObject({kind:'not_found'})
+    await expect(uploader.abort(human,started.uploadId)).rejects.toMatchObject({kind:'not_found'})
+    active=false
+    await expect(uploader.complete(caller,started.uploadId)).rejects.toThrow('revoked')
+    expect(files.rows.size).toBe(0)
+    active=true
+    const file=await uploader.complete(caller,started.uploadId)
+    expect(file.createdByAssistantId).toBe(assistantId)
+  })
+
   // The open boot's default resolver: a self-host's bucket is its own, so the
   // gate must accept an infinite limit rather than treat it as "unknown plan".
   it('accepts an unlimited storage resolver (the self-host default) without a quota gate', async () => {
@@ -331,9 +383,29 @@ describe('[COMP:files/chunked-upload] durable direct upload', () => {
     await vi.waitFor(() => {
       expect(gcs.blobs.has(chunkedUploadPartKey(upload, 0))).toBe(false)
       expect(gcs.blobs.has(chunkedUploadPartKey(upload, 1))).toBe(false)
-      expect(upload.partsDeletedAt).toBeInstanceOf(Date)
+      expect(upload.partsDeletedAt).toBeNull()
     })
     expect(upload.status).toBe('completed')
+  })
+
+  it.each(['completed', 'aborted'] as const)('sweeps late signed PUT bytes after a %s upload expires', async status => {
+    const uploader = service()
+    const started = await uploader.start(ctx, {fileName:'late.bin',mime:'application/octet-stream',sizeBytes:3})
+    const upload = uploads.rows.get(started.uploadId)!
+    const key = chunkedUploadPartKey(upload,0)
+    gcs.blobs.set(key,Buffer.from([1,2,3]))
+    if(status === 'completed') await uploader.complete(ctx,upload.id)
+    else await uploader.abort(ctx,upload.id)
+    await vi.waitFor(() => expect(gcs.blobs.has(key)).toBe(false))
+    expect(upload.partsDeletedAt).toBeNull()
+    gcs.blobs.set(key,Buffer.from([4,5,6]))
+    expect(await uploader.sweepExpired()).toBe(0)
+    upload.expiresAt = new Date(Date.now()-1000)
+    expect(await uploader.sweepExpired()).toBe(1)
+    expect(gcs.blobs.has(key)).toBe(false)
+    expect(upload.partsDeletedAt).toBeInstanceOf(Date)
+    expect(await uploader.sweepExpired()).toBe(0)
+    if(status === 'completed') expect(gcs.blobs.get(`ws-1/${started.fileId}`)).toEqual(Buffer.from([1,2,3]))
   })
 
   it('does not create a workspace file when a part has the wrong size', async () => {

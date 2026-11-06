@@ -23,6 +23,7 @@ import * as React from "react";
 import { ArrowUp, Paperclip, Check, X } from "lucide-react";
 import { parseSSEStream, createSSEBuffer, ChatMarkdown } from "@use-brian/chat-ui";
 import { authFetch } from "@/lib/auth-fetch";
+import { useDurableDraft } from "@/lib/offline/use-durable-draft";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { ThreadGutter, relativeTime, type CommentAuthor } from "./comment-primitives";
@@ -210,6 +211,7 @@ type Props = {
   seed?: CommentSeed;
   /** Refetch the page's threads after a reply / resolve. */
   onChanged: () => void;
+  onSeedAccepted?: () => void;
   /** Dismiss the host shell after the thread is resolved. */
   onResolved: () => void;
   /** Start the message list scrolled to the latest comment (rail expansion). */
@@ -242,6 +244,7 @@ export function CommentThreadBody({
   currentUser,
   assistant,
   onChanged,
+  onSeedAccepted,
   onResolved,
   scrollToEnd,
   initialMessages,
@@ -298,7 +301,7 @@ export function CommentThreadBody({
   const hadInitial = React.useRef((initialMessages?.length ?? 0) > 0);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [draft, setDraft] = React.useState("");
+  const [draft, setDraft, draftStorageFailed] = useDurableDraft(workspaceId, `thread:${thread.id}`, currentUser?.id);
   // Quote-reply: text the reader selected in an existing comment (via the
   // floating <CommentQuoteReply> button) to reply to. Shown as a quote chip
   // above the composer and prefixed onto the sent reply as a Markdown blockquote
@@ -363,7 +366,6 @@ export function CommentThreadBody({
     // A thread whose turn is still running (a refresh mid-reply) reconnects to
     // the live turn below and owns the streaming bubble — don't clear it here.
     if (thread.sessionStatus !== "running") setStreaming(null);
-    setDraft("");
     void fetchSessionMessages(sessionId, { signal: controller.signal })
       .then((rows) => {
         // `fetchSessionMessages` swallows aborts/errors and resolves to `[]`. If
@@ -579,15 +581,16 @@ export function CommentThreadBody({
     // thread's first comment) records its mentions in `collab-page-editor`
     // where the thread is minted.
     const mentions = override ? [] : mentionIds;
-    // A user-typed reply clears the composer; an override carries no composer
-    // state to reset.
-    if (!override) {
-      setDraft("");
+    // Retain the durable draft until the server confirms this exact message.
+    // A lost response can be reconciled below; it is never an instruction to resend.
+    const accepted = () => {
+      if (override) { onSeedAccepted?.(); return; }
+      setDraft(current => current === draft ? "" : current);
       setMentionIds([]);
       setQuotedReply(null);
       att.clear();
       setPendingRecordings([]);
-    }
+    };
     // Show the sent comment immediately (replaced by the persisted row on
     // refetch). Without this the user's own message doesn't appear until the
     // assistant's whole reply has streamed.
@@ -608,6 +611,7 @@ export function CommentThreadBody({
     if (replyWithoutAi) {
       try {
         await addCommentMessage(thread.id, effectiveBody);
+        accepted();
         if (mentions.length > 0) {
           void recordDocMention({
             workspaceId,
@@ -753,6 +757,7 @@ export function CommentThreadBody({
       }
       const rows = await fetchSessionMessages(thread.sessionId);
       setMessages(rows);
+      if (hasPersistedInterruptedComment(rows, knownMessageIds, effectiveBody)) accepted();
       if (duplicateInFlight) {
         // This renderer lost the exactly-once race to an already-running copy.
         // Retire the seed, refresh `sessionStatus`, then let the existing live
@@ -779,6 +784,7 @@ export function CommentThreadBody({
       // the load error.
       const rows = await fetchSessionMessages(thread.sessionId);
       if (hasPersistedInterruptedComment(rows, knownMessageIds, effectiveBody)) {
+        accepted();
         setMessages(rows);
         seedRef.current = null;
         onChanged();
@@ -1009,6 +1015,7 @@ export function CommentThreadBody({
               toggles, send next to the model picker), so a grown multi-line reply
               isn't flanked by controls drifting in its vertical centre (mirrors
               the landing + floating-dock composers). */}
+          {draftStorageFailed && <p role="status" className="text-xs text-muted-foreground">{t.localDraftFailed}</p>}
           <CommentComposer
             textareaRef={composerRef}
             value={draft}
