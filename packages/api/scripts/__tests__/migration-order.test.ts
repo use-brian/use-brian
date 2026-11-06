@@ -136,6 +136,21 @@ describe('[COMP:api/migration-order] Migration file ordering', () => {
     expect(ordered).toEqual([{ dir: '/open', file: '001_a.sql' }])
   })
 
+  it('restores skill revision owner access before the authored-root backfill', () => {
+    const files = [
+      '8221_workspace_mcp_oauth.sql',
+      '8220_authored_skill_scope_roots.sql',
+      '82200_skill_scope_owner_access.sql',
+      '8219_workspace_mcp_context_selection.sql',
+    ]
+    expect(orderMigrationFiles([{ dir: '/open', files }]).map(({ file }) => file)).toEqual([
+      '8219_workspace_mcp_context_selection.sql',
+      '82200_skill_scope_owner_access.sql',
+      '8220_authored_skill_scope_roots.sql',
+      '8221_workspace_mcp_oauth.sql',
+    ])
+  })
+
   it('throws on a duplicate filename across dirs', () => {
     expect(() =>
       orderMigrationFiles([
