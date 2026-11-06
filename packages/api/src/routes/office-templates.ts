@@ -4,7 +4,7 @@ import { Router } from 'express'
 import {officeMetadataRoute} from './office-metadata.js'
 import { z } from 'zod'
 import { inferOfficeTemplateRouting, officeTemplateRoutingDiagnostics } from '@use-brian/core'
-import { OfficeTemplateRoutingDraftSchema, type OfficeArtifactSnapshot, type PdfSnapshot } from '@use-brian/office-model'
+import { OfficeTemplateRoutingDraftSchema, type OfficeArtifactSnapshot, type OfficeTemplateBundle, type PdfSnapshot } from '@use-brian/office-model'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 
 type TemplateDraftRow = {
@@ -20,12 +20,13 @@ type TemplateLiveSnapshot = { snapshot: OfficeArtifactSnapshot; seq: number; bas
 type DurableOfficeSnapshot = Exclude<OfficeArtifactSnapshot, PdfSnapshot>
 
 export type OfficeTemplatesRouteDeps = {
+  readPublished(userId: string, templateId: string, versionId: string): Promise<{ bundle: OfficeTemplateBundle; revision: string; scope: { sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] } } | null>
   list(userId: string, workspaceId: string, family?: 'document' | 'presentation' | 'spreadsheet'): Promise<unknown[]>
   getTemplate(userId: string, templateId: string): Promise<TemplateDraftRow | null>
   getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
   getSnapshot(userId: string, artifactId: string): Promise<TemplateLiveSnapshot | null>
   createDraft(params: { userId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; name: string; description: string; sensitivity: 'public' | 'internal' | 'confidential'; draftArtifactId: string }): Promise<{ id: string }>
-  createTemplateShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; templateVersionId: null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; mode: 'template' }): Promise<{ id: string }>
+  createTemplateShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; templateVersionId: string | null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; requiredCompartments?: string[]; projectIds?: string[]; mode: 'template' }): Promise<{ id: string }>
   initializeDraft(params: { userId: string; artifactId: string; snapshot: OfficeArtifactSnapshot }): Promise<boolean>
   getDraftRouting(userId: string, templateId: string): Promise<unknown | null>
   saveDraftRouting(params: { userId: string; templateId: string; routing: unknown }): Promise<boolean>
@@ -63,6 +64,42 @@ export function officeTemplateRoutes(deps: OfficeTemplatesRouteDeps): Router {
     if (!workspaceId.success || !family.success) return {status:400,body:{ error: 'Invalid template query' }}
     return {workspaceId:workspaceId.data,body:{ templates: await deps.list(userId, workspaceId.data, family.data) }}
   }))
+  router.get('/templates/:templateId/versions/:versionId', officeMetadataRoute(async (req, userId) => {
+    const source = await deps.readPublished(userId, String(req.params.templateId), String(req.params.versionId))
+    if (!source) return { status: 404, body: { error: 'Published template not found' } }
+    return { workspaceId: source.bundle.workspaceId, body: { snapshot: source.bundle.snapshot } }
+  }))
+  router.post('/templates/:templateId/versions/:versionId/copy', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const body = z.object({ name: z.string().trim().min(1).max(255) }).strict().safeParse(req.body)
+    if (!body.success) return void res.status(400).json({ error: 'Invalid template copy' })
+    const templateId = String(req.params.templateId), versionId = String(req.params.versionId)
+    const source = await deps.readPublished(userId, templateId, versionId)
+    if (!source) return void res.status(404).json({ error: 'Published template not found' })
+    const { bundle, scope } = source
+    if (bundle.family === 'pdf') return void res.status(404).json({ error: 'Published template not found' })
+    let artifact: { id: string } | null = null, template: { id: string } | null = null
+    try {
+      artifact = await deps.createTemplateShell({ userId, workspaceId: bundle.workspaceId, family: bundle.family, title: body.data.name, templateVersionId: versionId, capabilityVersion: bundle.capabilityVersion, sensitivity: scope.sensitivity, requiredCompartments: scope.compartments, projectIds: scope.projectIds, mode: 'template' })
+      template = await deps.createDraft({ userId, workspaceId: bundle.workspaceId, family: bundle.family, name: body.data.name, description: bundle.description, sensitivity: scope.sensitivity, draftArtifactId: artifact.id })
+      const current = await deps.readPublished(userId, templateId, versionId)
+      if (!current || current.revision !== source.revision) throw new Error('office_template_source_changed')
+      const snapshot = { ...structuredClone(bundle.snapshot), artifactId: artifact.id, title: body.data.name, accessibility: { ...bundle.snapshot.accessibility, title: body.data.name }, templateVersionId: versionId }
+      if (!await deps.initializeDraft({ userId, artifactId: artifact.id, snapshot })) throw new Error('template_copy_not_initialized')
+      if (!await deps.saveDraftRouting({ userId, templateId: template.id, routing: { source: 'promote', fields: bundle.fields, slideRecipes: bundle.slideRecipes } })) throw new Error('template_routing_not_saved')
+      const final = await deps.readPublished(userId, templateId, versionId)
+      if (!final || final.revision !== source.revision) throw new Error('office_template_source_changed')
+    } catch (cause) {
+      await Promise.allSettled([
+        template ? deps.deleteEmptyDraft(userId, template.id) : Promise.resolve(false),
+        artifact ? deps.deleteEmptyShell(userId, artifact.id) : Promise.resolve(false),
+      ])
+      if (cause instanceof Error && cause.message === 'office_template_source_changed') return void res.status(409).json({ error: 'office_template_source_changed' })
+      throw cause
+    }
+    res.status(201).json({ id: template.id, draftArtifactId: artifact.id })
+  })
   router.post('/templates', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })

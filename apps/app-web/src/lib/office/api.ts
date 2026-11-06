@@ -379,6 +379,14 @@ export async function listOfficeTemplates(workspaceId: string): Promise<OfficeTe
   return metadata<OfficeTemplate[], {templates: OfficeTemplate[]}>(`templates?workspaceId=${encodeURIComponent(workspaceId)}`, "office_templates_failed", body => body.templates);
 }
 
+export async function getPublishedOfficeTemplate(templateId: string, versionId: string): Promise<OfficeArtifactSnapshot> {
+  return metadata<OfficeArtifactSnapshot, { snapshot: OfficeArtifactSnapshot }>(`templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(versionId)}`, "office_template_read_failed", body => body.snapshot);
+}
+
+export async function copyPublishedOfficeTemplate(templateId: string, versionId: string, name: string): Promise<{ id: string; draftArtifactId: string }> {
+  return json(await authFetch(`${API_URL}/api/office/templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(versionId)}/copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) }), "office_template_copy_failed");
+}
+
 export async function createOfficeTemplate(input: { workspaceId: string; family: OfficeFamily; name: string; description: string; creationMethod: "guided" | "upload"; canonicalWebsite?: string; companyHasNoWebsite?: boolean }): Promise<{ id: string; draftArtifactId: string }> {
   return json(await authFetch(`${API_URL}/api/office/templates`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...input, sensitivity: "internal" }) }), "office_template_create_failed");
 }
