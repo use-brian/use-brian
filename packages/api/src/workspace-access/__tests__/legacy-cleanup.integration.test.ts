@@ -1,3 +1,4 @@
+import {runMigrations} from '../../../scripts/migrate.js'
 import {randomUUID} from 'node:crypto'
 import {ContextScopeAccumulator} from '@use-brian/core'
 import express from 'express'
@@ -59,6 +60,33 @@ async function legacySchedule(f:Awaited<ReturnType<typeof fixture>>){
 }
 describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selective cleanup',()=>{
  afterAll(async()=>{await getAppPool().end();await pool.end()})
+ it('[COMP:api/migration-order] aliases released names without rerunning SQL or changing their applied timestamp',async()=>{
+  const pairs=[
+   ['557_association_membership_catalogue.sql','5570_association_membership_catalogue.sql'],
+   ['561_association_site_content.sql','5610_association_site_content.sql'],
+   ['563_department_scope_evidence.sql','5630_department_scope_evidence.sql'],
+   ['564_crm_intake_existing_or_new.sql','5640_crm_intake_existing_or_new.sql'],
+   ['8146_explicit_unclassified_legacy_erasure.sql','81460_explicit_unclassified_legacy_erasure.sql'],
+   ['8147_private_chat_recovery.sql','81470_private_chat_recovery.sql'],
+  ]
+  const names=pairs.flat(),before=(await pool.query('SELECT name,applied_at FROM public._migrations WHERE name=ANY($1::text[])',[names])).rows
+  const timestamp='2026-01-01T00:00:00.000Z',log=vi.spyOn(console,'log').mockImplementation(()=>{})
+  try{
+   await pool.query('DELETE FROM public._migrations WHERE name=ANY($1::text[])',[names])
+   for(const [previous] of pairs)await pool.query('INSERT INTO public._migrations(name,applied_at) VALUES($1,$2)',[previous,timestamp])
+   for(let attempt=0;attempt<2;attempt++){
+    const result=await runMigrations({databaseUrl:process.env.DATABASE_URL!,beforeApply:({file})=>{throw new Error('Released migration would rerun: '+file)}})
+    expect(result.appliedCount).toBe(0)
+   }
+   const rows=(await pool.query('SELECT name,applied_at FROM public._migrations WHERE name=ANY($1::text[])',[names])).rows
+   expect(rows).toHaveLength(12)
+   expect(rows.every(row=>row.applied_at.toISOString()===timestamp)).toBe(true)
+  }finally{
+   log.mockRestore()
+   await pool.query('DELETE FROM public._migrations WHERE name=ANY($1::text[])',[names])
+   for(const row of before)await pool.query('INSERT INTO public._migrations(name,applied_at) VALUES($1,$2)',[row.name,row.applied_at])
+  }
+ })
  it('reviews General firing bindings without deleting or changing schedules, delivery targets or history',async()=>{
   const f=await fixture()
   try{
@@ -592,8 +620,7 @@ describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selectiv
  it('invalidates a changed General cascade child and supports more than 500 retained records',async()=>{
   const f=await fixture(),name='cleanup_probe_'+randomUUID().replaceAll('-','')
   try{
-   await pool.query(`INSERT INTO memories(workspace_id,assistant_id,summary,sensitivity,compartments,created_by_user_id)
-    SELECT $1,$2,'Fictional retained bulk memory','internal',$3::text[],$4 FROM generate_series(1,510)`,[f.workspaceId,f.assistantId,[f.team.compartmentKey],f.ownerId])
+   for(let i=0;i<510;i++)await createMemory({workspaceId:f.workspaceId,userId:null,assistantId:f.assistantId,createdByUserId:f.ownerId,summary:'Fictional retained bulk memory',sensitivity:'internal',compartments:[f.team.compartmentKey!]})
    await pool.query(`CREATE TABLE ${name}(id uuid PRIMARY KEY,workspace_id uuid REFERENCES workspaces(id) ON DELETE CASCADE,
     source_id uuid REFERENCES memories(id) ON DELETE CASCADE,note text)`)
    await pool.query(`INSERT INTO ${name} VALUES($1,$2,$3,'Fictional initial child')`,[randomUUID(),f.workspaceId,f.memory.id])
@@ -609,8 +636,9 @@ describe.sequential('[COMP:api/workspace-legacy-cleanup] owner-reviewed selectiv
   try{
    await f.confirm(await f.prepare())
    expect((await pool.query("SELECT read_scope_review_impact_source($1,'memory',$2) AS ref",[other.workspaceId,f.memory.id])).rows[0].ref).toBeNull()
-   await pool.query(`INSERT INTO memories(id,workspace_id,assistant_id,summary,sensitivity,compartments)
-    VALUES($1,$2,$3,'Fictional restored foreign memory','internal','{}')`,[f.memory.id,other.workspaceId,other.assistantId])
+   const restored=await other.memory('Fictional restored foreign memory')
+   // Simulate a restored physical identity after canonical author/partition admission.
+   await pool.query('UPDATE memories SET id=$1 WHERE id=$2',[f.memory.id,restored.id])
    expect((await pool.query("SELECT read_scope_review_impact_source($1,'memory',$2) AS ref",[f.workspaceId,f.memory.id])).rows[0].ref).toBeNull()
   }finally{await other.cleanup();await f.cleanup()}
  })

@@ -22,7 +22,7 @@ export function officeCanonicalSnapshotHash(snapshot: OfficeArtifactSnapshot): s
   return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')
 }
 
-export class OfficeLiveHeadConflict extends Error {
+class OfficeLiveHeadConflict extends Error {
   constructor() {
     super('Office collaboration base no longer matches the immutable head')
     this.name = 'OfficeLiveHeadConflict'

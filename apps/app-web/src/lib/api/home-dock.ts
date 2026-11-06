@@ -15,7 +15,7 @@ import { authFetch } from "@/lib/auth-fetch";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
-export type ResolvedNeed = {
+type ResolvedNeed = {
   kind:
     | "brain_review"
     | "approvals"

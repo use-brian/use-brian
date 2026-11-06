@@ -56,7 +56,7 @@ export function CommentAssistantPicker({ roster, selectedId, onSelect, disabled 
   if (roster.length < 2 || !selected) return null;
   return (
     <Select value={selected.id} onValueChange={value => { if (value) onSelect(value); }} disabled={disabled}>
-      <SelectTrigger aria-label={t.assistantLabel} className="min-h-11 min-w-0 max-w-40 gap-1.5 border-0 bg-transparent px-1.5 py-1 text-xs text-muted-foreground shadow-none md:min-h-7">
+      <SelectTrigger aria-label={t.assistantLabel} className="min-h-11 min-w-0 max-w-40 gap-1.5 border-0 bg-transparent px-1.5 py-1 text-[16px] md:text-xs text-muted-foreground shadow-none md:min-h-7">
         <span aria-hidden><AssistantAvatar id={selected.id} name={selected.name} iconSeed={selected.iconSeed ?? undefined} size="sm" /></span>
         <span className="truncate">{selected.name}</span>
       </SelectTrigger>

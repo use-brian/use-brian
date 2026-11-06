@@ -11,7 +11,7 @@ import {readAdmittedSessionQuery} from '../../../db/session-query-reader.js'
 import type {ScopeSource} from '@use-brian/core'
 import {sourceModeFixture} from './source-modes.js'
 const store=createDbMemoryStore(),tools=createMemoryTools(store)
- export async function originalMemoryAuthority(x:Awaited<ReturnType<typeof sourceModeFixture>>,actor=x.f.ownerId,shared=false){
+ export async function originalMemoryAuthority(x:Awaited<ReturnType<typeof sourceModeFixture>>,actor=x.f.ownerId,shared=false,options:{durableSession?:boolean}={}){
   const auth=await authSessionStore.create(actor,{deviceLabel:'Fictional memory device',userAgent:'Fixture',ipAddress:'127.0.0.1'})
   if(!auth)throw new Error('Missing actual memory authentication session')
   const session=await createPersonalWebSession({assistantId:x.f.assistantId,userId:actor,workspaceId:x.f.workspaceId,channelType:'web',channelId:crypto.randomUUID(),appOrigin:'chat'},
@@ -21,7 +21,7 @@ const store=createDbMemoryStore(),tools=createMemoryTools(store)
   const resolved=await resolveExecutionContextSystem({userId:actor,workspaceId:x.f.workspaceId,assistant,memberMode:'member',sharedAudience:false,session,sessionAuthority:session,
    identity:{kind:'attended',principal:{kind:'workspace_member',userId:actor,authenticationKind:'native_session'}},ownership:{kind:'workspace',workspaceId:x.f.workspaceId},
    lifecycle:{sessionId:session.id,sessionPersisted:true,channelType:'web',channelId:session.channelId,abortSignal:new AbortController().signal},
-   credentialCurrent:async()=>!!await authSessionStore.validateAccess(claims)})
+   ...(options.durableSession?{nativeSessionCredential:claims}:{credentialCurrent:async()=>!!await authSessionStore.validateAccess(claims)})})
   const execution=resolved.executionContext
   const current=await x.runtime(actor,shared?undefined:execution)
   bindSessionContextRetainedAuthority(current.execution,(execution,sources,action)=>x.coordinator.prepare(execution,sources,action))

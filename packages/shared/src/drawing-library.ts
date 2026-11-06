@@ -1,6 +1,6 @@
 import { drawingSceneSchema, type DrawingScene } from './drawing.js';
 
-export const LIBRARY_BYTES = 2 * 1024 * 1024;
+const LIBRARY_BYTES = 2 * 1024 * 1024;
 export type DrawingLibraryItem = { id: string; name?: string; status: 'published' | 'unpublished'; created: number; elements: DrawingScene['elements'] };
 export function validateLibraryItems(value: unknown): DrawingLibraryItem[] {
   if (!Array.isArray(value) || value.length > 500 || new TextEncoder().encode(JSON.stringify(value)).length > LIBRARY_BYTES) throw new Error('library-size');

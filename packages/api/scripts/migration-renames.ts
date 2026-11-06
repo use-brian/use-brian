@@ -4,6 +4,13 @@
  * both names lets old and new releases safely skip the same migration.
  */
 const migrationRenames = [
+  ['557_association_membership_catalogue.sql', '5570_association_membership_catalogue.sql'],
+  ['561_association_site_content.sql', '5610_association_site_content.sql'],
+  ['563_department_scope_evidence.sql', '5630_department_scope_evidence.sql'],
+  ['564_crm_intake_existing_or_new.sql', '5640_crm_intake_existing_or_new.sql'],
+  ['8146_explicit_unclassified_legacy_erasure.sql', '81460_explicit_unclassified_legacy_erasure.sql'],
+  ['8147_private_chat_recovery.sql', '81470_private_chat_recovery.sql'],
+
   ['8231_workspace_file_attachments.sql', '8233_workspace_file_attachments.sql'],
   ['8148_department_mode_admission.sql', '8171_department_mode_admission.sql'],
   ['8149_organization_cutover.sql', '8172_organization_cutover.sql'],

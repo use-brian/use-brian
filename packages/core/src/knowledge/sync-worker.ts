@@ -578,7 +578,7 @@ async function computeDirHash(root: string, files: string[]): Promise<string> {
 }
 
 // Repository roots are directories, never string prefixes.
-export function normalizeKnowledgeRoot(root: string): string {
+function normalizeKnowledgeRoot(root: string): string {
   const parts = root.trim().replace(/\\/g, '/').split('/').filter(p => p && p !== '.')
   if (parts.includes('..')) throw new Error('Invalid knowledge root')
   return parts.join('/')
