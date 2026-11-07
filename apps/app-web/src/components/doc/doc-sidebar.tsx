@@ -88,6 +88,7 @@ import { parseSectionDropId, sectionDropId } from "@/lib/sidebar-sections";
 import { fetchInbox, type InboxPayload } from "@/lib/api/inbox";
 import { DOC_COMMENTS_CHANGED_EVENT } from "@/lib/comment-events";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
+import { ApprovalsNav } from "./approvals-nav";
 import { SidebarTreeNode, parseDropId } from "./sidebar-tree-node";
 import { BrainSidebarPanel } from "./sidebar-panels/brain-sidebar-panel";
 import { StudioSidebarPanel } from "./sidebar-panels/studio-sidebar-panel";
@@ -545,6 +546,10 @@ export function DocSidebar(props: Props) {
       </div>
 
       <WorkspaceAppRail mobile workspaceId={workspaceId} activeSurface={props.activeSurface} activeApp={activeOperatorApp} homeApps={props.homeApps} customApps={props.customApps} liveCount={liveActiveCount} studioNudge={props.studioNudge} onDismissStudioNudge={props.onDismissStudioNudge} />
+
+      <div data-doc-chrome className="shrink-0 px-2 pt-1 md:px-3">
+        <ApprovalsNav workspaceId={workspaceId} />
+      </div>
 
       <div className={`doc-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-2 pb-4 pt-2 md:px-3 ${sidebarSurface === "chat" ? "md:pt-0.5 md:[scrollbar-gutter:auto]" : ""}`}>
         {(sidebarSurface === "projects" || sidebarSurface === "organization") && <WorkspaceStructureSwitcher workspaceId={workspaceId} view={sidebarSurface} />}
