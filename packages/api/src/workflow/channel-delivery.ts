@@ -554,7 +554,7 @@ function createDelivery(
             workspaceId, assistantId, channelIntegrationId, 'whatsapp', targetChannelId)
         : undefined
       if (question && (!integ || (integ.credentials as { provider?: string }).provider === 'cloud_api')) return { status: 'skipped', channelType, reason: 'no_integration' }
-      const prepared = integ ? await prepareQuestion(integ.id) : { text: deliverable, token: undefined }
+      const prepared = integ ? await prepareQuestion(integ.id) : { text: deliverable, token: undefined, actions }
       const messageId = await createWhatsAppAdapter({
         connectorUrl: options.waConnectorUrl,
         connectorSecret: options.waConnectorSecret,
