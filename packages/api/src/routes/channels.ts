@@ -1,5 +1,7 @@
 import { listChannelRecordings, changeChannelRecording, confirmChannelRecordingOwner } from '../channel-recording.js'
 import { recoverTelegramRecordingOwner } from '../channel-recording-owner.js'
+import { previewTelegramRecordingRecovery, applyTelegramRecordingRecovery } from '../channel-recording-recovery.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 /**
  * Workspace channels management routes — the Phase D operator surface.
  *
@@ -1065,6 +1067,28 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     res.json({ channel: serializeChannel(updated, integrations.get(channelId)) })
   })
 
+  // Reviewed historical release is separate from ordinary recorder confirmation.
+  router.get('/workspaces/:workspaceId/channels/:channelId/recordings/legacy-recovery', async (req, res) => {
+    const actorId = (req as { userId?: string }).userId
+    if (!actorId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+    if (!await loadChannel(actorId, workspaceId, channelId, res)) return
+    res.json(await previewTelegramRecordingRecovery({ actorId, workspaceId, channelId }))
+  })
+  router.post('/workspaces/:workspaceId/channels/:channelId/recordings/legacy-recovery', async (req, res) => {
+    const actorId = (req as { userId?: string }).userId
+    if (!actorId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+    if (!await loadChannel(actorId, workspaceId, channelId, res)) return
+    const parsed = z.object({ sessionId: z.string().uuid(), snapshotToken: z.string().regex(/^[a-f0-9]{64}$/),
+      confirmConnectedByMe: z.literal(true), confirmHistoryReview: z.literal(true) }).strict().safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'recording_recovery_confirmation_required' }); return }
+    try { res.json(await applyTelegramRecordingRecovery({ actorId, workspaceId, channelId, ...parsed.data })) }
+    catch (error) {
+      if (!(error instanceof WorkspaceAccessError) && (error as { code?: string }).code !== '42501' && (error as { code?: string }).code !== '23505') throw error
+      res.status(409).json({ error: 'recording_recovery_unavailable' })
+    }
+  })
   // Owner commands use the same channel visibility gate as channel settings.
   router.get('/workspaces/:workspaceId/channels/:channelId/recordings', async (req, res) => {
     const actorId = (req as { userId?: string }).userId
