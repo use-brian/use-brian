@@ -43,7 +43,9 @@ for (const app of ['api', 'doc-sync', 'browser-relay']) {
     const build = dockerfile.indexOf('RUN pnpm --filter ', buildStart)
     assert.ok(install >= 0 && buildStart > install && build > buildStart)
     const metadataSources = copiedSources(dockerfile.slice(0, install))
-    const buildSources = copiedSources(dockerfile.slice(buildStart, build))
+    const buildStage = dockerfile.slice(buildStart, build)
+    const buildSources = copiedSources(buildStage)
+    assert.match(buildStage, /^ENV NODE_OPTIONS=--max-old-space-size=6144$/m, 'clean API compilation needs its builder-only heap budget')
     const appPackage = JSON.parse(readFileSync(resolve(root, `apps/${app}/package.json`), 'utf8')).name
     for (const name of workspaceClosure(appPackage)) {
       const { path } = packages.get(name)
@@ -53,3 +55,15 @@ for (const app of ['api', 'doc-sync', 'browser-relay']) {
     }
   })
 }
+
+test('[COMP:ci/execution-topology] CI compilation heap budget reaches Turbo child tasks', () => {
+  const workflow = readFileSync(resolve(root, '.github/workflows/ci.yml'), 'utf8')
+  const compilationSteps = workflow.split(/\n      - /).filter(step =>
+    /run: pnpm (?:build|typecheck)\n|run: pnpm exec turbo run build --filter="@use-brian\/api-open\^\.\.\."|run: >-\n          pnpm exec turbo run test\n/.test(step))
+  assert.ok(compilationSteps.length >= 4, 'locate the API compilation steps before checking their budgets')
+  for (const step of compilationSteps) {
+    assert.match(step, /\n        env:\n          NODE_OPTIONS: --max-old-space-size=6144\n/)
+  }
+  const turbo = JSON.parse(readFileSync(resolve(root, 'turbo.json'), 'utf8'))
+  assert.ok(turbo.globalPassThroughEnv.includes('NODE_OPTIONS'))
+})
