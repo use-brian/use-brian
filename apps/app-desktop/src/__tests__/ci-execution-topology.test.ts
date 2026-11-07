@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -67,11 +68,12 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(remainingCommand).toContain("--filter='!@use-brian/api-open'");
     expect(remainingCommand).toContain('--concurrency=4');
     const embedded = workflow.jobs['embedded-database-tests'];
-    expect(embedded.strategy.matrix.shard).toEqual([1, 2, 3]);
+    expect(embedded.strategy.matrix.group).toEqual(['owner-legacy', 'owner-fresh', 'owner-cutover', 'owner-successor', 'owner-prerequisites', 'session', 'remaining']);
+    expect(embedded['timeout-minutes']).toBe(10);
     expect(embedded.strategy['fail-fast']).toBe(false);
     const nodeTests = embedded.steps.find((step: { name?: string }) => step.name === 'Embedded database tests');
-    expect(nodeTests.run).toContain('scripts/testing/embedded-database-tests.mjs ${{ matrix.shard }}');
-    expect(embedded.steps.find((step: { name?: string }) => step.name === 'Runtime unit tests').if).toBe('matrix.shard == 3');
+    expect(nodeTests.run).toContain('scripts/testing/embedded-database-tests.mjs ${{ matrix.group }}');
+    expect(embedded.steps.find((step: { name?: string }) => step.name === 'Runtime unit tests').if).toBe("matrix.group == 'remaining'");
     const acceptance = workflow.jobs['department-isolation-shards'];
     expect(acceptance.strategy.matrix.shard).toContain('fromJSON(needs.ci-scope.outputs.shards)');
     expect(workflow.jobs['embedded-current-tests'].if).toBe("needs.ci-scope.outputs.historical == 'false'");
@@ -128,6 +130,53 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     }
     expect(workflow.jobs['build-test'].steps[0].env.OFFLINE_CONTINUITY_RESULT)
       .toBe('${{ needs.offline-continuity.result }}');
+  });
+
+  it('restores same-run dependencies without spending acceptance time recompiling', () => {
+    const workflow = yaml.load(readFileSync(join(sourceRoot, '.github/workflows/ci.yml'), 'utf8'));
+    const build = workflow.jobs['build-typecheck'];
+    const acceptance = workflow.jobs['department-isolation-shards'];
+    expect(acceptance.needs).toEqual(['ci-scope', 'build-typecheck']);
+    expect(acceptance['timeout-minutes']).toBe(10);
+    const step = (job: any, name: string) => job.steps.find((item: { name?: string }) => item.name === name);
+    const upload = step(build, 'Retain database test dependencies');
+    const download = step(acceptance, 'Download database test dependencies');
+    expect(upload.uses).toBe('actions/upload-artifact@v4');
+    expect(download.uses).toBe('actions/download-artifact@v4');
+    expect(upload.with.name).toBe('database-test-dependencies-${{ github.sha }}');
+    expect(download.with.name).toBe(upload.with.name);
+    expect(upload.with['if-no-files-found']).toBe('error');
+    expect(download.with.path).toBe('${{ runner.temp }}');
+    expect(acceptance.steps.some((item: { run?: string }) => item.run?.includes('turbo run build'))).toBe(false);
+    for (const transfer of [upload, download]) {
+      expect(transfer['continue-on-error']).not.toBe(true);
+      expect(transfer.if).toBeUndefined();
+    }
+
+    const directory = mkdtempSync(join(tmpdir(), 'ci-dependency-transfer-'));
+    const producer = join(directory, 'producer'), consumer = join(directory, 'consumer');
+    const runnerTemp = join(directory, 'artifacts');
+    for (const path of [producer, consumer, runnerTemp]) mkdirSync(path);
+    const outputs = ['packages/api/dist/routes/nested.js', 'packages/core/dist/skills/builtin/SKILL.md'];
+    try {
+      for (const path of outputs) {
+        mkdirSync(join(producer, path, '..'), { recursive: true });
+        writeFileSync(join(producer, path), `compiled ${path}`, { mode: 0o755 });
+      }
+      const run = (script: string, cwd: string) => spawnSync('bash', ['-e', '-c', script], {
+        cwd, env: { ...process.env, RUNNER_TEMP: runnerTemp }, encoding: 'utf8',
+      });
+      const archive = step(build, 'Archive database test dependencies').run;
+      const restore = step(acceptance, 'Restore database test dependencies').run;
+      expect(run(archive, producer).status).toBe(0);
+      expect(run(restore, consumer).status).toBe(0);
+      for (const path of outputs) {
+        expect(readFileSync(join(consumer, path), 'utf8')).toBe(`compiled ${path}`);
+        expect(statSync(join(consumer, path)).mode & 0o777).toBe(0o755);
+      }
+      rmSync(join(runnerTemp, 'database-test-dependencies.tgz'));
+      expect(run(restore, consumer).status).not.toBe(0);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
   it('fails the aggregate for every unsuccessful selected lane and unknown selection', () => {

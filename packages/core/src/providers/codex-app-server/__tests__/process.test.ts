@@ -9,7 +9,7 @@ import {
   resolvePinnedCodexCommand,
   startCodexAppServer,
 } from '../process.js'
-import { PINNED_CODEX_VERSION, PINNED_CODEX_CATALOG_VERSION } from '../protocol.js'
+import { PINNED_CODEX_VERSION } from '../protocol.js'
 
 const fakeServer = fileURLToPath(new URL('./fixtures/fake-codex-app-server.mjs', import.meta.url))
 const cleanupPaths: string[] = []
@@ -77,8 +77,6 @@ describe('[COMP:providers/codex-process] managed Codex app-server process', () =
 
   it('keeps discovery and inference on the same cache-compatible runtime pin', async () => {
     const command = await resolvePinnedCodexCommand('account')
-    expect(PINNED_CODEX_CATALOG_VERSION).toBe('0.165.0')
-    expect(PINNED_CODEX_CATALOG_VERSION).toBe(PINNED_CODEX_VERSION)
     const manifest = JSON.parse(await readFile(new URL('../../../../package.json', import.meta.url), 'utf8'))
     expect(manifest.dependencies['@openai/codex']).toBe(PINNED_CODEX_VERSION)
     expect(manifest.dependencies['@openai/codex-catalog']).toBe(`npm:@openai/codex@${PINNED_CODEX_VERSION}`)

@@ -34,7 +34,7 @@ Issuance responses use `Cache-Control: no-store`. Authority identifiers and sour
 
 ### Database rollout
 
-Apply `8240_external_human_approvals.sql` and then `8241_workspace_external_approval_sources.sql` through the normal reviewed migration process. The first adds the immutable transport sidecar; the second adds workspace registrations. Previously provisioned server allowlist entries are not automatically imported: register applications through workspace settings and replace their caller credentials.
+Apply `8241_external_human_approvals.sql` and then `8242_workspace_external_approval_sources.sql` through the normal reviewed migration process. The first adds the immutable transport sidecar; the second adds workspace registrations. Both native and embedded runners recognize the previous filenames `8240_external_human_approvals.sql` and `8241_workspace_external_approval_sources.sql`, preserving their existing ledger timestamps without replaying applied DDL. Existing workspace registrations and credentials remain valid; do not delete or rewrite the migration ledger to force a replay. Previously provisioned server allowlist entries are not automatically imported: register those applications through workspace settings and replace their caller credentials.
 
 Both sidecars enable RLS without tenant policies: transport data and credential digests are owner/service-only. The controlled implementation uses `getPool()` (`DATABASE_URL`, schema owner), not `getAppPool()` (`DATABASE_URL_APP`, non-owner `app_user`). Do not grant tenant access to these tables or disable RLS. Existing queue projections retain tenant RLS plus the assigned human and current-source checks. No live migration or credential provisioning is implied by these implementation instructions.
 
@@ -71,11 +71,17 @@ Receipts are separate from human decisions. Both approval and denial can be ackn
 
 ## Focused verification
 
-From `packages/api`, with existing dependencies (130 focused protocol, management, SQL, channel-routing and migration-order tests):
+From `packages/api`, with existing dependencies (138 focused protocol, management, SQL, channel-routing and migration compatibility tests):
 
 ```sh
-NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/vitest run src/external-approvals/__tests__ src/workflow/__tests__/approval-replies.test.ts src/workflow/__tests__/approval-deliveries.test.ts src/workflow/__tests__/recent-approval-channel.test.ts src/routes/__tests__/approvals.test.ts src/routes/__tests__/channel-workflow-replies.test.ts scripts/__tests__/migration-order.test.ts --maxWorkers=1
+NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/vitest run src/external-approvals/__tests__ src/workflow/__tests__/approval-replies.test.ts src/workflow/__tests__/approval-deliveries.test.ts src/workflow/__tests__/recent-approval-channel.test.ts src/routes/__tests__/approvals.test.ts src/routes/__tests__/channel-workflow-replies.test.ts scripts/__tests__/migration-order.test.ts scripts/__tests__/migration-renames.test.ts --maxWorkers=1
 NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/tsc --noEmit
+```
+
+From `apps/api`, after building package dependencies, verify fresh and previously applied embedded migration filenames without a live database:
+
+```sh
+node --import tsx --test src/__tests__/migration-renames.test.ts
 ```
 
 From `apps/app-web` (58 focused tests, including workspace registration and existing cache/filter regressions):

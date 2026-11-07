@@ -10,7 +10,6 @@ import { z } from 'zod'
  * only when Brian starts consuming that method.
  */
 export const PINNED_CODEX_VERSION = '0.165.0'
-export const PINNED_CODEX_CATALOG_VERSION = PINNED_CODEX_VERSION
 
 const RpcIdSchema = z.union([z.string(), z.number().finite()])
 

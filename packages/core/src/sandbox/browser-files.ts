@@ -11,7 +11,7 @@ export const BrowserDownloadsSchema = z.object({ downloads: z.array(z.object({
 })).max(20) }).refine(v => new Set(v.downloads.map(d => d.id)).size === v.downloads.length &&
   v.downloads.reduce((sum, d) => sum + d.size, 0) <= 128 * 1024 * 1024, 'Invalid download inventory')
 export type BrowserDownloads = z.infer<typeof BrowserDownloadsSchema>
-export const BrowserDownloadChunkSchema = z.object({
+const BrowserDownloadChunkSchema = z.object({
   data: z.string().max(4 * Math.ceil(BROWSER_DOWNLOAD_CHUNK / 3)),
   offset: z.number().int().min(0).max(MAX_BROWSER_DOWNLOAD),
   total: z.number().int().min(0).max(MAX_BROWSER_DOWNLOAD),

@@ -383,7 +383,7 @@ describe("[COMP:app-web/page-comments] posting hands the comment to the thread b
       act(() => toggle.click());
       expect(toggle.getAttribute("aria-pressed")).toBe("false");
       expect(trigger.disabled).toBe(true);
-      expect(container!.querySelector(`[aria-label="${dict.attachments.attach}"]`)).toBeNull();
+      expect(container!.querySelector(`[aria-label="${dict.attachments.attach}"]`)).not.toBeNull();
       expect(textarea.value).toBe("Keep this comment unsent");
       const send = container!.querySelector<HTMLButtonElement>(`[aria-label="${dict.comments.send}"]`)!;
       expect(send.disabled).toBe(false);

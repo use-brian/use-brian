@@ -671,6 +671,11 @@ export function officeTemplateListCacheKey(workspaceId: string, viewerId = getUs
   return `office-templates:${workspaceId}:${viewerId ?? ""}`;
 }
 
+/** Published snapshots share the template collection's authority invalidation. */
+export function officePublishedTemplateCacheKey(workspaceId: string, viewerId: string, templateId: string, versionId: string): string {
+  return `${officeTemplateListCacheKey(workspaceId, viewerId)}:version:${templateId}:${versionId}`;
+}
+
 /**
  * Cache key for one Office home list (`listOfficeArtifacts(workspaceId, view)`).
  *

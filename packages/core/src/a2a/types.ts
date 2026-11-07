@@ -185,7 +185,7 @@ export type ConsultChain = {
  * (free-text conversation, full tool surface, conversational reply).
  */
 /** Server-created parent reference. Never accepted by the external A2A schema. */
-export type WorkspaceCredentialParent = {
+type WorkspaceCredentialParent = {
   kind: 'brain_key' | 'assistant_key' | 'oauth_token'
   credentialId: string
   revision: string

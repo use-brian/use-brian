@@ -706,6 +706,7 @@ import { officeJobStreamRead, officeJobStreamRoutes } from './routes/office-job-
 import { officeConversationRoutes } from './routes/office-conversation.js'
 import { ensureOfficeArtifactSessionSystem, findOfficeArtifactSessionSystem } from './db/office-artifact-sessions.js'
 import { startOfficeJobEventBus } from './office/job-event-bus.js'
+import { createPublishedOfficeTemplateReader } from './office/published-template.js'
 import { officeTemplateRoutes } from './routes/office-templates.js'
 import { createOfficeCommentAnchorWriter } from './office/comment-anchor-storage.js'
 import { createOfficeCommentVersionResolver } from './office/comment-version.js'
@@ -8021,7 +8022,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     retry: officeGenerationStore.retryTemplateImport,
     wake: wakeTemplateCompile,
   })
+  const readPublishedOfficeTemplate = createPublishedOfficeTemplateReader({
+    getTemplate: officeTemplateStore.get,
+    getVersion: officeTemplateStore.getVersion,
+    readBundle: readOfficeTemplateBundle,
+  })
   app.use('/api/office', requireAuth(env.JWT_SECRET), officeTemplateRoutes({
+    readPublished: readPublishedOfficeTemplate,
     list: officeTemplateStore.list,
     retryImport: retryOfficeTemplateImport,
     getTemplate: officeTemplateStore.get,
@@ -8144,13 +8151,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
   const readOfficeResource = officeReleaseRuntime?.readOfficeResource ?? (async () => null)
   if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeResourceRoutes({
-    async load(userId, artifactId) {
+    async load(userId, artifactId, published) {
       const [artifact, access, live] = await Promise.all([
         officeArtifactStore.get(userId, artifactId),
         resolveDurableOfficeAccess(userId, artifactId),
         officeLiveStore.get(userId, artifactId),
       ])
-      return artifact && access && live ? { artifact, access, snapshot: live.snapshot } : null
+      if (!artifact || !access) return null
+      if (published) {
+        const template = await officeTemplateStore.get(userId, published.templateId)
+        if (template?.draftArtifactId !== artifactId) return null
+        const source = await readPublishedOfficeTemplate(userId, published.templateId, published.versionId)
+        return source ? { artifact, access, snapshot: source.bundle.snapshot } : null
+      }
+      return live ? { artifact, access, snapshot: live.snapshot } : null
     },
     async readUpload(userId, workspaceId, fileId) {
       return readBoundOfficeFile!({ userId, workspaceId, fileId })

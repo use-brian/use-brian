@@ -92,6 +92,20 @@ describe('[COMP:api/office-resources] Office image admission', () => {
     expect(test.deps.persistImage).not.toHaveBeenCalled()
   })
 
+  it('binds published resource reads to the requested version on both authorization checks', async () => {
+    const test = server();
+    const published = { templateId: FILE, versionId: RESOURCE };
+    const context = { artifact: { workspaceId: WORKSPACE }, snapshot: { resources: [{ id: RESOURCE, hash: test.image.hash, mime: test.image.mime }] } };
+    vi.mocked(test.deps.load).mockImplementation(async (_user, _artifact, source) => source?.templateId === FILE && source.versionId === RESOURCE ? context as never : null);
+    const path = `/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}?templateId=${FILE}&versionId=${RESOURCE}`;
+    await request(test.app).get(path).expect(200);
+    expect(test.deps.load).toHaveBeenNthCalledWith(1, USER, ARTIFACT, published);
+    expect(test.deps.load).toHaveBeenNthCalledWith(2, USER, ARTIFACT, published);
+    await request(test.app).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}?templateId=${FILE}`).expect(400);
+    vi.mocked(test.deps.load).mockResolvedValueOnce(context as never).mockResolvedValueOnce(null);
+    await request(test.app).get(path).expect(404);
+  });
+
   it('serves only exact persisted bytes referenced by the live snapshot', async () => {
     const test = server()
     vi.mocked(test.deps.load).mockResolvedValue({ artifact: { workspaceId: WORKSPACE }, snapshot: { resources: [{ id: RESOURCE, hash: test.image.hash, mime: test.image.mime }] } } as never)

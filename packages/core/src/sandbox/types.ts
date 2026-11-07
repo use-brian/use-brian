@@ -1,3 +1,4 @@
+import type { BrowserDownloads } from './browser-files.js'
 import type { AuthoritySource } from '../security/authority-source.js'
 import type { AuthoringAuthority } from '../security/access-ceiling.js'
 import type { CurrentAuthorityBoundary } from '../tools/types.js'
@@ -212,7 +213,7 @@ export const NO_EXTENSION_MESSAGE = `No browser is connected for this browser pr
  * cloud mode resolves the task's sandbox per call (stateless orchestrator).
  */
 export interface BrowserProvider {
-  listDownloads?(ctx: BrowserCallContext): Promise<import('./browser-files.js').BrowserDownloads>
+  listDownloads?(ctx: BrowserCallContext): Promise<BrowserDownloads>
   readDownload?(ctx: BrowserCallContext, id: string, offset: number): Promise<import('./browser-files.js').BrowserDownloadChunk>
   uploadFile?(ctx: BrowserCallContext, ref: string, name: string, data: string): Promise<void>
   readonly kind: 'local' | 'cloud'

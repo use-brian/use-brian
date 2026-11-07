@@ -11,3 +11,5 @@ export const officeDialogBackdropClassName = "fixed inset-0 z-50 bg-background/8
 export const officeDialogClassName = "fixed inset-0 z-50 h-dvh w-full overflow-y-auto bg-background p-5 outline-none sm:inset-auto sm:left-1/2 sm:top-1/2 sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:w-[calc(100%-2rem)] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl sm:border sm:p-6 sm:shadow-xl sm:ring-1 sm:ring-foreground/5";
 export const officeWarningClassName = "border-amber-500/25 bg-amber-500/10 text-amber-800 dark:text-amber-200";
 export const officeFamilyBadgeClassName = "absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md border border-border bg-background/95 px-2 py-1 text-xs font-medium text-foreground shadow-sm";
+export const officeCardSelectionTargetClassName = "absolute right-1 top-1 z-10 flex size-7 cursor-pointer items-center justify-center max-md:right-0 max-md:top-0 max-md:size-11";
+export const officeSelectionCheckboxClassName = "size-3.5 rounded-[4px] bg-background/95";

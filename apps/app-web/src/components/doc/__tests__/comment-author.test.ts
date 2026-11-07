@@ -33,6 +33,13 @@ function msg(over: Partial<DocSessionMessage>): DocSessionMessage {
 }
 
 describe("[COMP:app-web/comment-thread-body] resolveCommentAuthor", () => {
+  it("keeps a past answering voice when the selected assistant changes", () => {
+    const author = resolveCommentAuthor({ role: "assistant", senderUserId: null, senderName: null, senderAssistantId: "old-voice" }, {
+      assistant: { id: "current-voice", name: "Current voice", isAssistant: true },
+      assistants: [{ id: "old-voice", name: "Previous voice", iconSeed: 4, kind: "standard", appType: null }],
+    });
+    expect(author).toMatchObject({ id: "old-voice", name: "Previous voice", iconSeed: 4 });
+  });
   it("returns the assistant identity for assistant rows", () => {
     const a = resolveCommentAuthor(msg({ role: "assistant" }), {
       currentUser: { id: "u1", name: "Ada" },

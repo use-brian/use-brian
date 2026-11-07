@@ -10,8 +10,8 @@ export async function preparedIdentity(): Promise<string> {
   const migrations = (await readdir(new URL('packages/api/migrations/', root))).filter(name => name.endsWith('.sql')).sort()
   const hash = createHash('sha256')
   for (const path of ['pnpm-lock.yaml', 'apps/api/src/migrate-pglite.ts',
-    'packages/api/src/migrations/pglite-sql.ts', 'apps/api/src/__tests__/prepared-pglite.ts',
-    'apps/api/src/__tests__/migration-owner-role.test.ts', ...migrations.map(name => `packages/api/migrations/${name}`)]) {
+    'packages/api/src/migrations/pglite-sql.ts', 'packages/api/src/migrations/renames.ts', 'packages/api/src/migrations/execution-sql.ts', 'apps/api/src/__tests__/prepared-pglite.ts',
+    'apps/api/src/__tests__/migration-owner-role.test.ts', 'apps/api/src/__tests__/migration-owner-groups.ts', ...migrations.map(name => `packages/api/migrations/${name}`)]) {
     hash.update(path).update('\0').update(await readFile(new URL(path, root))).update('\0')
   }
   return hash.digest('hex')

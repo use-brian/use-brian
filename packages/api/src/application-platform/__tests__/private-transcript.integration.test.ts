@@ -9,6 +9,9 @@ import {createPendingApprovalsStore} from '../../db/pending-approvals-store.js'
 import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
 import * as queryFrames from '../../db/session-context-revisions.js'
 import * as storedSessions from '../../db/sessions.js'
+import * as audience from '../../context-scope/attended-audience.js'
+import {createResponseDeliveryAdmission} from '../../context-scope/response-delivery-admission.js'
+import {takeTurnLease,releaseTurn} from '../../turn/lease.js'
 import {boundScopeSources,ContextScopeAccumulator,executionToolContext} from '@use-brian/core'
 import {getAppPool,getPool} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
@@ -17,6 +20,7 @@ import {createDbMemoryStore} from '../../db/memory-store.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
 import {readPrivateTranscript} from '../../db/private-transcript.js'
+import * as privateTranscripts from '../../db/private-transcript.js'
 import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
 import {readAttendedSessionHistory,captureAttendedSessionClassification,assessAttendedSessionMessage,readClassifiedSessionHistory} from '../../routes/attended-session-context.js'
 import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../model-source-authority.js'
@@ -118,14 +122,71 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
   await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.reply.id])
   await expect(assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fictional-hold'}),scopeAccumulator:authority.accumulator})).rejects.toBeTruthy()
  })
- it.each(['edit','delete','membership','device','recording'])('refuses current transcript authority withdrawal: %s',async change=>{
+ it('rechecks dialogue on every chunk while admitting the mixed native cohort once',async()=>{
   const c=await setup(),authority=await c.fresh()
   await readPrivateTranscript(authority,c.session.id,c.reply.sequenceNum)
+  const index=await createDbMemoryStore().getIndex(authority.execution.security.access,false,authority)
+  authority.accumulator.note({sources:boundScopeSources(index)})
+  expect(authority.accumulator.evidence.sources?.some(source=>source.resourceKind==='application_field')).toBe(true)
+  const admit=vi.spyOn(audience,'validateAttendedAudienceEvidence')
+  const delivery=createResponseDeliveryAdmission(authority.execution,authority.accumulator,c.session)!
+  const context={...executionToolContext(authority.execution,{appId:'fictional-streaming-dialogue'}),scopeAccumulator:authority.accumulator}
+  await delivery.assertOutputAuthority(context)
+  const initial=admit.mock.calls.length
+  for(let chunk=0;chunk<5;chunk++)await delivery.assertOutputAuthority(context)
+  expect(admit.mock.calls.slice(initial).map(call=>call[1].sources?.map(source=>source.resourceKind))).toEqual(
+   Array.from({length:5},()=>['private_transcript']))
+  // The first event must also validate the ordinary current sources.
+  expect(admit.mock.calls.slice(0,initial).some(call=>call[1].sources?.some(source=>source.resourceKind==='application_field'))).toBe(true)
+ })
+ it.each([false,true])('releases transcript locks between events and observes withdrawal during native admission (withdraw=%s)',async withdraw=>{
+  const c=await setup(),authority=await c.fresh()
+  await readPrivateTranscript(authority,c.session.id,c.reply.sequenceNum)
+  const index=await createDbMemoryStore().getIndex(authority.execution.security.access,false,authority)
+  authority.accumulator.note({sources:boundScopeSources(index)})
+  const lease=await takeTurnLease({sessionId:c.session.id,admission:'personal',assistantId:c.f.assistantId})
+  if(!lease.taken)throw new Error('Fixture turn was not admitted')
+  const delivery=createResponseDeliveryAdmission(authority.execution,authority.accumulator,c.session)!
+  const context={...executionToolContext(authority.execution,{appId:'fictional-heartbeat'}),scopeAccumulator:authority.accumulator}
+  await delivery.assertOutputAuthority(context)
+  // A distinct, still valid transcript capture changes the evidence footprint.
+  await readPrivateTranscript(authority,c.session.id,c.input.sequenceNum)
+  let entered!:()=>void,finish!:()=>void
+  const enteredNative=new Promise<void>(resolve=>{entered=resolve}),resume=new Promise<void>(resolve=>{finish=resolve})
+  const original=audience.validateAttendedAudienceEvidence
+  vi.spyOn(audience,'validateAttendedAudienceEvidence').mockImplementation(async(...args)=>{
+   if(args[1].sources?.every(source=>source.resourceKind!=='private_transcript')){entered();await resume}
+   return original(...args)
+  })
+  const pending=delivery.assertOutputAuthority(context)
+  // Attach the rejection observer before opening the controlled race.
+  const outcome=withdraw?expect(pending).rejects.toBeTruthy():expect(pending).resolves.toBeUndefined()
+  let tick:ReturnType<typeof storedSessions.touchTurnLease>|undefined
+  try{
+   await enteredNative
+   // A leaked FOR SHARE transcript lock would block the production heartbeat
+   // writer until the paused delivery resumes. It must finish independently.
+   let finished=false
+   tick=storedSessions.touchTurnLease(c.session.id,lease.token).then(value=>{finished=true;return value})
+   await expect.poll(()=>finished,{timeout:1000}).toBe(true)
+   expect(await tick).toEqual({held:true,cancelRequested:false})
+   if(withdraw)await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.reply.id])
+  }finally{finish();await outcome;await tick;await releaseTurn(c.session.id,lease.token,'completed')}
+ })
+ it.each(['edit','delete','message-hold','membership','device','recording'])('refuses current transcript authority withdrawal: %s',async change=>{
+  const c=await setup(),authority=await c.fresh()
+  await readPrivateTranscript(authority,c.session.id,c.reply.sequenceNum)
+  const delivery=createResponseDeliveryAdmission(authority.execution,authority.accumulator,c.session)!
+  const context={...executionToolContext(authority.execution,{appId:'fictional-live-dialogue'}),scopeAccumulator:authority.accumulator}
+  await delivery.assertOutputAuthority(context)
   if(change==='edit')await c.f.pool.query('UPDATE session_messages SET content=$2 WHERE id=$1',[c.reply.id,JSON.stringify([{type:'text',text:'Edited utterance'}])])
   if(change==='delete')await c.f.pool.query('DELETE FROM session_messages WHERE id=$1',[c.reply.id])
+  if(change==='message-hold')await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.reply.id])
   if(change==='membership')await c.f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[c.f.workspaceId,c.userId])
   if(change==='device')await authSessionStore.revokeForUser(c.userId,c.device.id)
   if(change==='recording')await c.f.pool.query('UPDATE sessions SET recording_privacy_held=true WHERE id=$1',[c.session.id])
+  await expect(delivery.assertOutputAuthority(context)).rejects.toBeTruthy()
+  await expect(delivery.assertOutputAuthority(context)).rejects.toBeTruthy()
   await expect(assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fictional-withdrawal'}),scopeAccumulator:authority.accumulator})).rejects.toBeTruthy()
  })
  it('keeps captures bounded, deduplicated and unavailable to direct app-role writes',async()=>{
@@ -166,7 +227,7 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
   expect(summary?.summary).toContain('amber notebook')
   expect(summary?.boundarySequence).toBe(next.sequenceNum)
  },120_000)
- it.each(['ordinary','compacted','history-timeout','summary-timeout'])('passes old dialogue to the actual web provider: %s',async mode=>{
+ it.each(['ordinary','greeting','retry','channel-retry','compacted','history-timeout','summary-timeout'])('passes old dialogue to the actual web provider: %s',async mode=>{
   const compacted=mode==='compacted'||mode==='summary-timeout'
   const c=await setup()
   if(compacted)expect(await setCompactSummaryAndBoundary(c.session.id,'The office opens at nine; amber notebook selected.',c.reply.sequenceNum,null,
@@ -188,7 +249,9 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
    })
   }
   const calls:Message[][]=[]
-  const chunks=(text:string):StreamChunk[]=>[{type:'message_start',model:'fixture'},{type:'text_delta',text},
+  const chunks=(text:string):StreamChunk[]=>[{type:'message_start',model:'fixture'},
+   {type:'thinking_delta',text:'Considering the conversation.'},
+   ...text.split(' ').map((word,index)=>({type:'text_delta' as const,text:(index?' ':'')+word})),
    {type:'message_end',stopReason:'end_turn',usage:{inputTokens:10,outputTokens:5}}]
   const provider:LLMProvider={name:'fictional-continuity',models:['fixture'],
    stream:async function*(){yield* chunks('Fictional notebook discussion')},
@@ -198,13 +261,33 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
   })
   app.use('/chat',chatRoutes({provider,systemPrompt:'Continue the fictional private conversation.',tools:new Map(),
    memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore(),pendingApprovalsStore:createPendingApprovalsStore()}))
-  const response=await request(app).post('/chat').send({sessionId:c.session.id,assistantId:c.f.assistantId,workspaceId:c.f.workspaceId,
-   message:'Which notebook did we choose earlier?',mode:'default',model:'pro'})
+  const replay=mode==='retry'||mode==='channel-retry'
+  const resume=vi.spyOn(privateTranscripts,'resumePrivateLegacySession')
+  const failedInput=replay?await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'hi?'}],senderUserId:c.userId,scope:c.scope}):undefined
+  const target=mode==='channel-retry'?{channelId:c.session.channelId}:{sessionId:c.session.id}
+  const response=await request(app).post('/chat').send({...target,assistantId:c.f.assistantId,workspaceId:c.f.workspaceId,
+   ...(failedInput?{truncateFromMessageId:failedInput.id}:{}),
+   message:mode==='greeting'||replay?'hi?':'Which notebook did we choose earlier?',mode:'default',model:'pro'})
   expect(response.status,response.text).toBe(200)
   expect(response.text).not.toContain('event: error')
+  expect(resume).not.toHaveBeenCalled()
   expect(calls.length,response.text).toBeGreaterThan(0)
   expect(JSON.stringify(calls[0])).toContain('We chose the amber notebook. The office opens at nine.')
-  expect((await readAttendedSessionHistory(await c.fresh(),c.session.id)).at(-1)?.content).toEqual([{type:'text',text:'We chose the amber notebook.'}])
+  const history=await readAttendedSessionHistory(await c.fresh(),c.session.id)
+  expect(history.at(-1)?.content).toEqual([{type:'text',text:'We chose the amber notebook.'}])
+  if(failedInput){
+   expect(history.map(row=>row.id)).not.toContain(failedInput.id)
+   expect(history.map(row=>row.id)).toContain(c.reply.id)
+   const replacement=history.at(-2)!
+   const replayed=await request(app).post('/chat').send({...target,assistantId:c.f.assistantId,workspaceId:c.f.workspaceId,
+    truncateFromMessageId:replacement.id,message:'hi?',mode:'default',model:'pro'})
+   expect(replayed.text).not.toContain('event: error')
+   expect(resume).not.toHaveBeenCalled()
+   const after=await readAttendedSessionHistory(await c.fresh(),c.session.id)
+   expect(after.map(row=>row.id)).not.toContain(replacement.id)
+   expect(after.map(row=>row.id)).toContain(c.reply.id)
+   expect(after.at(-1)?.content).toEqual([{type:'text',text:'We chose the amber notebook.'}])
+  }
  },120_000)
 
 })

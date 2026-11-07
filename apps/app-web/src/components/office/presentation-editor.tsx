@@ -132,6 +132,21 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   }, [slide.id, slideId, snapshot.slides]);
 
   useEffect(() => {
+    const rail = railRef.current;
+    const index = snapshot.slides.findIndex(item => item.id === slideId);
+    const thumbnail = rail?.querySelector<HTMLElement>(`[data-slide-index="${index}"]`);
+    if (!rail || !thumbnail) return;
+    const bounds = rail.getBoundingClientRect(), item = thumbnail.getBoundingClientRect();
+    if (isPhoneViewport()) {
+      if (item.left < bounds.left) rail.scrollLeft -= bounds.left - item.left;
+      else if (item.right > bounds.right) rail.scrollLeft += item.right - bounds.right;
+    } else {
+      if (item.top < bounds.top) rail.scrollTop -= bounds.top - item.top;
+      else if (item.bottom > bounds.bottom) rail.scrollTop += item.bottom - bounds.bottom;
+    }
+  }, [slideId, snapshot.slides]);
+
+  useEffect(() => {
     onSelectTargets?.(selectedObjectIds.length ? selectedObjectIds : selectedSlideIds.length ? selectedSlideIds : [slide.id]);
   }, [onSelectTargets, selectedObjectIds, selectedSlideIds, slide.id]);
 
@@ -546,10 +561,10 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
   }
 
   return (
-    <div ref={rootRef} className={cn("flex min-h-0 min-w-0 flex-1 flex-col md:grid md:grid-cols-[var(--presentation-slide-rail-width)_0.5rem_minmax(0,1fr)]", railResizing && "select-none")} style={{ "--presentation-slide-rail-width": `${railWidth}px` } as CSSProperties} data-office-editor="presentation" data-properties-open={primary ? "true" : "false"} tabIndex={-1}>
+    <div ref={rootRef} className={cn("flex min-h-0 min-w-0 flex-1 flex-col md:grid md:grid-rows-[minmax(0,1fr)] md:grid-cols-[var(--presentation-slide-rail-width)_0.5rem_minmax(0,1fr)]", railResizing && "select-none")} style={{ "--presentation-slide-rail-width": `${railWidth}px` } as CSSProperties} data-office-editor="presentation" data-properties-open={primary ? "true" : "false"} tabIndex={-1}>
       {/* Below md the rail is a horizontal filmstrip above the canvas (report
           B row 18): a permanent 104px side rail left a 224px canvas at 360. */}
-      <nav ref={railRef} data-slide-rail="true" className="flex shrink-0 gap-2 overflow-x-auto border-b bg-muted/30 p-2 md:block md:min-h-0 md:overflow-y-auto md:border-b-0" aria-label={t.slideRail} onPointerMove={updateSlideDrag} onPointerUp={finishSlideDrag} onPointerCancel={cancelSlideDrag}>
+      <nav ref={railRef} data-slide-rail="true" className="flex shrink-0 gap-2 overflow-x-auto border-b bg-muted/30 p-2 md:block md:min-h-0 md:overflow-x-hidden md:overflow-y-auto md:overscroll-contain md:border-b-0" aria-label={t.slideRail} onPointerMove={updateSlideDrag} onPointerUp={finishSlideDrag} onPointerCancel={cancelSlideDrag}>
         {snapshot.slides.map((item, index) => {
           const sourceIndex = dragSlideId ? snapshot.slides.findIndex((candidate) => candidate.id === dragSlideId) : -1;
           const insertion = dragSlideIndex === index && sourceIndex !== index ? index < sourceIndex ? "before" : "after" : undefined;
@@ -557,7 +572,7 @@ export function PresentationEditor({ snapshot, baseVersion, role, suggestMode, o
           <PresentationSlideVisual artifactId={snapshot.artifactId} slide={item} slideSize={snapshot.slideSize} className="pointer-events-none h-full w-full" />
           <span aria-hidden className="absolute left-1 top-1 z-20 rounded bg-background/80 px-1 text-[9px] leading-4 text-foreground shadow-sm">{index + 1}</span>
           {insertion ? <span aria-hidden data-slide-drop-indicator={insertion} className={cn("pointer-events-none absolute z-40 bg-primary shadow-[0_0_0_1px_hsl(var(--background))] max-md:inset-y-0 max-md:w-1 md:inset-x-0 md:h-1", insertion === "before" ? "max-md:left-0 md:top-0" : "max-md:right-0 md:bottom-0")} /> : null}
-          <button type="button" aria-label={`${index + 1}: ${item.title}`} aria-pressed={selectedSlideIds.includes(item.id)} onPointerDown={(event) => { if (event.button !== 0) return; selectSlide(item.id, event.shiftKey); if (event.shiftKey) return; if (event.pointerType === "touch") { beginSlideHold(event, item.id, index); return; } setDragSlideId(item.id); setDragSlideIndex(index); event.currentTarget.setPointerCapture?.(event.pointerId); event.preventDefault(); }} className="absolute inset-0 z-30 cursor-grab touch-pan-x active:cursor-grabbing md:touch-none"><span className="sr-only">{item.title}</span></button>
+          <button type="button" aria-label={`${index + 1}: ${item.title}`} aria-pressed={selectedSlideIds.includes(item.id)} onClick={event => { if (event.detail === 0) selectSlide(item.id, event.shiftKey); }} onPointerDown={(event) => { if (event.button !== 0) return; selectSlide(item.id, event.shiftKey); if (event.shiftKey) return; if (event.pointerType === "touch") { beginSlideHold(event, item.id, index); return; } setDragSlideId(item.id); setDragSlideIndex(index); event.currentTarget.setPointerCapture?.(event.pointerId); event.preventDefault(); }} className="absolute inset-0 z-30 cursor-grab touch-pan-x active:cursor-grabbing md:touch-pan-y"><span className="sr-only">{item.title}</span></button>
         </div>;
         })}
         <button type="button" onClick={addSlide} disabled={!canChange} className={buttonVariants({ variant: "outline", size: "sm", className: "w-28 shrink-0 border-dashed" })}><Plus className="size-3" />{t.newSlide}</button>

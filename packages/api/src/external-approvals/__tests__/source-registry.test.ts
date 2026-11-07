@@ -29,7 +29,7 @@ beforeAll(async()=>{
   await db.query('INSERT INTO assistants VALUES($1,$2)',[assistantId,workspaceId])
   await db.query("INSERT INTO workspace_members VALUES($1,$2,'admin'),($1,$3,'member')",[workspaceId,userId,approverUserId])
   await db.query("INSERT INTO auth_sessions(id,user_id,expires_at) VALUES($1,$2,clock_timestamp()+interval '1 day')",[sessionId,userId])
-  await db.exec(readFileSync(new URL('../../../migrations/8241_workspace_external_approval_sources.sql',import.meta.url),'utf8'))
+  await db.exec(readFileSync(new URL('../../../migrations/8242_workspace_external_approval_sources.sql',import.meta.url),'utf8'))
 },30000)
 afterAll(()=>db.close())
 describe('[COMP:api/external-approvals] workspace source registry',()=>{

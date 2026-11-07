@@ -31,12 +31,16 @@ export function cleanRuntimeEnvironment(env) {
     .filter((key) => env[key] !== undefined).map((key) => [key, env[key]]))
 }
 
-export async function runCommand(command, args, { env, cwd = ossRoot, logPath, inherit = false } = {}) {
+export async function runCommand(command, args, { env, cwd = ossRoot, logPath, inherit = false, onOutput } = {}) {
   return new Promise((accept, reject) => {
     const child = spawn(command, args, { cwd, env, shell: false, stdio: inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'] })
     let output = ''
     if (!inherit) {
-      const capture = (chunk) => { output = (output + chunk.toString()).slice(-10_000_000) }
+      const capture = (chunk) => {
+        const text = chunk.toString()
+        output = (output + text).slice(-10_000_000)
+        try { onOutput?.(text) } catch (error) { child.kill('SIGTERM'); reject(error) }
+      }
       child.stdout.on('data', capture)
       child.stderr.on('data', capture)
     }
@@ -63,7 +67,7 @@ async function availablePort() {
 }
 
 /** Creates only a new cluster. No caller-supplied database or data directory. */
-export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false, beforeApply, beforeApplyFile, runtimeRole = 'app_user', prepareTemplate = false } = {}) {
+export async function createLocalFixture({ pgBin, migrationDirs = [], env = process.env, walArchive = false, beforeApply, beforeApplyFile, runtimeRole = 'app_user', prepareTemplate = false, migrationProgress = false } = {}) {
   validateAmbientDatabase(env)
   if (runtimeRole !== 'app_user') throw new Error('Unsupported fixture runtime role')
   if ((beforeApply === undefined) !== (beforeApplyFile === undefined) || (beforeApply !== undefined && (typeof beforeApply !== 'function' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.sql$/.test(beforeApplyFile)))) throw new Error('Upgrade callback requires one explicit pending migration filename')
@@ -149,7 +153,17 @@ export async function createLocalFixture({ pgBin, migrationDirs = [], env = proc
         } })
         if (!boundarySeen) throw new Error('Upgrade boundary missing or already applied: ' + beforeApplyFile)
       } else {
-        await runCommand(process.execPath, ['--import', import.meta.resolve('tsx'), 'packages/api/scripts/migrate.ts'], { env: fixtureEnv, logPath: join(directory, 'migrations.log') })
+        let pending = ''
+        await runCommand(process.execPath, ['--import', import.meta.resolve('tsx'), 'packages/api/scripts/migrate.ts'], {
+          env: fixtureEnv, logPath: join(directory, 'migrations.log'),
+          onOutput: migrationProgress ? text => {
+            const lines = (pending + text).split('\n'); pending = lines.pop() ?? ''
+            for (const line of lines) {
+              const match = /^\s*apply: ([\w.-]+\.sql)$/.exec(line)
+              if (match) console.log(`Preparing database: ${match[1]}`)
+            }
+          } : undefined,
+        })
       }
       await activateRuntimeRole(connection, { password: appPassword })
     } finally { await connection.end() }

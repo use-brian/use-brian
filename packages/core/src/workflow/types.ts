@@ -839,7 +839,7 @@ export type WorkflowStepRunRecord = {
 // ── Store interfaces ────────────────────────────────────────────────────
 
 /** Trusted server-only creation context. Never deserialize from a request/tool body. */
-export type WorkflowCreateOptions = {
+type WorkflowCreateOptions = {
   /** API-minted transaction capability for canonical compound commands. */
   transaction?: object
   /** API-minted canonical Goal producer capability, never serialized. */
@@ -865,7 +865,7 @@ export type WorkflowCreateOptions = {
   }
 }
 
-export type WorkflowScheduleEditProof = {
+type WorkflowScheduleEditProof = {
   kind: 'authenticated-workflow-rest'
   userId: string
   authSessionId: string

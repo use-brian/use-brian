@@ -1,6 +1,6 @@
 /** Live microphone interaction wire contract. [COMP:recordings/live-interaction] */
 export const DEFAULT_INTERACTION_RULE = 'When I say Hey Brian, answer the question that follows.'
-export type InteractionSource = 'microphone' | 'system'
+type InteractionSource = 'microphone' | 'system'
 export type InteractionSettings = { rule: string }
 export type InteractionCapture = {
   id: string; workspaceId: string; pageId: string; chatSessionId: string; assistantId: string

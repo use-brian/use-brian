@@ -9,7 +9,6 @@ import {
   InitializeParamsSchema,
   InitializeResponseSchema,
   PINNED_CODEX_VERSION,
-  PINNED_CODEX_CATALOG_VERSION,
   type InitializeResponse,
 } from './protocol.js'
 import { CodexRpcClosedError, CodexRpcPeer } from './rpc.js'
@@ -241,7 +240,7 @@ export async function resolvePinnedCodexCommand(
 ): Promise<CodexCommand> {
   const require = createRequire(import.meta.url)
   const packageName = surface === 'account' ? '@openai/codex-catalog' : '@openai/codex'
-  const expectedVersion = surface === 'account' ? PINNED_CODEX_CATALOG_VERSION : PINNED_CODEX_VERSION
+  const expectedVersion = PINNED_CODEX_VERSION
   const packageJsonPath = surface === 'account'
     ? require.resolve('@openai/codex-catalog/package.json')
     : require.resolve('@openai/codex/package.json')

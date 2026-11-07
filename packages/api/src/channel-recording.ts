@@ -13,6 +13,7 @@ import { admitChannelRoom, admitSessionCreate } from './workspace-access/session
 import { WorkspaceAccessError } from './workspace-access/policy.js'
 import type { ChannelIntegrationConfig } from './db/channel-integrations.js'
 import { hasTelegramWorkspaceConversationBinding, telegramConfiguredConversation } from './telegram-conversation-admission.js'
+import { recoverTelegramRecordingOwner } from './channel-recording-owner.js'
 
 export type RecordingPolicy = {
   id: string; conversationId: string; enabled: boolean; destination: 'personal' | 'workspace';
@@ -24,6 +25,7 @@ const cols = `id,conversation_id AS "conversationId",enabled,destination,project
 const unavailable = () => new WorkspaceAccessError('recording_destination_unavailable', 409)
 
 async function liveOwner(db: Pick<PoolClient, 'query'>, integrationId: string) {
+  await recoverTelegramRecordingOwner(integrationId, db)
   return (await db.query<{ ownerUserId: string; workspaceId: string; botId: string }>(`SELECT ci.bot_user_id AS "botId",ci.recording_owner_user_id AS "ownerUserId",c.workspace_id AS "workspaceId"
     FROM channel_integrations ci JOIN channels c ON c.id=ci.channel_id
     JOIN workspace_members wm ON wm.workspace_id=c.workspace_id AND wm.user_id=ci.recording_owner_user_id
