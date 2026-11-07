@@ -1,4 +1,5 @@
 import express from 'express'
+import {createMemory} from '../../db/memories.js'
 import request from 'supertest'
 import {requireAuth} from '../../auth/middleware.js'
 import {createTokens} from '../../auth/jwt.js'
@@ -58,8 +59,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:tasks/tools] origi
     })
    }finally{await client.query('ROLLBACK');client.release()}
    // A changed original memory domain remains a refusal, never a widened read.
-   await x.f.pool.query(`INSERT INTO memories(workspace_id,user_id,summary,sensitivity,source,created_by_user_id)
-    VALUES($1,$2,'Fictional later Memory outside the retained empty domain','internal','user',$2)`,[x.f.workspaceId,x.f.ownerId])
+   await createMemory({workspaceId:x.f.workspaceId,userId:x.f.ownerId,assistantId:x.f.assistantId,createdByUserId:x.f.ownerId,summary:'Fictional later Memory outside the retained empty domain',sensitivity:'internal',source:'user'})
    await expect(listTasks(access,{limit:500})).rejects.toMatchObject({code:'access_unavailable'})
   }finally{await x.cleanup()}
  },60_000)
@@ -106,7 +106,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:tasks/tools] origi
   try{
    await x.f.pool.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2",[x.f.workspaceId,x.f.ownerId])
    await x.f.pool.query("UPDATE workspace_access_policies SET access_mode='departments',setup_state='ready' WHERE workspace_id=$1",[x.f.workspaceId])
-   let current=await originalMemoryAuthority(x)
+   let current=await originalMemoryAuthority(x,x.f.ownerId,false,{durableSession:true})
    await addSessionMessage({sessionId:current.session.id,role:'user',content:[{type:'text',text:'Review the permitted source record as a Task.'}],scope:sessionMessageInputScope({scope:current.turnScope,workspaceId:x.f.workspaceId,userId:x.f.ownerId})})
    const read=await current.runtime.read!('readRecord',{id:'record-1',fields:['description']},'governed')
    expect(JSON.stringify(read)).toContain('Fictional released fact')
@@ -146,7 +146,7 @@ describe.sequential('[COMP:api/application-persistence] [COMP:tasks/tools] origi
    expect(await authSessionStore.validateAccess({userId:x.f.ownerId,sessionId:viewerAuth!.id,authVersion:viewerAuth!.authVersion})).toBe(true)
    expect((await x.f.pool.query('SELECT confirmed_at FROM goals WHERE id=$1',[goal!.id])).rows[0].confirmed_at).toBeNull()
    // A separate genuine request authors new work; revoked original consent is never revived.
-   current=await originalMemoryAuthority(x)
+   current=await originalMemoryAuthority(x,x.f.ownerId,false,{durableSession:true})
    await addSessionMessage({sessionId:current.session.id,role:'user',content:[{type:'text',text:'Review the permitted source record in a new request.'}],scope:sessionMessageInputScope({scope:current.turnScope,workspaceId:x.f.workspaceId,userId:x.f.ownerId})})
    const nextRead=await current.runtime.read!('readRecord',{id:'record-1',fields:['description']},'governed')
    expect(JSON.stringify(nextRead.result)).toContain(sourceText)
@@ -171,13 +171,13 @@ describe.sequential('[COMP:api/application-persistence] [COMP:tasks/tools] origi
    expect(await getGoalForExecutionSystem(goal!.id)).toMatchObject({outcome:'Finish '+title})
    expect((await x.f.pool.query('SELECT last_seen_at<clock_timestamp()-interval \'5 minutes\' AS stale FROM auth_sessions WHERE id=$1',[proof.retained.sourceAuthority.nativeCredential.sessionId])).rows[0].stale).toBe(true)
    await x.sourcePool.query("UPDATE records SET withdrawn=true WHERE id='record-1'")
-   const withdrawnReader=await originalMemoryAuthority(x)
+   const withdrawnReader=await originalMemoryAuthority(x,x.f.ownerId,false,{durableSession:true})
    await expect(getRetainedGoalById(x.f.ownerId,goal!.id,withdrawnReader)).rejects.toMatchObject({code:'scope_source_changed'})
    await x.sourcePool.query("UPDATE records SET withdrawn=false WHERE id='record-1'")
-   const restoredReader=await originalMemoryAuthority(x)
+   const restoredReader=await originalMemoryAuthority(x,x.f.ownerId,false,{durableSession:true})
    expect(await getRetainedGoalById(x.f.ownerId,goal!.id,restoredReader)).toMatchObject({outcome:'Finish '+title})
    await authSessionStore.revokeForUser(x.f.ownerId,proof.retained.sourceAuthority.nativeCredential.sessionId)
-   const freshReader=await originalMemoryAuthority(x)
+   const freshReader=await originalMemoryAuthority(x,x.f.ownerId,false,{durableSession:true})
    expect(await getRetainedGoalById(x.f.ownerId,goal!.id,freshReader)).toBeNull()
    await expect(getGoalForExecutionSystem(goal!.id)).rejects.toMatchObject({reason:'authority_changed'})
    expect(JSON.stringify((await x.f.pool.query('SELECT proof FROM goal_task_source_authority WHERE goal_id=$1',[goal!.id])).rows[0].proof.retained.sources)).toBe(originalSources)

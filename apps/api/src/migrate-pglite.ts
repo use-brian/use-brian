@@ -1,3 +1,4 @@
+import { previousMigrationNames } from '@use-brian/api/migrations/renames.js'
 import type { PGlite } from '@electric-sql/pglite'
 import { createHash } from 'node:crypto'
 import { readdir, readFile } from 'node:fs/promises'
@@ -40,23 +41,6 @@ export async function preparePgliteRuntimeRole(db: PGlite): Promise<void> {
 }
 const OSS_CHANNELS_330 = '330_oss_channels.sql'
 const OSS_CHANNELS_330_SHA256 = '64aeddde4c05bd186b638be0b0c02f477dd16afb20358c00446b2e9d0d739c1e'
-// The chat archive migrations were exercised locally before their feature
-// branch was rebased onto newer develop migrations. The rebase changed only
-// their sequence prefixes. Preserve those existing local brains by recording
-// the final filename when the exact pre-rebase filename is already applied.
-const LEGACY_MIGRATION_ALIASES: Readonly<Record<string, readonly string[]>> = {
-  '8171_department_mode_admission.sql': ['8148_department_mode_admission.sql'],
-  '8172_organization_cutover.sql': ['8149_organization_cutover.sql'],
-  '8173_department_office_publication.sql': ['8150_department_office_publication.sql'],
-  '8174_reviewed_legacy_knowledge_binding.sql': ['8151_reviewed_legacy_knowledge_binding.sql'],
-  '552_association_order_financial_evidence.sql': ['537_association_order_financial_evidence.sql'],
-  '405_chat_message_archive.sql': ['395_chat_message_archive.sql', '393_chat_message_archive.sql'],
-  '406_local_chat_archive_sink.sql': ['396_local_chat_archive_sink.sql', '394_local_chat_archive_sink.sql'],
-  '407_chat_archive_enrichment.sql': ['397_chat_archive_enrichment.sql', '395_chat_archive_enrichment.sql'],
-  '408_chat_archive_owner_cascade.sql': ['398_chat_archive_owner_cascade.sql', '396_chat_archive_owner_cascade.sql'],
-  '409_chat_archive_media.sql': ['402_chat_archive_media.sql'],
-}
-
 function concurrentIndexStatements(sql: string): string[] | null {
   if (!/concurrently/i.test(sql) || /^\s*BEGIN/im.test(sql)) return null
   return sql
@@ -115,8 +99,8 @@ async function migratePgliteExclusive(
 
   let count = 0
   for (const file of files) {
-    const legacyNames = LEGACY_MIGRATION_ALIASES[file]
-    if (legacyNames) {
+    const legacyNames = previousMigrationNames(file)
+    if (legacyNames.length) {
       const aliasState = await db.transaction(async (tx) => {
         const existing = await tx.query<{ name: string }>(
           'SELECT name FROM public._migrations WHERE name = ANY($1::text[])',
@@ -125,7 +109,9 @@ async function migratePgliteExclusive(
         if (existing.rows.some((row) => row.name === file)) return 'current'
         if (!existing.rows.some((row) => legacyNames.includes(row.name))) return 'missing'
 
-        await tx.query('INSERT INTO public._migrations (name) VALUES ($1)', [file])
+        await tx.query(`INSERT INTO public._migrations (name, applied_at)
+          SELECT $1, applied_at FROM public._migrations WHERE name = ANY($2::text[])
+          ORDER BY applied_at, name LIMIT 1 ON CONFLICT (name) DO NOTHING`, [file, legacyNames])
         return 'aliased'
       })
       if (aliasState !== 'missing') {

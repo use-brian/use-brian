@@ -1,7 +1,7 @@
 import { authFetch } from "@/lib/auth-fetch";
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 // Consume the source contract until the shared package publishes this subpath.
-export type { InteractionCapture, InteractionJob, InteractionSource } from "../../../../../packages/shared/src/live-interaction";
+export type { InteractionCapture, InteractionJob } from "../../../../../packages/shared/src/live-interaction";
 export { DEFAULT_INTERACTION_RULE } from "../../../../../packages/shared/src/live-interaction";
 
 export class InteractionRequestError extends Error {

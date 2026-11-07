@@ -20,7 +20,7 @@ export function PublishedTemplateViewer({ workspaceId, viewerId, templateId, ver
   if (!snapshot) return resource.error ? <div role="alert"><p>{t.office.loadFailed}</p><Button onClick={() => void resource.refresh()}>{t.chat.retry}</Button></div> : <div className="h-64 animate-pulse rounded-xl bg-muted" aria-busy="true" />;
   return <div data-office-published-template="true" className="flex max-h-[65dvh] min-h-0 gap-3 overflow-hidden">
     <nav aria-label={t.office.pdf.pages} className="w-20 shrink-0 space-y-2 overflow-y-auto p-1">
-      {pages.map((page, index) => <button type="button" key={page.id} className="min-h-11 w-full rounded border p-2 text-sm hover:bg-muted" onClick={() => document.getElementById(`published-template-page-${templateId}-${index}`)?.scrollIntoView({ block: "nearest" })}>{index + 1}</button>)}
+      {pages.map((page, index) => <button type="button" key={page.id} className="min-h-11 md:min-h-8 w-full rounded border p-2 text-sm hover:bg-muted" onClick={() => document.getElementById(`published-template-page-${templateId}-${index}`)?.scrollIntoView({ block: "nearest" })}>{index + 1}</button>)}
     </nav>
     <div className="min-w-0 flex-1 space-y-4 overflow-auto bg-muted/40 p-2">
       {pages.map((page, index) => <div key={page.id} id={`published-template-page-${templateId}-${index}`} className="bg-white text-slate-950 shadow-sm [&_svg]:h-auto [&_svg]:w-full" dangerouslySetInnerHTML={{ __html: renderOfficePreviewSvg(page, { resourceUrls: urls }) }} />)}

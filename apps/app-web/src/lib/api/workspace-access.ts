@@ -126,8 +126,8 @@ export type MigrationProjection = {
   config?:{teamMode:'legacy'|'all'|'assigned';teamIds:string[];defaultGroupId:string|null}|null;
   resourceAuthorizationRequired:true; humanIntersectionRequired?:true;
 };
-export type PrincipalMigrationAction=Extract<DepartmentAccessCommand,{type:'member.access.set'|'department.member.set'|'department.assistant.set'|'assistant.audience.set'}>;
-export type ResourceMigrationAction={type:'resource.scope';resourceKind:ScopeReviewKind;resourceId:string;action:'confirm_general'|'assign_team'|'hold'|'consolidate_default';targetTeamId?:string};
+type PrincipalMigrationAction=Extract<DepartmentAccessCommand,{type:'member.access.set'|'department.member.set'|'department.assistant.set'|'assistant.audience.set'}>;
+type ResourceMigrationAction={type:'resource.scope';resourceKind:ScopeReviewKind;resourceId:string;action:'confirm_general'|'assign_team'|'hold'|'consolidate_default';targetTeamId?:string};
 type MigrationItemBase={id:string;subject_id:string;subject_kind:string;reason:string;status:string;command_review_id:string|null;diagnostic_code:string|null};
 export type PrincipalMigrationItem=MigrationItemBase & {proposed_action:PrincipalMigrationAction;before_state?:MigrationProjection;after_state?:MigrationProjection};
 export type ResourceMigrationItem=MigrationItemBase & {
@@ -137,7 +137,7 @@ export type ResourceMigrationItem=MigrationItemBase & {
 };
 export type MigrationItem=PrincipalMigrationItem|ResourceMigrationItem;
 export function isResourceMigrationItem(item:MigrationItem):item is ResourceMigrationItem{return item.proposed_action.type==='resource.scope';}
-export type ResourceMigrationConfirmation={kind:'resource';reviewId:string;expectedVersion:string;payloadHash:string;expiresAt:string};
+type ResourceMigrationConfirmation={kind:'resource';reviewId:string;expectedVersion:string;payloadHash:string;expiresAt:string};
 export type MigrationConfirmation=DepartmentCommandApply|ResourceMigrationConfirmation;
 export type MigrationItemReviewResult=
   | {kind?:never;review:DepartmentCommandReview;item:PrincipalMigrationItem}

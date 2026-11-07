@@ -1,4 +1,5 @@
 import express from 'express'
+import { ExecutorError } from '@use-brian/browser-control/executor.js'
 import request from 'supertest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createProtectedFillService } from '../../../../core/src/sandbox/protected-fill.js'
@@ -41,17 +42,22 @@ describe('actual extension coordinator with backend auth/resolve/complete', () =
     })
     const issued = await service.create(scope, [{ kind: 'crm', entityId: 'entity', field: 'email' }])
     const values: unknown[] = []
+    let denial: unknown
     const transport = createRelayCommandTransport({ relayUrl: 'https://relay.example', relaySecret: 'secret', protectedFill: service,
       fetchImpl: async (_url, init) => {
         const command = JSON.parse(String(init?.body))
         try {
           const data = await extension.fill(command.args, () => [1], async () => async (items: Array<{ ref: string; value: string }>) => { values.push(...items) })
           return new Response(JSON.stringify({ ok: true, data }))
-        } catch { return new Response(JSON.stringify({ ok: false, error: 'Protected fill unavailable', code: 'protected_fill_denied' })) }
+        } catch (error) { denial = error; return new Response(JSON.stringify({ ok: false, error: 'Protected fill unavailable', code: 'protected_fill_denied' })) }
       },
     })
     const result = await transport.send({ userId: 'u', browserProfileId: 'p', op: 'browserFillReference', args: { ...binding, items: [{ referenceId: issued.references[0]!.referenceId, ref: '@e1' }] } })
     expect(result.ok).toBe(approved)
+    if (!approved) {
+      expect(denial).toBeInstanceOf(ExecutorError)
+      expect(denial).toMatchObject({ code: 'protected_fill_denied' })
+    }
     expect(JSON.stringify({ result, stored, issued })).not.toContain('SECRET_SENTINEL')
     expect(values).toEqual(approved ? [{ ref: '@e1', value: 'SECRET_SENTINEL' }] : [])
     expect(paths.includes('/api/protected-browser-fill/resolve')).toBe(approved)

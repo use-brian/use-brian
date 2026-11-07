@@ -616,7 +616,7 @@ export type PageWriteActor = 'user' | 'system'
  * imports/copies/generated bodies. Research pointers require current native
  * source admission and do not enable ready-mode source-derived writes.
  * A parent proves placement, not content provenance. */
-export type SavedViewCreationOptions = {
+type SavedViewCreationOptions = {
   provenance: { kind: 'human-authored'; actorId: string } | {
     /** Server-only persisted research pointers, never caller-supplied authority.
      * This remains unsupported by ready-mode source-derived admission. */

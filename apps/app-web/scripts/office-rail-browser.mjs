@@ -32,6 +32,26 @@ try {
   const phone = await rail.evaluate(el => ({ width: el.clientWidth, content: el.scrollWidth, touch: getComputedStyle(el.querySelector('button')).touchAction }));
   assert(phone.width > 0 && phone.content > phone.width && phone.touch === 'pan-x', JSON.stringify(phone));
   await page.screenshot({ path: resolve(tmpdir(), 'office-rail-phone.png') });
+  await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/scripts/fixtures/office-rail-browser.html?controls`);
+  const selection = page.locator('[data-office-library-selection] label');
+  const input = page.locator('[data-preflight-controls] [role="combobox"]');
+  const templateButton = page.locator('[data-office-published-template] nav button').first();
+  await templateButton.waitFor();
+  const phoneControls = {
+    selectionHeight: await selection.evaluate(el => el.getBoundingClientRect().height),
+    inputFont: await input.evaluate(el => getComputedStyle(el).fontSize),
+    templateHeight: await templateButton.evaluate(el => el.getBoundingClientRect().height),
+  };
+  assert(phoneControls.selectionHeight >= 44 && phoneControls.templateHeight >= 44 && phoneControls.inputFont === '16px', JSON.stringify(phoneControls));
+  await selection.click(); assert.match(await page.locator('[role="status"]').innerText(), /2/);
+  await input.click(); await page.getByRole('option', { name: 'second' }).click();
+  assert.match(await input.innerText(), /second/);
+  await page.locator('[data-office-published-template] nav button').nth(1).click();
+  await page.screenshot({ path: resolve(tmpdir(), 'preflight-controls-phone.png') });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  assert.equal(await input.evaluate(el => getComputedStyle(el).fontSize), '12px');
+  await page.screenshot({ path: resolve(tmpdir(), 'preflight-controls-desktop.png') });
+  console.log(JSON.stringify({ phoneControls, selectedAndChangedVoice: true, navigatedPublishedPage: true }));
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ desktop, phone, nativeWheelScroll: true }));
 } finally { await browser?.close(); await server.close(); await rm(cache, { recursive: true, force: true }); }
