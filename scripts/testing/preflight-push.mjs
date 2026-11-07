@@ -58,9 +58,18 @@ async function contextsFor(repositories) {
   return contexts
 }
 
+function requireOssParticipant(repositories) {
+  for (const repo of repositories.filter(repo => repo.kind === 'platform')) {
+    const oss = join(resolve(repo.root), 'use-brian')
+    if (!repositories.some(candidate => candidate.kind === 'oss' && resolve(candidate.root) === oss))
+      throw new Error('Platform preflight requires its nested OSS CI participant')
+  }
+}
+
 export async function verifyReceipt(path, expectedRepositories) {
   const report = JSON.parse(await readFile(path, 'utf8'))
   if (report.kind !== 'push_preflight' || report.version !== 1 || report.status !== 'passed' || !report.repositories?.length) throw new Error('No complete successful push preflight receipt')
+  requireOssParticipant(report.repositories.map(repo => ({root:repo.input.root,kind:repo.kind})))
   const roots = report.repositories.map(repo => `${repo.kind}:${repo.input.root}`).sort()
   if (expectedRepositories && JSON.stringify(roots) !== JSON.stringify(expectedRepositories.map(repo => `${repo.kind}:${resolve(repo.root)}`).sort())) throw new Error('Preflight receipt does not cover the publication repositories')
   for (const repo of report.repositories) {
@@ -108,7 +117,7 @@ export async function runPreflight({ repositories, reportPath, pgBin, signal }) 
     if (!rel.startsWith('..') && !isAbsolute(rel)) throw new Error('Preflight reports must remain outside the source checkout')
   }
   let plans
-  try { plans = await Promise.all(repositories.map(repo => publicationPlan(resolve(repo.root), repo.kind))) }
+  try { requireOssParticipant(repositories); plans = await Promise.all(repositories.map(repo => publicationPlan(resolve(repo.root), repo.kind))) }
   catch (error) {
     const failed = { version: 1, kind: 'push_preflight', status: 'failed', repositories: [], error: error.message, finishedAt: new Date().toISOString() }
     await saveReceipt(reportPath, failed); return failed
@@ -171,7 +180,8 @@ export async function runPreflight({ repositories, reportPath, pgBin, signal }) 
             if (check.id === 'documentation') await documentationCheck(root, plan.input.base, record.log)
             else {
               const args = check.id === 'install' ? ['install', '--frozen-lockfile']
-                : check.id === 'api-deploy' ? ['verify:api-deploy'] : [check.id]
+                : check.id === 'api-deploy' ? ['verify:api-deploy']
+                  : plan.kind === 'platform' && check.id === 'test' ? ['test', '--filter=./apps/*', '--filter=./packages/*'] : [check.id]
               record.command = ['pnpm', ...args]
               await command('pnpm', args, { cwd: root, env, signal, log: record.log, timeoutMs: 30 * 60_000 })
             }

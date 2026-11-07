@@ -182,9 +182,17 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
     await assert.rejects(verifyReceipt(reportPath), /Stale/)
   })
 
+  test('cannot certify hosted-only tests without the nested OSS CI participant', async () => {
+    const root=await repository(null)
+    const { report }=await preflight(root,'platform')
+    assert.equal(report.status,'failed')
+    assert.match(report.error,/requires its nested OSS CI participant/)
+  })
+
   test('freezes the canonical KB context for actual platform checks and invalidates changed context', async () => {
     const parent = await directory()
     const scripts = Object.fromEntries(['verify:api-deploy', 'build', 'typecheck', 'test', 'smoke'].map(name => [name, 'echo passed']))
+    scripts.test = 'node -e "require(\'node:assert/strict\').deepEqual(process.argv.slice(1),[\'--filter=./apps/*\',\'--filter=./packages/*\'])" --'
     scripts.check = 'node -e "require(\'node:assert/strict\').equal(require(\'node:fs\').readFileSync(\'../industry-brain/brian-kb/proof.md\',\'utf8\'),\'frozen\')"'
     const platform = await repository(null, { name: 'platform-fixture', private: true, scripts }, join(parent, 'platform'))
     const oss = await repository(simple('true'), undefined, join(platform, 'use-brian'))
