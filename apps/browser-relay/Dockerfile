@@ -16,6 +16,7 @@ COPY packages/office-model/package.json packages/office-model/tsconfig.json ./pa
 COPY packages/office-renderer/package.json packages/office-renderer/tsconfig.json ./packages/office-renderer/
 COPY packages/core/package.json packages/core/tsconfig.json ./packages/core/
 COPY packages/api/package.json packages/api/tsconfig.json ./packages/api/
+COPY packages/browser-control/package.json packages/browser-control/tsconfig.json ./packages/browser-control/
 COPY packages/brian-kb/package.json packages/brian-kb/tsconfig.json ./packages/brian-kb/
 COPY packages/brian-app/package.json packages/brian-app/tsconfig.json ./packages/brian-app/
 COPY apps/browser-relay/package.json apps/browser-relay/tsconfig.json ./apps/browser-relay/
@@ -38,6 +39,7 @@ COPY packages/office-renderer/src ./packages/office-renderer/src
 COPY packages/core/src ./packages/core/src
 COPY packages/core/scripts ./packages/core/scripts
 COPY packages/api/src ./packages/api/src
+COPY packages/browser-control/src ./packages/browser-control/src
 COPY packages/api/migrations ./packages/api/migrations
 # Source only: copying the whole package dir would clobber the node_modules
 # symlinks pnpm created in the deps stage, breaking a clean build.
