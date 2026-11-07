@@ -19,8 +19,10 @@ CREATE TABLE workspace_external_approval_sources (
   rotated_at timestamptz,
   revoked_by uuid,
   revoked_at timestamptz,
-  CHECK ((channel_type='web' AND channel_id='queue' AND channel_integration_id IS NULL)
-    OR (channel_type<>'web' AND channel_integration_id IS NOT NULL)),
+  -- Web inbox uses channel_id='queue'; personal web chat uses the session id.
+  -- Messaging destinations always pin a channel_integration_id.
+  CHECK ((channel_type='web' AND channel_integration_id IS NULL AND length(channel_id) > 0)
+    OR (channel_type<>'web' AND channel_integration_id IS NOT NULL AND length(channel_id) > 0)),
   CHECK ((revoked_at IS NULL) = (revoked_by IS NULL))
 );
 CREATE INDEX workspace_external_approval_sources_workspace ON workspace_external_approval_sources(workspace_id,created_at);

@@ -11,7 +11,7 @@ export const ja: Dictionary = {
     "notification": "通知先",
     "web": "Web受信箱",
     "verifiedChannel": "承認者の確認済みの最近のチャネル",
-    "verifiedUnavailable": "確認済みの通知先がありません。承認者に接続済みのチャネルからこのアシスタントへメッセージを送ってもらうか、Web受信箱を選んでください。",
+    "verifiedUnavailable": "確認済みの通知先がありません。承認者にWebチャットまたは接続済みのチャネルからこのアシスタントへメッセージを送ってもらうか、Web受信箱を選んでください。",
     "unavailable": "登録、アシスタント、または承認者を利用できません。一覧を更新して選択内容を確認してください。",
     "choose": "選択してください",
     "create": "アプリを登録",

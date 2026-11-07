@@ -22,7 +22,7 @@ export const zhCN: Dictionary = {
     "notification": "通知目标",
     "web": "网页收件箱",
     "verifiedChannel": "审批者已验证的近期频道",
-    "verifiedUnavailable": "没有可用的已验证通知目标。请审批者通过已连接的频道向此助手发送消息，或选择网页收件箱。",
+    "verifiedUnavailable": "没有可用的已验证通知目标。请审批者在网页聊天或已连接的频道向此助手发送消息，或选择网页收件箱。",
     "unavailable": "此注册、助手或审批者已不可用。请刷新列表并检查选择。",
     "choose": "请选择",
     "create": "注册应用",

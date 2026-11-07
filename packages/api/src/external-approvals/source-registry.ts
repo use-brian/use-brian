@@ -105,9 +105,19 @@ export function createExternalApprovalSourceRegistry(options: {
           const resolveChannel = options.resolveRecentChannel ?? (await import('../workflow/recent-approval-channel.js'))
             .createRecentApprovalChannelResolver((text, values) => c.query(text, values))
           const resolved = await resolveChannel({workspaceId,assistantId:input.assistantId,approverUserId:input.approverUserId})
-          if (!resolved || !resolved.channelIntegrationId || !z.string().uuid().safeParse(resolved.channelIntegrationId).success
-            || !(PROACTIVE_DELIVERY_TRANSPORTS as readonly string[]).includes(resolved.channelType) || !resolved.channelId) throw new ExternalApprovalError(409, 'Verified notification destination unavailable')
-          target = resolved
+          if (!resolved || !resolved.channelId) {
+            throw new ExternalApprovalError(409, 'Verified notification destination unavailable')
+          }
+          // Personal web chat is a first-class verified destination: no channel
+          // integration exists, and channelId is the durable session id.
+          if (resolved.channelType === 'web') {
+            target = { channelType: 'web', channelId: resolved.channelId }
+          } else if (!resolved.channelIntegrationId || !z.string().uuid().safeParse(resolved.channelIntegrationId).success
+            || !(PROACTIVE_DELIVERY_TRANSPORTS as readonly string[]).includes(resolved.channelType)) {
+            throw new ExternalApprovalError(409, 'Verified notification destination unavailable')
+          } else {
+            target = resolved
+          }
         }
         const key = credential()
         const row = (await c.query<PublicExternalApprovalSource>(`INSERT INTO workspace_external_approval_sources

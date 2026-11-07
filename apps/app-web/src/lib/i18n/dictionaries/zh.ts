@@ -11,7 +11,7 @@ export const zh: Dictionary = {
     "notification": "通知目的地",
     "web": "網頁收件匣",
     "verifiedChannel": "審批者已驗證的近期頻道",
-    "verifiedUnavailable": "沒有可用的已驗證通知目的地。請審批者透過已連接的頻道傳送訊息給此助理，或選擇網頁收件匣。",
+    "verifiedUnavailable": "沒有可用的已驗證通知目的地。請審批者在網頁聊天或已連接的頻道傳送訊息給此助理，或選擇網頁收件匣。",
     "unavailable": "此註冊、助理或審批者已無法使用。請重新整理清單並檢查選擇。",
     "choose": "請選擇",
     "create": "註冊應用程式",

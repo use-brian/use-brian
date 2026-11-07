@@ -24,7 +24,7 @@ export const en = {
     "notification": "Notification destination",
     "web": "Web inbox",
     "verifiedChannel": "Approver’s verified recent channel",
-    "verifiedUnavailable": "No verified destination is available. Ask the approver to message this assistant through their connected channel, or choose Web inbox.",
+    "verifiedUnavailable": "No verified destination is available. Ask the approver to message this assistant in web chat or a connected channel, or choose Web inbox.",
     "unavailable": "This registration, assistant or approver is no longer available. Refresh the list and review your selection.",
     "choose": "Choose an option",
     "create": "Register application",
