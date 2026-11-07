@@ -4,6 +4,7 @@ export type SettingsSection =
   | "preferences"
   | "privacy"
   | "notifications"
+  | "ws-external-approvals"
   | "ws-general"
   | "ws-members"
   | "ws-teams"

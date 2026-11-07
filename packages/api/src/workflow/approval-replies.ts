@@ -1,3 +1,4 @@
+import { externalApprovals, ExternalApprovalError } from '../external-approvals/service.js'
 /**
  * Inbound channel reply handler — Phase C (Q4 §12).
  *
@@ -37,7 +38,7 @@ export async function maybeHandleApprovalReply(
   },
   userId: string,
   text: string,
-  scope?: { workspaceId: string; assistantId: string; authorized: () => Promise<boolean>; abortSignal?: AbortSignal },
+  scope?: { workspaceId: string; assistantId: string; channelId?: string; channelIntegrationId?: string; authorized: () => Promise<boolean>; abortSignal?: AbortSignal },
 ): Promise<ApprovalReplyMatch | null> {
   const match = text.match(APPROVE_RE)
   if (!match) return null
@@ -54,11 +55,11 @@ export async function maybeHandleApprovalReply(
 
   // Resolve the short id prefix to a full approval id, but only among
   // rows the user is the assigned approver for + still pending.
-  const result = await query<{ id: string }>(
-    `SELECT id FROM pending_approvals
+  const result = await query<{ id: string; kind?: string }>(
+    `SELECT id, kind FROM pending_approvals
      WHERE approver_user_id = $1
        AND status = 'pending'
-       AND kind = 'workflow_step'
+       AND kind IN ('workflow_step', 'external_action')
        AND (expires_at IS NULL OR expires_at > now())
        AND ($3::uuid IS NULL OR workspace_id = $3)
        AND ($4::uuid IS NULL OR originating_assistant_id = $4)
@@ -72,6 +73,17 @@ export async function maybeHandleApprovalReply(
 
   if (scope?.abortSignal?.aborted) return unavailable('cancelled')
   const approvalId = result.rows[0].id
+  if (result.rows[0].kind === 'external_action') {
+    if (scope && !await scope.authorized()) return unavailable()
+    if (scope?.abortSignal?.aborted) return unavailable('cancelled')
+    try {
+      const state = await externalApprovals().resolve(approvalId, decision, { userId, human: true, origin: 'channel', channelId: scope?.channelId, channelIntegrationId: scope?.channelIntegrationId })
+      return { decision, approvalId, reason, status: state.status, runId: null }
+    } catch (error) {
+      if (error instanceof ExternalApprovalError) return unavailable()
+      throw error
+    }
+  }
   const outcome = await resumeFromApproval(deps.bridgeDeps, approvalId, decision, userId, reason, scope?.abortSignal)
   return {
     decision,

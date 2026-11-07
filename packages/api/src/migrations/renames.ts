@@ -16,6 +16,8 @@ const migrationRenames = [
   ['8146_explicit_unclassified_legacy_erasure.sql', '81460_explicit_unclassified_legacy_erasure.sql'],
   ['8147_private_chat_recovery.sql', '81470_private_chat_recovery.sql'],
 
+  ['8240_external_human_approvals.sql', '8241_external_human_approvals.sql'],
+  ['8241_workspace_external_approval_sources.sql', '8242_workspace_external_approval_sources.sql'],
   ['8231_workspace_file_attachments.sql', '8233_workspace_file_attachments.sql'],
   ['8148_department_mode_admission.sql', '8171_department_mode_admission.sql'],
   ['8149_organization_cutover.sql', '8172_organization_cutover.sql'],

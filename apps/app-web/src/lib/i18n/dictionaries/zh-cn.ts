@@ -12,6 +12,41 @@
 import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
+  externalApprovals: {
+    "title": "外部审批",
+    "adminOnly": "只有工作区所有者和管理员可以管理外部审批凭证。",
+    "description": "为一位助手和一位人类审批者注册外部应用。审批决定不会执行外部操作。",
+    "name": "应用名称",
+    "assistant": "助手",
+    "approver": "人类审批者",
+    "notification": "通知目标",
+    "web": "网页收件箱",
+    "verifiedChannel": "审批者已验证的近期频道",
+    "verifiedUnavailable": "没有可用的已验证通知目标。请审批者通过已连接的频道向此助手发送消息，或选择网页收件箱。",
+    "unavailable": "此注册、助手或审批者已不可用。请刷新列表并检查选择。",
+    "choose": "请选择",
+    "create": "注册应用",
+    "credential": "新凭证",
+    "once": "请立即复制。仅显示一次。请安全保管。",
+    "copy": "复制凭证",
+    "dismiss": "关闭凭证",
+    "copied": "已复制凭证。",
+    "copyFailed": "复制失败。请选择并手动复制。",
+    "saved": "已保存。正在刷新列表。",
+    "failed": "请求失败或结果不确定。草稿已保留。重试前请刷新列表；若丢失凭证值，请轮换。",
+    "loadFailed": "无法刷新。请检查连接和管理员权限后重试。",
+    "retry": "刷新列表和选项",
+    "rotate": "轮换凭证",
+    "revoke": "撤销凭证",
+    "rotateConfirm": "立即替换？旧凭证将失效。助手、审批者和目标不变。",
+    "revokeConfirm": "撤销此凭证？其请求及尚未应用的决定将永久失效。已执行的操作无法撤回。",
+    "cancel": "取消",
+    "immutable": "绑定不可修改。如需更改助手、审批者或目标，请撤销并重新注册。",
+    "empty": "尚未注册外部应用。",
+    "sourceId": "来源 ID",
+    "prefix": "凭证前缀",
+    "revoked": "已撤销"
+},
   attendedSourceSetup: {
     revoke: "撤销设置",
     revokeHint: "这会阻止受保护的访问并保留历史限制。撤销后请创建新审核以更改或重新开始设置。",
@@ -5649,6 +5684,7 @@ export const zhCN: Dictionary = {
       "此文件无法预览。上传文件仅保留 7 天，可能已过期。重新上传即可再次预览。",
   },
   approvalsPage: {
+    externalActionNotice: "这是对外部代理的一次性人工决定。记录决定并不代表代理已收到。",
     loadFailed: "无法加载待审批项目。请重试以查看等待处理的决定。",
     retryLoad: "重试",
     title: "核准",
@@ -5669,6 +5705,7 @@ export const zhCN: Dictionary = {
       browser_skill_send: "浏览器送出",
       department_access: "访问申请",
       email_sender: "新的邮件寄件者",
+      external_action: "外部操作",
     },
     refinement: {
       step: "步骤 {step}",

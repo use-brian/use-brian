@@ -83,3 +83,9 @@ describe("[COMP:app-web/settings-modal] OSS source version footer", () => {
     expect(html).toContain('href="https://github.com/use-brian/use-brian"');
   });
 });
+
+describe("[COMP:app-web/external-approvals] settings discoverability", () => {
+  it.each(["oss", "hosted", "outpost"] as const)("exposes workspace registration in %s", edition => {
+    expect(workspaceSettingsSections(deploymentCapabilitiesFor(edition))).toContain("ws-external-approvals");
+  });
+});

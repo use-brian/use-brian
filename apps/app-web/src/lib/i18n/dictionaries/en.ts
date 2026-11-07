@@ -14,6 +14,41 @@
 import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
+  externalApprovals: {
+    "title": "External approvals",
+    "adminOnly": "Only workspace owners and admins can manage external approval credentials.",
+    "description": "Register an external app for one assistant and one human approver. Approval decisions do not execute external actions.",
+    "name": "Application name",
+    "assistant": "Assistant",
+    "approver": "Human approver",
+    "notification": "Notification destination",
+    "web": "Web inbox",
+    "verifiedChannel": "Approver’s verified recent channel",
+    "verifiedUnavailable": "No verified destination is available. Ask the approver to message this assistant through their connected channel, or choose Web inbox.",
+    "unavailable": "This registration, assistant or approver is no longer available. Refresh the list and review your selection.",
+    "choose": "Choose an option",
+    "create": "Register application",
+    "credential": "New credential",
+    "once": "Copy now. This credential is shown only once. Store it securely.",
+    "copy": "Copy credential",
+    "dismiss": "Dismiss credential",
+    "copied": "Credential copied.",
+    "copyFailed": "Copy failed. Select the credential and copy manually.",
+    "saved": "Saved. Refreshing the list.",
+    "failed": "Request failed or outcome is uncertain. Your draft is preserved. Refresh before retrying; rotate if the issued value was lost.",
+    "loadFailed": "Could not refresh sources or options. Check connection and administrator access, then retry.",
+    "retry": "Refresh list and options",
+    "rotate": "Rotate credential",
+    "revoke": "Revoke credential",
+    "rotateConfirm": "Replace the credential immediately? The old credential stops working. Assistant, approver and destination remain unchanged.",
+    "revokeConfirm": "Revoke this credential? Its requests and outstanding decisions will become permanently unavailable. Actions already taken cannot be undone.",
+    "cancel": "Cancel",
+    "immutable": "Bindings cannot be edited. To change assistant, approver or destination, revoke and register a new application.",
+    "empty": "No external applications registered.",
+    "sourceId": "Source ID",
+    "prefix": "Credential prefix",
+    "revoked": "Revoked"
+},
   attendedSourceSetup: {
     revoke: "Revoke setup",
     revokeHint: "This blocks protected access and preserves prior history restrictions. After revoking, create a new review to change or restart setup.",
@@ -5921,6 +5956,7 @@ export const en = {
       "Preview isn't available for this file. It may have expired: uploads are kept for 7 days. Re-upload the file to preview it again.",
   },
   approvalsPage: {
+    externalActionNotice: "One-time human decision for an external agent. Recording your decision does not confirm that the agent received it.",
     loadFailed: "Could not load approvals. Retry to check which decisions are waiting.",
     retryLoad: "Retry",
     title: "Approvals",
@@ -5942,6 +5978,7 @@ export const en = {
       browser_skill_send: "Browser send",
       department_access: "Access requests",
       email_sender: "New email sender",
+      external_action: "External action",
     },
     refinement: {
       step: "Step {step}",

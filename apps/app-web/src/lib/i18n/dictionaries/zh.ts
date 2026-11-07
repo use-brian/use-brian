@@ -1,6 +1,41 @@
 import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
+  externalApprovals: {
+    "title": "外部審批",
+    "adminOnly": "只有工作區擁有者和管理員可以管理外部審批憑證。",
+    "description": "為一位助理和一位人類審批者註冊外部應用程式。審批決定不會執行外部操作。",
+    "name": "應用程式名稱",
+    "assistant": "助理",
+    "approver": "人類審批者",
+    "notification": "通知目的地",
+    "web": "網頁收件匣",
+    "verifiedChannel": "審批者已驗證的近期頻道",
+    "verifiedUnavailable": "沒有可用的已驗證通知目的地。請審批者透過已連接的頻道傳送訊息給此助理，或選擇網頁收件匣。",
+    "unavailable": "此註冊、助理或審批者已無法使用。請重新整理清單並檢查選擇。",
+    "choose": "請選擇",
+    "create": "註冊應用程式",
+    "credential": "新憑證",
+    "once": "請立即複製。僅顯示一次。請安全保管。",
+    "copy": "複製憑證",
+    "dismiss": "關閉憑證",
+    "copied": "已複製憑證。",
+    "copyFailed": "複製失敗。請選取並手動複製。",
+    "saved": "已儲存。正在更新清單。",
+    "failed": "請求失敗或結果不確定。草稿已保留。重試前請更新清單；若遺失憑證值，請輪替。",
+    "loadFailed": "無法更新。請檢查連線和管理員權限後重試。",
+    "retry": "更新清單與選項",
+    "rotate": "輪替憑證",
+    "revoke": "撤銷憑證",
+    "rotateConfirm": "立即替換？舊憑證將失效。助理、審批者和目的地不變。",
+    "revokeConfirm": "撤銷此憑證？其請求及尚未套用的決定將永久失效。已執行的動作無法撤回。",
+    "cancel": "取消",
+    "immutable": "綁定不可修改。若需更改助理、審批者或目的地，請撤銷並重新註冊。",
+    "empty": "尚未註冊外部應用程式。",
+    "sourceId": "來源 ID",
+    "prefix": "憑證前綴",
+    "revoked": "已撤銷"
+},
   attendedSourceSetup: {
     revoke: "撤銷設定",
     revokeHint: "這會封鎖受保護的存取並保留歷史限制。撤銷後請建立新審查以變更或重新開始設定。",
@@ -5696,6 +5731,7 @@ export const zh: Dictionary = {
       "此檔案無法預覽。上傳檔案僅保留 7 天，可能已過期。重新上傳即可再次預覽。",
   },
   approvalsPage: {
+    externalActionNotice: "這是對外部代理的一次性人工決定。記錄決定並不代表代理已收到。",
     loadFailed: "無法載入待審批項目。請重試以查看等待處理的決定。",
     retryLoad: "重試",
     title: "核准",
@@ -5717,6 +5753,7 @@ export const zh: Dictionary = {
       browser_skill_send: "瀏覽器送出",
       department_access: "存取申請",
       email_sender: "新的郵件寄件者",
+      external_action: "外部操作",
     },
     refinement: {
       step: "步驟 {step}",

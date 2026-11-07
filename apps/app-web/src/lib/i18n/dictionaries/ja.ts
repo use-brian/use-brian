@@ -1,6 +1,41 @@
 import type { Dictionary } from "./en";
 
 export const ja: Dictionary = {
+  externalApprovals: {
+    "title": "外部承認",
+    "adminOnly": "オーナーと管理者のみが外部承認の認証情報を管理できます。",
+    "description": "外部アプリを1つのアシスタントと人間の承認者に登録します。承認の判断は外部操作を実行しません。",
+    "name": "アプリ名",
+    "assistant": "アシスタント",
+    "approver": "人間の承認者",
+    "notification": "通知先",
+    "web": "Web受信箱",
+    "verifiedChannel": "承認者の確認済みの最近のチャネル",
+    "verifiedUnavailable": "確認済みの通知先がありません。承認者に接続済みのチャネルからこのアシスタントへメッセージを送ってもらうか、Web受信箱を選んでください。",
+    "unavailable": "登録、アシスタント、または承認者を利用できません。一覧を更新して選択内容を確認してください。",
+    "choose": "選択してください",
+    "create": "アプリを登録",
+    "credential": "新しい認証情報",
+    "once": "今すぐコピーしてください。表示は一度のみです。安全に保管してください。",
+    "copy": "認証情報をコピー",
+    "dismiss": "認証情報を閉じる",
+    "copied": "コピーしました。",
+    "copyFailed": "コピーできませんでした。選択して手動でコピーしてください。",
+    "saved": "保存しました。一覧を更新します。",
+    "failed": "要求に失敗したか結果が不明です。下書きは保持されています。再試行前に一覧を更新し、値を失った場合は再発行してください。",
+    "loadFailed": "更新できませんでした。接続と管理者権限を確認して再試行してください。",
+    "retry": "一覧と選択肢を更新",
+    "rotate": "認証情報を再発行",
+    "revoke": "認証情報を失効",
+    "rotateConfirm": "すぐに置き換えますか？以前の認証情報は無効になります。アシスタント、承認者、通知先は変わりません。",
+    "revokeConfirm": "この認証情報を失効しますか？依頼と未適用の判断は永久に無効になります。実行済みの操作は取り消せません。",
+    "cancel": "キャンセル",
+    "immutable": "設定は変更できません。アシスタント、承認者、通知先を変更するには失効して新しく登録してください。",
+    "empty": "外部アプリは未登録です。",
+    "sourceId": "ソースID",
+    "prefix": "認証情報の接頭辞",
+    "revoked": "失効済み"
+},
   attendedSourceSetup: {
     revoke: "設定を取り消す",
     revokeHint: "保護されたアクセスを停止し、履歴の制限を維持します。取り消し後、新しいレビューで設定を変更または再開してください。",
@@ -5710,6 +5745,7 @@ export const ja: Dictionary = {
       "このファイルのプレビューは利用できません。アップロードの保存期間は 7 日間のため、期限切れの可能性があります。再度アップロードするとプレビューできます。",
   },
   approvalsPage: {
+    externalActionNotice: "外部エージェントへの一度限りの人間の判断です。判断の記録は、エージェントによる受信を保証しません。",
     loadFailed: "承認待ちの項目を読み込めませんでした。再試行して確認してください。",
     retryLoad: "再試行",
     title: "承認",
@@ -5731,6 +5767,7 @@ export const ja: Dictionary = {
       browser_skill_send: "ブラウザ送信",
       department_access: "アクセス申請",
       email_sender: "新しいメール送信者",
+      external_action: "外部アクション",
     },
     refinement: {
       step: "ステップ {step}",

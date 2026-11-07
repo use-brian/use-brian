@@ -8,6 +8,11 @@ import { findSessionById } from './db/sessions.js'
 import { classifySession } from './session-kind.js'
 import { createSessionPinTools } from './session-pin-tools.js'
 import { createWorkspaceMcpProfile } from './workspace-mcp/profile.js'
+import { createExternalApprovalSourceRegistry } from './external-approvals/source-registry.js'
+import { externalApprovalSourceRoutes } from './external-approvals/source-routes.js'
+import { ExternalApprovalService, configureExternalApprovals } from './external-approvals/service.js'
+import { createExternalApprovalSqlStore } from './external-approvals/sql-store.js'
+import { externalApprovalRoutes } from './external-approvals/routes.js'
 import { createRecoverRecordingTool, resolveCurrentRecordingId } from './recordings/recovery.js'
 import { feishuNotificationRoutes } from './routes/feishu-notifications.js'
 import { enqueueNativeSessionStateJob } from './db/session-state-jobs.js'
@@ -3784,6 +3789,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     telegramBotToken: env.TELEGRAM_BOT_TOKEN,
   })
 
+  const externalApprovalSources = createExternalApprovalSourceRegistry()
+  const externalApprovalService = new ExternalApprovalService(
+    externalApprovalSources, createExternalApprovalSqlStore(),
+    async (source, state) => {
+      await approvalDeliveries({ approvalId: state.approvalId, workspaceId: source.workspaceId,
+        workflowName: '', stepId: '', toolName: '', arguments: {}, approverUserId: source.approverUserId, externalAction: true,
+        deliveryChannelType: source.channelType, deliveryChannelId: source.channelId, assistantId: source.assistantId,
+        ...(source.channelType !== 'web' ? { recentTarget: { channelType: source.channelType, channelId: source.channelId,
+          channelIntegrationId: source.channelIntegrationId } } : {}),
+      })
+    },
+  )
+  configureExternalApprovals(externalApprovalService)
+  // Dedicated source authentication; before user-authenticated /api routers.
+  app.use('/internal/external-approvals', externalApprovalRoutes(externalApprovalService))
+
   const approvalBridgeDeps: ApprovalBridgeDeps = {
     resolveRecentChannel: resolveRecentApprovalChannel,
     approvalsStore: pendingApprovalsStore,
@@ -6822,6 +6843,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/invitations', optionalAuth(env.JWT_SECRET), invitationRouter)
 
   app.use('/api/workspaces/:workspaceId/brain-keys', requireAuth(env.JWT_SECRET), brainKeysRoutes({ brainKeyStore, workspaceStore, workspaceProfile: workspaceMcpProfile }))
+  app.use('/api/workspaces/:workspaceId/external-approval-sources', requireAuth(env.JWT_SECRET), externalApprovalSourceRoutes({ workspaceStore, store: externalApprovalSources }))
   if(engineeringHistory)app.use('/api/workspaces/:workspaceId/engineering-history',requireAuth(env.JWT_SECRET),engineeringHistoryRoutes({service:engineeringHistory,workspaceStore}))
   app.use(
     '/api/workspaces/:workspaceId/programmatic-capture-profiles',

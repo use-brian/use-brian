@@ -44,6 +44,7 @@ export async function maybeHandleChannelWorkflowReply(params: {
     try {
       const result = await maybeHandleApprovalReply(params.approvals, params.address.userId, params.text, {
         workspaceId: params.address.workspaceId, assistantId: params.address.assistantId,
+        channelId: params.address.channelId, channelIntegrationId: params.address.integrationId,
         authorized: params.authorized,
         ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
       })
