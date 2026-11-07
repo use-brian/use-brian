@@ -93,20 +93,48 @@ export async function verifyReceipt(path, expectedRepositories) {
   return report
 }
 
+function localMarkdownLinks(text) {
+  return [...text.matchAll(/\]\((?:<([^>]+)>|([^\s)]+))(?:\s+"[^"]*")?\)/g)]
+    .map(match => match[1] ?? match[2]).filter(link => !/^(?:[a-z][\w+.-]*:|#|\/)/i.test(link))
+}
+
 async function documentationCheck(root, base, log) {
   const start = base ?? git(root, ['hash-object', '-w', '-t', 'tree', '--stdin']).toString().trim()
-  await command('git', ['diff', '--check', start, 'HEAD'], { cwd: root, log })
-  const files = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z']).toString().split('\0').filter(path => path.endsWith('.md'))
-  for (const path of new Set(files)) {
-    const text = await readFile(join(root, path), 'utf8').catch(error => error.code === 'ENOENT' ? null : Promise.reject(error))
-    if (text === null) continue
-    for (const match of text.matchAll(/\]\((?:<([^>]+)>|([^\s)]+))(?:\s+"[^"]*")?\)/g)) {
-      const link = match[1] ?? match[2]
-      if (/^(?:[a-z][\w+.-]*:|#|\/)/i.test(link)) continue
-      const target = decodeURIComponent(link.split('#')[0])
-      if (!target) continue
-      if (!await lstat(resolve(root, dirname(path), target)).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error))) throw new Error(`Missing documentation link: ${path} -> ${target}`)
+  try {
+    await command('git', ['diff', '--check', start, 'HEAD'], { cwd: root, log })
+    const files = new Set(git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z']).toString().split('\0').filter(Boolean))
+    const before = new Set(git(root, ['ls-tree', '-r', '--name-only', '-z', start]).toString().split('\0').filter(Boolean))
+    const deleted = git(root, ['diff', '--name-only', '--no-renames', '--diff-filter=D', '-z', start, 'HEAD']).toString().split('\0').filter(Boolean)
+    const changed = new Set(git(root, ['diff', '--name-only', '--no-renames', '-z', start, 'HEAD']).toString().split('\0').filter(Boolean))
+    let introduced = 0, removedTargets = 0
+    for (const path of [...files].filter(path => path.endsWith('.md') && (deleted.length || changed.has(path)))) {
+      const counts = new Map()
+      const previous = before.has(path) ? git(root, ['show', `${start}:${path}`]).toString() : ''
+      for (const link of localMarkdownLinks(previous)) counts.set(link, (counts.get(link) ?? 0) + 1)
+      const text = await readFile(join(root, path), 'utf8')
+      for (const link of localMarkdownLinks(text)) {
+        const existing = counts.get(link) ?? 0
+        if (existing) counts.set(link, existing - 1)
+        if (existing && !deleted.length) continue
+        let target
+        try { target = decodeURIComponent(link.split('#')[0]) }
+        catch (error) { if (existing) continue; throw error }
+        if (!target) continue
+        const absolute = resolve(root, dirname(path), target), rel = relative(root, absolute)
+        const inside = !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)
+        const removed = inside && deleted.some(file => file === rel || file.startsWith(`${rel}/`))
+        if (existing && !removed) continue
+        if (!inside) throw new Error(`Relative documentation link leaves its repository; use a URL: ${path} -> ${target}`)
+        if (!existing) introduced++; else removedTargets++
+        const published = rel === '' || files.has(rel) || [...files].some(file => file.startsWith(`${rel}/`))
+        if (!published || !await lstat(absolute).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error)))
+          throw new Error(`Missing documentation link: ${path} -> ${target}`)
+      }
     }
+    await writeFile(log, `Outgoing documentation delta: ${introduced} new local link(s), ${removedTargets} removed-target reference(s) validated.\n`, { flag: 'a', mode: 0o600 })
+  } catch (error) {
+    await writeFile(log, `${error.message}\n`, { flag: 'a', mode: 0o600 })
+    throw error
   }
 }
 
@@ -154,9 +182,9 @@ export async function runPreflight({ repositories, reportPath, pgBin, signal }) 
       await rm(join(platform.snapshot, 'use-brian'), { recursive: true, force: true })
       await snapshot(oss.input.root, join(platform.snapshot, 'use-brian'), env)
     }
-    // Platform checks run first so existing repository failures stop publication
-    // before paying for the complete OSS workflow.
-    for (const plan of [...plans].sort((a, b) => (a.kind === 'platform' ? -1 : b.kind === 'platform' ? 1 : 0))) {
+    // Cheap documentation deltas precede composition and the full CI matrix.
+    const priority = plan => plan.checks.every(check => check.id === 'documentation') ? 0 : plan.kind === 'platform' ? 1 : 2
+    for (const plan of [...plans].sort((a, b) => priority(a) - priority(b))) {
       const root = plan.snapshot
       const repoDirectory = join(directory, `execution-${plans.indexOf(plan)}`); await mkdir(repoDirectory)
       const repoLogs = join(logs, String(plans.indexOf(plan))); await mkdir(repoLogs)

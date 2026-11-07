@@ -228,4 +228,44 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
     assert.equal(failed.id, 'documentation')
     assert.match(await readFile(failed.log, 'utf8'), /trailing whitespace/)
   })
+  test('grades new link occurrences while preserving unchanged baseline links in edited prose', async () => {
+    const root=await repository(null)
+    await rm(join(root,'package.json'))
+    await put(root,'legacy.md','[Existing reference](stale.md)\n')
+    commit(root); git(root,['update-ref','refs/remotes/origin/develop',git(root,['rev-parse','HEAD']).toString().trim()])
+    await put(root,'legacy.md','[Existing reference](stale.md)\nNew publication guidance.\n')
+    assert.equal((await preflight(root,'companion')).report.status,'passed')
+    for(const content of ['[Existing reference](stale.md)\n[New](missing.md)\n','[Existing reference](stale.md)\n[Duplicate](stale.md)\n']) {
+      await put(root,'legacy.md',content)
+      const {report}=await preflight(root,'companion')
+      assert.equal(report.status,'failed')
+      assert.match(report.error,/Missing documentation link/)
+      assert.match(await readFile(report.repositories[0].verification.jobs[0].log,'utf8'),/Missing documentation link/)
+    }
+  })
+
+  test('refuses an unchanged incoming link whose published target is deleted', async () => {
+    const root=await repository(null)
+    await rm(join(root,'package.json'))
+    await put(root,'guide.md','[Published target](asset.txt)\n'); await put(root,'asset.txt','source')
+    commit(root); git(root,['update-ref','refs/remotes/origin/develop',git(root,['rev-parse','HEAD']).toString().trim()])
+    await rm(join(root,'asset.txt'))
+    const {report}=await preflight(root,'companion')
+    assert.equal(report.status,'failed')
+    assert.match(report.error,/Missing documentation link: guide.md -> asset.txt/)
+  })
+
+  test('rejects a broken documentation delta before expensive platform and OSS commands', async () => {
+    const parent=await directory(),scripts=Object.fromEntries(['verify:api-deploy','build','typecheck','test','smoke','check'].map(name=>[name,'exit 99']))
+    const platform=await repository(null,{name:'platform-fixture',private:true,scripts},join(parent,'platform'))
+    const oss=await repository(simple('exit 97'),undefined,join(platform,'use-brian'))
+    git(platform,['add','use-brian']);commit(platform)
+    const docs=await repository(null,undefined,join(parent,'notes'));await rm(join(docs,'package.json'))
+    await put(docs,'new.md','[Missing](missing.md)\n')
+    const repositories=[{root:platform,kind:'platform'},{root:oss,kind:'oss'},{root:docs,kind:'companion'}]
+    const report=await runPreflight({repositories,reportPath:join(await directory(),'receipt.json')})
+    assert.equal(report.status,'failed');assert.match(report.error,/Missing documentation link/)
+    assert.equal(report.repositories[0].verification,undefined);assert.equal(report.repositories[1].verification,undefined)
+  })
+
 })
