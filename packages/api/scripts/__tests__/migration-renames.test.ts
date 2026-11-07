@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { orderMigrationFiles } from '../migration-order.js'
-import { findAppliedMigrationRenames } from '../migration-renames.js'
+import { findAppliedMigrationRenames } from '../../src/migrations/renames.js'
 
 describe('[COMP:api/migration-order] Migration filename compatibility', () => {
   it('preserves each released collision without skipping its same-number neighbour', () => {

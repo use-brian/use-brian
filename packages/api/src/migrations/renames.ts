@@ -4,6 +4,11 @@
  * both names lets old and new releases safely skip the same migration.
  */
 const migrationRenames = [
+  ['393_chat_message_archive.sql', '405_chat_message_archive.sql'],
+  ['394_local_chat_archive_sink.sql', '406_local_chat_archive_sink.sql'],
+  ['395_chat_archive_enrichment.sql', '407_chat_archive_enrichment.sql'],
+  ['396_chat_archive_owner_cascade.sql', '408_chat_archive_owner_cascade.sql'],
+  ['402_chat_archive_media.sql', '409_chat_archive_media.sql'],
   ['557_association_membership_catalogue.sql', '5570_association_membership_catalogue.sql'],
   ['561_association_site_content.sql', '5610_association_site_content.sql'],
   ['563_department_scope_evidence.sql', '5630_department_scope_evidence.sql'],
@@ -31,7 +36,7 @@ const migrationRenames = [
   ['398_chat_archive_owner_cascade.sql', '408_chat_archive_owner_cascade.sql'],
 ] as const
 
-export type AppliedMigrationRename = {
+type AppliedMigrationRename = {
   previousName: string
   currentName: string
 }
@@ -42,4 +47,9 @@ export function findAppliedMigrationRenames(
   return migrationRenames
     .filter(([previousName, currentName]) => applied.has(previousName) && !applied.has(currentName))
     .map(([previousName, currentName]) => ({ previousName, currentName }))
+}
+
+/** All exact prior spellings for a canonical filename, never numeric-prefix matching. */
+export function previousMigrationNames(currentName: string): readonly string[] {
+  return migrationRenames.filter(([, current]) => current === currentName).map(([previous]) => previous)
 }
