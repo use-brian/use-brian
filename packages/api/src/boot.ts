@@ -3793,11 +3793,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const externalApprovalService = new ExternalApprovalService(
     externalApprovalSources, createExternalApprovalSqlStore(),
     async (source, state) => {
-      await approvalDeliveries({ approvalId: state.approvalId, workspaceId: source.workspaceId,
-        workflowName: '', stepId: '', toolName: '', arguments: {}, approverUserId: source.approverUserId, externalAction: true,
-        deliveryChannelType: source.channelType, deliveryChannelId: source.channelId, assistantId: source.assistantId,
-        ...(source.channelType !== 'web' ? { recentTarget: { channelType: source.channelType, channelId: source.channelId,
-          channelIntegrationId: source.channelIntegrationId } } : {}),
+      // Load the frozen request so channel/web cards can show title + details.
+      const row = await pendingApprovalsStore.getByIdSystem(state.approvalId)
+      const request = (row?.approvalPayload as { request?: { title?: string; message?: string } } | undefined)?.request
+      const recentTarget = source.channelType === 'web'
+        ? (source.channelId !== 'queue'
+          ? { channelType: 'web' as const, channelId: source.channelId }
+          : undefined)
+        : { channelType: source.channelType, channelId: source.channelId,
+            channelIntegrationId: source.channelIntegrationId }
+      await approvalDeliveries({
+        approvalId: state.approvalId, workspaceId: source.workspaceId,
+        workflowName: '', stepId: '', toolName: '', arguments: {},
+        approverUserId: source.approverUserId, externalAction: true,
+        deliveryChannelType: source.channelType, deliveryChannelId: source.channelId,
+        assistantId: source.assistantId,
+        ...(request?.title ? { prompt: { title: request.title, details: request.message } } : {}),
+        ...(recentTarget ? { recentTarget } : {}),
       })
     },
   )

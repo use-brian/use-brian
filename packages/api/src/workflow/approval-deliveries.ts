@@ -1,23 +1,21 @@
 /**
  * Approval prompt deliveries — Phase C (Q4 §12).
  *
- * Dispatch a short notification + deep-link / reply-instruction message
- * over the chosen channel. Best-effort — the web UI is always a valid
- * response surface even when delivery fails.
+ * Dispatch a confirmation-style notification over the chosen channel.
+ * Best-effort — the web Approvals panel is always a valid response surface
+ * even when delivery fails.
  *
- * V1 implements:
- *   - 'web'      → no-op (UI surfaces the row independently)
- *   - 'telegram' → looks up the user's preferred Telegram chat_id and
- *                  sends a one-message prompt via the official bot
- *
- * 'slack' and 'whatsapp' are stubbed with a console.warn — same shape
- * as the existing channel adapters, plug in when those audiences need it.
+ * Channel cards mirror tool-confirmation UX: title + details + Allow/Deny
+ * actions whose reply text is the existing `approve <id>` / `reject <id>`
+ * command path. Personal web chat destinations receive the same card text
+ * as an assistant message in the verified session.
  *
  * [COMP:channels/approval-deliveries]
  */
 
 import type { DeliverToChannel } from '@use-brian/core'
 import { query } from '../db/client.js'
+import { addSessionMessage, findSessionById } from '../db/sessions.js'
 import type { ApprovalDeliveryDispatcher } from './approval.js'
 
 export type ApprovalDeliveryDeps = {
@@ -31,12 +29,27 @@ export function createApprovalDeliveryDispatcher(
   deps: ApprovalDeliveryDeps,
 ): ApprovalDeliveryDispatcher {
   return async (params) => {
-    if (params.deliveryChannelType === 'web') {
-      // Web UI is always available; no push needed.
+    const deepLink = `${deps.webBaseUrl}/w/${params.workspaceId}/p?panel=approvals&approval=${params.approvalId}`
+    const message = composeMessage(params, deepLink)
+    const actions = confirmationActions(params.approvalId)
+
+    // Verified personal web chat: post the confirmation card into that session.
+    // The Approvals panel remains available; web inbox (`channelId: 'queue'`) stays a no-op push.
+    const webSessionId =
+      params.recentTarget?.channelType === 'web'
+        ? params.recentTarget.channelId
+        : params.deliveryChannelType === 'web' && params.deliveryChannelId && params.deliveryChannelId !== 'queue'
+          ? params.deliveryChannelId
+          : null
+    if (webSessionId) {
+      await deliverWebChat(params, webSessionId, message)
       return
     }
 
-    const deepLink = `${deps.webBaseUrl}/w/${params.workspaceId}/approvals?focus=${params.approvalId}`
+    if (params.deliveryChannelType === 'web') {
+      // Web inbox — the Approvals panel surfaces the row independently.
+      return
+    }
 
     if (params.recentTarget) {
       if (!deps.deliverToChannel || !params.assistantId) return
@@ -45,10 +58,9 @@ export function createApprovalDeliveryDispatcher(
         workspaceId: params.workspaceId,
         assistantId: params.assistantId,
         userId: params.approverUserId,
-        text: composeMessage(params, deepLink),
-        // The pushed text carries no run content (see composeMessage), so it
-        // is public - and still passes the destination-audience gate rather
-        // than skipping it as an evidence-less caller would.
+        text: message,
+        actions,
+        // Public confirmation card text — still passes the destination-audience gate.
         scopeEvidence: { sensitivity: 'public', compartments: [], projectIds: [] },
       })
       if (outcome.status !== 'delivered') {
@@ -82,38 +94,80 @@ export function createApprovalDeliveryDispatcher(
         )
         return
       }
-      const message = composeMessage(params, deepLink)
       await sendTelegramMessage(deps.telegramBotToken, chatId, message)
       return
     }
 
-    // 'slack' / 'whatsapp' — stubs. Wire up when product needs it.
+    // 'slack' / 'whatsapp' — stubs without a recentTarget. Wire up when product needs it.
     console.warn(
       `[approval-deliveries] ${params.deliveryChannelType} delivery not yet implemented; approval ${params.approvalId} relies on web UI`,
     )
   }
 }
 
+function shortId(approvalId: string): string {
+  return approvalId.slice(0, 8)
+}
+
+function confirmationActions(approvalId: string) {
+  const id = shortId(approvalId)
+  return [
+    { id: 'allow', label: 'Allow', data: `approval:${approvalId}:allow`, replyText: `approve ${id}` },
+    { id: 'deny', label: 'Deny', data: `approval:${approvalId}:deny`, replyText: `reject ${id}` },
+  ]
+}
+
 function composeMessage(
   params: Parameters<ApprovalDeliveryDispatcher>[0],
   deepLink: string,
 ): string {
-  // Workflow/tool names and arguments are protected run metadata, and a push
-  // destination is chosen by recency, not by who may read that scope. They
-  // stay on the authorized web page this message links to.
+  const id = shortId(params.approvalId)
+  const title = params.prompt?.title?.trim()
+    || (params.externalAction
+      ? 'An external agent action needs your approval'
+      : 'A workflow action needs your approval')
+  const details = params.prompt?.details?.trim()
+  const question = `Allow this action?\nReply: approve / deny`
   return [
-    params.externalAction ? '🔐 An external agent action needs your approval. Review the exact request on the web before deciding.' : '🔐 A workflow action needs your approval.',
-    ``,
-    ...(params.recentTarget && !params.externalAction ? [`Approve or reject on the web: ${deepLink}`] : [
-      `Reply with \`approve ${params.approvalId.slice(0, 8)}\` or \`reject ${params.approvalId.slice(0, 8)}\`,`,
-      `or open: ${deepLink}`,
-    ]),
+    `**${title}**`,
+    ...(details ? ['', details] : []),
+    '',
+    question,
+    '',
+    `Reply with \`approve ${id}\` or \`reject ${id}\`,`,
+    `or open: ${deepLink}`,
   ].join('\n')
 }
 
+async function deliverWebChat(
+  params: Parameters<ApprovalDeliveryDispatcher>[0],
+  sessionId: string,
+  text: string,
+): Promise<void> {
+  if (!params.assistantId) return
+  const session = await findSessionById(sessionId)
+  if (!session
+    || session.assistantId !== params.assistantId
+    || session.userId !== params.approverUserId
+    || session.channelType !== 'web') {
+    console.warn(
+      `[approval-deliveries] web chat session ${sessionId} unavailable for approval ${params.approvalId}; relying on web UI`,
+    )
+    return
+  }
+  try {
+    await addSessionMessage({
+      sessionId: session.id,
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      senderAssistantId: params.assistantId,
+    })
+  } catch (err) {
+    console.warn(`[approval-deliveries] web chat delivery failed for approval ${params.approvalId}:`, err)
+  }
+}
+
 async function resolveTelegramChatId(userId: string): Promise<string | null> {
-  // The user's most-recently-active Telegram channel route (the existing
-  // table where we resolve preferred channels for scheduled-job delivery).
   const result = await query<{ chatId: string }>(
     `SELECT channel_id AS "chatId" FROM channel_routes
      WHERE user_id = $1 AND channel_type = 'telegram'

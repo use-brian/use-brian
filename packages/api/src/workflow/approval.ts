@@ -57,6 +57,8 @@ export type ApprovalDeliveryDispatcher = (params: {
   assistantId?: string
   /** External requests use the same human reply path, never workflow resume. */
   externalAction?: boolean
+  /** Frozen display snapshot for channel cards (title + optional details). */
+  prompt?: { title: string; details?: string }
 }) => Promise<void>
 
 export type ApprovalBridgeDeps = {

@@ -13,27 +13,32 @@ workflow. Use the assigned approver's most recent inbound user message to the
 workflow's executing assistant in the same workspace. Never select another
 user's history or let outgoing assistant messages, workflow notifications, or
 session activity move the target. Messaging history considers Telegram, Slack, WhatsApp, Microsoft Teams,
-and Feishu. Web and internal sessions do not compete with messaging
-conversations. Recent notifications support positively identified connected
-Telegram, Slack, Microsoft Teams, and Feishu integrations. A latest WhatsApp
-conversation remains web-only: its proactive delivery path cannot yet pin the
-owning account safely. Never substitute an older conversation.
+and Feishu first. When no safe messaging destination exists, the resolver
+falls back to the approver's most recent personal web chat with the same
+assistant. Internal sessions still do not compete. Recent notifications
+support positively identified connected Telegram, Slack, Microsoft Teams, and
+Feishu integrations. A latest WhatsApp conversation cannot yet pin its owning
+account safely, so it also falls through to personal web chat (or the Approvals
+panel when none exists). Never substitute an older conversation.
 
 Persist the resolved concrete channel type/id on the approval and pin routing
 metadata in its payload. Subsequent messages cannot move an existing request.
 Telegram topics and Slack threads retain their conversation routing. Feishu
 uses the inbound message id for reply delivery. Bound channel integrations use
-the existing workflow delivery adapters, including BYO credentials. Missing or ambiguous
-integration bindings fall back to web rather than guessing a bot. Surface
-bindings resolve exact conversation, Telegram parent chat, then default;
-bindings for unrelated conversations do not compete. Legacy official Telegram
-history without a positively identifiable integration is web-only in recent
-mode; it must not be confused with a removed BYO bot.
+the existing workflow delivery adapters, including BYO credentials. Missing or
+ambiguous integration bindings fall back to personal web chat rather than
+guessing a bot. Surface bindings resolve exact conversation, Telegram parent
+chat, then default; bindings for unrelated conversations do not compete.
+Legacy official Telegram history without a positively identifiable integration
+is web-chat-or-panel only in recent mode; it must not be confused with a
+removed BYO bot.
 
-No matching history means web-only approval. A provider delivery failure or
-unsupported delivery configuration never approves or runs the action: the
-request remains in the web Approvals queue. Recent notifications link to the
-web approval surface rather than promising text-reply support on every channel.
+No matching messaging or personal web-chat history means Approvals-panel-only
+review. A provider delivery failure or unsupported delivery configuration never
+approves or runs the action: the request remains in the web Approvals queue.
+Channel and web-chat notifications carry a confirmation-style title, optional
+details, Allow/Deny actions (or approve/reject reply text), and a deep link into
+the Approvals panel.
 The assigned approver's existing
 authorization checks are unchanged; receiving the notification grants no new
 authority. A group conversation previously used by the approver may be the
