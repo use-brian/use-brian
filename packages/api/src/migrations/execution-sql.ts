@@ -21,6 +21,7 @@ const reviewed: Readonly<Record<string, readonly [string, number]>> = {
   '8243_active_work_recording_native_proof.sql': ['e7e126dd6fa0f1d6259474dd9c247ab49d94fc4595565e25e883d5c1fe445949', 2],
   '8245_native_current_field_planning.sql': ['f5299318ec052cec600a6d9e2901ed2ab3459f1119722380ca89591e517cb7a6', 2],
   '8246_native_private_memory_empty_domain.sql': ['439f8d2b932d73d47603a874d3b3b02b8c29de801e8aab0c995c65a4d0d4fd3d', 2],
+  '8247_recording_privacy_ancestry_frontier.sql': ['310375585317824f227fdec661cb68fb6775b152e2ee0baf03bf1dc145f99d15', 2],
 }
 
 const callers = 'FOR caller IN SELECT p.oid,p.prosrc FROM pg_proc p'
