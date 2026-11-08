@@ -17,6 +17,9 @@ const reviewed: Readonly<Record<string, readonly [string, number]>> = {
   '8234_private_transcript_continuity.sql': ['b8e8cf73ecabac713d42936c1a8a6ced5d83de78bc7014d797079a145d6e344d', 2],
   '8235_office_export_source_reader.sql': ['b884e604bce18970789b1eccb99b1bbb4a579e919e557cea52f534689f4a1850', 2],
   '8236_private_transcript_publication.sql': ['b3c12403a20102374e244650bdaeb3ccee1d0039411a3cc27def2113cdc54957', 2],
+  '8242_native_empty_annotation_lookup.sql': ['f1a58c7c3934d351f0a392b97629fe3abdc3073ec4201409154c0cb8ebdb0a3c', 2],
+  '8243_active_work_recording_native_proof.sql': ['e7e126dd6fa0f1d6259474dd9c247ab49d94fc4595565e25e883d5c1fe445949', 2],
+  '8245_native_current_field_planning.sql': ['f5299318ec052cec600a6d9e2901ed2ab3459f1119722380ca89591e517cb7a6', 2],
 }
 
 const callers = 'FOR caller IN SELECT p.oid,p.prosrc FROM pg_proc p'
