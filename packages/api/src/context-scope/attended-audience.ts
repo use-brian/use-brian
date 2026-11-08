@@ -16,10 +16,11 @@ import {classifySession,isWebTransport,policyFor} from '../session-kind.js'
 import {readSessionById} from '../db/sessions.js'
 import {hasWorkspaceMcpRetainedAuthority} from '../db/session-context-revisions.js'
 import {findAssistantById} from '../db/users.js'
+import {deliveryFailureMetadata,type DeliveryVerificationPhase} from './delivery-failure.js'
 
 type Prepare=(execution:ExecutionContext,sources:readonly ScopeSource[],action:'context'|'deliver')=>Promise<PreparedExternalSourceAuthority>
 type Options={integrationStore?:ChannelIntegrationStore;prepareSource?:Prepare}
-function denied():never{throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable')}
+function denied(phase?:DeliveryVerificationPhase):never{throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable',deliveryFailureMetadata(undefined,phase))}
 /** A destination narrows data access, never the original invocation identity. */
 export async function validateAttendedAudienceEvidence(execution:ExecutionContext,rawEvidence:ScopeEvidence,rawRecipient:AccessCeiling,
  options:{prepareSource?:Prepare;directHumanSource?:boolean}={}):Promise<ScopeEvidence>{
@@ -94,7 +95,7 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
     // machine identity never exempts a field from proof. Keep all original
     // roots and validate the complete mixed ancestry below under these locks.
     const current=await tryValidateNativeScopeEvidence({sources:nativeFieldProof},recipient,client,'audience')
-    if(!current)denied()
+    if(!current)denied('anonymous_field_proof')
     evidence.note(current)
    }
    await applyApplicationRLSContext(client,execution)
@@ -113,7 +114,7 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
   await execution.security.authority.assertCurrent();assertWiring();return result
  }catch(error){
   if(error instanceof DeliveryAudienceUnverifiedError)throw error
-  throw Object.assign(new DeliveryAudienceUnverifiedError(undefined,scopeEvidenceFailureOf(error)??'verification_error'),{cause:error})
+  throw Object.assign(new DeliveryAudienceUnverifiedError(undefined,scopeEvidenceFailureOf(error)??'verification_error',error),{cause:error})
  }
 }
 /** Existing destination resolution, with a current original-actor SQL validator. */
@@ -154,7 +155,7 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
    await execution.security.authority.assertCurrent()
    return{allowed:true,evidence}
   }catch(error){
-   return{allowed:false,reason:'delivery_audience_unverified',diagnostic:scopeEvidenceFailureOf(error)??'verification_error'}
+   return{allowed:false,reason:'delivery_audience_unverified',diagnostic:scopeEvidenceFailureOf(error)??'verification_error',...deliveryFailureMetadata(error)}
   }
  }
 }

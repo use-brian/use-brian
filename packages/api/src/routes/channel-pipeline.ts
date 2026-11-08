@@ -156,6 +156,7 @@ import {
   isDeliveryAudienceUnverifiedError,
 } from '../context-scope/delivery-authority.js'
 import { validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
+import { deliveryFailureAnalytics } from '../context-scope/delivery-failure.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import {
   buildChannelSessionKey,
@@ -1275,7 +1276,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     ? await resolveDeliveryAudienceEnvelope(audienceInput)
     : null
   if (audienceEnvelope && !audienceEnvelope.allowed) {
-    throw new DeliveryAudienceUnverifiedError(audienceEnvelope.detail, audienceEnvelope.diagnostic)
+    throw new DeliveryAudienceUnverifiedError(audienceEnvelope.detail, audienceEnvelope.diagnostic, audienceEnvelope)
   }
   const publicAudienceTurn = privateRecording || audienceEnvelope?.allowed === true
     && audienceEnvelope.source === 'public'
@@ -1431,7 +1432,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       ...audienceInput,
       scopeEvidence: scopeAccumulator.evidence,
     })
-    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
+    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic, decision)
     // Current labels of a source that changed since it was read join the floor.
     scopeAccumulator.note({
       sensitivity: decision.evidence.sensitivity,
@@ -1463,6 +1464,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         metadata: {
           error_type: sanitizeAnalytics((err as Error).name),
           stage: sanitizeAnalytics('pre_generation'),
+          ...Object.fromEntries(Object.entries(deliveryFailureAnalytics(err)).map(([key, value]) => [key, sanitizeAnalytics(value)])),
           ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
             ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
             : {}),
@@ -3544,6 +3546,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         metadata: {
           error_type: sanitizeAnalytics((err as Error).name),
           stage: sanitizeAnalytics('live_authority'),
+          ...Object.fromEntries(Object.entries(deliveryFailureAnalytics(err)).map(([key, value]) => [key, sanitizeAnalytics(value)])),
           ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
             ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
             : {}),

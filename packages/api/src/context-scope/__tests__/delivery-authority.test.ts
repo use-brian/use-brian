@@ -6,7 +6,9 @@ import {
   bindingCeiling,
   createDeliveryAudienceAuthorizer,
   createDeliveryAudienceEnvelopeResolver,
+  DeliveryAudienceUnverifiedError,
 } from '../delivery-authority.js'
+import { deliveryFailureAnalytics } from '../delivery-failure.js'
 import { connectorExposureAllowed } from '../connector-exposure.js'
 
 const WS = '11111111-1111-4111-8111-111111111111'
@@ -422,6 +424,37 @@ const speakerInput = {
 const ownPersonalRow = { sensitivity: 'internal' as const, compartments: [], projectIds: [], sources: [source('own-memory', null)] }
 
 describe('[COMP:api/delivery-authority] a linked member speaking in an approved group', () => {
+  it.each(['source_held', 'source_changed', 'source_unverifiable', 'verification_error', 'shape'] as const)(
+    'does not claim the approved audience is too narrow for %s', async diagnostic => {
+      const failure = Object.assign(new Error('PRIVATE scope', { cause: Object.assign(new Error('PRIVATE SQL'), { code: '57014' }) }), {
+        diagnostic, verificationPhase: 'native_proof', privateSourceId: 'PRIVATE',
+      })
+      const authorize = createDeliveryAudienceAuthorizer({
+        ...approvedGroupDeps({ speakerRole: 'member' }),
+        validateEvidence: async () => { throw failure },
+      })
+      const decision = await authorize(speakerInput)
+      expect(decision).toEqual({ allowed: false, reason: 'delivery_audience_unverified', diagnostic,
+        verificationPhase: 'native_proof', verificationSqlstateClass: '57' })
+      if (decision.allowed) throw new Error('Expected refusal')
+      const error = new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic, decision)
+      expect(error.retrySafe).toBe(false)
+      expect(deliveryFailureAnalytics(error)).toEqual({ verification_phase: 'native_proof', verification_sqlstate_class: '57' })
+      expect(JSON.stringify(decision)).not.toContain('PRIVATE')
+    },
+  )
+
+  it.each(['clearance', 'teams', 'projects', 'user_visibility', 'assistant_visibility', 'workspace', 'source_reclassified'] as const)(
+    'retains the coarse restriction detail for a proved %s failure', async diagnostic => {
+      const authorize = createDeliveryAudienceAuthorizer({
+        ...approvedGroupDeps({ speakerRole: 'member' }),
+        validateEvidence: async () => { throw Object.assign(new Error('PRIVATE'), { diagnostic }) },
+      })
+      await expect(authorize(speakerInput)).resolves.toEqual({ allowed: false, reason: 'delivery_audience_unverified',
+        detail: 'evidence_exceeds_audience', diagnostic })
+    },
+  )
+
   // 2026-10-01: group bindings could never carry personal context, so an
   // owner's own topic-routed Telegram group refused every turn that touched
   // their memories. Who else is in the group is the call of the owner or

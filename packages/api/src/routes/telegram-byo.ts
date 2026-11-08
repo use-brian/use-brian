@@ -78,6 +78,7 @@ import { processChannelMessage } from './channel-pipeline.js'
 import { admitChannelMessage } from './channel-message-admission.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { isDeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
+import { deliveryAudienceFailureKind, deliveryFailureAnalytics } from '../context-scope/delivery-failure.js'
 import { cacheInboundImage } from './channel-file-cache.js'
 import { mediaByteLimit, type ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
 import { archiveUnroutedInbound, resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
@@ -758,6 +759,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           error_type: sanitizeAnalytics((err as Error)?.name ?? 'unknown'),
           error_message: sanitizeAnalytics(((err as Error)?.message ?? '').slice(0, 200)),
           stage: sanitizeAnalytics('telegram_byo_route_catch'),
+          ...Object.fromEntries(Object.entries(deliveryFailureAnalytics(err)).map(([key, value]) => [key, sanitizeAnalytics(value)])),
           ...(typeof (err as { diagnostic?: unknown } | null)?.diagnostic === 'string'
             ? { denial_diagnostic: sanitizeAnalytics((err as { diagnostic: string }).diagnostic) }
             : {}),
@@ -2474,8 +2476,10 @@ const TELEGRAM_GROUP_NEEDS_MORE_ACCESS_NOTICE =
 export function telegramIncomingFailureText(channelId: string, err: unknown): string {
   const chatId = channelId.split(':topic:', 1)[0] ?? channelId
   if (chatId.startsWith('-') && isDeliveryAudienceUnverifiedError(err)) {
-    if (err.detail === 'evidence_exceeds_audience') return TELEGRAM_GROUP_NEEDS_MORE_ACCESS_NOTICE
-    return TELEGRAM_GROUP_NOT_APPROVED_NOTICE
+    const failure = deliveryAudienceFailureKind(err)
+    if (failure === 'restriction') return TELEGRAM_GROUP_NEEDS_MORE_ACCESS_NOTICE
+    if (failure === 'unbound') return TELEGRAM_GROUP_NOT_APPROVED_NOTICE
+    return channelUserErrorText(err)
   }
   if (isDeliveryAudienceUnverifiedError(err)) return channelUserErrorText(err)
   return TELEGRAM_RETRY_NOTICE

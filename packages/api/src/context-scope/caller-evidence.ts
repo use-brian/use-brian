@@ -11,6 +11,7 @@ import { readExternalSourceAncestors } from '../application-platform/external-so
 import { readApplicationFieldAncestors } from '../application-platform/field-evidence.js'
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
 import type { PoolClient } from 'pg'
+import { deliveryFailureMetadata, type DeliveryFailureMetadata, type DeliveryVerificationPhase } from './delivery-failure.js'
 
 /**
  * Why evidence could not be admitted. Internal only: it reaches logs and
@@ -32,19 +33,20 @@ export type ScopeEvidenceFailure =
   /** Not a policy decision: the check itself failed (e.g. a pool timeout). */
   | 'verification_error'
 
-export type ScopeEvidenceError = Error & {
+export type ScopeEvidenceError = Error & DeliveryFailureMetadata & {
   reason: 'caller_evidence_unavailable' | 'delivery_audience_unverified'
   retrySafe: false
   diagnostic: ScopeEvidenceFailure
 }
 
-function unavailable(kind: 'caller' | 'audience', diagnostic: ScopeEvidenceFailure, cause?: unknown): ScopeEvidenceError {
+function unavailable(kind: 'caller' | 'audience', diagnostic: ScopeEvidenceFailure, cause?: unknown, phase?: DeliveryVerificationPhase): ScopeEvidenceError {
   return Object.assign(new Error(kind === 'caller'
     ? 'The source context is unavailable. Start a new request with current access.'
     : 'The destination audience cannot receive this output under its current access.', cause === undefined ? undefined : { cause }), {
     reason: kind === 'caller' ? 'caller_evidence_unavailable' as const : 'delivery_audience_unverified' as const,
     retrySafe: false as const,
     diagnostic,
+    ...deliveryFailureMetadata(cause, phase),
   })
 }
 
@@ -160,7 +162,7 @@ async function validateScopeEvidence(
         if(failure)throw unavailable(additionalCeilings.length?'audience':kind,failure)
         return expanded.evidence
       }
-    } catch (error) { throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error) }
+    } catch (error) { throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error, 'native_proof') }
   }
   if (nativeOnly) return null
   // A history subset carries only checked scopes. It never admits the whole
@@ -218,7 +220,7 @@ async function validateScopeEvidence(
     expanded.note({sources:persistent});snapshot=expanded.evidence;sources=snapshot.sources ?? []
     for(const source of persistent)failure ??= visibilityFailure(source,ceiling) ?? labelFailure(source,ceiling)
     if(failure)throw unavailable(kind,failure)
-  } catch(error){throw scopeEvidenceFailureOf(error) ? error : unavailable(kind,'source_unverifiable',error)}
+  } catch(error){throw scopeEvidenceFailureOf(error) ? error : unavailable(kind,'source_unverifiable',error,'ancestry')}
 
 
   // A native envelope cannot erase its independently authorized source ancestry.
@@ -261,7 +263,7 @@ async function validateScopeEvidence(
     snapshot = expanded.evidence
     sources = snapshot.sources ?? []
   } catch (error) {
-    throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error)
+    throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error, 'ancestry')
   }
 
   // Page receipts carry principal boundaries beyond generic labels. Resolve
@@ -323,7 +325,7 @@ async function validateScopeEvidence(
   try {
     states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, sources.filter(source=>!pageKinds.has(source.resourceKind)), workflowRunId, kind === 'caller' ? 'context' : 'deliver', !!client)
   } catch (error) {
-    throw unavailable(kind, 'verification_error', error)
+    throw unavailable(kind, 'verification_error', error, 'current_source')
   }
   const raised: ScopeEvidence = raisedPages.evidence
   for (const state of states) {
@@ -352,7 +354,7 @@ async function validateScopeEvidence(
       throw unavailable(kind, 'source_unverifiable')
     }
   } catch (error) {
-    throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error)
+    throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error, 'ancestry_recheck')
   }
   return raised
 }

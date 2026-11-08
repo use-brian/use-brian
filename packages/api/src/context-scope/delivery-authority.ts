@@ -18,6 +18,7 @@ import { scopeEvidenceFailureOf, validateAudienceScopeEvidence, type ScopeEviden
 import { roomAudienceCeiling } from '../routes/_room-binding.js'
 import { isWebTransport } from '../session-kind.js'
 import { isWechatRecipientCurrentSystem } from '../db/channel-identity-bindings.js'
+import { deliveryFailureMetadata, isAudienceScopeRestriction, type DeliveryFailureMetadata } from './delivery-failure.js'
 
 export type DeliveryAudienceInput = {
   workspaceId: string
@@ -85,7 +86,7 @@ export type DeliveryAudienceDiagnostic =
   | 'no_binding_ceiling'
   | 'wechat_recipient_unbound'
 
-type Denial = {
+type Denial = DeliveryFailureMetadata & {
   allowed: false
   reason: 'delivery_audience_unverified'
   detail?: DeliveryAudienceDenialDetail
@@ -118,11 +119,16 @@ export class DeliveryAudienceUnverifiedError extends Error {
   readonly detail: DeliveryAudienceDenialDetail | undefined
   /** Internal only; see `DeliveryAudienceDiagnostic`. */
   readonly diagnostic: DeliveryAudienceDiagnostic | undefined
-  constructor(detail?: DeliveryAudienceDenialDetail, diagnostic?: DeliveryAudienceDiagnostic) {
+  readonly verificationPhase: DeliveryFailureMetadata['verificationPhase']
+  readonly verificationSqlstateClass: DeliveryFailureMetadata['verificationSqlstateClass']
+  constructor(detail?: DeliveryAudienceDenialDetail, diagnostic?: DeliveryAudienceDiagnostic, failure?: unknown) {
     super('The current destination is not authorized for this response.')
     this.name = 'DeliveryAudienceUnverifiedError'
     this.detail = detail
     this.diagnostic = diagnostic
+    const metadata = deliveryFailureMetadata(failure)
+    this.verificationPhase = metadata.verificationPhase
+    this.verificationSqlstateClass = metadata.verificationSqlstateClass
   }
 }
 
@@ -145,17 +151,18 @@ type Dependencies = {
   isWechatRecipientCurrent?: typeof isWechatRecipientCurrentSystem
 }
 
-function denial(detail?: DeliveryAudienceDenialDetail, diagnostic?: DeliveryAudienceDiagnostic): Denial {
+function denial(detail?: DeliveryAudienceDenialDetail, diagnostic?: DeliveryAudienceDiagnostic, failure?: unknown): Denial {
   return {
     allowed: false,
     reason: 'delivery_audience_unverified',
     ...(detail ? { detail } : {}),
     ...(diagnostic ? { diagnostic } : {}),
+    ...deliveryFailureMetadata(failure),
   }
 }
 
-function denied(detail?: DeliveryAudienceDenialDetail, diagnostic?: DeliveryAudienceDiagnostic): DeliveryAudienceDecision {
-  return denial(detail, diagnostic)
+function denied(detail?: DeliveryAudienceDenialDetail, diagnostic?: DeliveryAudienceDiagnostic, failure?: unknown): DeliveryAudienceDecision {
+  return denial(detail, diagnostic, failure)
 }
 
 function envelopeDenied(detail?: DeliveryAudienceDenialDetail, diagnostic?: DeliveryAudienceDiagnostic): DeliveryAudienceEnvelopeDecision {
@@ -244,10 +251,9 @@ async function validate(
   } catch (error) {
     const diagnostic = scopeEvidenceFailureOf(error) ?? 'verification_error'
     if (diagnostic === 'verification_error') {
-      const cause = (error as { cause?: unknown } | null)?.cause ?? error
-      console.warn('[delivery-authority] evidence verification failed:', (cause as Error)?.message ?? cause)
+      console.warn('[delivery-authority] evidence verification failed:', diagnostic, deliveryFailureMetadata(error))
     }
-    return denied(undefined, diagnostic)
+    return denied(undefined, diagnostic, error)
   }
 }
 
@@ -472,13 +478,16 @@ export function createDeliveryAudienceAuthorizer(dependencies: Dependencies = {}
         ceiling = member.ceiling
       }
       const sink = await validate(evidence, ceiling, deps.validateEvidence)
-      if (!sink.allowed) return denied(undefined, sink.diagnostic)
+      if (!sink.allowed) return denied(undefined, sink.diagnostic, sink)
     }
 
     const envelope = await resolveEnvelope(input, deps)
-    if (!envelope.allowed) return denied(envelope.detail, envelope.diagnostic)
+    if (!envelope.allowed) return denied(envelope.detail, envelope.diagnostic, envelope)
     const decision = await validate(evidence, envelope.ceiling, deps.validateEvidence)
     if (decision.allowed) return decision
-    return denied(envelope.source === 'public' ? 'unbound' : 'evidence_exceeds_audience', decision.diagnostic)
+    const detail = isAudienceScopeRestriction(decision.diagnostic)
+      ? envelope.source === 'public' ? 'unbound' : 'evidence_exceeds_audience'
+      : undefined
+    return denied(detail, decision.diagnostic, decision)
   }
 }

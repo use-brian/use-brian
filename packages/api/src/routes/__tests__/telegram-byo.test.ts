@@ -642,6 +642,7 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
   it('explains how an admin can approve an unverified Telegram group', () => {
     expect(telegramIncomingFailureText('-1002000000001', {
       reason: 'delivery_audience_unverified',
+      detail: 'unbound',
     })).toBe(
       'Telegram is connected, but this group is not approved for workspace replies. Ask a workspace owner or admin to approve it in Studio > Channels > Group reply access.',
     )
@@ -679,6 +680,32 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
       detail: 'evidence_exceeds_audience',
     })).toContain('not approved to receive')
   })
+
+  it.each(['source_held', 'source_changed', 'source_unverifiable', 'verification_error', 'shape', 'unknown'])(
+    'uses the access-unverified notice for %s even with a historical coarse detail', diagnostic => {
+      for (const detail of [undefined, 'unbound', 'evidence_exceeds_audience']) {
+        const text = telegramIncomingFailureText('-1002000000001:topic:15', {
+          reason: 'delivery_audience_unverified', detail, diagnostic,
+          message: 'PRIVATE SQL and source ids', verificationPhase: 'native_proof', verificationSqlstateClass: '57',
+        })
+        expect(text).toContain("access to some information couldn't be verified")
+        expect(text).toContain('may already be saved')
+        expect(text).not.toMatch(/not approved|Group reply access|try again|PRIVATE|native_proof|57/)
+      }
+    },
+  )
+
+  it('does not assert missing group approval when the coarse reason and diagnostic are absent', () => {
+    expect(telegramIncomingFailureText('-1002000000001', { reason: 'delivery_audience_unverified' }))
+      .toContain("access to some information couldn't be verified")
+  })
+
+  it.each(['binding_expired', 'binding_audience_mismatch', 'binding_approver_not_admin'])(
+    'retains approval guidance for proven %s', diagnostic => {
+      expect(telegramIncomingFailureText('-1002000000001', { reason: 'delivery_audience_unverified', diagnostic }))
+        .toContain('not approved for workspace replies')
+    },
+  )
 })
 
 describe('[COMP:api/telegram-byo-route] OSS owner pairing', () => {
