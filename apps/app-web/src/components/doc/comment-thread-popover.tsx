@@ -185,7 +185,7 @@ export function placeMarginComment(
 
 /** The in-doc text the card must track. The gutter badge is absolute and can
  *  sit on the editor frame instead of the line, so it is never an anchor. */
-export function usableCommentAnchor(el: HTMLElement | null): HTMLElement | null {
+function usableCommentAnchor(el: HTMLElement | null): HTMLElement | null {
   if (!el || !el.isConnected) return null;
   if (el.hasAttribute("data-comment-badge")) return null;
   if (el === document.body) return null;

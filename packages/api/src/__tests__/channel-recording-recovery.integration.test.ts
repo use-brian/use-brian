@@ -12,6 +12,7 @@ import {createDbMemoryStore} from '../db/memory-store.js'
 import {createDbCapabilityStore} from '../db/capability-store.js'
 import {findAssistantById} from '../db/users.js'
 import {createDecisionRuntime} from '../decision-runtime.js'
+import {createMemory} from '../db/memories.js'
 const {runTurn,inject,nativeQueries}=vi.hoisted(()=>({runTurn:vi.fn(),inject:vi.fn(),nativeQueries:[] as Array<{available:boolean;sources:number;fields:ScopeSource[]}>}))
 vi.mock('../turn/kernel.js',async original=>({...await original<typeof import('../turn/kernel.js')>(),runAssistantTurn:runTurn}))
 vi.mock('../turn/prepare.js',()=>({prepareAssistantRun:vi.fn(async input=>({model:input.model,tools:input.candidateTools,trustedContext:'',userVisibleContext:''}))}))
@@ -221,11 +222,16 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
  })
 
  it('delivers an owner forum reply with private memories and durable prior annotations',async()=>{
-  const memories=(await query<{id:string}>(`INSERT INTO memories(user_id,workspace_id,assistant_id,scope,summary,sensitivity,
-    created_by_user_id,scope_version,scope_held,valid_from,valid_to)
-    SELECT $1,$2,$3,'shared','PRIVATE_MEMORY_'||n,CASE WHEN n>68 THEN 'internal' ELSE 'confidential' END,
-      $1,1,n>68,now()-interval '2 days',CASE WHEN n BETWEEN 4 AND 68 THEN now()-interval '1 day' ELSE NULL END
-    FROM generate_series(1,70) n RETURNING id`,[owner,workspace,assistant])).rows.map(row=>row.id)
+  const memories:string[]=[]
+  for(let n=1;n<=70;n++){
+   const created=await createMemory({workspaceId:workspace,userId:owner,assistantId:assistant,createdByUserId:owner,
+    scope:'shared',summary:`PRIVATE_MEMORY_${n}`,sensitivity:n>68?'internal':'confidential'})
+   memories.push(created.id)
+  }
+  await query(`UPDATE memories SET valid_from=now()-interval '2 days',
+    scope_held=substring(summary from 'PRIVATE_MEMORY_(\\d+)$')::int>68,
+    valid_to=CASE WHEN substring(summary from 'PRIVATE_MEMORY_(\\d+)$')::int BETWEEN 4 AND 68 THEN now()-interval '1 day' ELSE NULL END
+    WHERE id=ANY($1::uuid[])`,[memories])
   try{
    expect((await query(`SELECT count(*) FILTER(WHERE valid_to IS NULL AND NOT scope_held)::int current,
      count(*) FILTER(WHERE valid_to IS NOT NULL)::int retired,count(*) FILTER(WHERE scope_held)::int held

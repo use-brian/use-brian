@@ -809,7 +809,7 @@ const TOGGLE_SUMMARY_TYPES = new Set(["paragraph", "heading"]);
  * Insert an empty paragraph there so the list becomes body and a collapsed
  * chevron can hide it. Pure, so it unit-tests on a constructed doc.
  */
-export function toggleMissingSummaryPos(doc: PMNode): number {
+function toggleMissingSummaryPos(doc: PMNode): number {
   let found = -1;
   doc.descendants((node, pos) => {
     if (found >= 0) return false;

@@ -12,7 +12,7 @@ import { isImageIcon } from "@use-brian/shared/page-icon";
 import { normalizeHostHeader } from "@/lib/site-hosts";
 
 export const SOCIAL_IMAGE_SIZE = { width: 1200, height: 1200 } as const;
-export const SOCIAL_IMAGE_FALLBACK_TITLE = "Shared page";
+const SOCIAL_IMAGE_FALLBACK_TITLE = "Shared page";
 
 const TITLE_CODEPOINTS = 64;
 

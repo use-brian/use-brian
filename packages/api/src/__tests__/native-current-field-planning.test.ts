@@ -16,7 +16,8 @@ beforeAll(async()=>{
  await db.exec(`CREATE ROLE mixed_planning_owner;CREATE ROLE mixed_planning_actor LOGIN;
   GRANT CREATE ON SCHEMA public TO mixed_planning_owner;SET ROLE mixed_planning_owner;
   CREATE TABLE session_messages(id uuid);
-  CREATE TABLE memories(id uuid,workspace_id uuid);
+  CREATE TABLE fixture_memories(id uuid,workspace_id uuid);
+  CREATE VIEW memories AS SELECT id,workspace_id FROM fixture_memories;
   CREATE TABLE application_native_resource_owners(workspace_id uuid,origin jsonb,resource_type text);
   CREATE TABLE application_field_resources(id uuid,workspace_id uuid,origin jsonb,type_key text,selection text,selected_version text);
   CREATE TABLE fixture_state(mode text,helper_current boolean,generation integer,memory_generation integer,memory_calls integer,native_seen boolean,metadata_generation integer);
@@ -103,9 +104,9 @@ beforeAll(async()=>{
  await db.query("SELECT set_config('app.current_user_id',$1,false)",[actor])
 })
 beforeEach(async()=>{
- await db.exec(`DELETE FROM memories;DELETE FROM application_native_resource_owners;DELETE FROM application_field_observations;DELETE FROM fixture_state;DELETE FROM fixture_lineage;DELETE FROM fixture_dependencies;DELETE FROM application_field_resources;
+ await db.exec(`DELETE FROM fixture_memories;DELETE FROM application_native_resource_owners;DELETE FROM application_field_observations;DELETE FROM fixture_state;DELETE FROM fixture_lineage;DELETE FROM fixture_dependencies;DELETE FROM application_field_resources;
   INSERT INTO fixture_state VALUES('normal',true,1,1,0,false,1);`)
- await db.query('INSERT INTO memories VALUES($1,$2)',[memory,workspace])
+ await db.query('INSERT INTO fixture_memories VALUES($1,$2)',[memory,workspace])
  for(const [id,type] of [[memory,'memory'],[native,'session_message'],[parent,'session_message_annotation']]){
   await db.query('INSERT INTO application_field_resources VALUES($1,$2,$3,$4,$5,NULL)',[id,workspace,{kind:'native',moduleKey:'native'},type,type==='memory'?'query_domain':'query'])
   await db.query('INSERT INTO fixture_lineage VALUES($1,$2,$1,$3)',[id,'application_field','v1'])

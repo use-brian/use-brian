@@ -96,7 +96,7 @@ type TeamspaceSettingsPatch = {
   workspaceGroupId?: string | null;
 };
 
-export function teamspaceDraftFrom(teamspace: Teamspace): TeamspaceSettingsDraft {
+function teamspaceDraftFrom(teamspace: Teamspace): TeamspaceSettingsDraft {
   return {
     name: teamspace.name,
     icon: teamspace.icon,
