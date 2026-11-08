@@ -1,6 +1,9 @@
 /** [COMP:api/channel-recording] Reviewed history reaches the model and delivery. */
 import {randomUUID,randomBytes} from 'node:crypto'
 import {z} from 'zod'
+// Whole pipeline functional cases have a finite 90 second budget.
+// Generic tests and existing generated topic regressions keep 30 seconds;
+// SQL statements keep their existing 15 second timeout.
 import {afterAll,beforeAll,describe,expect,it,onTestFinished,vi} from 'vitest'
 import {getAppPool,getPool,query,queryWithRLS,applyRLSGucs,rollbackAndRelease,runWithAgentAccess} from '../db/client.js'
 import {buildTool,createGeminiProvider,createRoutingProvider,wrapProvider,type ExecutionContext,type ScopeSource} from '@use-brian/core'
@@ -13,6 +16,8 @@ import {createDbCapabilityStore} from '../db/capability-store.js'
 import {findAssistantById} from '../db/users.js'
 import {createDecisionRuntime} from '../decision-runtime.js'
 import {createMemory} from '../db/memories.js'
+import {createDbLinkedAccountStore} from '../db/linked-accounts.js'
+import {channelLinkBindsHere} from '../db/channel-user-store.js'
 const {runTurn,inject,nativeQueries}=vi.hoisted(()=>({runTurn:vi.fn(),inject:vi.fn(),nativeQueries:[] as Array<{available:boolean;sources:number;fields:ScopeSource[]}>}))
 vi.mock('../turn/kernel.js',async original=>({...await original<typeof import('../turn/kernel.js')>(),runAssistantTurn:runTurn}))
 vi.mock('../turn/prepare.js',()=>({prepareAssistantRun:vi.fn(async input=>({model:input.model,tools:input.candidateTools,trustedContext:'',userVisibleContext:''}))}))
@@ -20,11 +25,12 @@ vi.mock('../mcp/inject.js',()=>({injectMcpTools:inject}))
 // Observe the genuine admitted reader without replacing native SQL or proof.
 vi.mock('../application-platform/native-session-query-evidence.js',async original=>{
  const real=await original<typeof import('../application-platform/native-session-query-evidence.js')>()
- return{...real,readNativeSessionQueryEvidence:async(...args:Parameters<typeof real.readNativeSessionQueryEvidence>)=>{
-  const result=await real.readNativeSessionQueryEvidence(...args)
+ const observe=(read:typeof real.readNativeSessionQueryEvidence)=>async(...args:Parameters<typeof read>)=>{
+  const result=await read(...args)
   nativeQueries.push({available:result!==null,sources:result?.sources.length??0,fields:result?.sources.filter(source=>source.resourceKind==='application_field')??[]})
   return result
- }}
+ }
+ return{...real,readNativeSessionQueryEvidence:observe(real.readNativeSessionQueryEvidence)}
 })
 const {assertLocalFixture}=await import(new URL('../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -32,9 +38,12 @@ const [owner,other,workspace,assistant,channel,integration,source]=Array.from({l
 const conversation='-1000008241:topic:24',question='Our fictional meeting is December 9.',answer='The fictional meeting date is recorded.'
 const originalConsoleError=console.error.bind(console)
 const credentialKey=randomBytes(32),integrationStore=createDbChannelIntegrationStore(credentialKey)
+const linkedAccounts=createDbLinkedAccountStore()
+const telegramSender=(id:string)=>id===owner?'91000082461':'91000082462'
 // The installed incident had 255 eligible public rows. Two-row fixtures do
 // not exercise the native history/annotation query boundary at that size.
 const publicHistoryRows=255
+const privateMemoryRows=289
 let recovered:string
 let verifiedOtherExecution:ExecutionContext|undefined
 
@@ -72,6 +81,7 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   await query("INSERT INTO workspaces(id,name,owner_user_id,plan) VALUES($1,'Fictional recovery',$2,'pro')",[workspace,owner])
   await query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential'),($1,$3,'admin','confidential')",[workspace,owner,other])
   await query("INSERT INTO assistants(id,name,workspace_id,clearance) VALUES($1,'Fictional recovery assistant',$2,'internal')",[assistant,workspace])
+  for(const actor of [owner,other])await linkedAccounts.upsert({userId:actor,assistantId:assistant,provider:'telegram',providerId:telegramSender(actor)})
   await query("INSERT INTO channels(id,workspace_id,channel_type,display_name) VALUES($1,$2,'telegram','Fictional recovery bot')",[channel,workspace])
   const config={requireMentionOverrides:[{chatId:'-1000008241',topicId:24}],deliveryAudienceBindings:[{version:1,channelId:'-1000008241',clearance:'internal',expiresAt:null,approvedAt:'2026-10-01T00:00:00Z',projectIds:[],audienceType:'group',compartments:[],companyWide:true,recipientUserId:null,approvedByUserId:owner}]}
   await query("INSERT INTO channel_integrations(id,channel_id,channel_type,credentials,bot_user_id,config) VALUES($1,$2,'telegram',$4,'987658241',$3)",[integration,channel,config,encryptCredentials({bot_token:'fictional',webhook_secret:'fictional'},credentialKey)])
@@ -158,8 +168,14 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
    expect(recording?.session.id).toBe(recovered)
    const selectedAssistant=await findAssistantById(assistant)
    expect(selectedAssistant).not.toBeNull()
+   const linked=await linkedAccounts.findByProvider('telegram',telegramSender(actorId))
+   expect(linked).not.toBeNull()
+   expect(linked!.userId).toBe(actorId)
+   const senderLinkedIdentity=await channelLinkBindsHere(linked,assistant,owner,workspace)
+   expect(senderLinkedIdentity).toBe(true)
+   const isIdentified=linked!.userId===actorId&&senderLinkedIdentity
    pending=processChannelMessage({recording,admittedAnswerContext:{kind:'continue'},assistant:selectedAssistant!,
-    userId:actorId,ownerId:owner,isIdentified:true,senderLinkedIdentity:true,externalGuest:false,channelType:'telegram',channelId:conversation,isGroupChat:true,channelIntegrationId:integration,channelIntegrationStore:integrationStore,
+    userId:actorId,ownerId:owner,isIdentified,senderLinkedIdentity,externalGuest:false,channelType:'telegram',channelId:conversation,isGroupChat:true,channelIntegrationId:integration,channelIntegrationStore:integrationStore,
     incomingChannelMessageId:id,replyToMessageId:options.replyToMessageId,messageText:text,userContentBlocks:[{type:'text',text}],abortController,modelAlias:'standard',adaptiveResearchEnabled:true,decisionRuntime,configuredProviders:new Set(['gemini']),provider,systemPrompt:'Fixture prompt',tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore(),connectorStore:{},mcpSettingsStore:{},
     hooks:{onConfirmationRequired:async()=>{},sendError:async(error:Error)=>{throw error},sendResponse:async(text:string)=>{sent.push(text);await recordDeliveredTelegramMessage({channelId:conversation,providerMessageId:`reply-${id}`,text,botId:'987658241',botUsername:'fictional_recovery_bot'});return{channelMessageId:`reply-${id}`}}}} as unknown as ChannelPipelineParams)
    await pending
@@ -184,7 +200,7 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   expect(first.loop.context.userId).toBe(other)
   expect(normalHarness.injections[0].actorIdentity.userId).toBe(other)
   expect(normalHarness.sent).toEqual([normalHarness.final.content[0].text])
- })
+ },90_000)
  it('retains the delivered reply in the subsequent Telegram follow-up',async()=>{
   if(!normalHarness)throw new Error('The preceding Telegram delivery did not initialize its harness')
   await normalHarness.turn('1006','Remind me again.')
@@ -192,7 +208,7 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   expect(JSON.stringify(runTurn.mock.calls[1][0].loop.messages)).toContain('What date did we agree?')
   expect(JSON.stringify(runTurn.mock.calls[1][0].loop.messages)).toContain(normalHarness.final.content[0].text)
   expect((await query("SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1 AND role='assistant'",[recovered])).rows[0].count).toBeGreaterThan(1)
- })
+ },90_000)
  let realHarness:Awaited<ReturnType<typeof createChannelHarness>>
  it('delivers recovered history through the actual kernel and managed provider boundary',async()=>{
   const real=await vi.importActual<typeof import('../turn/kernel.js')>('../turn/kernel.js')
@@ -209,7 +225,7 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   expect(realHarness.sent).toEqual(['Fictional complete reply.'])
   expect((await query("SELECT channel_message_id FROM session_messages WHERE session_id=$1 AND role='assistant' AND channel_message_id=$2",[recovered,'reply-1007'])).rows).toEqual([{channel_message_id:'reply-1007'}])
   expect((await query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[recovered])).rows[0]).toEqual({status:'idle',turn_lease_token:null})
- })
+ },90_000)
  it('keeps the actual kernel reply available to the next managed provider turn',async()=>{
   if(!realHarness)throw new Error('The preceding actual kernel turn did not initialize its harness')
   await realHarness.turn('1008','Thanks')
@@ -219,23 +235,28 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   expect(realHarness.sent).toEqual(['Fictional complete reply.','Fictional complete reply.'])
   expect((await query("SELECT channel_message_id FROM session_messages WHERE session_id=$1 AND role='assistant' AND channel_message_id=$2",[recovered,'reply-1008'])).rows).toEqual([{channel_message_id:'reply-1008'}])
   expect((await query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[recovered])).rows[0]).toEqual({status:'idle',turn_lease_token:null})
- })
+ },90_000)
 
  it('delivers an owner forum reply with private memories and durable prior annotations',async()=>{
+  const seedStarted=performance.now()
   const memories:string[]=[]
-  for(let n=1;n<=70;n++){
+  // Keep the original three current,65 retired and two held rows, then add
+  //219 retired private rows to exercise the full physical namespace scan.
+  for(let n=1;n<=privateMemoryRows;n++){
    const created=await createMemory({workspaceId:workspace,userId:owner,assistantId:assistant,createdByUserId:owner,
-    scope:'shared',summary:`PRIVATE_MEMORY_${n}`,sensitivity:n>68?'internal':'confidential'})
+    scope:'shared',summary:`PRIVATE_MEMORY_${n}`,sensitivity:n===69||n===70?'internal':'confidential'})
    memories.push(created.id)
   }
   await query(`UPDATE memories SET valid_from=now()-interval '2 days',
-    scope_held=substring(summary from 'PRIVATE_MEMORY_(\\d+)$')::int>68,
-    valid_to=CASE WHEN substring(summary from 'PRIVATE_MEMORY_(\\d+)$')::int BETWEEN 4 AND 68 THEN now()-interval '1 day' ELSE NULL END
+    scope_held=substring(summary from 'PRIVATE_MEMORY_(\\d+)$')::int BETWEEN 69 AND 70,
+    valid_to=CASE WHEN substring(summary from 'PRIVATE_MEMORY_(\\d+)$')::int NOT IN(1,2,3,69,70) THEN now()-interval '1 day' ELSE NULL END
     WHERE id=ANY($1::uuid[])`,[memories])
   try{
    expect((await query(`SELECT count(*) FILTER(WHERE valid_to IS NULL AND NOT scope_held)::int current,
-     count(*) FILTER(WHERE valid_to IS NOT NULL)::int retired,count(*) FILTER(WHERE scope_held)::int held
-     FROM memories WHERE id=ANY($1::uuid[])`,[memories])).rows[0]).toEqual({current:3,retired:65,held:2})
+     count(*) FILTER(WHERE valid_to IS NOT NULL)::int retired,count(*) FILTER(WHERE scope_held)::int held,
+     count(*) FILTER(WHERE user_id IS NOT NULL)::int user_private
+     FROM memories WHERE id=ANY($1::uuid[])`,[memories])).rows[0]).toEqual({current:3,retired:privateMemoryRows-5,held:2,user_private:privateMemoryRows})
+   console.info('[recovered Telegram namespace setup timing]',{privateMemoryRows,elapsedMs:Math.round(performance.now()-seedStarted)})
    const prior=(await query('SELECT count(*)::int count FROM session_message_annotation_heads WHERE session_id=$1',[recovered])).rows[0].count
    expect(prior).toBeGreaterThanOrEqual(2)
    const real=await vi.importActual<typeof import('../turn/kernel.js')>('../turn/kernel.js')
@@ -266,7 +287,7 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   }finally{
    await query('DELETE FROM memories WHERE id=ANY($1::uuid[])',[memories])
   }
- })
+ },90_000)
 
  it('uses native proof for the current Work epoch while held legacy history retains its fallback',async()=>{
   expect(await nativeProof()).toMatchObject({proof:{admitted:true}})
