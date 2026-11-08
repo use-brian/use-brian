@@ -27,14 +27,68 @@ const reviewed: Readonly<Record<string, readonly [string, number]>> = {
 const callers = 'FOR caller IN SELECT p.oid,p.prosrc FROM pg_proc p'
 const update = 'EXECUTE replace(pg_get_functiondef(caller.oid),caller.prosrc,body);'
 
+/** 8246 sealed a generated roster using the author's database collation.
+ * Authenticate the same declared members and code while retaining the target
+ * database's existing runtime ORDER BY semantics. Never evaluate catalog text.
+ */
+function privateMemoryGuardEnrollment(sql: string): string {
+  const tag = '$private_memory_domain_profile$'
+  const start = sql.indexOf(`DO ${tag}`), end = sql.indexOf(`END ${tag};`, start) + `END ${tag};`.length
+  if (start < 0 || end < start || sql.indexOf(`DO ${tag}`, start + 1) >= 0) throw new Error('8246: unexpected private Memory enrollment block')
+  let block = sql.slice(start, end)
+  const once = (before: string, after: string) => {
+    if (block.split(before).length !== 2) throw new Error('8246: unexpected private Memory enrollment anchor')
+    block = block.replace(before, after)
+  }
+  const rosters = ['before', 'after'].map(phase => {
+    const marker = `$native_guard_${phase}$`, prefix = `guard_${phase} constant text:=${marker}`
+    const begin = block.indexOf(prefix), finish = block.indexOf(`${marker};`, begin + prefix.length)
+    if (begin < 0 || finish < 0) throw new Error('8246: missing declared native guard roster')
+    const declaration = block.slice(begin, finish + marker.length + 1)
+    const expression = block.slice(begin + prefix.length, finish), members = [...expression.matchAll(/'([^']*)'/g)].map(match => match[1])
+    if (expression !== `ARRAY[${members.map(member => `'${member}'`).join(',')}]::text[]`
+      || members.length !== (phase === 'before' ? 148 : 149) || new Set(members).size !== members.length) {
+      throw new Error('8246: unexpected declared native guard members')
+    }
+    once(declaration, `guard_${phase}_members constant text[]:=${expression};\n guard_${phase} text;`)
+    return members
+  })
+  if (rosters[0].includes('application_memory_statement_helpers_current()')
+    || !rosters[1].includes('application_memory_statement_helpers_current()')
+    || rosters[0].some(member => !rosters[1].includes(member))) throw new Error('8246: unexpected native guard enrollment')
+  once("BEGIN\n SELECT relowner INTO STRICT owner_oid", `BEGIN
+ IF cardinality(guard_before_members)<>148 OR cardinality(guard_after_members)<>149
+  OR (SELECT count(DISTINCT signature) FROM unnest(guard_before_members) signature)<>148
+  OR (SELECT count(DISTINCT signature) FROM unnest(guard_after_members) signature)<>149
+  OR NOT guard_after_members @> guard_before_members
+  OR 'application_memory_statement_helpers_current()'=ANY(guard_before_members)
+  OR NOT 'application_memory_statement_helpers_current()'=ANY(guard_after_members)
+ THEN RAISE EXCEPTION 'private_memory_profile_declared_roster_changed';END IF;
+ SELECT 'ARRAY['||string_agg(quote_literal(signature),',' ORDER BY signature)||']::text[]'
+ INTO guard_before FROM unnest(guard_before_members) declared(signature);
+ SELECT 'ARRAY['||string_agg(quote_literal(signature),',' ORDER BY signature)||']::text[]'
+ INTO guard_after FROM unnest(guard_after_members) declared(signature);
+ SELECT relowner INTO STRICT owner_oid`)
+  // Same template authentication as immutable 8190. Only the one exact local
+  // roster literal is replaced; every other byte remains authenticated.
+  const template = '803d9cd34a7c94347e32172c77ea7387d5cb8e642f905ca08f7f18b796451255'
+  once("encode(sha256(convert_to(original,'UTF8')),'hex') IS DISTINCT FROM 'd76edcc03ae49ebbe10bebbe198267aeff0837d597085058aaab0a65ab6247a2'",
+    `encode(sha256(convert_to(replace(original,guard_before,'__ROSTER__'),'UTF8')),'hex') IS DISTINCT FROM '${template}'`)
+  once("encode(sha256(convert_to(successor,'UTF8')),'hex') IS DISTINCT FROM 'bc3189f583bd7ffb8dd3ba24551fb9d677ee3bf64478fd1fb4959d56b161708b'",
+    `encode(sha256(convert_to(replace(successor,guard_after,'__ROSTER__'),'UTF8')),'hex') IS DISTINCT FROM '${template}'
+  OR (length(successor)-length(replace(successor,guard_after,'')))/length(guard_after)<>1`)
+  return sql.slice(0, start) + block + sql.slice(end)
+}
+
 export function toMigrationExecutionSql(sql: string, file: string): string {
   const expected = reviewed[file]
   if (!expected) return sql
   if (createHash('sha256').update(sql).digest('hex') !== expected[0]) {
     throw new Error(`${file}: historical migration content changed; refusing execution adapter`)
   }
+  const executable = file === '8246_native_private_memory_empty_domain.sql' ? privateMemoryGuardEnrollment(sql) : sql
   let blocks = 0
-  const result = sql.replace(/^DO (\$[a-z_]+\$)([\s\S]*?)\1;/gm, (original, tag: string, block: string) => {
+  const result = executable.replace(/^DO (\$[a-z_]+\$)([\s\S]*?)\1;/gm, (original, tag: string, block: string) => {
     if (!block.includes(callers)) return original
     if (block.split(callers).length !== 2 || block.split(update).length !== 2) {
       throw new Error(`${file}: unexpected migration pin propagation block`)
