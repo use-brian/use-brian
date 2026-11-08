@@ -141,6 +141,38 @@ describe("[COMP:app-web/share-dialog] ReadOnlyPageBlocks toggle body", () => {
     // No `open` attribute on the <details> tag → collapsed by default.
     expect(html).not.toMatch(/<details[^>]*\bopen\b/);
   });
+
+  it("puts a list parked in the summary slot into the body", () => {
+    const blocks: PublicBlock[] = [
+      {
+        kind: "toggle",
+        id: "tg",
+        richText: {
+          type: "doc",
+          content: [
+            {
+              type: "bulletList",
+              content: [
+                {
+                  type: "listItem",
+                  content: [
+                    { type: "paragraph", content: [{ type: "text", text: "Start with the brief" }] },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      } as unknown as PublicBlock,
+    ];
+    const html = renderToString(
+      <ReadOnlyPageBlocks blocks={blocks} payload={emptyPayload} source={source} />,
+    );
+    const bodyAt = html.indexOf('class="doc-toggle-body"');
+    expect(bodyAt).toBeGreaterThan(-1);
+    expect(html.slice(bodyAt)).toContain("Start with the brief");
+    expect(html.slice(html.indexOf("<summary"), bodyAt)).not.toContain("Start with the brief");
+  });
 });
 
 describe("[COMP:app-web/share-dialog] public typography parity", () => {

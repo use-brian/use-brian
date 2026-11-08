@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { placeAnchoredPanel, scrollMovesAnchor } from "../comment-thread-popover";
+import { placeAnchoredPanel, placeMarginComment, scrollMovesAnchor } from "../comment-thread-popover";
 
 /**
  * [COMP:app-web/comment-thread-popover] placement math.
@@ -10,6 +10,33 @@ import { placeAnchoredPanel, scrollMovesAnchor } from "../comment-thread-popover
  * bug this guards against: a hardcoded height estimate flipped the box above
  * the anchor and clipped its top off-screen.
  */
+describe("[COMP:app-web/comment-thread-popover] placeMarginComment", () => {
+  const VW = 1440;
+  const VH = 900;
+  const CHROME = 88;
+
+  it("parks the card just past the column, top-aligned with the line", () => {
+    const pos = placeMarginComment(220, 780, VW, VH, CHROME);
+    expect(pos).toMatchObject({ left: 788, top: 220, width: 420 });
+    expect(pos!.top! + pos!.maxHeight).toBeLessThanOrEqual(VH - 8);
+  });
+
+  it("keeps the card below the chrome when the line scrolls under it", () => {
+    const pos = placeMarginComment(20, 780, VW, VH, CHROME);
+    expect(pos?.top).toBe(CHROME);
+  });
+
+  it("pulls the card up when the line is too close to the viewport bottom", () => {
+    const pos = placeMarginComment(860, 780, VW, VH, CHROME);
+    expect(pos?.top).toBeLessThan(860);
+    expect(pos!.top! + pos!.maxHeight).toBeLessThanOrEqual(VH - 8);
+  });
+
+  it("returns null when the margin cannot hold a card", () => {
+    expect(placeMarginComment(200, 1200, 1280, VH, CHROME)).toBeNull();
+  });
+});
+
 describe("[COMP:app-web/comment-thread-popover] placeAnchoredPanel", () => {
   const VW = 1280;
   const VH = 800;

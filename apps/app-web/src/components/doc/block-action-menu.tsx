@@ -184,10 +184,10 @@ export function BlockActionMenu({
   const [sub, setSub] = useState<null | "turn" | "color">(null);
 
   // Hover submenus open on enter and close on a short INTENT DELAY, not
-  // instantly — see SUBMENU_CLOSE_DELAY_MS. The flyout is a DOM child of its
-  // row, so re-entering it re-fires the row's `onMouseEnter` (→ `openSub`),
-  // which clears the pending close; opening one submenu also cancels the other's
-  // scheduled close so they never both linger.
+  // instantly — see SUBMENU_CLOSE_DELAY_MS. The panel is portalled beside
+  // the row, so it wires its own enter/leave to the same open/close pair:
+  // re-entering the panel clears the pending close; opening one submenu also
+  // cancels the other's scheduled close so they never both linger.
   const openSub = (name: "turn" | "color") => {
     window.clearTimeout(subCloseTimer.current);
     setSub(name);
@@ -235,6 +235,10 @@ export function BlockActionMenu({
       const node = e.target as Node;
       if (ref.current?.contains(node)) return;
       if (anchorEl?.contains(node)) return; // re-clicking the grip is handled there
+      // The hover panel is portalled beside the menu, so it is not inside
+      // `ref`. A press on it is part of the menu, not an outside dismiss.
+      const el = node instanceof Element ? node : node.parentElement;
+      if (el?.closest("[data-popover='block-actions-flyout']")) return;
       onClose();
     }
     function onKey(e: KeyboardEvent) {
@@ -529,19 +533,24 @@ function MenuButton({
 }
 
 /**
- * A row that flies a child list out to the right on hover (Notion submenu).
+ * A row that opens its child list as its own panel on hover (Notion submenu).
  *
  * `inline` is the touch mode (responsive contract M2 / M5): there is no hover
  * to open on and no room beside a 240px menu on a phone, so the row toggles on
  * TAP (`onToggle`) and the child list renders as a second level INSIDE the
  * menu, directly under the row, with the chevron turned down. The hover
  * handlers are not bound in that mode: a tap fires a synthetic `mouseenter`
- * first, which would open the fly-out before the tap could toggle it.
+ * first, which would open the panel before the tap could toggle it.
  *
- * In fly-out mode a CLICK (or Enter / Space on the focused row) opens the
- * fly-out too, so a keyboard user and a hover-capable device with a stylus
- * have a path that does not depend on `mouseenter`. `flyoutSide` flips the
- * fly-out to the left when the menu sits against the right edge.
+ * On a fine pointer the panel is portalled to `document.body`. The parent
+ * menu scrolls (`overflow-y-auto`) when the viewport is short; a flyout
+ * inside that box is clipped and becomes more scroll height, so hovering
+ * Turn into made people scroll the menu to see the options. The panel sits
+ * beside the row instead. A click (or Enter / Space) opens it too, so a
+ * keyboard user and a stylus have a path that does not depend on
+ * `mouseenter`. `flyoutSide` flips it to the left when the menu sits against
+ * the right edge. Entering the panel cancels the row's close delay; the
+ * panel is not a DOM child, so it wires that itself.
  */
 function SubmenuRow({
   icon: Icon,
@@ -562,20 +571,68 @@ function SubmenuRow({
   onClose: () => void;
   /** Tap toggle for `inline` mode. */
   onToggle?: () => void;
-  /** Render the child list inside the menu instead of a hover fly-out. */
+  /** Render the child list inside the menu instead of a hover panel. */
   inline?: boolean;
-  /** Which side the fly-out opens on (fly-out mode only). */
+  /** Which side the panel opens on (fly-out mode only). */
   flyoutSide?: "right" | "left";
   wide?: boolean;
   children: React.ReactNode;
 }) {
+  const rowRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({
+    position: "fixed",
+    visibility: "hidden",
+  });
+
+  useLayoutEffect(() => {
+    if (inline || !open || !rowRef.current || !panelRef.current) return;
+    const row = rowRef.current.getBoundingClientRect();
+    const panel = panelRef.current.getBoundingClientRect();
+    const margin = 8;
+    const gap = 4;
+    const width = panel.width || (wide ? 224 : 208);
+    const height = panel.height;
+    const openLeft =
+      flyoutSide === "left" || row.right + gap + width > window.innerWidth - margin;
+    const top = Math.max(margin, Math.min(row.top, window.innerHeight - margin - height));
+    const left = openLeft
+      ? Math.max(margin, row.left - gap - width)
+      : row.right + gap;
+    setPanelStyle({ position: "fixed", top, left, visibility: "visible" });
+  }, [inline, open, flyoutSide, wide, children]);
+
+  const panel =
+    open && !inline && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            ref={panelRef}
+            role="menu"
+            data-submenu="flyout"
+            data-flyout-side={flyoutSide}
+            data-popover="block-actions-flyout"
+            style={panelStyle}
+            onMouseEnter={onOpen}
+            onMouseLeave={onClose}
+            onMouseDown={(e) => e.preventDefault()}
+            className={
+              "z-[61] max-h-[min(24rem,calc(100dvh-1rem))] overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-lg " +
+              (wide ? "w-56" : "w-52")
+            }
+          >
+            {children}
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
     <div
-      className="relative"
       onMouseEnter={inline ? undefined : onOpen}
       onMouseLeave={inline ? undefined : onClose}
     >
       <button
+        ref={rowRef}
         type="button"
         role="menuitem"
         aria-haspopup="menu"
@@ -591,22 +648,16 @@ function SubmenuRow({
           aria-hidden
         />
       </button>
-      {open ? (
+      {inline && open ? (
         <div
           role="menu"
-          data-submenu={inline ? "inline" : "flyout"}
-          data-flyout-side={inline ? undefined : flyoutSide}
-          className={
-            inline
-              ? "mx-2 mb-1 rounded-md border border-border/70 bg-muted/30 p-1"
-              : "absolute top-0 z-[61] rounded-md border border-border bg-popover p-1 shadow-lg " +
-                (flyoutSide === "left" ? "right-full mr-1 " : "left-full ml-1 ") +
-                (wide ? "w-56" : "w-52")
-          }
+          data-submenu="inline"
+          className="mx-2 mb-1 rounded-md border border-border/70 bg-muted/30 p-1"
         >
           {children}
         </div>
       ) : null}
+      {panel}
     </div>
   );
 }

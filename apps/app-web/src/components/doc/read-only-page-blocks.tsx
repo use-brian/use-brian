@@ -191,13 +191,15 @@ function renderToggle(
 ): ReactNode {
   const nodes = content ?? [];
   const head = nodes[0];
-  const summary =
-    head?.type === "paragraph"
+  // Summary is a paragraph or heading. A list in that slot is body, so a
+  // collapsed toggle does not leave the points on the summary line.
+  const headIsSummary = head?.type === "paragraph" || head?.type === "heading";
+  const summary = !head || !headIsSummary
+    ? null
+    : head.type === "paragraph"
       ? renderNodes(head.content, `${key}.s`)
-      : head
-        ? renderNode(head, `${key}.s`)
-        : null;
-  const body = nodes.slice(1);
+      : renderNode(head, `${key}.s`);
+  const body = headIsSummary ? nodes.slice(1) : nodes;
   const hasBody = body.length > 0 || !!childBlocks;
   return (
     <details key={key} {...rootProps} className={cx("doc-toggle", rootProps?.className)}>

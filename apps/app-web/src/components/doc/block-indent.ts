@@ -40,14 +40,21 @@
  *     title never gets displaced into the body); in a COLLAPSED toggle the
  *     split lands as a paragraph sibling AFTER the toggle (never into the
  *     hidden body); in an open toggle the default split-into-first-child is
- *     already Notion parity. Bails while a slash/mention suggestion popup is
- *     active so the popup keeps its Enter-to-select.
+ *     already Notion parity. An empty body line followed only by more empty
+ *     lines exits the toggle (`exitToggleThroughEmptyTail`) instead of
+ *     letting `liftEmptyBlock` split the defining parent into a second
+ *     toggle. Bails while a slash/mention suggestion popup is active so the
+ *     popup keeps its Enter-to-select.
  *   - **Caret guard** (ProseMirror plugin): after any transaction that leaves
  *     the selection inside a collapsed toggle's hidden body, either the
  *     toggle opens (content/caret legitimately moved in — drag-drop, paste,
  *     arrow-through) or, when the toggle was collapsed AROUND an unmoved
  *     caret (chevron click while editing a child), the caret moves out to the
  *     summary. Defense-in-depth for every path the keymap doesn't special-case.
+ *   - **Summary slot** (`toggleSummaryGuard`): a list or other non-text block
+ *     left in the toggle's first slot gets an empty paragraph in front on the
+ *     next local edit, so collapsing can hide the points. Remote changes are
+ *     left alone (same CRDT rule as the list normalizer).
  *
  * The commands are plain ProseMirror `Command`s (no Tiptap-chain wrapping) so
  * they unit-test against a constructed `EditorState`, and run against the live
@@ -58,8 +65,11 @@
  */
 
 import { Extension, type Editor } from "@tiptap/core";
+import { isChangeOrigin } from "@tiptap/extension-collaboration";
+import { splitBlock } from "@tiptap/pm/commands";
 import { Fragment, type Node as PMNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection, type Command, type EditorState } from "@tiptap/pm/state";
+import { liftTarget } from "@tiptap/pm/transform";
 
 /** Non-list block kinds that hold nested child blocks (`content: 'block+'`). */
 export const CONTAINER_NODES = new Set(["toggle", "callout", "blockquote"]);
@@ -700,6 +710,61 @@ export const toggleSummaryEnter: Command = (state, dispatch) => {
   return true;
 };
 
+function emptyTextblock(node: PMNode): boolean {
+  return node.isTextblock && node.content.size === 0;
+}
+
+/**
+ * Enter on an empty line inside a toggle body.
+ *
+ * The default exit (`liftEmptyBlock`) only lifts when the empty block is the
+ * last child. Anything after it takes the other branch and *splits the
+ * parent*. A toggle is `defining`, so that split is a second toggle: three
+ * Enters from the last bullet, when an empty indented line sits under the
+ * list, creates a toggle instead of the root-level empty paragraph those
+ * three Enters produce with no trailing line.
+ *
+ * Empty lines after the caret are not body content. Delete them and lift, the
+ * same exit as a trailing empty child. A later sibling that actually has text
+ * stays inside the toggle; Enter inserts a paragraph there rather than
+ * splitting the toggle around it.
+ */
+export const exitToggleThroughEmptyTail: Command = (state, dispatch) => {
+  const { $from, empty } = state.selection;
+  if (!empty || suggestionActive(state)) return false;
+  if (!emptyTextblock($from.parent)) return false;
+  const depth = $from.depth - 1;
+  if (depth < 1) return false;
+  const toggle = $from.node(depth);
+  if (toggle.type.name !== "toggle") return false;
+  const index = $from.index(depth);
+  // Summary belongs to toggleSummaryEnter. An already-trailing empty child
+  // is the default exit; don't handle it twice.
+  if (index === 0 || index === toggle.childCount - 1) return false;
+
+  let tailEmpty = true;
+  for (let i = index + 1; i < toggle.childCount; i++) {
+    if (!emptyTextblock(toggle.child(i))) {
+      tailEmpty = false;
+      break;
+    }
+  }
+  if (!tailEmpty) return splitBlock(state, dispatch);
+
+  if (!dispatch) return true;
+  const from = $from.after();
+  const to = $from.end(depth);
+  const tr = state.tr;
+  if (from < to) tr.delete(from, to);
+  const $cursor = tr.doc.resolve(tr.mapping.map($from.pos));
+  const range = $cursor.blockRange();
+  const target = range && liftTarget(range);
+  if (!range || target == null) return false;
+  tr.lift(range, target).scrollIntoView();
+  dispatch(tr);
+  return true;
+};
+
 /**
  * Mod-Enter, Notion-style (A5): with the caret in a to-do, flip its `checked`;
  * otherwise, with the caret anywhere inside a toggle (summary or body), flip
@@ -734,6 +799,61 @@ export const modEnterDisclosure: Command = (state, dispatch) => {
   }
   return false;
 };
+
+/** A toggle summary is a text line. A list in that slot cannot collapse. */
+const TOGGLE_SUMMARY_TYPES = new Set(["paragraph", "heading"]);
+
+/**
+ * Position just inside the first toggle whose first child is not a paragraph
+ * or heading (a bullet list sitting where the summary belongs), or -1.
+ * Insert an empty paragraph there so the list becomes body and a collapsed
+ * chevron can hide it. Pure, so it unit-tests on a constructed doc.
+ */
+export function toggleMissingSummaryPos(doc: PMNode): number {
+  let found = -1;
+  doc.descendants((node, pos) => {
+    if (found >= 0) return false;
+    if (node.type.name !== "toggle") return true;
+    const first = node.firstChild;
+    if (!first || !TOGGLE_SUMMARY_TYPES.has(first.type.name)) {
+      found = pos + 1;
+      return false;
+    }
+    return true;
+  });
+  return found;
+}
+
+const summaryGuardKey = new PluginKey("docToggleSummaryGuard");
+
+/**
+ * Local edits only (`!isChangeOrigin`), same CRDT rule as the list normalizer:
+ * a remote change was authored somewhere else, and two clients inserting the
+ * same summary paragraph would duplicate it. `addToHistory: false` so the
+ * repair is not its own undo step. Edit-gated: a read-only viewer must not
+ * mutate the shared doc.
+ */
+function toggleSummaryGuard(editor: Editor): Plugin {
+  return new Plugin({
+    key: summaryGuardKey,
+    appendTransaction(transactions, _oldState, newState) {
+      if (!editor?.isEditable) return null;
+      if (!transactions.some((tr) => tr.docChanged && !isChangeOrigin(tr))) return null;
+      const paragraph = newState.schema.nodes.paragraph;
+      if (!paragraph) return null;
+      let pos = toggleMissingSummaryPos(newState.doc);
+      if (pos < 0) return null;
+      const tr = newState.tr;
+      for (let guard = 0; pos >= 0 && guard < 100; guard += 1) {
+        tr.insert(pos, paragraph.create());
+        pos = toggleMissingSummaryPos(tr.doc);
+      }
+      if (!tr.docChanged) return null;
+      tr.setMeta("addToHistory", false);
+      return tr;
+    },
+  });
+}
 
 const caretGuardKey = new PluginKey("docToggleCaretGuard");
 
@@ -814,8 +934,11 @@ export const BlockIndent = Extension.create({
         unwrapToggle(editor.state, editor.view.dispatch) ||
         unwrapListItem(editor.state, editor.view.dispatch) ||
         joinBackwardIntoVisible(editor.state, editor.view.dispatch),
-      // Toggle-summary Enter (E1–E3); everything else keeps the default.
-      Enter: ({ editor }) => toggleSummaryEnter(editor.state, editor.view.dispatch),
+      // Toggle-summary Enter (E1–E3), then an empty body line whose only
+      // followers are empty lines. Everything else keeps the default.
+      Enter: ({ editor }) =>
+        toggleSummaryEnter(editor.state, editor.view.dispatch) ||
+        exitToggleThroughEmptyTail(editor.state, editor.view.dispatch),
       // Notion Mod-Enter: check a to-do / flip a toggle. Falls through to the
       // default (hard break) outside both.
       "Mod-Enter": ({ editor }) => modEnterDisclosure(editor.state, editor.view.dispatch),
@@ -854,6 +977,6 @@ export const BlockIndent = Extension.create({
     };
   },
   addProseMirrorPlugins() {
-    return [toggleCaretGuard(this.editor)];
+    return [toggleCaretGuard(this.editor), toggleSummaryGuard(this.editor)];
   },
 });

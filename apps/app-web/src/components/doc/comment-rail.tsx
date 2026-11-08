@@ -50,7 +50,7 @@ import {
   type CommentAuthor,
   type CommentSeed,
 } from "./comment-thread-body";
-import { chromeBottom, scrollMovesAnchor } from "./comment-thread-popover";
+import { chromeBottom, nearestScrollParent, scrollMovesAnchor } from "./comment-thread-popover";
 import { PreviewMarkdown } from "./preview-markdown";
 import { quoteForRow } from "./comment-quote";
 
@@ -288,12 +288,16 @@ export function CommentRail({
     window.addEventListener("scroll", onScroll, true);
     // Content edits change anchor positions without a scroll/resize.
     const pm = document.querySelector(".doc-collab-editor .ProseMirror");
-    const ro = pm ? new ResizeObserver(compute) : null;
-    if (pm && ro) ro.observe(pm);
+    const scroller = nearestScrollParent(pm instanceof HTMLElement ? pm : null);
+    scroller?.addEventListener("scroll", onScroll, { passive: true });
+    const ro = new ResizeObserver(compute);
+    if (pm) ro.observe(pm);
+    if (scroller) ro.observe(scroller);
     return () => {
       window.cancelAnimationFrame(raf);
       window.removeEventListener("resize", compute);
       window.removeEventListener("scroll", onScroll, true);
+      scroller?.removeEventListener("scroll", onScroll);
       ro?.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -536,8 +540,13 @@ export function CommentRail({
   // `display:contents` so the wrapper adds no box (the cards stay
   // `position:fixed` exactly as before) while still being a DOM ancestor the
   // scroll filter can test card-internal scrolls against (`railRef`).
+  // A plain wrapper, not `display: contents`. Fixed cards inside a contents
+  // box lose their viewport containing block in some browsers and sit at the
+  // bottom corner instead of tracking `top`. Fixed children don't stretch
+  // this wrapper, so it adds no layout of its own; it only exists so an
+  // internal card scroll can be told apart from a page scroll.
   return createPortal(
-    <div ref={railRef} style={{ display: "contents" }}>
+    <div ref={railRef}>
       {cards}
     </div>,
     document.body,

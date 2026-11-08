@@ -36,5 +36,12 @@ describe("[COMP:app-web/collab-page-editor] CJK-safe code-block font", () => {
     expect(globalsCss).toMatch(
       /\.chat-markdown code\s*{[^}]*font-family:\s*var\(--font-code\);/,
     );
+    expect(globalsCss).toMatch(
+      /\.chat-markdown code\s*{[^}]*font-weight:\s*500;[^}]*color:\s*var\(--inline-code-fg,\s*#c0594e\);[^}]*background:\s*var\(--inline-code-bg,\s*#f4f3f3\);/,
+    );
+    expect(themeCss).toMatch(/--inline-code-fg:\s*#c0594e;/);
+    expect(themeCss).toMatch(/--inline-code-bg:\s*#f4f3f3;/);
+    expect(themeCss).toMatch(/\.dark\s*{[^}]*--inline-code-fg:\s*#ee8b80;/);
+    expect(themeCss).toMatch(/\.dark\s*{[^}]*--inline-code-bg:\s*#3a2c2b;/);
   });
 });

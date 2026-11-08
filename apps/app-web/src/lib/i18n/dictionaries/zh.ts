@@ -3478,7 +3478,6 @@ export const zh: Dictionary = {
     teamspaceModalCloseAria: "關閉團隊空間設定",
     teamspaceTabGeneral: "一般",
     teamspaceTabMembers: "成員",
-    teamspaceSaveAction: "儲存變更",
     teamspaceSaving: "儲存中…",
     teamspaceSavedNotice: "已儲存變更。",
     teamspaceUpdateFailed: "無法更新團隊空間：{message}",
@@ -3514,6 +3513,7 @@ export const zh: Dictionary = {
     // Emoji picker (page-icon popover, opened from a row's leading icon)
     emojiPicker: {
       title: "選擇圖示",
+      insertTitle: "表情符號",
       iconButtonAria: "變更頁面圖示",
       remove: "移除",
       categories: {
@@ -4034,6 +4034,7 @@ export const zh: Dictionary = {
         to_do: "待辦清單",
         toggle: "摺疊清單",
         page: "頁面",
+        emoji: "表情符號",
         template: "範本",
         callout: "標註",
         quote: "引述",

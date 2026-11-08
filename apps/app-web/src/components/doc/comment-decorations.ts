@@ -310,9 +310,13 @@ export function buildDecorations(
   // count is the number of DISTINCT threads on the block, never the run count.
   for (const [, b] of badge) {
     const count = b.threadIds.size;
+    // Inside the block, not before it. A widget parked before the block
+    // escapes the block's positioning context and the absolute badge
+    // anchors to the whole editor frame (bottom-right of the page).
+    const widgetAt = Math.min(b.pos + 1, doc.content.size);
     decos.push(
       Decoration.widget(
-        b.pos,
+        widgetAt,
         () => {
           const el = document.createElement("button");
           el.type = "button";

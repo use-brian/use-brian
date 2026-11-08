@@ -304,6 +304,38 @@ describe('[COMP:doc-model/mapping] container children (toggle/callout)', () => {
     expect(toggle.children?.[0]).toMatchObject({ kind: 'text', text: 'body' })
   })
 
+  it('recovers a list parked in the summary slot as children, not the title', () => {
+    const out = pmDocToBlocks({
+      type: 'doc',
+      content: [{
+        type: 'toggle',
+        attrs: { blockId: 't1', open: false },
+        content: [{
+          type: 'bulletList',
+          attrs: { blockId: 'l1' },
+          content: [{
+            type: 'listItem',
+            attrs: { blockId: 'i1' },
+            content: [{
+              type: 'paragraph',
+              attrs: { blockId: 'p1' },
+              content: [{ type: 'text', text: 'Start' }],
+            }],
+          }],
+        }],
+      }],
+    })
+    const toggle = out[0] as {
+      kind: string
+      richText: { content: Array<{ type: string; content?: unknown[] }> }
+      children?: Array<{ kind: string; id: string }>
+    }
+    expect(toggle.kind).toBe('toggle')
+    expect(toggle.richText.content[0]).toEqual({ type: 'paragraph' })
+    expect(toggle.children?.map((c) => c.id)).toEqual(['i1'])
+    expect(toggle.children?.[0].kind).toBe('bulleted_list_item')
+  })
+
   it('a childless toggle keeps its pre-children canonical shape (no children key)', () => {
     const blocks: Block[] = [
       { kind: 'toggle', id: 't1', richText: cell('Only summary') } as Block,

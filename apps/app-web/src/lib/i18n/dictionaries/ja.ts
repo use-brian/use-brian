@@ -3486,7 +3486,6 @@ export const ja: Dictionary = {
     teamspaceModalCloseAria: "チームスペース設定を閉じる",
     teamspaceTabGeneral: "一般",
     teamspaceTabMembers: "メンバー",
-    teamspaceSaveAction: "変更を保存",
     teamspaceSaving: "保存中…",
     teamspaceSavedNotice: "変更を保存しました。",
     teamspaceUpdateFailed: "チームスペースを更新できませんでした: {message}",
@@ -3523,6 +3522,7 @@ export const ja: Dictionary = {
     // Emoji picker (page-icon popover, opened from a row's leading icon)
     emojiPicker: {
       title: "アイコンを選択",
+      insertTitle: "絵文字",
       iconButtonAria: "ページアイコンを変更",
       remove: "削除",
       categories: {
@@ -4047,6 +4047,7 @@ export const ja: Dictionary = {
         to_do: "ToDo リスト",
         toggle: "トグルリスト",
         page: "ページ",
+        emoji: "絵文字",
         template: "テンプレート",
         callout: "コールアウト",
         quote: "引用",

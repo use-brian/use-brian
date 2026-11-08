@@ -3556,7 +3556,6 @@ export const en = {
     teamspaceModalCloseAria: "Close teamspace settings",
     teamspaceTabGeneral: "General",
     teamspaceTabMembers: "Members",
-    teamspaceSaveAction: "Save changes",
     teamspaceSaving: "Saving…",
     teamspaceSavedNotice: "Changes saved.",
     teamspaceUpdateFailed: "Could not update teamspace: {message}",
@@ -3594,6 +3593,7 @@ export const en = {
     // Emoji picker (page-icon popover, opened from a row's leading icon)
     emojiPicker: {
       title: "Pick an icon",
+      insertTitle: "Emoji",
       iconButtonAria: "Change page icon",
       remove: "Remove",
       categories: {
@@ -4185,6 +4185,7 @@ export const en = {
         to_do: "To-do list",
         toggle: "Toggle list",
         page: "Page",
+        emoji: "Emoji",
         template: "Template",
         callout: "Callout",
         quote: "Quote",

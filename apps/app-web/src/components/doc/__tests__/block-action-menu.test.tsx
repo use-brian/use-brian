@@ -101,6 +101,19 @@ function rowLabels(): string[] {
   ).map((b) => b.textContent ?? "");
 }
 
+/** The portalled hover panel (Turn into / Color). Not inside the menu scroller. */
+function flyoutEl(): HTMLElement {
+  const el = document.querySelector<HTMLElement>('[data-submenu="flyout"]');
+  expect(el).not.toBeNull();
+  return el!;
+}
+
+function radioLabels(root: ParentNode = menuEl()): string[] {
+  return Array.from(root.querySelectorAll('[role="menuitemradio"]')).map(
+    (b) => b.textContent ?? "",
+  );
+}
+
 /** Open a hover submenu (React derives mouseenter from a bubbling mouseover). */
 function openSubmenu(label: string) {
   const row = Array.from(
@@ -123,9 +136,7 @@ describe("[COMP:app-web/block-action-menu] capability gating", () => {
     expect(labels.some((l) => l.includes(ba.delete))).toBe(true);
 
     openSubmenu(ba.turnInto);
-    const kinds = Array.from(
-      menuEl().querySelectorAll('[role="menuitemradio"]'),
-    ).map((b) => b.textContent ?? "");
+    const kinds = radioLabels(flyoutEl());
     expect(kinds).toHaveLength(12);
     expect(kinds.some((l) => l.includes(slashItems.heading_4))).toBe(true);
     expect(kinds.some((l) => l.includes(slashItems.to_do))).toBe(true);
@@ -143,9 +154,7 @@ describe("[COMP:app-web/block-action-menu] capability gating", () => {
     expect(labels.some((l) => l.includes(ba.delete))).toBe(true);
 
     openSubmenu(ba.turnInto);
-    const kinds = Array.from(
-      menuEl().querySelectorAll('[role="menuitemradio"]'),
-    ).map((b) => b.textContent ?? "");
+    const kinds = radioLabels(flyoutEl());
     // paragraph, h1-3, bulleted, numbered, quote, code — the md set.
     expect(kinds).toHaveLength(8);
     expect(kinds.some((l) => l.includes(slashItems.heading_4))).toBe(false);
@@ -237,13 +246,15 @@ describe("[COMP:app-web/block-action-menu] touch mode", () => {
     expect(menuEl().querySelector('[data-submenu]')).toBeNull();
   });
 
-  it("keeps the hover fly-out on a fine pointer", () => {
+  it("keeps the hover panel beside the menu, outside its scroll box", () => {
     mountMenu({ extensions: browserDocExtensions(), pageContext: true });
     expect(menuEl().getAttribute("data-coarse")).toBeNull();
     openSubmenu(ba.turnInto);
-    const sub = menuEl().querySelector<HTMLElement>('[data-submenu]');
-    expect(sub).not.toBeNull();
-    expect(sub!.getAttribute("data-submenu")).toBe("flyout");
-    expect(sub!.className).toContain("left-full");
+    const sub = flyoutEl();
+    expect(menuEl().contains(sub)).toBe(false);
+    expect(sub.getAttribute("data-popover")).toBe("block-actions-flyout");
+    expect(sub.className).not.toContain("left-full");
+    expect(sub.className).toContain("overflow-y-auto");
+    expect(radioLabels(sub).length).toBeGreaterThan(0);
   });
 });

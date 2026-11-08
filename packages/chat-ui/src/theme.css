@@ -21,6 +21,10 @@
      Chinese clipboard text render as one-for-one substituted glyphs. */
   --font-code: var(--font-jetbrains-mono, ui-monospace), var(--font-rocknroll), ui-monospace,
     monospace;
+  /* Inline-code chip (backtick spans). Dark mode overrides these below.
+     Fenced blocks do not use them. */
+  --inline-code-fg: #c0594e;
+  --inline-code-bg: #f4f3f3;
   /* Heading / title display face — same stack as the body so headings, page
      titles, and editor H1–H4 stay in one type system. (Aliased; both lead with
      the OS UI font, which also gives Latin headings genuine heavy weights.) */
@@ -166,6 +170,8 @@
   --secondary-foreground: #D4D4D4;
   --muted: #2F2F2F;
   --muted-foreground: #979797;
+  --inline-code-fg: #ee8b80;
+  --inline-code-bg: #3a2c2b;
   --accent: #2F2F2F;
   --accent-foreground: #D4D4D4;
   --accent-2: #529CCA;
@@ -209,9 +215,13 @@
 .chat-markdown h2 { font-size: 1.125em; }
 .chat-markdown h3 { font-size: 1em; }
 .chat-markdown code {
-  font-size: 0.85em; padding: 0.15em 0.35em;
-  background: var(--muted); border-radius: 0.25rem;
+  font-size: 0.85em; padding: 0.12em 0.4em;
+  font-weight: 500;
+  color: var(--inline-code-fg);
+  background: var(--inline-code-bg); border-radius: 0.25rem;
   font-family: var(--font-code);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 .chat-markdown pre {
   margin: 0.5rem 0; padding: 0.75rem 1rem;
@@ -220,6 +230,7 @@
 }
 .chat-markdown pre code {
   padding: 0; background: none; border-radius: 0;
+  font-weight: inherit; color: inherit;
 }
 .chat-markdown a {
   color: var(--primary); text-decoration: underline;

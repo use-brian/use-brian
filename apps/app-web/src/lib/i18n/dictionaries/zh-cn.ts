@@ -3474,7 +3474,6 @@ export const zhCN: Dictionary = {
     teamspaceModalCloseAria: "关闭团队空间设置",
     teamspaceTabGeneral: "一般",
     teamspaceTabMembers: "成员",
-    teamspaceSaveAction: "保存变更",
     teamspaceSaving: "保存中…",
     teamspaceSavedNotice: "已保存变更。",
     teamspaceUpdateFailed: "无法更新团队空间：{message}",
@@ -3502,6 +3501,7 @@ export const zhCN: Dictionary = {
     sidebarWorkflowNextRun: "下次运行 {when}",
     emojiPicker: {
       title: "选择图标",
+      insertTitle: "表情符号",
       iconButtonAria: "变更页面图标",
       remove: "移除",
       categories: {
@@ -4017,6 +4017,7 @@ export const zhCN: Dictionary = {
         to_do: "待办清单",
         toggle: "折叠清单",
         page: "页面",
+        emoji: "表情符号",
         template: "范本",
         callout: "标注",
         quote: "引述",

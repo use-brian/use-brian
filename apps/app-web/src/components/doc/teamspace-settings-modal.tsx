@@ -10,8 +10,11 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * full two-rail settings shell) with two tabs, like Notion's teamspace
  * settings:
  *  - **General** — name, icon (the shared `EmojiPicker`), description,
- *    sensitivity (themed `Select`, never native), and a "Delete
- *    teamspace" danger row (hidden for the default General teamspace).
+ *    optional linked Team, and sensitivity (themed `Select`, never
+ *    native). These fields save themselves: text after a short pause
+ *    and on blur or close, choices immediately. There is no Save
+ *    changes button. A "Delete teamspace" danger row stays explicit
+ *    (hidden for the default General teamspace).
  *  - **Members** — search filter, roster rows (avatar initial + name +
  *    email + workspace-role pill, mirroring the workspace members tab),
  *    per-row remove/leave (confirmDialog; hidden on the default
@@ -29,7 +32,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * [COMP:app-web/teamspace-settings]
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { Plus, X } from "lucide-react";
 
@@ -73,6 +76,57 @@ const SENSITIVITIES: TeamspaceSensitivity[] = [
   "internal",
   "confidential",
 ];
+
+/** Pause before a name or description edit is written. Choices save immediately. */
+export const TEAMSPACE_AUTOSAVE_MS = 600;
+
+export type TeamspaceSettingsDraft = {
+  name: string;
+  icon: string | null;
+  description: string;
+  sensitivity: TeamspaceSensitivity;
+  workspaceGroupId: string | null;
+};
+
+type TeamspaceSettingsPatch = {
+  name?: string;
+  icon?: string | null;
+  description?: string;
+  sensitivity?: TeamspaceSensitivity;
+  workspaceGroupId?: string | null;
+};
+
+export function teamspaceDraftFrom(teamspace: Teamspace): TeamspaceSettingsDraft {
+  return {
+    name: teamspace.name,
+    icon: teamspace.icon,
+    description: teamspace.description ?? "",
+    sensitivity: teamspace.sensitivity,
+    workspaceGroupId: teamspace.workspaceGroupId,
+  };
+}
+
+/**
+ * Diff a General-tab draft against the last acknowledged values.
+ * A blank name is left unwritten so a mid-edit clear cannot wipe the
+ * teamspace; every other dirty field is still included.
+ */
+export function teamspaceSettingsPatch(
+  saved: TeamspaceSettingsDraft,
+  next: TeamspaceSettingsDraft,
+): TeamspaceSettingsPatch | null {
+  const name = next.name.trim();
+  const description = next.description.trim();
+  const patch: TeamspaceSettingsPatch = {};
+  if (name && name !== saved.name.trim()) patch.name = name;
+  if (next.icon !== saved.icon) patch.icon = next.icon;
+  if (description !== saved.description.trim()) patch.description = description;
+  if (next.sensitivity !== saved.sensitivity) patch.sensitivity = next.sensitivity;
+  if (next.workspaceGroupId !== saved.workspaceGroupId) {
+    patch.workspaceGroupId = next.workspaceGroupId;
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
 
 /** The docPage dictionary slice both dialogs read. */
 type DocPageDict = ReturnType<typeof useT>["docPage"];
@@ -388,22 +442,165 @@ function GeneralTab({
     teamspace.workspaceGroupId,
   );
   const [teams, setTeams] = useState<ContextTeam[]>([]);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [error, setError] = useState("");
+
+  const savedRef = useRef(teamspaceDraftFrom(teamspace));
+  const draftRef = useRef(teamspaceDraftFrom(teamspace));
+  const teamspaceIdRef = useRef(teamspace.id);
+  const onChangedRef = useRef(onChanged);
+  const tRef = useRef(t);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inflightRef = useRef(false);
+  const mountedRef = useRef(true);
+  const didSaveRef = useRef(false);
+  /** Latest draft for an id whose component went away while a save was in flight. */
+  const orphanRef = useRef<{ id: string; draft: TeamspaceSettingsDraft } | null>(null);
+  const flushRef = useRef<() => Promise<void>>(async () => {});
+
+  onChangedRef.current = onChanged;
+  tRef.current = t;
+
+  flushRef.current = async () => {
+    if (timerRef.current != null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    if (inflightRef.current) return;
+    const id = teamspaceIdRef.current;
+    const patch = teamspaceSettingsPatch(savedRef.current, draftRef.current);
+    if (!patch) {
+      if (mountedRef.current && teamspaceIdRef.current === id) {
+        setStatus(didSaveRef.current ? "saved" : "idle");
+      }
+      return;
+    }
+    const draftAtSend = draftRef.current;
+    const savedAtSend = savedRef.current;
+    inflightRef.current = true;
+    if (mountedRef.current) {
+      setStatus("saving");
+      setError("");
+    }
+    let failed = false;
+    let updated: Teamspace | null = null;
+    try {
+      updated = await updateTeamspace(id, patch);
+      if (teamspaceIdRef.current === id) {
+        savedRef.current = teamspaceDraftFrom(updated);
+        didSaveRef.current = true;
+      }
+      onChangedRef.current();
+    } catch (err) {
+      failed = true;
+      if (mountedRef.current && teamspaceIdRef.current === id) {
+        setError(
+          format(tRef.current.teamspaceUpdateFailed, {
+            message: teamspaceErrorMessage(err, tRef.current),
+          }),
+        );
+        setStatus("idle");
+      }
+    } finally {
+      inflightRef.current = false;
+    }
+
+    const orphan = orphanRef.current;
+    if (orphan && orphan.id === id) {
+      orphanRef.current = null;
+      const base = updated ? teamspaceDraftFrom(updated) : savedAtSend;
+      const rest = teamspaceSettingsPatch(base, orphan.draft);
+      if (rest) {
+        void updateTeamspace(id, rest)
+          .then(() => onChangedRef.current())
+          .catch(() => {});
+      }
+      return;
+    }
+    if (failed || teamspaceIdRef.current !== id) return;
+
+    const more = teamspaceSettingsPatch(savedRef.current, draftRef.current);
+    // A response that did not apply the patch must not retry forever.
+    // A draft that moved during the request is a newer edit and should go out.
+    if (more && draftRef.current !== draftAtSend) {
+      void flushRef.current();
+      return;
+    }
+    if (mountedRef.current) setStatus(more ? "idle" : "saved");
+  };
+
+  function queueAutosave(immediate: boolean) {
+    setError("");
+    const patch = teamspaceSettingsPatch(savedRef.current, draftRef.current);
+    if (!patch) {
+      if (timerRef.current != null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      if (!inflightRef.current) setStatus(didSaveRef.current ? "saved" : "idle");
+      return;
+    }
+    if (immediate) {
+      void flushRef.current();
+      return;
+    }
+    setStatus("saving");
+    if (timerRef.current != null) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      void flushRef.current();
+    }, TEAMSPACE_AUTOSAVE_MS);
+  }
+
+  function editDraft(partial: Partial<TeamspaceSettingsDraft>, immediate: boolean) {
+    const next = { ...draftRef.current, ...partial };
+    draftRef.current = next;
+    if (partial.name !== undefined) setName(partial.name);
+    if (partial.icon !== undefined) setIcon(partial.icon);
+    if (partial.description !== undefined) setDescription(partial.description);
+    if (partial.sensitivity !== undefined) setSensitivity(partial.sensitivity);
+    if (partial.workspaceGroupId !== undefined) setWorkspaceGroupId(partial.workspaceGroupId);
+    queueAutosave(immediate);
+  }
 
   // Re-seed when the modal is pointed at a DIFFERENT teamspace — not on
   // every list refresh, so an in-progress edit isn't clobbered by a reload.
+  // Cleanup flushes the previous id before those refs are reseeded.
   const teamspaceId = teamspace.id;
   useEffect(() => {
-    setName(teamspace.name);
-    setIcon(teamspace.icon);
-    setDescription(teamspace.description ?? "");
-    setSensitivity(teamspace.sensitivity);
-    setWorkspaceGroupId(teamspace.workspaceGroupId);
-    setSaving(false);
-    setSaved(false);
+    const next = teamspaceDraftFrom(teamspace);
+    savedRef.current = next;
+    draftRef.current = { ...next };
+    teamspaceIdRef.current = teamspace.id;
+    mountedRef.current = true;
+    didSaveRef.current = false;
+    setName(next.name);
+    setIcon(next.icon);
+    setDescription(next.description);
+    setSensitivity(next.sensitivity);
+    setWorkspaceGroupId(next.workspaceGroupId);
+    setStatus("idle");
     setError("");
+    return () => {
+      mountedRef.current = false;
+      const id = teamspaceIdRef.current;
+      const saved = savedRef.current;
+      const draft = draftRef.current;
+      if (timerRef.current != null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      if (inflightRef.current) {
+        orphanRef.current = { id, draft };
+        return;
+      }
+      const patch = teamspaceSettingsPatch(saved, draft);
+      if (patch) {
+        void updateTeamspace(id, patch)
+          .then(() => onChangedRef.current())
+          .catch(() => {});
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by id on purpose (see above)
   }, [teamspaceId]);
 
@@ -420,48 +617,6 @@ function GeneralTab({
       cancelled = true;
     };
   }, [teamspace.workspaceId]);
-
-  async function save() {
-    if (saving) return;
-    const trimmedName = name.trim();
-    if (!trimmedName) return;
-    const patch: Parameters<typeof updateTeamspace>[1] = {
-      ...(trimmedName !== teamspace.name ? { name: trimmedName } : {}),
-      ...(icon !== teamspace.icon ? { icon } : {}),
-      ...(description.trim() !== (teamspace.description ?? "")
-        ? { description: description.trim() }
-        : {}),
-      ...(sensitivity !== teamspace.sensitivity ? { sensitivity } : {}),
-      ...(workspaceGroupId !== teamspace.workspaceGroupId
-        ? { workspaceGroupId }
-        : {}),
-    };
-    if (Object.keys(patch).length === 0) {
-      setSaved(true);
-      return;
-    }
-    setSaving(true);
-    setError("");
-    setSaved(false);
-    try {
-      const updated = await updateTeamspace(teamspace.id, patch);
-      setName(updated.name);
-      setIcon(updated.icon);
-      setDescription(updated.description ?? "");
-      setSensitivity(updated.sensitivity);
-      setWorkspaceGroupId(updated.workspaceGroupId);
-      setSaved(true);
-      onChanged();
-    } catch (err) {
-      setError(
-        format(t.teamspaceUpdateFailed, {
-          message: teamspaceErrorMessage(err, t),
-        }),
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
 
   async function removeTeamspace() {
     const ok = await confirmDialog({
@@ -495,8 +650,7 @@ function GeneralTab({
         <div className="mt-1.5 flex items-center gap-2">
           <EmojiPicker
             onPick={(emoji) => {
-              setIcon(emoji);
-              setSaved(false);
+              editDraft({ icon: emoji }, true);
             }}
             trigger={
               <button
@@ -513,10 +667,8 @@ function GeneralTab({
             type="text"
             value={name}
             placeholder={t.teamspaceNamePlaceholder}
-            onChange={(e) => {
-              setName(e.target.value);
-              setSaved(false);
-            }}
+            onChange={(e) => editDraft({ name: e.target.value }, false)}
+            onBlur={() => queueAutosave(true)}
             className="h-11 w-full rounded-md border border-border bg-background px-3 text-[16px] text-foreground outline-none placeholder:text-muted-foreground sm:h-9 md:text-sm"
           />
         </div>
@@ -534,10 +686,11 @@ function GeneralTab({
             <Select
               value={workspaceGroupId ?? "__unlinked__"}
               onValueChange={(value) => {
-                setWorkspaceGroupId(value === "__unlinked__" ? null : value);
-                setSaved(false);
+                editDraft(
+                  { workspaceGroupId: value === "__unlinked__" ? null : value },
+                  true,
+                );
               }}
-              disabled={saving}
             >
               <SelectTrigger className="w-full bg-muted/50" aria-label={t.teamspaceLinkedTeamLabel}>
                 <SelectValue>
@@ -567,10 +720,8 @@ function GeneralTab({
           value={description}
           rows={2}
           placeholder={t.teamspaceDescriptionPlaceholder}
-          onChange={(e) => {
-            setDescription(e.target.value);
-            setSaved(false);
-          }}
+          onChange={(e) => editDraft({ description: e.target.value }, false)}
+          onBlur={() => queueAutosave(true)}
           className="mt-1.5 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-[16px] text-foreground outline-none placeholder:text-muted-foreground md:text-sm"
         />
       </div>
@@ -582,32 +733,20 @@ function GeneralTab({
         <div className="mt-1.5">
           <SensitivitySelect
             value={sensitivity}
-            onChange={(next) => {
-              setSensitivity(next);
-              setSaved(false);
-            }}
-            disabled={saving}
+            onChange={(next) => editDraft({ sensitivity: next }, true)}
           />
         </div>
       </div>
 
       {error && <div className="text-xs text-destructive">{error}</div>}
 
-      <div className="flex items-center justify-end gap-2">
-        {saved && !error && (
-          <span className="text-xs text-muted-foreground">
-            {t.teamspaceSavedNotice}
+      {(status === "saving" || status === "saved") && !error && (
+        <div className="flex justify-end">
+          <span className="text-xs text-muted-foreground" aria-live="polite">
+            {status === "saving" ? t.teamspaceSaving : t.teamspaceSavedNotice}
           </span>
-        )}
-        <Button
-          variant="default"
-          size="sm"
-          disabled={saving || !name.trim()}
-          onClick={save}
-        >
-          {saving ? t.teamspaceSaving : t.teamspaceSaveAction}
-        </Button>
-      </div>
+        </div>
+      )}
 
       {/* Danger row — never for the default (General) teamspace. */}
       {!teamspace.isDefault && (

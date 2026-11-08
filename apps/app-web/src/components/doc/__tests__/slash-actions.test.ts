@@ -28,5 +28,7 @@ describe('[COMP:app-web/slash-actions] slashActionFor', () => {
   it('maps heading at level 4 (Notion H4) and routes the editor-handled kinds', () => {
     expect(slashActionFor('child_page')).toEqual({ command: 'createChildPage' })
     expect(slashActionFor('link_to_page')).toEqual({ command: 'linkToPage' })
+    expect(slashActionFor('template')).toEqual({ command: 'openTemplateGallery' })
+    expect(slashActionFor('emoji')).toEqual({ command: 'openEmojiPicker' })
   })
 })

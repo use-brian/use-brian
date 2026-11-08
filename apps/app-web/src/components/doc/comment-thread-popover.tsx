@@ -57,6 +57,10 @@ type Props = {
    *  message on open. Set only for a freshly-posted page comment (which, being
    *  unanchored, always opens in this overlay rather than the margin rail). */
   seed?: CommentSeed;
+  /** Live in-doc highlight. Re-queried on scroll so the card tracks the line. */
+  resolveAnchor?: () => HTMLElement | null;
+  /** Page column's right edge. The card parks just past it when the margin fits. */
+  columnRight?: () => number | null;
   onClose: () => void;
   onChanged: () => void;
 };
@@ -69,10 +73,15 @@ export type AnchoredPos = {
   bottom?: number;
   /** Hard ceiling — the panel compresses (inner scroll) instead of overflowing. */
   maxHeight: number;
+  /** Set when the card sits in the right margin and must shrink to the room there. */
+  width?: number;
 };
 
 /** A viewport rect — the subset of DOMRect this math reads. */
 type AnchorRect = Pick<DOMRect, "top" | "bottom" | "left">;
+
+/** Narrowest card that still reads as a comment in the right margin. */
+const MIN_MARGIN_WIDTH = 280;
 
 /**
  * Choose a placement for the fixed panel that is always confined to the
@@ -143,6 +152,60 @@ export function placeAnchoredPanel(
 }
 
 /**
+ * Park the card in the right margin, top-aligned with the commented line.
+ *
+ * `columnRight` is the page column's viewport right edge. The card's top
+ * tracks that line and is only pulled into the chrome/viewport band when the
+ * line itself is under the top bar or too close to the bottom to host a card.
+ * Returns null when the margin cannot hold a card; the caller then uses
+ * {@link placeAnchoredPanel}.
+ */
+export function placeMarginComment(
+  anchorTop: number,
+  columnRight: number,
+  vw: number,
+  vh: number,
+  topInset = 0,
+  visibleBottom = vh,
+): AnchoredPos | null {
+  const ceiling = Math.max(MARGIN, topInset);
+  const floorY = Math.min(vh, visibleBottom) - MARGIN;
+  const left = columnRight + GAP;
+  const room = vw - MARGIN - left;
+  if (room < MIN_MARGIN_WIDTH) return null;
+  const maxTop = Math.max(ceiling, floorY - MIN_HEIGHT);
+  const top = Math.min(Math.max(anchorTop, ceiling), maxTop);
+  return {
+    left,
+    top,
+    maxHeight: Math.max(0, floorY - top),
+    width: Math.min(PANEL_WIDTH, room),
+  };
+}
+
+/** The in-doc text the card must track. The gutter badge is absolute and can
+ *  sit on the editor frame instead of the line, so it is never an anchor. */
+export function usableCommentAnchor(el: HTMLElement | null): HTMLElement | null {
+  if (!el || !el.isConnected) return null;
+  if (el.hasAttribute("data-comment-badge")) return null;
+  if (el === document.body) return null;
+  if (el.classList.contains("doc-collab-editor") || el.classList.contains("ProseMirror")) return null;
+  return el;
+}
+
+/** Nearest ancestor that actually scrolls. The page scroller is an inner
+ *  `overflow-y: auto` pane, not the window. */
+export function nearestScrollParent(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null;
+  while (node) {
+    const oy = getComputedStyle(node).overflowY;
+    if (oy === "auto" || oy === "scroll") return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+/**
  * The viewport-y bottom edge of the doc page chrome — the top bar
  * (`doc-topbar.tsx`) + breadcrumb/action navbar (`page-header.tsx`), each
  * tagged `data-doc-chrome`. This is the ceiling the fixed, body-portaled
@@ -199,7 +262,8 @@ function samePos(a: AnchoredPos, b: AnchoredPos): boolean {
     a.left === b.left &&
     a.top === b.top &&
     a.bottom === b.bottom &&
-    a.maxHeight === b.maxHeight
+    a.maxHeight === b.maxHeight &&
+    a.width === b.width
   );
 }
 
@@ -219,11 +283,14 @@ export function useAnchoredPosition(
   anchorEl: HTMLElement | null,
   open: boolean,
   panelRef?: React.RefObject<HTMLElement | null>,
+  resolveAnchor?: () => HTMLElement | null,
+  columnRight?: () => number | null,
 ) {
   const [pos, setPos] = React.useState<AnchoredPos | null>(null);
   React.useEffect(() => {
-    if (!open || !anchorEl || typeof window === "undefined") return;
+    if (!open || typeof window === "undefined") return;
     let raf = 0;
+    let misses = 0;
     let last: AnchoredPos | null = null;
     // The on-screen keyboard shrinks the VISUAL viewport, not the layout one
     // (`innerHeight` is unchanged on iOS), so the visible floor comes from
@@ -232,13 +299,43 @@ export function useAnchoredPosition(
     const vv = window.visualViewport;
     const compute = () => {
       raf = 0;
-      const next = placeAnchoredPanel(
-        anchorEl.getBoundingClientRect(),
-        window.innerWidth,
-        window.innerHeight,
-        chromeBottom(),
-        vv ? vv.offsetTop + vv.height : window.innerHeight,
-      );
+      // Re-query the live highlight every tick. ProseMirror replaces decoration
+      // spans, and the gutter badge (often the first `[data-thread-id]`) is
+      // absolutely positioned on the editor frame, so a stored element either
+      // detaches or sits at the bottom-right and the card stops following the line.
+      const live = usableCommentAnchor(resolveAnchor?.() ?? null);
+      const stored = usableCommentAnchor(anchorEl);
+      const el = live ?? stored;
+      const vh = window.innerHeight;
+      const vw = window.innerWidth;
+      const visibleBottom = vv ? vv.offsetTop + vv.height : vh;
+      const inset = chromeBottom();
+      let next: AnchoredPos | null = null;
+      if (el) {
+        misses = 0;
+        const rect = el.getBoundingClientRect();
+        const edge = columnRight?.() ?? null;
+        next =
+          edge == null
+            ? null
+            : placeMarginComment(rect.top, edge, vw, vh, inset, visibleBottom);
+        next ??= placeAnchoredPanel(rect, vw, vh, inset, visibleBottom);
+      } else if (anchorEl?.isConnected && misses >= 8) {
+        // Orphaned thread: the highlight never paints. Fill the band under the
+        // chrome rather than leaving the click with no composer.
+        next = placeAnchoredPanel(
+          anchorEl.getBoundingClientRect(),
+          vw,
+          vh,
+          inset,
+          visibleBottom,
+        );
+      } else if (misses < 8) {
+        misses += 1;
+        raf = window.requestAnimationFrame(compute);
+        return;
+      }
+      if (!next) return;
       if (last && samePos(last, next)) return;
       last = next;
       setPos(next);
@@ -253,20 +350,36 @@ export function useAnchoredPosition(
       schedule();
     };
     compute();
+    const host =
+      usableCommentAnchor(resolveAnchor?.() ?? null) ??
+      usableCommentAnchor(anchorEl) ??
+      anchorEl;
+    const column = host?.closest<HTMLElement>(".doc-collab-editor") ?? null;
+    const scroller = nearestScrollParent(column);
+    const ro = new ResizeObserver(schedule);
+    // The gutter is padding on the scroll pane. That moves the column's right
+    // edge without a window resize, so watch both boxes.
+    if (column) ro.observe(column);
+    if (scroller) ro.observe(scroller);
     window.addEventListener("resize", schedule);
     vv?.addEventListener("resize", schedule);
     vv?.addEventListener("scroll", schedule);
     // Capture phase so a scroll from the anchor's own (non-bubbling) scroll
     // parent is seen; `onScroll` filters out the panel's internal scroll.
+    // The page pane is a direct listener too: some browsers do not deliver
+    // its scroll to a window capture listener.
     window.addEventListener("scroll", onScroll, true);
+    scroller?.addEventListener("scroll", onScroll, { passive: true });
     return () => {
       if (raf) window.cancelAnimationFrame(raf);
+      ro.disconnect();
       window.removeEventListener("resize", schedule);
       vv?.removeEventListener("resize", schedule);
       vv?.removeEventListener("scroll", schedule);
       window.removeEventListener("scroll", onScroll, true);
+      scroller?.removeEventListener("scroll", onScroll);
     };
-  }, [anchorEl, open, panelRef]);
+  }, [anchorEl, open, panelRef, resolveAnchor, columnRight]);
   return pos;
 }
 
@@ -279,6 +392,8 @@ export function CommentThreadPopover({
   currentUser,
   assistant,
   seed,
+  resolveAnchor,
+  columnRight,
   onClose,
   onChanged,
 }: Props) {
@@ -286,7 +401,7 @@ export function CommentThreadPopover({
   const panelRef = React.useRef<HTMLDivElement>(null);
   // Pass the panel element so a scroll INSIDE it (the thread list auto-following
   // a streaming reply) doesn't trigger a reposition — see `scrollMovesAnchor`.
-  const pos = useAnchoredPosition(anchorEl, open, panelRef);
+  const pos = useAnchoredPosition(anchorEl, open, panelRef, resolveAnchor, columnRight);
 
   // Outside-click + Escape. The listener is attached on the next tick so the
   // click that opened the panel can't immediately close it.
@@ -330,7 +445,7 @@ export function CommentThreadPopover({
         left: pos.left,
         top: pos.top,
         bottom: pos.bottom,
-        width: PANEL_WIDTH,
+        width: pos.width ?? PANEL_WIDTH,
         maxHeight: pos.maxHeight,
       }}
       className="z-40 flex max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-lg"

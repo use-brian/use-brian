@@ -63,6 +63,28 @@ describe("[COMP:app-web/toggle-view] Toggle node-view render", () => {
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain(en.docPage.blocks.toggleExpandAria);
   });
+
+  it("treats a bullet list in the summary slot as a missing summary", () => {
+    const props = {
+      node: {
+        attrs: { open: false },
+        childCount: 1,
+        firstChild: { type: { name: "bulletList" } },
+      },
+      updateAttributes: () => {},
+      editor: { isEditable: true },
+      getPos: () => 0,
+    } as never;
+    const html = renderToStaticMarkup(
+      createElement(
+        I18nProvider,
+        { dict, locale: "en", children: createElement(ToggleView, props) } as never,
+      ),
+    );
+    expect(html).toContain('data-summary="missing"');
+    expect(html).toContain(en.docPage.blocks.toggleTextPlaceholder);
+    expect(html).toContain("doc-toggle-summary-missing");
+  });
 });
 
 describe("[COMP:app-web/toggle-view] Toggle collapsible structure", () => {

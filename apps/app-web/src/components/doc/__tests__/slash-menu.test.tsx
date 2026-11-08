@@ -38,11 +38,11 @@ const dict = en as unknown as Dictionary;
 // ── Catalogue ──────────────────────────────────────────────────────────
 
 describe("[COMP:app-web/slash-menu] Catalogue", () => {
-  it("ships 27 items including Drawing", () => {
-    expect(SLASH_MENU_ITEMS).toHaveLength(27);
+  it("ships 28 items including Drawing and Emoji", () => {
+    expect(SLASH_MENU_ITEMS).toHaveLength(28);
   });
 
-  it("groups items into Basic / Media / Database (17 / 6 / 4)", () => {
+  it("groups items into Basic / Media / Database (18 / 6 / 4)", () => {
     const byCategory = SLASH_MENU_ITEMS.reduce<Record<SlashMenuCategory, number>>(
       (acc, item) => {
         acc[item.category] = (acc[item.category] ?? 0) + 1;
@@ -51,10 +51,10 @@ describe("[COMP:app-web/slash-menu] Catalogue", () => {
       { basic: 0, media: 0, database: 0, embed: 0 },
     );
 
-    // Basic gains the native simple Table + the Template gallery item; Database
-    // holds 4 (Table view = the bound `data` block, Chart, Diagram, Extraction
-    // slot = the blueprint "/extract" authoring directive).
-    expect(byCategory.basic).toBe(17);
+    // Basic gains the native simple Table, the Emoji picker, and the Template
+    // gallery item; Database holds 4 (Table view = the bound `data` block,
+    // Chart, Diagram, Extraction slot = the blueprint "/extract" directive).
+    expect(byCategory.basic).toBe(18);
     expect(byCategory.media).toBe(6);
     expect(byCategory.database).toBe(4);
     // Embeds is intentionally empty in v1; Phase 4 populates it.
@@ -153,6 +153,12 @@ describe("[COMP:app-web/slash-menu] filterSlashMenuItems", () => {
   it("matches 'todo' to the to-do item via alias", () => {
     const matches = filterSlashMenuItems("todo");
     expect(matches.some((item) => item.id === "to_do")).toBe(true);
+  });
+
+  it("matches 'em' to Emoji ahead of the Template substring hit", () => {
+    const matches = filterSlashMenuItems("em");
+    expect(matches[0]?.id).toBe("emoji");
+    expect(matches.some((item) => item.id === "template")).toBe(true);
   });
 
   it("matches 'img' to the image item via alias", () => {
