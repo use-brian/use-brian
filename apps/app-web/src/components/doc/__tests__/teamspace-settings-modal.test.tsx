@@ -25,7 +25,7 @@ const updateTeamspace = vi.fn(async (_id: string, patch: Record<string, unknown>
 }));
 
 vi.mock("@/lib/api/teamspaces", () => ({
-  updateTeamspace: (...args: unknown[]) => updateTeamspace(...args),
+  updateTeamspace: (id: string, patch: Record<string, unknown>) => updateTeamspace(id, patch),
   listTeamspaceMembers: vi.fn(async () => []),
   addTeamspaceMember: vi.fn(),
   removeTeamspaceMember: vi.fn(),

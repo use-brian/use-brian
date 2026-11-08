@@ -327,11 +327,11 @@ describe('[COMP:doc-model/mapping] container children (toggle/callout)', () => {
     })
     const toggle = out[0] as {
       kind: string
-      richText: { content: Array<{ type: string; content?: unknown[] }> }
+      richText?: { content?: Array<{ type: string; content?: unknown[] }> }
       children?: Array<{ kind: string; id: string }>
     }
     expect(toggle.kind).toBe('toggle')
-    expect(toggle.richText.content[0]).toEqual({ type: 'paragraph' })
+    expect(toggle.richText?.content?.[0]).toEqual({ type: 'paragraph' })
     expect(toggle.children?.map((c) => c.id)).toEqual(['i1'])
     expect(toggle.children?.[0].kind).toBe('bulleted_list_item')
   })
