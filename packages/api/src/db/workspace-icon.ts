@@ -23,6 +23,30 @@ const ICON_COLUMNS = `
   icon_storage_uri AS "iconStorageUri"
 ` as const
 
+export type PublicWorkspaceIcon = {
+  url: string | null
+  seed: number
+}
+
+/**
+ * Identity a public page may show: the uploaded picture URL (or null) and the
+ * landmark seed. Never throws — a lookup failure still lets the page render,
+ * and the social image falls back to the seed-0 landmark.
+ */
+export async function getPublicWorkspaceIcon(workspaceId: string): Promise<PublicWorkspaceIcon> {
+  try {
+    const result = await query<{ iconUrl: string | null; iconSeed: number | null }>(
+      `SELECT icon_url AS "iconUrl", icon_seed AS "iconSeed" FROM workspaces WHERE id = $1`,
+      [workspaceId],
+    )
+    const row = result.rows[0]
+    return { url: row?.iconUrl ?? null, seed: row?.iconSeed ?? 0 }
+  } catch (err) {
+    console.error('[workspace-icon] public identity lookup failed:', err)
+    return { url: null, seed: 0 }
+  }
+}
+
 /** System read used by the public byte proxy and authorized write routes. */
 export async function getWorkspaceIconPointer(
   workspaceId: string,

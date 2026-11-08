@@ -14,6 +14,10 @@
       "types": "./dist/workspace-picker.d.ts",
       "default": "./dist/workspace-picker.js"
     },
+    "./pixel-landmark": {
+      "types": "./dist/pixel-landmark.d.ts",
+      "default": "./dist/pixel-landmark.js"
+    },
     "./appearance.css": "./src/appearance.css",
     "./theme.css": "./src/theme.css"
   },
