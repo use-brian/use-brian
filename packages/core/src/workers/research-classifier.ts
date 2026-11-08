@@ -220,6 +220,11 @@ function validateResearchResult(result: ResearchClassifyResult): ResearchClassif
   return result
 }
 
+/** The fixed legacy completion and its ownership check must describe identical bytes. */
+function buildResearchClassifierMessages(message: string, recentConversation: NonNullable<ResearchClassifyOptions['recentConversation']>) {
+  return [{ role: 'user' as const, content: JSON.stringify({ currentMessage: message, recentConversation }) }]
+}
+
 async function classifyResearchWithLlm(params: {
   assertInputAuthority?: () => Promise<void>
   signal?: AbortSignal
@@ -229,10 +234,7 @@ async function classifyResearchWithLlm(params: {
   recentConversation: Array<{ role: 'user' | 'assistant'; text: string }>
 }): Promise<ResearchClassifyResult> {
   const provider = captureInputAdmissionProvider(params.provider)
-  const messages = [{ role: 'user' as const, content: JSON.stringify({
-    currentMessage: params.message,
-    recentConversation: params.recentConversation,
-  }) }]
+  const messages = buildResearchClassifierMessages(params.message, params.recentConversation)
   await assertProviderInputPreparation(provider, { model: params.model, messages }, params.assertInputAuthority)
   params.signal?.throwIfAborted()
   const stream = provider.stream({
@@ -404,8 +406,10 @@ async function classifyResearchIntentCurrent(
             } : {}),
           }
         },
-      }, (route, request) => combined && ownsInputAdmission(route.provider, {
+      }, (route, request) => ownsInputAdmission(route.provider, combined ? {
         model: route.modelId, messages: buildLlmDecisionMessages(request), allowProviderFallback: false,
+      } : {
+        model: route.modelId, messages: buildResearchClassifierMessages(message, recentConversation),
       })),
     })
     return result.result

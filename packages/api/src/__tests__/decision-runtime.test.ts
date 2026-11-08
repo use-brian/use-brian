@@ -8,6 +8,7 @@ import {
   createRoutingProvider,
   wrapProvider,
   bindScopeSources,
+  boundScopeSources,
   ContextScopeAccumulator,
   createExecutionContext,
   type DecisionProvider,
@@ -71,6 +72,12 @@ function typedCompletionResponse() {
   return new Response('data: ' + JSON.stringify(packet) + '\n\n', { headers: { 'content-type': 'text/event-stream' } })
 }
 
+function researchCompletionResponse() {
+  const packet = { candidates: [{ content: { parts: [{ text: '{"research":true,"effort":"focused"}' }] }, finishReason: 'STOP' }],
+    usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } }
+  return new Response('data: ' + JSON.stringify(packet) + '\n\n', { headers: { 'content-type': 'text/event-stream' } })
+}
+
 function classifierAuthority(assertCurrent: () => Promise<void>): SessionContextAuthority {
   return {
     accumulator: new ContextScopeAccumulator(),
@@ -93,6 +100,115 @@ const classifierSource = { workspaceId: 'fictional-workspace', userId: null, ass
 
 describe('[COMP:decisions/runtime] certified classifier admission', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it.each(['llm_only', 'fallback'] as const)('admits the actual managed research-only request at dispatch and final return (%s)', async mode => {
+    const full = vi.fn(async () => {})
+    const raw = createGeminiProvider({ kind: 'ai-studio', endpoint: model => `https://fictional.example/${model}`, headers: async () => ({}) })
+    const routed = createRoutingProvider({ gemini: wrapProvider(raw) })
+    const recentConversation = Array.from({ length: 8 }, (_, index) => ({ role: 'user' as const, text: `  Fictional prior ${index} ${'x'.repeat(2100)}  ` }))
+    const fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes('typesafe.ai')) return new Response('{}', { status: 503 })
+      expect(full).toHaveBeenCalledTimes(mode === 'fallback' ? 2 : 1)
+      expect(String(url)).toContain('gemini-3.6-flash')
+      const body = JSON.parse(String(init?.body))
+      expect(body.contents).toEqual([{ role: 'user', parts: [{ text: JSON.stringify({
+        currentMessage: 'Compare fictional battery recycling methods',
+        recentConversation: recentConversation.slice(-6).map(turn => ({ role: turn.role, text: turn.text.trim().slice(0, 2000) })),
+      }) }] }])
+      expect(JSON.stringify(body.systemInstruction)).toContain('MULTI-SOURCE INVESTIGATION')
+      return researchCompletionResponse()
+    })
+    vi.stubGlobal('fetch', fetch)
+    const result = await classifyResearchIntent(bindScopeSources({ provider: routed, model: 'gemini-3.6-flash-standard',
+      message: 'Compare fictional battery recycling methods', recentConversation, authority: classifierAuthority(async () => {}),
+      decisionRuntime: classifierRuntime({ llmProvider: routed,
+        ...(mode === 'llm_only' ? { resolveRoute: () => ({ mode: 'llm_only' as const }) } : {}) }), assertInputAuthority: full }, [classifierSource]))
+    expect(result).toMatchObject({ research: true, effort: 'focused' })
+    expect(boundScopeSources(result)).toEqual([classifierSource])
+    expect(result).not.toHaveProperty('toolNames')
+    // Legacy decoding retains its extra source check after collecting the response.
+    expect(full).toHaveBeenCalledTimes(mode === 'fallback' ? 4 : 3)
+    expect(fetch).toHaveBeenCalledTimes(mode === 'fallback' ? 2 : 1)
+  })
+
+  it.each(['dispatch', 'collected', 'final'] as const)('refuses research-only source withdrawal at %s', async boundary => {
+    const refusal = authorityRefusal()
+    const full = vi.fn(async () => { if (full.mock.calls.length === (boundary === 'dispatch' ? 1 : boundary === 'collected' ? 2 : 3)) throw refusal })
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const fetch = vi.fn(async () => researchCompletionResponse())
+    vi.stubGlobal('fetch', fetch)
+    await expect(classifyResearchIntent({ provider, model: 'gemini-3.5-flash-lite', message: 'Compare fictional energy storage methods',
+      decisionRuntime: classifierRuntime({ llmProvider: provider, resolveRoute: () => ({ mode: 'llm_only' }) }), assertInputAuthority: full })).rejects.toBe(refusal)
+    expect(fetch).toHaveBeenCalledTimes(boundary === 'dispatch' ? 0 : 1)
+  })
+
+  it.each(['before', 'after'] as const)('handles research-only provider replacement %s qualification', async timing => {
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const original = provider.stream.bind(provider)
+    const replacement = vi.fn(async function* (request: Parameters<LLMProvider['stream']>[0]) { yield* original(request) })
+    const full = vi.fn(async () => { await Promise.resolve(); if (timing === 'after') provider.stream = replacement })
+    vi.stubGlobal('fetch', vi.fn(async () => researchCompletionResponse()))
+    const result = await classifyResearchIntent({ provider, model: 'gemini-3.5-flash-lite', message: 'Compare fictional energy storage methods',
+      decisionRuntime: classifierRuntime({ llmProvider: provider, resolveRoute: async () => {
+        await Promise.resolve(); if (timing === 'before') provider.stream = replacement
+        return { mode: 'llm_only' }
+      } }), assertInputAuthority: full })
+    expect(result.research).toBe(true)
+    if (timing === 'before') { expect(replacement).toHaveBeenCalledOnce(); expect(full.mock.calls.length).toBeGreaterThan(3) }
+    else { expect(replacement).not.toHaveBeenCalled(); expect(full).toHaveBeenCalledTimes(3) }
+  })
+
+  it.each(['runtime', 'accounting'] as const)('keeps conservative research-only checks for changed %s callbacks', async changed => {
+    const full = vi.fn(async () => {})
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    vi.stubGlobal('fetch', vi.fn(async () => researchCompletionResponse()))
+    const hook = vi.fn(async () => {})
+    const runtime = classifierRuntime({ llmProvider: provider, resolveRoute: () => ({ mode: 'llm_only' }),
+      ...(changed === 'accounting' ? { onAttempt: hook } : {}) })
+    if (changed === 'runtime') {
+      const original = runtime.run.bind(runtime)
+      runtime.run = options => { hook(); return original(options) }
+    }
+    expect(await classifyResearchIntent({ provider, model: 'gemini-3.5-flash-lite', message: 'Compare fictional energy storage methods',
+      decisionRuntime: runtime, assertInputAuthority: full })).toMatchObject({ research: true })
+    expect(hook).toHaveBeenCalledOnce()
+    expect(full.mock.calls.length).toBeGreaterThan(3)
+  })
+
+  it.each([false, true])('preserves research-only routing fallback and freshly admits its unowned child (withdrawn=%s)', async withdrawn => {
+    const refusal = authorityRefusal()
+    const full = vi.fn(async () => { if (withdrawn && full.mock.calls.length === 2) throw refusal })
+    const primary = fixtureLlm(), fallback = fixtureLlm()
+    primary.stream = vi.fn(async function* () { throw Object.assign(new Error('Fictional outage'), { status: 503 }) })
+    fallback.stream = vi.fn(async function* (request) {
+      expect(full).toHaveBeenCalledTimes(2)
+      expect(request.model).toBe('claude-haiku-4-5')
+      expect(request).not.toHaveProperty('allowProviderFallback')
+      expect(JSON.parse(String(request.messages[0]?.content)).currentMessage).toBe('Compare fictional energy storage methods')
+      yield { type: 'text_delta' as const, text: '{"research":false}' }
+      yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } }
+    })
+    const routed = createRoutingProvider({ gemini: primary, anthropic: fallback })
+    const result = classifyResearchIntent({ provider: routed, model: 'gemini-3.6-flash-standard', message: 'Compare fictional energy storage methods',
+      decisionRuntime: classifierRuntime({ llmProvider: routed, resolveRoute: () => ({ mode: 'llm_only' }) }), assertInputAuthority: full })
+    if (withdrawn) { await expect(result).rejects.toBe(refusal); expect(fallback.stream).not.toHaveBeenCalled() }
+    else { expect(await result).toMatchObject({ research: false }); expect(fallback.stream).toHaveBeenCalledOnce(); expect(full).toHaveBeenCalledTimes(4) }
+    expect(primary.stream).toHaveBeenCalledOnce()
+  })
+
+  it('prevents late research-only dispatch after cancellation during physical admission', async () => {
+    let release!: () => void, entered!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve }), started = new Promise<void>(resolve => { entered = resolve })
+    const controller = new AbortController(), full = vi.fn(async () => { entered(); await pending })
+    const provider = createGeminiProvider({ kind: 'ai-studio', endpoint: () => 'https://fictional.example/completion', headers: async () => ({}) })
+    const fetch = vi.fn(async () => researchCompletionResponse()); vi.stubGlobal('fetch', fetch)
+    const result = classifyResearchIntent({ provider, model: 'gemini-3.5-flash-lite', message: 'Compare fictional energy storage methods', signal: controller.signal,
+      decisionRuntime: classifierRuntime({ llmProvider: provider, resolveRoute: () => ({ mode: 'llm_only' }) }), assertInputAuthority: full })
+    const rejected = expect(result).rejects.toBeDefined()
+    await started; controller.abort(new Error('Fictional cancellation')); release(); await rejected
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(fetch).not.toHaveBeenCalled()
+  })
 
   it.each(['llm_only', 'fallback'] as const)('preserves owned admission through the actual managed resolver and boot provider factories (%s)', async mode => {
     const full = vi.fn(async () => {})

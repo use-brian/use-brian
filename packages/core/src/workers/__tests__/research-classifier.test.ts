@@ -96,6 +96,19 @@ describe('[COMP:workers/research-classifier] detectOperateSiteIntent', () => {
 describe('[COMP:workers/research-classifier] classifyResearchIntent', () => {
   afterEach(() => vi.useRealTimers())
 
+  it('preserves the actual legacy payload and default provider fallback without a decision runtime', async () => {
+    const provider = makeProvider('{"research":false}')
+    const recentConversation = Array.from({ length: 8 }, (_, index) => ({ role: 'user' as const, text: `  Prior ${index} ${'x'.repeat(2100)}  ` }))
+    await classifyResearchIntent({ provider, model: 'fixture-model', message: 'Compare battery recycling methods', recentConversation })
+    const request = vi.mocked(provider.stream).mock.calls[0]![0]
+    expect(request.messages).toEqual([{ role: 'user', content: JSON.stringify({
+      currentMessage: 'Compare battery recycling methods',
+      recentConversation: recentConversation.slice(-6).map(turn => ({ role: turn.role, text: turn.text.trim().slice(0, 2000) })),
+    }) }])
+    expect(request).not.toHaveProperty('allowProviderFallback')
+    expect(request.systemPrompt).toContain('MULTI-SOURCE INVESTIGATION')
+  })
+
   it.each(['fixture-model', 'gemini-3.5-flash-lite'])('preserves bounded legacy research output with reasoning room for %s', async model => {
     const provider = makeProvider('{"research":false}')
     await classifyResearchIntent({ provider, model, message: 'Compare battery recycling methods' })

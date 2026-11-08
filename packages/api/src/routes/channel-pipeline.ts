@@ -1,7 +1,7 @@
 import { recordingInputScope, type RecordingAdmission } from '../channel-recording.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
 import { isInputAuthorityError } from '@use-brian/core'
-import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
+import { captureAttendedSessionClassification, classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
 import { getPool } from '../db/client.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
@@ -1610,11 +1610,12 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     : await persistUserMessage()
   const earlyUserMessageRow = nativeTranscriptAuthority ? await persistInboundMessage() : undefined
 
-  // Load the pre-turn transcript once and reuse it for adaptive research +
-  // topic classification. Follow-up detection needs actual dialogue, not an
-  // isolated current sentence (2026-08-09 Snapio incident on web; channels
-  // share the same classifier contract).
-  const preExistingDbMessages = privateRecording ? [] : nativeTranscriptAuthority
+  // Native classifiers share admitted bytes, while each retains its fresh
+  // input-authority check. Legacy classifiers need their pre-turn dialogue.
+  const nativeClassificationCapture = nativeTranscriptAuthority && earlyUserMessageRow
+    ? await captureAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow })
+    : undefined
+  const preExistingDbMessages = privateRecording || nativeClassificationCapture ? [] : nativeTranscriptAuthority
     ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, undefined, earlyUserMessageRow ? earlyUserMessageRow.sequenceNum - 1 : undefined)
     : await filterHistoryForAudience(await getSessionMessages(session.id, { excludeHeld: true }))
   const adaptiveRecentConversation = preExistingDbMessages
@@ -1663,6 +1664,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         ? await classifyAttendedResearchMessage({
             authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
             provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
+            capture: nativeClassificationCapture,
           })
         : await classifyResearchIntent({
         provider: backgroundProvider,
@@ -1784,6 +1786,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     ? await classifyAttendedSessionMessage({
         authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
         provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
+        capture: nativeClassificationCapture,
         reply: { channelType, replyToMessageId: replyToMessageId ?? null },
       })
     : undefined
