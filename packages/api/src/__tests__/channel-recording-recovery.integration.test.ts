@@ -35,7 +35,7 @@ const credentialKey=randomBytes(32),integrationStore=createDbChannelIntegrationS
 // not exercise the native history/annotation query boundary at that size.
 const publicHistoryRows=255
 let recovered:string
-let verifiedExecution:ExecutionContext|undefined
+let verifiedOtherExecution:ExecutionContext|undefined
 
 function expectPublicHistory(value:unknown){
  const serialized=JSON.stringify(value)
@@ -46,7 +46,7 @@ function expectPublicHistory(value:unknown){
 /** The same non-owner role and GUC setup used by native session frames. The
  * lookup itself independently rechecks current SQL policy; no allow is reused. */
 async function nativeProof(sessionId=recovered,roots?:ScopeSource[],whileOpen?:(value:unknown,pid:number)=>Promise<void>) {
- const execution=verifiedExecution
+ const execution=verifiedOtherExecution
  if(!execution)throw new Error('The genuine Telegram kernel execution was not reached')
  return runWithAgentAccess(execution.security.access,async()=>{
   const client=await getAppPool().connect()
@@ -105,7 +105,8 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   expect((await query('SELECT recording_privacy_held FROM sessions WHERE id=$1',[source])).rows[0]).toEqual({recording_privacy_held:true})
   expect((await query('SELECT count(*)::int AS count FROM session_messages WHERE session_id=$1',[recovered])).rows[0].count).toBe(publicHistoryRows)
  })
- async function createChannelHarness(kernel?:typeof import('../turn/kernel.js').runAssistantTurn){
+ async function createChannelHarness(kernel?:typeof import('../turn/kernel.js').runAssistantTurn,options:{actorId?:string;replyToMessageId?:string;timeoutTopic?:boolean}={}){
+  const actorId=options.actorId??other
   const failures:string[]=[]
   vi.spyOn(console,'error').mockImplementation((...args)=>{failures.push(args.map(String).join(' '));originalConsoleError(...args)})
   const injections:Array<{actorIdentity:{userId:string}}>=[]
@@ -115,7 +116,7 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   runTurn.mockImplementation(async input=>{
    const {sink,loop}=input
    expect(nativeQueries.slice(nativeQueryStart).some(proof=>proof.available&&proof.sources>=publicHistoryRows)).toBe(true)
-   verifiedExecution=loop.context.executionContext
+   if(actorId===other)verifiedOtherExecution=loop.context.executionContext
    if(kernel)return kernel(input)
    await sink.onEvent({type:'assistant_turn',response:final,toolResults:[]});await sink.onEvent({type:'turn_complete',response:final});return{finalText:final.content[0].text}
   })
@@ -129,6 +130,14 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
    providerRequests.push(request)
    const main=String(url).endsWith('/gemini-3.6-flash')&&request.generationConfig?.responseMimeType!=='application/json'
    if(main)mainRequests.push(request)
+   if(options.timeoutTopic&&!main&&request.generationConfig?.responseMimeType==='application/json'){
+    const signal=init?.signal
+    if(!signal)throw new Error('The fictional classifier transport requires its real deadline signal')
+    await new Promise<never>((_resolve,reject)=>{
+     const abort=()=>reject(signal.reason??new Error('Fictional classifier deadline'))
+     if(signal.aborted)abort();else signal.addEventListener('abort',abort,{once:true})
+    })
+   }
    const properties=request.generationConfig?.responseJsonSchema?.properties?.answers?.properties as Record<string,{properties:{value:{enum?:string[];type:string}}}>|undefined
    const text=main?'Fictional complete reply.':properties?JSON.stringify({answers:Object.fromEntries(Object.entries(properties).map(([id,field])=>{
     const values=field.properties.value.enum??[]
@@ -144,13 +153,13 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
    const abortController=new AbortController()
    let pending:Promise<void>|undefined
    onTestFinished(async()=>{abortController.abort();await pending?.catch(()=>undefined)})
-   const recording=await admitTelegramRecording({integrationId:integration,conversationId:conversation,assistantId:assistant,providerMessageId:id,text,senderUserId:other})
+   const recording=await admitTelegramRecording({integrationId:integration,conversationId:conversation,assistantId:assistant,providerMessageId:id,text,senderUserId:actorId})
    expect(recording?.session.id).toBe(recovered)
    const selectedAssistant=await findAssistantById(assistant)
    expect(selectedAssistant).not.toBeNull()
    pending=processChannelMessage({recording,admittedAnswerContext:{kind:'continue'},assistant:selectedAssistant!,
-    userId:other,ownerId:owner,isIdentified:true,senderLinkedIdentity:true,externalGuest:false,channelType:'telegram',channelId:conversation,isGroupChat:true,channelIntegrationId:integration,channelIntegrationStore:integrationStore,
-    incomingChannelMessageId:id,messageText:text,userContentBlocks:[{type:'text',text}],abortController,modelAlias:'standard',adaptiveResearchEnabled:true,decisionRuntime,configuredProviders:new Set(['gemini']),provider,systemPrompt:'Fixture prompt',tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore(),connectorStore:{},mcpSettingsStore:{},
+    userId:actorId,ownerId:owner,isIdentified:true,senderLinkedIdentity:true,externalGuest:false,channelType:'telegram',channelId:conversation,isGroupChat:true,channelIntegrationId:integration,channelIntegrationStore:integrationStore,
+    incomingChannelMessageId:id,replyToMessageId:options.replyToMessageId,messageText:text,userContentBlocks:[{type:'text',text}],abortController,modelAlias:'standard',adaptiveResearchEnabled:true,decisionRuntime,configuredProviders:new Set(['gemini']),provider,systemPrompt:'Fixture prompt',tools:new Map(),memoryStore:createDbMemoryStore(),capabilityStore:createDbCapabilityStore(),connectorStore:{},mcpSettingsStore:{},
     hooks:{onConfirmationRequired:async()=>{},sendError:async(error:Error)=>{throw error},sendResponse:async(text:string)=>{sent.push(text);await recordDeliveredTelegramMessage({channelId:conversation,providerMessageId:`reply-${id}`,text,botId:'987658241',botUsername:'fictional_recovery_bot'});return{channelMessageId:`reply-${id}`}}}} as unknown as ChannelPipelineParams)
    await pending
    expect(failures).toEqual([])
@@ -209,6 +218,48 @@ describe.sequential('[COMP:api/channel-recording] recovered public history reach
   expect(realHarness.sent).toEqual(['Fictional complete reply.','Fictional complete reply.'])
   expect((await query("SELECT channel_message_id FROM session_messages WHERE session_id=$1 AND role='assistant' AND channel_message_id=$2",[recovered,'reply-1008'])).rows).toEqual([{channel_message_id:'reply-1008'}])
   expect((await query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[recovered])).rows[0]).toEqual({status:'idle',turn_lease_token:null})
+ })
+
+ it('delivers an owner forum reply with private memories and durable prior annotations',async()=>{
+  const memories=(await query<{id:string}>(`INSERT INTO memories(user_id,workspace_id,assistant_id,scope,summary,sensitivity,
+    created_by_user_id,scope_version,scope_held,valid_from,valid_to)
+    SELECT $1,$2,$3,'shared','PRIVATE_MEMORY_'||n,CASE WHEN n>68 THEN 'internal' ELSE 'confidential' END,
+      $1,1,n>68,now()-interval '2 days',CASE WHEN n BETWEEN 4 AND 68 THEN now()-interval '1 day' ELSE NULL END
+    FROM generate_series(1,70) n RETURNING id`,[owner,workspace,assistant])).rows.map(row=>row.id)
+  try{
+   expect((await query(`SELECT count(*) FILTER(WHERE valid_to IS NULL AND NOT scope_held)::int current,
+     count(*) FILTER(WHERE valid_to IS NOT NULL)::int retired,count(*) FILTER(WHERE scope_held)::int held
+     FROM memories WHERE id=ANY($1::uuid[])`,[memories])).rows[0]).toEqual({current:3,retired:65,held:2})
+   const prior=(await query('SELECT count(*)::int count FROM session_message_annotation_heads WHERE session_id=$1',[recovered])).rows[0].count
+   expect(prior).toBeGreaterThanOrEqual(2)
+   const real=await vi.importActual<typeof import('../turn/kernel.js')>('../turn/kernel.js')
+   const preparation=await import('../turn/prepare.js')
+   const realPreparation=await vi.importActual<typeof import('../turn/prepare.js')>('../turn/prepare.js')
+   vi.mocked(preparation.prepareAssistantRun).mockImplementation(realPreparation.prepareAssistantRun)
+   const current=await createChannelHarness(real.runAssistantTurn,{actorId:owner,replyToMessageId:'5',timeoutTopic:true})
+   await current.turn('1009','Hi')
+   expect(current.mainRequests).toHaveLength(1)
+   expectPublicHistory(current.mainRequests[0])
+   expect(JSON.stringify(current.mainRequests[0])).toContain('fictionalCalendarRead')
+   expect(runTurn.mock.calls.at(-1)?.[0].loop.context.userId).toBe(owner)
+   expect(runTurn.mock.calls.at(-1)?.[0].loop.tools.get('fictionalCalendarRead')?.isReadOnly).toBe(true)
+   expect(current.injections.at(-1)?.actorIdentity.userId).toBe(owner)
+   expect(current.sent).toEqual(['Fictional complete reply.'])
+   const annotation=(await query(`SELECT (c.content->>'topicConfidence')::float confidence,c.content->>'topicLabel' label,
+      (SELECT count(*)::int FROM scope_derivations d JOIN scope_derivation_sources s ON s.workspace_id=d.workspace_id AND s.derivation_id=d.id
+       WHERE d.workspace_id=r.workspace_id AND d.resource_kind='session_context_revision' AND d.resource_id=r.id) source_edges
+     FROM session_messages m JOIN session_message_annotation_heads h ON h.workspace_id=m.workspace_id AND h.message_id=m.id
+     JOIN session_context_scope_revisions r ON r.workspace_id=h.workspace_id AND r.id=h.scope_revision_id
+     JOIN session_context_revision_contents c ON c.workspace_id=r.workspace_id AND c.revision_id=r.id
+     WHERE m.session_id=$1 AND m.channel_message_id=$2`,[recovered,'1009'])).rows[0]
+   expect(annotation).toMatchObject({confidence:0,label:'(uncategorized)'})
+   expect(annotation.source_edges).toBeGreaterThan(0)
+   expect((await query('SELECT count(*)::int count FROM session_message_annotation_heads WHERE session_id=$1',[recovered])).rows[0].count).toBe(prior+1)
+   expect((await query("SELECT channel_message_id FROM session_messages WHERE session_id=$1 AND role='assistant' AND channel_message_id=$2",[recovered,'reply-1009'])).rows).toEqual([{channel_message_id:'reply-1009'}])
+   expect((await query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[recovered])).rows[0]).toEqual({status:'idle',turn_lease_token:null})
+  }finally{
+   await query('DELETE FROM memories WHERE id=ANY($1::uuid[])',[memories])
+  }
  })
 
  it('uses native proof for the current Work epoch while held legacy history retains its fallback',async()=>{
