@@ -35,7 +35,7 @@ export function ArchivedChatsSettings({ onOpenChat }: { onOpenChat?: () => void 
     </div>
     <Dialog.Root open={open} onOpenChange={next => { if (!next) close(); }}>
       <Dialog.Portal>
-        <Dialog.Backdrop className="fixed inset-0 z-[60] bg-background/70 backdrop-blur-sm" />
+        <Dialog.Backdrop className="fixed inset-0 z-[60] bg-foreground/40 backdrop-blur-sm" />
         <Dialog.Popup
           className="fixed inset-0 z-[60] flex h-[100dvh] w-full flex-col overflow-hidden border border-border bg-background shadow-2xl sm:inset-auto sm:left-1/2 sm:top-1/2 sm:h-[min(36rem,calc(100dvh-3rem))] sm:w-[calc(100%-3rem)] sm:max-w-2xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-2xl"
           onKeyDown={event => {

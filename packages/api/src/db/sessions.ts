@@ -853,6 +853,7 @@ export const TURN_LEASE_STALE_AFTER_MS = 90_000
 /** Why a turn's lock was released. Persisted so a heal can explain itself. */
 export type TurnEndReason =
   | 'completed'
+  | 'failed'
   | 'stopped_by_user'
   | 'stalled_reclaimed'
   | 'timeout'
@@ -970,7 +971,8 @@ export async function requestTurnCancel(sessionId: string): Promise<boolean> {
  * blocks nothing but preserves the debugging signal that this turn did not end
  * the way it was supposed to.
  */
-function restingStatusFor(reason: TurnEndReason): 'idle' | 'timeout' {
+function restingStatusFor(reason: TurnEndReason): 'idle' | 'timeout' | 'failed' {
+  if (reason === 'failed') return 'failed'
   return reason === 'completed' || reason === 'stopped_by_user' ? 'idle' : 'timeout'
 }
 

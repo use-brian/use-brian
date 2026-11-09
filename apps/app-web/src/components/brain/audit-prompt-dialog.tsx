@@ -155,7 +155,7 @@ export function AuditPromptDialog({
   return (
     <Dialog.Root open={target !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity duration-150 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
+        <Dialog.Backdrop className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm transition-opacity duration-150 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
         <Dialog.Popup className="fixed left-1/2 top-1/2 z-50 flex h-[min(88vh,960px)] w-[calc(var(--native-app-width,100vw)-2rem)] max-w-4xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-border bg-background shadow-xl ring-1 ring-foreground/5 outline-none transition-[opacity,transform] duration-150 data-[starting-style]:scale-95 data-[starting-style]:opacity-0 data-[ending-style]:scale-95 data-[ending-style]:opacity-0">
           <div className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-3">
             <div className="min-w-0 flex-1">

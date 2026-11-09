@@ -31,6 +31,7 @@ import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { CommentThread } from "@/lib/api/comments";
 import type { DocSessionMessage } from "@/lib/api/sessions";
+import { authFetch } from "@/lib/auth-fetch";
 
 // Override only fetchSessionMessages — keep the real extractMessageText /
 // parseMessageAttachments / stripCommentThreadReplyTag so visibleComments runs
@@ -102,11 +103,11 @@ const persisted: DocSessionMessage[] = [
 
 const noop = () => {};
 
-function body(withSeed: boolean) {
+function body(withSeed: boolean, overrides: Partial<CommentThread> = {}) {
   return (
     <I18nProvider locale="en" dict={dict}>
       <CommentThreadBody
-        thread={thread}
+        thread={{ ...thread, ...overrides }}
         pageId="p1"
         workspaceId="ws1"
         assistantId="a1"
@@ -127,7 +128,12 @@ describe("[COMP:app-web/comment-thread-body] seed one-shot across navigation", (
   let container: HTMLDivElement | null = null;
 
   beforeEach(() => {
+    expect(dict.comments.replyFailed).toBeTypeOf("string");
+    expect(dict.comments.replyAccessUnavailable).toBeTypeOf("string");
+    expect(dict.comments.replyPageUnavailable).toBeTypeOf("string");
+    expect(dict.comments.sendUnconfirmed).toBeTypeOf("string");
     mockFetchMessages.mockReset().mockResolvedValue(persisted);
+    vi.mocked(authFetch).mockReset().mockRejectedValue(new TypeError("Connection interrupted"));
   });
 
   afterEach(() => {
@@ -145,6 +151,29 @@ describe("[COMP:app-web/comment-thread-body] seed one-shot across navigation", (
     await act(async () => {});
   }
 
+  it.each(["delivery_audience_unverified", "authority_changed", "unknown"])(
+    "keeps an explicit %s failure visible after reconciling a saved comment", async code => {
+      vi.mocked(authFetch).mockImplementation(async url => {
+        if (!String(url).endsWith("/api/chat")) return { ok: false, json: async () => ({}) } as Response;
+        return { ok: true, body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(`event: error\ndata: ${JSON.stringify({ code, error: "INTERNAL DETAIL MUST NOT APPEAR" })}\n\n`));
+            controller.close();
+          },
+        }) } as Response;
+      });
+      const id = `terminal_${code}`;
+      await mount(body(true, { id }));
+      const alert = container!.querySelector('[role="alert"]');
+      expect(alert?.textContent).toBe(code === "unknown" ? dict.comments.replyFailed : dict.comments.replyAccessUnavailable);
+      expect(container!.textContent).toContain(persisted[0].content);
+      expect(container!.textContent).not.toContain("INTERNAL DETAIL");
+      expect(container!.textContent).not.toContain(dict.comments.streamingReply);
+      expect(hasClaimedCommentSeed(id)).toBe(true);
+      expect(vi.mocked(authFetch).mock.calls.filter(([url]) => String(url).endsWith("/api/chat"))).toHaveLength(1);
+    },
+  );
+
   it("retains an unsent reply through thread history loading and a process remount", async () => {
     const key = "brian:unsent:v1:" + ["https://api.example", "u1", "ws1", `thread:${thread.id}`].map(encodeURIComponent).join(":");
     localStorage.setItem(key, "Unsent offline reply");
@@ -154,6 +183,35 @@ describe("[COMP:app-web/comment-thread-body] seed one-shot across navigation", (
     await mount(body(false));
     expect(container!.querySelector("textarea")?.value).toBe("Unsent offline reply");
     expect(localStorage.getItem(key)).toBe("Unsent offline reply"); localStorage.removeItem(key);
+  });
+
+  it("keeps an acknowledged comment and terminal failure when history cannot be read", async () => {
+    mockFetchMessages.mockRejectedValue(new Error("History unavailable"));
+    vi.mocked(authFetch).mockImplementation(async url => {
+      if (!String(url).endsWith("/api/chat")) throw new TypeError("Connection interrupted");
+      return { ok:true,body:new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: user_message_saved\ndata: {"id":"saved-comment"}\n\nevent: error\ndata: {"code":"page_context_unavailable"}\n\n'));
+        controller.close();
+      } }) } as Response;
+    });
+    await mount(body(true, { id:"acknowledged_failed_history" }));
+    expect(container!.querySelector('[role="alert"]')?.textContent).toBe(dict.comments.replyPageUnavailable);
+    expect(container!.textContent).toContain(seed.message);
+    expect(vi.mocked(authFetch).mock.calls.filter(([url]) => String(url).endsWith("/api/chat"))).toHaveLength(1);
+  });
+
+  it("shows an unavailable history as a load failure", async () => {
+    mockFetchMessages.mockRejectedValue(new Error("History unavailable"));
+    await mount(body(false, { id:"unreadable_history" }));
+    expect(container!.querySelector('[role="alert"]')?.textContent).toBe(dict.comments.loadError);
+    expect(container!.textContent).not.toContain(dict.comments.emptyThread);
+  });
+
+  it("shows a persisted failed turn when the thread is reopened", async () => {
+    await mount(body(false, { id: "reopened_failure", sessionStatus: "failed" }));
+    expect(container!.querySelector('[role="alert"]')?.textContent).toBe(dict.comments.replyFailed);
+    expect(container!.textContent).toContain(persisted[0].content);
+    expect(vi.mocked(authFetch).mock.calls.some(([url]) => String(url).endsWith("/api/chat"))).toBe(false);
   });
 
   it("a remount with a stale already-sent seed fetches the persisted comment instead of 'No comments yet'", async () => {

@@ -105,7 +105,7 @@ export function ProvenanceSheet({
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 z-40 bg-background/40 backdrop-blur-[2px]"
+        className="fixed inset-0 z-40 bg-foreground/40 backdrop-blur-[2px]"
         onClick={onClose}
         aria-hidden
       />

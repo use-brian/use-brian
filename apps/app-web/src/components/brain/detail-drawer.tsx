@@ -779,7 +779,7 @@ export function BrainDetailDrawer({
     <>
       <div
         className={cn(
-          "fixed inset-0 z-40 bg-background/40 backdrop-blur-[2px]",
+          "fixed inset-0 z-40 bg-foreground/40 backdrop-blur-[2px]",
           "duration-300 ease-out",
           closing ? "animate-out fade-out-0" : "animate-in fade-in-0",
         )}
@@ -3205,7 +3205,7 @@ function SkillDrawer({
     <>
       <div
         className={cn(
-          "fixed inset-0 z-40 bg-background/40 backdrop-blur-[2px]",
+          "fixed inset-0 z-40 bg-foreground/40 backdrop-blur-[2px]",
           "duration-300 ease-out",
           closing ? "animate-out fade-out-0" : "animate-in fade-in-0",
         )}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { ArrowDown, ArrowUp, Pencil, SmilePlus, Trash2, Upload } from "lucide-react";
 import { desktopBridge, type DesktopAccount } from "@/lib/desktop-auth-source";
 import { useT } from "@/lib/i18n/client";
@@ -9,6 +9,87 @@ import { UserAvatar } from "@/components/ui/user-avatar";
 import { Button } from "@/components/ui/button";
 import { EmojiPicker } from "@/components/ui/emoji-picker";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { Skeleton } from "@/components/skeleton";
+
+type DirectoryView = {
+  ready: boolean;
+  failed: boolean;
+  canSwitch: boolean;
+  accounts: DesktopAccount[];
+};
+
+const emptyDirectory: DirectoryView = { ready: false, failed: false, canSwitch: false, accounts: [] };
+let directoryView: DirectoryView = emptyDirectory;
+let directoryGeneration = 0;
+let directoryPending: Promise<void> | null = null;
+const directoryListeners = new Set<() => void>();
+
+function sameAccounts(left: readonly DesktopAccount[], right: readonly DesktopAccount[]): boolean {
+  return left.length === right.length && left.every((account, index) => {
+    const other = right[index];
+    return account.key === other.key && account.id === other.id && account.name === other.name
+      && account.email === other.email && account.displayName === other.displayName && account.icon === other.icon
+      && account.avatarUrl === other.avatarUrl && account.deployment === other.deployment
+      && account.appUrl === other.appUrl && account.active === other.active;
+  });
+}
+
+function publishDirectory(next: DirectoryView): void {
+  directoryView = next;
+  for (const listener of directoryListeners) listener();
+}
+
+function subscribeDirectory(listener: () => void): () => void {
+  directoryListeners.add(listener);
+  return () => directoryListeners.delete(listener);
+}
+
+/** Drop the in-memory display list. Tests use this between cases. */
+export function resetDesktopAccountDirectory(): void {
+  directoryGeneration += 1;
+  directoryPending = null;
+  directoryView = emptyDirectory;
+}
+
+/**
+ * Read the shell's account directory once and keep it. Later calls join the
+ * in-flight read. An unchanged result does not notify, so an open menu does
+ * not repaint when the shell repeats the same rows.
+ */
+export function warmDesktopAccounts(): Promise<void> {
+  const list = desktopBridge()?.listAccounts;
+  if (!list) return Promise.resolve();
+  if (directoryPending) return directoryPending;
+  const request = ++directoryGeneration;
+  const task = list().then((result) => {
+    if (request !== directoryGeneration) return;
+    const next: DirectoryView = { ready: true, failed: false, canSwitch: result.canSwitch, accounts: result.accounts };
+    if (directoryView.ready && directoryView.canSwitch === next.canSwitch && sameAccounts(directoryView.accounts, next.accounts)) return;
+    publishDirectory(next);
+  }).catch(() => {
+    if (request !== directoryGeneration || directoryView.ready) return;
+    publishDirectory({ ...emptyDirectory, failed: true });
+  }).finally(() => {
+    if (directoryPending === task) directoryPending = null;
+  });
+  directoryPending = task;
+  return task;
+}
+
+function replaceDesktopAccounts(next: DesktopAccount[] | ((current: DesktopAccount[]) => DesktopAccount[])): void {
+  if (!directoryView.ready) return;
+  const accounts = typeof next === "function" ? next(directoryView.accounts) : next;
+  directoryGeneration += 1;
+  publishDirectory({ ...directoryView, accounts, failed: false });
+}
+
+function useDesktopAccountDirectory(): DirectoryView & {
+  replace: (next: DesktopAccount[] | ((current: DesktopAccount[]) => DesktopAccount[])) => void;
+} {
+  const current = useSyncExternalStore(subscribeDirectory, () => directoryView, () => emptyDirectory);
+  useEffect(() => { void warmDesktopAccounts(); }, []);
+  return { ...current, replace: replaceDesktopAccounts };
+}
 
 /** One identity list across desktop deployments. [COMP:app-web/desktop-accounts] */
 export function DesktopAccounts(props: {
@@ -25,20 +106,12 @@ export function DesktopAccounts(props: {
   const [displayName, setDisplayName] = useState("");
   const [icon, setIcon] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
-  const [accounts, setAccounts] = useState<DesktopAccount[]>([]);
-  const [canSwitch, setCanSwitch] = useState(false);
+  const directory = useDesktopAccountDirectory();
+  const accounts = directory.accounts;
+  const canSwitch = directory.canSwitch;
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    void desktopBridge()?.listAccounts?.().then((result) => {
-      if (!live) return;
-      setAccounts(result.accounts);
-      setCanSwitch(result.canSwitch);
-    }).catch(() => { if (live) setError(t.switchError); });
-    return () => { live = false; };
-  }, [t.switchError]);
+  const shownError = error ?? (directory.failed ? t.switchError : null);
 
   async function select(account?: DesktopAccount) {
     if (pending || !canSwitch || account?.active) return;
@@ -54,7 +127,7 @@ export function DesktopAccounts(props: {
       if (!result?.ok) {
         const expired = result && "error" in result && result.error === "reauth";
         setError(expired ? t.accountSessionExpired : t.switchError);
-        if (expired && account) setAccounts((rows) => rows.filter((row) => row.key !== account.key));
+        if (expired && account) directory.replace((rows) => rows.filter((row) => row.key !== account.key));
       }
     } catch { setError(t.switchError); }
     finally { setPending(null); }
@@ -78,7 +151,7 @@ export function DesktopAccounts(props: {
         setError(t.removeConnectionError);
         return;
       }
-      setAccounts((current) => current.filter((row) => row.key !== account.key));
+      directory.replace((current) => current.filter((row) => row.key !== account.key));
     } catch {
       setError(t.removeConnectionError);
     } finally {
@@ -124,14 +197,27 @@ export function DesktopAccounts(props: {
         ? await bridge?.moveAccount?.(account.key, direction)
         : await bridge?.updateAccountPresentation?.(account.key, { displayName, icon });
       if (!result?.ok) { setError(t.customizeError); return; }
-      setAccounts(result.accounts);
+      directory.replace(result.accounts);
       if (!direction) setEditing(null);
     } catch { setError(t.customizeError); }
     finally { setPending(null); }
   }
 
   return (
-    <div className="flex flex-col gap-0.5" aria-busy={pending !== null}>
+    <div className="flex flex-col gap-0.5" aria-busy={pending !== null || !directory.ready}>
+      {!directory.ready && !directory.failed && (
+        <ul aria-hidden="true" data-account-list-skeleton="" className="flex flex-col gap-0.5">
+          {Array.from({ length: 3 }, (_, index) => (
+            <li key={index} className="flex min-h-8 max-md:min-h-11 items-center gap-2 px-2 py-1.5">
+              <Skeleton className="size-6 shrink-0 rounded-full" />
+              <span className="min-w-0 flex-1 space-y-1">
+                <Skeleton className="h-3" style={{ width: `${56 + index * 10}%` }} />
+                <Skeleton className="h-2.5 w-2/5" />
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
       {accounts.filter((account) => !props.allowedKeys || props.allowedKeys.includes(account.key)).map((account, index) => {
         const label = account.deployment === "cloud" ? t.deploymentCloud
           : account.deployment === "local" ? t.deploymentLocal : t.deploymentSelfHosted;
@@ -245,7 +331,7 @@ export function DesktopAccounts(props: {
           {customizing ? t.customizeDone : t.customizeAccounts}
         </button>
       )}
-      {error && <p role="alert" className="px-2 py-1 text-xs text-destructive">{error}</p>}
+      {shownError && <p role="alert" className="px-2 py-1 text-xs text-destructive">{shownError}</p>}
     </div>
   );
 }

@@ -5576,6 +5576,10 @@ export const zhCN: Dictionary = {
     fallbackDesc: "默认为关闭。开启后，此端点无法回应的消息会改由该层级的内置模型回复，回复中会注明此事，并以一般 Brian 用量计费。",
   },
   comments: {
+    replyFailed: "你的留言已保存，但 Brian 未能完成回复。",
+    replyAccessUnavailable: "你的留言已保存，但 Brian 未能确认完成回复所需的访问权限。",
+    replyPageUnavailable: "你的留言已保存，但 Brian 未能访问此页面以完成请求。",
+    sendUnconfirmed: "未能确认你的留言是否已保存。",
     attachmentsNeedAi: "开启 AI 回复以发送附件。",
     localDraftFailed: "无法在此设备保存草稿。请保持此窗口打开，直到存储空间可用。",
     toolbarButton: "留言",

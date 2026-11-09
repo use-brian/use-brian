@@ -148,7 +148,7 @@ function titleScheduling(accepted: boolean, failure?: Error) {
   const enqueue = vi.fn(async () => { if (failure) throw failure; return accepted })
   const readTitle = vi.fn(async () => null)
   const scope = {
-    programmatic: undefined,
+    programmatic: undefined, pageBoundTurn: false,
     options: { enqueueSessionTitleJob: enqueue }, nativeTranscriptAuthority: {}, turnReleased: true,
     postReply: { isPublishedReply: () => true },
     classifySession: () => ({ anchor: { kind: 'none' }, transport: 'web', lane: 'conversation' }),

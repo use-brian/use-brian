@@ -33,6 +33,7 @@ import { TableView } from "./node-views/table-view";
 import { BlockIndent } from "./block-indent";
 import { ListNormalizer } from "./list-normalizer";
 import { BlockAreaSelect } from "./block-area-select";
+import { BlockSelectionClipboard } from "./block-selection-clipboard";
 import { DocMediaPaste } from "./doc-media-paste";
 import { DocPlainPaste } from "./doc-plain-paste";
 import { SmartArrows } from "./smart-arrows";
@@ -148,6 +149,9 @@ export function browserDocExtensions(opts?: {
     ListNormalizer,
     NodeRange.configure({ key: "Mod" }),
     BlockAreaSelect,
+    // Cmd/Ctrl+C and Cmd/Ctrl+X for a block area selection. The gesture clears
+    // the DOM selection, so the browser never fires copy/cut on its own.
+    BlockSelectionClipboard,
     // Paste / drag-drop of image + file media → durable `/api/doc-files`
     // upload + embed insert. No-ops without a workspaceId (test editors).
     DocMediaPaste.configure({ workspaceId: opts?.workspaceId }),

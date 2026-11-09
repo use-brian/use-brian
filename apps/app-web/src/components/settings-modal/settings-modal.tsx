@@ -184,7 +184,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
   return (
     <Dialog.Root open={open} onOpenChange={(next) => { if (!next && !pickerOpen) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Backdrop forceRender className="fixed inset-0 z-50 bg-background/40 backdrop-blur-sm" />
+        <Dialog.Backdrop forceRender className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm" />
         <div className="pointer-events-none fixed inset-0 z-50 overflow-y-auto">
       <div className="min-h-full flex items-center justify-center p-0 sm:p-6">
         <Dialog.Popup

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { pageThreadSourceExecutionSql } from './page-thread-execution.js'
 
 /** Executable-only optimization; historical SQL and all contract checks stay intact.
  * [COMP:api/migration-execution-sql]
@@ -22,7 +23,9 @@ const reviewed: Readonly<Record<string, readonly [string, number]>> = {
   '8245_native_current_field_planning.sql': ['f5299318ec052cec600a6d9e2901ed2ab3459f1119722380ca89591e517cb7a6', 2],
   '8246_native_private_memory_empty_domain.sql': ['439f8d2b932d73d47603a874d3b3b02b8c29de801e8aab0c995c65a4d0d4fd3d', 2],
   '8247_recording_privacy_ancestry_frontier.sql': ['310375585317824f227fdec661cb68fb6775b152e2ee0baf03bf1dc145f99d15', 2],
+  '8248_page_thread_context_authority.sql': ['4f58c737f519fc9a2726c13ae6d04d5c38f1e78973bc841af273e9e4e36ea5e2', 2],
   '8249_telegram_conversation_context.sql': ['30a27fe9683b924d011f2bcaced1d5f4770f86a470841dd1c1d303cdf8da70ea', 2],
+  '8250_page_thread_batch_preparation.sql': ['8b41fe1e2704faccc86920a53abec42cf790db663aec7b049c791371062a857c', 2],
 }
 
 const callers = 'FOR caller IN SELECT p.oid,p.prosrc FROM pg_proc p'
@@ -87,7 +90,8 @@ export function toMigrationExecutionSql(sql: string, file: string): string {
   if (createHash('sha256').update(sql).digest('hex') !== expected[0]) {
     throw new Error(`${file}: historical migration content changed; refusing execution adapter`)
   }
-  const executable = file === '8246_native_private_memory_empty_domain.sql' ? privateMemoryGuardEnrollment(sql) : sql
+  const executable = file === '8246_native_private_memory_empty_domain.sql' ? privateMemoryGuardEnrollment(sql)
+    : file === '8248_page_thread_context_authority.sql' ? pageThreadSourceExecutionSql(sql) : sql
   let blocks = 0
   const result = executable.replace(/^DO (\$[a-z_]+\$)([\s\S]*?)\1;/gm, (original, tag: string, block: string) => {
     if (!block.includes(callers)) return original

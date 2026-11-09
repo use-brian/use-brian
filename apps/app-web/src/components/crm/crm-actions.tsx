@@ -182,7 +182,7 @@ function Shell({ open, onOpenChange, title, description, children, busy = false 
   return (
     <Dialog.Root open={open} onOpenChange={(next) => { if (!busy) onOpenChange(next); }}>
       <Dialog.Portal>
-        <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm" />
+        <Dialog.Backdrop className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm" />
         {/* Full-screen below `sm` (the settings-modal shape, responsive
             contract M5): a floating card with the iOS keyboard open left its
             lower third, Create included, under the keyboard. */}

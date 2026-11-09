@@ -55,6 +55,11 @@ import { useFileDrop } from "@/lib/use-file-drop";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
+/** A terminal server decision must never enter transport-interruption recovery. */
+class CommentTurnFailed extends Error {
+  constructor(readonly code?: string) { super("comment turn failed"); }
+}
+
 // The presentational atoms (`Avatar`, `AuthorAvatar`, `ThreadGutter`,
 // `relativeTime`, and the `CommentAuthor` type) now live in
 // `./comment-primitives` so the read-only public share view can render an
@@ -310,6 +315,9 @@ export function CommentThreadBody({
   const hadInitial = React.useRef((initialMessages?.length ?? 0) > 0);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    if (thread.sessionStatus === "failed" || thread.sessionStatus === "timeout") setError(t.replyFailed);
+  }, [thread.sessionStatus, t.replyFailed]);
   const [draft, setDraft, draftStorageFailed] = useDurableDraft(workspaceId, `thread:${thread.id}`, currentUser?.id);
   // Quote-reply: text the reader selected in an existing comment (via the
   // floating <CommentQuoteReply> button) to reply to. Shown as a quote chip
@@ -371,14 +379,13 @@ export function CommentThreadBody({
     // Preloaded? Revalidate without the loader (and swallow a failed refetch —
     // we already have content to show). Otherwise load + show the loader.
     if (!hadInitial.current) setLoading(true);
-    setError(null);
+    if (thread.sessionStatus !== "failed" && thread.sessionStatus !== "timeout") setError(null);
     // A thread whose turn is still running (a refresh mid-reply) reconnects to
     // the live turn below and owns the streaming bubble — don't clear it here.
     if (thread.sessionStatus !== "running") setStreaming(null);
-    void fetchSessionMessages(sessionId, { signal: controller.signal })
+    void fetchSessionMessages(sessionId, { signal: controller.signal, strict: true })
       .then((rows) => {
-        // `fetchSessionMessages` swallows aborts/errors and resolves to `[]`. If
-        // this fetch was aborted (effect re-run / StrictMode's mount→unmount→
+        // If this fetch was aborted (effect re-run / StrictMode's mount→unmount→
         // mount) its `[]` must NOT overwrite the preloaded messages — that
         // wiped content out from under the open and flashed empty → grow
         // (the "shrink then expand" double-move). Likewise keep preloaded
@@ -388,7 +395,7 @@ export function CommentThreadBody({
         setMessages(rows);
       })
       .catch(() => {
-        if (!hadInitial.current) setError(t.loadError);
+        if (!controller.signal.aborted) setError(current => current ?? t.loadError);
       })
       .finally(() => {
         // Don't let an aborted fetch's settle clear the loader the live fetch
@@ -442,11 +449,17 @@ export function CommentThreadBody({
     let cancelled = false;
     const finish = () => {
       if (cancelled) return;
-      void fetchSessionMessages(sessionId).then((rows) => {
+      void fetchSessionMessages(sessionId, { strict: true }).then((rows) => {
         if (cancelled) return;
         if (rows.length > 0) setMessages(rows);
         setStreaming(null);
         setStreamActivity(null);
+      }).catch(() => {
+        if (!cancelled) {
+          setError(current => current ?? t.loadError);
+          setStreaming(null);
+          setStreamActivity(null);
+        }
       });
       onChanged();
     };
@@ -464,7 +477,9 @@ export function CommentThreadBody({
           if (done) break;
           for (const ev of parseSSEStream(decoder.decode(value, { stream: true }), buf)) {
             if (ev.event === "status") {
-              if ((ev.data as { status?: string }).status !== "running") {
+              const status = (ev.data as { status?: string }).status;
+              if (status === "failed" || status === "timeout") setError(t.replyFailed);
+              if (status !== "running") {
                 finish();
                 return;
               }
@@ -472,6 +487,13 @@ export function CommentThreadBody({
               const d = ev.data as { text?: string; activity?: string | null };
               setStreaming(d.text ?? "");
               setStreamActivity(d.text ? null : d.activity ? narrationFor(d.activity) : null);
+            } else if (ev.event === "turn_completed") {
+              const reason = (ev.data as { reason?: string }).reason;
+              if (reason === "failed" || reason === "timeout" || reason === "error") setError(t.replyFailed);
+            } else if (ev.event === "error") {
+              setError(t.replyFailed);
+              finish();
+              return;
             } else if (ev.event === "done") {
               finish();
               return;
@@ -587,6 +609,7 @@ export function CommentThreadBody({
     const replyWithoutAi = override ? override.aiReply === false : !aiReply;
     if (replyWithoutAi && !body) return;
     setBusy(true);
+    setError(null);
     // Mentions belong to a user-typed reply; the seed `override` (a new
     // thread's first comment) records its mentions in `collab-page-editor`
     // where the thread is minted.
@@ -643,6 +666,7 @@ export function CommentThreadBody({
 
     setStreaming("");
     setStreamActivity(null);
+    let commentWasSaved = false;
     try {
       const res = await authFetch(`${API_URL}/api/chat`, {
         method: "POST",
@@ -661,7 +685,11 @@ export function CommentThreadBody({
           ...(hasRecordings ? { attachedRecordingIds } : {}),
         }),
       });
-      if (!res.ok || !res.body) throw new Error("stream failed");
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null) as { code?: unknown } | null;
+        throw new CommentTurnFailed(typeof payload?.code === "string" ? payload.code : undefined);
+      }
+      if (!res.body) throw new Error("stream failed");
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       const buf = createSSEBuffer();
@@ -671,7 +699,11 @@ export function CommentThreadBody({
         const { done, value } = await reader.read();
         if (done) break;
         for (const ev of parseSSEStream(decoder.decode(value, { stream: true }), buf)) {
-          if (ev.event === "text_delta") {
+          if (ev.event === "user_message_saved") {
+            commentWasSaved = true;
+            accepted();
+            seedRef.current = null;
+          } else if (ev.event === "text_delta") {
             acc += (ev.data as { text?: string }).text ?? "";
             setStreaming(acc);
             setStreamActivity(null);
@@ -680,7 +712,7 @@ export function CommentThreadBody({
             if (code === "turn_in_flight") {
               duplicateInFlight = true;
             } else {
-              throw new Error(code ?? "comment turn failed");
+              throw new CommentTurnFailed(code);
             }
           } else if (ev.event === "tool_start" && !acc) {
             // Reflect the assistant's work before any reply text lands.
@@ -765,7 +797,7 @@ export function CommentThreadBody({
           }
         }
       }
-      const rows = await fetchSessionMessages(thread.sessionId);
+      const rows = await fetchSessionMessages(thread.sessionId, { strict: true });
       setMessages(rows);
       if (hasPersistedInterruptedComment(rows, knownMessageIds, effectiveBody)) accepted();
       if (duplicateInFlight) {
@@ -785,21 +817,27 @@ export function CommentThreadBody({
         });
       }
       onChanged();
-    } catch {
+    } catch (failure) {
       // A network/SSE failure does not prove the send failed. `doc_thread`
       // turns deliberately survive a disconnected client, so first reconcile
       // the exact optimistic row from the canonical transcript. If it landed,
       // retire the seed and refresh the thread status so the reconnect effect
       // can attach to the background turn. Only a genuinely absent row gets
       // the load error.
-      const rows = await fetchSessionMessages(thread.sessionId);
-      if (hasPersistedInterruptedComment(rows, knownMessageIds, effectiveBody)) {
+      const rows = await fetchSessionMessages(thread.sessionId, { strict: true }).catch(() => null);
+      if (commentWasSaved || rows && hasPersistedInterruptedComment(rows, knownMessageIds, effectiveBody)) {
         accepted();
-        setMessages(rows);
+        if (rows) setMessages(rows);
         seedRef.current = null;
         onChanged();
+        if (failure instanceof CommentTurnFailed) {
+          setError(failure.code === "delivery_audience_unverified" || failure.code === "authority_changed"
+            ? t.replyAccessUnavailable : failure.code === "page_context_unavailable" ? t.replyPageUnavailable : t.replyFailed);
+        } else if (!rows) {
+          setError(t.loadError);
+        }
       } else {
-        setError(t.loadError);
+        setError(failure instanceof CommentTurnFailed ? t.sendUnconfirmed : t.loadError);
       }
     } finally {
       setStreaming(null);
@@ -868,7 +906,7 @@ export function CommentThreadBody({
       >
         {loading ? (
           <p className="py-4 text-center text-[13px] text-muted-foreground">…</p>
-        ) : visible.length === 0 && !streaming ? (
+        ) : visible.length === 0 && !streaming && !error ? (
           <p className="py-4 text-center text-[13px] text-muted-foreground">{t.emptyThread}</p>
         ) : showCollapsed ? (
           <CollapsedThreadPreview
@@ -962,7 +1000,7 @@ export function CommentThreadBody({
           </div>
         ) : null}
 
-        {error ? <p className="pb-2 text-[12px] text-destructive">{error}</p> : null}
+        {error ? <p role="alert" className="pb-2 text-[12px] text-destructive">{error}</p> : null}
       </div>
 
       {/* Quote-reply: selecting text in any comment above pops a floating

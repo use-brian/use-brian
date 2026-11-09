@@ -8,6 +8,7 @@
 import { createTransport, type Transporter } from 'nodemailer'
 import addressparser from 'nodemailer/lib/addressparser/index.js'
 import type { MagicLinkLocale } from '../db/magic-link-store.js'
+import { brandMarkAttachment } from './brand-mark.js'
 import { renderMagicLinkEmail } from './magic-link-template.js'
 import {
   renderWorkspaceInviteEmail,
@@ -33,6 +34,13 @@ export interface SmtpTransport {
     subject: string
     html: string
     text: string
+    attachments?: Array<{
+      filename: string
+      content: Buffer
+      cid: string
+      contentType: string
+      contentDisposition: 'inline'
+    }>
   }): Promise<unknown>
 }
 
@@ -149,6 +157,7 @@ export function createSmtpClient(opts: {
         subject,
         html,
         text,
+        attachments: [brandMarkAttachment()],
       })
     },
     async sendWorkspaceInvitation(to, inviteOpts) {

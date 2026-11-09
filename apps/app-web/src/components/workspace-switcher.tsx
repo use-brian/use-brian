@@ -70,7 +70,7 @@ import {
 } from "@/lib/workspace-picker";
 import { getAccountsDir, type AccountDirEntry } from "@/lib/accounts";
 import { WorkspacePickerTrigger, IdentityAccountSection, IdentityWorkspaceSection, IdentityMenuAction } from "@use-brian/chat-ui";
-import { DesktopAccounts } from "@/components/desktop-accounts";
+import { DesktopAccounts, warmDesktopAccounts } from "@/components/desktop-accounts";
 import { openDesktopAddAccount } from "@/components/desktop-add-account";
 import {
   CreateWorkspaceForm,
@@ -226,6 +226,12 @@ export function WorkspaceSwitcher({ iconOnly = false }: { iconOnly?: boolean }) 
     }
     window.addEventListener(WORKSPACE_RENAMED_EVENT, onRenamed);
     return () => window.removeEventListener(WORKSPACE_RENAMED_EVENT, onRenamed);
+  }, []);
+
+  // The desktop shell's account rows live behind IPC. Ask for them with the
+  // chrome, not when the menu opens, so the first open paints the cached list.
+  useEffect(() => {
+    if (desktopBridge()?.listAccounts) warmDesktopAccounts();
   }, []);
 
   // Re-read the account directory each time the popover opens so it reflects

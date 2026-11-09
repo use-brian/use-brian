@@ -262,7 +262,7 @@ export function isTuningSession(row: Pick<SessionKindRow, 'channelId'>): boolean
  * Which anchor-specific gate a workspace read passes through in addition to
  * workspace membership + clearance + compartments.
  */
-export type AnchorReadGate = 'none' | 'feed_draft_audience' | 'feed_collaboration' | 'office_file'
+export type AnchorReadGate = 'none' | 'doc_page' | 'feed_draft_audience' | 'feed_collaboration' | 'office_file'
 
 export type ReadPolicy =
   | { rule: 'owner' }
@@ -457,6 +457,7 @@ export function sessionPolicy(kind: SessionKind, facts: SessionTurnFacts = {}): 
     draft ? 'feed_draft_audience'
       : anchor === 'feed_thread' ? 'feed_collaboration'
         : anchor === 'office_file' ? 'office_file'
+          : anchor === 'doc_thread' ? 'doc_page'
           : 'none'
 
   return {
@@ -622,6 +623,8 @@ export const sessionKindSql = {
   /** A workspace-audience row (rooms, drafts, anchored threads): `classifySession(row).audience`. */
   workspaceAudience: (alias: string): string =>
     `${alias}.visibility = 'workspace'`,
+  /** A Page-backed comment thread, whose reads require its Page's authority. */
+  pageThread: (alias: string): string => `${alias}.anchor_kind = 'doc_thread'`,
   /** Not the notification inbox (`anchor_kind='inbox'`, the `notifications` sentinel). */
   notInbox: (alias: string): string =>
     `${alias}.anchor_kind <> 'inbox'`,

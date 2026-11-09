@@ -5636,6 +5636,10 @@ export const ja: Dictionary = {
     fallbackDesc: "既定ではオフです。オンにすると、このエンドポイントが応答できなかったメッセージは該当ティアの組み込みモデルが応答し、その旨が返信に表示され、通常の Brian 利用として課金されます。",
   },
   comments: {
+    replyFailed: "コメントは保存されましたが、Brian は返信を完了できませんでした。",
+    replyAccessUnavailable: "コメントは保存されましたが、Brian は返信を完了するために必要なアクセス権を確認できませんでした。",
+    replyPageUnavailable: "コメントは保存されましたが、Brian はこのページにアクセスできず、リクエストを完了できませんでした。",
+    sendUnconfirmed: "コメントが保存されたか確認できませんでした。",
     attachmentsNeedAi: "添付ファイルを送信するには AI 返信をオンにしてください。",
     localDraftFailed: "この下書きを端末に保存できませんでした。保存できるようになるまで、このウィンドウを開いたままにしてください。",
     toolbarButton: "コメント",

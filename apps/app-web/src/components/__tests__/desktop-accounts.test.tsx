@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
-import { DesktopAccounts } from "../desktop-accounts";
+import { DesktopAccounts, resetDesktopAccountDirectory } from "../desktop-accounts";
 import type { DesktopAccount } from "@/lib/desktop-auth-source";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const confirm = vi.hoisted(() => vi.fn());
@@ -21,6 +21,7 @@ const rows: DesktopAccount[] = [
 let root: Root, host: HTMLDivElement;
 const select = vi.fn(), selectCloud = vi.fn(), remove = vi.fn();
 beforeEach(() => {
+  resetDesktopAccountDirectory();
   confirm.mockReset().mockResolvedValue(true);
   select.mockReset().mockResolvedValue({ ok: false, error: "switch" });
   selectCloud.mockReset().mockResolvedValue({ ok: false });
@@ -190,6 +191,24 @@ describe("[COMP:app-web/desktop-accounts] account provenance and switching", () 
     expect(host.textContent).toContain("https://brain.example.com");
     expect(host.querySelector("[role=alert]")?.textContent).toBe(en.workspaceSwitcher.removeConnectionError);
     expect(host.querySelector("[aria-busy]")?.getAttribute("aria-busy")).toBe("false");
+  });
+  it("paints a cached directory immediately and keeps those rows while a refresh is still out", async () => {
+    let resolveList: (value: { accounts: DesktopAccount[]; canSwitch: boolean }) => void = () => {};
+    window.usebrianDesktop!.listAccounts = vi.fn().mockReturnValue(new Promise((resolve) => { resolveList = resolve; }));
+    await act(async () => root.render(<I18nProvider locale="en" dict={en}><DesktopAccounts /></I18nProvider>));
+    expect(host.querySelector("[data-account-list-skeleton]")).not.toBeNull();
+    expect(host.textContent).not.toContain("person@example.com");
+    await act(async () => { resolveList({ accounts: rows, canSwitch: true }); });
+    expect(host.querySelector("[data-account-list-skeleton]")).toBeNull();
+    expect(host.textContent).toContain("person@example.com");
+
+    await act(async () => root.unmount());
+    window.usebrianDesktop!.listAccounts = vi.fn().mockReturnValue(new Promise(() => {}));
+    root = createRoot(host);
+    await act(async () => root.render(<I18nProvider locale="en" dict={en}><DesktopAccounts /></I18nProvider>));
+    expect(host.querySelector("[data-account-list-skeleton]")).toBeNull();
+    expect(host.textContent).toContain("https://brain.example.com");
+    expect(window.usebrianDesktop!.listAccounts).toHaveBeenCalledOnce();
   });
   it("hides removal when an older desktop bridge does not expose it", async () => {
     delete window.usebrianDesktop!.removeAccount;

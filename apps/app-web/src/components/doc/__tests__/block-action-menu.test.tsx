@@ -52,6 +52,7 @@ afterEach(() => {
   anchor?.remove();
   anchor = null;
   mocks.bestInternalShareLink.mockReset();
+  vi.restoreAllMocks();
 });
 
 function mountMenu(opts: { extensions: AnyExtension[]; pageContext?: boolean }) {
@@ -256,5 +257,40 @@ describe("[COMP:app-web/block-action-menu] touch mode", () => {
     expect(sub.className).not.toContain("left-full");
     expect(sub.className).toContain("overflow-y-auto");
     expect(radioLabels(sub).length).toBeGreaterThan(0);
+  });
+});
+
+describe("[COMP:app-web/block-action-menu] flyout geometry", () => {
+  it("tracks the scroll box edge and row position through scrolling and resizing", () => {
+    let rowTop = 80;
+    let menuLeft = 40;
+    const rect = (left: number, top: number, width: number, height: number) =>
+      ({ left, top, right: left + width, bottom: top + height, width, height, x: left, y: top, toJSON() {} });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.popover === "block-actions") return rect(menuLeft, 40, 240, 200);
+      if (this.dataset.submenu === "flyout") return rect(0, 0, 208, 160);
+      if (this.getAttribute("aria-haspopup") === "menu") return rect(menuLeft + 1, rowTop, 238, 32);
+      return rect(40, 16, 24, 24);
+    });
+    mountMenu({ extensions: browserDocExtensions(), pageContext: true });
+    openSubmenu(ba.turnInto);
+    expect(flyoutEl().style.left).toBe("284px");
+    expect(flyoutEl().style.top).toBe("80px");
+
+    rowTop = 52;
+    act(() => { menuEl().dispatchEvent(new Event("scroll")); });
+    expect(flyoutEl().style.top).toBe("52px");
+    // Scrolling the child leaves the parent's scroll position alone.
+    act(() => { flyoutEl().dispatchEvent(new Event("scroll")); });
+    expect(menuEl().scrollTop).toBe(0);
+
+    menuLeft = 800;
+    act(() => { window.dispatchEvent(new Event("resize")); });
+    expect(flyoutEl().style.left).toBe("588px");
+    expect(flyoutEl().dataset.flyoutSide).toBe("left");
+
+    rowTop = 0;
+    act(() => { menuEl().dispatchEvent(new Event("scroll")); });
+    expect(flyoutEl().style.visibility).toBe("hidden");
   });
 });

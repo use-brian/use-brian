@@ -139,6 +139,7 @@ import {
   automaticContextAccess,
 } from '../context-scope/resolve-turn-scope.js'
 import { resolveExecutionContextSystem, type ResolveExecutionContextInput } from '../context-scope/execution-context.js'
+import { readOptionalContext } from '../context-scope/optional-context.js'
 import { prepareAssistantRun } from '../turn/prepare.js'
 import { assertContextActivationReady } from '../context-scope/context-readiness.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
@@ -3063,6 +3064,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       turnTimingIdentity = { userId: user.id, assistantId: assistant.id, sessionId: session.id }
 
       const turnPolicy = sessionPolicy(classifySession(session))
+      const pageBoundTurn = turnPolicy.read.rule === 'workspace' && turnPolicy.read.anchorGate === 'doc_page'
       const isRoomSession = turnPolicy.crossAssistantSend === 'room'
       sharedAudienceForError = turnPolicy.deliveryCeiling.ceiling === 'audience'
       // D11: admission is decided by audience. Every workspace session (a
@@ -3114,7 +3116,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         }),
         ...(nativeTranscriptAuthority ? { authority: nativeTranscriptAuthority } : {}),
       })
-      const authorizeDeliveryAudience = nativeTranscriptAuthority
+      const authorizeDeliveryAudience = nativeTranscriptAuthority || classifySession(session).anchor.kind === 'doc_thread'
         ? createAttendedDeliveryAudienceAuthorizer(executionContext)
         : createDeliveryAudienceAuthorizer()
       const assertDeliveryAudience = (): Promise<void> => turnTiming.time('audience_check', async () => {
@@ -3134,12 +3136,36 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // A source that changed since it was read passed on its CURRENT labels;
         // those labels now belong to this turn's floor, so later writes and
         // the transcript row carry them (labels only - no new lineage).
+        if (classifySession(session).anchor.kind === 'doc_thread') scopeAccumulator.note(decision.evidence)
         scopeAccumulator.note({
           sensitivity: decision.evidence.sensitivity,
           compartments: decision.evidence.compartments,
           projectIds: decision.evidence.projectIds,
         })
       })
+      // Candidate readers use an isolated accumulator. Rejected optional context
+      // must never contaminate the evidence for required Page work.
+      const optionalContext = <T>(
+        read: (candidate: import('@use-brian/core').SessionContextAuthority | undefined) => Promise<T>,
+        fallback: T,
+        rows: (value: T) => readonly unknown[] = value => [value, ...(Array.isArray(value) ? value : [])],
+        contributes: (value: T) => boolean = value => value != null
+          && (!Array.isArray(value) || value.length > 0) && (typeof value !== 'string' || value.trim().length > 0),
+      ): Promise<T> => !executionContext.security.access.sharedAudience
+        ? read(nativeTranscriptAuthority)
+        : readOptionalContext({
+            execution: executionContext, accumulator: scopeAccumulator, read, fallback, contributes,
+            evidence: value => {
+              const candidate = new ContextScopeAccumulator()
+              noteAutomaticScopeEvidence(candidate, rows(value))
+              return candidate.evidence
+            },
+            authorize: evidence => authorizeDeliveryAudience({
+              workspaceId: assistant.workspaceId ?? '', assistantId: assistant.id, userId: user.id,
+              channelType: 'web', channelId: session.channelId, sessionId: session.id,
+              recipientType: turnPolicy.deliveryCeiling.recipientType, scopeEvidence: evidence,
+            }),
+          })
       // A proxy can sever the browser stream while its upstream POST stays open.
       // Publish every turn's capped activity so an authenticated reconnect sees
       // ongoing tools even when this server never observed a disconnect.
@@ -4123,7 +4149,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
 
       // Assess after the original canonical invocation and authored input exist.
       // Quota races retain this real request and its denial in the same thread.
-      const classificationCapture=adaptiveResearchEligible&&message&&nativeTranscriptAuthority&&earlyStoredUserMsg
+      const classificationCapture=!pageBoundTurn&&adaptiveResearchEligible&&message&&nativeTranscriptAuthority&&earlyStoredUserMsg
         ?await turnTiming.time('classification_capture',()=>captureAttendedSessionClassification({
           authority:nativeTranscriptAuthority,session,message:earlyStoredUserMsg,
         })):undefined
@@ -4136,7 +4162,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // background classifier work running after the route has failed.
       const assessments = await Promise.allSettled([
         (async () => {
-          if (!adaptiveResearchEligible || !message) return undefined
+          if (pageBoundTurn || !adaptiveResearchEligible || !message) return undefined
           if (!nativeTranscriptAuthority || !earlyStoredUserMsg) {
             throw Object.assign(new Error('The assessment context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
           }
@@ -4149,7 +4175,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             measure: turnTiming.time,
           }))
         })(),
-        (async () => nativeTranscriptAuthority && earlyStoredUserMsg
+        (async () => !pageBoundTurn && nativeTranscriptAuthority && earlyStoredUserMsg
         ? await turnTiming.time('topic_classify', () => assessAttendedSessionMessage({
             authority: topicAssessmentBranch?.authority ?? nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
             provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
@@ -4200,7 +4226,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         clientSnippet: replyTo?.text,
       })
 
-      const preExistingDbMessages = nativeClassification && earlyStoredUserMsg
+      const preExistingDbMessages = pageBoundTurn ? [] : nativeClassification && earlyStoredUserMsg
         ? nativeClassification.history.filter(row => row.sequenceNum < earlyStoredUserMsg.sequenceNum)
         : await getSessionMessages(session.id, { excludeHeld: true })
       const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
@@ -4217,10 +4243,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         })
         .filter((t) => t.text.length > 0)
 
-      const knownTopics = nativeClassification ? [] : await getSessionTopicLabels(session.id, 20)
+      const knownTopics = pageBoundTurn || nativeClassification ? [] : await getSessionTopicLabels(session.id, 20)
 
       let classification: TopicClassification | null = nativeClassification?.classification ?? null
-      if (!nativeClassification) {
+      if (!nativeClassification && !pageBoundTurn) {
         try {
           classification = await classifyTopic({
             provider: backgroundProvider,
@@ -4502,7 +4528,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // "Provider signatures".
       // `fromSequence` skips rows already compacted into the most recent
       // boundary; null (never compacted) loads full history.
-      const dbMessages = await turnTiming.time('history_read', async () => nativeTranscriptAuthority
+      const dbMessages = await turnTiming.time('history_read', async () => pageBoundTurn ? [storedUserMsg] : nativeTranscriptAuthority
         ? nativeClassification
           ? await (nativeClassificationAssembly?.readHistory(session.compactBoundarySequence)
             ?? readClassifiedSessionHistory(nativeTranscriptAuthority, session.id, nativeClassification.history, session.compactBoundarySequence))
@@ -4579,7 +4605,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // retryHint injection) to the returned message array before the query
       // loop.
       if (!nativeOutputBoundary) await assertDeliveryAudience()
-      const compactionResult = await turnTiming.time('compaction', () => runProactiveCompaction({
+      const compactionResult = pageBoundTurn
+        ? { messages: toStampedMessages(dbMessages, user.timezone ?? 'UTC', sharedSenderNames, roomAssistantVoices) as Message[] }
+        : await turnTiming.time('compaction', () => runProactiveCompaction({
         modelContext: { execution: executionContext, accumulator: scopeAccumulator },
         sessionMessages: dbMessages,
         timezone: user.timezone ?? 'UTC',
@@ -4700,11 +4728,17 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       const viewerCtx = { ...automaticContextAccess(turnScope.access, turnScope.activeProjectId), memoryContext: { ...(turnScope.activeProjectId ? {projectId:turnScope.activeProjectId} : {}), activity:memoryActivityFromText(typeof message === "string" ? message : undefined) } }
       turnTiming.mark('admission')
       const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
-        (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
-        options.memoryStore.getIdentity(viewerCtx,nativeTranscriptAuthority),
-        options.memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP,nativeTranscriptAuthority),
+        optionalContext(async () => {
+          const value = await (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} }))
+          if (executionContext.security.access.sharedAudience && value.content && !value.evidence.sources?.length) {
+            return { content: null, evidence: {} }
+          }
+          return value
+        }, { content: null, evidence: {} }, value => value.evidence.sources?.map(scopeSource => ({ scopeSource })) ?? [], value => !!value.content),
+        optionalContext(candidate => options.memoryStore.getIdentity(viewerCtx, candidate), []),
+        optionalContext(candidate => options.memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP, candidate), { rows: [], totalCount: 0 }, value => [value, value.rows, ...value.rows], value => value.rows.length > 0 || value.totalCount > 0),
         getPreferredChannel(assistant.id, user.id),
-        getSelfEntityId(viewerCtx),
+        turnScope.access.sharedAudience ? Promise.resolve(null) : getSelfEntityId(viewerCtx),
       ])
       noteAutomaticScopeEvidence(scopeAccumulator,[identityMemories,...identityMemories])
       const soul = soulContext.content
@@ -4755,10 +4789,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       let workspaceIdentity: { name: string; purpose: string } | null = null
       if (assistant.workspaceId) {
         ;[workspaceIdentityMemories, teamMemoryIndex, teamVoiceRules, workspaceIdentity] = await Promise.all([
-          options.memoryStore.getWorkspaceIdentity(viewerCtx),
-          options.memoryStore.getWorkspaceIndex(viewerCtx,undefined,nativeTranscriptAuthority),
-          options.memoryStore.getWorkspaceMemoriesByCategory(viewerCtx, 'voice'),
-          getWorkspaceIdentity(assistant.workspaceId),
+          optionalContext(() => options.memoryStore.getWorkspaceIdentity(viewerCtx), []),
+          optionalContext(candidate => options.memoryStore.getWorkspaceIndex(viewerCtx, undefined, candidate), []),
+          optionalContext(() => options.memoryStore.getWorkspaceMemoriesByCategory(viewerCtx, 'voice'), []),
+          turnScope.access.sharedAudience ? Promise.resolve(null) : getWorkspaceIdentity(assistant.workspaceId),
         ])
       }
       const teamPurpose = workspaceIdentity?.purpose ?? null
@@ -4817,9 +4851,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         activeCapabilities.has('files')
       ) {
         try {
-          const rows = await options.workspaceFilesStore.listIndexRanked(
+          const rows = await optionalContext(() => options.workspaceFilesStore!.listIndexRanked(
             {
-              workspaceId: assistant.workspaceId,
+              workspaceId: assistant.workspaceId!,
               userId: user.id,
               assistantId: assistant.id,
               assistantKind: assistant.kind,
@@ -4832,7 +4866,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               ...(viewerCtx.departmentRead ? { departmentRead: viewerCtx.departmentRead } : {}),
             },
             PER_TURN_FILES_INDEX_CAP,
-          )
+          ), [])
           noteAutomaticScopeEvidence(scopeAccumulator, rows)
           workspaceFilesContext = buildWorkspaceFilesContext(rows)
         } catch (err) {
@@ -4844,7 +4878,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // (capability + an APPROVED default brand) and the store live in
       // `resolveBrandContext`, so this route and every channel share one
       // chokepoint instead of each forwarding a store.
-      const brandContext = await resolveBrandContext({
+      const brandContext = turnScope.access.sharedAudience ? null : await resolveBrandContext({
         userId: user.id,
         workspaceId: assistant.workspaceId,
         hasCapability: activeCapabilities.has('brand'),
@@ -4944,14 +4978,14 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       if (options.episodicStore && classification) {
         const store = options.episodicStore, fetchByTopic = store.fetchByTopic.bind(store)
         try {
-          episodicContext = await fetchEpisodicContext({
-            authority: { execution: executionContext, accumulator: scopeAccumulator },
+          episodicContext = await optionalContext(candidate => fetchEpisodicContext({
+            authority: candidate ?? { execution: executionContext, accumulator: scopeAccumulator },
             store: nativeClassificationAssembly ? { ...store,
               fetchByTopic: query => nativeClassificationAssembly.runEffect(() => fetchByTopic(query)),
             } : store,
             sessionId: session.id,
             classification,
-          })
+          }), null)
         } catch (err) {
           if (isAuthorityChangedError(err)) throw err
           console.error('[chat] episodic context fetch failed:', err)
@@ -4962,13 +4996,13 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // Injected every turn regardless of classifier verdict so the model
       // doesn't re-derive resolved commitments from raw history.
       let sessionStateBlock: string | null = null
-      if (options.sessionStateStore) {
+      if (options.sessionStateStore && !pageBoundTurn) {
         try {
-          sessionStateBlock = await buildSessionStateBlock({
-            authority: { execution: executionContext, accumulator: scopeAccumulator },
-            store: options.sessionStateStore,
+          sessionStateBlock = await optionalContext(candidate => buildSessionStateBlock({
+            authority: candidate ?? { execution: executionContext, accumulator: scopeAccumulator },
+            store: options.sessionStateStore!,
             sessionId: session.id,
-          })
+          }), null)
         } catch (err) {
           console.error('[chat] session-state block fetch failed:', err)
         }
@@ -4978,7 +5012,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // only while the session has an `active` task attempt (the builder
       // returns null for dormant/archived attempts, so it can't leak).
       let planBlock: string | null = null
-      if (options.planStore) {
+      if (options.planStore && !turnScope.access.sharedAudience) {
         try {
           planBlock = await buildActivePlanBlock({
             store: options.planStore,
@@ -5057,7 +5091,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // assembly. See docs/architecture/brain/corrections.md →
       // "Workspace-level prompt evolution".
       let workspaceEvolutionSnippet: string | null = null
-      if (assistant.workspaceId) {
+      if (assistant.workspaceId && !turnScope.access.sharedAudience) {
         try {
           // Two snippets: memory-side (scope/sensitivity bias from
           // memory_verifications, mig 166) and brain-side (per-primitive
@@ -5080,7 +5114,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // One scoped loader serves every prompt lane. It returns model-visible
       // rule text separately from the content-free application id used only
       // by an exact frozen approval created later in this turn.
-      const decisionPlaybookContext = await loadDecisionPlaybookContext({
+      const decisionPlaybookContext = turnScope.access.sharedAudience && !feedTurnContext
+        ? { playbookRules: [], appliedRuleIds: [], decisionApplicationId: null, readFailed: false }
+        : await loadDecisionPlaybookContext({
         ...(researchMode ? { research: { projectId: session.contextProjectId ?? null } } : {}),
         workspaceId: assistant.workspaceId ?? null,
         assistantId: assistant.id,
@@ -5198,7 +5234,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       const userVisibleContextParts: string[] = splitPrompt.userVisibleContext
         ? [splitPrompt.userVisibleContext]
         : []
-      if (options.crmEmailDraftStore && assistant.workspaceId && activeCapabilities.has('crm')) {
+      if (!turnScope.access.sharedAudience && options.crmEmailDraftStore && assistant.workspaceId && activeCapabilities.has('crm')) {
         try {
           const activeEmailDraft = await options.crmEmailDraftStore.getActiveForSession({
             userId: user.id,
@@ -5328,6 +5364,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             requestedDocViewId,
             { ...executionToolContext(executionContext, { appId: assistant.id }), scopeAccumulator },
           )
+          if (!current && classifySession(session).anchor.kind === 'doc_thread') {
+            throw new ChatTurnRefusal('page_context_unavailable', 'Brian could not access the Page needed to complete this request.')
+          }
           if (current) {
             const pageForOutline = {
               blocks: current.page.blocks,
@@ -5425,7 +5464,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
                   import('../db/saved-views-store.js'),
                   import('@use-brian/core'),
                 ])
-              const hood = await getPageTreeNeighborhood(user.id, requestedDocViewId)
+              const hood = turnScope.access.sharedAudience ? null : await getPageTreeNeighborhood(user.id, requestedDocViewId)
               const treeBlock = hood
                 ? formatPageTreeContext(
                     { id: requestedDocViewId, title: current.title },
@@ -5438,6 +5477,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             }
           }
         } catch (err) {
+          if (classifySession(session).anchor.kind === 'doc_thread') {
+            if (isAuthorityChangedError(err)) throw err
+            throw new ChatTurnRefusal('page_context_unavailable', 'Brian could not access the Page needed to complete this request.')
+          }
           console.error('[chat] doc outline injection failed:', err)
         }
 
@@ -5452,7 +5495,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             import('../db/comment-thread-store.js'),
             import('@use-brian/core'),
           ])
-          const summaries = await createDbCommentThreadStore().listThreadSummariesForPage(
+          const summaries = turnScope.access.sharedAudience ? [] : await createDbCommentThreadStore().listThreadSummariesForPage(
             user.id,
             requestedDocViewId,
           )
@@ -7448,6 +7491,18 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             return name&&input&&typeof input.timeMin==='string'&&typeof input.timeMax==='string'&&(input.calendarId===undefined||typeof input.calendarId==='string')
               ? [{name,input:{calendarId:input.calendarId??'primary',timeMin:input.timeMin,timeMax:input.timeMax,maxResults:2500}}]:[]
           }) : [])
+        const pageDiscussion = pageBoundTurn && loopTools.has('getCommentThread')
+          ? (await query<{ id: string }>('SELECT id FROM comment_threads WHERE workspace_id=$1 AND session_id=$2',
+              [assistant.workspaceId,session.id])).rows[0] : undefined
+        if (pageDiscussion) {
+          const tool = loopTools.get('getCommentThread')!
+          loopTools.set('getCommentThread', { ...tool, execute: (input, context) => {
+            if (input.threadId !== pageDiscussion.id) return Promise.resolve({
+              data: { error: 'thread_outside_context', message: 'This Page conversation can read only its own discussion.' }, isError: true,
+            })
+            return tool.execute(input, context)
+          } })
+        }
         const preparedRun = await prepareAssistantRun({
           executionContext,
           beforeAssembly: async canonicalBrief => {
@@ -7474,7 +7529,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             }
             return bound
           },
-          trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }],
+          trustedContributions: [{ name: 'runtime', content: runtimeSystemContext }, ...(pageDiscussion ? [{
+            name: 'page_discussion', content: `This turn starts with the current Page and newest comment. Earlier discussion remains available through getCommentThread({threadId: ${JSON.stringify(pageDiscussion.id)}}). If the request refers to earlier comments, choices or decisions, read that discussion before answering or editing. Do not ask the person to repeat it.`,
+          }] : [])],
           userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         })
         const routineDeclineReason = routineCalendarReadDeclineReason({
@@ -7554,6 +7611,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             },
           } : undefined,
           context: {
+            ...(classifySession(session).anchor.kind === 'doc_thread'
+              ? { assertModelInputAuthority: async () => { await assertDeliveryAudience() } } : {}),
             ...executionToolContext(executionContext, { appId: 'Use Brian' }),
             workerRuntime: customLlmRuntime
               ? {
@@ -7813,7 +7872,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           sink: { kind: 'sse', ...(permissionContext
             ? { permissionContext, assertOutputAuthority: permissionContext.authorizeDelivery,
                 onOutputAuthorityTiming: (ms: number) => turnTiming.add('audience_check', ms) }
-            : nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority ? { assertOutputAuthority:assertDeliveryAudience } : {}),
+            : nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority || classifySession(session).anchor.kind === 'doc_thread' ? { assertOutputAuthority:assertDeliveryAudience } : {}),
           onReplyTextComplete: () => postReply.announceTextCompletion(() => {
             sendActivityEvent('reply_text_complete', {})
             turnStream.setReplyPhase('saving')
@@ -7826,7 +7885,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             }
             const publishReply = () => flushBufferedTurns('[Tool did not return a result. Treat as failed and do not retry.]')
             const stateStore = options.sessionStateStore
-            if (!stateStore) { await publishReply(); return }
+            if (!stateStore || pageBoundTurn) { await publishReply(); return }
             // Ordinary native chat persists a small job, then releases the turn.
             // The safety-net model runs with fresh authority in the worker.
             const stateJobKind = classifySession(session)
@@ -8992,11 +9051,11 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // title as an auto-generated placeholder to replace (isPlaceholderTitle —
       // open default false), or every ~10 human turns. The NULL check is robust
       // against tool-use inflating the message count.
-      const currentTitle = !titleQueued && nativeTranscriptAuthority ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
+      const currentTitle = !pageBoundTurn && !titleQueued && nativeTranscriptAuthority ? await readSessionTitle(session.id,nativeTranscriptAuthority) : null
       const needsFirstTitle = !currentTitle || isPlaceholderTitle(currentTitle.title)
       const isNotification = classifySession(session).anchor.kind === 'inbox'
-      let shouldTitle = !titleQueued && needsFirstTitle && !isNotification && !currentTitle?.manual
-      if (!titleQueued && !shouldTitle && !isNotification && !currentTitle?.manual) {
+      let shouldTitle = !pageBoundTurn && !titleQueued && needsFirstTitle && !isNotification && !currentTitle?.manual
+      if (!pageBoundTurn && !titleQueued && !shouldTitle && !isNotification && !currentTitle?.manual) {
         const turnCount = nativeTranscriptAuthority
           ? await attendedSessionTurnCount(nativeTranscriptAuthority,dbMessages)
           : Math.floor(await authority.execute(() => countSessionTurns(session.id)) / 2)
@@ -9278,7 +9337,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         // by the concurrent-turn guard. Token-guarded when we hold a lease.
         try {
           if (turnLeaseToken) {
-            await releaseTurn(sessionIdForError, turnLeaseToken, 'completed')
+            await releaseTurn(sessionIdForError, turnLeaseToken,
+              !postReplyNotice && !recoveryDelivered && (err as Error)?.name !== 'AbortError' ? 'failed' : 'completed')
             turnLeaseToken = null
           }
         } catch { /* ignore */ }

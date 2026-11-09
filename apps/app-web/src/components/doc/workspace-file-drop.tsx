@@ -86,7 +86,7 @@ export function WorkspaceFileDropBoundary({
               z-[70] this backdrop covered that confirm, so every audio/video drop
               sat on "Checking recording..." with nothing to click. Only the
               transient, pointer-events-none drag overlay above may go higher. */}
-          <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity duration-150 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
+          <Dialog.Backdrop className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm transition-opacity duration-150 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
           <Dialog.Popup className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-border bg-background p-5 shadow-xl ring-1 ring-foreground/5 transition-all duration-150 data-[starting-style]:scale-95 data-[starting-style]:opacity-0 data-[ending-style]:scale-95 data-[ending-style]:opacity-0">
             <Dialog.Title className="sr-only">{t.ingestTitle}</Dialog.Title>
             <Dialog.Description className="sr-only">{t.ingestCaption}</Dialog.Description>

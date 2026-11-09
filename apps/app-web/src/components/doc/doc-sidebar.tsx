@@ -114,6 +114,9 @@ import { useLeasedResource } from "@/lib/offline/surface-content-cache";
 export const WORKSPACE_STATUS_ROW_HEIGHT_CLASS =
   "h-[calc(3.25rem+env(safe-area-inset-bottom))] md:h-[calc(2.25rem+env(safe-area-inset-bottom))]";
 
+/** One nesting step, the same 12px SidebarTreeNode applies per depth. */
+const TEAMSPACE_CHILD_INDENT = 12;
+
 export type SidebarMove = ContextAwareReparentMove;
 
 /** Section-collapse localStorage key (per workspace) — the section analog of
@@ -460,10 +463,11 @@ export function DocSidebar(props: Props) {
   // One recursive tree row, shared by every section so they render
   // identically (chevron toggle, nesting, DnD); the node itself shows the
   // Save action + prune caption only on `state: 'draft'` rows.
-  const renderRoot = (node: TreeNode) => (
+  const renderRoot = (node: TreeNode, indentOffset = 0) => (
     <SidebarTreeNode
       key={node.row.id}
       node={node}
+      indentOffset={indentOffset}
       activeId={activeId}
       expanded={expanded}
       onToggleExpand={toggleExpand}
@@ -496,13 +500,16 @@ export function DocSidebar(props: Props) {
 
   // A section's body — the tree, or a muted empty caption when expanded with
   // nothing inside (mirrors the per-row "No pages inside" treatment).
-  const renderSectionBody = (nodes: TreeNode[]) =>
+  const renderSectionBody = (nodes: TreeNode[], indentOffset = 0) =>
     nodes.length === 0 ? (
-      <div className="select-none py-1 pl-7 pr-1 text-[13px] text-sidebar-foreground/40">
+      <div
+        style={{ paddingLeft: `${28 + indentOffset}px` }}
+        className="select-none py-1 pr-1 text-[13px] text-sidebar-foreground/40"
+      >
         {t.sidebarNoPagesInside}
       </div>
     ) : (
-      <ul className="space-y-0.5">{nodes.map(renderRoot)}</ul>
+      <ul className="space-y-0.5">{nodes.map((node) => renderRoot(node, indentOffset))}</ul>
     );
 
   return (
@@ -627,13 +634,13 @@ export function DocSidebar(props: Props) {
                 {ts.workspaceGroupId ? (
                   <Link
                     href={`/w/${props.workspaceId}/briefs/department/${ts.workspaceGroupId}`}
-                    className="flex min-h-8 items-center gap-1.5 rounded px-2 text-sm text-sidebar-foreground/80 hover:bg-muted max-sm:min-h-11"
+                    className="flex min-h-8 items-center gap-1.5 rounded py-1 pl-5 pr-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground max-sm:min-h-11"
                   >
                     <Compass className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
                     <span className="truncate">{copy.briefs.departmentEntry}</span>
                   </Link>
                 ) : null}
-                {renderSectionBody(sectionTrees.get(ts.id) ?? [])}
+                {renderSectionBody(sectionTrees.get(ts.id) ?? [], TEAMSPACE_CHILD_INDENT)}
               </TeamspaceRow>
             ))}
 
@@ -680,7 +687,7 @@ export function DocSidebar(props: Props) {
               dragging={draggingId !== null}
             >
               {privateTree.length > 0 && (
-                <ul className="space-y-0.5">{privateTree.map(renderRoot)}</ul>
+                <ul className="space-y-0.5">{privateTree.map((node) => renderRoot(node))}</ul>
               )}
             </PrivateGroupSection>
           </DndContext>
@@ -761,8 +768,8 @@ function TeamspacesGroupHeader({
  * the whole row is a DROP ZONE (`sectionDropId`) that files a dropped page at
  * this teamspace's root. Hover reveals the teamspace `⋯` (Add members /
  * Settings / Leave / Delete via `TeamspaceSectionMenu`) then `+` (new page
- * here), out of flow like a page row's actions. Its child page tree renders
- * indented beneath so the nesting reads.
+ * here), out of flow like a page row's actions. Child rows share this row's
+ * width, content indented one level, with the same gap used between pages.
  *
  * [COMP:app-web/teamspace-sections]
  */
@@ -881,8 +888,11 @@ function TeamspaceRow({
           </div>
         )}
       </div>
-      {/* Child pages, indented so the nesting under the teamspace reads. */}
-      {!collapsed && <div className="pl-3">{children}</div>}
+      {/* Same gap page rows use between each other (the 4px drop strip plus
+          space-y-0.5). space-y keeps a Department Brief that far from the
+          first page. Indent lives on the page content, not this wrapper, so
+          a hovered page pill is as wide as the teamspace row. */}
+      {!collapsed && <div className="mt-1.5 space-y-1.5">{children}</div>}
     </>
   );
 }

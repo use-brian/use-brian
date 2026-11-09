@@ -165,12 +165,11 @@ export function VisualLightbox({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        {/* Translucent dimming scrim — the page stays visible behind it
-            (Notion-style), so the preview reads as "focus this visual", not "a
-            new opaque screen". No blur: the ask is to see THROUGH it. */}
+        {/* Faded page behind the preview. No blur: the page stays legible
+            through the scrim, so this reads as "focus this visual". */}
         <Dialog.Backdrop
           className={cn(
-            "fixed inset-0 z-50 bg-background/65 transition-opacity duration-150",
+            "fixed inset-0 z-50 bg-foreground/40 transition-opacity duration-150",
             "data-[starting-style]:opacity-0 data-[ending-style]:opacity-0",
           )}
         />

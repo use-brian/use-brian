@@ -5847,6 +5847,10 @@ export const en = {
     fallbackDesc: "Off by default. When on, a message this endpoint cannot answer is answered by the built-in model for that tier, the reply says it happened, and the turn is billed as normal Brian usage.",
   },
   comments: {
+    replyFailed: "Your comment was saved, but Brian could not complete the reply.",
+    replyAccessUnavailable: "Your comment was saved, but Brian could not verify access to finish the reply.",
+    replyPageUnavailable: "Your comment was saved, but Brian could not access this Page to finish the request.",
+    sendUnconfirmed: "Could not confirm your comment was saved.",
     attachmentsNeedAi: "Turn on AI reply to send attachments.",
     localDraftFailed: "This draft could not be saved on this device. Keep this window open until storage is available.",
     toolbarButton: "Comment",

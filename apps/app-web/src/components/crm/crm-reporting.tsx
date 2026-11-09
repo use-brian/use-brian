@@ -37,7 +37,7 @@ export function CrmReportingDialog({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm" />
+        <Dialog.Backdrop className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm" />
         <Dialog.Popup className="fixed left-1/2 top-1/2 z-50 flex h-[100dvh] w-full max-w-none -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-none border border-border bg-background shadow-xl sm:h-auto sm:max-h-[85dvh] sm:w-[calc(100%-2rem)] sm:max-w-4xl sm:rounded-2xl">
           <div className="flex items-center justify-between border-b border-border px-5 py-4">
             <div>

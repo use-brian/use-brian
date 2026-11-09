@@ -407,6 +407,20 @@ describe('[COMP:api/execution-context] stored shared web room audience', () => {
     })
   })
 
+  it('bounds Page comment reads and tool access by the shared thread before assembly', async () => {
+    const result = await resolveExecutionContextSystem({
+      ...base(), sharedAudience: true,
+      session: { ...room, anchorKind: 'doc_thread', contextCompartments: [], contextProjectId: null },
+    }, { resolveScope: async () => broadScope(true), createLease: () => authority })
+    expect(result.executionContext.security.ceiling).toMatchObject({
+      clearance: 'public', compartments: [], projectIds: [],
+      departmentRead: { base: 'public', departments: {}, projects: {} },
+    })
+    expect(executionToolContext(result.executionContext, { appId: 'page-comment' })).toMatchObject({
+      clearance: 'public', compartments: [], projectIds: [], sharedAudience: true,
+    })
+  })
+
   it.each(['office_file', 'feed_draft', 'feed_thread'])('keeps the anchor audience for %s instead of empty session labels', async anchorKind => {
     const maximumAccess = {
       workspaceId: 'workspace-1', userId: 'actor-1', clearance: 'internal' as const,

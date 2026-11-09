@@ -68,7 +68,7 @@ export function DrawingLibraryCatalog({ theme, path, onClose, onImport }: {
   const matches = entries.filter(entry => `${entry.name} ${entry.authors}`.toLowerCase().includes(search.trim().toLowerCase()));
   return <Dialog.Root open onOpenChange={open => { if (!open) dismiss(); }}>
     <Dialog.Portal>
-      <Dialog.Backdrop forceRender className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm dark:bg-background/80" />
+      <Dialog.Backdrop forceRender className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm" />
       <Dialog.Popup className="fixed left-1/2 top-1/2 z-50 flex h-[calc(100dvh-1rem)] max-h-[56rem] w-[calc(100%-1rem)] max-w-6xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border border-border bg-background text-foreground shadow-2xl ring-1 ring-foreground/20 sm:h-[calc(100dvh-4rem)] sm:w-[calc(100%-4rem)]">
         <div className="flex max-h-[50%] shrink-0 flex-wrap items-center gap-2 overflow-y-auto border-b border-border p-3">
           <Dialog.Title className="mr-auto font-semibold">{t.libraryBrowse}</Dialog.Title>

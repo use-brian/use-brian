@@ -154,7 +154,14 @@ export function getApplicationExecutionBinding(execution: ExecutionContext) {
 export async function applyApplicationRLSContext(client: PoolClient, execution: ExecutionContext): Promise<boolean> {
   transactionBindings.delete(client)
   const binding = bindings.get(execution)
-  if (!binding) return false
+  if (!binding) {
+    // The SQL Page reader independently checks the exact stored Page/thread,
+    // original actor and receipt boundaries. This is a selector, never an allow
+    // receipt, and does not change the sticky shared audience or identity.
+    if (execution.security.access.sharedAudience) await client.query(
+      "SELECT set_config('app.page_thread_session_id',$1,true)", [execution.lifecycle.sessionId])
+    return false
+  }
   await execution.security.authority.assertCurrent()
   await client.query(`SELECT set_config('app.application_id',$1,true),set_config('app.application_credential_id',$2,true),
     set_config('app.application_oauth_id',$3,true),set_config('app.application_assistant_id',$4,true),

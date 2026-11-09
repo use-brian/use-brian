@@ -272,7 +272,7 @@ export default function DrawingEditor({ scene, title, preview: savedPreview, edi
 
   return <Dialog.Root open onOpenChange={(open) => { if (!open) onCancel(); }}>
     <Dialog.Portal>
-      <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80" />
+      <Dialog.Backdrop className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm" />
       {/* Excalidraw finishes gestures in native window pointerup listeners.
           Keep pointer/mouse events bubbling; DrawingToolbarProvider hides host UI. */}
       <Dialog.Popup

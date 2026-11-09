@@ -2366,17 +2366,22 @@ async function listDeploymentAccounts() {
     if (!cfg.bundled) {
       const target = accountTarget();
       const store = await readAccountStoreFromJar();
+      const listed: Array<{ tokens: StoredTokens; activate: boolean }> = [];
       for (const account of await readAccountDirFromJar()) {
-        if (store[account.id]) deploymentAccounts.put(target, {
-          accessToken: "refresh-required", refreshToken: store[account.id], accessTokenExpiresAt: 0, user: account,
-        }, false);
+        const refreshToken = store[account.id];
+        if (!refreshToken) continue;
+        listed.push({
+          tokens: { accessToken: "refresh-required", refreshToken, accessTokenExpiresAt: 0, user: account },
+          activate: false,
+        });
       }
       const user = parseUserCookieValue(await readJarCookie("user"));
       const accessToken = await readJarCookie("access_token");
       const refreshToken = await readJarCookie("refresh_token");
-      if (user && accessToken && refreshToken) deploymentAccounts.put(target, {
-        accessToken, refreshToken, accessTokenExpiresAt: 0, user,
-      });
+      if (user && accessToken && refreshToken) {
+        listed.push({ tokens: { accessToken, refreshToken, accessTokenExpiresAt: 0, user }, activate: true });
+      }
+      deploymentAccounts.syncListedSessions(target, listed);
     }
     return { accounts: deploymentAccounts.rows(accountTarget()), canSwitch: !cfg.envTargetOverride, localAppUrl: rememberedLocalAppUrl() };
 

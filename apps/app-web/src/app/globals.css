@@ -33,6 +33,14 @@
   --selection-2: var(--interaction);
 }
 
+/* Fade the page behind every open dialog. A background-colored wash
+   (`bg-background/80`) is invisible on a light page, so the scrim always
+   uses the foreground tint. The inbox panel is a desktop popover and
+   keeps its own backdrop. Hand-rolled modals use the same tint directly. */
+[role="presentation"][data-open]:not([data-inbox-backdrop]) {
+  background-color: color-mix(in srgb, var(--foreground) 40%, transparent);
+}
+
 /* The `custom` palette — an AI-generated theme whose core tokens are injected as
    a <style> at runtime (see lib/theme.tsx) — keeps its branded sidebar surface.
    Navigation and selection use neutral interaction feedback. Filled actions stay

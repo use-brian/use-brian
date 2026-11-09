@@ -163,6 +163,11 @@ describe("[COMP:app-web/teamspace-settings] General tab autosave", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   });
 
+  it("fades the page behind the open dialog", () => {
+    const backdrops = [...document.querySelectorAll<HTMLElement>('[role="presentation"]')];
+    expect(backdrops.some((node) => node.className.includes("bg-foreground/40"))).toBe(true);
+  });
+
   it("saves a name edit after the pause and does not offer Save changes", async () => {
     expect(document.body.textContent).not.toContain("Save changes");
     expect(document.body.textContent).toContain(en.docPage.teamspaceMenuDelete);

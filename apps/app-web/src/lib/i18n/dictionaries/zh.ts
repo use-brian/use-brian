@@ -5622,6 +5622,10 @@ export const zh: Dictionary = {
     fallbackDesc: "預設為關閉。開啟後，此端點無法回應的訊息會改由該層級的內建模型回覆，回覆中會註明此事，並以一般 Brian 用量計費。",
   },
   comments: {
+    replyFailed: "你的留言已儲存，但 Brian 未能完成回覆。",
+    replyAccessUnavailable: "你的留言已儲存，但 Brian 未能確認完成回覆所需的存取權限。",
+    replyPageUnavailable: "你的留言已儲存，但 Brian 未能存取此頁面以完成要求。",
+    sendUnconfirmed: "未能確認你的留言是否已儲存。",
     attachmentsNeedAi: "開啟 AI 回覆以傳送附件。",
     localDraftFailed: "無法在此裝置儲存草稿。請保持此視窗開啟，直到儲存空間可用。",
     toolbarButton: "留言",

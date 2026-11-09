@@ -17,6 +17,7 @@
  */
 
 import type { InboxPendingReply } from './inbox-types.js'
+import type { SessionContextAuthority } from '../memory/session-state-types.js'
 
 /** How a thread is pinned to the page. */
 export type CommentAnchorKind =
@@ -153,7 +154,7 @@ export type CommentThreadStore = {
    * first. Returns null when the thread is absent or the user can't access it.
    * The on-demand "read a thread" path behind the `getCommentThread` tool.
    */
-  listThreadComments(userId: string, threadId: string): Promise<CommentMessage[] | null>
+  listThreadComments(userId: string, threadId: string, authority?: SessionContextAuthority): Promise<CommentMessage[] | null>
 
   /**
    * The ids of a page's EMPTY threads — rows whose session never got a

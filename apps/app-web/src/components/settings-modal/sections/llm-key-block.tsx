@@ -241,7 +241,7 @@ function RemoveLlmKeyDialog({
       }}
     >
       <AlertDialog.Portal>
-        <AlertDialog.Backdrop className="fixed inset-0 z-[60] bg-background/80 backdrop-blur-sm transition-opacity duration-150 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
+        <AlertDialog.Backdrop className="fixed inset-0 z-[60] bg-foreground/40 backdrop-blur-sm transition-opacity duration-150 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
         <AlertDialog.Popup className="fixed left-1/2 top-1/2 z-[60] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-background p-6 shadow-xl ring-1 ring-foreground/5 transition-all duration-150 data-[starting-style]:opacity-0 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[ending-style]:scale-95">
           <AlertDialog.Title className="text-base font-semibold text-foreground">
             {tk.removeDialogTitle}

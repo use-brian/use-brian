@@ -151,7 +151,7 @@ export function AccountSignInDialog() {
   const explicitEntry = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("accountEntry") && path === "/";
   const open = path !== "/accounts" && !explicitEntry && state.session === "authenticated" && (!workspaceId || state.admissions[workspaceId]?.kind === "allowed") && auth.phase !== "idle";
   return <Dialog.Root open={open} onOpenChange={(value) => { if (!value) desktopBridge()?.cancelSignIn?.(); }}>
-    <Dialog.Portal><Dialog.Backdrop className="fixed inset-0 z-[70] bg-background/80 backdrop-blur-sm" />
+    <Dialog.Portal><Dialog.Backdrop className="fixed inset-0 z-[70] bg-foreground/40 backdrop-blur-sm" />
       <Dialog.Popup className="fixed left-1/2 top-1/2 z-[70] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 space-y-5 rounded-2xl border border-border bg-background p-6 shadow-xl">
         <Dialog.Title className="text-lg font-semibold">{t.signIn}</Dialog.Title>
         <Dialog.Description className="sr-only">{t.browserWaiting}</Dialog.Description>

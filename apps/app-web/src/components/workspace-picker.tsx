@@ -2,8 +2,9 @@
 
 /**
  * Thresholded workspace picker shared by the Next full-page picker and the
- * bundled desktop shell. Five or fewer workspaces keep the original cards;
- * six or more get searchable, preference-backed sections.
+ * bundled desktop shell. Five or fewer workspaces keep filled identity
+ * destinations (icon, name, role, enter mark). Six or more get searchable,
+ * preference-backed sections.
  *
  * [COMP:app-web/workspace-picker]
  */
@@ -11,6 +12,7 @@
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import {
+  ChevronRight,
   Eye,
   EyeOff,
   MoreHorizontal,
@@ -136,27 +138,37 @@ export function WorkspacePicker({
 
   if (!scalable) {
     return (
-      <ul className="space-y-2 animate-stagger">
+      <ul className="space-y-3 animate-stagger">
         {workspaces.map((workspace) => (
           <li key={workspace.id}>
             <Link
               href={workspaceHref(workspace.id)}
               onClick={() => markOpened(workspace.id)}
-              className="group flex items-center justify-between rounded-xl border border-border bg-card px-4 py-3.5 text-card-foreground transition-all duration-200 hover:border-primary/40 hover:bg-accent hover:text-accent-foreground active:bg-accent/80 hover-lift"
+              data-slot="workspace-destination"
+              className="group flex min-h-16 items-center gap-3.5 rounded-2xl bg-secondary px-3.5 py-3 text-secondary-foreground transition-colors hover:bg-[color-mix(in_srgb,var(--secondary)_80%,var(--foreground)_20%)] active:bg-[color-mix(in_srgb,var(--secondary)_70%,var(--foreground)_30%)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring forced-colors:border forced-colors:border-[ButtonText] forced-colors:bg-[ButtonFace]"
             >
-              <div className="space-y-0.5">
-                <div className="text-sm font-medium">{workspace.name}</div>
+              <TeamAvatar
+                id={workspace.id}
+                name={workspace.name}
+                iconSeed={workspace.iconSeed}
+                iconUrl={workspace.iconUrl}
+                size="md"
+              />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-medium">
+                  {workspace.name}
+                </span>
                 {workspace.role ? (
-                  <div className="text-xs text-muted-foreground capitalize">
+                  <span className="block text-xs capitalize text-muted-foreground">
                     {workspace.role}
-                  </div>
+                  </span>
                 ) : null}
-              </div>
+              </span>
               <span
                 aria-hidden
-                className="text-muted-foreground transition-all duration-200 group-hover:text-primary group-hover:translate-x-0.5"
+                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground shadow-sm transition-transform group-hover:translate-x-0.5 forced-colors:border forced-colors:border-[ButtonText]"
               >
-                →
+                <ChevronRight className="size-4" />
               </span>
             </Link>
           </li>

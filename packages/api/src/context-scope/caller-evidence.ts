@@ -12,6 +12,7 @@ import { readApplicationFieldAncestors } from '../application-platform/field-evi
 import { readCurrentScopeSources } from '../db/derived-scope-store.js'
 import type { PoolClient } from 'pg'
 import { deliveryFailureMetadata, type DeliveryFailureMetadata, type DeliveryVerificationPhase } from './delivery-failure.js'
+import { readPageThreadAudienceAuthority, type PageThreadAudience } from './page-thread-audience.js'
 
 /**
  * Why evidence could not be admitted. Internal only: it reaches logs and
@@ -93,7 +94,7 @@ function labelFailure(
 }
 
 function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client:Pick<PoolClient,'query'>|undefined,workflowRunId:string|undefined,nativeOnly:true,readNative?:typeof readNativeSessionEvidence,additionalCeilings?:readonly AccessCeiling[]):Promise<ScopeEvidence|null>
-function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client?:Pick<PoolClient,'query'>,workflowRunId?:string,nativeOnly?:false):Promise<ScopeEvidence>
+function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client?:Pick<PoolClient,'query'>,workflowRunId?:string,nativeOnly?:false,readNative?:typeof readNativeSessionEvidence,additionalCeilings?:readonly AccessCeiling[],pageAudience?:PageThreadAudience):Promise<ScopeEvidence>
 async function validateScopeEvidence(
   evidence: ScopeEvidence,
   ceiling: AccessCeiling,
@@ -103,7 +104,15 @@ async function validateScopeEvidence(
   nativeOnly = false,
   readNative:typeof readNativeSessionEvidence = readNativeSessionEvidence,
   additionalCeilings:readonly AccessCeiling[] = [],
+  pageAudience?: PageThreadAudience,
 ): Promise<ScopeEvidence|null> {
+  const currentVisibility = (scope: ResourceScope, receiver: AccessCeiling) => {
+    const pageSource = pageAudience && kind === 'audience' && receiver.userId === ''
+      && 'resourceKind' in scope && ['page_event_changed','page_event_destination','page_live_changed','page_live_destination'].includes(String(scope.resourceKind))
+    // The Page's own thread proves this principal axis below. Private Memory,
+    // fields and every other source keep their ordinary per-source visibility.
+    return visibilityFailure(pageSource ? { ...scope, userId: null } : scope, receiver)
+  }
   let failure: ScopeEvidenceFailure | null = null
   let snapshot: ScopeEvidence
   try {
@@ -129,7 +138,7 @@ async function validateScopeEvidence(
   const originalSources=structuredClone(sources)
   const nativeCeilings=[ceiling,...additionalCeilings]
   for (const checkedCeiling of nativeCeilings) {
-    for (const source of sources) failure ??= visibilityFailure(source, checkedCeiling) ?? labelFailure(source, checkedCeiling)
+    for (const source of sources) failure ??= currentVisibility(source, checkedCeiling) ?? labelFailure(source, checkedCeiling)
     failure ??= labelFailure({ sensitivity:snapshot.sensitivity??'public',compartments:snapshot.compartments??[],projectIds:snapshot.projectIds??[] },checkedCeiling)
     if(failure)throw unavailable(checkedCeiling===ceiling?kind:'audience',failure)
   }
@@ -147,7 +156,7 @@ async function validateScopeEvidence(
         expanded.note(native.evidence)
         for (const source of [...native.evidence.sources ?? [], ...native.current]) {
           for(const checkedCeiling of nativeCeilings){
-            const refused=visibilityFailure(source,checkedCeiling)??labelFailure(source,checkedCeiling)
+            const refused=currentVisibility(source,checkedCeiling)??labelFailure(source,checkedCeiling)
             if(refused)throw unavailable(checkedCeiling===ceiling?kind:'audience',refused)
           }
         }
@@ -192,7 +201,7 @@ async function validateScopeEvidence(
       if(!value.available)throw unavailable(kind,'source_unverifiable')
       if(workflowRunId)throw unavailable(kind,'source_unverifiable')
       for(const scope of value.scopes){
-        const refused=visibilityFailure(scope,ceiling)??labelFailure(scope,ceiling)
+        const refused=currentVisibility(scope,ceiling)??labelFailure(scope,ceiling)
         if(refused)throw unavailable(kind,refused)
       }
       scopes.push({root:value.root,scopes:value.scopes})
@@ -218,7 +227,7 @@ async function validateScopeEvidence(
     if(persistent.length && !client)throw unavailable(kind,'source_unverifiable')
     const expanded=new ContextScopeAccumulator(snapshot)
     expanded.note({sources:persistent});snapshot=expanded.evidence;sources=snapshot.sources ?? []
-    for(const source of persistent)failure ??= visibilityFailure(source,ceiling) ?? labelFailure(source,ceiling)
+    for(const source of persistent)failure ??= currentVisibility(source,ceiling) ?? labelFailure(source,ceiling)
     if(failure)throw unavailable(kind,failure)
   } catch(error){throw scopeEvidenceFailureOf(error) ? error : unavailable(kind,'source_unverifiable',error,'ancestry')}
 
@@ -236,7 +245,7 @@ async function validateScopeEvidence(
     const fieldAncestors = await readApplicationFieldAncestors(ceiling.workspaceId, ancestryRoots, client)
     originalFieldAncestry = ancestryKey(fieldAncestors)
     if (fieldAncestors.length && !client) throw unavailable(kind, 'source_unverifiable')
-    for (const source of fieldAncestors) failure ??= visibilityFailure(source, ceiling) ?? labelFailure(source, ceiling)
+    for (const source of fieldAncestors) failure ??= currentVisibility(source, ceiling) ?? labelFailure(source, ceiling)
     // Only fields admitted on the actual client may supply retained-history
     // label metadata. Keep both fixed root sets for the final footprint check.
     projectedHistoryRoots=structuredClone(fieldAncestors)
@@ -253,7 +262,7 @@ async function validateScopeEvidence(
       if (previous && (previous.version !== source.version || resourceScopeKey(previous) !== resourceScopeKey(source))) {
         throw unavailable(kind, 'source_unverifiable')
       }
-      failure ??= visibilityFailure(source, ceiling) ?? labelFailure(source, ceiling)
+      failure ??= currentVisibility(source, ceiling) ?? labelFailure(source, ceiling)
     }
     if (failure) throw unavailable(kind, failure)
     const expanded = new ContextScopeAccumulator(snapshot)
@@ -281,7 +290,7 @@ async function validateScopeEvidence(
       ancestry.note({sources:rows.flatMap(row=>row.dependencies)})
       snapshot = ancestry.evidence
       sources = snapshot.sources ?? []
-      for (const source of sources) failure ??= visibilityFailure(source,ceiling) ?? labelFailure(source,ceiling)
+      for (const source of sources) failure ??= currentVisibility(source,ceiling) ?? labelFailure(source,ceiling)
       if (failure) throw unavailable(kind,failure)
     } catch (error) {
       throw scopeEvidenceFailureOf(error) ? error : unavailable(kind,'verification_error',error)
@@ -298,17 +307,19 @@ async function validateScopeEvidence(
   const raisedPages = new ContextScopeAccumulator(snapshot)
   try {
     for (const source of sources.filter(source => pageKinds.has(source.resourceKind))) {
-      const authority = (await (client ?? getPool()).query<{ authority: {
+      const authority = kind === 'audience' && ceiling.userId === '' && pageAudience
+        ? await readPageThreadAudienceAuthority(ceiling.workspaceId, source, pageAudience)
+        : (await (client ?? getPool()).query<{ authority: {
         source: ScopeSource | null; requiredSources: ScopeSource[]; principalAllowed: boolean
       } | null }>(`SELECT ${client ? 'read_admitted_page_authority' : 'read_page_scope_authority'}($1,$2,$3,$4) AS authority`,
-      [ceiling.workspaceId,source.resourceKind,source.resourceId,ceiling.userId])).rows[0]?.authority
+      [ceiling.workspaceId,source.resourceKind,source.resourceId,ceiling.userId || null])).rows[0]?.authority
       if (!authority?.source || !Array.isArray(authority.requiredSources) || !authority.requiredSources.length
         || !authority.principalAllowed) throw unavailable(kind,'source_unverifiable')
       if (authority.source.version !== source.version || resourceScopeKey(authority.source) !== resourceScopeKey(source)) {
         throw unavailable(kind,'source_changed')
       }
       for (const current of authority.requiredSources) {
-        if (visibilityFailure(current,ceiling) || labelFailure(current,ceiling)) throw unavailable(kind,'source_reclassified')
+        if (currentVisibility(current,ceiling) || labelFailure(current,ceiling)) throw unavailable(kind,'source_reclassified')
         raisedPages.note({sources:[current]})
       }
     }
@@ -334,7 +345,7 @@ async function validateScopeEvidence(
     if (state.state === 'stale_input') throw unavailable(kind, 'source_changed')
     if (state.state !== 'changed') continue
     const current = state.current
-    if (visibilityFailure(current, ceiling) || labelFailure(current, ceiling)) {
+    if (currentVisibility(current, ceiling) || labelFailure(current, ceiling)) {
       throw unavailable(kind, 'source_reclassified')
     }
     // High-water: the receiver's evidence carries both the read labels and
@@ -365,8 +376,9 @@ export async function validateCallerScopeEvidence(evidence: ScopeEvidence, ceili
 }
 
 /** Final output evidence checked against the current destination audience. */
-export async function validateAudienceScopeEvidence(evidence: ScopeEvidence, ceiling: AccessCeiling, client?: Pick<PoolClient, 'query'>): Promise<ScopeEvidence> {
-  return validateScopeEvidence(evidence, ceiling, 'audience', client)
+export async function validateAudienceScopeEvidence(evidence: ScopeEvidence, ceiling: AccessCeiling, client?: Pick<PoolClient, 'query'>,
+  pageAudience?: PageThreadAudience): Promise<ScopeEvidence> {
+  return validateScopeEvidence(evidence, ceiling, 'audience', client, undefined, false, readNativeSessionEvidence, [], pageAudience)
 }
 
 /** Closed native proof only; an unsupported closure must take the original full path. */
