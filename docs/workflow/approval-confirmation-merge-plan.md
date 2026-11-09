@@ -50,9 +50,15 @@ Focused PGlite tests mock canonical helper bodies; the ordinary-owner fresh-chai
 ## Additive external questions
 
 Keep legacy confirm/select Allow/Deny behavior. For `method:'question'`, reuse the
-shared card's actions slot for text, closed single-choice or custom-answer Submit
-forms in Chat and Needs you. Keep concurrent external arrays independent of native
-confirmations and never block the composer. Preserve mounted drafts across transient
+shared card's actions slot with Brian's native `QuestionAnswerForm` in Chat and
+Needs you: “I need your input”, compact auto-growing textarea, Enter sends,
+Shift+Enter/IME do not submit, and Send answer. Closed single-choice/custom
+controls use an optional selection slot. The controlled form is presentation-only,
+with localized native copy and no API, controller or resume imports. Native
+`PendingQuestionPanel` keeps trimmed answers, confirmed Cancel and connector
+resolution; external answers preserve literal whitespace and expose no Cancel.
+Native enables desktop-only autofocus; external cards never autofocus. Keep
+concurrent external arrays independent of native confirmations and never block the composer. Preserve mounted drafts across transient
 errors; recheck expiry, lost races and current permissions rather than claiming success.
 
 Browser humans post strict `{answer:string}` to `/api/approvals/:id/respond`.

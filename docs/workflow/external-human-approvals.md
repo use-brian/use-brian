@@ -124,4 +124,13 @@ BRIAN_TEST_MIGRATION_OWNER_GROUP=fresh NODE_OPTIONS=--max-old-space-size=6144 no
 node --import tsx --test src/__tests__/migration-renames.test.ts
 ```
 
+External question UI reuses the native pending-question `QuestionAnswerForm`
+presentation inside `ChatConfirmationCard`, not native submission authority.
+Its compact textarea grows with the draft; Enter sends, Shift+Enter and IME do
+not submit. External cards never autofocus or offer native Cancel. Options stay
+on the project Select, and valid answers retain their literal whitespace.
+Also run `src/components/chrome/__tests__/{question-answer-form,pending-question-panel,pending-question-connector}.test.tsx`
+with the web suite above for presentation, native endpoint/cancel and connector
+regressions. No new dictionary strings are introduced.
+
 The explicit heap avoids the automatic diagnostic runner's 2 GiB limit. Focused SQL tests use ephemeral PGlite with mocked canonical helper bodies and notification/service ports; the fresh-chain test separately applies the real migrations. Neither proves multi-connection PostgreSQL races or live end-to-end delivery. Tests never connect to a live database.
