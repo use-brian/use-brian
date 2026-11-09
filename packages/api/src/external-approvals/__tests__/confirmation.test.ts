@@ -125,3 +125,12 @@ describe('external confirmation Attention projection', () => {
     expect(result.items[0]).not.toHaveProperty('confirmation')
   })
 })
+
+
+it('projects full literal questions and omits absent optional settings',()=>{
+  for(const extra of [{},{options:[' A ','B']},{options:['A'],allowCustom:true}]) {
+    const request={method:'question',title:'  '+ 'x'.repeat(16300)+'\n',message:' '+ 'y'.repeat(32700)+'\t',...extra}
+    expect(externalActionConfirmation(row({approvalPayload:{request}}))).toEqual({approvalId:'approval-1',...request,expiresAt:'2099-01-01T00:00:00.000Z'})
+  }
+  expect(externalActionConfirmation(row({approvalPayload:{request:{method:'question',title:'Q',allowCustom:false}}}))).toBeNull()
+})

@@ -55,7 +55,7 @@ export type ApprovalDeliveryDispatcher = (params: {
   recentTarget?: RecentApprovalTarget
   assistantId?: string
   /** Frozen display snapshot for channel cards (title + optional details). */
-  prompt?: { title: string; details?: string }
+  prompt?: { title: string; details?: string; method?: 'question'; options?: string[]; allowCustom?: boolean }
 } & (
   | { externalAction?: false; approverUserId: string; deliveryUserId?: never }
   | { externalAction: true; approverUserId: string | null; deliveryUserId?: string }

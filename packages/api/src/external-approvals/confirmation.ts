@@ -1,7 +1,10 @@
+import { externalInputSchema } from './contracts.js'
 import type { PendingApproval } from '../db/pending-approvals-store.js'
 
 /** Display-only projection of the frozen request; never tool invocation input. */
 export type ExternalActionConfirmation = {
+  method?: 'question'
+  allowCustom?: boolean
   approvalId: string
   title: string
   message?: string
@@ -18,6 +21,11 @@ export function externalActionConfirmation(row: PendingApproval): ExternalAction
   const request = (payload as Record<string, unknown>).request
   if (!request || typeof request !== 'object' || Array.isArray(request)) return null
   const body = request as Record<string, unknown>
+  if (body.method === 'question') {
+    const parsed = externalInputSchema.shape.request.safeParse(body)
+    if (!parsed.success || parsed.data.method !== 'question') return null
+    return { approvalId: row.id, ...parsed.data, expiresAt: row.expiresAt.toISOString() }
+  }
   if ((body.method !== 'confirm' && body.method !== 'select') || typeof body.title !== 'string' ||
       (body.message !== undefined && typeof body.message !== 'string')) return null
   if (body.method === 'select' && (!Array.isArray(body.options) || body.options.length !== 2 ||

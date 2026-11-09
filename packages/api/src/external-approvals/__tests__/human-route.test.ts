@@ -40,3 +40,14 @@ describe('[COMP:api/external-approvals] human respond boundary',()=>{
    expect(store.decide).not.toHaveBeenCalled();expect(respond).not.toHaveBeenCalled()
  })
 })
+
+
+it('fails unavailable answer stores closed and requires live actor evidence on legacy sources',async()=>{
+  const {store,sources}=fixture()
+  const service=new ExternalApprovalService(sources,store)
+  const actor={userId:source.approverUserId!,human:true,origin:'ui' as const,authSessionId:'human-session'}
+  await expect(service.answer('approval','literal',actor)).rejects.toMatchObject({status:503})
+  await expect(service.answer('approval','literal',{...actor,authSessionId:undefined})).rejects.toMatchObject({status:403})
+  sources.entries.delete(source.id)
+  await expect(service.answer('approval','literal',actor)).rejects.toMatchObject({status:404})
+})

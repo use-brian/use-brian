@@ -3808,7 +3808,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       if (!deliveryUserId) return
       // Load the frozen request so channel/web cards can show title + details.
       const row = await pendingApprovalsStore.getByIdSystem(state.approvalId)
-      const request = (row?.approvalPayload as { request?: { title?: string; message?: string } } | undefined)?.request
+      const request = (row?.approvalPayload as { request?: { title?: string; message?: string; method?: string; options?: string[]; allowCustom?: boolean } } | undefined)?.request
       const recentTarget = source.channelType === 'web'
         ? (source.channelId !== 'queue'
           ? { channelType: 'web' as const, channelId: source.channelId }
@@ -3821,7 +3821,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         approverUserId: source.approverUserId, deliveryUserId, externalAction: true,
         deliveryChannelType: source.channelType, deliveryChannelId: source.channelId,
         assistantId: source.assistantId,
-        ...(request?.title ? { prompt: { title: request.title, details: request.message } } : {}),
+        ...(request?.title ? { prompt: { title: request.title, details: request.message,
+          ...(request.method === 'question' ? { method: 'question' as const, options: request.options, allowCustom: request.allowCustom } : {}),
+        } } : {}),
         ...(recentTarget ? { recentTarget } : {}),
       })
     },

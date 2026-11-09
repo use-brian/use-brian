@@ -41,7 +41,7 @@ export async function maybeHandleChannelWorkflowReply(params: {
       params.address.integrationId, params.address.channelId, questionMessageId))
   } catch { return 'Workflow replies are temporarily unavailable.' }
   // Explicit question answers are literal text, even "approve abc123".
-  if (!explicitQuestion && /^\s*(approve|reject)\s+[a-f0-9-]{6,}(?:\s|$)/i.test(params.text)) {
+  if (!explicitQuestion && /^\s*(approve|reject|answer)\s+[a-f0-9-]{6,}(?:\s|$)/i.test(params.text)) {
     if (!params.approvals) return 'Workflow approvals are unavailable here. Open Chat to review requests.'
     try {
       const result = await maybeHandleApprovalReply(params.approvals, params.address.userId, params.text, {

@@ -12,10 +12,10 @@ import express from 'express'
 import request from 'supertest'
 
 vi.mock('../../external-approvals/service.js', () => ({
-  externalApprovals: () => ({ resolve: externalResolve }),
+  externalApprovals: () => ({ resolve: externalResolve, answer: externalAnswer }),
   ExternalApprovalError: class extends Error {},
 }))
-const { externalResolve } = vi.hoisted(() => ({ externalResolve: vi.fn() }))
+const { externalResolve, externalAnswer } = vi.hoisted(() => ({ externalResolve: vi.fn(), externalAnswer: vi.fn() }))
 
 vi.mock('../../workflow/approval.js', () => ({
   resumeFromApproval: vi.fn(async () => ({ status: 'completed', runId: 'run-1' })),
@@ -692,5 +692,27 @@ describe('external human responses', () => {
     externalResolve.mockClear()
     await request(app).post('/api/approvals/ap-1/respond').send({ decision: 'approved' }).expect(403)
     expect(externalResolve).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('external question human respond protocol', () => {
+  const question = () => makeApproval({kind:'external_action',approvalPayload:{request:{method:'question',title:'Question'}}})
+  it('passes only a strict literal answer to the human service',async()=>{
+    externalAnswer.mockResolvedValue({status:'answered',answer:'  literal\n'})
+    const {app}=makeApp({getById:vi.fn(async()=>question())})
+    const result=await request(app).post('/api/approvals/ap-1/respond').send({answer:'  literal\n'})
+    expect(result.status).toBe(200)
+    expect(result.body).toMatchObject({status:'answered',answer:'  literal\n'})
+    expect(externalAnswer).toHaveBeenCalledWith('ap-1','  literal\n',{userId:'u-1',authSessionId:'auth-session-1',human:true,origin:'ui'})
+  })
+  it('rejects decisions, mixed bodies, missing session, and answers to native/confirm rows',async()=>{
+    for(const body of [{decision:'approved'},{decision:'rejected'},{answer:'A',decision:'approved'},{answer:'A',grantAlways:true},{answer:'A',reason:'x'},{answer:''},{answer:'bad\u0000'}]) {
+      await request(makeApp({getById:vi.fn(async()=>question())}).app).post('/api/approvals/ap-1/respond').send(body).expect(400)
+    }
+    await request(makeApp({getById:vi.fn(async()=>question()),authSessionId:null}).app).post('/api/approvals/ap-1/respond').send({answer:'A'}).expect(403)
+    for(const approval of [makeApproval(),makeApproval({kind:'external_action',approvalPayload:{request:{method:'confirm',title:'Allow?'}}})]) {
+      await request(makeApp({getById:vi.fn(async()=>approval)}).app).post('/api/approvals/ap-1/respond').send({answer:'A'}).expect(400)
+    }
   })
 })

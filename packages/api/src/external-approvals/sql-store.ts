@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg'
 import { getPool } from '../db/client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
-import { sourceBinding, type ExternalApprovalSource, type ExternalApprovalInput, type AckStatus } from './contracts.js'
+import { externalAnswerSchema, sourceBinding, type ExternalApprovalSource, type ExternalApprovalInput, type AckStatus } from './contracts.js'
 import { ExternalApprovalError, externalApprovals, type ExternalApprovalStore, type ExternalApprovalState, type HumanApprovalActor } from './service.js'
 import { lockExternalApprovalSource } from './source-registry.js'
 import { assertExternalDestination } from './authority.js'
@@ -20,11 +20,13 @@ async function authorize(client: PoolClient, source: ExternalApprovalSource, use
   }
 }
 const projection = `p.id AS "approvalId", e.external_request_id AS "externalRequestId", p.status,
+  e.immutable_input->'request'->>'method' AS method, e.human_answer AS "humanAnswer",
   (e.superseded_at IS NOT NULL) AS superseded,
   e.expires_at AS "expiresAt", e.payload_hash AS "payloadHash", e.ack_status AS "ackStatus"`
 function state(row: Record<string, unknown>): ExternalApprovalState {
   return { approvalId: row.approvalId as string, externalRequestId: row.externalRequestId as string,
-    status: row.status as ExternalApprovalState['status'], expiresAt: new Date(row.expiresAt as string).toISOString(),
+    status: (row.method === 'question' && row.status === 'approved' ? 'answered' : row.status) as ExternalApprovalState['status'],
+    ...(row.method === 'question' && row.status === 'approved' && typeof row.humanAnswer === 'string' ? { answer: row.humanAnswer } : {}), expiresAt: new Date(row.expiresAt as string).toISOString(),
     payloadHash: row.payloadHash as string, ...(row.ackStatus ? { ackStatus: row.ackStatus as AckStatus } : {}) }
 }
 /** Only trusted browser or verified-channel entry points construct this evidence. */
@@ -48,7 +50,7 @@ async function assertHumanActor(c: PoolClient, source: ExternalApprovalSource, a
     // account must never acquire permission merely by entering a room.
     if (!actor.providerUserId || !source.channelIntegrationId || actor.channelIntegrationId !== source.channelIntegrationId
       || actor.channelId !== source.channelId || source.channelType === 'web'
-      || (source.audience === 'conversation_members' && actor.threadRef !== source.threadRef)) throw denied()
+      || actor.threadRef !== source.threadRef) throw denied()
     const linked = await c.query(`SELECT id FROM linked_identities
       WHERE user_id=$1 AND provider=$2 AND provider_id=$3 FOR SHARE`, [actor.userId, source.channelType, actor.providerUserId])
     if (!linked.rows.length) throw denied()
@@ -90,10 +92,11 @@ async function locked(c: PoolClient, s: ExternalApprovalSource, id: string, byAp
   if (rows.rows[0].superseded) current = { ...current, status: 'superseded' }
   // Expiry is an applicability projection, never a rewrite of a recorded human decision.
   // An already applied receipt remains historical evidence of application, not a new grant.
-  if ((current.status === 'approved' || current.status === 'rejected') && !current.ackStatus) {
+  if ((current.status === 'approved' || current.status === 'answered' || current.status === 'rejected') && !current.ackStatus) {
     const elapsed = await c.query('SELECT $1::timestamptz<=clock_timestamp() AS elapsed', [current.expiresAt])
     if (elapsed.rows[0]?.elapsed) current = { ...current, status: 'expired' }
   }
+  if (current.status !== 'answered') delete current.answer
   return current
 }
 export function createExternalApprovalSqlStore(): ExternalApprovalStore {
@@ -132,7 +135,7 @@ export function createExternalApprovalSqlStore(): ExternalApprovalStore {
     ack: (s,id,status) => transaction(s, async c => {
       const current = await locked(c,s,id)
       if (!current) return null
-      if (current.status === 'pending' || (status === 'applied' && current.status !== 'approved' && current.status !== 'rejected')) throw new ExternalApprovalError(409, 'No applicable human decision')
+      if (current.status === 'pending' || (status === 'applied' && current.status !== 'approved' && current.status !== 'answered' && current.status !== 'rejected')) throw new ExternalApprovalError(409, 'No applicable human decision')
       if (current.ackStatus && current.ackStatus !== status) throw new ExternalApprovalError(409, 'Receipt conflict')
       await c.query('UPDATE external_approval_requests SET ack_status=$2,acknowledged_at=COALESCE(acknowledged_at,clock_timestamp()) WHERE approval_id=$1', [current.approvalId,status])
       return { ...current, ackStatus: status }
@@ -142,15 +145,39 @@ export function createExternalApprovalSqlStore(): ExternalApprovalStore {
         const current = await locked(c,s,id)
         if (!current) return null
         // Cancellation invalidates even an approved but not-yet-consumed decision.
-        if (!current.ackStatus && (current.status === 'pending' || current.status === 'approved')) {
+        if (!current.ackStatus && (current.status === 'pending' || current.status === 'approved' || current.status === 'answered')) {
           await c.query('UPDATE external_approval_requests SET superseded_at=COALESCE(superseded_at,clock_timestamp()) WHERE approval_id=$1', [current.approvalId])
           // Preserve an already recorded human approval and its timestamp as audit evidence.
           await c.query("UPDATE pending_approvals SET status='superseded',responded_at=clock_timestamp() WHERE id=$1 AND status='pending'", [current.approvalId])
-          return { ...current, status: 'superseded' as const }
+          const { answer: _answer, ...evidence } = current
+          return { ...evidence, status: 'superseded' as const }
         }
         return current
       })
       if (result) notifyWorkspaceChange(s.workspaceId,'approval','update',result.approvalId)
+      return result
+    },
+    answer: async (s,id,answer,actor) => {
+      if (!actor || (s.audience !== 'conversation_members' && actor.userId !== s.approverUserId)) throw new ExternalApprovalError(403, 'Human answer required')
+      if (!externalAnswerSchema.safeParse(answer).success) throw new ExternalApprovalError(400, 'Invalid answer')
+      const result = await transaction(s, async c => {
+        const current = await locked(c,s,id,true)
+        if (!current) return null
+        const row = await c.query("SELECT immutable_input->'request' AS request FROM external_approval_requests WHERE approval_id=$1", [id])
+        const request = row.rows[0]?.request
+        if (request?.method !== 'question') throw new ExternalApprovalError(400, 'Only questions accept answers')
+        // A retry, including a different attempted answer, reports the actual winner.
+        if (current.status !== 'pending') return current
+        if (request.options && request.allowCustom !== true && !request.options.includes(answer)) throw new ExternalApprovalError(400, 'Answer must exactly match an option')
+        const changed = await c.query(`UPDATE pending_approvals SET status='approved',responded_by=$2,responded_at=clock_timestamp(),resolution_origin='human'
+          WHERE id=$1 AND kind='external_action' AND status='pending'
+            AND (approver_user_id=$2 OR ($3::boolean AND approver_user_id IS NULL))
+            AND expires_at>clock_timestamp() RETURNING id`, [id,actor.userId,s.audience === 'conversation_members'])
+        if (!changed.rows.length) return locked(c,s,id,true)
+        await c.query('UPDATE external_approval_requests SET human_answer=$2 WHERE approval_id=$1', [id,answer])
+        return { ...current, status: 'answered' as const, answer }
+      }, actor.userId, actor)
+      if (result) notifyWorkspaceChange(s.workspaceId,'approval','update',id)
       return result
     },
     decide: async (s,id,userId,decision,actor) => {
@@ -158,7 +185,10 @@ export function createExternalApprovalSqlStore(): ExternalApprovalStore {
       if (s.audience === 'conversation_members' && (!actor || actor.userId !== userId)) return null
       const result = await transaction(s, async c => {
         const current = await locked(c,s,id,true)
-        if (!current || current.status !== 'pending') return current
+        if (!current) return null
+        const method = await c.query("SELECT immutable_input->'request'->>'method' AS method FROM external_approval_requests WHERE approval_id=$1", [id])
+        if (method.rows[0]?.method === 'question') throw new ExternalApprovalError(400, 'Question requires an answer')
+        if (current.status !== 'pending') return current
         const changed = await c.query(`UPDATE pending_approvals SET status=$2,responded_by=$3,responded_at=clock_timestamp(),resolution_origin='human'
           WHERE id=$1 AND kind='external_action' AND status='pending'
             AND (approver_user_id=$3 OR ($4::boolean AND approver_user_id IS NULL))

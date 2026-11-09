@@ -60,7 +60,9 @@ export function createApprovalDeliveryDispatcher(
       ? `${deps.webBaseUrl}/w/${params.workspaceId}/chat?attention=${encodeURIComponent(params.approvalId)}`
       : `${deps.webBaseUrl}/w/${params.workspaceId}/p?panel=approvals&approval=${params.approvalId}`
     const message = composeMessage(params, deepLink)
-    const actions = confirmationActions(params.approvalId)
+    // Question answers use the human-only text path, not native question tokens
+    // or approval buttons. Long literal options must not become provider callbacks.
+    const actions = params.externalAction && params.prompt?.method === 'question' ? [] : confirmationActions(params.approvalId)
 
     if (params.recentTarget) {
       if (!deps.deliverToChannel || !params.assistantId) return
@@ -146,6 +148,15 @@ function composeMessage(
       ? 'An external agent action needs your approval'
       : 'A workflow action needs your approval')
   const details = params.prompt?.details
+  if (params.externalAction && params.prompt?.method === 'question') {
+    const options = params.prompt.options
+    return [
+      `**${title}**`, ...(details !== undefined ? ['', details] : []),
+      ...(options ? ['', ...options.map(option => `• ${option}`), '',
+        params.prompt.allowCustom ? 'Choose an option or write your own answer.' : 'Use the exact option text, not its number.'] : []),
+      '', `Reply: answer ${id} <your answer>`, '', deepLink,
+    ].join('\n')
+  }
   const question = 'Allow this action?'
   return [
     `**${title}**`,

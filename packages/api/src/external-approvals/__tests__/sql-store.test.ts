@@ -53,6 +53,7 @@ beforeAll(async()=>{
   await db.query('INSERT INTO workspace_members(workspace_id,user_id) VALUES($1,$2)',[source.workspaceId,source.approverUserId])
   await db.query('INSERT INTO assistants VALUES($1,$2)',[source.assistantId,source.workspaceId])
   await db.exec(readFileSync(new URL('../../../migrations/8241_external_human_approvals.sql',import.meta.url),'utf8'))
+  await db.exec(readFileSync(new URL('../../../migrations/8245_external_human_question_answers.sql',import.meta.url),'utf8'))
   await db.exec(readFileSync(new URL('../../../migrations/8242_workspace_external_approval_sources.sql',import.meta.url),'utf8'))
   // Lightweight store fixture. Full migration and RLS behavior is covered by
   // the lightweight destination migration suite (canonical helpers mocked).
@@ -236,6 +237,21 @@ describe('conversation-member external human authority', () => {
     expect((await db.query<{responded_by:string}>('SELECT responded_by FROM pending_approvals WHERE id=$1',[state.approvalId])).rows[0].responded_by).toBe(member)
     expect((await store.read(s,state.externalRequestId))?.status).toBe('approved')
   })
+  it('answers only with current conversation membership and live session evidence',async()=>{
+    const {source:s}=await request()
+    const raw={...input(),request:{method:'question',title:'Literal question'}}
+    const q=await service.create(s,raw)
+    await db.query('DELETE FROM workspace_members WHERE user_id=$1',[member])
+    await expect(service.answer(q.approvalId,'no authority',teammate)).rejects.toMatchObject({status:404})
+    await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'member')",[source.workspaceId,member])
+    await db.query("UPDATE sessions SET visibility='personal' WHERE id=$1",[destination])
+    await expect(service.answer(q.approvalId,'no access',teammate)).rejects.toMatchObject({status:404})
+    await db.query("UPDATE sessions SET visibility='workspace' WHERE id=$1",[destination])
+    await db.query('UPDATE auth_sessions SET revoked_at=clock_timestamp() WHERE id=$1',[memberSession])
+    await expect(service.answer(q.approvalId,'revoked',teammate)).rejects.toMatchObject({status:403})
+    await db.query('UPDATE auth_sessions SET revoked_at=NULL WHERE id=$1',[memberSession])
+    expect(await service.answer(q.approvalId,'  member answer\n',teammate)).toMatchObject({status:'answered',answer:'  member answer\n'})
+  })
   it('requires the exact live provider identity, not a cached sender or another linked account',async()=>{
     const channelDestination=randomUUID(),integration=randomUUID(),route=randomUUID(),identity=randomUUID()
     await db.query("INSERT INTO channels(id,workspace_id,channel_id,status) VALUES($1,$2,'room','active')",[integration,source.workspaceId])
@@ -243,7 +259,7 @@ describe('conversation-member external human authority', () => {
     await db.query('INSERT INTO channel_assistants VALUES($1,$2,$3,NULL,NULL)',[route,integration,source.assistantId])
     await db.query("INSERT INTO sessions(id,workspace_id,assistant_id,user_id,channel_type,channel_id) VALUES($1,$2,$3,$4,'slack','room:thread:root')",[channelDestination,source.workspaceId,source.assistantId,actor.userId])
     await db.query("INSERT INTO linked_identities VALUES($1,$2,'slack','current-provider-sender')",[identity,member])
-    const {state}=await request({channelType:'slack',channelId:'room',channelIntegrationId:integration,destinationSessionId:channelDestination,threadRef:'root'})
+    const {source:s,state}=await request({channelType:'slack',channelId:'room',channelIntegrationId:integration,destinationSessionId:channelDestination,threadRef:'root'})
     const channelActor={userId:member,human:true,origin:'channel' as const,channelId:'room',channelIntegrationId:integration,threadRef:'root',providerUserId:'current-provider-sender'}
     for(const providerUserId of [undefined,'old-cached-sender']) {
       await expect(service.resolve(state.approvalId,'approved',{...channelActor,providerUserId})).rejects.toMatchObject({status:403})
@@ -252,6 +268,14 @@ describe('conversation-member external human authority', () => {
     await expect(service.resolve(state.approvalId,'approved',channelActor)).rejects.toMatchObject({status:403})
     await db.query("INSERT INTO linked_identities VALUES($1,$2,'slack','current-provider-sender')",[identity,member])
     await expect(service.resolve(state.approvalId,'rejected',channelActor)).resolves.toMatchObject({status:'rejected'})
+    const q=await service.create(s,{...input(),request:{method:'question',title:'Channel question'}})
+    for(const bad of [{...channelActor,providerUserId:'old-cached-sender'},{...channelActor,threadRef:'other'},{...channelActor,channelId:'other'},{...channelActor,channelIntegrationId:randomUUID()}]) {
+      await expect(service.answer(q.approvalId,'not allowed',bad)).rejects.toMatchObject({status:403})
+    }
+    await db.query('DELETE FROM linked_identities WHERE id=$1',[identity])
+    await expect(service.answer(q.approvalId,'unlinked',channelActor)).rejects.toMatchObject({status:403})
+    await db.query("INSERT INTO linked_identities VALUES($1,$2,'slack','current-provider-sender')",[identity,member])
+    expect(await service.answer(q.approvalId,'  linked sender answer',channelActor)).toMatchObject({status:'answered',answer:'  linked sender answer'})
   })
   it('rejects missing, mismatched, revoked and expired browser session evidence', async () => {
     const {state} = await request()
@@ -283,5 +307,53 @@ describe('conversation-member external human authority', () => {
       await expect(service.resolve(state.approvalId,'approved',bad)).rejects.toMatchObject({status:403})
     }
     expect((await store.read(s,state.externalRequestId))?.status).toBe('pending')
+  })
+})
+
+describe('external literal human questions',()=>{
+  const human={...actor,authSessionId:sessionId}
+  const question=(extra:Record<string,unknown>={})=>({...input(),request:{method:'question',title:'  Which?\n',...extra}})
+  it('stores one actual answer atomically, preserves whitespace and frozen payload, and replays it',async()=>{
+    const raw=question(); const a=await service.create(source,raw)
+    const [one,two]=await Promise.all([service.answer(a.approvalId,' \tfirst\n',human),service.answer(a.approvalId,'second',human)])
+    expect(one).toMatchObject({status:'answered',answer:' \tfirst\n'});expect(two).toEqual(one)
+    expect(await service.create(source,raw)).toEqual(one)
+    expect(await store.read(source,raw.externalRequestId)).toEqual(one)
+    const p=(await db.query<Record<string,unknown>>('SELECT * FROM pending_approvals WHERE id=$1',[a.approvalId])).rows[0]
+    expect(p).toMatchObject({status:'approved',responded_by:actor.userId,resolution_origin:'human',kind:'external_action',approval_payload:{request:raw.request,allowPersistentApproval:false}})
+    await expect(service.resolve(a.approvalId,'approved',actor)).rejects.toMatchObject({status:400})
+    expect(await store.ack(source,raw.externalRequestId,'applied')).toMatchObject({status:'answered',answer:' \tfirst\n',ackStatus:'applied'})
+    expect(await store.cancel(source,raw.externalRequestId)).toMatchObject({status:'answered',answer:' \tfirst\n'})
+  })
+  it('requires exact single-choice options unless custom answers explicitly allowed',async()=>{
+    const raw=question({options:[' A ','B']});const a=await service.create(source,raw)
+    for(const text of ['A','b','A,B']) await expect(service.answer(a.approvalId,text,human)).rejects.toMatchObject({status:400})
+    expect(await service.answer(a.approvalId,' A ',human)).toMatchObject({status:'answered',answer:' A '})
+    const b=await service.create(source,question({options:['A'],allowCustom:true}))
+    expect(await service.answer(b.approvalId,'  custom\n',human)).toMatchObject({status:'answered',answer:'  custom\n'})
+    const c=await service.create(source,input())
+    await expect(service.answer(c.approvalId,'yes',human)).rejects.toMatchObject({status:400})
+  })
+  it('requires live actor evidence even for legacy assigned sources, including direct store calls',async()=>{
+    const a=await service.create(source,question())
+    for(const bad of [actor,{...human,human:false},{...human,origin:'model' as const},{...human,origin:'delegated' as const},{...human,grantAlways:true},{...human,authSessionId:randomUUID()},{...human,userId:source.assistantId},{...human,origin:'channel' as const,providerUserId:'unlinked'}]) {
+      await expect(service.answer(a.approvalId,'literal',bad)).rejects.toBeDefined()
+      await expect(store.answer!(source,a.approvalId,'literal',bad)).rejects.toBeDefined()
+    }
+    await expect(store.answer!(source,a.approvalId,'literal',undefined as never)).rejects.toMatchObject({status:403})
+    expect(await store.read(source,(await db.query<{external_request_id:string}>('SELECT external_request_id FROM external_approval_requests WHERE approval_id=$1',[a.approvalId])).rows[0].external_request_id)).toMatchObject({status:'pending'})
+  })
+  it('expires/cancels applicability without leaking an answer or destroying human evidence',async()=>{
+    for(const action of ['expire','cancel']) {
+      const raw=question();const a=await service.create(source,raw);await service.answer(a.approvalId,'evidence',human)
+      if(action==='expire') await db.query("UPDATE external_approval_requests SET expires_at=clock_timestamp()-interval '1 second' WHERE approval_id=$1",[a.approvalId])
+      else await store.cancel(source,raw.externalRequestId)
+      const projected=await store.read(source,raw.externalRequestId)
+      expect(projected?.status).toBe(action==='expire'?'expired':'superseded');expect(projected?.answer).toBeUndefined()
+      expect((await service.answer(a.approvalId,'different',human)).answer).toBeUndefined()
+      await expect(store.ack(source,raw.externalRequestId,'applied')).rejects.toMatchObject({status:409})
+      expect(await store.ack(source,raw.externalRequestId,'stale')).toMatchObject({ackStatus:'stale'})
+      expect((await db.query<{human_answer:string}>('SELECT human_answer FROM external_approval_requests WHERE approval_id=$1',[a.approvalId])).rows[0].human_answer).toBe('evidence')
+    }
   })
 })

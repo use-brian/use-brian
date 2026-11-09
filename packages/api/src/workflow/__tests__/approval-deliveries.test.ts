@@ -223,6 +223,23 @@ it('uses the destination session carrier for member external delivery, not an ap
   expect(deliverToChannel).toHaveBeenCalledWith(expect.objectContaining({ userId: 'session-carrier', channelIntegrationId: 'pinned', channelId: 'conversation' }))
 })
 
+it.each([{options:undefined},{options:[' A ','B']}])('delivers a literal external question with an answer command, not approval/native-question actions: %j',async ({options})=>{
+  const deliverToChannel=vi.fn(async(_target:unknown)=>({status:'delivered' as const,channelType:'slack' as const,channelId:'conversation'}))
+  await createApprovalDeliveryDispatcher({deliverToChannel,webBaseUrl:'https://app.test'})(params({
+    approvalId:'abcdef12-rest',externalAction:true,approverUserId:null,deliveryUserId:'carrier',assistantId:'assistant',
+    deliveryChannelType:'slack',recentTarget:{channelType:'slack',channelId:'conversation',channelIntegrationId:'pinned',threadRef:'exact-root'},
+    prompt:{method:'question',title:' Literal <b>question</b> ',details:'  full\nmessage  ',options,allowCustom:true},
+  }))
+  const sent=deliverToChannel.mock.calls[0][0] as unknown as {text:string;actions:unknown[];threadRef:string;channelIntegrationId:string}
+  expect(sent.text).toContain(' Literal <b>question</b> ');expect(sent.text).toContain('  full\nmessage  ')
+  expect(sent.text).toContain('Reply: answer abcdef12 <your answer>')
+  expect(sent.text).toContain('/chat?attention=abcdef12-rest')
+  for(const option of options??[]) expect(sent.text).toContain(option)
+  expect(sent.text).not.toContain('Allow this action?');expect(sent.text).not.toContain('approve abcdef12')
+  expect(sent.actions).toEqual([]);expect(sent.threadRef).toBe('exact-root');expect(sent.channelIntegrationId).toBe('pinned')
+  expect(mockAddMessage).not.toHaveBeenCalled();expect(mockFetch).not.toHaveBeenCalled()
+})
+
 it('does not send an explicit external notification through an unpinned integration', async () => {
   const deliverToChannel = vi.fn()
   await createApprovalDeliveryDispatcher({ deliverToChannel, webBaseUrl: 'https://app.test' })(params({
