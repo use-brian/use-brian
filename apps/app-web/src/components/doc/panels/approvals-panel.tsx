@@ -152,8 +152,10 @@ export function ApprovalsPanel() {
   );
   // Failed loads are unavailable, never a successful empty queue. Hide stale
   // actionable rows until the queue is authoritative again.
+  // External human requests are tool-style confirmation cards in Chat/Attention,
+  // not a second decision queue. Keep the legacy native-kind surface unchanged.
   const rows: PendingApprovalRow[] | null = authorityLost || queue.error
-    ? null : queue.data ?? (queue.loading ? null : []);
+    ? null : queue.data?.filter((row) => row.kind !== "external_action") ?? (queue.loading ? null : []);
   // Target-skill snapshots for staged_skill_* cards, keyed by approval id.
   // null = not answered yet (cards degrade); {} = answered (possibly failed).
   const skillDetails = snapshots.data ?? null;
@@ -234,7 +236,6 @@ export function ApprovalsPanel() {
             isActionable(r.kind) &&
             r.kind !== "email_sender" &&
             r.kind !== "department_access" &&
-            r.kind !== "external_action" &&
             !isReviewedWorkflowEmailApproval(r) && !isRoutineProposal(r),
         )
         .map((r) => r.id),
@@ -468,7 +469,6 @@ export function ApprovalsPanel() {
                 isActionable(row.kind) &&
                 row.kind !== "email_sender" &&
                 row.kind !== "department_access" &&
-                row.kind !== "external_action" &&
                 !isReviewedWorkflowEmailApproval(row) && !isRoutineProposal(row)
               }
               selected={selected.has(row.id)}
@@ -750,9 +750,8 @@ function ApprovalCard({
   const toolDisplayName = row.toolName
     ? getToolDisplayName(row.toolName.split("__", 1)[0]!)
     : "";
-  const externalRequest = row.kind === "external_action" ? row.approvalPayload.request : undefined;
   const headline =
-    row.kind === "external_action" ? externalRequest?.title || t.approvalsPage.kind.external_action : row.kind === "department_access" ? row.approvalPayload.targetTeamName ?? t.approvalsPage.kind.department_access : row.kind === "email_sender"
+    row.kind === "department_access" ? row.approvalPayload.targetTeamName ?? t.approvalsPage.kind.department_access : row.kind === "email_sender"
       ? row.approvalPayload.senderName?.trim() ||
         row.approvalPayload.sender ||
         t.approvalsPage.kind.email_sender
@@ -775,7 +774,6 @@ function ApprovalCard({
   // replaces the step prompt, so it is never approved without the
   // current-vs-proposed context.
   const approveBlocked =
-    (row.kind === "external_action" && (!externalRequest || !row.expiresAt || Date.parse(row.expiresAt) <= Date.now())) ||
     (row.kind === "staged_skill_update" && !skillDetail?.targetSkill) ||
     (row.kind === "workflow_refinement" && !skillDetail?.targetWorkflow);
 
@@ -1088,14 +1086,6 @@ function ApprovalCard({
             {row.kind === "browser_skill_send" && (
               <BrowserSkillSendBody row={row} />
             )}
-            {row.kind === "external_action" && (
-              <div className="mt-2 flex flex-col gap-2 text-sm">
-                <p className="text-xs text-muted-foreground">{t.approvalsPage.externalActionNotice}</p>
-                {externalRequest?.title && <pre className="whitespace-pre-wrap break-words rounded border border-border p-3 text-xs">{externalRequest.title}</pre>}
-                {externalRequest?.message && <pre className="whitespace-pre-wrap break-words rounded border border-border p-3 text-xs">{externalRequest.message}</pre>}
-                {externalRequest?.options && <div className="whitespace-pre-wrap break-words text-xs">{externalRequest.options.join(" / ")}</div>}
-              </div>
-            )}
             {row.kind === "email_sender" && <EmailSenderBody row={row} />}
             {row.kind === "department_access" && <DepartmentAccessBody row={row} />}
             <div className="text-xs text-muted-foreground mt-0.5">
@@ -1106,14 +1096,14 @@ function ApprovalCard({
 
           {actionable ? (
             <div className="flex flex-col gap-2">
-              {row.kind !== "external_action" && <input
+              <input
                 type="text"
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
                 placeholder={t.approvalsPage.reasonPlaceholder}
                 disabled={busy || batchBusy}
                 className="text-[16px] md:text-xs px-2 py-1.5 rounded border border-border bg-background w-full max-w-md"
-              />}
+              />
               {row.kind === "browser_skill_send" ? (
                 // The R2-2 three-button card: Deny / Allow once / Allow always
                 // for this block+profile. "Allow always" mints the standing
@@ -1171,9 +1161,7 @@ function ApprovalCard({
                       ? t.approvalsPage.emailRevision.approveAndSend
                       : row.kind === "email_sender"
                         ? t.approvalsPage.emailSender.allow
-                        : row.kind === "external_action"
-                          ? t.approvalsPage.browserSkillSend.allowOnce
-                          : t.approvalsPage.approveAction}
+                        : t.approvalsPage.approveAction}
                   </button>
                   <button
                     type="button"

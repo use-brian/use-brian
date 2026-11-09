@@ -36,9 +36,11 @@ removed BYO bot.
 No matching messaging or personal web-chat history means Approvals-panel-only
 review. A provider delivery failure or unsupported delivery configuration never
 approves or runs the action: the request remains in the web Approvals queue.
-Channel and web-chat notifications carry a confirmation-style title, optional
-details, Allow/Deny actions (or approve/reject reply text), and a deep link into
-the Approvals panel.
+Native workflow notifications keep their existing confirmation-style message
+and Approvals-panel fallback. External human approvals reuse this destination
+resolver but not that queue UX: messaging channels get Allow/Deny actions with
+exact approve/reject replies, and web chat restores independent confirmation
+cards. External fallback links open Chat's existing Needs you popover.
 The assigned approver's existing
 authorization checks are unchanged; receiving the notification grants no new
 authority. A group conversation previously used by the approver may be the

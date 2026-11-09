@@ -6,6 +6,7 @@
  */
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { authFetch } from "@/lib/auth-fetch";
+import type { ExternalActionConfirmation } from "./pending-questions";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
@@ -32,7 +33,7 @@ type AttentionReview = {
 
 export type AttentionItem =
   | { key: string; kind: "approval_waiting"; approvalId: string; approvalKind: string; toolName: string | null; summary: string | null
-      createdAt: string; sessionId: string | null; workflowRunId: string | null; projectIds: string[]; review: AttentionReview; seen: boolean }
+      confirmation?: ExternalActionConfirmation; createdAt: string; sessionId: string | null; workflowRunId: string | null; projectIds: string[]; review: AttentionReview; seen: boolean }
   | { key: string; kind: "delegated_decision"; approvalId: string; receiptId: string; reviewerAssistantId: string; reviewerName: string | null
       toolName: string | null; decidedAt: string; invalidated: boolean; sessionId: string | null; projectIds: string[]; seen: boolean }
   | { key: string; kind: "route_blocker"; eventId: string; workflowId: string; blocker: string; createdAt: string; projectIds: string[]; seen: boolean };

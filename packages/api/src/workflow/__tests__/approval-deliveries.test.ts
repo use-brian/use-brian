@@ -3,9 +3,10 @@
  * Component tag: [COMP:channels/approval-deliveries].
  *
  * Mocks `query`, session helpers, and global `fetch`. Verifies
- * createApprovalDeliveryDispatcher: web inbox is a no-op, personal web chat
- * posts an assistant confirmation message, telegram/slack recent targets go
- * through deliverToChannel with Allow/Deny actions, and legacy stubs remain.
+ * createApprovalDeliveryDispatcher: web inbox / personal web chat are no-ops
+ * (chat restores the confirmation card via GET /pending), messaging recent
+ * targets go through deliverToChannel with Allow/Deny actions, and legacy
+ * stubs remain.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -53,7 +54,7 @@ afterEach(() => {
 })
 
 describe('[COMP:channels/approval-deliveries] createApprovalDeliveryDispatcher', () => {
-  it('is a no-op for the web inbox — the Approvals panel surfaces the row', async () => {
+  it('is a no-op for the web inbox — chat restores confirmations independently', async () => {
     const dispatch = createApprovalDeliveryDispatcher({ webBaseUrl: 'https://app.test' })
     await dispatch(params({ deliveryChannelType: 'web', deliveryChannelId: 'queue' }))
     expect(mockQuery).not.toHaveBeenCalled()
@@ -61,11 +62,7 @@ describe('[COMP:channels/approval-deliveries] createApprovalDeliveryDispatcher',
     expect(mockAddMessage).not.toHaveBeenCalled()
   })
 
-  it('posts a confirmation card into a verified personal web chat session', async () => {
-    mockFindSession.mockResolvedValueOnce({
-      id: 'sess-1', assistantId: 'assistant', userId: 'u-1', channelType: 'web',
-    } as never)
-    mockAddMessage.mockResolvedValueOnce({ id: 'msg-1' } as never)
+  it('is a no-op for verified personal web chat — pending restore shows the card', async () => {
     const dispatch = createApprovalDeliveryDispatcher({ webBaseUrl: 'https://app.test' })
     await dispatch(params({
       deliveryChannelType: 'web',
@@ -75,15 +72,20 @@ describe('[COMP:channels/approval-deliveries] createApprovalDeliveryDispatcher',
       prompt: { title: 'Deploy canary', details: 'Ship revision abc' },
       recentTarget: { channelType: 'web', channelId: 'sess-1' },
     }))
-    expect(mockAddMessage).toHaveBeenCalledOnce()
-    const content = mockAddMessage.mock.calls[0][0].content as Array<{ text: string }>
-    const text = content[0].text
-    expect(text).toContain('**Deploy canary**')
-    expect(text).toContain('Ship revision abc')
-    expect(text).toContain('Allow this action?')
-    expect(text).toContain('approve appr-123')
-    expect(text).toContain('/w/ws-1/p?panel=approvals&approval=appr-12345678-rest')
+    expect(mockAddMessage).not.toHaveBeenCalled()
+    expect(mockFindSession).not.toHaveBeenCalled()
     expect(mockFetch).not.toHaveBeenCalled()
+  })
+
+  it('preserves native workflow delivery into personal web chat', async () => {
+    mockFindSession.mockResolvedValueOnce({ id: 'sess-1', assistantId: 'assistant', userId: 'u-1', channelType: 'web' } as never)
+    mockAddMessage.mockResolvedValueOnce({ id: 'message' } as never)
+    await createApprovalDeliveryDispatcher({ webBaseUrl: 'https://app.test' })(params({
+      deliveryChannelType: 'web', deliveryChannelId: 'sess-1', assistantId: 'assistant',
+    }))
+    expect(mockAddMessage).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'sess-1', content: [{ type: 'text', text: expect.stringContaining('/p?panel=approvals') }],
+    }))
   })
 
   it('skips telegram delivery when no bot token is configured', async () => {
@@ -173,6 +175,8 @@ it('includes external request title and details when provided', async () => {
   const text = deliverToChannel.mock.calls[0][0].text
   expect(text).toContain('**Restart gateway**')
   expect(text).toContain('Affects loopback only')
+  expect(text).toContain('/chat?attention=appr-12345678-rest')
+  expect(text).not.toContain('panel=approvals')
 })
 
 it.each(['skipped', 'failed'] as const)('warns when recent delivery is %s without falling back to the official bot', async (status) => {

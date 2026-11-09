@@ -1,6 +1,11 @@
 # External human approvals
 
-External approvals are display-only, one-time decisions in Brian's existing approval queue. They never execute a Brian tool or resume a workflow. A separate relay consumes the decision and acknowledges its own attempt; an approval, notification, or receipt is not proof of tool execution.
+External approvals are display-only, one-time decisions. They never execute a Brian tool or resume a workflow. In product UX they behave like tool-use confirmation requests (Allow/Deny cards in chat or channel actions), not a separate Approvals decision queue. A separate relay consumes the decision and acknowledges its own attempt; an approval, notification, or receipt is not proof of tool execution.
+
+The [confirmation consolidation plan](approval-confirmation-merge-plan.md) records
+how this feature reuses the existing tool-request UI without changing native
+workflow/tool execution. The legacy Approvals panel is not an external decision
+surface; existing native-kind review flows remain compatible.
 
 ## Workspace setup
 
@@ -17,7 +22,7 @@ The screen lists source IDs, credential prefixes, assistant, approver, notificat
 
 Credentials live only in the one-time response and the mounted reveal component, never in the surface cache or browser storage. Switching workspace/viewer or closing the screen discards the reveal. On an ambiguous network failure, refresh the source list before retrying; if issuance succeeded but its response was lost, rotate that source to obtain a new credential. Do not automatically replay credential mutations.
 
-The existing delivery dispatcher applies its destination-audience gate. Verified-channel and personal web-chat notifications use a confirmation-style card: frozen request title, optional message details, Allow/Deny actions (or `approve`/`reject` reply text), and a deep link into the Approvals panel. Workflow-step pushes still omit tool arguments. A failed notification leaves web review available and is not evidence of delivery. Web-inbox sources (`channelId: queue`) cannot grant channel consent; personal web-chat destinations remain Approvals-panel authoritative for typed replies in v1.
+The existing delivery dispatcher applies its destination-audience gate. Verified messaging-channel notifications use a confirmation-style card: frozen request title, optional message details, Allow/Deny actions (or `approve`/`reject` reply text), and a chat deep link. Personal web-chat destinations bind the pending row to that session so `GET /api/sessions/:sessionId/pending` returns every applicable request in `externalConfirmations`, rendered with the existing `ChatConfirmationCard`; delivery itself is a no-op push. The array is independent of live tool confirmations and their private turn leases. Web-inbox requests use the same full-detail card in Chat's existing Needs you popover, not a new inbox. Workflow-step pushes still omit tool arguments. A failed notification leaves the chat confirmation restore path available and is not evidence of delivery. Web-inbox sources (`channelId: queue`) cannot grant channel consent.
 
 ### Workspace management API
 
@@ -34,7 +39,7 @@ Issuance responses use `Cache-Control: no-store`. Authority identifiers and sour
 
 ### Database rollout
 
-Apply `8241_external_human_approvals.sql`, `8242_workspace_external_approval_sources.sql`, and `8243_external_approval_web_chat_destination.sql` through the normal reviewed migration process. The first adds the immutable transport sidecar; the second adds workspace registrations; the third allows verified personal web-chat destinations in addition to the Approvals-panel inbox. Both native and embedded runners recognize the previous filenames `8240_external_human_approvals.sql` and `8241_workspace_external_approval_sources.sql`, preserving their existing ledger timestamps without replaying applied DDL. Existing workspace registrations and credentials remain valid; do not delete or rewrite the migration ledger to force a replay. Previously provisioned server allowlist entries are not automatically imported: register those applications through workspace settings and replace their caller credentials.
+Apply `8241_external_human_approvals.sql`, `8242_workspace_external_approval_sources.sql`, and `8243_external_approval_web_chat_destination.sql` through the normal reviewed migration process. The first adds the immutable transport sidecar; the second adds workspace registrations; the third allows verified personal web-chat destinations (session-bound confirmation cards) in addition to the web-inbox destination. Both native and embedded runners recognize the previous filenames `8240_external_human_approvals.sql` and `8241_workspace_external_approval_sources.sql`, preserving their existing ledger timestamps without replaying applied DDL. Existing workspace registrations and credentials remain valid; do not delete or rewrite the migration ledger to force a replay. Previously provisioned server allowlist entries are not automatically imported: register those applications through workspace settings and replace their caller credentials.
 
 Both sidecars enable RLS without tenant policies: transport data and credential digests are owner/service-only. The controlled implementation uses `getPool()` (`DATABASE_URL`, schema owner), not `getAppPool()` (`DATABASE_URL_APP`, non-owner `app_user`). Do not grant tenant access to these tables or disable RLS. Existing queue projections retain tenant RLS plus the assigned human and current-source checks. No live migration or credential provisioning is implied by these implementation instructions.
 
@@ -63,7 +68,7 @@ SHA-256 lowercase hex of UTF-8 `JSON.stringify` of the normalized object in this
 
 ### Decision and receipt semantics
 
-Only the configured, currently authorized human may resolve `external_action`, through the unified queue's `/api/approvals/:id/respond` (`approved|rejected`) or deterministic typed `approve <id-prefix>` / `reject <id-prefix>` channel commands. Channel decisions additionally require the exact configured channel ID and pinned integration; a web-only source or an unpinned integration cannot use channel consent. The web card shows the full frozen title/message/options as plain text, offers only Allow once/Reject, and excludes these requests from bulk approval. The notification presents the frozen request for an inline Allow/Deny decision and still links to the Approvals panel. Ambiguous or unavailable prefixes are consumed without invoking the model. External requests cannot use delegated review assignments, prior delegated receipts, learned patterns, standing grants, permanent approvals, or generic `PendingApprovalsStore.respond`.
+Only the configured, currently authorized human may resolve `external_action`, through `/api/approvals/:id/respond` (`approved|rejected`) — including restored chat confirmation cards and Attention Allow/Deny — or deterministic typed `approve <id-prefix>` / `reject <id-prefix>` channel commands. Channel decisions additionally require the exact configured channel ID and pinned integration; a web-only source or an unpinned integration cannot use channel consent. The chat confirmation card shows the frozen title/message as description/display lines and offers Allow/Deny. Ambiguous or unavailable prefixes are consumed without invoking the model. External requests cannot use delegated review assignments, prior delegated receipts, learned patterns, standing grants, permanent approvals, or generic `PendingApprovalsStore.respond`.
 
 Insertion is transactional and source-key serialized. Every decision locks the native pending row, verifies current source authority and checks the database clock in its final write. Only one approve/reject wins. Expired pending requests become expired. A recorded human decision is never rewritten merely because its expiry elapses: polling projects unacknowledged elapsed decisions as `expired`, and an `applied` receipt is then refused. An existing receipt remains historical, not a renewed grant.
 
@@ -71,10 +76,10 @@ Receipts are separate from human decisions. Both approval and denial can be ackn
 
 ## Focused verification
 
-From `packages/api`, with existing dependencies (141 focused protocol, management, SQL, channel-routing and migration compatibility tests):
+From `packages/api`, with existing dependencies (protocol, management, SQL, channel-routing, session-confirmation and migration compatibility tests):
 
 ```sh
-NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/vitest run src/external-approvals/__tests__ src/workflow/__tests__/approval-replies.test.ts src/workflow/__tests__/approval-deliveries.test.ts src/workflow/__tests__/recent-approval-channel.test.ts src/routes/__tests__/approvals.test.ts src/routes/__tests__/channel-workflow-replies.test.ts scripts/__tests__/migration-order.test.ts scripts/__tests__/migration-renames.test.ts --maxWorkers=1
+NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/vitest run src/external-approvals/__tests__ src/routes/__tests__/sessions-questions.test.ts src/workflow/__tests__/approval-replies.test.ts src/workflow/__tests__/approval-deliveries.test.ts src/workflow/__tests__/recent-approval-channel.test.ts src/routes/__tests__/approvals.test.ts src/routes/__tests__/channel-workflow-replies.test.ts scripts/__tests__/migration-order.test.ts scripts/__tests__/migration-renames.test.ts --maxWorkers=1
 NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/tsc --noEmit
 ```
 
@@ -84,10 +89,10 @@ From `apps/api`, after building package dependencies, verify fresh and previousl
 node --import tsx --test src/__tests__/migration-renames.test.ts
 ```
 
-From `apps/app-web` (60 focused tests, including workspace registration and existing cache/filter regressions):
+From `apps/app-web` (confirmation-card/Attention behavior, workspace registration and existing cache/filter regressions):
 
 ```sh
-NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/vitest run src/lib/__tests__/approvals-filter.test.ts src/lib/__tests__/external-approvals-api.test.ts src/components/doc/panels/__tests__/approvals-cache.test.tsx src/lib/api/__tests__/external-approval-sources.test.ts src/components/settings-modal/sections/__tests__/external-approvals-section.test.tsx src/components/settings-modal/__tests__/settings-modal.test.ts --maxWorkers=1
+NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/vitest run src/components/chrome/__tests__/external-action-confirmation.test.tsx src/components/chrome/__tests__/chat-confirmation-card.test.tsx src/components/chat-app/__tests__/approval-review-chat.test.tsx src/lib/api/__tests__/pending-session-input.test.ts src/lib/__tests__/approvals-filter.test.ts src/lib/__tests__/external-approvals-api.test.ts src/components/doc/panels/__tests__/approvals-cache.test.tsx src/lib/api/__tests__/external-approval-sources.test.ts src/components/settings-modal/sections/__tests__/external-approvals-section.test.tsx src/components/settings-modal/__tests__/settings-modal.test.ts --maxWorkers=1
 NODE_OPTIONS=--max-old-space-size=6144 node_modules/.bin/tsc --noEmit --incremental false
 ```
 

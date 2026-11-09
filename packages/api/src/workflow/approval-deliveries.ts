@@ -2,13 +2,15 @@
  * Approval prompt deliveries — Phase C (Q4 §12).
  *
  * Dispatch a confirmation-style notification over the chosen channel.
- * Best-effort — the web Approvals panel is always a valid response surface
- * even when delivery fails.
+ * Best-effort — chat confirmation cards / channel Allow-Deny remain the
+ * response surface even when delivery fails.
  *
  * Channel cards mirror tool-confirmation UX: title + details + Allow/Deny
  * actions whose reply text is the existing `approve <id>` / `reject <id>`
- * command path. Personal web chat destinations receive the same card text
- * as an assistant message in the verified session.
+ * command path. Personal web chat destinations bind the pending row to that
+ * session so GET /sessions/:id/pending returns externalConfirmations rendered
+ * with the shared ChatConfirmationCard;
+ * no Approvals-panel queue is required for the decision.
  *
  * [COMP:channels/approval-deliveries]
  */
@@ -29,27 +31,36 @@ export function createApprovalDeliveryDispatcher(
   deps: ApprovalDeliveryDeps,
 ): ApprovalDeliveryDispatcher {
   return async (params) => {
-    const deepLink = `${deps.webBaseUrl}/w/${params.workspaceId}/p?panel=approvals&approval=${params.approvalId}`
-    const message = composeMessage(params, deepLink)
-    const actions = confirmationActions(params.approvalId)
-
-    // Verified personal web chat: post the confirmation card into that session.
-    // The Approvals panel remains available; web inbox (`channelId: 'queue'`) stays a no-op push.
     const webSessionId =
       params.recentTarget?.channelType === 'web'
         ? params.recentTarget.channelId
         : params.deliveryChannelType === 'web' && params.deliveryChannelId && params.deliveryChannelId !== 'queue'
           ? params.deliveryChannelId
           : null
-    if (webSessionId) {
-      await deliverWebChat(params, webSessionId, message)
+    // Personal web chat: the pending row is already bound to delivery_channel_id.
+    // Chat restores it as a confirmation card via GET /sessions/:id/pending — no
+    // separate Approvals-panel push and no assistant transcript substitute.
+    if (webSessionId && !params.externalAction) {
+      // Preserve native workflow notification behavior. Only external requests
+      // have the independent externalConfirmations restore path.
+      const session = await findSessionById(webSessionId)
+      if (params.assistantId && session?.assistantId === params.assistantId
+        && session.userId === params.approverUserId && session.channelType === 'web') {
+        await addSessionMessage({ sessionId: session.id, role: 'assistant',
+          content: [{ type: 'text', text: composeMessage(params,
+            `${deps.webBaseUrl}/w/${params.workspaceId}/p?panel=approvals&approval=${params.approvalId}`) }],
+          senderAssistantId: params.assistantId,
+        }).catch(err => console.warn('[approval-deliveries] native web notification failed', err))
+      }
       return
     }
+    if (webSessionId || params.deliveryChannelType === 'web') return
 
-    if (params.deliveryChannelType === 'web') {
-      // Web inbox — the Approvals panel surfaces the row independently.
-      return
-    }
+    const deepLink = params.externalAction
+      ? `${deps.webBaseUrl}/w/${params.workspaceId}/chat?attention=${encodeURIComponent(params.approvalId)}`
+      : `${deps.webBaseUrl}/w/${params.workspaceId}/p?panel=approvals&approval=${params.approvalId}`
+    const message = composeMessage(params, deepLink)
+    const actions = confirmationActions(params.approvalId)
 
     if (params.recentTarget) {
       if (!deps.deliverToChannel || !params.assistantId) return
@@ -122,12 +133,12 @@ function composeMessage(
   deepLink: string,
 ): string {
   const id = shortId(params.approvalId)
-  const title = params.prompt?.title?.trim()
+  const title = params.prompt?.title
     || (params.externalAction
       ? 'An external agent action needs your approval'
       : 'A workflow action needs your approval')
-  const details = params.prompt?.details?.trim()
-  const question = `Allow this action?\nReply: approve / deny`
+  const details = params.prompt?.details
+  const question = 'Allow this action?'
   return [
     `**${title}**`,
     ...(details ? ['', details] : []),
@@ -139,33 +150,6 @@ function composeMessage(
   ].join('\n')
 }
 
-async function deliverWebChat(
-  params: Parameters<ApprovalDeliveryDispatcher>[0],
-  sessionId: string,
-  text: string,
-): Promise<void> {
-  if (!params.assistantId) return
-  const session = await findSessionById(sessionId)
-  if (!session
-    || session.assistantId !== params.assistantId
-    || session.userId !== params.approverUserId
-    || session.channelType !== 'web') {
-    console.warn(
-      `[approval-deliveries] web chat session ${sessionId} unavailable for approval ${params.approvalId}; relying on web UI`,
-    )
-    return
-  }
-  try {
-    await addSessionMessage({
-      sessionId: session.id,
-      role: 'assistant',
-      content: [{ type: 'text', text }],
-      senderAssistantId: params.assistantId,
-    })
-  } catch (err) {
-    console.warn(`[approval-deliveries] web chat delivery failed for approval ${params.approvalId}:`, err)
-  }
-}
 
 async function resolveTelegramChatId(userId: string): Promise<string | null> {
   const result = await query<{ chatId: string }>(

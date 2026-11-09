@@ -257,11 +257,13 @@ import { accelEnterLabel } from "@/lib/surface-shortcuts";
 import {
   fetchPendingSessionInput,
   toRestoredConfirmation,
+  type ExternalActionConfirmation as ExternalRequest,
 } from "@/lib/api/pending-questions";
 import { respondByKind } from "@/lib/api/approvals";
-import { requestApprovalsRefresh } from "@/lib/approvals-events";
+import { APPROVALS_REFRESH_EVENT, requestApprovalsRefresh, type ApprovalsRefreshDetail } from "@/lib/approvals-events";
 import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
+import { ExternalActionConfirmation } from "@/components/chrome/external-action-confirmation";
 import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
 import { ChatSidePane, ChatSidePaneToggle } from "@/components/chat-app/chat-side-pane";
 import { ChatPaneLink, PaneLinkProvider } from "@/components/chat-app/chat-link-routing";
@@ -1652,6 +1654,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setRemoteStartedAt(null);
   }, []);
 
+  const [externalRequests, setExternalRequests] = useState<{ workspaceId: string; sessionId: string; items: ExternalRequest[] } | null>(null);
+
   const refreshPendingInput = useCallback(
     (sessionId: string) => {
       const epoch = sessionEpochRef.current;
@@ -1659,12 +1663,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       const controllerProbe = chatController.capture();
       const request = ++pendingInputRequestRef.current;
       void fetchPendingSessionInput(sessionId)
-        .then(({ pending, toolConfirmation }) => {
+        .then(({ pending, toolConfirmation, externalConfirmations }) => {
           if (
             sessionEpochRef.current !== epoch ||
             sessionIdRef.current !== sessionId ||
             pendingInputRequestRef.current !== request
           ) return;
+          // Independent of the current Brian turn; transient read failures
+          // omit this field so mounted requests are not mistaken for an empty list.
+          if (externalConfirmations) setExternalRequests({ workspaceId, sessionId, items: externalConfirmations });
           if (!chatController.isCurrent(controllerProbe)) return;
           setPendingQuestion(
             pending
@@ -1700,8 +1707,21 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         })
         .catch(() => {});
     },
-    [chat.addConfirmation, chatController],
+    [workspaceId, chat.addConfirmation, chatController],
   );
+
+  // External approvals delivered into this chat restore as confirmation cards
+  // via GET /pending. Re-probe when the workspace approval signal fires.
+  useEffect(() => {
+    const onRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<ApprovalsRefreshDetail>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      const sessionId = sessionIdRef.current;
+      if (sessionId) refreshPendingInput(sessionId);
+    };
+    window.addEventListener(APPROVALS_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(APPROVALS_REFRESH_EVENT, onRefresh);
+  }, [workspaceId, refreshPendingInput]);
 
   // A turn-end explanation belongs to the room it happened in; switching
   // rooms must not carry it across.
@@ -4815,6 +4835,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             workspaceId={workspaceId}
             sessionId={activeSessionId ?? null}
             projectId={activeContextSession?.contextProjectId ?? null}
+            openRequestId={searchParams?.get("attention") ?? null}
           />
           {!heroMode && <ChatSidePaneToggle pane={pane} />}
           <button
@@ -5314,6 +5335,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 write confirmations ride their POST stream; a teammate's ride
                 the activity mirror. EVERYONE sees the card — the server
                 enforces who may act (addresser or workspace admin). */}
+            {externalRequests?.workspaceId === workspaceId && externalRequests.sessionId === activeSessionId && externalRequests.items.map((request) => (
+              <ExternalActionConfirmation
+                key={`${workspaceId}:${activeSessionId}:${request.approvalId}`}
+                workspaceId={workspaceId}
+                request={request}
+                onResolved={() => refreshPendingInput(activeSessionId!)}
+              />
+            ))}
             {chat.state.pendingConfirmations
               .filter((c) => c.status === "pending" || c.status === "approving")
               .map((c) => (
