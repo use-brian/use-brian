@@ -195,7 +195,7 @@ describe("[COMP:app-web/approval-review-chat] chat attention and reviewer contro
     expect(Array.from(host.querySelectorAll('textarea')).map(el => el.value)).toEqual(["  first answer\n ", ""]);
     expect(button(t.assign)).toBeUndefined(); expect(button(t.reviewNow)).toBeUndefined();
     expect(button(t.allow)).toBeTruthy(); expect(button(t.deny)).toBeTruthy();
-    await click(button(t.submitAnswer));
+    await click(button(en.chat.pendingQuestion.submit));
     expect(api.answerExternalQuestion).toHaveBeenCalledExactlyOnceWith("ap-1", "  first answer\n ");
     expect(api.respondByKind).not.toHaveBeenCalled();
     expect(host.textContent).toContain(t.answered);

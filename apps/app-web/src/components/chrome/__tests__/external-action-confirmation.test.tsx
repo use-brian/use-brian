@@ -5,8 +5,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExternalActionConfirmation as Request } from "@/lib/api/pending-questions";
 
-const api = vi.hoisted(() => ({ respondByKind: vi.fn(), answerExternalQuestion: vi.fn(), resume: vi.fn() }));
+const api = vi.hoisted(() => ({ respondByKind: vi.fn(), answerExternalQuestion: vi.fn(), resume: vi.fn(), nativeSubmit: vi.fn(), nativeCancel: vi.fn() }));
 vi.mock("@/lib/api/approvals", () => ({ respondByKind: api.respondByKind, answerExternalQuestion: api.answerExternalQuestion }));
+vi.mock("@/lib/api/pending-questions", () => ({ submitAnswer: api.nativeSubmit, cancelPendingQuestion: api.nativeCancel }));
 // The real card is deliberately not mocked. Any accidental network/resume work fails the test.
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: api.resume }));
 vi.mock("@/lib/i18n/client", async () => {
@@ -43,6 +44,8 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount()); host.remove(); vi.useRealTimers();
   expect(api.resume).not.toHaveBeenCalled();
+  expect(api.nativeSubmit).not.toHaveBeenCalled();
+  expect(api.nativeCancel).not.toHaveBeenCalled();
 });
 
 describe("[COMP:app-web/external-action-confirmation] independent external consent", () => {
@@ -142,12 +145,16 @@ describe("[COMP:app-web/external-action-confirmation] external questions", () =>
     const row = question(); await render({ request: row });
     expect(host.textContent).toContain(row.title);
     expect(host.textContent).toContain(row.message);
+    expect(host.querySelector("form")?.getAttribute("aria-label")).toBe(row.title);
+    expect(host.textContent).toContain(en.chat.pendingQuestion.heading);
+    expect(host.querySelector("textarea")?.placeholder).toBe(en.chat.pendingQuestion.placeholder);
+    expect(document.activeElement).not.toBe(host.querySelector("textarea"));
     expect(host.querySelector("script, b, a")).toBeNull();
-    expect(buttons().map(el => el.textContent)).toEqual([t.submitAnswer]);
+    expect(buttons().map(el => el.textContent)).toEqual([en.chat.pendingQuestion.submit]);
     expect(host.querySelector("label")?.htmlFor).toBe(host.querySelector("textarea")?.id);
-    expect(button(t.submitAnswer).disabled).toBe(true);
-    await typeAnswer(" \t\n "); expect(button(t.submitAnswer).disabled).toBe(true);
-    const literal = "  <b>raw</b>\nanswer\t  "; await typeAnswer(literal); await click(t.submitAnswer);
+    expect(button(en.chat.pendingQuestion.submit).disabled).toBe(true);
+    await typeAnswer(" \t\n "); expect(button(en.chat.pendingQuestion.submit).disabled).toBe(true);
+    const literal = "  <b>raw</b>\nanswer\t  "; await typeAnswer(literal); await click(en.chat.pendingQuestion.submit);
     expect(api.answerExternalQuestion).toHaveBeenCalledExactlyOnceWith("external-1", literal);
     expect(api.respondByKind).not.toHaveBeenCalled();
     expect(host.textContent).toBe(t.answered);
@@ -156,24 +163,24 @@ describe("[COMP:app-web/external-action-confirmation] external questions", () =>
     await render({ request: question() });
     await typeAnswer("x".repeat(32769));
     expect(host.querySelector("textarea")?.value).toHaveLength(32769);
-    expect(button(t.submitAnswer).disabled).toBe(true);
+    expect(button(en.chat.pendingQuestion.submit).disabled).toBe(true);
     await typeAnswer("x".repeat(32768));
-    expect(button(t.submitAnswer).disabled).toBe(false);
+    expect(button(en.chat.pendingQuestion.submit).disabled).toBe(false);
   });
   it("keeps the mounted draft through a network failure and retries only explicitly", async () => {
     api.answerExternalQuestion.mockRejectedValueOnce(new Error("offline"));
     const onResolved = vi.fn(); const row = question(); await render({ request: row, onResolved });
-    await typeAnswer("  retry\n "); await click(t.submitAnswer);
+    await typeAnswer("  retry\n "); await click(en.chat.pendingQuestion.submit);
     await render({ request: { ...row }, onResolved });
     expect(host.querySelector("textarea")?.value).toBe("  retry\n ");
     expect(host.textContent).toContain(t.answerFailed); expect(onResolved).not.toHaveBeenCalled();
     expect(api.answerExternalQuestion).toHaveBeenCalledTimes(1);
-    await click(t.submitAnswer); expect(onResolved).toHaveBeenCalledTimes(1);
+    await click(en.chat.pendingQuestion.submit); expect(onResolved).toHaveBeenCalledTimes(1);
     expect(api.answerExternalQuestion).toHaveBeenLastCalledWith("external-1", "  retry\n ");
   });
   it.each([403, 404, 409, 410])("reports changed rather than the attempted answer on %s", async status => {
     api.answerExternalQuestion.mockResolvedValueOnce({ ok: false, status });
-    await render({ request: question() }); await typeAnswer("mine"); await click(t.submitAnswer);
+    await render({ request: question() }); await typeAnswer("mine"); await click(en.chat.pendingQuestion.submit);
     expect(host.textContent).toBe(t.changed); expect(host.textContent).not.toContain(t.answered);
   });
   it("disables a mounted question and retains its draft when expiry passes", async () => {
@@ -183,7 +190,7 @@ describe("[COMP:app-web/external-action-confirmation] external questions", () =>
     await act(async () => { vi.advanceTimersByTime(1001); });
     expect(host.querySelector("textarea")?.value).toBe("draft");
     expect(host.querySelector("textarea")?.disabled).toBe(true);
-    await click(t.submitAnswer); expect(api.answerExternalQuestion).not.toHaveBeenCalled();
+    await click(en.chat.pendingQuestion.submit); expect(api.answerExternalQuestion).not.toHaveBeenCalled();
     expect(host.textContent).toContain(t.expired);
   });
   it("offers literal closed single choices and preserves selection for retry", async () => {
@@ -192,10 +199,10 @@ describe("[COMP:app-web/external-action-confirmation] external questions", () =>
     await render({ request: question({ options }) });
     expect(host.querySelector("textarea, select")).toBeNull();
     expect(host.textContent).toContain(options[0]);
-    await selectAnswer(options[0]); await click(t.submitAnswer);
+    await selectAnswer(options[0]); await click(en.chat.pendingQuestion.submit);
     expect(api.answerExternalQuestion).toHaveBeenCalledWith("external-1", options[0]);
-    expect(button(t.submitAnswer).disabled).toBe(false);
-    await click(t.submitAnswer); expect(host.textContent).toBe(t.answered);
+    expect(button(en.chat.pendingQuestion.submit).disabled).toBe(false);
+    await click(en.chat.pendingQuestion.submit); expect(host.textContent).toBe(t.answered);
   });
   it("offers custom text only when explicitly allowed and retains its independent draft", async () => {
     await render({ request: question({ options: ["One", "Two"], allowCustom: true }) });
@@ -203,7 +210,7 @@ describe("[COMP:app-web/external-action-confirmation] external questions", () =>
     await selectAnswer(t.customAnswer); await typeAnswer(" custom\n ");
     await selectAnswer("One"); expect(host.querySelector("textarea")).toBeNull();
     await selectAnswer(t.customAnswer); expect(host.querySelector("textarea")?.value).toBe(" custom\n ");
-    await click(t.submitAnswer);
+    await click(en.chat.pendingQuestion.submit);
     expect(api.answerExternalQuestion).toHaveBeenCalledExactlyOnceWith("external-1", " custom\n ");
   });
   it("keeps concurrent cards independent", async () => {
@@ -211,5 +218,31 @@ describe("[COMP:app-web/external-action-confirmation] external questions", () =>
     await typeAnswer("first");
     expect(Array.from(host.querySelectorAll("textarea")).map(el => el.value)).toEqual(["first", ""]);
     expect(new Set(Array.from(host.querySelectorAll("textarea")).map(el => el.id)).size).toBe(2);
+    expect(Array.from(host.querySelectorAll("textarea"))).not.toContain(document.activeElement);
+  });
+  it("keeps concurrent option and text cards usable while another answer is in flight", async () => {
+    let resolve!: (value: { ok: true; status: string }) => void;
+    api.answerExternalQuestion.mockReturnValueOnce(new Promise(done => { resolve = done; }));
+    const composer = document.createElement("textarea"); document.body.appendChild(composer); composer.focus();
+    try {
+      await act(async () => root.render(<>
+        <ExternalActionConfirmation workspaceId="ws-1" request={question()} />
+        <ExternalActionConfirmation workspaceId="ws-1" request={question({ approvalId: "external-2", options: ["  option\n ", "Other"] })} />
+      </>));
+      expect(document.activeElement).toBe(composer);
+      await typeAnswer("first");
+      const first = button(en.chat.pendingQuestion.submit);
+      await act(async () => { first.click(); first.click(); });
+      expect(api.answerExternalQuestion).toHaveBeenCalledTimes(1);
+      expect(host.querySelector("textarea")?.disabled).toBe(true);
+      expect((host.querySelector('[role="combobox"]') as HTMLButtonElement).disabled).toBe(false);
+      expect(composer.disabled).toBe(false);
+      await selectAnswer("  option\n ");
+      const sends = buttons().filter(el => el.textContent === en.chat.pendingQuestion.submit);
+      expect(sends).toHaveLength(1); expect(sends[0].disabled).toBe(false);
+      await act(async () => sends[0].click());
+      expect(api.answerExternalQuestion).toHaveBeenLastCalledWith("external-2", "  option\n ");
+      await act(async () => resolve({ ok: true, status: "answered" }));
+    } finally { composer.remove(); }
   });
 });
