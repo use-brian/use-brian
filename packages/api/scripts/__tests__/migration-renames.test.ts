@@ -20,15 +20,20 @@ describe('[COMP:api/migration-order] Migration filename compatibility', () => {
 
   it('preserves every external ledger spelling without skipping provenance or Telegram recovery', () => {
     const renames = [
-      { previousName: '8240_external_human_approvals.sql', currentName: '8242_external_human_approvals.sql' },
-      { previousName: '8241_external_human_approvals.sql', currentName: '8242_external_human_approvals.sql' },
-      { previousName: '8241_workspace_external_approval_sources.sql', currentName: '8243_workspace_external_approval_sources.sql' },
-      { previousName: '8242_workspace_external_approval_sources.sql', currentName: '8243_workspace_external_approval_sources.sql' },
-      { previousName: '8243_external_approval_web_chat_destination.sql', currentName: '8244_external_approval_web_chat_destination.sql' },
-      { previousName: '8244_external_approval_conversation_members.sql', currentName: '8245_external_approval_conversation_members.sql' },
-      { previousName: '8245_external_human_question_answers.sql', currentName: '8246_external_human_question_answers.sql' },
+      { previousName: '8240_external_human_approvals.sql', currentName: '8252_external_human_approvals.sql' },
+      { previousName: '8241_external_human_approvals.sql', currentName: '8252_external_human_approvals.sql' },
+      { previousName: '8241_workspace_external_approval_sources.sql', currentName: '8253_workspace_external_approval_sources.sql' },
+      { previousName: '8242_workspace_external_approval_sources.sql', currentName: '8253_workspace_external_approval_sources.sql' },
+      { previousName: '8243_external_approval_web_chat_destination.sql', currentName: '8254_external_approval_web_chat_destination.sql' },
+      { previousName: '8244_external_approval_conversation_members.sql', currentName: '8255_external_approval_conversation_members.sql' },
+      { previousName: '8245_external_human_question_answers.sql', currentName: '8256_external_human_question_answers.sql' },
+      { previousName: '8242_external_human_approvals.sql', currentName: '8252_external_human_approvals.sql' },
+      { previousName: '8243_workspace_external_approval_sources.sql', currentName: '8253_workspace_external_approval_sources.sql' },
+      { previousName: '8244_external_approval_web_chat_destination.sql', currentName: '8254_external_approval_web_chat_destination.sql' },
+      { previousName: '8245_external_approval_conversation_members.sql', currentName: '8255_external_approval_conversation_members.sql' },
+      { previousName: '8246_external_human_question_answers.sql', currentName: '8256_external_human_question_answers.sql' },
     ]
-    const neighbours = ['8240_channel_connection_provenance.sql', '8241_telegram_recording_history_recovery.sql']
+    const neighbours = ['8240_channel_connection_provenance.sql', '8241_telegram_recording_history_recovery.sql', '8242_native_empty_annotation_lookup.sql', '8243_active_work_recording_native_proof.sql', '8244_native_mixed_field_dependencies.sql', '8245_native_current_field_planning.sql', '8246_native_private_memory_empty_domain.sql']
     const canonical = [...new Set(renames.map(row => row.currentName))]
     expect(findAppliedMigrationRenames(new Set(neighbours))).toEqual([])
     expect(findAppliedMigrationRenames(new Set([...neighbours, ...renames.map(row => row.previousName)]))).toEqual(renames)

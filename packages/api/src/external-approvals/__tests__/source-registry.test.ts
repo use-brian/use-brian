@@ -32,9 +32,9 @@ beforeAll(async()=>{
   await db.query('INSERT INTO assistants VALUES($1,$2)',[assistantId,workspaceId])
   await db.query("INSERT INTO workspace_members VALUES($1,$2,'admin'),($1,$3,'member')",[workspaceId,userId,approverUserId])
   await db.query("INSERT INTO auth_sessions(id,user_id,expires_at) VALUES($1,$2,clock_timestamp()+interval '1 day')",[sessionId,userId])
-  await db.exec(readFileSync(new URL('../../../migrations/8243_workspace_external_approval_sources.sql',import.meta.url),'utf8'))
+  await db.exec(readFileSync(new URL('../../../migrations/8253_workspace_external_approval_sources.sql',import.meta.url),'utf8'))
   await db.exec('CREATE TABLE pending_approvals(id uuid PRIMARY KEY,workspace_id uuid,kind text,approver_user_id uuid,originating_assistant_id uuid,delivery_channel_type text,delivery_channel_id text); ALTER TABLE pending_approvals ENABLE ROW LEVEL SECURITY;')
-  await db.exec(readFileSync(new URL('../../../migrations/8245_external_approval_conversation_members.sql',import.meta.url),'utf8'))
+  await db.exec(readFileSync(new URL('../../../migrations/8255_external_approval_conversation_members.sql',import.meta.url),'utf8'))
 },30000)
 afterAll(()=>db.close())
 describe('[COMP:api/external-approvals] workspace source registry',()=>{

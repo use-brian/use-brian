@@ -744,7 +744,7 @@ export type AdminApprovalRow = {
   workflowStepRunId: string | null
   blockingSessionId: string | null
   originatingAssistantId: string | null
-  approverUserId: string
+  approverUserId: string | null
   deliveryChannelType: ApprovalDeliveryChannel | null
   expiresAt: Date | null
   respondedAt: Date | null
@@ -1791,7 +1791,7 @@ function rowToAdminRow(row: Record<string, unknown>): AdminApprovalRow {
     workflowStepRunId: (row.workflowStepRunId as string | null) ?? null,
     blockingSessionId: (row.blockingSessionId as string | null) ?? null,
     originatingAssistantId: (row.originatingAssistantId as string | null) ?? null,
-    approverUserId: row.approverUserId as string,
+    approverUserId: (row.approverUserId as string | null) ?? null,
     deliveryChannelType: (row.deliveryChannelType as ApprovalDeliveryChannel | null) ?? null,
     expiresAt: (row.expiresAt as Date | null) ?? null,
     respondedAt,

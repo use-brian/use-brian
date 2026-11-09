@@ -52,9 +52,9 @@ beforeAll(async()=>{
   await db.query('INSERT INTO auth_sessions(id,user_id,expires_at) VALUES($1,$2,clock_timestamp()+interval \'1 hour\')',[sessionId,source.approverUserId])
   await db.query('INSERT INTO workspace_members(workspace_id,user_id) VALUES($1,$2)',[source.workspaceId,source.approverUserId])
   await db.query('INSERT INTO assistants VALUES($1,$2)',[source.assistantId,source.workspaceId])
-  await db.exec(readFileSync(new URL('../../../migrations/8242_external_human_approvals.sql',import.meta.url),'utf8'))
-  await db.exec(readFileSync(new URL('../../../migrations/8246_external_human_question_answers.sql',import.meta.url),'utf8'))
-  await db.exec(readFileSync(new URL('../../../migrations/8243_workspace_external_approval_sources.sql',import.meta.url),'utf8'))
+  await db.exec(readFileSync(new URL('../../../migrations/8252_external_human_approvals.sql',import.meta.url),'utf8'))
+  await db.exec(readFileSync(new URL('../../../migrations/8256_external_human_question_answers.sql',import.meta.url),'utf8'))
+  await db.exec(readFileSync(new URL('../../../migrations/8253_workspace_external_approval_sources.sql',import.meta.url),'utf8'))
   // Lightweight store fixture. Full migration and RLS behavior is covered by
   // the lightweight destination migration suite (canonical helpers mocked).
   await db.exec(`ALTER TABLE workspace_external_approval_sources ALTER COLUMN approver_user_id DROP NOT NULL,

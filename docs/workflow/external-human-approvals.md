@@ -41,9 +41,9 @@ Issuance responses use `Cache-Control: no-store`. Authority identifiers and sour
 
 ### Database rollout
 
-Migrations `8242_external_human_approvals.sql`, `8243_workspace_external_approval_sources.sql`, `8244_external_approval_web_chat_destination.sql` and additive `8245_external_approval_conversation_members.sql` describe the schema. Migration 8245 permits nullable approvers only for external approvals; native approvals still require a named approver. It adds `audience: conversation_members`, `destination_session_id` and `thread_ref` without rewriting legacy sources or hashes.
+Migrations `8252_external_human_approvals.sql`, `8253_workspace_external_approval_sources.sql`, `8254_external_approval_web_chat_destination.sql` and additive `8255_external_approval_conversation_members.sql` describe the schema. Migration 8255 permits nullable approvers only for external approvals; native approvals still require a named approver. It adds `audience: conversation_members`, `destination_session_id` and `thread_ref` without rewriting legacy sources or hashes.
 
-These filenames follow develop's `8241_telegram_recording_history_recovery.sql`. Permanent exact-filename aliases preserve every prior external migration spelling, including the earlier `8240`/`8241` approval and source names. Already-applied external SQL is not replayed, and its original ledger timestamps are retained; unrelated same-number migrations are never treated as aliases. Run the ordinary migration command rather than manually renaming or deleting ledger rows.
+These filenames follow the native context and Page-thread sequence through `8251_private_page_thread_source.sql`. Permanent exact-filename aliases preserve every prior external migration spelling, including the earlier `8240`/`8241` approval and source names and all previously canonical `8242` through `8246` approval names. SQL bytes remain unchanged. Already-applied external SQL is not replayed, and its original ledger timestamps are retained; unrelated same-number migrations are never treated as aliases. Run the ordinary migration command rather than manually renaming or deleting ledger rows.
 
 The immutable binding freezes the selected session, integration and exact Slack/Feishu thread, and requires the pinned assistant to remain the winning route. Unthreaded and threaded conversations are distinct; neither can authorize the other. Only conversation-member `sourceBinding` adds the `conversation_members:v1` version and session/thread fields; legacy source-binding and payload hashes remain unchanged.
 
@@ -92,7 +92,7 @@ Poll the same source lifecycle endpoint: applicable question responses expose `s
 
 The shared `ChatConfirmationCard` actions slot renders text, select or custom-answer inputs with a Submit form in both Chat and Needs you. External arrays remain independent and concurrent without blocking the composer. Mounted drafts survive transient errors for retry; expiry, lost races and current permission checks still gate submission and refresh.
 
-Migration `8246_external_human_question_answers.sql` adds `human_answer` to the same private sidecar. It requires an ordinary reviewed migration after the code update; it is not evidence of a live applied migration, tested rollout or deployment.
+Migration `8256_external_human_question_answers.sql` adds `human_answer` to the same private sidecar. It requires an ordinary reviewed migration after the code update; it is not evidence of a live applied migration, tested rollout or deployment.
 
 Example ingestion (existing `TOKEN` and `REQUEST_ID`; generic `BASE_URL`, task/session correlation IDs):
 
@@ -136,3 +136,10 @@ with the web suite above for presentation, native endpoint/cancel and connector
 regressions. No new dictionary strings are introduced.
 
 The explicit heap avoids the automatic diagnostic runner's 2 GiB limit. Focused SQL tests use ephemeral PGlite with mocked canonical helper bodies and notification/service ports; the fresh-chain test separately applies the real migrations. Neither proves multi-connection PostgreSQL races or live end-to-end delivery. Tests never connect to a live database.
+
+## Responsive control contract
+
+Approval forms and workspace registration use compact desktop controls with a
+44px minimum touch target on phones. Shared Select triggers render each option's
+human-readable label, including when the stored value is an opaque destination
+or assistant ID. Native and external question forms retain the same dimensions.

@@ -78,11 +78,11 @@ export function QuestionAnswerForm({
     {error && <div className="text-xs text-destructive">{error}</div>}
     {ready && <div className="flex items-center justify-between gap-2">
       {cancel && <button type="button" onClick={cancel.onClick} disabled={locked}
-        className="min-h-11 rounded-md px-2.5 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed">
+        className="min-h-8 max-sm:min-h-11 rounded-md px-2.5 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed">
         {cancel.label}
       </button>}
       <button type="submit" disabled={locked || !canSubmit}
-        className="ml-auto min-h-11 rounded-md bg-action px-3 py-1 text-[12px] font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50 disabled:cursor-not-allowed">
+        className="ml-auto min-h-8 max-sm:min-h-11 rounded-md bg-action px-3 py-1 text-[12px] font-medium text-action-foreground transition-colors hover:bg-action/90 disabled:opacity-50 disabled:cursor-not-allowed">
         {submitting ? dict.submitting : dict.submit}
       </button>
     </div>}

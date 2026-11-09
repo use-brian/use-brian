@@ -104,11 +104,11 @@ export function ExternalActionConfirmation({ workspaceId, request, onResolved }:
               <div className="space-y-1">
                 <label id={`${inputId}-choice`}>{t.chooseAnswer}</label>
                 <Select items={choiceItems} value={choice} onValueChange={setChoice} disabled={busy || expired}>
-                  <SelectTrigger aria-labelledby={`${inputId}-choice`} className="min-h-11 w-full text-base whitespace-pre-wrap break-words [&_[data-slot=select-value]]:line-clamp-none">
+                  <SelectTrigger aria-labelledby={`${inputId}-choice`} className="min-h-8 max-sm:min-h-11 w-full text-base whitespace-pre-wrap break-words [&_[data-slot=select-value]]:line-clamp-none">
                     <SelectValue placeholder={t.chooseAnswer} />
                   </SelectTrigger>
                   <SelectContent>
-                    {choiceItems.map(item => <SelectItem key={item.value} value={item.value} className="min-h-11 text-base [&_span]:whitespace-pre-wrap [&_span]:break-words">{item.label}</SelectItem>)}
+                    {choiceItems.map(item => <SelectItem key={item.value} value={item.value} className="min-h-8 max-sm:min-h-11 text-base [&_span]:whitespace-pre-wrap [&_span]:break-words">{item.label}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>

@@ -136,8 +136,15 @@ const typeAnswer = async (value: string) => {
 const question = (over: Partial<Request> = {}) => request({ method: "question", options: undefined, ...over });
 const selectAnswer = async (label: string) => {
   await act(async () => { (host.querySelector('[role="combobox"]') as HTMLButtonElement).click(); });
-  const item = Array.from(document.querySelectorAll('[role="option"]')).find(el => el.textContent === label);
+  // Closing portals can remain mounted for their exit animation. Interact
+  // with the currently open popup, as a browser user would.
+  await vi.waitFor(() => expect(document.querySelector('[data-slot="select-content"][data-open]')).toBeTruthy());
+  const popup = document.querySelector('[data-slot="select-content"][data-open]')!;
+  const item = Array.from(popup.querySelectorAll('[role="option"]')).find(el => el.textContent === label);
   expect(item).toBeTruthy();
+  // Base UI commits a mouse click only on the highlighted item. A real
+  // pointer moves over the target before clicking it.
+  await act(async () => item!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })));
   await act(async () => (item as HTMLElement).click());
 };
 describe("[COMP:app-web/external-action-confirmation] external questions", () => {

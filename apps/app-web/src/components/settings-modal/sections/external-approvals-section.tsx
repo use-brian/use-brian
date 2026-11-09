@@ -103,24 +103,24 @@ function ExternalApprovalsAdmin({ workspaceId, viewerId }: {workspaceId: string;
   const data = resource.data;
   const canCreate = !!draft.name.trim() && validAssistant && destinations.error === undefined && destinations.data?.destinations.some(d => d.id === draft.destinationId && d.assistantId === draft.assistantId);
   const disabled = busy || !!secret;
-  const picker = (label: string, value: string, options: {id:string;label:string}[], change: (value:string) => void) => <div className="space-y-1"><span className="text-sm">{label}</span><Select value={value || null} onValueChange={v => change(v ?? '')} disabled={disabled}><SelectTrigger aria-label={label} className="min-h-11 w-full text-base"><SelectValue placeholder={t.choose} /></SelectTrigger><SelectContent>{options.map(o => <SelectItem className="min-h-11 whitespace-normal break-all text-base" key={o.id} value={o.id}>{o.label}</SelectItem>)}</SelectContent></Select></div>;
+  const picker = (label: string, value: string, options: {id:string;label:string}[], change: (value:string) => void) => <div className="space-y-1"><span className="text-sm">{label}</span><Select items={options.map(option => ({value:option.id,label:option.label}))} value={value || null} onValueChange={v => change(v ?? '')} disabled={disabled}><SelectTrigger aria-label={label} className="min-h-8 max-sm:min-h-11 w-full text-base"><SelectValue placeholder={t.choose} /></SelectTrigger><SelectContent>{options.map(o => <SelectItem className="min-h-8 max-sm:min-h-11 whitespace-normal break-all text-base" key={o.id} value={o.id}>{o.label}</SelectItem>)}</SelectContent></Select></div>;
   return <section className="space-y-4 min-w-0">
     <h2 className="text-lg font-semibold">{t.title}</h2><p className="text-sm text-muted-foreground">{t.description}</p>
     {feedback}
     {secret && <div className="rounded border p-3 space-y-2" role="region" aria-label={t.credential}>
       <p>{t.once}</p><code className="block break-all select-all">{secret}</code>
-      <div className="flex flex-wrap gap-2"><Button className="min-h-11" onClick={() => void copy()}>{t.copy}</Button><Button className="min-h-11" onClick={() => setSecret(null)}>{t.dismiss}</Button></div>
+      <div className="flex flex-wrap gap-2"><Button className="min-h-8 max-sm:min-h-11" onClick={() => void copy()}>{t.copy}</Button><Button className="min-h-8 max-sm:min-h-11" onClick={() => setSecret(null)}>{t.dismiss}</Button></div>
     </div>}
-    {error && <div role="alert" className="space-y-2"><p>{error}</p><Button className="min-h-11" onClick={() => void refresh()}>{t.retry}</Button></div>}
-    {resource.error !== undefined && <div role="alert"><p>{errorMessage(resource.error, true)}</p><Button className="min-h-11" onClick={() => void refresh()}>{t.retry}</Button></div>}
+    {error && <div role="alert" className="space-y-2"><p>{error}</p><Button className="min-h-8 max-sm:min-h-11" onClick={() => void refresh()}>{t.retry}</Button></div>}
+    {resource.error !== undefined && <div role="alert"><p>{errorMessage(resource.error, true)}</p><Button className="min-h-8 max-sm:min-h-11" onClick={() => void refresh()}>{t.retry}</Button></div>}
     {!data && resource.loading && <SurfaceSkeletonFor surface="studio" chrome={false} />}
     {data && <>
       <form className="space-y-3" onSubmit={e => {e.preventDefault(); if (canCreate && !disabled) void mutate('create');}}>
-        <label className="block space-y-1"><span>{t.name}</span><input className="min-h-11 w-full rounded border px-3 text-base" value={draft.name} disabled={disabled} maxLength={120} onChange={e => setDraft({...draft, name:e.target.value})} /></label>
+        <label className="block space-y-1"><span>{t.name}</span><input className="min-h-8 max-sm:min-h-11 w-full rounded border px-3 text-base" value={draft.name} disabled={disabled} maxLength={120} onChange={e => setDraft({...draft, name:e.target.value})} /></label>
         {picker(t.assistant, draft.assistantId, data.assistants.map(a => ({id:a.id,label:a.name})), assistantId => setDraft({...draft, assistantId, destinationId:''}))}
         <p className="text-sm text-muted-foreground">{t.audiencePolicy}</p>
         {validAssistant && <>
-          <Button type="button" className="min-h-11" onClick={() => void destinations.refresh()}>{t.refreshDestinations}</Button>
+          <Button type="button" className="min-h-8 max-sm:min-h-11" onClick={() => void destinations.refresh()}>{t.refreshDestinations}</Button>
           {destinations.loading && <SurfaceSkeletonFor surface="studio" chrome={false} />}
           {destinations.error !== undefined && <p role="alert">{errorMessage(destinations.error, true)}</p>}
           {destinations.data && <>
@@ -131,7 +131,7 @@ function ExternalApprovalsAdmin({ workspaceId, viewerId }: {workspaceId: string;
             </li>)}</ul>
           </>}
         </>}
-        <Button type="submit" className="min-h-11" disabled={disabled || !canCreate}>{t.create}</Button>
+        <Button type="submit" className="min-h-8 max-sm:min-h-11" disabled={disabled || !canCreate}>{t.create}</Button>
       </form>
       <p className="text-sm text-muted-foreground">{t.immutable}</p>
       {data.sources.length === 0 && <p>{t.empty}</p>}
@@ -144,7 +144,7 @@ function ExternalApprovalsAdmin({ workspaceId, viewerId }: {workspaceId: string;
           <div><dt>{t.audience}</dt><dd>{source.audience === 'conversation_members' ? t.audiencePolicy : source.approverUserId ? `${t.legacyApprover}: ${source.approverUserId}` : t.audiencePolicy}</dd></div>
           <div><dt>{t.notification}</dt><dd className="break-all">{source.channelType === 'web' ? `${t.web}: ${source.destinationSessionId ?? source.channelId}` : `${source.channelType}: ${source.channelId}${source.threadRef ? ` #${source.threadRef}` : ''}`}{source.channelIntegrationId ? ` (${source.channelIntegrationId})` : ''}</dd></div>
         </dl>
-        {source.revokedAt ? <p>{t.revoked}</p> : <div className="flex flex-wrap gap-2"><Button className="min-h-11" disabled={disabled} onClick={() => void mutate('rotate',source.id)}>{t.rotate}</Button><Button className="min-h-11" variant="destructive" disabled={disabled} onClick={() => void mutate('revoke',source.id)}>{t.revoke}</Button></div>}
+        {source.revokedAt ? <p>{t.revoked}</p> : <div className="flex flex-wrap gap-2"><Button className="min-h-8 max-sm:min-h-11" disabled={disabled} onClick={() => void mutate('rotate',source.id)}>{t.rotate}</Button><Button className="min-h-8 max-sm:min-h-11" variant="destructive" disabled={disabled} onClick={() => void mutate('revoke',source.id)}>{t.revoke}</Button></div>}
       </li>)}</ul>
     </>}
   </section>;

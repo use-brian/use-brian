@@ -8,13 +8,18 @@ import { test } from 'node:test'
 import { migratePglite } from '../migrate-pglite.js'
 
 const externalPairs = [
-  ['8240_external_human_approvals.sql', '8242_external_human_approvals.sql'],
-  ['8241_external_human_approvals.sql', '8242_external_human_approvals.sql'],
-  ['8241_workspace_external_approval_sources.sql', '8243_workspace_external_approval_sources.sql'],
-  ['8242_workspace_external_approval_sources.sql', '8243_workspace_external_approval_sources.sql'],
-  ['8243_external_approval_web_chat_destination.sql', '8244_external_approval_web_chat_destination.sql'],
-  ['8244_external_approval_conversation_members.sql', '8245_external_approval_conversation_members.sql'],
-  ['8245_external_human_question_answers.sql', '8246_external_human_question_answers.sql'],
+  ['8240_external_human_approvals.sql', '8252_external_human_approvals.sql'],
+  ['8241_external_human_approvals.sql', '8252_external_human_approvals.sql'],
+  ['8241_workspace_external_approval_sources.sql', '8253_workspace_external_approval_sources.sql'],
+  ['8242_workspace_external_approval_sources.sql', '8253_workspace_external_approval_sources.sql'],
+  ['8243_external_approval_web_chat_destination.sql', '8254_external_approval_web_chat_destination.sql'],
+  ['8244_external_approval_conversation_members.sql', '8255_external_approval_conversation_members.sql'],
+  ['8245_external_human_question_answers.sql', '8256_external_human_question_answers.sql'],
+  ['8242_external_human_approvals.sql', '8252_external_human_approvals.sql'],
+  ['8243_workspace_external_approval_sources.sql', '8253_workspace_external_approval_sources.sql'],
+  ['8244_external_approval_web_chat_destination.sql', '8254_external_approval_web_chat_destination.sql'],
+  ['8245_external_approval_conversation_members.sql', '8255_external_approval_conversation_members.sql'],
+  ['8246_external_human_question_answers.sql', '8256_external_human_question_answers.sql'],
 ] as const
 const pairs = [
   ['557_association_membership_catalogue.sql', '5570_association_membership_catalogue.sql'],
@@ -59,6 +64,7 @@ test('executes canonical files on fresh embedded brains and then skips them', as
 for (const { label, applied } of [
   { label: 'original approval/source names', applied: ['8240_external_human_approvals.sql', '8241_workspace_external_approval_sources.sql'] },
   { label: 'previous complete feature names', applied: ['8241_external_human_approvals.sql', '8242_workspace_external_approval_sources.sql', '8243_external_approval_web_chat_destination.sql', '8244_external_approval_conversation_members.sql', '8245_external_human_question_answers.sql'] },
+  { label: 'previous canonical names', applied: ['8242_external_human_approvals.sql', '8243_workspace_external_approval_sources.sql', '8244_external_approval_web_chat_destination.sql', '8245_external_approval_conversation_members.sql', '8246_external_human_question_answers.sql'] },
   { label: 'current canonical names', applied: externalNames },
 ]) {
   test(`upgrades ${label} without replaying applied SQL or skipping same-number neighbours`, async () => {
@@ -75,7 +81,9 @@ for (const { label, applied } of [
         if (!retained.has(current)) expectedTables.push(table)
         await writeFile(join(directory, current), sql)
       }
-      const neighbours = ['8240_channel_connection_provenance.sql', '8241_telegram_recording_history_recovery.sql']
+      // Synthetic same-prefix files exercise independent execution without
+      // impersonating checksum-bound native migration source.
+      const neighbours = ['8240_channel_connection_provenance.sql', '8241_telegram_recording_history_recovery.sql', '8242_native_collision_probe.sql', '8243_native_collision_probe.sql', '8244_native_collision_probe.sql', '8245_native_collision_probe.sql', '8246_native_collision_probe.sql']
       for (const [index, name] of neighbours.entries()) {
         const table = `rename_stage_probe_neighbour_${index}`
         expectedTables.push(table)
