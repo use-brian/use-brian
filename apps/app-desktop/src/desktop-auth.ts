@@ -24,6 +24,8 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
+import { z } from "zod";
+import { acceptDeclaredApiUrl, normalizeTargetUrl, parseDesktopPublicConfig, type DesktopPublicConfig } from "./target-store.js";
 
 // ── PKCE ───────────────────────────────────────────────────────
 
@@ -78,9 +80,33 @@ export function parseAuthReturnIntent(value: unknown): AuthReturnIntent | undefi
 }
 export interface PendingVerifier {
   intent?: AuthReturnIntent;
+  destination?: AuthDestinationBinding;
   verifier: string;
   /** True when this sign-in adds a second account rather than replacing the active one. */
   addAccount: boolean;
+}
+
+const targetBaseUrl = z.string().max(2048).refine(value => normalizeTargetUrl(value) === value);
+const publicDestinationConfig = z.custom<DesktopPublicConfig>(value => {
+  const parsed = parseDesktopPublicConfig(value);
+  if (!parsed || !value || typeof value !== "object" || Array.isArray(value)) return false;
+  const raw = value as Record<string, unknown>;
+  return Object.keys(raw).every(key => Object.hasOwn(parsed, key))
+    && Object.entries(parsed).every(([key, item]) => raw[key] === item);
+});
+const destinationBinding = z.object({
+  source: z.object({ kind: z.enum(["cloud", "local"]), appUrl: targetBaseUrl, apiUrl: targetBaseUrl,
+    auth: z.enum(["pkce", "local-session"]) }).strict(),
+  target: z.object({ kind: z.literal("local"), appUrl: targetBaseUrl,
+    apiUrl: targetBaseUrl.refine(value => acceptDeclaredApiUrl(value) === value), auth: z.literal("pkce"),
+    publicConfig: publicDestinationConfig.nullable().optional() }).strict().refine(target => !target.publicConfig
+      || target.publicConfig.apiUrl === target.apiUrl && target.publicConfig.edition !== "oss"),
+}).strict();
+/** A user-selected destination, never credentials or a cross-deployment return route. */
+export type AuthDestinationBinding = z.infer<typeof destinationBinding>;
+export function parseAuthDestinationBinding(value: unknown): AuthDestinationBinding | undefined {
+  const parsed = destinationBinding.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 export function serializePendingVerifier(
@@ -88,8 +114,9 @@ export function serializePendingVerifier(
   nowMs: number,
   addAccount = false,
   intent?: AuthReturnIntent,
+  destination?: AuthDestinationBinding,
 ): string {
-  return JSON.stringify({ verifier, createdAt: nowMs, addAccount, ...(intent ? { intent } : {}) });
+  return JSON.stringify({ verifier, createdAt: nowMs, addAccount, ...(intent ? { intent } : {}), ...(destination ? { destination } : {}) });
 }
 
 /**
@@ -104,7 +131,7 @@ export function parsePendingVerifier(
   nowMs: number,
   maxAgeMs: number = PENDING_VERIFIER_TTL_MS,
 ): PendingVerifier | null {
-  let obj: { verifier?: unknown; createdAt?: unknown; addAccount?: unknown; intent?: unknown };
+  let obj: { verifier?: unknown; createdAt?: unknown; addAccount?: unknown; intent?: unknown; destination?: unknown };
   try {
     obj = JSON.parse(raw) as typeof obj;
   } catch {
@@ -116,7 +143,9 @@ export function parsePendingVerifier(
   if (age < 0 || age > maxAgeMs) return null;
   const intent = parseAuthReturnIntent(obj.intent);
   if (obj.intent !== undefined && !intent) return null;
-  return { verifier: obj.verifier, addAccount: obj.addAccount === true, ...(intent ? { intent } : {}) };
+  const destination = obj.destination === undefined ? undefined : parseAuthDestinationBinding(obj.destination);
+  if (obj.destination !== undefined && !destination || destination && intent) return null;
+  return { verifier: obj.verifier, addAccount: obj.addAccount === true, ...(intent ? { intent } : {}), ...(destination ? { destination } : {}) };
 }
 
 // ── URLs ───────────────────────────────────────────────────────

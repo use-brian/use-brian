@@ -13,19 +13,19 @@ import type { DesktopSignInState } from "@/lib/desktop-auth-source";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 vi.mock("next/navigation", () => ({ usePathname: () => "/", useRouter: () => ({ push: vi.fn() }) }));
 let root: Root, host: HTMLDivElement, notify: (state: DesktopSignInState) => void;
-const signIn = vi.fn(), reopen = vi.fn(), cancel = vi.fn();
+const addAccount = vi.fn(), signIn = vi.fn(), reopen = vi.fn(), cancel = vi.fn();
 async function render(dict: Dictionary = en, mode = "signed-out") { await act(async () => root.render(<I18nProvider locale="en" dict={dict}>
   <AppSessionProvider><AccountEntry mode={mode} /></AppSessionProvider>
 </I18nProvider>)); }
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-  vi.clearAllMocks(); window.usebrianDesktop = { signIn, getSignInState: async () => ({ phase: "idle" }),
+  vi.clearAllMocks(); window.usebrianDesktop = { signIn, addAccount, getSignInState: async () => ({ phase: "idle" }),
     onSignInState: callback => { notify = callback; return () => {}; }, reopenSignIn: reopen, cancelSignIn: cancel,
     listAccounts: async () => ({ accounts: [], canSwitch: true }),
   };
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); delete window.usebrianDesktop; });
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); delete window.usebrianDesktop; delete window.__USE_BRIAN_PUBLIC_CONFIG__; });
 describe("[COMP:app-web/account-entry] shared account experience", () => {
   it.each([en, ja, zh, zhCN])("uses the active dictionary for reconnect and browser progress", async dict => {
     await render(dict, "reauthenticate"); expect(host.textContent).toContain(dict.desktopSession.reconnectDescription);
@@ -35,6 +35,16 @@ describe("[COMP:app-web/account-entry] shared account experience", () => {
     const button = (text: string) => [...host.querySelectorAll("button")].find(b => b.textContent === text)!;
     await act(async () => button(dict.desktopSession.reopenBrowser).click()); expect(reopen).toHaveBeenCalledOnce();
     await act(async () => button(dict.desktopSession.cancel).click()); expect(cancel).toHaveBeenCalledOnce();
+  });
+  it.each([en, ja, zh, zhCN])("signs in to the selected Outpost while keeping Cloud an explicit choice", async dict => {
+    const { resolveRuntimePublicConfig } = await import("@/lib/runtime-public-config");
+    window.__USE_BRIAN_PUBLIC_CONFIG__ = resolveRuntimePublicConfig({ USEBRIAN_EDITION: "outpost", PUBLIC_PRIMARY_AUTH_URL: "https://auth.brain.example.com" });
+    await render(dict);
+    const button = (text: string) => [...host.querySelectorAll("button")].find(b => b.textContent === text)!;
+    await act(async () => button(dict.desktopSession.signIn).click());
+    expect(signIn).toHaveBeenCalledOnce(); expect(addAccount).not.toHaveBeenCalled();
+    await act(async () => button(dict.workspaceSwitcher.addAccountDialog.cloud).click());
+    expect(addAccount).toHaveBeenCalledOnce();
   });
   it("shows waiting and failure recovery without a second Cloud sign-in control", async () => {
     await render(); await act(async () => notify({ phase: "exchanging" }));

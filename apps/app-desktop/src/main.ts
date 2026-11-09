@@ -180,6 +180,8 @@ import {
   serializePendingVerifier,
   parseAuthReturnIntent,
   type AuthReturnIntent,
+  parseAuthDestinationBinding,
+  type AuthDestinationBinding,
   parsePendingVerifier,
   type DesktopSession,
 } from "./desktop-auth.js";
@@ -349,14 +351,16 @@ let brianPetDragOffset: BrianPosition | null = null;
 /** The PKCE verifier for an in-flight sign-in; held until the callback returns. */
 let pendingVerifier: string | null = null;
 let pendingAuthIntent: AuthReturnIntent | undefined;
+let pendingAuthDestination: AuthDestinationBinding | undefined;
 let authGeneration = 0;
 let authExchangeAbort: AbortController | null = null;
 let credentialGeneration = 0;
 let authStartUrl: string | null = null;
-let authLastOptions: { addAccount?: boolean; userId?: string } = {};
+type NativeSignInOptions = { addAccount?: boolean; userId?: string; destination?: AccountTarget };
+let authLastOptions: NativeSignInOptions = {};
 let signInState: { phase: "idle" | "browser" | "exchanging" | "error"; appUrl?: string } = { phase: "idle" };
-function publishSignInState(phase: typeof signInState.phase): void {
-  signInState = { phase, ...(phase !== "idle" ? { appUrl: cfg.appUrl } : {}) };
+function publishSignInState(phase: typeof signInState.phase, appUrl = pendingAuthDestination?.target.appUrl ?? cfg.appUrl): void {
+  signInState = { phase, ...(phase !== "idle" ? { appUrl } : {}) };
   for (const win of [mainWindow, desktopChatWindow]) if (win && !win.isDestroyed() && isAppPage(win)) {
     win.webContents.send("Use Brian:sign-in-state", signInState);
   }
@@ -367,11 +371,12 @@ function openSignInBrowser(url: string): void {
   try { void Promise.resolve(shell.openExternal(url)).catch(failed); } catch { failed(); }
 }
 function cancelSignIn(phase: "idle" | "error" = "idle"): void {
+  const appUrl = pendingAuthDestination?.target.appUrl ?? cfg.appUrl;
   ++authGeneration;
   authExchangeAbort?.abort(); authExchangeAbort = null;
   closeAuthServer(); clearPersistedVerifier();
-  pendingVerifier = null; pendingAuthIntent = undefined; pendingAddAccount = false; authStartUrl = null;
-  publishSignInState(phase);
+  pendingVerifier = null; pendingAuthIntent = undefined; pendingAuthDestination = undefined; pendingAddAccount = false; authStartUrl = null;
+  publishSignInState(phase, appUrl);
 }
 /** Whether the in-flight sign-in adds a second account (stash) vs replaces the active one. */
 let pendingAddAccount = false;
@@ -441,7 +446,7 @@ function authenticatedSessionFetch(input: string, init: RequestInit): Promise<Re
   return targetSession().fetch(input, { ...init, headers, credentials: "include" });
 }
 
-type GatewayContext = { session: ReturnType<typeof targetSession>; fetch: GatewayProbeFetch };
+type GatewayContext = { session: ReturnType<typeof targetSession>; fetch: typeof authenticatedSessionFetch };
 function gatewayContext(target = accountTarget(), grant: CloudflareAccessGrant | null = activeAccessGrant): GatewayContext {
   const jar = targetSession(target);
   return { session: jar, fetch: (input, init) => {
@@ -2966,18 +2971,28 @@ function closeConnectorServer(): void {
  * works in an unpackaged dev run, unlike the `usebrian://auth` scheme. If the
  * loopback server can't bind, fall back to the scheme (packaged builds only).
  */
-function startSignIn(opts: { addAccount?: boolean; userId?: string } = {}): void {
-  if (changingTarget || signInState.phase === "exchanging") return;
-  if (signInState.phase === "browser" && authStartUrl) { openSignInBrowser(authStartUrl); return; }
+function startSignIn(opts: NativeSignInOptions = {}): boolean {
+  if (changingTarget || signInState.phase === "exchanging") return false;
+  const source = accountTarget();
+  const destination = opts.destination ? parseAuthDestinationBinding({ source: {
+    kind: source.kind, appUrl: source.appUrl, apiUrl: source.apiUrl, auth: source.auth,
+  }, target: opts.destination }) : undefined;
+  if (opts.destination && !destination) return false;
+  if (signInState.phase === "browser" && authStartUrl
+    && (destination ? pendingAuthDestination && deploymentKey(destination.target) === deploymentKey(pendingAuthDestination.target) : !pendingAuthDestination)) {
+    openSignInBrowser(authStartUrl); return true;
+  }
   cancelSignIn();
   const generation = authGeneration;
   const target = cfg;
   authLastOptions = opts;
+  pendingAuthDestination = destination;
+  const authenticationTarget = destination?.target ?? source;
   const win = mainWindow;
   const current = win && isAppPage(win) ? new URL(win.webContents.getURL()) : null;
   const route = current?.protocol === "file:" ? current.hash.slice(1) : current ? current.pathname + current.search + current.hash : "";
   const originalUser = readStoredTokens()?.user?.id ?? opts.userId;
-  pendingAuthIntent = opts.addAccount ? undefined : parseAuthReturnIntent({ appUrl: cfg.appUrl, apiUrl: cfg.apiUrl, route, ...(originalUser ? { userId: originalUser } : {}) });
+  pendingAuthIntent = opts.addAccount || destination ? undefined : parseAuthReturnIntent({ appUrl: cfg.appUrl, apiUrl: cfg.apiUrl, route, ...(originalUser ? { userId: originalUser } : {}) });
   publishSignInState("browser");
   const { verifier, challenge } = generatePkcePair();
   pendingVerifier = verifier;
@@ -2989,7 +3004,7 @@ function startSignIn(opts: { addAccount?: boolean; userId?: string } = {}): void
   try {
     writeFileSync(
       pendingVerifierFile(),
-      serializePendingVerifier(verifier, Date.now(), addAccount, pendingAuthIntent),
+      serializePendingVerifier(verifier, Date.now(), addAccount, pendingAuthIntent, destination),
     );
   } catch (err) {
     console.warn("Failed to persist sign-in state:", err);
@@ -3009,7 +3024,7 @@ function startSignIn(opts: { addAccount?: boolean; userId?: string } = {}): void
       return;
     }
     res.writeHead(302, {
-      Location: buildSignedInPageUrl(cfg.appUrl, { error: cb.kind !== "code" }),
+      Location: buildSignedInPageUrl(authenticationTarget.appUrl, { error: cb.kind !== "code" }),
       "Cache-Control": "no-store",
     });
     res.end();
@@ -3022,7 +3037,7 @@ function startSignIn(opts: { addAccount?: boolean; userId?: string } = {}): void
     console.warn("Loopback sign-in server failed; falling back to scheme:", err);
     closeAuthServer();
     if (generation !== authGeneration || target !== cfg) return;
-    authStartUrl = buildDesktopAuthStartUrl(cfg.appUrl, challenge, { addAccount });
+    authStartUrl = buildDesktopAuthStartUrl(authenticationTarget.appUrl, challenge, { addAccount });
     authServerTimer = setTimeout(() => cancelSignIn("error"), LOOPBACK_SERVER_TTL_MS);
     openSignInBrowser(authStartUrl);
   });
@@ -3031,17 +3046,17 @@ function startSignIn(opts: { addAccount?: boolean; userId?: string } = {}): void
   server.listen(0, "127.0.0.1", () => {
     const port = (server.address() as AddressInfo).port;
     if (generation !== authGeneration || target !== cfg) return;
-    authStartUrl = buildDesktopAuthStartUrl(cfg.appUrl, challenge, {
+    authStartUrl = buildDesktopAuthStartUrl(authenticationTarget.appUrl, challenge, {
       redirectUri: buildLoopbackRedirectUri(port), state, addAccount,
     });
     openSignInBrowser(authStartUrl);
   });
+  return true;
 }
 
 async function completeSignIn(code: string): Promise<void> {
   if (browserIdentityChanging) return;
   browserIdentityChanging = true;
-  embeddedBrowser.dispose();
   try { await completeSignInImpl(code); }
   finally { browserIdentityChanging = false; }
 }
@@ -3051,17 +3066,23 @@ async function completeSignInImpl(code: string): Promise<void> {
   const target = cfg;
   const staged: { current?: { target: AccountTarget; session: DesktopSession; route?: string } } = {};
   await targetOperations.run(async () => {
+    if (generation !== authGeneration || target !== cfg) return;
     // In-memory state is authoritative for the loopback transport (same process);
     // the persisted blob covers the cross-process `usebrian://auth` fallback. Both
     // carry the add-account intent so the right process knows to stash vs replace.
     const pending = pendingVerifier
-      ? { verifier: pendingVerifier, addAccount: pendingAddAccount, intent: pendingAuthIntent }
+      ? { verifier: pendingVerifier, addAccount: pendingAddAccount, intent: pendingAuthIntent, destination: pendingAuthDestination }
       : readPersistedVerifier();
     if (!pending) {
       publishSignInState("error");
       return;
     }
-    const { verifier, addAccount, intent } = pending;
+    const { verifier, addAccount, intent, destination } = pending;
+    if (destination && deploymentKey(destination.source) !== deploymentKey(accountTarget())) { cancelSignIn("error"); return; }
+    pendingAuthDestination = destination;
+    if (destination) authLastOptions = { destination: destination.target };
+    const authenticationTarget = destination?.target ?? accountTarget();
+    if (!destination) embeddedBrowser.dispose();
     if (intent && (intent.appUrl !== cfg.appUrl || intent.apiUrl !== cfg.apiUrl)) { cancelSignIn("error"); return; }
     publishSignInState("exchanging");
     pendingVerifier = null;
@@ -3071,22 +3092,28 @@ async function completeSignInImpl(code: string): Promise<void> {
     try {
       const abort = new AbortController();
       authExchangeAbort = abort;
+      const fetch = destination
+        ? gatewayContext(destination.target, await usableAccessGrantFor(destination.target.appUrl)).fetch
+        : cfg.target === "local" ? authenticatedSessionFetch : undefined;
+      if (generation !== authGeneration || target !== cfg) return;
       const result = await exchangeCode(
-        cfg.apiUrl,
+        authenticationTarget.apiUrl,
         code,
         verifier,
-        cfg.target === "local" ? authenticatedSessionFetch : undefined,
+        fetch,
         abort.signal,
       );
       if (authExchangeAbort === abort) authExchangeAbort = null;
       if (generation !== authGeneration || target !== cfg) return;
       if (!result.user?.id) throw new Error("Sign-in did not return an account identity");
-      const currentUser = cfg.bundled ? readStoredTokens()?.user?.id : parseUserCookieValue(await readJarCookie("user"))?.id;
+      const currentUser = destination ? undefined : cfg.bundled ? readStoredTokens()?.user?.id : parseUserCookieValue(await readJarCookie("user"))?.id;
+      if (generation !== authGeneration || target !== cfg) return;
       const route = intent && (!intent.userId || intent.userId === result.user.id) ? intent.route : undefined;
-      if (currentUser && currentUser !== result.user.id) {
+      if (destination || currentUser && currentUser !== result.user.id) {
+        const selectedTarget = destination?.target ?? accountTarget();
         const tokens = parseStoredTokens(serializeTokens(result, Date.now()));
-        if (!tokens || !deploymentAccounts.put(accountTarget(), tokens, false)) throw new Error("Could not save the account securely");
-        staged.current = { target: accountTarget(), session: result, route };
+        if (!tokens || !deploymentAccounts.put(selectedTarget, tokens, false)) throw new Error("Could not save the account securely");
+        staged.current = { target: selectedTarget, session: result, route };
         return; // Drain this operation before replacing the old account windows.
       }
       if (cfg.bundled) {
@@ -3118,7 +3145,7 @@ async function completeSignInImpl(code: string): Promise<void> {
         }
       }
       publishSignInState("idle");
-      authStartUrl = null; pendingAuthIntent = undefined;
+      authStartUrl = null; pendingAuthIntent = undefined; pendingAuthDestination = undefined;
       await loadApp(win, route ? { route } : {});
       focusWindow(win); // focus AFTER the reload so the fresh contents take input
       const pendingLink = linkNavigation.state();
@@ -3138,7 +3165,7 @@ async function completeSignInImpl(code: string): Promise<void> {
         }
         if (!persistSession(selected.session)) throw new Error("Could not save the selected account");
       }, selected.target.publicConfig, selected.route);
-    if (!ok) publishSignInState("error");
+    if (!ok) publishSignInState("error", selected.target.appUrl);
     else { const link = linkNavigation.state(); if (link) linkNavigation.retry(link.requestId); }
   }
 }
@@ -4560,6 +4587,13 @@ if (!gotLock) {
         validation.value.publicConfig,
       ) ?? target;
       if (!currentSender() || !(await targetOperations.idle())) return { ok: false, error: "switch", url: resolvedTarget.appUrl };
+      if (resolvedTarget.auth === "pkce") {
+        const destination: AccountTarget = { kind: "local", appUrl: resolvedTarget.appUrl,
+          apiUrl: resolvedTarget.apiUrl, auth: resolvedTarget.auth, publicConfig: resolvedTarget.publicConfig };
+        return startSignIn({ destination })
+          ? { ok: true, url: destination.appUrl }
+          : { ok: false, error: "switch", url: destination.appUrl };
+      }
       let installSession: (() => Promise<void>) | undefined;
       if (resolvedTarget.auth === "local-session") {
         const destination: AccountTarget = { kind: "local", appUrl: resolvedTarget.appUrl,

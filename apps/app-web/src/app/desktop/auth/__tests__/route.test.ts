@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "../route";
 import { parseLastCookie } from "@/lib/auth-cookies";
 import { primaryAuthUrl } from "@/lib/primary-auth";
@@ -24,9 +24,43 @@ beforeEach(() => {
   mockedPrimaryAuthUrl.mockReset();
   mockedPrimaryAuthUrl.mockReturnValue("https://usebrian.ai");
   vi.unstubAllGlobals();
+  vi.stubEnv("AUTHED_APP_URL", undefined);
+  vi.stubEnv("NEXT_PUBLIC_AUTHED_APP_URL", undefined);
 });
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("[COMP:app-web/desktop-auth-bridge] GET /desktop/auth", () => {
+  it.each(["signed-out", "add-account", "expired-access"] as const)(
+    "preserves the configured public bridge origin for %s behind ingress",
+    async (entry) => {
+      vi.stubEnv("AUTHED_APP_URL", "https://work.harbor.example");
+      mockedPrimaryAuthUrl.mockReturnValue("https://auth.harbor.example");
+      const fetch = vi.fn().mockResolvedValue(new Response(null, { status: 401 }));
+      vi.stubGlobal("fetch", fetch);
+      if (entry === "expired-access") mockedParseLastCookie.mockReturnValue("expired-access");
+      const redirect = "http://127.0.0.1:49152/cb";
+      const query = new URLSearchParams({ challenge: "abcdefghijklmnop", redirect, state: "abcdefgh" });
+      if (entry === "add-account") query.set("addAccount", "1");
+      const response = await GET(new Request(`https://localhost:3003/desktop/auth?${query}`, {
+        headers: { "x-forwarded-host": "untrusted.example", "x-forwarded-proto": "http" },
+      }));
+      const login = new URL(response.headers.get("location")!);
+      const bridge = new URL(login.searchParams.get("next")!);
+
+      expect(response.status).toBe(307);
+      expect(login.origin).toBe("https://auth.harbor.example");
+      expect(bridge.origin).toBe("https://work.harbor.example");
+      expect(bridge.pathname).toBe("/desktop/auth");
+      expect(bridge.searchParams.get("challenge")).toBe("abcdefghijklmnop");
+      expect(bridge.searchParams.get("redirect")).toBe(redirect);
+      expect(bridge.searchParams.get("state")).toBe("abcdefgh");
+      expect(bridge.searchParams.has("addAccount")).toBe(false);
+      expect(login.searchParams.get("addAccount")).toBe(entry === "add-account" ? "1" : null);
+      expect(fetch).toHaveBeenCalledTimes(entry === "expired-access" ? 1 : 0);
+    },
+  );
+
   it("delegates a signed-out hosted user directly to the canonical login", async () => {
     const source =
       "https://app.usebrian.ai/desktop/auth?challenge=abcdefghijklmnop&redirect=http%3A%2F%2F127.0.0.1%3A49152%2Fcb&state=abcdefgh";
