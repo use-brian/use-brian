@@ -1753,7 +1753,7 @@ async function replyWithoutRecording(params: ProcessMessageParams): Promise<void
       providerKeySource: custom?.providerKeySource ?? 'platform',actualCostUsd: custom?.providerKeySource === 'user' ? 0 : calculateCost(model,usage) })
   }
   await current()
-  await adapter.sendMessage(incoming.channelId,{ text: !toolUse && text.trim() ? sanitizeDeliveryText(text) : 'I could not produce a reply. Please try again.' })
+  await adapter.sendMessage(incoming.channelId,{ text: !toolUse && text.trim() ? sanitizeDeliveryText(text) : 'I could not produce a reply. Please try again.', format: 'markdown' })
 }
 
 async function processMessage(params: ProcessMessageParams): Promise<void> {

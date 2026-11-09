@@ -3,6 +3,14 @@
 The open BYO Telegram integration supports private chats, groups, forum topics,
 broadcast-channel posts, and comments in linked discussion supergroups.
 
+## Reply formatting
+
+Model replies use Telegram HTML formatting, including when conversation saving
+is unavailable. Headings and emphasis render as bold text, bullets use readable
+bullet characters, and Markdown tables become vertical labelled comparisons.
+If Telegram rejects the HTML, a plain-text version preserves the same comparison
+layout and literal code. Conversation saving and output formatting are separate.
+
 ## Setup and operation
 
 1. Connect your bot in **Studio → Channels** with a public HTTPS webhook.

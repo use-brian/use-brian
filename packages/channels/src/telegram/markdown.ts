@@ -178,7 +178,7 @@ function convertTables(text: string): string {
 
 function parsePipeRow(line: string): string[] {
   const stripped = line.replace(/^\||\|$/g, '')
-  return stripped.split('|').map((c) => c.trim()).filter((c) => c.length > 0)
+  return stripped.split('|').map((c) => c.trim())
 }
 
 /**
@@ -188,13 +188,19 @@ function parsePipeRow(line: string): string[] {
  * `###` / `*   ` / `**` markers.
  */
 export function stripMarkdown(text: string): string {
+  const code: string[] = []
+  const protectCode = (body: string) => {
+    code.push(body)
+    return `\x00TG_PLAIN_CODE_${code.length - 1}\x00`
+  }
   let out = text
 
-  // Fenced code blocks — strip fences, keep body
-  out = out.replace(/```[a-zA-Z0-9_+\-]*\n?([\s\S]*?)```/g, '$1')
+  // Preserve literal code while normalising the surrounding Markdown.
+  out = out.replace(/```[a-zA-Z0-9_+\-]*\n?([\s\S]*?)```/g, (_, body) => protectCode(body))
+  out = out.replace(/`([^`\n]+)`/g, (_, body) => protectCode(body))
 
-  // Inline code
-  out = out.replace(/`([^`\n]+)`/g, '$1')
+  // The plain fallback needs the same narrow-screen layout as the HTML send.
+  out = convertTables(out)
 
   // Images → alt (url)
   out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, alt, url) =>
@@ -224,5 +230,5 @@ export function stripMarkdown(text: string): string {
   out = out.replace(/(^|[^_\w])_(?!\s)([^_\n]+?)(?<!\s)_(?!\w)/g, '$1$2')
   out = out.replace(/~~(.+?)~~/g, '$1')
 
-  return out
+  return out.replace(/\x00TG_PLAIN_CODE_(\d+)\x00/g, (_, index) => code[Number(index)] ?? '')
 }

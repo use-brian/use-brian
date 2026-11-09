@@ -89,6 +89,7 @@ const confirmationOrder: string[] = []
 // path can be asserted without touching api.telegram.org.
 let linkedDiscussionChatId: number | undefined
 let chatLookupFails = false
+let useRealTelegramSend = false
 const setWebhookCalls: Array<{ url: string; secret: string }> = []
 
 // Overridable so a test can fail the DOWNLOAD leg the way Telegram actually
@@ -138,9 +139,11 @@ vi.mock('@use-brian/channels', async () => {
     // the add-protection assertions.
     createTelegramAdapter: (opts: Parameters<typeof actual.createTelegramAdapter>[0]) => {
       const real = actual.createTelegramAdapter(opts)
+      const realSendMessage = real.sendMessage.bind(real)
       return Object.assign(real, {
         sendMessage: vi.fn(async (channelId: string, message: OutgoingMessage) => {
           adapterSendCalls.push({ channelId, ...message })
+          if (useRealTelegramSend) return realSendMessage(channelId, message)
           return 'msg_stub'
         }),
         answerCallbackQuery: vi.fn(async () => { confirmationOrder.push('ack') }),
@@ -3718,6 +3721,60 @@ describe('[COMP:api/telegram-byo-route] original media archive', () => {
 })
 
 describe('[COMP:api/telegram-byo-route] workspace ingress admission', () => {
+  it.each([false, true])('formats no-recording replies at the provider boundary (HTML rejected: %s)', async (rejectHtml) => {
+    const { findAssistantById } = await import('../../db/users.js')
+    const previous = await findAssistantById('assistant_1')
+    vi.mocked(findAssistantById).mockResolvedValue({ ...previous, workspaceId: 'ws_1' } as never)
+    vi.mocked(telegramRecordingEnabled).mockResolvedValue(false)
+    const text = [
+      '**跑鞋 A** 與 **跑鞋 B**', '',
+      '| 項目 | 跑鞋 A | 跑鞋 B |', '|---|---|---|',
+      '| 用途 | 日常訓練 | 速度訓練 |', '',
+      '### 怎樣選', '- **日常跑**：選 A', '- **速度課**：選 B',
+    ].join('\n')
+    const stream = vi.fn(async function* () { yield { type: 'text_delta', text } })
+    const sends: Array<Record<string, unknown>> = []
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      sends.push(body)
+      return new Response(JSON.stringify(rejectHtml && body.parse_mode === 'HTML'
+        ? { ok: false, error_code: 400, description: "Bad Request: can't parse entities" }
+        : { ok: true, result: { message_id: 77 } }), { status: 200 })
+    })
+    useRealTelegramSend = true
+    const instance = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: { stream } as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore({ requireMention: false }) as never,
+      capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+    try {
+      await postUpdate(instance, { message: message({ text: 'Compare two running shoes' }) })
+      await vi.waitFor(() => expect(sends).toHaveLength(rejectHtml ? 2 : 1))
+      expect(sends[0]).toMatchObject({ chat_id: '-100', message_thread_id: 898, parse_mode: 'HTML' })
+      expect(sends[0].text).toContain('<b>跑鞋 A</b> 與 <b>跑鞋 B</b>')
+      expect(sends[0].text).toContain('<b>跑鞋 A:</b> 日常訓練')
+      expect(sends[0].text).toContain('<b>怎樣選</b>')
+      expect(sends[0].text).toContain('• <b>日常跑</b>：選 A')
+      const delivered = sends.at(-1)!
+      expect(delivered.text).not.toMatch(/\*\*|###|\|/)
+      if (rejectHtml) {
+        expect(delivered).toMatchObject({ chat_id: '-100', message_thread_id: 898 })
+        expect(delivered.parse_mode).toBeUndefined()
+        expect(delivered.text).toContain('跑鞋 A: 日常訓練')
+        expect(delivered.text).not.toContain('<b>')
+      }
+      expect(admitTelegramRecording).not.toHaveBeenCalled()
+      expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+      expect(archiveUnroutedInbound).not.toHaveBeenCalled()
+      expect(pipelineCalls).toHaveLength(0)
+    } finally {
+      useRealTelegramSend = false
+      fetch.mockRestore()
+      vi.mocked(telegramRecordingEnabled).mockResolvedValue(true)
+      vi.mocked(findAssistantById).mockResolvedValue(previous)
+    }
+  })
+
   it.each([
     { label: 'explicit mention', config: { requireMention: true }, text: '@testbot help', entities: [{ type: 'mention', offset: 0, length: 8 }] },
     { label: 'configured topic without mention', config: { requireMention: true, requireMentionOverrides: [{ chatId: '-100', topicId: 898 }] }, text: 'help', entities: [] },
