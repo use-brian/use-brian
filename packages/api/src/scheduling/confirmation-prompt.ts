@@ -71,7 +71,7 @@ async function resolveTelegramDelivery(
   channelIntegrationId?: string,
   channelId?: string,
   workspaceId?: string,
-): Promise<{ token: string; integrationId: string } | undefined> {
+): Promise<{ token: string; integrationId: string; generation?: number } | undefined> {
   if (channelIntegrationId) {
     if (!deps.integrationStore || !channelId || !workspaceId) return undefined
     const integration = await deps.integrationStore.getCredentialsForAssistantIntegrationSystem(
@@ -82,12 +82,12 @@ async function resolveTelegramDelivery(
       channelId,
     )
     return integration
-      ? { token: (integration.credentials as { bot_token: string }).bot_token, integrationId: integration.id }
+      ? { token: (integration.credentials as { bot_token: string }).bot_token, integrationId: integration.id, ...(integration.identityGeneration != null ? { generation: integration.identityGeneration } : {}) }
       : undefined
   }
   if (deps.integrationStore) {
     const integration = await deps.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
-    if (integration) return { token: (integration.credentials as { bot_token: string }).bot_token, integrationId: integration.id }
+    if (integration) return { token: (integration.credentials as { bot_token: string }).bot_token, integrationId: integration.id, ...(integration.identityGeneration != null ? { generation: integration.identityGeneration } : {}) }
   }
   return deps.defaultTelegramBotToken ? { token: deps.defaultTelegramBotToken, integrationId: SHARED_TELEGRAM_CONFIRMATION_INTEGRATION } : undefined
 }
@@ -204,7 +204,8 @@ export async function sendConfirmationPrompt(
         }
       }
       {
-        const adapter = createTelegramAdapter({ token: telegram.token, strictTopic: true })
+        const adapter = createTelegramAdapter({ token: telegram.token, strictTopic: true,
+          ...(telegram.generation != null ? { deliveryOrigin: { integrationId: telegram.integrationId, generation: telegram.generation } } : {}) })
         const actions = buildConfirmationActions(req.toolCallId, allowPersist)
         await push(adapter, target.channelId, {
           text: `${displayName}\n\nAllow this action?`,

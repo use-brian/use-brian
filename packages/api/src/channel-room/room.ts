@@ -15,6 +15,7 @@
 // docs/architecture/channels/channel-user-identity.md -> "Guests in a room".
 
 import type { PoolClient } from 'pg'
+import { randomUUID } from 'node:crypto'
 import { resolveGroupAudienceSystem, DeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
 import { maxSensitivity, scopeGrantContains, type AccessCeiling, type ResourceScope } from '@use-brian/core'
 import { getPool, query } from '../db/client.js'
@@ -23,7 +24,7 @@ import { sessionKindSql, transportPolicy, type Transport } from '../session-kind
 import { admitChannelRoom } from '../workspace-access/session-create-admission.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { noopPublishSessionEvent, type PublishSessionEvent } from '../session-event-port.js'
-import { appendChannelRoomMessage } from './messages.js'
+import { appendChannelRoomMessage, assertChannelConversationCurrent } from './messages.js'
 
 /** The workspace that owns a group's room, through its channel integration (D15). */
 export type ChannelRoomBinding = {
@@ -105,6 +106,7 @@ export async function findOrCreateChannelRoom(params: ChannelRoomBinding & {
   channelType: string
   channelId: string
   starterUserId: string
+  providerContextIdentity?: NonNullable<Session['providerContextIdentity']>
 }): Promise<{ room: Session; created: boolean }> {
   const existing = await findChannelRoom(params)
   if (existing) return { room: existing, created: false }
@@ -115,7 +117,7 @@ export async function findOrCreateChannelRoom(params: ChannelRoomBinding & {
     await client.query('BEGIN')
     id = await insertRoom(client, params)
     created = id !== null
-    if (created) {
+    if (created && !params.providerContextIdentity) {
       await client.query(
         `UPDATE sessions s SET archived_at = now()
           WHERE s.channel_type = $2 AND s.channel_id = $3 AND ${sessionKindSql.legacyGroupRow('s')}
@@ -138,7 +140,7 @@ export async function findOrCreateChannelRoom(params: ChannelRoomBinding & {
 async function findChannelRoom(params: { workspaceId: string; channelType: string; channelId: string }): Promise<Session | null> {
   const row = (await query<{ id: string }>(
     `SELECT s.id FROM sessions s
-      WHERE s.workspace_id = $1 AND s.channel_type = $2 AND s.channel_id = $3 AND ${sessionKindSql.channelRoom('s')} AND s.recording_revision IS NULL`,
+      WHERE s.workspace_id = $1 AND s.channel_type = $2 AND s.channel_id = $3 AND ${sessionKindSql.activeChannelRoom('s')}`,
     [params.workspaceId, params.channelType, params.channelId],
   )).rows[0]
   return row ? readSessionById(row.id) : null
@@ -149,6 +151,7 @@ async function insertRoom(client: PoolClient, params: ChannelRoomBinding & {
   channelType: string
   channelId: string
   starterUserId: string
+  providerContextIdentity?: NonNullable<Session['providerContextIdentity']>
 }): Promise<string | null> {
   const admitted = await admitChannelRoom(client, {
     assistantId: params.assistantId,
@@ -158,19 +161,31 @@ async function insertRoom(client: PoolClient, params: ChannelRoomBinding & {
     channelId: params.channelId,
     channelIntegrationId: params.channelIntegrationId,
   })
+  const id = randomUUID()
+  if (params.providerContextIdentity) {
+    await client.query("SELECT set_config('app.provider_conversation_context_admission',$1,true)", [JSON.stringify({
+      version: 1, sessionId: id, workspaceId: params.workspaceId, assistantId: params.assistantId,
+      actorUserId: params.starterUserId, channelId: params.channelId, identity: params.providerContextIdentity, generation: params.providerContextIdentity.generation,
+      clearance: admitted.effectiveClearance, compartments: admitted.contextCompartments, projectId: admitted.contextProjectId,
+    })])
+  } else if ((await client.query(`SELECT 1 FROM sessions s WHERE s.workspace_id=$1 AND s.channel_type=$2
+    AND s.channel_id=$3 AND ${sessionKindSql.heldChannelRoom('s')}`, [params.workspaceId,params.channelType,params.channelId])).rows.length) {
+    throw new Error('channel_room_unavailable')
+  }
   const inserted = await client.query<{ id: string }>(
     `INSERT INTO sessions (assistant_id, user_id, workspace_id, channel_type, channel_id,
-        visibility, anchor_kind, anchor_ref, effective_clearance, context_group_id, context_compartments, context_project_id, clearance_source)
-     VALUES ($1, $2, $3, $4, $5, 'workspace', 'channel', $5, $6, $7, $8, $9, 'anchor')
+        visibility, anchor_kind, anchor_ref, effective_clearance, context_group_id, context_compartments, context_project_id, clearance_source, id, provider_conversation_context, provider_context_identity, room_capture, provider_context_generation)
+     VALUES ($1, $2, $3, $4, $5, 'workspace', 'channel', $5, $6, $7, $8, $9, 'anchor', $10, $11, $12, $13, $14)
      ON CONFLICT ${sessionKindSql.channelRoomConflict()}
      DO NOTHING
      RETURNING id`,
     [params.assistantId, params.starterUserId, params.workspaceId, params.channelType, params.channelId,
-      admitted.effectiveClearance, admitted.contextGroupId, admitted.contextCompartments, admitted.contextProjectId],
+      admitted.effectiveClearance, admitted.contextGroupId, admitted.contextCompartments, admitted.contextProjectId,
+      id, Boolean(params.providerContextIdentity), params.providerContextIdentity ?? null, !params.providerContextIdentity, params.providerContextIdentity?.generation ?? null],
   )
   // A concurrent first message won the race: the admission receipt is
   // single-use and the conflict consumed nothing, so clear it explicitly.
-  if (!inserted.rows.length) await client.query("SELECT set_config('app.session_creation_admission','',true)")
+  if (!inserted.rows.length) await client.query("SELECT set_config('app.session_creation_admission','',true),set_config('app.provider_conversation_context_admission','',true)")
   return inserted.rows[0]?.id ?? null
 }
 
@@ -234,6 +249,8 @@ export async function postToChannelRoom(params: {
     channelMessageId: params.channelMessageId ?? null,
     senderUserId: params.senderUserId,
     scope: params.inputScope ?? roomInputScope(params.room, params.workspaceId),
+    ...(params.room.providerContextIdentity && params.room.providerContextGeneration != null
+      ? { providerContext: { identity: params.room.providerContextIdentity, generation: params.room.providerContextGeneration } } : {}),
   })
   if (!result.created) return null
   const stored = result.message
@@ -423,4 +440,38 @@ export async function findRoomForDelivery(params: {
 }): Promise<Session | null> {
   if (!transportPolicy(params.channelType as Transport).rooms.converge) return null
   return findChannelRoom(params)
+}
+
+/** A reconnect of the same integration AND same bot renews generation through
+ * fresh admission, preserving its topic identity and rejecting in-flight old
+ * senders. The original creation provenance remains immutable. */
+export async function renewChannelConversationGeneration(room: Session, generation: number): Promise<Session> {
+  const db = await getPool().connect()
+  try {
+    await db.query('BEGIN')
+    await db.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE',[room.workspaceId])
+    const locked=(await db.query<{generation:number;identity:Session['providerContextIdentity'];receipt:Record<string,unknown>}>(
+      `SELECT provider_context_generation AS generation,provider_context_identity AS identity,
+       jsonb_build_object('version',1,'sessionId',id,'workspaceId',workspace_id,'assistantId',assistant_id,
+        'actorUserId',user_id,'channelId',channel_id,'identity',provider_context_identity,'generation',$2::integer,
+        'clearance',effective_clearance,'compartments',to_jsonb(context_compartments),'projectId',context_project_id) AS receipt
+       FROM sessions s WHERE id=$1 AND ${sessionKindSql.activeChannelRoom('s')} FOR UPDATE`,[room.id,generation])).rows[0]
+    if(!locked?.identity || locked.identity.integrationId!==room.providerContextIdentity?.integrationId
+      || locked.identity.botId!==room.providerContextIdentity.botId
+      || Number(locked.identity.generation)!==Number(room.providerContextIdentity.generation))throw new Error('provider_context_unavailable')
+    await admitChannelRoom(db,{assistantId:room.assistantId,userId:room.userId,workspaceId:room.workspaceId!,
+      channelType:room.channelType,channelId:room.channelId,channelIntegrationId:room.providerContextIdentity!.integrationId})
+    if(locked.generation!==generation){
+      await db.query("SELECT set_config('app.provider_conversation_context_admission',$1,true)",[JSON.stringify(locked.receipt)])
+      const changed=await db.query(`UPDATE sessions s SET provider_context_generation=$2 WHERE s.id=$1
+        AND s.provider_context_generation=$3 AND ${sessionKindSql.activeChannelRoom('s')} RETURNING id`,[room.id,generation,locked.generation])
+      if(!changed.rows.length)throw new Error('provider_context_unavailable')
+    }
+    await assertChannelConversationCurrent(db,room.id,{identity:room.providerContextIdentity!,generation})
+    await db.query("SELECT set_config('app.session_creation_admission','',true)")
+    await db.query('COMMIT')
+  } catch(error){await db.query('ROLLBACK');throw error}finally{db.release()}
+  const current=await readSessionById(room.id)
+  if(!current || current.providerContextGeneration!==generation)throw new Error('provider_context_unavailable')
+  return current
 }

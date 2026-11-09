@@ -1,3 +1,4 @@
+import { recordDeliveredTelegramConversation } from './telegram-conversation-context.js'
 import { createOfficeVersionRuntime } from './office/version-runtime.js'
 import { workspaceCredentialDelegation } from '@use-brian/core'
 import { captureWorkspaceMcpDelegation, restoreWorkspaceMcpDelegation } from './workspace-mcp/delegation.js'
@@ -2469,7 +2470,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // providers through this registration, so a route that forgets to thread
   // them cannot change which model answers a turn.
   configureTurnKernel({ resolveWorkspaceCustomLlm, configuredProviders })
-  configureTelegramTextDeliveryObserver(recordDeliveredTelegramMessage)
+  configureTelegramTextDeliveryObserver(async delivery => {
+    await Promise.all([recordDeliveredTelegramMessage(delivery),recordDeliveredTelegramConversation(delivery)])
+  })
   // Accepted Brief grounding + revision boundary for every runner's prepare stage.
   configureBriefTurnContext(resolveBriefTurn)
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>

@@ -21,6 +21,11 @@ const A2A: SessionKindRow = { channelType: 'assistant-call', anchorKind: null, c
 const CRON: SessionKindRow = { channelType: 'cron', anchorKind: null, channelId: 'j' }
 
 describe('[COMP:api/session-policy] sessionPolicy drift ledger', () => {
+  it('keeps context-only topic history out of learning until capture is explicitly enabled', () => {
+    const room={channelType:'telegram',anchorKind:'channel',visibility:'workspace',providerConversationContext:true}
+    expect(policyFor({...room,roomCapture:false}).surfacesBeyondAnchor).toBe(false)
+    expect(policyFor({...room,roomCapture:true}).surfacesBeyondAnchor).toBe(true)
+  })
   it.each([['programmatic', 'brain_key'], ['assistant_mcp', 'assistant_key']])('gives bound %s conversations room controls while keeping machine attribution', (channelType, keyKind) => {
     const row = { channelType, anchorKind: 'none', visibility: 'workspace', channelId: `workspace-mcp:${keyKind}:11111111-1111-4111-8111-111111111111` }
     expect(classifySession(row)).toMatchObject({ lane: 'machine', machine: 'workspace_mcp' })

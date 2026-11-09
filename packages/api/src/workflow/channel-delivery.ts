@@ -340,7 +340,7 @@ function createDelivery(
     }
 
     if (channelType === 'telegram') {
-      const tokens: Array<{ token: string; integrationId?: string }> = []
+      const tokens: Array<{ token: string; integrationId?: string; generation?: number }> = []
       if (options.integrationStore) {
         const integ = channelIntegrationId
           ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
@@ -352,7 +352,7 @@ function createDelivery(
             )
           : await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
         const byoToken = integ && (integ.credentials as { bot_token?: string }).bot_token
-        if (byoToken) tokens.push({ token: byoToken, integrationId: integ.id })
+        if (byoToken) tokens.push({ token: byoToken, integrationId: integ.id, generation: integ.identityGeneration })
       }
       if (!channelIntegrationId && options.defaultTelegramBotToken && (tokens.length === 0 || !question)) {
         tokens.push({ token: options.defaultTelegramBotToken })
@@ -361,14 +361,15 @@ function createDelivery(
       // `threadRef` (an earlier delivery's message id) posts this one as a
       // reply; the returned message id lets a later `deliver.thread` step
       // reply under THIS message. See workflow.md → deliver `thread`.
-      for (const [index, { token, integrationId }] of tokens.entries()) {
+      for (const [index, { token, integrationId, generation }] of tokens.entries()) {
         try {
           if (question && !integrationId) return { status: 'skipped', channelType, reason: 'no_integration' }
           const store = options.questionStore ?? createChannelQuestionStore()
           const questionToken = question && integrationId ? await store.create({
             integrationId, workspaceId, assistantId, userId, channelId, question, response: questionResponse, threadRef,
           }) : undefined
-          const send = () => createTelegramAdapter({ token, strictTopic: !!questionToken || !!publicationApprovalId }).sendMessage(
+          const send = () => createTelegramAdapter({ token, strictTopic: !!questionToken || !!publicationApprovalId,
+            ...(integrationId && generation != null ? { deliveryOrigin: { integrationId, generation } } : {}) }).sendMessage(
             channelId,
             { text: deliverable + (questionToken && question ? workflowQuestionReplyHint(questionToken, question, !!questionResponse) : ''), format: 'markdown',
               actions: questionToken && question && questionResponse ? workflowQuestionActions(questionToken, question) : undefined },

@@ -192,7 +192,8 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
           reason: `Not delivered to Telegram: this assistant has no connected Telegram bot, and no shared bot is configured, so there is no way to reach chat \`${channelId}\` and the message was not delivered. Connect Telegram for this assistant (Studio → Channels) before promising a Telegram delivery; retrying will not help until then.`,
         }
       }
-      const adapter = createTelegramAdapter({ token: botToken })
+      const adapter = createTelegramAdapter({ token: botToken, ...(byo?.identityGeneration != null
+        ? { deliveryOrigin: { integrationId: byo.id, generation: byo.identityGeneration } } : {}) })
       await adapter.sendMessage(channelId, { text, format: 'markdown' })
     } else if (channelType === 'slack') {
       const integration = integrationStore

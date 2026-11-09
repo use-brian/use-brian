@@ -90,6 +90,10 @@ export type Session = {
   channelType: string
   channelId: string
   appId: string
+  providerConversationContext?: boolean
+  providerContextIdentity?: { integrationId: string; botId: string; generation: number } | null
+  roomCapture?: boolean
+  providerContextGeneration?: number | null
   /**
    * Which app surface the session was created from (`brain`, `studio`,
    * `workflow`, `doc`, `chat`). Null for sessions older than
@@ -712,6 +716,7 @@ export async function readSessionById(id: string): Promise<Session | null> {
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             workspace_id as "workspaceId",
+            provider_conversation_context AS "providerConversationContext", provider_context_identity AS "providerContextIdentity", provider_context_generation AS "providerContextGeneration", room_capture AS "roomCapture",
             channel_type as "channelType", channel_id as "channelId",
             app_id as "appId", app_origin as "appOrigin", status, turn_started_at as "turnStartedAt", NULL::text as "compactSummary",
             compaction_count as "compactionCount",

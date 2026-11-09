@@ -11,6 +11,20 @@ bullet characters, and Markdown tables become vertical labelled comparisons.
 If Telegram rejects the HTML, a plain-text version preserves the same comparison
 layout and literal code. Conversation saving and output formatting are separate.
 
+## Topic conversation history
+
+An explicitly bound topic with an approved workspace audience can keep one shared
+conversation history even when the bot has no recording owner. Authorized
+workspace members can read it at the topic's sensitivity and Department/Project
+scope. Replies use the preceding exchange and can interpret a current image.
+Different topics stay separate, and history survives a server restart or a
+reconnect of the same bot.
+
+Conversation history starts with Brain capture off. It does not automatically
+file images/documents, enable private tools or turn the chat into learned memory.
+Explicit recording stops are honored. Held historical captures are not restored
+or merged into this new history. These changes require an updated server release.
+
 ## Setup and operation
 
 1. Connect your bot in **Studio → Channels** with a public HTTPS webhook.

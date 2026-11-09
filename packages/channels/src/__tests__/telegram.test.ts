@@ -7,6 +7,18 @@ import { createTelegramWebhookHandler, verifyTelegramWebhook } from '../telegram
 import { escapeHtml, markdownToTelegramHTML, stripMarkdown } from '../telegram/markdown.js'
 
 describe('[COMP:channels/telegram] provider-confirmed text delivery recording', () => {
+  it('captures immutable integration and identity generation before provider I/O', async () => {
+    const origin={integrationId:'fictional-integration',generation:2}
+    const receipts:TelegramTextDelivery[]=[]
+    vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>({ok:true,result:{message_id:3,text:'Visible reply'}})})))
+    try {
+      const adapter=createTelegramAdapter({token:'12345:fictional',deliveryOrigin:origin,onTextDelivered:receipt=>{receipts.push(receipt)}})
+      origin.generation=9
+      await adapter.sendMessage('-1000000001:topic:21',{text:'Visible reply'})
+      expect(receipts[0].origin).toEqual({integrationId:'fictional-integration',generation:2})
+    } finally { vi.unstubAllGlobals() }
+  })
+
   async function run(options: { failAt?: number; recorderFails?: boolean; fallbackTopic?: boolean } = {}) {
     const deliveries: TelegramTextDelivery[] = []
     let sends = 0

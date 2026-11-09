@@ -1,3 +1,5 @@
+import { findTelegramConversationContext } from '../../telegram-conversation-context.js'
+vi.mock('../../telegram-conversation-context.js', () => ({ findTelegramConversationContext: vi.fn(async () => null), assertTelegramConversationCurrent: vi.fn(async () => {}) }))
 import { telegramRecordingEnabled, admitTelegramRecording } from '../../channel-recording.js'
 vi.mock('../../channel-recording.js', () => ({
   telegramRecordingEnabled: vi.fn(async () => true),
@@ -208,6 +210,8 @@ vi.mock('../../db/chat-lock.js', () => ({
 // Capture processChannelMessage calls and invoke sendResponse so we can
 // verify the adapter is called with a topic-qualified channel id on reply.
 const pipelineCalls: Array<{
+  conversationContext?: unknown
+  recording?: unknown
   admittedAnswerContext?: { kind: 'continue'; questionAnswer?: string }
   archiveInboundAlreadyPersisted?: boolean
   channelId: string
@@ -241,6 +245,8 @@ beforeAll(async () => {
 
 vi.mock('../channel-pipeline.js', () => ({
   processChannelMessage: vi.fn(async (params: {
+    conversationContext?: unknown
+    recording?: unknown
     admittedAnswerContext?: { kind: 'continue'; questionAnswer?: string }
     archiveInboundAlreadyPersisted?: boolean
     interactionScope?: ChannelInteractionScope
@@ -276,6 +282,7 @@ vi.mock('../channel-pipeline.js', () => ({
     // The real central pipeline owns typed-answer resolution and action registration.
     if (!params.admittedAnswerContext && binding && !params.workflowCallback) resolveChannelQuestion(binding)
     pipelineCalls.push({
+      conversationContext: params.conversationContext, recording: params.recording,
       archiveInboundAlreadyPersisted: params.archiveInboundAlreadyPersisted,
       admittedAnswerContext: params.admittedAnswerContext,
       interactionScope: params.interactionScope,
@@ -446,6 +453,7 @@ function makeIntegrationStore(
       channelType: 'telegram',
       botUsername: 'testbot',
       botUserId: '999999',
+      identityGeneration: 0,
       config,
       credentials: {
         bot_token: 'fake-token',
@@ -478,6 +486,7 @@ function flushMicrotasks(): Promise<void> {
 }
 
 beforeEach(() => {
+  vi.mocked(findTelegramConversationContext).mockReset().mockResolvedValue(null)
   vi.mocked(admitTelegramRecording).mockClear()
   vi.mocked(telegramRecordingEnabled).mockClear()
   archiveUnroutedInbound.mockClear()
@@ -3721,6 +3730,40 @@ describe('[COMP:api/telegram-byo-route] original media archive', () => {
 })
 
 describe('[COMP:api/telegram-byo-route] workspace ingress admission', () => {
+  it.each(['document','album'] as const)('interprets a context-only %s without automatic file or Brain intake',async(kind)=>{
+    const { findAssistantById }=await import('../../db/users.js')
+    const previous=await findAssistantById('assistant_1')
+    vi.mocked(findAssistantById).mockResolvedValue({...previous,workspaceId:'ws_1'} as never)
+    const context={id:'approved-topic-context',workspaceId:'ws_1',providerConversationContext:true}
+    vi.mocked(findTelegramConversationContext).mockResolvedValue(context as never)
+    vi.mocked(telegramRecordingEnabled).mockResolvedValue(false)
+    const ingest=vi.fn(),storeBuffer=vi.fn()
+    const instance=createTestApp('/webhook/telegram-byo',telegramByoRoutes({provider:{} as never,systemPrompt:'',tools:new Map(),
+      memoryStore:{} as never,capabilityStore:{} as never,apiUrl:'http://test',
+      integrationStore:makeIntegrationStore({requireMention:false}) as never,ingestChannelMediaRef:ingest,archiveMedia:{storeBuffer} as never}))
+    try {
+      const base={message_id:6701,date:1,from:{id:42},chat:{id:-100,type:'supergroup',is_forum:true},message_thread_id:898,caption:'Please review this'}
+      if(kind==='document')await postUpdate(instance,{message:{...base,document:{file_id:'context-doc',file_name:'notes.pdf',mime_type:'application/pdf'}}})
+      else {
+        await postUpdate(instance,{message:{...base,media_group_id:'context-album',photo:[{file_id:'context-photo-1'}]}})
+        await postUpdate(instance,{message:{...base,message_id:6702,media_group_id:'context-album',photo:[{file_id:'context-photo-2'}]}})
+      }
+      await vi.waitFor(()=>expect(pipelineCalls).toHaveLength(1),{timeout:3000})
+      expect(pipelineCalls[0].conversationContext).toBe(context)
+      expect(vi.mocked(findTelegramConversationContext).mock.calls[0]?.[0].expectedIdentity).toEqual({integrationId:'integ_1',botId:'999999',generation:0})
+      expect(pipelineCalls[0].recording).toBeUndefined()
+      expect(pipelineCalls[0].userContentBlocks).toEqual(expect.arrayContaining([expect.objectContaining({type:'image'})]))
+      expect(mediaDownloadCalls.length).toBeGreaterThan(0)
+      expect(ingest).not.toHaveBeenCalled()
+      expect(storeBuffer).not.toHaveBeenCalled()
+      expect(archiveUnroutedInbound).not.toHaveBeenCalled()
+      expect(admitTelegramRecording).not.toHaveBeenCalled()
+    } finally {
+      vi.mocked(findAssistantById).mockResolvedValue(previous)
+      vi.mocked(telegramRecordingEnabled).mockResolvedValue(true)
+    }
+  })
+
   it.each([false, true])('formats no-recording replies at the provider boundary (HTML rejected: %s)', async (rejectHtml) => {
     const { findAssistantById } = await import('../../db/users.js')
     const previous = await findAssistantById('assistant_1')

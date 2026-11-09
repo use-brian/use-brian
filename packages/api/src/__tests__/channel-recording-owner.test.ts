@@ -40,6 +40,7 @@ describe('[COMP:api/channel-recording] authenticated connector recovery across u
       CREATE TABLE channels(id uuid PRIMARY KEY,workspace_id uuid,status text);
       CREATE TABLE channel_integrations(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),channel_id uuid UNIQUE,
         channel_type text,credentials bytea,team_id text,team_name text,bot_user_id text,bot_username text,
+        identity_generation bigint NOT NULL DEFAULT 0,
         status text DEFAULT 'active',config jsonb DEFAULT '{}',created_at timestamptz DEFAULT now(),
         updated_at timestamptz DEFAULT now(),last_event_at timestamptz,connector_instance_id uuid,
         recording_owner_user_id uuid REFERENCES users(id) ON DELETE SET NULL);

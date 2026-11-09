@@ -74,6 +74,8 @@ export type SessionKind = {
    * A hint for personal-history scoping only; never an authority input.
    */
   surface: string | null
+  providerContext?: boolean
+  captureEnabled?: boolean
 }
 
 /**
@@ -93,6 +95,8 @@ export type SessionKindRow = {
   appOrigin?: string | null
   channelId?: string | null
   transient?: boolean | null
+  providerConversationContext?: boolean
+  roomCapture?: boolean
 }
 
 const ANCHOR_KINDS: readonly AnchorKind[] = ['none', 'doc_thread', 'office_file', 'feed_draft', 'feed_thread', 'channel', 'inbox', 'job']
@@ -242,6 +246,8 @@ export function classifySession(row: SessionKindRow, turn: SessionTurnFacts = {}
     lane: machine ? 'machine' : 'conversation',
     machine,
     surface: row.appOrigin ?? null,
+    providerContext: row.providerConversationContext === true,
+    captureEnabled: row.roomCapture === true,
   }
 }
 
@@ -472,7 +478,7 @@ export function sessionPolicy(kind: SessionKind, facts: SessionTurnFacts = {}): 
     confirmations: workspace ? 'addresser_or_admin' : 'owner',
     lifecycle: workspace ? { rename: 'participants', delete: 'admin' } : { rename: 'owner', delete: 'owner' },
     humanActivity: conversation,
-    surfacesBeyondAnchor: anchor !== 'office_file',
+    surfacesBeyondAnchor: anchor !== 'office_file' && !(kind.providerContext && !kind.captureEnabled),
     billing: workspace || isExternalTransport(kind.transport) ? 'workspace' : 'user',
     compaction: kind.transport === 'web' ? 'context_pressure' : 'idle_tiered',
     createAdmission: room,
@@ -594,7 +600,7 @@ export const sessionKindSql = {
    * the file's audience only, so it never leaves the file.
    */
   surfacesBeyondAnchor: (alias: string): string =>
-    `${alias}.anchor_kind <> 'office_file'`,
+    `${alias}.anchor_kind <> 'office_file' AND (${alias}.provider_conversation_context IS NOT TRUE OR ${alias}.room_capture)`,
   /**
    * A plain web conversation workspace search indexes: web transport, no
    * anchor (doc / Office / feed threads and drafts live in their anchors).
@@ -669,7 +675,13 @@ export const sessionKindSql = {
     `(${param}::text IS NULL OR ${alias}.app_origin = ${param} OR ${alias}.app_origin IS NULL)`,
   /** The ON CONFLICT target of a channel room: `sessions_channel_room_key` (D8). */
   channelRoomConflict: (): string =>
-    `(workspace_id, channel_type, channel_id) WHERE visibility = 'workspace' AND anchor_kind = 'channel' AND recording_revision IS NULL`,
+    `(workspace_id, channel_type, channel_id) WHERE visibility = 'workspace' AND anchor_kind = 'channel' AND recording_revision IS NULL AND NOT recording_privacy_held AND archived_at IS NULL`,
+  /** Active room identity excludes retained quarantined and retired rooms. */
+  activeChannelRoom: (alias: string): string =>
+    `${alias}.visibility = 'workspace' AND ${alias}.anchor_kind = 'channel' AND ${alias}.recording_revision IS NULL AND NOT ${alias}.recording_privacy_held AND ${alias}.archived_at IS NULL`,
+  heldChannelRoom: (alias: string): string =>
+    `${alias}.visibility = 'workspace' AND ${alias}.anchor_kind = 'channel' AND ${alias}.recording_revision IS NULL AND ${alias}.recording_privacy_held`,
+  providerConversationContext: (alias: string): string => `${alias}.provider_conversation_context IS TRUE`,
   /** A session with this anchor (migration 741). An empty alias leaves the column unqualified. */
   anchored: (alias: string, kind: AnchorKind): string =>
     `${alias ? `${alias}.` : ''}anchor_kind = '${kind}'`,
