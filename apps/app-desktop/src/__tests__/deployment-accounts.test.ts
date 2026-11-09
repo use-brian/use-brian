@@ -147,7 +147,7 @@ describe("[COMP:app-desktop/deployment-accounts] saved sessions", () => {
     expect(deploymentKind({ ...local, appUrl: "https://brain.example.com" })).toBe("self-hosted");
   });
   it("serves later reads from memory and does not rewrite an unchanged listing", () => {
-    let disk = Buffer.alloc(0);
+    let disk: Buffer = Buffer.alloc(0);
     let decrypts = 0;
     let writes = 0;
     const cipher = {
