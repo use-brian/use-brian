@@ -29,6 +29,7 @@
  */
 
 import { Router } from 'express'
+import { externalActionConfirmation } from '../external-approvals/confirmation.js'
 import { CONFIGURE_CAPABILITY, type CapabilityStore, type WorkerRunsStore, type WorkerStatus } from '@use-brian/core'
 import {
   findSessionById,
@@ -203,7 +204,7 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
       // Pre-workspace assistants can't suspend on a question (the engine
       // requires `assistant.workspaceId` to mint the approval). Return
       // empty rather than 500.
-      res.json({ pending: null, toolConfirmation: null })
+      res.json({ pending: null, toolConfirmation: null, externalConfirmations: [] })
       return
     }
     const pending = await opts.approvalsStore.listPendingForWorkspace(userId, wsId)
@@ -225,6 +226,17 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
             (r.expiresAt === null || r.expiresAt.getTime() > now),
         )
       : undefined
+    // Independent of the live turn lease: these are frozen human requests,
+    // not tool invocations. The store also checks the registration's live RLS authority.
+    const externalConfirmations = session.channelType === 'web' && session.userId === userId
+      ? pending.flatMap((row) => {
+          if (row.kind !== 'external_action' || row.status !== 'pending' ||
+              row.approverUserId !== userId || row.originatingAssistantId !== session.assistantId ||
+              row.deliveryChannelType !== 'web' || row.deliveryChannelId !== sessionId) return []
+          const confirmation = externalActionConfirmation(row)
+          return confirmation ? [confirmation] : []
+        })
+      : []
     const connectorEntry = question
       ? connectorAuthorizationEntry(question.approvalPayload.actionId)
       : null
@@ -235,6 +247,7 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
       (await opts.capabilityStore.listActive(question.originatingAssistantId)).includes(CONFIGURE_CAPABILITY),
     )
     res.json({
+      externalConfirmations,
       pending: question
         ? {
             approvalId: question.id,
