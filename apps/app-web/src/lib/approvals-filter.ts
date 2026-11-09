@@ -23,6 +23,7 @@ import type { ApprovalKind, PendingApprovalRow } from "@/lib/api/approvals";
  * via the `nativeSurface` hint.
  */
 export const ACTIONABLE_KINDS: readonly ApprovalKind[] = [
+  "external_action",
   "workflow_step",
   "tool_invocation",
   "staged_write",

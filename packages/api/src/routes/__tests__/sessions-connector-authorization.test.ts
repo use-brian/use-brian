@@ -64,7 +64,7 @@ function row(overrides: Partial<PendingApproval> = {}): PendingApproval {
     originatingAssistantId: ASSISTANT,
     answerText: null,
     ...overrides,
-  }
+  } as PendingApproval
 }
 
 function makeApp(input: {

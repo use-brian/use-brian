@@ -11,7 +11,8 @@ import { PROACTIVE_DELIVERY_TRANSPORTS, sessionKindSql } from '../session-kind.j
 
 export type RecentApprovalTarget = Pick<Parameters<DeliverToChannel>[0],
   'channelId' | 'channelIntegrationId' | 'threadRef'> & {
-  channelType: (typeof PROACTIVE_DELIVERY_TRANSPORTS)[number]
+  /** Messaging transports, or a personal web chat session id for in-app delivery. */
+  channelType: (typeof PROACTIVE_DELIVERY_TRANSPORTS)[number] | 'web'
 }
 export type RecentApprovalResolver = (scope: {
   workspaceId: string
@@ -20,8 +21,14 @@ export type RecentApprovalResolver = (scope: {
 }) => Promise<RecentApprovalTarget | null>
 
 /** Only inbound human messages count. Session activity also includes outbound pushes. */
-export const resolveRecentApprovalChannel: RecentApprovalResolver = async (scope) => {
-  const result = await query<RecentApprovalTarget & { messageId: string | null }>(
+export const resolveRecentApprovalChannel: RecentApprovalResolver = createRecentApprovalChannelResolver()
+
+/** Allows credential registration to derive its target on the existing transaction connection. */
+export function createRecentApprovalChannelResolver(runQuery: typeof query = query): RecentApprovalResolver {
+  return scope => resolveWithQuery(scope, runQuery)
+}
+async function resolveWithQuery(scope: Parameters<RecentApprovalResolver>[0], runQuery: typeof query): Promise<RecentApprovalTarget | null> {
+  const result = await runQuery<RecentApprovalTarget & { messageId: string | null }>(
     `SELECT s.channel_type AS "channelType", s.channel_id AS "channelId",
             m.channel_message_id AS "messageId"
      FROM session_messages m
@@ -37,7 +44,9 @@ export const resolveRecentApprovalChannel: RecentApprovalResolver = async (scope
   const target = result.rows[0]
   // WhatsApp delivery currently uses the system connector, not the pinned account.
   // Do not search older history or risk sending through a different account.
-  if (!target || target.channelType === 'whatsapp') return null
+  if (!target || target.channelType === 'whatsapp') {
+    return resolveRecentWebChat(scope, runQuery)
+  }
   const channelId = providerChannelIdFromSession(target.channelType, target.channelId)
   const threadRef = target.channelType === 'slack' && channelId !== target.channelId
     ? target.channelId.slice(channelId.length + SLACK_THREAD_SESSION_DELIMITER.length)
@@ -47,7 +56,7 @@ export const resolveRecentApprovalChannel: RecentApprovalResolver = async (scope
   // Prefer an observed chat; ambiguous bindings are not safe notification destinations.
   // Match the credential resolver's winning binding across ALL assistants.
   // Retain inactive integrations: the adapter will reject them without switching bots.
-  const integrations = await query<{ id: string; observed: boolean }>(
+  const integrations = await runQuery<{ id: string; observed: boolean }>(
     `SELECT DISTINCT ci.id,
        EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(ci.config->'seenChats', '[]'::jsonb)) chat
                WHERE chat->>'chatId' IN ($4, $5)) AS observed
@@ -75,6 +84,27 @@ export const resolveRecentApprovalChannel: RecentApprovalResolver = async (scope
   const candidates = integrations.rows.some((r) => r.observed)
     ? integrations.rows.filter((r) => r.observed) : integrations.rows
   // No binding is not evidence of official-bot provenance (e.g. deleted BYO).
-  if (candidates.length !== 1) return null
+  if (candidates.length !== 1) return resolveRecentWebChat(scope, runQuery)
   return { channelType: target.channelType, channelId, threadRef, channelIntegrationId: candidates[0].id }
 }
+
+/** Fall back to the approver's most recent personal web chat with this assistant. */
+async function resolveRecentWebChat(
+  scope: Parameters<RecentApprovalResolver>[0],
+  runQuery: typeof query,
+): Promise<RecentApprovalTarget | null> {
+  const result = await runQuery<{ sessionId: string }>(
+    `SELECT s.id AS "sessionId"
+     FROM session_messages m
+     JOIN sessions s ON s.id = m.session_id
+     JOIN assistants a ON a.id = s.assistant_id
+     WHERE a.workspace_id = $1 AND s.assistant_id = $2 AND s.user_id = $3
+       AND m.role = 'user' AND (m.sender_user_id IS NULL OR m.sender_user_id = $3)
+       AND ${sessionKindSql.personalConversation('s')}
+     ORDER BY m.created_at DESC, m.id DESC LIMIT 1`,
+    [scope.workspaceId, scope.assistantId, scope.approverUserId],
+  )
+  const row = result?.rows?.[0]
+  return row ? { channelType: 'web', channelId: row.sessionId } : null
+}
+

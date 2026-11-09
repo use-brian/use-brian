@@ -1,21 +1,43 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
 import { query } from '../../db/client.js'
-import { resolveRecentApprovalChannel } from '../recent-approval-channel.js'
+import { createRecentApprovalChannelResolver, resolveRecentApprovalChannel } from '../recent-approval-channel.js'
 const db = vi.mocked(query)
 const scope = { workspaceId: 'workspace', assistantId: 'assistant', approverUserId: 'approver' }
 beforeEach(() => db.mockReset())
 
 function rows(value: unknown[]) { return { rows: value } as Awaited<ReturnType<typeof query>> }
 describe('[COMP:workflow/recent-approval-channel] recent approval channel', () => {
-  it('returns no target when there is no eligible inbound history', async () => {
-    db.mockResolvedValueOnce(rows([]))
-    expect(await resolveRecentApprovalChannel(scope)).toBeNull()
-    expect(db).toHaveBeenCalledTimes(1)
+  it('uses the existing transaction connection for both target and integration queries', async () => {
+    const transactionQuery = vi.fn<typeof query>()
+      .mockResolvedValueOnce(rows([{ channelType: 'telegram', channelId: '123' }]))
+      .mockResolvedValueOnce(rows([{ id: 'pinned', observed: true }]))
+    // Vitest erases generic result-row inference; the two synthetic shapes are supplied above.
+    const resolve = createRecentApprovalChannelResolver(transactionQuery as typeof query)
+    expect(await resolve(scope)).toMatchObject({ channelId: '123', channelIntegrationId: 'pinned' })
+    expect(transactionQuery).toHaveBeenCalledTimes(2)
+    expect(db).not.toHaveBeenCalled()
   })
 
-  it('selects by inbound message time, never outbound session activity, and excludes other users/assistants/workspaces', async () => {
+  it('returns no target when there is no eligible inbound history', async () => {
+    db.mockResolvedValueOnce(rows([])) // messaging
+      .mockResolvedValueOnce(rows([])) // web chat fallback
+    expect(await resolveRecentApprovalChannel(scope)).toBeNull()
+    expect(db).toHaveBeenCalledTimes(2)
+  })
+
+
+  it('uses personal web chat when messaging history is empty', async () => {
     db.mockResolvedValueOnce(rows([]))
+      .mockResolvedValueOnce(rows([{ sessionId: 'web-session' }]))
+    expect(await resolveRecentApprovalChannel(scope)).toEqual({
+      channelType: 'web', channelId: 'web-session',
+    })
+    expect(db.mock.calls[1][0]).toContain("m.role = 'user'")
+  })
+  it('selects by inbound message time, never outbound session activity, and excludes other users/assistants/workspaces', async () => {
+    db.mockResolvedValueOnce(rows([])) // messaging probe
+      .mockResolvedValueOnce(rows([])) // web chat fallback
     await resolveRecentApprovalChannel(scope)
     const [sql, values] = db.mock.calls[0]
     expect(values).toEqual(['workspace', 'assistant', 'approver'])
@@ -39,17 +61,24 @@ describe('[COMP:workflow/recent-approval-channel] recent approval channel', () =
     expect(db.mock.calls[1][1]).toEqual(expect.arrayContaining(['workspace', 'assistant', channelType, channelId]))
   })
 
-  it('falls back to web after BYO deletion rather than guessing official provenance', async () => {
+  it('falls back to personal web chat after BYO deletion rather than guessing official provenance', async () => {
     db.mockResolvedValueOnce(rows([{ channelType: 'telegram', channelId: '123' }]))
       .mockResolvedValueOnce(rows([]))
-    expect(await resolveRecentApprovalChannel(scope)).toBeNull()
+      .mockResolvedValueOnce(rows([{ sessionId: 'web-session' }]))
+    expect(await resolveRecentApprovalChannel(scope)).toEqual({
+      channelType: 'web', channelId: 'web-session',
+    })
   })
 
-  it('stops at the latest WhatsApp conversation without looking up a connector or older channel', async () => {
+  it('skips WhatsApp connectors and falls back to personal web chat', async () => {
     db.mockResolvedValueOnce(rows([{ channelType: 'whatsapp', channelId: '123' }]))
-    expect(await resolveRecentApprovalChannel(scope)).toBeNull()
-    expect(db).toHaveBeenCalledTimes(1)
+      .mockResolvedValueOnce(rows([{ sessionId: 'web-session' }]))
+    expect(await resolveRecentApprovalChannel(scope)).toEqual({
+      channelType: 'web', channelId: 'web-session',
+    })
+    expect(db).toHaveBeenCalledTimes(2)
     expect(db.mock.calls[0][0]).toContain("'whatsapp'")
+    expect(db.mock.calls[1][0]).toContain('personal')
   })
 
   it.each([
@@ -78,12 +107,14 @@ describe('[COMP:workflow/recent-approval-channel] recent approval channel', () =
   it('rejects ambiguity even when multiple applicable integrations observed the chat', async () => {
     db.mockResolvedValueOnce(rows([{ channelType: 'telegram', channelId: '123' }]))
       .mockResolvedValueOnce(rows([{ id: 'one', observed: true }, { id: 'two', observed: true }]))
+      .mockResolvedValueOnce(rows([])) // no personal web chat either
     expect(await resolveRecentApprovalChannel(scope)).toBeNull()
   })
 
   it('fails closed for ambiguous integrations', async () => {
     db.mockResolvedValueOnce(rows([{ channelType: 'telegram', channelId: '123' }]))
       .mockResolvedValueOnce(rows([{ id: 'one' }, { id: 'two' }]))
+      .mockResolvedValueOnce(rows([]))
     expect(await resolveRecentApprovalChannel(scope)).toBeNull()
   })
 

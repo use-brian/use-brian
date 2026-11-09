@@ -34,7 +34,7 @@ const approval = (over: Partial<PendingApproval> = {}): PendingApproval => ({
   deliveryChannelId: null, status: 'approved', expiresAt: null, respondedAt: new Date(), respondedBy: null, rejectReason: null,
   createdAt: new Date(), kind: 'workflow_step', blockingSessionId: null, approvalPayload: {}, originatingAssistantId: EXECUTOR,
   answerText: null, resolutionOrigin: 'delegated_assistant', ...over,
-})
+} as PendingApproval)
 
 function deps() {
   const calls: ToolContext[] = []

@@ -64,10 +64,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Clean API compilation can exceed 4 GiB; keep this a step-local build budget.
       - name: Build
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: pnpm build
 
       - name: Typecheck
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: pnpm typecheck
 
       # One end-to-end queryLoop turn against an in-memory mock provider.
@@ -75,7 +80,7 @@ jobs:
         run: pnpm smoke
 
       - name: Test release-evidence checks
-        run: node --test scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs scripts/__tests__/migration-owner-groups.test.mjs scripts/__tests__/preflight-push.test.mjs
+        run: node --test scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs scripts/__tests__/migration-owner-groups.test.mjs scripts/__tests__/preflight-push.test.mjs scripts/__tests__/docker-build-closure.test.mjs
 
       - name: Archive database test dependencies
         run: tar -czf "$RUNNER_TEMP/database-test-dependencies.tgz" packages/*/dist
@@ -266,7 +271,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # These tests also compile the API through their transitive build graph.
       - name: Unit tests
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: >-
           pnpm exec turbo run test
           --filter='!@use-brian/api'
@@ -290,7 +298,10 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec turbo run build --filter="@use-brian/api-open^..."
+      - name: Build test dependencies
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: pnpm exec turbo run build --filter="@use-brian/api-open^..."
       - run: node scripts/testing/embedded-database-tests.mjs current
       - run: pnpm --filter @use-brian/api-open exec vitest run src/runtime.test.ts
 
@@ -314,6 +325,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Build test dependencies
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: pnpm exec turbo run build --filter="@use-brian/api-open^..."
       - name: Embedded database tests
         run: node scripts/testing/embedded-database-tests.mjs ${{ matrix.group }}

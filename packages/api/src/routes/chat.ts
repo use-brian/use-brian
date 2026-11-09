@@ -2027,6 +2027,9 @@ export async function runSessionResume(
     // FK CASCADE should prevent this — defensive only.
     return { status: 'failed', reason: 'approval_missing' }
   }
+  if (approval.kind === 'external_action') {
+    return { status: 'skipped', reason: 'external_approval_not_resumable' }
+  }
   if (approval.status === 'pending') {
     return { status: 'skipped', reason: 'approval_still_pending' }
   }

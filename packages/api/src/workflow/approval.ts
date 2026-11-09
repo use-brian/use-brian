@@ -50,12 +50,16 @@ export type ApprovalDeliveryDispatcher = (params: {
   stepId: string
   toolName: string
   arguments: Record<string, unknown>
-  approverUserId: string
   deliveryChannelType: ApprovalDeliveryChannel
   deliveryChannelId: string | null
   recentTarget?: RecentApprovalTarget
   assistantId?: string
-}) => Promise<void>
+  /** Frozen display snapshot for channel cards (title + optional details). */
+  prompt?: { title: string; details?: string; method?: 'question'; options?: string[]; allowCustom?: boolean }
+} & (
+  | { externalAction?: false; approverUserId: string; deliveryUserId?: never }
+  | { externalAction: true; approverUserId: string | null; deliveryUserId?: string }
+)) => Promise<void>
 
 export type ApprovalBridgeDeps = {
   resolveRecentChannel?: RecentApprovalResolver
@@ -682,6 +686,8 @@ export async function enqueueToolInvocationResume(
   },
 ): Promise<ToolInvocationResumeOutcome> {
   const { approval, decision, reason } = params
+  // External decisions must never enter native live-tool or restart continuations.
+  if (approval.kind === 'external_action') return { kind: 'no_checkpoint' }
   // These continuations have a durable credential parent. Replaying them as
   // an ordinary chat session would discard that ceiling and its revocation.
   if (approval.approvalPayload.workspaceMcpOperation === true || typeof approval.approvalPayload.workspaceMcpRunId === 'string') return { kind: 'no_checkpoint' }

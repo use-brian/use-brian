@@ -126,11 +126,20 @@ export function ChatConfirmationCard({
   onApprove,
   onAlwaysAllow,
   onDeny,
+  disabled = false,
+  allowComment = true,
+  showInput = true,
+  actions,
 }: {
   confirmation: PendingConfirmation;
   approveLabel: string;
   denyLabel: string;
   approvingLabel: string;
+  disabled?: boolean;
+  allowComment?: boolean;
+  showInput?: boolean;
+  /** Optional external human form; native controls remain unchanged by default. */
+  actions?: ReactNode;
   onApprove: (toolCallId: string) => void;
   onAlwaysAllow?: (toolCallId: string) => void;
   /** A denial with an optional note. The note reaches the model via
@@ -146,7 +155,7 @@ export function ChatConfirmationCard({
   const [commenting, setCommenting] = useState(false);
   const [comment, setComment] = useState("");
   const title = confirmation.displayName ?? confirmation.toolName;
-  const isInFlight = confirmation.status === "approving";
+  const isInFlight = disabled || confirmation.status === "approving";
   const effectiveApproveLabel =
     confirmation.toolName === "updateBrainEntry"
       ? brainEdit.editThreadApply
@@ -170,7 +179,7 @@ export function ChatConfirmationCard({
         <TriangleAlert className="size-3.5" aria-hidden />
       </div>
       <div className="flex-1 min-w-0 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
-        <div className="text-[13px] font-medium text-foreground">{title}</div>
+        <div className="whitespace-pre-wrap break-words text-[13px] font-medium text-foreground">{title}</div>
         {preview ? (
           <ToolPreview
             preview={preview}
@@ -182,7 +191,7 @@ export function ChatConfirmationCard({
         ) : (
           <>
             {confirmation.description ? (
-              <p className="text-xs text-muted-foreground leading-relaxed">
+              <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground leading-relaxed">
                 {confirmation.description}
               </p>
             ) : null}
@@ -192,15 +201,15 @@ export function ChatConfirmationCard({
                 toolName={confirmation.toolName}
                 lines={confirmation.displayLines}
               />
-            ) : (
+            ) : showInput ? (
               <GenericToolPreview
                 preview={buildConfirmationPreview(confirmation.input)}
               />
-            )}
+            ) : null}
           </>
         )}
-        <ToolInputToggle args={confirmation.input} disabled={isInFlight} />
-        {commenting ? (
+        {showInput && <ToolInputToggle args={confirmation.input} disabled={isInFlight} />}
+        {actions ?? (commenting ? (
           <div className="space-y-2 pt-1">
             <textarea
               // No auto-raised keyboard on a phone (responsive contract M4).
@@ -259,11 +268,11 @@ export function ChatConfirmationCard({
               onClick={() => onApprove(confirmation.toolCallId)}
               disabled={isInFlight}
               className={cn(
-                "rounded-md bg-action px-3 py-1 text-[12px] font-medium text-action-foreground",
+                "min-h-11 rounded-md bg-action px-3 py-1 text-[12px] font-medium text-action-foreground md:min-h-8",
                 "transition-colors hover:bg-action/90 disabled:opacity-50 disabled:cursor-not-allowed",
               )}
             >
-              {isInFlight ? effectiveApprovingLabel : effectiveApproveLabel}
+              {confirmation.status === "approving" ? effectiveApprovingLabel : effectiveApproveLabel}
             </button>
             {confirmation.allowPersistentApproval && onAlwaysAllow ? (
               <button type="button" disabled={isInFlight}
@@ -277,22 +286,22 @@ export function ChatConfirmationCard({
               onClick={() => onDeny(confirmation.toolCallId)}
               disabled={isInFlight}
               className={cn(
-                "rounded-md border border-border bg-background px-3 py-1 text-[12px] font-medium text-muted-foreground",
+                "min-h-11 rounded-md border border-border bg-background px-3 py-1 text-[12px] font-medium text-muted-foreground md:min-h-8",
                 "transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed",
               )}
             >
               {effectiveDenyLabel}
             </button>
-            <button
+            {allowComment && <button
               type="button"
               onClick={() => setCommenting(true)}
               disabled={isInFlight}
               className="rounded-md px-2 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {t.confirmationDenyWithComment}
-            </button>
+            </button>}
           </div>
-        )}
+        ))}
       </div>
     </div>
   );
