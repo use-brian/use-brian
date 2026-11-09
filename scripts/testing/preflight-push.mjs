@@ -7,6 +7,29 @@ import { command, environment, git, identity, sameIdentity, snapshot, saveReceip
 import { compileWorkflow, executeWorkflow, expression, workflowContext } from './preflight-workflow.mjs'
 import { needsHistoricalTests } from './ci-scope.mjs'
 
+const containerBuilds = new Set(['apps/api/Dockerfile', 'apps/api-admin/Dockerfile', 'apps/doc-sync/Dockerfile', 'apps/browser-relay/Dockerfile'])
+const containerPrefix = 'container-build:'
+
+/** Execute the actual image boundary; a full workspace build cannot prove COPY coverage. */
+export async function validateContainerBuild(root, dockerfile, { env, signal, log, run = command } = {}) {
+  if (!containerBuilds.has(dockerfile)) throw new Error(`Container needs a maintained local validator: ${dockerfile}`)
+  const endpoint = process.env.DOCKER_HOST || (await run('docker', ['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'],
+    { signal, timeoutMs: 10_000 })).output.trim()
+  if (!endpoint) throw new Error('Configured Docker daemon is unavailable')
+  const plugins = JSON.parse((await run('docker', ['info', '--format', '{{json .ClientInfo.Plugins}}'],
+    { signal, timeoutMs: 10_000 })).output)
+  const buildx = Array.isArray(plugins) && plugins.find(plugin => plugin.Name === 'buildx' && typeof plugin.Path === 'string' && isAbsolute(plugin.Path))
+  if (!buildx) throw new Error('Docker Buildx plugin is unavailable')
+  // Preserve executable discovery, not registry credentials or the user's home.
+  await mkdir(dirname(log), { recursive: true })
+  const dockerConfig = await mkdtemp(join(dirname(log), 'docker-config-'))
+  await writeFile(join(dockerConfig, 'config.json'), JSON.stringify({ cliPluginsExtraDirs: [dirname(buildx.Path)] }), { mode: 0o600 })
+  const args = ['buildx', 'build', '--builder', 'default', '--platform', 'linux/amd64', '--progress', 'plain',
+    '--output', 'type=cacheonly', '--file', dockerfile, '.']
+  await run('docker', args, { cwd: root, env: { ...env, DOCKER_HOST: endpoint, DOCKER_CONFIG: dockerConfig }, signal, log, timeoutMs: 30 * 60_000 })
+  return ['docker', ...args]
+}
+
 export async function publicationPlan(root, kind, comparisonBase) {
   const input = await identity(root)
   const base = comparisonBase === undefined ? input.base : comparisonBase
@@ -24,7 +47,7 @@ export async function publicationPlan(root, kind, comparisonBase) {
   }
   let checks
   if (kind === 'oss') {
-    const unsupported = [...changed].find(path => (/^\.github\/workflows\/.+\.ya?ml$/.test(path) && path !== '.github/workflows/ci.yml') || /(^|\/)(?:Dockerfile(?:\.[^/]+)?|\.dockerignore)$/.test(path))
+    const unsupported = [...changed].find(path => (/^\.github\/workflows\/.+\.ya?ml$/.test(path) && path !== '.github/workflows/ci.yml') || /(^|\/)(?:Dockerfile(?:\.[^/]+)?|\.dockerignore)$/.test(path) && !containerBuilds.has(path))
     if (unsupported) throw new Error(`Changed workflow/container definition needs a maintained local validator: ${unsupported}`)
     const context = workflowContext({ historical })
     checks = compileWorkflow(await readFile(join(root, '.github/workflows/ci.yml'), 'utf8'), context)
@@ -43,6 +66,7 @@ export async function publicationPlan(root, kind, comparisonBase) {
       checks = [{ id: 'documentation' }]
     }
   }
+  if (kind === 'oss' || kind === 'platform') checks.unshift(...[...changed].filter(path => containerBuilds.has(path)).sort().map(path => ({ id: `${containerPrefix}${path}` })))
   return { input, kind, historical, ciBase, checks }
 }
 
@@ -189,13 +213,29 @@ export async function runPreflight({ repositories, reportPath, pgBin, signal }) 
       const repoDirectory = join(directory, `execution-${plans.indexOf(plan)}`); await mkdir(repoDirectory)
       const repoLogs = join(logs, String(plans.indexOf(plan))); await mkdir(repoLogs)
       if (plan.kind === 'oss') {
+        const containers = []
         const sha = git(root, ['rev-parse', 'HEAD']).toString().trim()
         await writeFile(join(repoDirectory, 'event.json'), JSON.stringify({ before: plan.ciBase ?? '0'.repeat(40), after: sha }))
         const context = workflowContext({ historical: plan.historical, sha, branch: plan.input.branch })
         try {
+          for (const check of plan.checks.filter(check => check.id.startsWith(containerPrefix))) {
+            const started = performance.now()
+            const record = { ...check, status: 'running', log: join(repoLogs, `${check.id.replaceAll(/[:/]/g, '-')}.log`) }
+            containers.push(record)
+            console.log(`Preflight: ${check.id}`)
+            try {
+              record.command = await validateContainerBuild(root, check.id.slice(containerPrefix.length), { env, signal, log: record.log })
+              record.status = 'passed'
+            } catch (error) {
+              record.status = 'failed'; record.error = error.message
+              if (!await lstat(record.log).catch(issue => issue.code === 'ENOENT' ? null : Promise.reject(issue))) await writeFile(record.log, error.message, { mode: 0o600 })
+              throw error
+            } finally { record.durationMs = Math.round(performance.now() - started) }
+          }
           plan.verification = await executeWorkflow({ source: await readFile(join(root, '.github/workflows/ci.yml'), 'utf8'),
             root, context, env, directory: repoDirectory, logs: repoLogs, pgBin, signal })
-        } catch (error) { plan.verification = { status: 'failed', jobs: error.jobs ?? [], error: error.message }; throw error }
+          plan.verification.jobs.unshift(...containers)
+        } catch (error) { plan.verification = { status: 'failed', jobs: [...containers, ...(error.jobs ?? [])], error: error.message }; throw error }
       } else {
         const jobs = []; plan.verification = { status: 'running', jobs }
         if (plan.checks.some(check => check.id !== 'documentation')) await cleanOutputs(root)
@@ -205,7 +245,8 @@ export async function runPreflight({ repositories, reportPath, pgBin, signal }) 
           console.log(`Preflight: ${plan.kind}/${check.id}`)
           const started = performance.now()
           try {
-            if (check.id === 'documentation') await documentationCheck(root, plan.input.base, record.log)
+            if (check.id.startsWith(containerPrefix)) record.command = await validateContainerBuild(root, check.id.slice(containerPrefix.length), { env, signal, log: record.log })
+            else if (check.id === 'documentation') await documentationCheck(root, plan.input.base, record.log)
             else {
               const args = check.id === 'install' ? ['install', '--frozen-lockfile']
                 : check.id === 'api-deploy' ? ['verify:api-deploy']

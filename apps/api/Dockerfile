@@ -12,6 +12,7 @@ COPY packages/office-renderer/package.json packages/office-renderer/tsconfig.jso
 COPY packages/core/package.json packages/core/tsconfig.json ./packages/core/
 COPY packages/channels/package.json packages/channels/tsconfig.json ./packages/channels/
 COPY packages/api/package.json packages/api/tsconfig.json ./packages/api/
+COPY packages/browser-control/package.json packages/browser-control/tsconfig.json ./packages/browser-control/
 COPY packages/brian-app/package.json packages/brian-app/tsconfig.json ./packages/brian-app/
 COPY packages/doc-model/package.json packages/doc-model/tsconfig.json ./packages/doc-model/
 COPY apps/api/package.json apps/api/tsconfig.json ./apps/api/
@@ -32,6 +33,7 @@ COPY packages/office-renderer/src ./packages/office-renderer/src
 COPY packages/core/src ./packages/core/src
 COPY packages/channels/src ./packages/channels/src
 COPY packages/api/src ./packages/api/src
+COPY packages/browser-control/src ./packages/browser-control/src
 COPY packages/brian-app/src ./packages/brian-app/src
 COPY packages/doc-model/src ./packages/doc-model/src
 COPY apps/api/src ./apps/api/src

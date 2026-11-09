@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { git, identity, command, environment, snapshot, resetSnapshot } from '../testing/preflight-source.mjs'
 import { compileWorkflow, executeWorkflow, expression, workflowContext } from '../testing/preflight-workflow.mjs'
-import { publicationPlan, runPreflight, verifyReceipt } from '../testing/preflight-push.mjs'
+import { publicationPlan, runPreflight, verifyReceipt, validateContainerBuild } from '../testing/preflight-push.mjs'
 
 const owned = []
 afterEach(async () => { for (const path of owned.splice(0)) await rm(path, { recursive: true, force: true }) })
@@ -216,6 +216,33 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
     await rm(join(root, 'package.json'))
     await put(root, 'verify.sh', 'exit 0\n')
     await assert.rejects(publicationPlan(root, 'companion'), /Executable companion/)
+  })
+
+  test('requires actual image validation for supported changed Dockerfiles and propagates build failure', async () => {
+    const root = await repository(simple('true'))
+    for (const app of ['api', 'api-admin', 'doc-sync', 'browser-relay']) await put(root, `apps/${app}/Dockerfile`, 'FROM scratch\n')
+    const plan = await publicationPlan(root, 'oss')
+    assert.deepEqual(plan.checks.filter(check => check.id.startsWith('container-build:')).map(check => check.id).sort(),
+      ['container-build:apps/api-admin/Dockerfile', 'container-build:apps/api/Dockerfile', 'container-build:apps/browser-relay/Dockerfile', 'container-build:apps/doc-sync/Dockerfile'])
+    const platform = await publicationPlan(root, 'platform')
+    assert.deepEqual(platform.checks.filter(check => check.id.startsWith('container-build:')), plan.checks.filter(check => check.id.startsWith('container-build:')))
+    const calls = []
+    const run = async (file, args, options) => {
+      calls.push({ file, args, options })
+      if (args[0] === 'context') return { output: 'unix:///tmp/fixture-docker.sock\n' }
+      if (args[0] === 'info') return { output: JSON.stringify([{ Name: 'buildx', Path: '/tmp/fixture-plugins/docker-buildx' }]) }
+      throw new Error('container build refused')
+    }
+    const log = join(root, 'logs', 'container.log')
+    await assert.rejects(validateContainerBuild(root, 'apps/api/Dockerfile', { env: { CI: 'true' }, log, run }), /container build refused/)
+    const build = calls.at(-1)
+    assert.equal(build.file, 'docker')
+    assert.deepEqual(build.args, ['buildx', 'build', '--builder', 'default', '--platform', 'linux/amd64', '--progress', 'plain', '--output', 'type=cacheonly', '--file', 'apps/api/Dockerfile', '.'])
+    assert.equal(build.options.cwd, root)
+    assert.equal(build.options.log, log)
+    assert.ok(build.options.env.DOCKER_HOST)
+    assert.deepEqual(JSON.parse(await readFile(join(build.options.env.DOCKER_CONFIG, 'config.json'), 'utf8')), { cliPluginsExtraDirs: ['/tmp/fixture-plugins'] })
+    assert.equal(build.options.timeoutMs, 30 * 60_000)
   })
 
   test('checks the outgoing documentation delta even though the disposable snapshot is committed', async () => {
