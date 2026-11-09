@@ -49,16 +49,16 @@ Transport and credential sidecars remain owner/service-only under RLS. A narrow 
 
 ## Authenticated relay contract
 
-All endpoints require `Authorization: Bearer <source bearer>` and return only lifecycle state. They are mounted before user authentication at `/internal/external-approvals`, not under `/api`.
+All endpoints require `Authorization: Bearer <source bearer>` and return lifecycle state plus the literal answer for an applicable answered question. They are mounted before user authentication at `/internal/external-approvals`, not under `/api`.
 
 - `POST /internal/external-approvals`: `{externalRequestId, taskId, sessionId, request, expiresAt}`.
 - `GET /internal/external-approvals/:externalRequestId`: poll current applicable state.
 - `POST /internal/external-approvals/:externalRequestId/ack`: `{status:'applied'|'stale'|'failed'}`.
 - `POST /internal/external-approvals/:externalRequestId/cancel`: exactly `{}`.
 
-`request` is `{method:'confirm',title,message?}` or `{method:'select',title,message?,options:['Allow once','Deny']}`. No extra fields, executable callbacks, tools, transport data, identity or destination are accepted. No strings are truncated. Title is bounded to 16,384 characters, message to 32,768; correlation IDs to 200. External request IDs contain only ASCII letters, numbers, `_`, `.`, `:`, `-`. Other text rejects control characters except newline, tab and carriage return. `expiresAt` must be an ISO date-time with timezone and initially in the future. Effective expiry is the earlier of incoming expiry and initial ingestion + five minutes; retries never extend it.
+For approvals, `request` is `{method:'confirm',title,message?}` or `{method:'select',title,message?,options:['Allow once','Deny']}`. The additive `question` method is described below. No extra fields, executable callbacks, tools, transport data, identity or destination are accepted. No strings are truncated. Title is bounded to 16,384 characters, message to 32,768; correlation IDs to 200. External request IDs contain only ASCII letters, numbers, `_`, `.`, `:`, `-`. Other text rejects control characters except newline, tab and carriage return. `expiresAt` must be an ISO date-time with timezone and initially in the future. Effective expiry is the earlier of incoming expiry and initial ingestion + five minutes; retries never extend it.
 
-All responses have `{approvalId,externalRequestId,status,expiresAt,payloadHash,ackStatus?}`. Status is `pending|approved|rejected|expired|superseded`. Missing/invalid bearer is 401; invalid input 400; unavailable/foreign/revoked source 404; immutable replay conflict or conflicting acknowledgement 409. Replays return the same approval, hash and effective expiry without creating a new notification.
+All responses have `{approvalId,externalRequestId,status,expiresAt,payloadHash,ackStatus?}`; answered questions additionally return `answer`. Status is `pending|answered|approved|rejected|expired|superseded`. Missing/invalid bearer is 401; invalid input 400; unavailable/foreign/revoked source 404; immutable replay conflict or conflicting acknowledgement 409. Replays return the same approval, hash and effective expiry without creating a new notification.
 
 ### Payload hash
 
@@ -79,6 +79,27 @@ Authority is checked in the same owner database transaction as the decision, usi
 Insertion is transactional and source-key serialized. Every decision locks the native pending row, verifies current source authority and checks the database clock in its final write. Only one approve/reject wins. Expired pending requests become expired. A recorded human decision is never rewritten merely because its expiry elapses: polling projects unacknowledged elapsed decisions as `expired`, and an `applied` receipt is then refused. An existing receipt remains historical, not a renewed grant.
 
 Receipts are separate from human decisions. Both approval and denial can be acknowledged `applied`; `stale`/`failed` record relay outcomes. Receipt replay is idempotent; changing a recorded receipt is a conflict. No acknowledgement can grant permission. Cancellation invalidates pending or unacknowledged approved requests as `superseded`; sidecar `superseded_at` preserves an existing human approval and its timestamp as audit evidence. It does not supersede an already acknowledged applied decision. The relay must still close its local pending callback atomically before sending cancellation: Brian cannot retract an action the relay has already executed.
+
+## External questions (additive)
+
+`request` also accepts strict `{method:'question',title,message?,options?:string[],allowCustom?:boolean}`. Without options this is a text question (`allowCustom:false` is invalid); with options it is closed single-choice unless `allowCustom:true`. Options must be 1–20 unique, non-whitespace-only strings, each at most 2,048 characters. An answer must be 1–32,768 characters and not whitespace-only; closed choices require an exact option match. Valid leading/trailing whitespace is literal evidence: never trim or truncate options or answers. The existing control-character restrictions apply. Legacy `select` with `['Allow once','Deny']` remains an approval, not a question. For hashing, question request fields are ordered `method,title,message?,options?,allowCustom?`, omitting absent fields; existing hashes are unchanged.
+
+An authenticated browser human submits `POST /api/approvals/:id/respond` with strict `{answer:string}`, not a decision. Source bearers cannot answer. Channel humans use `answer <id8> <literal answer>`: remove exactly one separator after the eight-character ID, preserving the rest of the answer. Require the exact linked provider sender and frozen selected conversation, integration and thread, plus current membership and assistant/conversation access, under the same transactional authority checks as approvals. Questions carry literal-answer instructions and a Chat link, not Allow/Deny buttons, native workflow-question tokens or the native question store; this avoids provider callback payload limits.
+
+Poll the same source lifecycle endpoint: applicable question responses expose `status:'answered'` and `answer`. Internally the native pending kind stays `external_action`; internal `approved` maps to `answered` only for questions. Expired or superseded responses never return the answer, even though it remains private evidence. Receipt and cancellation semantics and the maximum five-minute TTL are unchanged. An answer never resumes a native tool or workflow.
+
+The shared `ChatConfirmationCard` actions slot renders text, select or custom-answer inputs with a Submit form in both Chat and Needs you. External arrays remain independent and concurrent without blocking the composer. Mounted drafts survive transient errors for retry; expiry, lost races and current permission checks still gate submission and refresh.
+
+Migration `8245_external_human_question_answers.sql` adds `human_answer` to the same private sidecar. It requires an ordinary reviewed migration after the code update; it is not evidence of a live applied migration, tested rollout or deployment.
+
+Example ingestion (existing `TOKEN` and `REQUEST_ID`; generic `BASE_URL`, task/session correlation IDs):
+
+```sh
+EXPIRES_AT=$(node -e 'process.stdout.write(new Date(Date.now()+240000).toISOString())')
+curl -sS "$BASE_URL/internal/external-approvals" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  --data "{\"externalRequestId\":\"$REQUEST_ID\",\"taskId\":\"task-1\",\"sessionId\":\"session-1\",\"request\":{\"method\":\"question\",\"title\":\"Which option?\",\"options\":[\"First\",\"Second\"],\"allowCustom\":true},\"expiresAt\":\"$EXPIRES_AT\"}"
+```
 
 ## Focused verification
 

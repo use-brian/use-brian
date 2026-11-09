@@ -46,3 +46,27 @@ Administrators choose name, assistant and an explicit connected conversation (we
 The immutable audience binds the selected session, integration and exact Slack/Feishu thread, distinguishing unthreaded from threaded, and requires the pinned assistant to remain the winning route. A deciding human needs current workspace membership and canonical assistant/conversation access. Revalidate live auth-session or channel-linked identity and policy epoch in the same owner transaction as the decision. No source-secret public decisions, models or delegation. Legacy registration and hashes remain compatible.
 
 Focused PGlite tests mock canonical helper bodies; the ordinary-owner fresh-chain test separately applies the real migrations. Neither proves multi-connection PostgreSQL races or live end-to-end delivery. No live deployment, migration application or credential operation is implied.
+
+## Additive external questions
+
+Keep legacy confirm/select Allow/Deny behavior. For `method:'question'`, reuse the
+shared card's actions slot for text, closed single-choice or custom-answer Submit
+forms in Chat and Needs you. Keep concurrent external arrays independent of native
+confirmations and never block the composer. Preserve mounted drafts across transient
+errors; recheck expiry, lost races and current permissions rather than claiming success.
+
+Browser humans post strict `{answer:string}` to `/api/approvals/:id/respond`.
+Channel questions offer literal `answer <id8> <literal answer>` instructions and a
+Chat link, not Allow/Deny buttons, provider callback answers or native workflow-question
+tokens/store. Remove only one answer separator and preserve remaining whitespace.
+Use the existing exact linked-sender/conversation/integration/thread authority checks.
+Source bearers cannot answer. Polling returns `answered` plus the literal answer only
+while applicable, never after expiry or supersession; private evidence remains retained.
+The native kind remains `external_action` and only questions project internal
+`approved` as `answered`; no native tool/workflow resumption is introduced.
+
+See the [question contract and curl example](external-human-approvals.md#external-questions-additive).
+Migration 8245 adds sidecar `human_answer` and requires an ordinary reviewed migration
+after the code update. The five-minute TTL is unchanged; no live application,
+testing or deployment is claimed. Keep the focused verification instructions above
+and in the contract document for subsequent verification.
