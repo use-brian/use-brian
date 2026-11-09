@@ -47,6 +47,33 @@ async function fixture() {
 
 const catalog = async (db: PGlite) => (await db.query(`SELECT to_jsonb(p) AS value FROM pg_proc p ORDER BY oid`)).rows
 
+test('[COMP:api/migration-execution-sql] creates the private Page predicate in public without system-schema authority', async () => {
+  const name = '8251_private_page_thread_source.sql'
+  const sql = await readFile(new URL(name, migrations), 'utf8')
+  const executable = toMigrationExecutionSql(sql, name)
+  const predicateDdl = (value: string) => value.slice(0, value.indexOf('DO $private_page_reader$')) + 'COMMIT;'
+  const db = new PGlite()
+  try {
+    await db.waitReady
+    await db.exec(`CREATE ROLE migration_owner NOSUPERUSER NOBYPASSRLS;
+      CREATE ROLE app_user NOSUPERUSER NOBYPASSRLS;
+      GRANT USAGE,CREATE ON SCHEMA public TO migration_owner; SET ROLE migration_owner;`)
+    await assert.rejects(db.exec(predicateDdl(sql)), /permission denied for schema pg_catalog/)
+    await db.exec('ROLLBACK')
+    await db.exec(predicateDdl(executable))
+    assert.deepEqual((await db.query(`SELECT n.nspname,p.prosecdef,r.rolname,r.rolsuper,r.rolbypassrls
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
+      WHERE p.oid='public.page_thread_private_source_visible(uuid,jsonb)'::regprocedure`)).rows,
+      [{ nspname:'public', prosecdef:true, rolname:'migration_owner', rolsuper:false, rolbypassrls:false }])
+    assert.deepEqual((await db.query(`SELECT
+      to_regprocedure('pg_catalog.page_thread_private_source_visible(uuid,jsonb)') IS NULL AS no_system_helper,
+      has_schema_privilege(current_user,'pg_catalog','CREATE') AS system_create,
+      has_function_privilege('app_user','public.page_thread_private_source_visible(uuid,jsonb)','EXECUTE') AS runtime_execute`)).rows,
+      [{ no_system_helper:true, system_create:false, runtime_execute:false }])
+    assert.throws(() => toMigrationExecutionSql(sql + '\n-- changed', name), /historical migration content changed/)
+  } finally { await db.close() }
+})
+
 test('[COMP:api/migration-execution-sql] repins the identical catalog, including transitive and quoted wildcard consumers, without elevated migration authority', async () => {
   const { db } = await fixture()
   try {

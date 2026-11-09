@@ -26,10 +26,21 @@ const reviewed: Readonly<Record<string, readonly [string, number]>> = {
   '8248_page_thread_context_authority.sql': ['4f58c737f519fc9a2726c13ae6d04d5c38f1e78973bc841af273e9e4e36ea5e2', 2],
   '8249_telegram_conversation_context.sql': ['30a27fe9683b924d011f2bcaced1d5f4770f86a470841dd1c1d303cdf8da70ea', 2],
   '8250_page_thread_batch_preparation.sql': ['8b41fe1e2704faccc86920a53abec42cf790db663aec7b049c791371062a857c', 2],
+  '8251_private_page_thread_source.sql': ['b49871608d903b4a50586bf12063d4fd789cb2f64cbd1fc3f846261169c73b00', 0],
 }
 
 const callers = 'FOR caller IN SELECT p.oid,p.prosrc FROM pg_proc p'
 const update = 'EXECUTE replace(pg_get_functiondef(caller.oid),caller.prosrc,body);'
+
+/** System-first lookup must not choose the creation schema for an app helper. */
+function privatePagePredicateNamespace(sql: string): string {
+  for (const prefix of ['CREATE FUNCTION ', 'REVOKE ALL ON FUNCTION ']) {
+    const anchor = `${prefix}page_thread_private_source_visible(`
+    if (sql.split(anchor).length !== 2) throw new Error('8251: private predicate namespace anchor changed')
+    sql = sql.replace(anchor, `${prefix}public.page_thread_private_source_visible(`)
+  }
+  return sql
+}
 
 /** 8246 sealed a generated roster using the author's database collation.
  * Authenticate the same declared members and code while retaining the target
@@ -91,7 +102,8 @@ export function toMigrationExecutionSql(sql: string, file: string): string {
     throw new Error(`${file}: historical migration content changed; refusing execution adapter`)
   }
   const executable = file === '8246_native_private_memory_empty_domain.sql' ? privateMemoryGuardEnrollment(sql)
-    : file === '8248_page_thread_context_authority.sql' ? pageThreadSourceExecutionSql(sql) : sql
+    : file === '8248_page_thread_context_authority.sql' ? pageThreadSourceExecutionSql(sql)
+      : file === '8251_private_page_thread_source.sql' ? privatePagePredicateNamespace(sql) : sql
   let blocks = 0
   const result = executable.replace(/^DO (\$[a-z_]+\$)([\s\S]*?)\1;/gm, (original, tag: string, block: string) => {
     if (!block.includes(callers)) return original
