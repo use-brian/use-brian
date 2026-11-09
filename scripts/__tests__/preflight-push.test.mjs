@@ -31,6 +31,12 @@ async function preflight(root, kind = 'oss') {
 }
 
 describe('[COMP:tooling/push-preflight] actual local publication boundary', () => {
+  test('gives child verification commands a bounded heap for a clean API compile', async () => {
+    const root = await directory(), env = environment(root, '/tmp/preflight-store')
+    const result = await command(process.execPath, ['-e', "process.stdout.write(String(require('node:v8').getHeapStatistics().heap_size_limit))"], { env })
+    const limit = Number(result.output)
+    assert.ok(limit >= 8 * 1024 ** 3 && limit < 8.2 * 1024 ** 3)
+  })
   test('refuses to reset a source checkout without a disposable ownership marker', async () => {
     const root = await repository(simple('true'))
     await put(root, 'unsent.md', 'preserve this work')

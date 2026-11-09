@@ -5,6 +5,7 @@ import { lstat, mkdir, readFile, readlink, rm, symlink, copyFile, writeFile, rea
 import { dirname, join, resolve, relative, delimiter } from 'node:path'
 
 export const digest = value => createHash('sha256').update(value).digest('hex')
+export const localNodeHeapMb = 8192
 export function git(root, args) {
   return execFileSync('git', ['-C', root, ...args], { maxBuffer: 128 * 1024 * 1024 })
 }
@@ -85,6 +86,7 @@ export function environment(directory, store) {
   return { ...Object.fromEntries(['PATH', 'LANG', 'LC_ALL', 'SystemRoot'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
     PATH: `${dirname(process.execPath)}${delimiter}${process.env.PATH ?? ''}`, HOME: join(directory, 'home'), TMPDIR: join(directory, 'tmp'),
     CI: 'true', BRIAN_TEST_NO_PAID: '1', TURBO_FORCE: 'true',
+    NODE_OPTIONS: `--max-old-space-size=${localNodeHeapMb}`,
     npm_config_store_dir: store, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
     GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' }
 }

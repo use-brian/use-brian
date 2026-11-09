@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile, readdir, lstat } from 'node:fs
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { command, environment, git, identity, sameIdentity, snapshot, saveReceipt, cleanOutputs, cleanupDatabases } from './preflight-source.mjs'
+import { command, environment, git, identity, sameIdentity, snapshot, saveReceipt, cleanOutputs, cleanupDatabases, localNodeHeapMb } from './preflight-source.mjs'
 import { compileWorkflow, executeWorkflow, expression, workflowContext } from './preflight-workflow.mjs'
 import { needsHistoricalTests } from './ci-scope.mjs'
 
@@ -175,7 +175,7 @@ export async function runPreflight({ repositories, reportPath, pgBin, signal }) 
     await saveReceipt(reportPath, failed); return failed
   }
   const report = { version: 1, kind: 'push_preflight', status: 'running', startedAt: new Date().toISOString(),
-    runtime: { node: process.version, platform: process.platform, architecture: process.arch }, repositories: plans,
+    runtime: { node: process.version, platform: process.platform, architecture: process.arch, localNodeHeapMb }, repositories: plans,
     contexts: await contextsFor(repositories) }
   const directory = await mkdtemp(join(tmpdir(), 'brian-push-preflight-'))
   let env
