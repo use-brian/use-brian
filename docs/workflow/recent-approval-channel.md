@@ -37,10 +37,10 @@ No matching messaging or personal web-chat history means Approvals-panel-only
 review. A provider delivery failure or unsupported delivery configuration never
 approves or runs the action: the request remains in the web Approvals queue.
 Native workflow notifications keep their existing confirmation-style message
-and Approvals-panel fallback. External human approvals reuse this destination
-resolver but not that queue UX: messaging channels get Allow/Deny actions with
-exact approve/reject replies, and web chat restores independent confirmation
-cards. External fallback links open Chat's existing Needs you popover.
+and Approvals-panel fallback. New external human approvals do **not** use this recent-history resolver. Administrators explicitly select a connected conversation (including web) after choosing an assistant, with no approver picker. Discovery returns opaque destination IDs and connection availability reasons (`no_conversation` or `unsupported_transport`); not every installed connection can deliver. Legacy external `verified_channel` registrations retain compatible recent routing.
+
+Connected external sources freeze the exact selected session, integration and Slack/Feishu thread, with strict unthreaded/threaded separation, and require the pinned assistant to remain the winning route. WhatsApp Cloud API is unavailable for pinned external approval delivery using its public metadata discriminator; connector-backed WhatsApp requires compatible addresses. Discord is unsupported. Web is a special session-bound surface, not proactive transport. External requests use existing ChatConfirmationCard and Needs you surfaces for all concurrent requests, never the native Approvals queue. Decisions require current workspace membership and canonical assistant/conversation access, revalidated with live identity and policy-epoch locking in the same owner transaction. See [external human approvals](external-human-approvals.md).
+
 The assigned approver's existing
 authorization checks are unchanged; receiving the notification grants no new
 authority. A group conversation previously used by the approver may be the
@@ -74,3 +74,5 @@ channel preserves all other step and approval properties.
 - Dispatcher tests verify adapter delivery rather than the legacy bot path.
 - Builder tests cover selecting `recent`, preserving approval settings, legacy
   values, and raw JSON synchronization.
+
+Connected external SQL tests use focused PGlite fixtures with mocked canonical helper bodies; the ordinary-owner fresh-chain test separately applies the real migrations. Neither proves multi-connection PostgreSQL races or live end-to-end delivery. No live operational changes are implied.

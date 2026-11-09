@@ -1,6 +1,6 @@
 # Approval confirmation consolidation
 
-Baseline: `develop` at `5514e70c4`. The existing Chat miniapp already has
+The existing Chat miniapp has
 `ApprovalReviewAttention` and the shared `ChatConfirmationCard` tool-request UI.
 External approvals extend those surfaces, not a new decision queue.
 
@@ -11,8 +11,8 @@ External approvals extend those surfaces, not a new decision queue.
    compatible; this feature does not delete unrelated workflow/skill review UI.
 2. Reuse `ChatConfirmationCard` for the complete frozen external request in
    Chat and the existing Needs you popover. Allow/Deny acts in place, without
-   an Open Approvals detour. Web-inbox registrations use Needs you; verified
-   personal web-chat registrations also show cards in their conversation.
+   an Open Approvals detour. Explicitly selected web conversations restore cards in their session;
+   Needs you remains the existing attention surface. Legacy registrations stay compatible.
 3. Return all applicable external confirmations as an additive array from the
    existing session pending endpoint, independent of live tool confirmations.
    Preserve active tool turn leases, native pending fields and native responses.
@@ -35,5 +35,14 @@ Transient reads preserve mounted cards; permission-loss reads clear them.
 The legacy Approvals panel remains for pre-existing native kinds. Replacing all
 native email revision, skill diff and workflow review flows is a separate
 migration, not a prerequisite or an excuse to introduce a second external
-approvals inbox. No database schema change or deployment is part of this UX
-consolidation.
+approvals inbox. The additive conversation-member schema is documented in
+[external human approvals](external-human-approvals.md); it does not change native approvals.
+No deployment or migration application is implied.
+
+## Connected-conversation registration
+
+Administrators choose name, assistant and an explicit connected conversation (web included), not an approver or recent history. Discovery returns opaque destination IDs and connection availability reasons; registration posts `{name,assistantId,destinationId}`. Not every installed connection can deliver. Web is session-bound, not a proactive transport.
+
+The immutable audience binds the selected session, integration and exact Slack/Feishu thread, distinguishing unthreaded from threaded, and requires the pinned assistant to remain the winning route. A deciding human needs current workspace membership and canonical assistant/conversation access. Revalidate live auth-session or channel-linked identity and policy epoch in the same owner transaction as the decision. No source-secret public decisions, models or delegation. Legacy registration and hashes remain compatible.
+
+Focused PGlite tests mock canonical helper bodies; the ordinary-owner fresh-chain test separately applies the real migrations. Neither proves multi-connection PostgreSQL races or live end-to-end delivery. No live deployment, migration application or credential operation is implied.
