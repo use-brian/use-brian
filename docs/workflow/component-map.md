@@ -2,7 +2,7 @@
 
 | COMP tag | doc path | source path | test path |
 |---|---|---|---|
-| api/external-approvals | docs/workflow/external-human-approvals.md | packages/api/src/external-approvals/; packages/api/migrations/8241_external_human_approvals.sql; packages/api/migrations/8242_workspace_external_approval_sources.sql; packages/api/migrations/8243_external_approval_web_chat_destination.sql; packages/api/migrations/8244_external_approval_conversation_members.sql; packages/api/migrations/8245_external_human_question_answers.sql | packages/api/src/external-approvals/__tests__/ |
+| api/external-approvals | docs/workflow/external-human-approvals.md | packages/api/src/external-approvals/; packages/api/migrations/8242_external_human_approvals.sql; packages/api/migrations/8243_workspace_external_approval_sources.sql; packages/api/migrations/8244_external_approval_web_chat_destination.sql; packages/api/migrations/8245_external_approval_conversation_members.sql; packages/api/migrations/8246_external_human_question_answers.sql | packages/api/src/external-approvals/__tests__/ |
 | api/external-approval-destinations | docs/workflow/external-human-approvals.md (explicit connected conversations, opaque IDs and unavailable connections; no recent-history dependency) | packages/api/src/external-approvals/destinations.ts; packages/api/src/external-approvals/source-routes.ts; packages/api/src/external-approvals/source-registry.ts; packages/api/src/external-approvals/contracts.ts; packages/api/src/external-approvals/authority.ts | packages/api/src/external-approvals/__tests__/destinations.test.ts; packages/api/src/external-approvals/__tests__/source-routes.test.ts; packages/api/src/external-approvals/__tests__/sql-store.test.ts |
 | app-web/external-approvals | docs/workflow/external-human-approvals.md | apps/app-web/src/components/settings-modal/sections/external-approvals-section.tsx; apps/app-web/src/lib/api/external-approval-sources.ts | apps/app-web/src/components/settings-modal/sections/__tests__/external-approvals-section.test.tsx; apps/app-web/src/lib/api/__tests__/external-approval-sources.test.ts; apps/app-web/src/components/settings-modal/__tests__/settings-modal.test.ts |
 | app-web/question-answer-form | docs/workflow/approval-confirmation-merge-plan.md | apps/app-web/src/components/chrome/question-answer-form.tsx; apps/app-web/src/components/chrome/pending-question-panel.tsx; apps/app-web/src/components/chrome/external-action-confirmation.tsx | apps/app-web/src/components/chrome/__tests__/question-answer-form.test.tsx; apps/app-web/src/components/chrome/__tests__/pending-question-panel.test.tsx; apps/app-web/src/components/chrome/__tests__/pending-question-connector.test.tsx; apps/app-web/src/components/chrome/__tests__/external-action-confirmation.test.tsx |
@@ -106,7 +106,7 @@ with independent concurrent arrays and mounted draft retries. Human answers use
 literal-answer instructions and exact sender/conversation/thread binding use
 `packages/api/src/workflow/approval-deliveries.ts` and `approval-replies.ts`
 (covered by their existing focused test files). No native workflow-question store,
-callback answer payload or tool/workflow resumption is involved. Migration 8245 adds
+callback answer payload or tool/workflow resumption is involved. Migration 8246 adds
 private sidecar `human_answer`; ordinary reviewed migration is required after the
 code update, not claimed applied. Applicable source polling projects questions as
 `answered` with an answer, withholding it after expiry/supersession. See the external

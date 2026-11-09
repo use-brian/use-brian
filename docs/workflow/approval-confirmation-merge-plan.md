@@ -72,7 +72,7 @@ The native kind remains `external_action` and only questions project internal
 `approved` as `answered`; no native tool/workflow resumption is introduced.
 
 See the [question contract and curl example](external-human-approvals.md#external-questions-additive).
-Migration 8245 adds sidecar `human_answer` and requires an ordinary reviewed migration
+Migration 8246 adds sidecar `human_answer` and requires an ordinary reviewed migration
 after the code update. The five-minute TTL is unchanged; no live application,
 testing or deployment is claimed. Keep the focused verification instructions above
 and in the contract document for subsequent verification.
