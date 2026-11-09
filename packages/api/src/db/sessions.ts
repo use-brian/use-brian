@@ -251,47 +251,10 @@ export type SessionMessageAttachment = {
 
 
 
-/** Storage-only delimiter for a thread-qualified session channel id. */
-const THREAD_SESSION_DELIMITER = ':thread:'
-/** Storage delimiter retained for Slack callers that need to decode a root. */
-export const SLACK_THREAD_SESSION_DELIMITER = THREAD_SESSION_DELIMITER
-
-/** Encode a provider delivery channel plus a stable thread root for storage. */
-export function buildThreadSessionChannelId(
-  channelId: string,
-  threadRoot?: string | null,
-): string {
-  return threadRoot
-    ? `${channelId}${THREAD_SESSION_DELIMITER}${threadRoot}`
-    : channelId
-}
-
-/**
- * Turn a Slack channel + root `thread_ts` into the conversation id
- * stored on `sessions.channel_id`. A missing root preserves the legacy
- * channel-level session used when the integration does not reply in threads.
- *
- * Slack API calls must keep using the base channel id plus a separate
- * `thread_ts`; this encoded id is only for Brian's session-scoped state.
- */
-export function buildSlackSessionChannelId(
-  channelId: string,
-  threadTs?: string | null,
-): string {
-  return buildThreadSessionChannelId(channelId, threadTs)
-}
-
-/** Convert a stored session conversation id back to a provider destination. */
-export function providerChannelIdFromSession(
-  channelType: string,
-  sessionChannelId: string,
-): string {
-  if (channelType !== 'slack' && channelType !== 'feishu') return sessionChannelId
-  const delimiterIndex = sessionChannelId.indexOf(THREAD_SESSION_DELIMITER)
-  return delimiterIndex === -1
-    ? sessionChannelId
-    : sessionChannelId.slice(0, delimiterIndex)
-}
+// Keep existing imports compatible while metadata-only consumers avoid loading
+// the entire session/authority graph merely to normalize an address.
+import { providerChannelIdFromSession } from './session-channel-id.js'
+export { buildThreadSessionChannelId, buildSlackSessionChannelId, providerChannelIdFromSession, SLACK_THREAD_SESSION_DELIMITER } from './session-channel-id.js'
 
 /**
  * Create a workspace-shared chat session (the Chat app's "New workspace chat").

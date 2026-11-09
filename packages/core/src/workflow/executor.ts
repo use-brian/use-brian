@@ -227,6 +227,8 @@ export type DeliverToChannel = (params: {
   channelId: string
   channelIntegrationId?: string
   text: string
+  /** Optional native action buttons (approve/deny). Text remains the portable fallback. */
+  actions?: Array<{ id: string; label: string; data: string; replyText?: string }>
   /** Trusted run/turn high-water evidence checked against the current audience. */
   scopeEvidence?: import('../security/context-scope.js').ScopeEvidence
   /** Engine-owned workflow step identity; never supplied by tool result data. */

@@ -144,6 +144,7 @@ type ApprovalGroupKey = keyof ApprovalGroupCounts
 /** Compile-time-exhaustive placement for the canonical backend taxonomy. A
  * new ApprovalKind must be assigned here before the API can compile. */
 const APPROVAL_GROUP_BY_KIND = {
+  external_action: 'externalActions',
   workflow_step: 'externalActions',
   tool_invocation: 'externalActions',
   staged_write: 'externalActions',

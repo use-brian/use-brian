@@ -11,6 +11,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 
+vi.mock('../../external-approvals/service.js', () => ({
+  externalApprovals: () => ({ resolve: externalResolve, answer: externalAnswer }),
+  ExternalApprovalError: class extends Error {},
+}))
+const { externalResolve, externalAnswer } = vi.hoisted(() => ({ externalResolve: vi.fn(), externalAnswer: vi.fn() }))
+
 vi.mock('../../workflow/approval.js', () => ({
   resumeFromApproval: vi.fn(async () => ({ status: 'completed', runId: 'run-1' })),
   enqueueToolInvocationResume: vi.fn(async () => ({ kind: 'enqueued', jobId: 'job-1' })),
@@ -49,7 +55,7 @@ function makeApproval(over: Partial<PendingApproval> = {}): PendingApproval {
     originatingAssistantId: null,
     answerText: null,
     ...over,
-  }
+  } as PendingApproval
 }
 
 type Stores = {
@@ -62,6 +68,7 @@ type Stores = {
   emailReviewContext: ReturnType<typeof vi.fn>
   pdfSignaturePreview: ReturnType<typeof vi.fn>
   withResumeDeps: boolean
+  authSessionId: string | null
 }
 
 function makeApp(stores: Partial<Stores> = {}) {
@@ -78,6 +85,7 @@ function makeApp(stores: Partial<Stores> = {}) {
   app.use(express.json())
   app.use((req, _res, next) => {
     ;(req as { userId?: string }).userId = 'u-1'
+    req.authSessionId = stores.authSessionId === null ? undefined : stores.authSessionId ?? 'auth-session-1'
     next()
   })
   app.use(
@@ -178,7 +186,7 @@ describe('[COMP:app-web/pdf-signature-approval] GET /:id/pdf-signature-preview',
     arguments: signatureArgs,
     originatingAssistantId: '10000000-0000-4000-8000-000000000004',
     ...over,
-  })
+  } as Partial<PendingApproval>)
 
   it('returns only the protected server composite for the assigned pending owner', async () => {
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47])
@@ -660,5 +668,51 @@ describe('[COMP:api/unified-approvals-route] atomic browser standing grant', () 
     const result=await request(denied.app).post('/api/approvals/ap-1/respond').send({decision:'approved',grantAlways:true}).expect(403)
     expect(result.body).toEqual({error:'approval_authority_denied'})
     expect(respond).not.toHaveBeenCalled()
+  })
+})
+
+describe('external human responses', () => {
+  it('dispatches authorized unassigned external decisions before native assignment gates', async () => {
+    externalResolve.mockResolvedValueOnce({ status: 'approved' })
+    const { app, respond } = makeApp({ getById: vi.fn(async () => makeApproval({
+      kind: 'external_action', approverUserId: null,
+    })) })
+    await request(app).post('/api/approvals/ap-1/respond').send({ decision: 'approved' }).expect(200)
+    expect(externalResolve).toHaveBeenCalledWith('ap-1', 'approved', {
+      userId: 'u-1', authSessionId: 'auth-session-1', human: true, origin: 'ui', grantAlways: undefined,
+    })
+    expect(respond).not.toHaveBeenCalled()
+    expect(mockResume).not.toHaveBeenCalled()
+    expect(mockToolResume).not.toHaveBeenCalled()
+  })
+  it('rejects external decisions without authenticated human session evidence', async () => {
+    const { app } = makeApp({ authSessionId: null, getById: vi.fn(async () => makeApproval({
+      kind: 'external_action', approverUserId: null,
+    })) })
+    externalResolve.mockClear()
+    await request(app).post('/api/approvals/ap-1/respond').send({ decision: 'approved' }).expect(403)
+    expect(externalResolve).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('external question human respond protocol', () => {
+  const question = () => makeApproval({kind:'external_action',approvalPayload:{request:{method:'question',title:'Question'}}})
+  it('passes only a strict literal answer to the human service',async()=>{
+    externalAnswer.mockResolvedValue({status:'answered',answer:'  literal\n'})
+    const {app}=makeApp({getById:vi.fn(async()=>question())})
+    const result=await request(app).post('/api/approvals/ap-1/respond').send({answer:'  literal\n'})
+    expect(result.status).toBe(200)
+    expect(result.body).toMatchObject({status:'answered',answer:'  literal\n'})
+    expect(externalAnswer).toHaveBeenCalledWith('ap-1','  literal\n',{userId:'u-1',authSessionId:'auth-session-1',human:true,origin:'ui'})
+  })
+  it('rejects decisions, mixed bodies, missing session, and answers to native/confirm rows',async()=>{
+    for(const body of [{decision:'approved'},{decision:'rejected'},{answer:'A',decision:'approved'},{answer:'A',grantAlways:true},{answer:'A',reason:'x'},{answer:''},{answer:'bad\u0000'}]) {
+      await request(makeApp({getById:vi.fn(async()=>question())}).app).post('/api/approvals/ap-1/respond').send(body).expect(400)
+    }
+    await request(makeApp({getById:vi.fn(async()=>question()),authSessionId:null}).app).post('/api/approvals/ap-1/respond').send({answer:'A'}).expect(403)
+    for(const approval of [makeApproval(),makeApproval({kind:'external_action',approvalPayload:{request:{method:'confirm',title:'Allow?'}}})]) {
+      await request(makeApp({getById:vi.fn(async()=>approval)}).app).post('/api/approvals/ap-1/respond').send({answer:'A'}).expect(400)
+    }
   })
 })

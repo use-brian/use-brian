@@ -280,4 +280,25 @@ describe("[COMP:app-web/approvals] approvals queue paints from the surface cache
     } finally{window.removeEventListener('doc:open-settings',event)}
   });
 
+  it("does not duplicate external confirmation requests in the legacy queue", async () => {
+    const card: PendingApprovalRow = { ...row("external-1", "Unused"), kind: "external_action", expiresAt: new Date(Date.now() + 60_000).toISOString(), approvalPayload: { request: { method: "select", title: "Run <img src=x>?", message: "Exact command\nsecond line", options: ["Allow once", "Deny"] }, allowPersistentApproval: false } };
+    await loadSurfaceCache(approvalsCacheKey("w1"), async () => [card]);
+    await loadSurfaceCache(approvalSkillDetailsCacheKey("w1"), async () => ({}));
+    api.respondByKind.mockResolvedValue({ ok: true, status: "approved" });
+    await mount();
+    expect(host!.textContent).not.toContain(card.approvalPayload.request!.title);
+    expect(host!.querySelector('[data-approval-kind="external_action"]')).toBeNull();
+    expect(host!.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(api.respondByKind).not.toHaveBeenCalled();
+  });
+
+  it("does not restore elapsed external requests into the legacy queue", async () => {
+    const card: PendingApprovalRow = { ...row("external-expired", "Unused"), kind: "external_action", expiresAt: new Date(Date.now() - 1).toISOString(), approvalPayload: { request: { method: "confirm", title: "Expired permission" } } };
+    await loadSurfaceCache(approvalsCacheKey("w1"), async () => [card]);
+    await loadSurfaceCache(approvalSkillDetailsCacheKey("w1"), async () => ({}));
+    await mount();
+    expect(host!.textContent).not.toContain("Expired permission");
+    expect([...host!.querySelectorAll("button")].find(b => b.textContent === en.approvalsPage.browserSkillSend.allowOnce)).toBeUndefined();
+    expect(api.respondByKind).not.toHaveBeenCalled();
+  });
 });

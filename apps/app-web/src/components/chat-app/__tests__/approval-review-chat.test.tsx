@@ -28,6 +28,8 @@ const api = vi.hoisted(() => ({
   listAssignments: vi.fn(),
   listWorkspaceAssistants: vi.fn(async () => [{ id: "rev-1", name: "Ops" }, { id: "rev-2", name: "Brian" }]),
   confirmDialog: vi.fn(async () => true),
+  answerExternalQuestion: vi.fn(async () => ({ ok: true, status: "answered" })),
+  respondByKind: vi.fn(async () => ({ ok: true, status: "approved" })),
 }));
 vi.mock("@/lib/api/approval-review", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/approval-review")>()),
@@ -36,6 +38,7 @@ vi.mock("@/lib/api/approval-review", async (importOriginal) => ({
   listPatterns: api.listPatterns, revokePattern: api.revokePattern, listAssignments: api.listAssignments,
 }));
 vi.mock("@/lib/api/views", () => ({ listWorkspaceAssistants: api.listWorkspaceAssistants }));
+vi.mock("@/lib/api/approvals", () => ({ respondByKind: api.respondByKind, answerExternalQuestion: api.answerExternalQuestion }));
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: api.confirmDialog }));
 vi.mock("next/link", () => ({ default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a> }));
 // Minimal popover: the trigger toggles, the content renders while open.
@@ -150,6 +153,65 @@ describe("[COMP:app-web/approval-review-chat] chat attention and reviewer contro
     expect(host.querySelector(`a[href="/w/${ws}/workflow/wf-1"]`)).toBeTruthy();
     // jsdom selectors mishandle "&" in attribute values; compare hrefs directly.
     expect(Array.from(host.querySelectorAll("a")).map((a) => a.getAttribute("href"))).toContain(`/w/${ws}/p?panel=approvals&approval=ap-2`);
+  });
+
+  it("renders the complete external confirmation inline without reviewer or panel authority", async () => {
+    const confirmation = { approvalId: "ap-1", title: "Release <b>literal</b>\nSecond title line", message: "Full request\n<script>not markup</script>", options: ["Allow once", "Deny"], expiresAt: "2099-10-13T00:00:00Z" };
+    api.fetchAttention.mockResolvedValue({ items: [waiting({ review: null, approvalKind: "external_action", confirmation })], unseen: 0 });
+    await render(<ApprovalReviewAttention workspaceId={ws} sessionId={null} projectId={null} />);
+    await click(host.querySelector('[data-testid="approval-review-attention"]'));
+    expect(host.textContent).toContain(confirmation.title);
+    expect(host.textContent).toContain(confirmation.message);
+    expect(host.querySelector("b, script")).toBeNull();
+    expect(button(t.assign)).toBeUndefined();
+    expect(button(t.reviewNow)).toBeUndefined();
+    expect(host.querySelector("a")).toBeNull();
+    const before = api.fetchAttention.mock.calls.length;
+    await click(button("Allow once"));
+    expect(api.respondByKind).toHaveBeenCalledWith({ id: "ap-1", kind: "external_action" }, "approved");
+    expect(api.fetchAttention.mock.calls.length).toBeGreaterThan(before);
+    expect(host.textContent).toContain(t.allowed);
+  });
+
+  it("renders concurrent questions beside decisions in Needs you without reviewer authority", async () => {
+    const rows = [
+      { approvalId: "ap-1", title: "First literal question", method: "question" as const, expiresAt: "2099-01-01T00:00:00Z" },
+      { approvalId: "ap-2", title: "Second literal question", method: "question" as const, expiresAt: "2099-01-01T00:00:00Z" },
+      { approvalId: "ap-3", title: "Legacy decision", expiresAt: "2099-01-01T00:00:00Z" },
+    ];
+    api.fetchAttention.mockResolvedValue({ unseen: 0, items: rows.map(confirmation => waiting({
+      key: `approval:${confirmation.approvalId}`, approvalId: confirmation.approvalId,
+      approvalKind: "external_action", confirmation,
+    })) });
+    await render(<ApprovalReviewAttention workspaceId={ws} sessionId="s-1" projectId={null} />);
+    await click(host.querySelector('[data-testid="approval-review-attention"]'));
+    expect(host.querySelectorAll('[data-external-confirmation]')).toHaveLength(3);
+    expect(host.querySelectorAll('textarea')).toHaveLength(2);
+    const input = host.querySelector('textarea')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "  first answer\n ");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(Array.from(host.querySelectorAll('textarea')).map(el => el.value)).toEqual(["  first answer\n ", ""]);
+    expect(button(t.assign)).toBeUndefined(); expect(button(t.reviewNow)).toBeUndefined();
+    expect(button(t.allow)).toBeTruthy(); expect(button(t.deny)).toBeTruthy();
+    await click(button(en.chat.pendingQuestion.submit));
+    expect(api.answerExternalQuestion).toHaveBeenCalledExactlyOnceWith("ap-1", "  first answer\n ");
+    expect(api.respondByKind).not.toHaveBeenCalled();
+    expect(host.textContent).toContain(t.answered);
+    expect(host.querySelectorAll('textarea')).toHaveLength(1);
+  });
+
+  it("opens notification links in existing Attention and puts the referenced request first", async () => {
+    const confirmation = (approvalId: string) => ({ approvalId, title: `Request ${approvalId}`, expiresAt: "2099-01-01T00:00:00Z" });
+    api.fetchAttention.mockResolvedValue({ unseen: 0, items: [
+      waiting({ approvalKind: "external_action", confirmation: confirmation("ap-1") }),
+      waiting({ key: "approval:ap-2", approvalId: "ap-2", approvalKind: "external_action", confirmation: confirmation("ap-2") }),
+    ] });
+    await render(<ApprovalReviewAttention workspaceId={ws} sessionId="other-session" projectId={null} openRequestId="ap-2" />);
+    expect(host.querySelector('[data-external-confirmation]')?.getAttribute('data-external-confirmation')).toBe("ap-2");
+    expect(button(t.scopeAll)?.getAttribute("aria-pressed")).toBe("true");
+    expect(host.querySelector('a[href*="panel=approvals"]')).toBeNull();
   });
 
   it("a failed load is an error with retry, never an empty list; the approval signal refreshes", async () => {

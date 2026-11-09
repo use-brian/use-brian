@@ -30,8 +30,15 @@ describe('common workflow interception', () => {
     const params = { ...fixture(), text: 'approve abc123' }
     expect(await maybeHandleChannelWorkflowReply(params)).not.toBeNull()
     expect(maybeHandleApprovalReply).toHaveBeenCalledWith(params.approvals, 'user', params.text,
-      { workspaceId: 'ws', assistantId: 'asst', authorized: params.authorized })
+      { workspaceId: 'ws', assistantId: 'asst', channelId: 'peer', channelIntegrationId: 'integration', authorized: params.authorized })
     expect(handleChannelQuestionReply).not.toHaveBeenCalled()
+  })
+  it('intercepts a scoped external answer before native questions or chat',async()=>{
+    vi.mocked(maybeHandleApprovalReply).mockResolvedValueOnce({decision:'answered',approvalId:'abc123',status:'answered',runId:null})
+    const params={...fixture(),text:'answer abc123  Literal\nanswer ',providerUserId:'sender',threadId:'root'}
+    expect(await maybeHandleChannelWorkflowReply(params)).toContain('answered')
+    expect(maybeHandleApprovalReply).toHaveBeenCalledWith(params.approvals,'user',params.text,expect.objectContaining({providerUserId:'sender',threadRef:'root',channelIntegrationId:'integration'}))
+    expect(handleChannelQuestionReply).not.toHaveBeenCalled();expect(dispatchQuestionResponse).not.toHaveBeenCalled()
   })
   it('never lets missing approval deps or approval errors fall into chat', async () => {
     expect(await maybeHandleChannelWorkflowReply({ ...fixture(), text: 'reject abc123', approvals: undefined })).toContain('unavailable')
