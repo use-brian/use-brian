@@ -193,6 +193,18 @@ describe("[COMP:app-web/external-action-confirmation] external questions", () =>
     await click(en.chat.pendingQuestion.submit); expect(api.answerExternalQuestion).not.toHaveBeenCalled();
     expect(host.textContent).toContain(t.expired);
   });
+  it("shows literal option text rather than internal indices after selection", async () => {
+    const row = question({ options: ["Alpha", "Beta"] });
+    await render({ request: row });
+    expect(host.querySelector('[data-slot="select-value"]')?.textContent).toBe(t.chooseAnswer);
+    await selectAnswer("Alpha");
+    expect(host.querySelector('[data-slot="select-value"]')?.textContent).toBe("Alpha");
+    await selectAnswer("Beta");
+    await render({ request: { ...row } });
+    expect(host.querySelector('[data-slot="select-value"]')?.textContent).toBe("Beta");
+    await click(en.chat.pendingQuestion.submit);
+    expect(api.answerExternalQuestion).toHaveBeenCalledExactlyOnceWith("external-1", "Beta");
+  });
   it("offers literal closed single choices and preserves selection for retry", async () => {
     const options = ["  <b>First</b>\n ", "Second"];
     api.answerExternalQuestion.mockRejectedValueOnce(new Error("offline"));
@@ -208,6 +220,7 @@ describe("[COMP:app-web/external-action-confirmation] external questions", () =>
     await render({ request: question({ options: ["One", "Two"], allowCustom: true }) });
     expect(host.querySelector("textarea")).toBeNull();
     await selectAnswer(t.customAnswer); await typeAnswer(" custom\n ");
+    expect(host.querySelector('[data-slot="select-value"]')?.textContent).toBe(t.customAnswer);
     await selectAnswer("One"); expect(host.querySelector("textarea")).toBeNull();
     await selectAnswer(t.customAnswer); expect(host.querySelector("textarea")?.value).toBe(" custom\n ");
     await click(en.chat.pendingQuestion.submit);

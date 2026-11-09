@@ -22,6 +22,9 @@ export function ExternalActionConfirmation({ workspaceId, request, onResolved }:
   const [draft, setDraft] = useState("");
   const [choice, setChoice] = useState<string | null>(null);
   const hasOptions = !!request.options?.length;
+  // Base UI needs the value-to-label mapping even after the popup unmounts.
+  const choiceItems = (request.options ?? []).map((label, index) => ({ value: String(index), label }));
+  if (request.allowCustom === true) choiceItems.push({ value: "custom", label: t.customAnswer });
   const custom = !hasOptions || choice === "custom";
   const answer = custom ? draft : choice === null ? "" : request.options?.[Number(choice)] ?? "";
   const validAnswer = answer.length >= 1 && answer.length <= 32768 && answer.trim().length > 0;
@@ -100,13 +103,12 @@ export function ExternalActionConfirmation({ workspaceId, request, onResolved }:
             selectionControls={hasOptions ? (
               <div className="space-y-1">
                 <label id={`${inputId}-choice`}>{t.chooseAnswer}</label>
-                <Select value={choice} onValueChange={setChoice} disabled={busy || expired}>
+                <Select items={choiceItems} value={choice} onValueChange={setChoice} disabled={busy || expired}>
                   <SelectTrigger aria-labelledby={`${inputId}-choice`} className="min-h-11 w-full text-base whitespace-pre-wrap break-words [&_[data-slot=select-value]]:line-clamp-none">
                     <SelectValue placeholder={t.chooseAnswer} />
                   </SelectTrigger>
                   <SelectContent>
-                    {request.options!.map((option, index) => <SelectItem key={index} value={String(index)} className="min-h-11 text-base [&_span]:whitespace-pre-wrap [&_span]:break-words">{option}</SelectItem>)}
-                    {request.allowCustom === true && <SelectItem value="custom" className="min-h-11 text-base">{t.customAnswer}</SelectItem>}
+                    {choiceItems.map(item => <SelectItem key={item.value} value={item.value} className="min-h-11 text-base [&_span]:whitespace-pre-wrap [&_span]:break-words">{item.label}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
