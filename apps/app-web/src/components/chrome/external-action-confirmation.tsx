@@ -1,12 +1,13 @@
 "use client";
 
 /** Reuse tool-request presentation, never its execution/resume authority. */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ChatConfirmationCard } from "./chat-confirmation-card";
-import { respondByKind } from "@/lib/api/approvals";
+import { answerExternalQuestion, respondByKind } from "@/lib/api/approvals";
 import type { ExternalActionConfirmation as Request } from "@/lib/api/pending-questions";
 import { requestApprovalsRefresh } from "@/lib/approvals-events";
 import { useT } from "@/lib/i18n/client";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 
 export function ExternalActionConfirmation({ workspaceId, request, onResolved }: {
   workspaceId: string;
@@ -14,8 +15,16 @@ export function ExternalActionConfirmation({ workspaceId, request, onResolved }:
   onResolved?: () => void;
 }) {
   const t = useT().chatApp.approvalReview;
+  const question = request.method === "question";
+  const inputId = useId();
+  const [draft, setDraft] = useState("");
+  const [choice, setChoice] = useState<string | null>(null);
+  const hasOptions = !!request.options?.length;
+  const custom = !hasOptions || choice === "custom";
+  const answer = custom ? draft : choice === null ? "" : request.options?.[Number(choice)] ?? "";
+  const validAnswer = answer.length >= 1 && answer.length <= 32768 && answer.trim().length > 0;
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<"approved" | "rejected" | "changed" | null>(null);
+  const [result, setResult] = useState<"approved" | "rejected" | "answered" | "changed" | null>(null);
   const [error, setError] = useState(false);
   const expiry = Date.parse(request.expiresAt);
   const [expired, setExpired] = useState(!Number.isFinite(expiry) || expiry <= Date.now());
@@ -30,13 +39,15 @@ export function ExternalActionConfirmation({ workspaceId, request, onResolved }:
     return () => { mounted.current = false; clearTimeout(timer); };
   }, [expiry]);
 
-  const decide = async (decision: "approved" | "rejected") => {
-    if (locked.current || result || !Number.isFinite(expiry) || expiry <= Date.now()) return;
+  const decide = async (decision: "approved" | "rejected" | "answered") => {
+    if ((decision === "answered" && !validAnswer) || locked.current || result || !Number.isFinite(expiry) || expiry <= Date.now()) return;
     locked.current = true;
     setBusy(true);
     setError(false);
     try {
-      const response = await respondByKind({ id: request.approvalId, kind: "external_action" }, decision);
+      const response = decision === "answered"
+        ? await answerExternalQuestion(request.approvalId, answer)
+        : await respondByKind({ id: request.approvalId, kind: "external_action" }, decision);
       if (!mounted.current) return;
       if (response.ok) {
         setResult(decision);
@@ -57,7 +68,7 @@ export function ExternalActionConfirmation({ workspaceId, request, onResolved }:
     }
   };
 
-  if (result) return <p role="status" className="text-xs text-muted-foreground">{result === "approved" ? t.allowed : result === "rejected" ? t.denied : t.changed}</p>;
+  if (result) return <p role="status" className="text-xs text-muted-foreground">{result === "approved" ? t.allowed : result === "rejected" ? t.denied : result === "answered" ? t.answered : t.changed}</p>;
   return (
     <div data-external-confirmation={request.approvalId}>
       <ChatConfirmationCard
@@ -79,11 +90,36 @@ export function ExternalActionConfirmation({ workspaceId, request, onResolved }:
         disabled={expired}
         allowComment={false}
         showInput={false}
+        actions={question ? (
+          <form aria-label={request.title} className="space-y-2" onSubmit={(event) => { event.preventDefault(); void decide("answered"); }}>
+            {hasOptions && <div className="space-y-1">
+              <label id={`${inputId}-choice`}>{t.chooseAnswer}</label>
+              <Select value={choice} onValueChange={setChoice} disabled={busy || expired}>
+                <SelectTrigger aria-labelledby={`${inputId}-choice`} className="min-h-11 w-full text-base whitespace-pre-wrap break-words [&_[data-slot=select-value]]:line-clamp-none">
+                  <SelectValue placeholder={t.chooseAnswer} />
+                </SelectTrigger>
+                <SelectContent>
+                  {request.options!.map((option, index) => <SelectItem key={index} value={String(index)} className="min-h-11 text-base [&_span]:whitespace-pre-wrap [&_span]:break-words">{option}</SelectItem>)}
+                  {request.allowCustom === true && <SelectItem value="custom" className="min-h-11 text-base">{t.customAnswer}</SelectItem>}
+                </SelectContent>
+              </Select>
+            </div>}
+            {custom && <div className="space-y-1">
+              <label htmlFor={inputId}>{t.yourAnswer}</label>
+              <textarea id={inputId} value={draft} onChange={(event) => setDraft(event.target.value)} disabled={busy || expired}
+                rows={3} className="min-h-11 w-full rounded-md border border-input bg-background p-2 text-[16px]" />
+            </div>}
+            <button type="submit" disabled={busy || expired || !validAnswer}
+              className="min-h-11 rounded-md bg-action px-3 text-base text-action-foreground disabled:opacity-50">
+              {busy ? t.submittingAnswer : t.submitAnswer}
+            </button>
+          </form>
+        ) : undefined}
         onApprove={() => void decide("approved")}
         onDeny={() => void decide("rejected")}
       />
       {expired && <p role="status" className="text-xs text-muted-foreground">{t.expired}</p>}
-      {error && <p role="alert" className="text-xs text-destructive">{t.decisionFailed}</p>}
+      {error && <p role="alert" className="text-xs text-destructive">{question ? t.answerFailed : t.decisionFailed}</p>}
     </div>
   );
 }

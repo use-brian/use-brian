@@ -65,6 +65,8 @@ describe("[COMP:app-web/pending-questions] pending session input", () => {
     const externalConfirmations = [
       { approvalId: "external-1", title: "Literal <b>title</b>", message: "line one\nline two", options: ["Allow once", "Deny"], expiresAt: "2099-01-01T00:00:00Z" },
       { approvalId: "external-2", title: "Another request", expiresAt: "2099-02-01T00:00:00Z" },
+      { approvalId: "external-3", method: "question", title: "Text question", message: "  Literal\n ", expiresAt: "2099-02-01T00:00:00Z" },
+      { approvalId: "external-4", method: "question", title: "Choose", options: ["  Literal\t ", "Other"], allowCustom: true, expiresAt: "2099-02-01T00:00:00Z" },
     ];
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ pending, toolConfirmation, externalConfirmations })));
     expect(await fetchPendingSessionInput("s1")).toEqual({ pending, toolConfirmation, externalConfirmations });

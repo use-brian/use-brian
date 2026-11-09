@@ -49,6 +49,8 @@ export type PendingToolConfirmation = {
 };
 
 export type ExternalActionConfirmation = {
+  method?: "question";
+  allowCustom?: boolean;
   approvalId: string;
   title: string;
   message?: string;

@@ -5,8 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExternalActionConfirmation as Request } from "@/lib/api/pending-questions";
 
-const api = vi.hoisted(() => ({ respondByKind: vi.fn(), resume: vi.fn() }));
-vi.mock("@/lib/api/approvals", () => ({ respondByKind: api.respondByKind }));
+const api = vi.hoisted(() => ({ respondByKind: vi.fn(), answerExternalQuestion: vi.fn(), resume: vi.fn() }));
+vi.mock("@/lib/api/approvals", () => ({ respondByKind: api.respondByKind, answerExternalQuestion: api.answerExternalQuestion }));
 // The real card is deliberately not mocked. Any accidental network/resume work fails the test.
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: api.resume }));
 vi.mock("@/lib/i18n/client", async () => {
@@ -36,6 +36,7 @@ const click = async (label: string) => { await act(async () => button(label).cli
 
 beforeEach(() => {
   api.respondByKind.mockReset().mockResolvedValue({ ok: true, status: "approved" });
+  api.answerExternalQuestion.mockReset().mockResolvedValue({ ok: true, status: "answered" });
   api.resume.mockReset().mockImplementation(() => { throw new Error("External consent must not resume a chat"); });
   host = document.createElement("div"); document.body.appendChild(host); root = createRoot(host);
 });
@@ -118,5 +119,97 @@ describe("[COMP:app-web/external-action-confirmation] independent external conse
     expect(host.querySelector('[role="alert"]')).toBeNull();
     expect(host.textContent).toBe(t.denied);
     expect(onResolved).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+const typeAnswer = async (value: string) => {
+  await act(async () => {
+    const input = host.querySelector("textarea")!;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+};
+const question = (over: Partial<Request> = {}) => request({ method: "question", options: undefined, ...over });
+const selectAnswer = async (label: string) => {
+  await act(async () => { (host.querySelector('[role="combobox"]') as HTMLButtonElement).click(); });
+  const item = Array.from(document.querySelectorAll('[role="option"]')).find(el => el.textContent === label);
+  expect(item).toBeTruthy();
+  await act(async () => (item as HTMLElement).click());
+};
+describe("[COMP:app-web/external-action-confirmation] external questions", () => {
+  it("shows the full literal question, submits raw whitespace without native decisions", async () => {
+    const row = question(); await render({ request: row });
+    expect(host.textContent).toContain(row.title);
+    expect(host.textContent).toContain(row.message);
+    expect(host.querySelector("script, b, a")).toBeNull();
+    expect(buttons().map(el => el.textContent)).toEqual([t.submitAnswer]);
+    expect(host.querySelector("label")?.htmlFor).toBe(host.querySelector("textarea")?.id);
+    expect(button(t.submitAnswer).disabled).toBe(true);
+    await typeAnswer(" \t\n "); expect(button(t.submitAnswer).disabled).toBe(true);
+    const literal = "  <b>raw</b>\nanswer\t  "; await typeAnswer(literal); await click(t.submitAnswer);
+    expect(api.answerExternalQuestion).toHaveBeenCalledExactlyOnceWith("external-1", literal);
+    expect(api.respondByKind).not.toHaveBeenCalled();
+    expect(host.textContent).toBe(t.answered);
+  });
+  it("does not truncate an overlong answer or submit it", async () => {
+    await render({ request: question() });
+    await typeAnswer("x".repeat(32769));
+    expect(host.querySelector("textarea")?.value).toHaveLength(32769);
+    expect(button(t.submitAnswer).disabled).toBe(true);
+    await typeAnswer("x".repeat(32768));
+    expect(button(t.submitAnswer).disabled).toBe(false);
+  });
+  it("keeps the mounted draft through a network failure and retries only explicitly", async () => {
+    api.answerExternalQuestion.mockRejectedValueOnce(new Error("offline"));
+    const onResolved = vi.fn(); const row = question(); await render({ request: row, onResolved });
+    await typeAnswer("  retry\n "); await click(t.submitAnswer);
+    await render({ request: { ...row }, onResolved });
+    expect(host.querySelector("textarea")?.value).toBe("  retry\n ");
+    expect(host.textContent).toContain(t.answerFailed); expect(onResolved).not.toHaveBeenCalled();
+    expect(api.answerExternalQuestion).toHaveBeenCalledTimes(1);
+    await click(t.submitAnswer); expect(onResolved).toHaveBeenCalledTimes(1);
+    expect(api.answerExternalQuestion).toHaveBeenLastCalledWith("external-1", "  retry\n ");
+  });
+  it.each([403, 404, 409, 410])("reports changed rather than the attempted answer on %s", async status => {
+    api.answerExternalQuestion.mockResolvedValueOnce({ ok: false, status });
+    await render({ request: question() }); await typeAnswer("mine"); await click(t.submitAnswer);
+    expect(host.textContent).toBe(t.changed); expect(host.textContent).not.toContain(t.answered);
+  });
+  it("disables a mounted question and retains its draft when expiry passes", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    await render({ request: question({ expiresAt: "2026-01-01T00:00:01Z" }) });
+    await typeAnswer("draft");
+    await act(async () => { vi.advanceTimersByTime(1001); });
+    expect(host.querySelector("textarea")?.value).toBe("draft");
+    expect(host.querySelector("textarea")?.disabled).toBe(true);
+    await click(t.submitAnswer); expect(api.answerExternalQuestion).not.toHaveBeenCalled();
+    expect(host.textContent).toContain(t.expired);
+  });
+  it("offers literal closed single choices and preserves selection for retry", async () => {
+    const options = ["  <b>First</b>\n ", "Second"];
+    api.answerExternalQuestion.mockRejectedValueOnce(new Error("offline"));
+    await render({ request: question({ options }) });
+    expect(host.querySelector("textarea, select")).toBeNull();
+    expect(host.textContent).toContain(options[0]);
+    await selectAnswer(options[0]); await click(t.submitAnswer);
+    expect(api.answerExternalQuestion).toHaveBeenCalledWith("external-1", options[0]);
+    expect(button(t.submitAnswer).disabled).toBe(false);
+    await click(t.submitAnswer); expect(host.textContent).toBe(t.answered);
+  });
+  it("offers custom text only when explicitly allowed and retains its independent draft", async () => {
+    await render({ request: question({ options: ["One", "Two"], allowCustom: true }) });
+    expect(host.querySelector("textarea")).toBeNull();
+    await selectAnswer(t.customAnswer); await typeAnswer(" custom\n ");
+    await selectAnswer("One"); expect(host.querySelector("textarea")).toBeNull();
+    await selectAnswer(t.customAnswer); expect(host.querySelector("textarea")?.value).toBe(" custom\n ");
+    await click(t.submitAnswer);
+    expect(api.answerExternalQuestion).toHaveBeenCalledExactlyOnceWith("external-1", " custom\n ");
+  });
+  it("keeps concurrent cards independent", async () => {
+    await act(async () => root.render(<><ExternalActionConfirmation workspaceId="ws-1" request={question()} /><ExternalActionConfirmation workspaceId="ws-1" request={question({ approvalId: "external-2" })} /></>));
+    await typeAnswer("first");
+    expect(Array.from(host.querySelectorAll("textarea")).map(el => el.value)).toEqual(["first", ""]);
+    expect(new Set(Array.from(host.querySelectorAll("textarea")).map(el => el.id)).size).toBe(2);
   });
 });

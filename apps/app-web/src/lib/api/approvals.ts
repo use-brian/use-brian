@@ -63,7 +63,7 @@ export type PendingApprovalRow = {
     displayLines?: string[];
     allowPersistentApproval?: boolean;
     /** Frozen external request, display only; never a Brian tool invocation. */
-    request?: { method: "confirm" | "select"; title: string; message?: string; options?: string[] };
+    request?: { method: "confirm" | "select" | "question"; title: string; message?: string; options?: string[]; allowCustom?: boolean };
     // staged_write provenance (kind='staged_write' only)
     surface?: StagedWriteSurface;
     credentialId?: string;
@@ -385,4 +385,20 @@ export function respondByKind(
 
 export function isRoutineProposal(row:{kind:string;arguments?:Record<string,unknown>}):boolean {
   return row.kind==='workflow_refinement' && row.arguments?.operation==='routine_intake';
+}
+
+/** One-time human answer, with no native turn/tool execution authority. */
+export async function answerExternalQuestion(id: string, answer: string): Promise<RespondResult> {
+  const res = await authFetch(`${API_URL}/api/approvals/${encodeURIComponent(id)}/respond`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answer }),
+  });
+  const data = await res.json().catch(() => ({})) as { kind?: string; status?: string; answer?: string; error?: string };
+  if (res.ok) {
+    return data.kind === "external_action" && data.status === "answered" && data.answer === answer
+      ? { ok: true, status: "answered" }
+      : { ok: false, status: 409, error: "external_approval_changed" };
+  }
+  return { ok: false, status: res.status, error: data.error ?? "Request failed" };
 }

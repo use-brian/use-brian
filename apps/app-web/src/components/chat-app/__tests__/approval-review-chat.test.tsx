@@ -28,6 +28,7 @@ const api = vi.hoisted(() => ({
   listAssignments: vi.fn(),
   listWorkspaceAssistants: vi.fn(async () => [{ id: "rev-1", name: "Ops" }, { id: "rev-2", name: "Brian" }]),
   confirmDialog: vi.fn(async () => true),
+  answerExternalQuestion: vi.fn(async () => ({ ok: true, status: "answered" })),
   respondByKind: vi.fn(async () => ({ ok: true, status: "approved" })),
 }));
 vi.mock("@/lib/api/approval-review", async (importOriginal) => ({
@@ -37,7 +38,7 @@ vi.mock("@/lib/api/approval-review", async (importOriginal) => ({
   listPatterns: api.listPatterns, revokePattern: api.revokePattern, listAssignments: api.listAssignments,
 }));
 vi.mock("@/lib/api/views", () => ({ listWorkspaceAssistants: api.listWorkspaceAssistants }));
-vi.mock("@/lib/api/approvals", () => ({ respondByKind: api.respondByKind }));
+vi.mock("@/lib/api/approvals", () => ({ respondByKind: api.respondByKind, answerExternalQuestion: api.answerExternalQuestion }));
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: api.confirmDialog }));
 vi.mock("next/link", () => ({ default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a> }));
 // Minimal popover: the trigger toggles, the content renders while open.
@@ -170,6 +171,35 @@ describe("[COMP:app-web/approval-review-chat] chat attention and reviewer contro
     expect(api.respondByKind).toHaveBeenCalledWith({ id: "ap-1", kind: "external_action" }, "approved");
     expect(api.fetchAttention.mock.calls.length).toBeGreaterThan(before);
     expect(host.textContent).toContain(t.allowed);
+  });
+
+  it("renders concurrent questions beside decisions in Needs you without reviewer authority", async () => {
+    const rows = [
+      { approvalId: "ap-1", title: "First literal question", method: "question" as const, expiresAt: "2099-01-01T00:00:00Z" },
+      { approvalId: "ap-2", title: "Second literal question", method: "question" as const, expiresAt: "2099-01-01T00:00:00Z" },
+      { approvalId: "ap-3", title: "Legacy decision", expiresAt: "2099-01-01T00:00:00Z" },
+    ];
+    api.fetchAttention.mockResolvedValue({ unseen: 0, items: rows.map(confirmation => waiting({
+      key: `approval:${confirmation.approvalId}`, approvalId: confirmation.approvalId,
+      approvalKind: "external_action", confirmation,
+    })) });
+    await render(<ApprovalReviewAttention workspaceId={ws} sessionId="s-1" projectId={null} />);
+    await click(host.querySelector('[data-testid="approval-review-attention"]'));
+    expect(host.querySelectorAll('[data-external-confirmation]')).toHaveLength(3);
+    expect(host.querySelectorAll('textarea')).toHaveLength(2);
+    const input = host.querySelector('textarea')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "  first answer\n ");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(Array.from(host.querySelectorAll('textarea')).map(el => el.value)).toEqual(["  first answer\n ", ""]);
+    expect(button(t.assign)).toBeUndefined(); expect(button(t.reviewNow)).toBeUndefined();
+    expect(button(t.allow)).toBeTruthy(); expect(button(t.deny)).toBeTruthy();
+    await click(button(t.submitAnswer));
+    expect(api.answerExternalQuestion).toHaveBeenCalledExactlyOnceWith("ap-1", "  first answer\n ");
+    expect(api.respondByKind).not.toHaveBeenCalled();
+    expect(host.textContent).toContain(t.answered);
+    expect(host.querySelectorAll('textarea')).toHaveLength(1);
   });
 
   it("opens notification links in existing Attention and puts the referenced request first", async () => {

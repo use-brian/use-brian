@@ -129,6 +129,7 @@ export function ChatConfirmationCard({
   disabled = false,
   allowComment = true,
   showInput = true,
+  actions,
 }: {
   confirmation: PendingConfirmation;
   approveLabel: string;
@@ -137,6 +138,8 @@ export function ChatConfirmationCard({
   disabled?: boolean;
   allowComment?: boolean;
   showInput?: boolean;
+  /** Optional external human form; native controls remain unchanged by default. */
+  actions?: ReactNode;
   onApprove: (toolCallId: string) => void;
   onAlwaysAllow?: (toolCallId: string) => void;
   /** A denial with an optional note. The note reaches the model via
@@ -206,7 +209,7 @@ export function ChatConfirmationCard({
           </>
         )}
         {showInput && <ToolInputToggle args={confirmation.input} disabled={isInFlight} />}
-        {commenting ? (
+        {actions ?? (commenting ? (
           <div className="space-y-2 pt-1">
             <textarea
               // No auto-raised keyboard on a phone (responsive contract M4).
@@ -298,7 +301,7 @@ export function ChatConfirmationCard({
               {t.confirmationDenyWithComment}
             </button>}
           </div>
-        )}
+        ))}
       </div>
     </div>
   );
