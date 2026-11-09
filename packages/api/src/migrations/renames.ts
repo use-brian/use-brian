@@ -16,8 +16,15 @@ const migrationRenames = [
   ['8146_explicit_unclassified_legacy_erasure.sql', '81460_explicit_unclassified_legacy_erasure.sql'],
   ['8147_private_chat_recovery.sql', '81470_private_chat_recovery.sql'],
 
-  ['8240_external_human_approvals.sql', '8241_external_human_approvals.sql'],
-  ['8241_workspace_external_approval_sources.sql', '8242_workspace_external_approval_sources.sql'],
+  // Resolve every released spelling directly to its final name: embedded
+  // migration lookup intentionally does not follow transitive rename chains.
+  ['8240_external_human_approvals.sql', '8242_external_human_approvals.sql'],
+  ['8241_external_human_approvals.sql', '8242_external_human_approvals.sql'],
+  ['8241_workspace_external_approval_sources.sql', '8243_workspace_external_approval_sources.sql'],
+  ['8242_workspace_external_approval_sources.sql', '8243_workspace_external_approval_sources.sql'],
+  ['8243_external_approval_web_chat_destination.sql', '8244_external_approval_web_chat_destination.sql'],
+  ['8244_external_approval_conversation_members.sql', '8245_external_approval_conversation_members.sql'],
+  ['8245_external_human_question_answers.sql', '8246_external_human_question_answers.sql'],
   ['8231_workspace_file_attachments.sql', '8233_workspace_file_attachments.sql'],
   ['8148_department_mode_admission.sql', '8171_department_mode_admission.sql'],
   ['8149_organization_cutover.sql', '8172_organization_cutover.sql'],

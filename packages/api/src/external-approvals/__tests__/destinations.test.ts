@@ -33,7 +33,7 @@ beforeAll(async()=>{
  CREATE FUNCTION session_context_parent_snapshot(uuid,uuid) RETURNS jsonb LANGUAGE sql AS 'SELECT jsonb_build_object(''visible'',visible) FROM sessions WHERE workspace_id=$1 AND id=$2';
  CREATE FUNCTION workflow_evidence_envelope_visible(uuid,jsonb) RETURNS boolean LANGUAGE sql AS 'SELECT ($2->>''visible'')::boolean';
  GRANT SELECT ON pending_approvals TO app_user;`)
- for(const migration of ['8241_external_human_approvals.sql','8242_workspace_external_approval_sources.sql','8243_external_approval_web_chat_destination.sql','8244_external_approval_conversation_members.sql']) await db.exec(readFileSync(new URL(`../../../migrations/${migration}`,import.meta.url),'utf8'))
+ for(const migration of ['8242_external_human_approvals.sql','8243_workspace_external_approval_sources.sql','8244_external_approval_web_chat_destination.sql','8245_external_approval_conversation_members.sql']) await db.exec(readFileSync(new URL(`../../../migrations/${migration}`,import.meta.url),'utf8'))
  await db.query('INSERT INTO users(id) VALUES($1)',[u]); await db.query('INSERT INTO workspaces VALUES($1)',[w]); await db.query('INSERT INTO assistants VALUES($1,$2)',[a,w]); await db.query("INSERT INTO workspace_members VALUES($1,$2,'admin')",[w,u])
  await db.query("INSERT INTO auth_sessions(id,user_id,expires_at) VALUES($1,$2,now()+interval '1 day')",[auth,u])
  await db.query("INSERT INTO sessions(id,workspace_id,assistant_id,channel_type,channel_id) VALUES($1,$2,$3,'web','web')",[web,w,a])

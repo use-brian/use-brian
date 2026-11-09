@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { readdirSync } from 'node:fs'
 import { orderMigrationFiles } from '../migration-order.js'
-import { findAppliedMigrationRenames } from '../../src/migrations/renames.js'
+import { findAppliedMigrationRenames, previousMigrationNames } from '../../src/migrations/renames.js'
 
 describe('[COMP:api/migration-order] Migration filename compatibility', () => {
   it('preserves each released collision without skipping its same-number neighbour', () => {
@@ -17,17 +18,35 @@ describe('[COMP:api/migration-order] Migration filename compatibility', () => {
     expect(findAppliedMigrationRenames(new Set(['557_structured_document_extractions.sql', '561_workflow_channel_questions.sql', '563_telegram_discussion_context.sql', '564_scoped_memory_summaries.sql', '8146_native_transcript_crm_event_inputs.sql', '8147_selected_department_erasure.sql']))).toEqual([])
   })
 
-  it('preserves external approval ledgers without skipping channel provenance or conflating adjacent registrations', () => {
+  it('preserves every external ledger spelling without skipping provenance or Telegram recovery', () => {
     const renames = [
-      { previousName: '8240_external_human_approvals.sql', currentName: '8241_external_human_approvals.sql' },
-      { previousName: '8241_workspace_external_approval_sources.sql', currentName: '8242_workspace_external_approval_sources.sql' },
+      { previousName: '8240_external_human_approvals.sql', currentName: '8242_external_human_approvals.sql' },
+      { previousName: '8241_external_human_approvals.sql', currentName: '8242_external_human_approvals.sql' },
+      { previousName: '8241_workspace_external_approval_sources.sql', currentName: '8243_workspace_external_approval_sources.sql' },
+      { previousName: '8242_workspace_external_approval_sources.sql', currentName: '8243_workspace_external_approval_sources.sql' },
+      { previousName: '8243_external_approval_web_chat_destination.sql', currentName: '8244_external_approval_web_chat_destination.sql' },
+      { previousName: '8244_external_approval_conversation_members.sql', currentName: '8245_external_approval_conversation_members.sql' },
+      { previousName: '8245_external_human_question_answers.sql', currentName: '8246_external_human_question_answers.sql' },
     ]
-    const provenance = '8240_channel_connection_provenance.sql'
-    expect(findAppliedMigrationRenames(new Set([provenance]))).toEqual([])
-    expect(findAppliedMigrationRenames(new Set([provenance, ...renames.map(row => row.previousName)]))).toEqual(renames)
-    expect(findAppliedMigrationRenames(new Set([provenance, ...renames.flatMap(row => [row.previousName, row.currentName])]))).toEqual([])
-    expect(orderMigrationFiles([{ dir: 'open', files: [provenance, ...renames.map(row => row.currentName)] }]).map(row => row.file))
-      .toEqual([provenance, '8241_external_human_approvals.sql', '8242_workspace_external_approval_sources.sql'])
+    const neighbours = ['8240_channel_connection_provenance.sql', '8241_telegram_recording_history_recovery.sql']
+    const canonical = [...new Set(renames.map(row => row.currentName))]
+    expect(findAppliedMigrationRenames(new Set(neighbours))).toEqual([])
+    expect(findAppliedMigrationRenames(new Set([...neighbours, ...renames.map(row => row.previousName)]))).toEqual(renames)
+    expect(findAppliedMigrationRenames(new Set([...neighbours, ...renames.flatMap(row => [row.previousName, row.currentName])]))).toEqual([])
+    for (const { previousName, currentName } of renames) {
+      expect(findAppliedMigrationRenames(new Set([previousName]))).toEqual([{ previousName, currentName }])
+      expect(previousMigrationNames(currentName)).toContain(previousName)
+      expect(findAppliedMigrationRenames(new Set([previousName, currentName]))).toEqual([])
+    }
+    expect(findAppliedMigrationRenames(new Set(canonical))).toEqual([])
+    expect(orderMigrationFiles([{ dir: 'open', files: [...canonical].reverse().concat(neighbours) }]).map(row => row.file))
+      .toEqual([...neighbours, ...canonical])
+
+    // Check the real checkout too, so a future develop collision fails here.
+    const files = readdirSync(new URL('../../migrations/', import.meta.url))
+    for (const currentName of canonical) {
+      expect(files.filter(file => file.startsWith(`${currentName.split('_')[0]}_`))).toEqual([currentName])
+    }
   })
 
   it('preserves applied workspace attachments without skipping private transcript authority', () => {
