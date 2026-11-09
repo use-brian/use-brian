@@ -25,7 +25,7 @@ export type ChannelWorkflowContextParams = Pick<ChannelPipelineParams,
   | 'workspaceToolPolicyStore' | 'sessionChannelId' | 'replyToMessageId' | 'replyRaw' | 'incomingChannelMessageId'> & Partial<Pick<ChannelPipelineParams, 'abortController'>> & {
   /** Verified integration UUID from route authentication, never webhook text. */
   integrationId?: string
-  incoming?: Pick<IncomingMessage, 'text' | 'messageId' | 'replyToMessageId' | 'raw'>
+  incoming?: Pick<IncomingMessage, 'text' | 'messageId' | 'replyToMessageId' | 'raw'> & Partial<Pick<IncomingMessage, 'userId'>>
   callback?: { data: string; messageId: string }
   quotedText?: string
   referenceToken?: string
@@ -104,6 +104,7 @@ export async function maybeHandleChannelWorkflowContext(params: ChannelWorkflowC
       integrationId: params.integrationId, channelId: params.channelId },
     text, questionStore: store, approvals: bridge ? { approvalsStore: bridge.approvalsStore, bridgeDeps: bridge } : undefined,
     callback: params.callback, referenceToken, replyToMessageId, threadId,
+    providerUserId: params.incoming?.userId,
     answerMessageId: answerId == null ? undefined : String(answerId),
     allowUnthreaded: params.allowUnthreaded, questionRepliesAvailable: !systemIntegration,
     authorized, abortSignal,

@@ -24,11 +24,11 @@ import { captureHumanDecisionSupport } from '../approval-review/patterns.js'
 
 /** Approval projections retain the current authority of every persisted parent. */
 async function canReadApprovalSource(userId: string, approval: PendingApproval): Promise<boolean> {
-  if ((approval.approvalPayload.workspaceMcpOperation === true || typeof approval.approvalPayload.workspaceMcpRunId === 'string') && approval.approverUserId !== userId) return false
   if (approval.kind === 'external_action') {
     const { canReadExternalApproval } = await import('../external-approvals/sql-store.js')
-    return approval.approverUserId === userId && await canReadExternalApproval(userId, approval.id)
+    return canReadExternalApproval(userId, approval.id)
   }
+  if ((approval.approvalPayload.workspaceMcpOperation === true || typeof approval.approvalPayload.workspaceMcpRunId === 'string') && approval.approverUserId !== userId) return false
   if (approval.workflowRunId) {
     if (!approval.workflowStepRunId) return false
     const parent = await queryWithRLS(userId,
@@ -148,14 +148,13 @@ export type ApprovalKind =
  * reader queries workflow-shaped rows where they're invariably set. When a
  * future reader pulls non-workflow kinds, narrow at the call site.
  */
-export type PendingApproval = {
+type PendingApprovalFields = {
   id: string
   workspaceId: string
   workflowRunId: string
   workflowStepRunId: string
   toolName: string
   arguments: Record<string, unknown>
-  approverUserId: string
   deliveryChannelType: ApprovalDeliveryChannel
   deliveryChannelId: string | null
   status: PendingApprovalStatus
@@ -164,8 +163,6 @@ export type PendingApproval = {
   respondedBy: string | null
   rejectReason: string | null
   createdAt: Date
-  /** Q10 unified surface — discriminator. Defaulted to 'workflow_step' for legacy rows. */
-  kind: ApprovalKind
   /** Set when a chat-session is suspended awaiting this row (kind='tool_invocation'). Powers Path B resume (WU-6.4). */
   blockingSessionId: string | null
   /** Internal monotonic provenance; optional only for legacy in-memory adapters. */
@@ -184,6 +181,12 @@ export type PendingApproval = {
    */
   resolutionOrigin?: ApprovalResolutionOrigin | null
 }
+
+/** Only external conversation requests may be unassigned. */
+export type PendingApproval = PendingApprovalFields & (
+  | { kind: 'external_action'; approverUserId: string | null }
+  | { kind: Exclude<ApprovalKind, 'external_action'>; approverUserId: string }
+)
 
 export type CreateApprovalParams = {
   workspaceId: string
@@ -781,7 +784,9 @@ function rowToApproval(row: Record<string, unknown>): PendingApproval {
     workflowStepRunId: row.workflowStepRunId as string,
     toolName: row.toolName as string,
     arguments: (row.arguments as Record<string, unknown>) ?? {},
-    approverUserId: row.approverUserId as string,
+    ...(row.kind === 'external_action'
+      ? { kind: 'external_action' as const, approverUserId: row.approverUserId as string | null }
+      : { kind: (row.kind as Exclude<ApprovalKind, 'external_action'>) ?? 'workflow_step', approverUserId: row.approverUserId as string }),
     deliveryChannelType: row.deliveryChannelType as ApprovalDeliveryChannel,
     deliveryChannelId: (row.deliveryChannelId as string | null) ?? null,
     status: row.status as PendingApprovalStatus,
@@ -790,7 +795,6 @@ function rowToApproval(row: Record<string, unknown>): PendingApproval {
     respondedBy: (row.respondedBy as string | null) ?? null,
     rejectReason: (row.rejectReason as string | null) ?? null,
     createdAt: row.createdAt as Date,
-    kind: (row.kind as ApprovalKind) ?? 'workflow_step',
     blockingSessionId: (row.blockingSessionId as string | null) ?? null,
     sourceSessionRequired: row.sourceSessionRequired === true,
     approvalPayload: (row.approvalPayload as Record<string, unknown>) ?? {},
@@ -1344,7 +1348,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       const result = await queryWithRLS(
         userId,
         `SELECT ${COLS} FROM pending_approvals
-         WHERE approver_user_id = $1 AND status = 'pending'`,
+         WHERE (approver_user_id = $1 OR kind = 'external_action') AND status = 'pending'`,
         [userId],
       )
       return (await readableApprovalRows(userId, result.rows)).length

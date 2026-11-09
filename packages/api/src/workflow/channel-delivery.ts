@@ -549,11 +549,12 @@ function createDelivery(
       if (!targetChannelId.includes('@')) {
         return { status: 'skipped', channelType, reason: 'no_integration' }
       }
-      const integ = question && options.integrationStore && channelIntegrationId
+      const integ = options.integrationStore && channelIntegrationId
         ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
             workspaceId, assistantId, channelIntegrationId, 'whatsapp', targetChannelId)
         : undefined
-      if (question && (!integ || (integ.credentials as { provider?: string }).provider === 'cloud_api')) return { status: 'skipped', channelType, reason: 'no_integration' }
+      // Explicit integration is pinned: never silently deliver through system.
+      if ((question || channelIntegrationId) && (!integ || (integ.credentials as { provider?: string }).provider === 'cloud_api' || !integ.channelId)) return { status: 'skipped', channelType, reason: 'no_integration' }
       const prepared = integ ? await prepareQuestion(integ.id) : { text: deliverable, token: undefined, actions }
       const messageId = await createWhatsAppAdapter({
         connectorUrl: options.waConnectorUrl,

@@ -352,18 +352,22 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
       res.status(404).json({ error: 'Approval not found' })
       return
     }
-    if (approval.approverUserId !== userId) {
-      res.status(403).json({ error: 'Only the assigned approver can respond' })
-      return
-    }
     if (approval.kind === 'external_action') {
+      if (!req.authSessionId) {
+        res.status(403).json({ error: 'Human authentication required' })
+        return
+      }
       try {
-        const state = await externalApprovals().resolve(id, decision, { userId, human: true, origin: 'ui', grantAlways: body.grantAlways })
+        const state = await externalApprovals().resolve(id, decision, { userId, authSessionId: req.authSessionId, human: true, origin: 'ui', grantAlways: body.grantAlways })
         res.json({ kind: 'external_action', ...state })
       } catch (error) {
         if (error instanceof ExternalApprovalError) res.status(error.status).json({ error: error.message })
         else throw error
       }
+      return
+    }
+    if (approval.approverUserId !== userId) {
+      res.status(403).json({ error: 'Only the assigned approver can respond' })
       return
     }
     if (approval.kind === 'department_access') {

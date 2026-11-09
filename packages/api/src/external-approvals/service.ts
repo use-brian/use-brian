@@ -12,7 +12,7 @@ export interface ExternalApprovalStore {
   read(source: ExternalApprovalSource, id: string): Promise<ExternalApprovalState | null>
   ack(source: ExternalApprovalSource, id: string, status: AckStatus): Promise<ExternalApprovalState | null>
   cancel(source: ExternalApprovalSource, id: string): Promise<ExternalApprovalState | null>
-  decide(source: ExternalApprovalSource, approvalId: string, userId: string, decision: 'approved' | 'rejected'): Promise<ExternalApprovalState | null>
+  decide(source: ExternalApprovalSource, approvalId: string, userId: string, decision: 'approved' | 'rejected', actor?: HumanApprovalActor): Promise<ExternalApprovalState | null>
   sourceForApproval(id: string): Promise<{ sourceId: string; binding: string } | null>
 }
 /** Live workspace registration lookup; implementations must not cache authority. */
@@ -20,7 +20,7 @@ export interface ExternalApprovalSourceRegistry {
   get(id: string): Promise<ExternalApprovalSource | null>
   authenticate(header?: string): Promise<ExternalApprovalSource | null>
 }
-export type HumanApprovalActor = { userId: string; human: boolean; origin: 'ui' | 'channel' | 'model' | 'delegated'; grantAlways?: boolean; channelId?: string; channelIntegrationId?: string }
+export type HumanApprovalActor = { userId: string; human: boolean; origin: 'ui' | 'channel' | 'model' | 'delegated'; grantAlways?: boolean; channelId?: string; channelIntegrationId?: string; threadRef?: string; providerUserId?: string; authSessionId?: string }
 export class ExternalApprovalService {
   constructor(public sources: ExternalApprovalSourceRegistry, public store: ExternalApprovalStore,
     private notify?: (source: ExternalApprovalSource, state: ExternalApprovalState) => Promise<void>) {}
@@ -35,12 +35,18 @@ export class ExternalApprovalService {
     if (!actor.human || !['ui', 'channel'].includes(actor.origin) || actor.grantAlways) throw new ExternalApprovalError(403, 'Human one-time decision required')
     const binding = await this.store.sourceForApproval(id)
     const source = binding && await this.sources.get(binding.sourceId)
-    if (!source || !binding || sourceBinding(source) !== binding.binding || source.approverUserId !== actor.userId) throw new ExternalApprovalError(404, 'Approval unavailable')
+    if (!source || !binding || sourceBinding(source) !== binding.binding || (source.audience !== 'conversation_members' && source.approverUserId !== actor.userId)) throw new ExternalApprovalError(404, 'Approval unavailable')
     if (actor.origin === 'channel' && (source.channelType === 'web' || !source.channelIntegrationId
-      || actor.channelId !== source.channelId || actor.channelIntegrationId !== source.channelIntegrationId)) {
+      || actor.channelId !== source.channelId || actor.channelIntegrationId !== source.channelIntegrationId
+      || (source.audience === 'conversation_members' && actor.threadRef !== source.threadRef))) {
       throw new ExternalApprovalError(404, 'Approval unavailable')
     }
-    const state = await this.store.decide(source, id, actor.userId, decision)
+    if (source.audience === 'conversation_members' && actor.origin === 'ui' && !actor.authSessionId) {
+      throw new ExternalApprovalError(403, 'Authenticated human session required')
+    }
+    const state = source.audience === 'conversation_members'
+      ? await this.store.decide(source, id, actor.userId, decision, actor)
+      : await this.store.decide(source, id, actor.userId, decision)
     if (!state) throw new ExternalApprovalError(404, 'Approval unavailable')
     return state
   }

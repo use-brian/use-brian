@@ -65,7 +65,7 @@ function makeApproval(overrides: Partial<PendingApproval> = {}): PendingApproval
     originatingAssistantId: null,
     answerText: null,
     ...overrides,
-  }
+  } as PendingApproval
 }
 
 function makeStubResumeStore(point: SessionResumePoint | null) {
@@ -158,6 +158,15 @@ describe('[COMP:brain/session-resume-worker] runSessionResume', () => {
     const deps = makeDeps({ point: SAMPLE_POINT, approval: null, replay })
     const outcome = await runSessionResume(deps, { sessionId: 'sess-1', approvalId: 'app-1' })
     expect(outcome).toEqual({ status: 'failed', reason: 'approval_missing' })
+    expect(replay).not.toHaveBeenCalled()
+  })
+
+  it('never replays an external approval even with a durable native checkpoint', async () => {
+    const replay = vi.fn<SessionResumeReplay>(async () => 'completed')
+    const deps = makeDeps({ point: SAMPLE_POINT, approval: makeApproval({ kind: 'external_action', approverUserId: null }), replay })
+    expect(await runSessionResume(deps, { sessionId: 'sess-1', approvalId: 'app-1' })).toEqual({
+      status: 'skipped', reason: 'external_approval_not_resumable',
+    })
     expect(replay).not.toHaveBeenCalled()
   })
 

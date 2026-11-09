@@ -61,6 +61,7 @@ export function requestScopes(facts: RequestFacts): Array<{ kind: ApprovalReview
 
 /** The effective assignment for a request (made by its approver), if any. */
 export async function effectiveAssignmentFor(facts: RequestFacts, db: Queryable = getPool()) {
+  if (facts.approval.kind === 'external_action') return null
   const active = await listActiveAssignmentsForScopes(facts.approval.workspaceId, requestScopes(facts), db)
   const hit = resolveEffectiveAssignment(active, {
     approvalId: facts.approval.id, approverUserId: facts.approval.approverUserId,

@@ -11,10 +11,18 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+vi.mock('../../external-approvals/sql-store.js', () => ({ canReadExternalApproval: vi.fn() }))
+vi.mock('../../external-approvals/service.js', () => ({
+  externalApprovals: () => ({ resolve: externalResolve }),
+  ExternalApprovalError: class extends Error {},
+}))
+const { externalResolve } = vi.hoisted(() => ({ externalResolve: vi.fn() }))
+
 vi.mock('../../db/client.js', () => ({ query: vi.fn() }))
 vi.mock('../approval.js', () => ({ resumeFromApproval: vi.fn() }))
 
 import { maybeHandleApprovalReply } from '../approval-replies.js'
+import { canReadExternalApproval } from '../../external-approvals/sql-store.js'
 import { query } from '../../db/client.js'
 import { resumeFromApproval } from '../approval.js'
 
@@ -70,7 +78,7 @@ describe('[COMP:channels/approval-replies] maybeHandleApprovalReply', () => {
     const [sql, params] = mockQuery.mock.calls[0]
     expect(sql).toContain("status = 'pending'")
     expect(sql).toContain('approver_user_id = $1')
-    expect(params).toEqual(['u-1', 'abc123de', null, null])
+    expect(params).toEqual(['u-1', 'abc123de', null, null, null, null, null])
     expect(sql).toContain("kind IN ('workflow_step', 'external_action')")
     expect(sql).toContain('expires_at > now()')
   })
@@ -95,7 +103,7 @@ it('checks fresh authorization before lookup and constrains workspace and assist
   scope.authorized.mockResolvedValue(true)
   mockQuery.mockResolvedValue({ rows: [] } as never)
   await maybeHandleApprovalReply(deps, 'u', 'approve abc123', scope)
-  expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('originating_assistant_id = $4'), ['u', 'abc123', 'ws', 'asst'])
+  expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('originating_assistant_id = $4'), ['u', 'abc123', 'ws', 'asst', null, null, null])
 })
 
 it.each(['authorization', 'lookup'] as const)('does not resume approval after cancellation during %s', async stage => {
@@ -119,4 +127,49 @@ it.each(['authorization', 'lookup'] as const)('does not resume approval after ca
   expect(await result).toMatchObject({ status: 'cancelled', runId: null })
   expect(mockResume).not.toHaveBeenCalled()
   if (stage === 'authorization') expect(mockQuery).not.toHaveBeenCalled()
+})
+
+describe('external channel member replies', () => {
+  const scope = { workspaceId: 'ws', assistantId: 'asst', channelId: 'conversation',
+    channelIntegrationId: 'integration', providerUserId: 'verified-provider-sender', threadRef: 'root', authorized: vi.fn(async () => true) }
+  beforeEach(() => {
+    vi.mocked(canReadExternalApproval).mockReset()
+    externalResolve.mockReset()
+    scope.authorized.mockReset().mockResolvedValue(true)
+  })
+  it('filters foreign prefix collisions before deciding as an authorized member', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [
+      { id: 'abc123-foreign', kind: 'external_action' },
+      { id: 'abc123-member', kind: 'external_action' },
+    ] } as never)
+    vi.mocked(canReadExternalApproval).mockImplementation(async (_user, id) => id === 'abc123-member')
+    externalResolve.mockResolvedValueOnce({ status: 'approved' })
+    const result = await maybeHandleApprovalReply(deps, 'member', 'approve abc123', scope)
+    expect(result).toMatchObject({ approvalId: 'abc123-member', status: 'approved', runId: null })
+    expect(externalResolve).toHaveBeenCalledWith('abc123-member', 'approved', {
+      userId: 'member', human: true, origin: 'channel', channelId: 'conversation', channelIntegrationId: 'integration',
+      providerUserId: 'verified-provider-sender', threadRef: 'root',
+    })
+    expect(mockResume).not.toHaveBeenCalled()
+    expect(mockQuery.mock.calls[0][0]).not.toContain('LIMIT 2')
+    expect(mockQuery.mock.calls[0][0]).toContain('s.channel_integration_id::text = $6')
+    expect(mockQuery.mock.calls[0][0]).toContain('s.thread_ref IS NOT DISTINCT FROM $7::text')
+    expect(mockQuery.mock.calls[0][1]).toEqual(['member','abc123','ws','asst','conversation','integration','root'])
+  })
+  it.each([undefined, { ...scope, channelId: undefined }, { ...scope, channelIntegrationId: undefined }])(
+    'does not resolve external requests without exact scope', async badScope => {
+      mockQuery.mockResolvedValueOnce({ rows: [{ id: 'abc123-member', kind: 'external_action' }] } as never)
+      expect(await maybeHandleApprovalReply(deps, 'member', 'approve abc123', badScope)).toMatchObject({ status: 'unavailable' })
+      expect(externalResolve).not.toHaveBeenCalled()
+      expect(mockResume).not.toHaveBeenCalled()
+    },
+  )
+  it('reuses current authorization immediately before external resolution', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'abc123-member', kind: 'external_action' }] } as never)
+    vi.mocked(canReadExternalApproval).mockResolvedValue(true)
+    scope.authorized.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    expect(await maybeHandleApprovalReply(deps, 'member', 'approve abc123', scope)).toMatchObject({ status: 'unavailable' })
+    expect(externalResolve).not.toHaveBeenCalled()
+    expect(mockResume).not.toHaveBeenCalled()
+  })
 })

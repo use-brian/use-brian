@@ -73,7 +73,7 @@ function makeQuestionRow(over: Partial<PendingApproval> = {}): PendingApproval {
     originatingAssistantId: 'asst-1',
     answerText: null,
     ...over,
-  }
+  } as PendingApproval
 }
 
 function makeToolConfirmationRow(
@@ -92,7 +92,7 @@ function makeToolConfirmationRow(
       turnLeaseToken: 'lease-current',
     },
     ...over,
-  })
+  } as Partial<PendingApproval>)
 }
 
 
@@ -113,7 +113,7 @@ function makeExternalConfirmationRow(
       allowPersistentApproval: false,
     },
     ...over,
-  })
+  } as Partial<PendingApproval>)
 }
 
 type StoreStubs = {
@@ -252,8 +252,22 @@ describe('[COMP:api/pending-questions-resume] GET /:sessionId/pending', () => {
     },
   )
 
+  it('restores unassigned member approvals in a shared web session', async () => {
+    mockFindSession.mockResolvedValue({
+      id: 'sess-1', assistantId: 'asst-1', userId: 'other-user', channelType: 'web',
+      visibility: 'workspace', effectiveClearance: 'internal',
+    } as never)
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    const { app } = makeApp({ listPendingForWorkspace: vi.fn(async () => [
+      makeExternalConfirmationRow({ approverUserId: null }),
+    ]) })
+    const res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(res.body.externalConfirmations).toHaveLength(1)
+    expect(res.body.externalConfirmations[0].approvalId).toBe('ap-ext-1')
+    expect(mockEnqueue).not.toHaveBeenCalled()
+  })
+
   it.each([
-    { approverUserId: 'other-user' },
     { originatingAssistantId: 'other-assistant' },
     { originatingAssistantId: null },
     { deliveryChannelId: 'other-session' },
@@ -281,7 +295,6 @@ describe('[COMP:api/pending-questions-resume] GET /:sessionId/pending', () => {
   })
 
   it.each([
-    { userId: 'other-user', channelType: 'web' },
     { userId: 'u-1', channelType: 'slack' },
     { userId: 'u-1' },
   ])('does not expose external rows to a different session owner or channel (%j)', async (session) => {

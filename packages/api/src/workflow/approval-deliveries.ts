@@ -64,11 +64,15 @@ export function createApprovalDeliveryDispatcher(
 
     if (params.recentTarget) {
       if (!deps.deliverToChannel || !params.assistantId) return
+      if (params.externalAction && params.recentTarget.channelType !== 'web'
+        && !params.recentTarget.channelIntegrationId) return
+      const deliveryUserId = params.externalAction ? params.deliveryUserId ?? params.approverUserId : params.approverUserId
+      if (!deliveryUserId) return
       const outcome = await deps.deliverToChannel({
         ...params.recentTarget,
         workspaceId: params.workspaceId,
         assistantId: params.assistantId,
-        userId: params.approverUserId,
+        userId: deliveryUserId,
         text: message,
         actions,
         // Public confirmation card text — still passes the destination-audience gate.
@@ -83,7 +87,11 @@ export function createApprovalDeliveryDispatcher(
       return
     }
 
+    // Explicit external destinations never fall back to a personal transport.
+    if (params.externalAction) return
+
     if (params.deliveryChannelType === 'telegram') {
+      if (!params.approverUserId) return
       if (!deps.telegramBotToken) {
         console.warn(
           `[approval-deliveries] telegram delivery skipped (no bot token configured) for approval ${params.approvalId}`,

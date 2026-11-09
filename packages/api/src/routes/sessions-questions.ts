@@ -228,10 +228,10 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
       : undefined
     // Independent of the live turn lease: these are frozen human requests,
     // not tool invocations. The store also checks the registration's live RLS authority.
-    const externalConfirmations = session.channelType === 'web' && session.userId === userId
+    const externalConfirmations = session.channelType === 'web'
       ? pending.flatMap((row) => {
           if (row.kind !== 'external_action' || row.status !== 'pending' ||
-              row.approverUserId !== userId || row.originatingAssistantId !== session.assistantId ||
+              row.originatingAssistantId !== session.assistantId ||
               row.deliveryChannelType !== 'web' || row.deliveryChannelId !== sessionId) return []
           const confirmation = externalActionConfirmation(row)
           return confirmation ? [confirmation] : []

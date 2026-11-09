@@ -9,7 +9,7 @@ const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`
 const body={name:'Source',assistantId:id(2),approverUserId:id(3)}
 const source={id:id(5),name:'Source',workspaceId:id(1),assistantId:id(2),approverUserId:id(3),channelType:'web' as const,channelId:'queue',prefix:'eas_prefix',createdAt:new Date().toISOString(),revokedAt:null}
 function fixture(role:string|null='admin',session:string|undefined=id(4),user:string|undefined=id(3)) {
-  const store={list:vi.fn(async()=>[source]),create:vi.fn(async()=>({source,token:'one-time'})),rotate:vi.fn(async()=>({source,token:'rotated'})),revoke:vi.fn(async()=>{})}
+  const store={destinations:vi.fn(async()=>({destinations:[],connections:[]})),list:vi.fn(async()=>[source]),create:vi.fn(async()=>({source,token:'one-time'})),rotate:vi.fn(async()=>({source,token:'rotated'})),revoke:vi.fn(async()=>{})}
   const getRole=vi.fn(async()=>role) as any
   const app=express();app.use(express.json());app.use((req,_res,next)=>{req.userId=user;req.authSessionId=session;next()})
   app.use('/api/workspaces/:workspaceId/external-approval-sources',externalApprovalSourceRoutes({workspaceStore:{getRole},store}))
@@ -36,6 +36,16 @@ describe('authenticated source management routes',()=>{
     const list=await request(f.app).get(f.path);expect(list.body).toEqual({sources:[source]});expect(JSON.stringify(list.body)).not.toContain('one-time')
     expect((await request(f.app).delete(`${f.path}/${id(5)}`)).status).toBe(204)
     expect(f.store.revoke).toHaveBeenCalledWith({userId:id(3),sessionId:id(4)},id(1),id(5))
+  })
+  it('accepts destination creation without a designated approver and discovers inventory without caching',async()=>{
+    const f=fixture();const selected={name:'Conversation',assistantId:id(2),destinationId:id(8)}
+    expect((await request(f.app).post(f.path).send(selected)).status).toBe(201)
+    expect(f.store.create).toHaveBeenCalledWith({userId:id(3),sessionId:id(4)},id(1),selected)
+    const inventory=await request(f.app).get(`${f.path}/destinations?assistantId=${id(2)}`)
+    expect(inventory.status).toBe(200);expect(inventory.headers['cache-control']).toBe('no-store')
+    expect(f.store.destinations).toHaveBeenCalledWith({userId:id(3),sessionId:id(4)},id(1),id(2))
+    expect((await request(f.app).post(f.path).send({...selected,approverUserId:id(3)})).status).toBe(400)
+    expect((await request(f.app).get(`${f.path}/destinations?assistantId=bad`)).status).toBe(400)
   })
   it('rejects arbitrary authority fields and rotation body, redacts unexpected errors',async()=>{
     const f=fixture()

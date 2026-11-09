@@ -2,7 +2,7 @@
 import { PGlite } from '@electric-sql/pglite'
 import { readFileSync } from 'node:fs'
 import { beforeAll,afterAll,describe,it,expect,vi } from 'vitest'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 vi.mock('../../db/client.js',()=>({getPool:()=>pool}))
 vi.mock('../../brain-stream/notify.js',()=>({notifyWorkspaceChange:vi.fn()}))
 import { createExternalApprovalSqlStore, canReadExternalApproval } from '../sql-store.js'
@@ -18,7 +18,7 @@ const pool = {
     return {query:(sql:string,args?:unknown[])=>db.query(sql,args),release}
   },
 }
-const source:ExternalApprovalSource = {id:'00000000-0000-4000-8000-000000000004',tokenSha256:createHash('sha256').update('unit-test-token').digest('hex'),workspaceId:'00000000-0000-4000-8000-000000000001',assistantId:'00000000-0000-4000-8000-000000000002',approverUserId:'00000000-0000-4000-8000-000000000003',channelType:'web',channelId:'queue'}
+const source:ExternalApprovalSource & { approverUserId: string } = {id:'00000000-0000-4000-8000-000000000004',tokenSha256:createHash('sha256').update('unit-test-token').digest('hex'),workspaceId:'00000000-0000-4000-8000-000000000001',assistantId:'00000000-0000-4000-8000-000000000002',approverUserId:'00000000-0000-4000-8000-000000000003',channelType:'web',channelId:'queue'}
 const store=createExternalApprovalSqlStore()
 const notify=vi.fn(async(_source:ExternalApprovalSource,_state:import('../service.js').ExternalApprovalState)=>{})
 const sources=createExternalApprovalSourceRegistry({notify:()=>{}})
@@ -31,9 +31,15 @@ const actor={userId:source.approverUserId,human:true,origin:'ui' as const}
 beforeAll(async()=>{
   await db.exec(`CREATE TABLE users(id uuid PRIMARY KEY,auth_version integer DEFAULT 0);
     CREATE TABLE workspaces(id uuid PRIMARY KEY);
+    CREATE TABLE application_policy_workspace_epochs(workspace_id uuid PRIMARY KEY);
+    CREATE TABLE department_edges(id uuid,workspace_id uuid,user_id uuid,expires_at timestamptz);
     CREATE TABLE auth_sessions(id uuid PRIMARY KEY,user_id uuid,auth_version integer DEFAULT 0,expires_at timestamptz,revoked_at timestamptz);
     CREATE TABLE workspace_members(workspace_id uuid,user_id uuid,role text DEFAULT 'admin');
     CREATE TABLE assistants(id uuid PRIMARY KEY,workspace_id uuid);
+    CREATE TABLE channels(id uuid PRIMARY KEY,workspace_id uuid,channel_id text,status text,display_name text);
+    CREATE TABLE channel_integrations(id uuid PRIMARY KEY,channel_id uuid,channel_type text,status text,bot_user_id text,team_id text);
+    CREATE TABLE channel_assistants(id uuid PRIMARY KEY,channel_id uuid,assistant_id uuid,external_surface_id text,model_alias text);
+    CREATE TABLE linked_identities(id uuid PRIMARY KEY,user_id uuid,provider text,provider_id text);
     CREATE FUNCTION assistant_placement_visible(uuid,uuid) RETURNS boolean LANGUAGE sql AS 'SELECT true';
     CREATE FUNCTION pg_advisory_xact_lock(bigint) RETURNS void LANGUAGE sql AS 'SELECT';
     CREATE TABLE pending_approvals(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),workspace_id uuid,kind text,approver_user_id uuid,originating_assistant_id uuid,
@@ -42,11 +48,25 @@ beforeAll(async()=>{
   `)
   await db.query('INSERT INTO users(id) VALUES($1)',[source.approverUserId])
   await db.query('INSERT INTO workspaces VALUES($1)',[source.workspaceId])
+  await db.query('INSERT INTO application_policy_workspace_epochs VALUES($1)',[source.workspaceId])
   await db.query('INSERT INTO auth_sessions(id,user_id,expires_at) VALUES($1,$2,clock_timestamp()+interval \'1 hour\')',[sessionId,source.approverUserId])
   await db.query('INSERT INTO workspace_members(workspace_id,user_id) VALUES($1,$2)',[source.workspaceId,source.approverUserId])
   await db.query('INSERT INTO assistants VALUES($1,$2)',[source.assistantId,source.workspaceId])
   await db.exec(readFileSync(new URL('../../../migrations/8241_external_human_approvals.sql',import.meta.url),'utf8'))
   await db.exec(readFileSync(new URL('../../../migrations/8242_workspace_external_approval_sources.sql',import.meta.url),'utf8'))
+  // Lightweight store fixture. Full migration and RLS behavior is covered by
+  // the lightweight destination migration suite (canonical helpers mocked).
+  await db.exec(`ALTER TABLE workspace_external_approval_sources ALTER COLUMN approver_user_id DROP NOT NULL,
+      ADD COLUMN audience text, ADD COLUMN destination_session_id uuid, ADD COLUMN thread_ref text;
+    CREATE TABLE sessions(id uuid PRIMARY KEY,workspace_id uuid,assistant_id uuid,user_id uuid,
+      channel_type text,channel_id text,visibility text DEFAULT 'workspace',mode text DEFAULT 'chat',
+      app_origin text,anchor_kind text DEFAULT 'none',recording_revision integer,transient boolean DEFAULT false);
+    CREATE FUNCTION session_recording_read_allowed(uuid) RETURNS boolean LANGUAGE sql AS 'SELECT true';
+    CREATE FUNCTION session_context_parent_snapshot(uuid,uuid) RETURNS jsonb LANGUAGE sql AS $$
+      SELECT '{}'::jsonb FROM sessions s WHERE s.workspace_id=$1 AND s.id=$2
+        AND (s.visibility='workspace' OR s.user_id=nullif(current_setting('app.current_user_id',true),'')::uuid) $$;
+    CREATE FUNCTION workflow_evidence_envelope_visible(uuid,jsonb) RETURNS boolean LANGUAGE sql AS 'SELECT $2 IS NOT NULL';
+  `)
   for(const id of [source.id,siblingId]) await db.query(`INSERT INTO workspace_external_approval_sources
     (id,workspace_id,name,assistant_id,approver_user_id,channel_type,channel_id,token_sha256,prefix,created_by)
     VALUES($1,$2,'Fixture source',$3,$4,'web','queue',$5,'test-prefix',$4)`,
@@ -128,6 +148,13 @@ describe('external approval durable SQL lifecycle',()=>{
     await expect(store.ack(source,raw.externalRequestId,'applied')).rejects.toMatchObject({status:409})
     expect((await db.query<{status:string}>('SELECT status FROM pending_approvals WHERE id=$1',[a.approvalId])).rows[0].status).toBe('approved')
   })
+  it('does not turn a transient authority read failure into definitive permission loss',async()=>{
+    const approval=await service.create(source,input())
+    const read=vi.spyOn(pool,'query').mockRejectedValueOnce(new Error('temporary database failure'))
+    try { await expect(canReadExternalApproval(actor.userId,approval.approvalId)).rejects.toThrow('temporary database failure') }
+    finally { read.mockRestore() }
+    expect(await canReadExternalApproval(actor.userId,approval.approvalId)).toBe(true)
+  })
   it('blocks sidecar reads for non-owner runtime role even with table SELECT',async()=>{
     await db.exec('CREATE ROLE unit_app_user; GRANT SELECT ON external_approval_requests,workspace_external_approval_sources TO unit_app_user; SET ROLE unit_app_user;')
     try {
@@ -174,5 +201,87 @@ describe('external approval durable SQL lifecycle',()=>{
     await db.query('DELETE FROM assistants WHERE id=$1',[source.assistantId])
     await expect(store.read(source,raw.externalRequestId)).rejects.toMatchObject({status:404})
     await db.query('INSERT INTO assistants VALUES($1,$2)',[source.assistantId,source.workspaceId])
+  })
+})
+
+describe('conversation-member external human authority', () => {
+  const member = '00000000-0000-4000-8000-000000000011'
+  const memberSession = '00000000-0000-4000-8000-000000000012'
+  const destination = '00000000-0000-4000-8000-000000000013'
+  const human = { ...actor, authSessionId: sessionId }
+  const teammate = { userId: member, human: true, origin: 'ui' as const, authSessionId: memberSession }
+  beforeAll(async () => {
+    await db.query('INSERT INTO users(id) VALUES($1)', [member])
+    await db.query('INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,\'member\')', [source.workspaceId,member])
+    await db.query('INSERT INTO auth_sessions(id,user_id,expires_at) VALUES($1,$2,clock_timestamp()+interval \'1 hour\')', [memberSession,member])
+    await db.query(`INSERT INTO sessions(id,workspace_id,assistant_id,user_id,channel_type,channel_id)
+      VALUES($1,$2,$3,$4,'web','chat')`, [destination,source.workspaceId,source.assistantId,source.approverUserId])
+  })
+  async function request(overrides:Partial<ExternalApprovalSource>={}) {
+    const s: ExternalApprovalSource = { ...source, id: randomUUID(), approverUserId: null,
+      audience: 'conversation_members', destinationSessionId: destination, channelId: destination, ...overrides }
+    await db.query(`INSERT INTO workspace_external_approval_sources
+      (id,workspace_id,name,assistant_id,approver_user_id,audience,destination_session_id,channel_type,channel_id,token_sha256,prefix,created_by,channel_integration_id,thread_ref)
+      VALUES($1,$2,'Shared conversation',$3,NULL,'conversation_members',$4,$7,$8,$5,'test',$6,$9,$10)`,
+      [s.id,s.workspaceId,s.assistantId,s.destinationSessionId,createHash('sha256').update(s.id).digest('hex'),actor.userId,s.channelType,s.channelId,s.channelIntegrationId??null,s.threadRef??null])
+    s.tokenSha256 = createHash('sha256').update(s.id).digest('hex')
+    return { source: s, state: await service.create(s,input()) }
+  }
+  it('has no assigned approver, permits current members and records exactly one human winner', async () => {
+    const { source: s,state } = await request()
+    expect((await db.query<{approver_user_id:string|null}>('SELECT approver_user_id FROM pending_approvals WHERE id=$1',[state.approvalId])).rows[0].approver_user_id).toBeNull()
+    expect(await canReadExternalApproval(member,state.approvalId)).toBe(true)
+    const [first,second] = await Promise.all([service.resolve(state.approvalId,'approved',teammate),service.resolve(state.approvalId,'rejected',human)])
+    expect(first.status).toBe('approved'); expect(second.status).toBe('approved')
+    expect((await db.query<{responded_by:string}>('SELECT responded_by FROM pending_approvals WHERE id=$1',[state.approvalId])).rows[0].responded_by).toBe(member)
+    expect((await store.read(s,state.externalRequestId))?.status).toBe('approved')
+  })
+  it('requires the exact live provider identity, not a cached sender or another linked account',async()=>{
+    const channelDestination=randomUUID(),integration=randomUUID(),route=randomUUID(),identity=randomUUID()
+    await db.query("INSERT INTO channels(id,workspace_id,channel_id,status) VALUES($1,$2,'room','active')",[integration,source.workspaceId])
+    await db.query("INSERT INTO channel_integrations(id,channel_id,channel_type,status) VALUES($1,$1,'slack','active')",[integration])
+    await db.query('INSERT INTO channel_assistants VALUES($1,$2,$3,NULL,NULL)',[route,integration,source.assistantId])
+    await db.query("INSERT INTO sessions(id,workspace_id,assistant_id,user_id,channel_type,channel_id) VALUES($1,$2,$3,$4,'slack','room:thread:root')",[channelDestination,source.workspaceId,source.assistantId,actor.userId])
+    await db.query("INSERT INTO linked_identities VALUES($1,$2,'slack','current-provider-sender')",[identity,member])
+    const {state}=await request({channelType:'slack',channelId:'room',channelIntegrationId:integration,destinationSessionId:channelDestination,threadRef:'root'})
+    const channelActor={userId:member,human:true,origin:'channel' as const,channelId:'room',channelIntegrationId:integration,threadRef:'root',providerUserId:'current-provider-sender'}
+    for(const providerUserId of [undefined,'old-cached-sender']) {
+      await expect(service.resolve(state.approvalId,'approved',{...channelActor,providerUserId})).rejects.toMatchObject({status:403})
+    }
+    await db.query('DELETE FROM linked_identities WHERE id=$1',[identity])
+    await expect(service.resolve(state.approvalId,'approved',channelActor)).rejects.toMatchObject({status:403})
+    await db.query("INSERT INTO linked_identities VALUES($1,$2,'slack','current-provider-sender')",[identity,member])
+    await expect(service.resolve(state.approvalId,'rejected',channelActor)).resolves.toMatchObject({status:'rejected'})
+  })
+  it('rejects missing, mismatched, revoked and expired browser session evidence', async () => {
+    const {state} = await request()
+    await expect(service.resolve(state.approvalId,'approved',{...teammate,authSessionId:undefined})).rejects.toMatchObject({status:403})
+    await expect(service.resolve(state.approvalId,'approved',{...teammate,authSessionId:sessionId})).rejects.toMatchObject({status:403})
+    await db.query('UPDATE auth_sessions SET revoked_at=clock_timestamp() WHERE id=$1',[memberSession])
+    await expect(service.resolve(state.approvalId,'approved',teammate)).rejects.toMatchObject({status:403})
+    await db.query('UPDATE auth_sessions SET revoked_at=NULL,expires_at=clock_timestamp()-interval \'1 second\' WHERE id=$1',[memberSession])
+    await expect(service.resolve(state.approvalId,'approved',teammate)).rejects.toMatchObject({status:403})
+    await db.query('UPDATE auth_sessions SET expires_at=clock_timestamp()+interval \'1 hour\' WHERE id=$1',[memberSession])
+    await expect(service.resolve(state.approvalId,'rejected',teammate)).resolves.toMatchObject({status:'rejected'})
+  })
+  it('rechecks conversation access and membership for reads and decisions', async () => {
+    const {state} = await request()
+    await db.query('UPDATE sessions SET visibility=\'personal\' WHERE id=$1',[destination])
+    expect(await canReadExternalApproval(member,state.approvalId)).toBe(false)
+    await expect(service.resolve(state.approvalId,'approved',teammate)).rejects.toMatchObject({status:404})
+    await db.query('UPDATE sessions SET visibility=\'workspace\' WHERE id=$1',[destination])
+    await db.query('DELETE FROM workspace_members WHERE user_id=$1',[member])
+    expect(await canReadExternalApproval(member,state.approvalId)).toBe(false)
+    await expect(service.resolve(state.approvalId,'approved',teammate)).rejects.toMatchObject({status:404})
+    await db.query('INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,\'member\')',[source.workspaceId,member])
+    await expect(service.resolve(state.approvalId,'rejected',teammate)).resolves.toMatchObject({status:'rejected'})
+  })
+  it('does not accept a source bearer or bare direct store call as decision authority', async () => {
+    const {source:s,state} = await request()
+    expect(await store.decide(s,state.approvalId,member,'approved')).toBeNull()
+    for (const bad of [{...teammate,human:false},{...teammate,origin:'model' as const},{...teammate,origin:'delegated' as const},{...teammate,grantAlways:true}]) {
+      await expect(service.resolve(state.approvalId,'approved',bad)).rejects.toMatchObject({status:403})
+    }
+    expect((await store.read(s,state.externalRequestId))?.status).toBe('pending')
   })
 })

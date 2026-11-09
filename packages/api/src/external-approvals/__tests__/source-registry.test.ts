@@ -1,4 +1,5 @@
 import { PGlite } from '@electric-sql/pglite'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import type { Pool, PoolClient } from 'pg'
 import { beforeAll, afterAll, describe, it, expect, vi } from 'vitest'
@@ -20,6 +21,8 @@ const registry=createExternalApprovalSourceRegistry({pool,notify,resolveRecentCh
 beforeAll(async()=>{
   await db.exec(`CREATE TABLE users(id uuid PRIMARY KEY,auth_version integer DEFAULT 0);
     CREATE TABLE workspaces(id uuid PRIMARY KEY);
+    CREATE SEQUENCE application_policy_revision_seq;
+    CREATE TABLE application_policy_workspace_epochs(workspace_id uuid PRIMARY KEY,revision bigint);
     CREATE TABLE assistants(id uuid PRIMARY KEY,workspace_id uuid);
     CREATE TABLE workspace_members(workspace_id uuid,user_id uuid,role text);
     CREATE TABLE auth_sessions(id uuid PRIMARY KEY,user_id uuid,auth_version integer DEFAULT 0,revoked_at timestamptz,expires_at timestamptz);
@@ -30,14 +33,25 @@ beforeAll(async()=>{
   await db.query("INSERT INTO workspace_members VALUES($1,$2,'admin'),($1,$3,'member')",[workspaceId,userId,approverUserId])
   await db.query("INSERT INTO auth_sessions(id,user_id,expires_at) VALUES($1,$2,clock_timestamp()+interval '1 day')",[sessionId,userId])
   await db.exec(readFileSync(new URL('../../../migrations/8242_workspace_external_approval_sources.sql',import.meta.url),'utf8'))
+  await db.exec('CREATE TABLE pending_approvals(id uuid PRIMARY KEY,workspace_id uuid,kind text,approver_user_id uuid,originating_assistant_id uuid,delivery_channel_type text,delivery_channel_id text); ALTER TABLE pending_approvals ENABLE ROW LEVEL SECURITY;')
+  await db.exec(readFileSync(new URL('../../../migrations/8244_external_approval_conversation_members.sql',import.meta.url),'utf8'))
 },30000)
 afterAll(()=>db.close())
 describe('[COMP:api/external-approvals] workspace source registry',()=>{
+  it('keeps legacy hashes byte stable and binds native threads only for new member authority',()=>{
+    const legacy={id:'legacy',tokenSha256:'digest',workspaceId,assistantId,approverUserId,channelType:'slack' as const,channelId:'room',channelIntegrationId:id(22)}
+    const expected=createHash('sha256').update(JSON.stringify([legacy.id,workspaceId,assistantId,approverUserId,'slack','room',id(22)])).digest('hex')
+    expect(sourceBinding(legacy)).toBe(expected)
+    expect(sourceBinding({...legacy,threadRef:'123'})).toBe(expected)
+    const member={...legacy,approverUserId:null,audience:'conversation_members' as const,destinationSessionId:id(60)}
+    expect(sourceBinding(member)).not.toBe(sourceBinding({...member,threadRef:'123'}))
+    expect(sourceBinding({...member,threadRef:'123'})).not.toBe(sourceBinding({...member,threadRef:'456'}))
+  })
   it('issues credentials once, persists only digest, scopes public list, rotates without rebinding and revokes immediately',async()=>{
     const a=await registry.create(actor,workspaceId,input)
     expect(a.source.id).toMatch(/^[a-f0-9-]{36}$/)
     expect(a.source).not.toHaveProperty('tokenSha256');expect(a.source).not.toHaveProperty('token')
-    expect(a.source).not.toHaveProperty('channelIntegrationId')
+    expect(a.source).not.toHaveProperty('channelIntegrationId');expect(a.source).not.toHaveProperty('threadRef')
     expect(await registry.list(id(10))).toEqual([])
     expect(JSON.stringify(await registry.list(workspaceId))).not.toContain(a.token)
     const original=(await registry.authenticate(`Bearer ${a.token}`))!

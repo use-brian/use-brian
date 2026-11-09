@@ -21,6 +21,8 @@ export async function maybeHandleChannelWorkflowReply(params: {
   replyToMessageId?: string
   /** Native thread root for implicit question matching. */
   threadId?: string
+  /** Provider sender from the authenticated incoming event, not a cached user mapping. */
+  providerUserId?: string
   referenceToken?: string
   quotedText?: string
   answerMessageId?: string
@@ -40,19 +42,20 @@ export async function maybeHandleChannelWorkflowReply(params: {
   } catch { return 'Workflow replies are temporarily unavailable.' }
   // Explicit question answers are literal text, even "approve abc123".
   if (!explicitQuestion && /^\s*(approve|reject)\s+[a-f0-9-]{6,}(?:\s|$)/i.test(params.text)) {
-    if (!params.approvals) return 'Workflow approvals are unavailable here. Use the approvals page.'
+    if (!params.approvals) return 'Workflow approvals are unavailable here. Open Chat to review requests.'
     try {
       const result = await maybeHandleApprovalReply(params.approvals, params.address.userId, params.text, {
         workspaceId: params.address.workspaceId, assistantId: params.address.assistantId,
-        channelId: params.address.channelId, channelIntegrationId: params.address.integrationId,
+        channelId: params.address.channelId, channelIntegrationId: params.address.integrationId, threadRef: params.threadId,
+        providerUserId: params.providerUserId,
         authorized: params.authorized,
         ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
       })
       if (result?.status === 'cancelled') return 'Stopped. No approval was submitted.'
       return result?.status === 'unavailable'
-        ? 'This approval is unavailable or ambiguous. Open the approvals page to check its current status and your access.'
+        ? 'This approval is unavailable or ambiguous. Open Chat and check Needs you for its current status and your access.'
         : `Approval reply processed (${result?.status ?? 'unavailable'}).`
-    } catch { return 'The approval reply could not be processed. Check the approvals page before retrying.' }
+    } catch { return 'The approval reply could not be processed. Check Chat before retrying.' }
   }
   if (params.questionRepliesAvailable === false) return explicitQuestion ? 'This workflow question is unavailable.' : null
   try {

@@ -14,7 +14,7 @@ function fixture() {
  const sources=testSources(source)
  configureExternalApprovals(new ExternalApprovalService(sources,store))
  const respond=vi.fn()
- const app=express().use(express.json()).use((req,_res,next)=>{Object.assign(req,{userId:source.approverUserId});next()})
+ const app=express().use(express.json()).use((req,_res,next)=>{Object.assign(req,{userId:source.approverUserId,authSessionId:'authenticated-human-session'});next()})
  app.use('/api/approvals',approvalsRoutes({approvalsStore:{getById:vi.fn(async()=>({id:'approval',kind:'external_action',approverUserId:source.approverUserId,status:'pending'})),respond} as never,workspaceStore:{} as never,bridgeDeps:{} as never,emailReviewContext:vi.fn() as never}))
  return {app,store,respond,sources}
 }

@@ -211,3 +211,24 @@ it('never sends the reply-to-approve fallback into a Telegram group', async () =
     warn.mockRestore()
   }
 })
+
+it('uses the destination session carrier for member external delivery, not an approver', async () => {
+  const deliverToChannel = vi.fn(async () => ({ status: 'delivered' as const, channelType: 'slack' as const, channelId: 'conversation' }))
+  const dispatch = createApprovalDeliveryDispatcher({ deliverToChannel, webBaseUrl: 'https://app.test' })
+  await dispatch({ approvalId: 'approval-1', workspaceId: 'ws', workflowName: '', stepId: '', toolName: '', arguments: {},
+    approverUserId: null, deliveryUserId: 'session-carrier', externalAction: true,
+    assistantId: 'asst', deliveryChannelType: 'slack', deliveryChannelId: 'conversation',
+    recentTarget: { channelType: 'slack', channelId: 'conversation', channelIntegrationId: 'pinned' },
+  })
+  expect(deliverToChannel).toHaveBeenCalledWith(expect.objectContaining({ userId: 'session-carrier', channelIntegrationId: 'pinned', channelId: 'conversation' }))
+})
+
+it('does not send an explicit external notification through an unpinned integration', async () => {
+  const deliverToChannel = vi.fn()
+  await createApprovalDeliveryDispatcher({ deliverToChannel, webBaseUrl: 'https://app.test' })(params({
+    externalAction: true, approverUserId: null, deliveryUserId: 'carrier', assistantId: 'assistant',
+    deliveryChannelType: 'whatsapp', recentTarget: { channelType: 'whatsapp', channelId: 'group@g.us' },
+  }))
+  expect(deliverToChannel).not.toHaveBeenCalled()
+  expect(mockFetch).not.toHaveBeenCalled()
+})

@@ -62,7 +62,7 @@ export async function listAttention(actor: ReviewActor, workspaceId: string, fil
   const store = createPendingApprovalsStore()
   const seen = await listAttentionSeen(actor.userId, workspaceId)
   const pending = (await store.listPendingForWorkspace(actor.userId, workspaceId))
-    .filter((a) => a.approverUserId === actor.userId && a.kind !== 'department_access')
+    .filter((a) => (a.kind === 'external_action' || a.approverUserId === actor.userId) && a.kind !== 'department_access')
     // Native history remains bounded, but every live external request needs a
     // confirmation surface now that it is intentionally absent from the queue.
     .filter((a, index) => index < 100 || a.kind === 'external_action')

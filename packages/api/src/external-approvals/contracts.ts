@@ -5,9 +5,12 @@ import { PROACTIVE_DELIVERY_TRANSPORTS } from '../session-kind.js'
 
 const bounded = (max: number) => z.string().min(1).max(max).refine(s => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(s))
 export type ExternalApprovalSource = {
-  id: string; tokenSha256: string; workspaceId: string; assistantId: string; approverUserId: string
+  id: string; tokenSha256: string; workspaceId: string; assistantId: string; approverUserId: string | null
+  /** Absent on legacy person-bound registrations. */
+  audience?: 'conversation_members'
+  destinationSessionId?: string
   channelType: 'web' | (typeof PROACTIVE_DELIVERY_TRANSPORTS)[number]
-  channelId: string; channelIntegrationId?: string
+  channelId: string; channelIntegrationId?: string; threadRef?: string
 }
 const requestSchema = z.discriminatedUnion('method', [
   z.object({ method: z.literal('confirm'), title: bounded(16384), message: bounded(32768).optional() }).strict(),
@@ -32,6 +35,9 @@ export function normalizeExternalInput(raw: unknown): { input: ExternalApprovalI
 }
 /** Pins all configured authority/destination, but permits token rotation. */
 export function sourceBinding(source: ExternalApprovalSource): string {
-  return createHash('sha256').update(JSON.stringify([source.id, source.workspaceId, source.assistantId, source.approverUserId,
-    source.channelType, source.channelId, source.channelIntegrationId ?? null])).digest('hex')
+  const binding = [source.id, source.workspaceId, source.assistantId, source.approverUserId,
+    source.channelType, source.channelId, source.channelIntegrationId ?? null]
+  // Never change existing request bindings during an upgrade.
+  if (source.audience === 'conversation_members') binding.push('conversation_members:v1', source.destinationSessionId ?? null, source.threadRef ?? null)
+  return createHash('sha256').update(JSON.stringify(binding)).digest('hex')
 }

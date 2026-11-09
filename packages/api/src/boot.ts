@@ -5,6 +5,8 @@ import { injectDocTools } from './doc/inject.js'
 import { resolvePinnedContext } from './resolve-session-pins.js'
 import { injectWorkspaceMcpSkills } from './workspace-mcp/skills.js'
 import { findSessionById } from './db/sessions.js'
+import { providerChannelIdFromSession } from './db/session-channel-id.js'
+import { destinationThreadRef } from './external-approvals/destinations.js'
 import { classifySession } from './session-kind.js'
 import { createSessionPinTools } from './session-pin-tools.js'
 import { createWorkspaceMcpProfile } from './workspace-mcp/profile.js'
@@ -3793,6 +3795,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const externalApprovalService = new ExternalApprovalService(
     externalApprovalSources, createExternalApprovalSqlStore(),
     async (source, state) => {
+      // Live destination session provides only a transport carrier, not an approver.
+      const destination = source.audience === 'conversation_members' && source.destinationSessionId
+        ? await findSessionById(source.destinationSessionId) : null
+      if (source.audience === 'conversation_members' && (!destination
+        || destination.workspaceId !== source.workspaceId || destination.assistantId !== source.assistantId
+        || destination.channelType !== source.channelType
+        || (source.channelType !== 'web' && (providerChannelIdFromSession(destination.channelType, destination.channelId) !== source.channelId
+          || destinationThreadRef(destination.channelType, destination.channelId) !== source.threadRef))
+        || (source.channelType === 'web' && destination.id !== source.channelId))) return
+      const deliveryUserId = destination?.userId ?? source.approverUserId
+      if (!deliveryUserId) return
       // Load the frozen request so channel/web cards can show title + details.
       const row = await pendingApprovalsStore.getByIdSystem(state.approvalId)
       const request = (row?.approvalPayload as { request?: { title?: string; message?: string } } | undefined)?.request
@@ -3801,11 +3814,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           ? { channelType: 'web' as const, channelId: source.channelId }
           : undefined)
         : { channelType: source.channelType, channelId: source.channelId,
-            channelIntegrationId: source.channelIntegrationId }
+            channelIntegrationId: source.channelIntegrationId, threadRef: source.threadRef }
       await approvalDeliveries({
         approvalId: state.approvalId, workspaceId: source.workspaceId,
         workflowName: '', stepId: '', toolName: '', arguments: {},
-        approverUserId: source.approverUserId, externalAction: true,
+        approverUserId: source.approverUserId, deliveryUserId, externalAction: true,
         deliveryChannelType: source.channelType, deliveryChannelId: source.channelId,
         assistantId: source.assistantId,
         ...(request?.title ? { prompt: { title: request.title, details: request.message } } : {}),

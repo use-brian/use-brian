@@ -20,6 +20,12 @@ export function externalApprovalSourceRoutes(options: {
     res.locals.sourceWorkspaceId = workspaceId
     next()
   })
+  router.get('/destinations',async (req,res) => {
+    const assistantId=z.string().uuid().parse(req.query.assistantId)
+    if (!req.authSessionId) throw new ExternalApprovalError(403,'Authenticated human session required')
+    if (!store.destinations) throw new ExternalApprovalError(503,'Destination discovery unavailable')
+    res.json(await store.destinations({userId:req.userId!,sessionId:req.authSessionId},res.locals.sourceWorkspaceId,assistantId))
+  })
   router.get('/',async (_req,res) => { res.json({sources:await store.list(res.locals.sourceWorkspaceId)}) })
   router.post('/',async (req,res) => {
     const input = createExternalApprovalSourceSchema.parse(req.body)

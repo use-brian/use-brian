@@ -17,6 +17,8 @@ const tx = vi.hoisted(() => ({
   release: vi.fn(),
 }))
 
+vi.mock('../../external-approvals/sql-store.js', () => ({ canReadExternalApproval: vi.fn() }))
+
 vi.mock('../client.js', () => ({
   query: vi.fn(),
   queryWithRLS: vi.fn(),
@@ -32,6 +34,7 @@ vi.mock('../decision-event-store.js', () => ({
   })),
 }))
 
+import { canReadExternalApproval } from '../../external-approvals/sql-store.js'
 import { createPendingApprovalsStore } from '../pending-approvals-store.js'
 import { query, queryWithRLS } from '../client.js'
 import { appendDecisionEvent } from '../decision-event-store.js'
@@ -541,5 +544,28 @@ describe('[COMP:api/pending-approvals-store] expireDueQuestions', () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     const expired = await store.expireDueQuestions()
     expect(expired).toEqual([])
+  })
+})
+
+describe('external member-audience projections', () => {
+  beforeEach(() => vi.mocked(canReadExternalApproval).mockReset())
+  it('reads an unassigned external card only through its live authority predicate', async () => {
+    const row = makeRow({ kind: 'external_action', approverUserId: null })
+    mockQueryWithRLS.mockResolvedValue({ rows: [row] } as never)
+    vi.mocked(canReadExternalApproval).mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    expect(await store.getById('member', 'ap-1')).toMatchObject({ kind: 'external_action', approverUserId: null })
+    expect(await store.getById('member', 'ap-1')).toBeNull()
+    expect(canReadExternalApproval).toHaveBeenCalledWith('member', 'ap-1')
+  })
+  it('counts every authorized unassigned external row without a hidden bound', async () => {
+    const rows = Array.from({ length: 125 }, (_, i) => makeRow({
+      id: `external-${i}`, kind: 'external_action', approverUserId: null,
+    }))
+    mockQueryWithRLS.mockResolvedValue({ rows } as never)
+    vi.mocked(canReadExternalApproval).mockImplementation(async (_user, id) => id !== 'external-0')
+    expect(await store.countPendingForUser('member')).toBe(124)
+    const sql = mockQueryWithRLS.mock.calls[0][1]
+    expect(sql).toContain("approver_user_id = $1 OR kind = 'external_action'")
+    expect(sql).not.toContain('LIMIT')
   })
 })

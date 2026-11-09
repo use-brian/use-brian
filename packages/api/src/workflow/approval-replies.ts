@@ -17,6 +17,7 @@ import { externalApprovals, ExternalApprovalError } from '../external-approvals/
  * [COMP:channels/approval-replies]
  */
 
+import { canReadExternalApproval } from '../external-approvals/sql-store.js'
 import { query } from '../db/client.js'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import { resumeFromApproval, type ApprovalBridgeDeps } from './approval.js'
@@ -38,7 +39,7 @@ export async function maybeHandleApprovalReply(
   },
   userId: string,
   text: string,
-  scope?: { workspaceId: string; assistantId: string; channelId?: string; channelIntegrationId?: string; authorized: () => Promise<boolean>; abortSignal?: AbortSignal },
+  scope?: { workspaceId: string; assistantId: string; channelId?: string; channelIntegrationId?: string; threadRef?: string; providerUserId?: string; authorized: () => Promise<boolean>; abortSignal?: AbortSignal },
 ): Promise<ApprovalReplyMatch | null> {
   const match = text.match(APPROVE_RE)
   if (!match) return null
@@ -53,31 +54,43 @@ export async function maybeHandleApprovalReply(
   if (scope && !await scope.authorized()) return unavailable()
   if (scope?.abortSignal?.aborted) return unavailable('cancelled')
 
-  // Resolve the short id prefix to a full approval id, but only among
-  // rows the user is the assigned approver for + still pending.
+  // Native rows remain assigned. External rows require an exact live channel
+  // scope, then current member authority before prefix collision detection.
   const result = await query<{ id: string; kind?: string }>(
     `SELECT id, kind FROM pending_approvals
-     WHERE approver_user_id = $1
+     WHERE ((kind = 'workflow_step' AND approver_user_id = $1)
+         OR (kind = 'external_action' AND $3::uuid IS NOT NULL AND $4::uuid IS NOT NULL
+           AND delivery_channel_id = $5 AND $5::text IS NOT NULL
+           AND $6::text IS NOT NULL AND EXISTS (
+             SELECT 1 FROM external_approval_requests e
+             JOIN workspace_external_approval_sources s ON s.id::text = e.source_id
+             WHERE e.approval_id = pending_approvals.id AND s.revoked_at IS NULL
+               AND s.channel_id = $5 AND s.channel_integration_id::text = $6
+               AND (s.audience IS DISTINCT FROM 'conversation_members' OR s.thread_ref IS NOT DISTINCT FROM $7::text))))
        AND status = 'pending'
        AND kind IN ('workflow_step', 'external_action')
        AND (expires_at IS NULL OR expires_at > now())
        AND ($3::uuid IS NULL OR workspace_id = $3)
        AND ($4::uuid IS NULL OR originating_assistant_id = $4)
        AND id::text LIKE $2 || '%'
-     ORDER BY created_at DESC
-     LIMIT 2`,
-    [userId, idPrefix, scope?.workspaceId ?? null, scope?.assistantId ?? null],
+     ORDER BY created_at DESC`,
+    [userId, idPrefix, scope?.workspaceId ?? null, scope?.assistantId ?? null, scope?.channelId ?? null, scope?.channelIntegrationId ?? null, scope?.threadRef ?? null],
   )
   // A recognized command is always consumed, including stale/foreign IDs.
-  if (result.rows.length !== 1) return unavailable()
+  const candidates = []
+  for (const row of result.rows) {
+    if (row.kind !== 'external_action' || (scope?.channelId && scope.channelIntegrationId
+      && await canReadExternalApproval(userId, row.id))) candidates.push(row)
+  }
+  if (candidates.length !== 1) return unavailable()
 
   if (scope?.abortSignal?.aborted) return unavailable('cancelled')
-  const approvalId = result.rows[0].id
-  if (result.rows[0].kind === 'external_action') {
-    if (scope && !await scope.authorized()) return unavailable()
+  const approvalId = candidates[0].id
+  if (candidates[0].kind === 'external_action') {
+    if (!scope || !await scope.authorized()) return unavailable()
     if (scope?.abortSignal?.aborted) return unavailable('cancelled')
     try {
-      const state = await externalApprovals().resolve(approvalId, decision, { userId, human: true, origin: 'channel', channelId: scope?.channelId, channelIntegrationId: scope?.channelIntegrationId })
+      const state = await externalApprovals().resolve(approvalId, decision, { userId, human: true, origin: 'channel', channelId: scope?.channelId, channelIntegrationId: scope?.channelIntegrationId, threadRef: scope?.threadRef, providerUserId: scope?.providerUserId })
       return { decision, approvalId, reason, status: state.status, runId: null }
     } catch (error) {
       if (error instanceof ExternalApprovalError) return unavailable()

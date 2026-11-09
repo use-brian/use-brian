@@ -2,12 +2,17 @@ import type { PoolClient } from 'pg'
 import { getPool } from '../db/client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { sourceBinding, type ExternalApprovalSource, type ExternalApprovalInput, type AckStatus } from './contracts.js'
-import { ExternalApprovalError, externalApprovals, type ExternalApprovalStore, type ExternalApprovalState } from './service.js'
+import { ExternalApprovalError, externalApprovals, type ExternalApprovalStore, type ExternalApprovalState, type HumanApprovalActor } from './service.js'
 import { lockExternalApprovalSource } from './source-registry.js'
+import { assertExternalDestination } from './authority.js'
 
 /** Current membership AND assistant placement, never an assertion from the external payload. */
-async function authorize(client: PoolClient, source: ExternalApprovalSource): Promise<void> {
+async function authorize(client: PoolClient, source: ExternalApprovalSource, userId?: string): Promise<void> {
   await lockExternalApprovalSource(client, source)
+  if (source.audience === 'conversation_members') {
+    await assertExternalDestination(client, source, userId)
+    return
+  }
   const member = await client.query(`SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR SHARE`, [source.workspaceId, source.approverUserId])
   const assistant = await client.query(`SELECT id FROM assistants WHERE workspace_id=$1 AND id=$2 FOR SHARE`, [source.workspaceId, source.assistantId])
   if (!member.rows.length || !assistant.rows.length || !(await client.query('SELECT public.assistant_placement_visible($1,$2) AS admitted', [source.approverUserId, source.assistantId])).rows[0]?.admitted) {
@@ -22,13 +27,49 @@ function state(row: Record<string, unknown>): ExternalApprovalState {
     status: row.status as ExternalApprovalState['status'], expiresAt: new Date(row.expiresAt as string).toISOString(),
     payloadHash: row.payloadHash as string, ...(row.ackStatus ? { ackStatus: row.ackStatus as AckStatus } : {}) }
 }
-async function transaction<T>(source: ExternalApprovalSource, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+/** Only trusted browser or verified-channel entry points construct this evidence. */
+async function assertHumanActor(c: PoolClient, source: ExternalApprovalSource, actor: HumanApprovalActor): Promise<void> {
+  const denied = () => new ExternalApprovalError(403, 'Authenticated human session required')
+  if (!actor.human || actor.grantAlways || !['ui', 'channel'].includes(actor.origin)) throw denied()
+  // Canonical grants use transaction time. Reject timed support that elapsed
+  // while waiting for locks, rather than committing against a stale clock.
+  if ((await c.query(`SELECT id FROM department_edges WHERE workspace_id=$1 AND user_id=$2
+      AND expires_at>transaction_timestamp() AND expires_at<=clock_timestamp() LIMIT 1`,
+    [source.workspaceId,actor.userId])).rows.length) throw denied()
+  if (actor.origin === 'ui') {
+    if (!actor.authSessionId) throw denied()
+    const session = await c.query(`SELECT s.id FROM auth_sessions s JOIN users u ON u.id=s.user_id
+      WHERE s.id=$1 AND s.user_id=$2 AND s.revoked_at IS NULL AND s.expires_at>clock_timestamp()
+        AND s.auth_version=u.auth_version FOR SHARE OF s,u`, [actor.authSessionId, actor.userId])
+    if (!session.rows.length) throw denied()
+  } else {
+    // Ingress has authenticated the provider event and resolved the human.
+    // Hold the current linked account as well: shadows and a stale/unlinked
+    // account must never acquire permission merely by entering a room.
+    if (!actor.providerUserId || !source.channelIntegrationId || actor.channelIntegrationId !== source.channelIntegrationId
+      || actor.channelId !== source.channelId || source.channelType === 'web'
+      || (source.audience === 'conversation_members' && actor.threadRef !== source.threadRef)) throw denied()
+    const linked = await c.query(`SELECT id FROM linked_identities
+      WHERE user_id=$1 AND provider=$2 AND provider_id=$3 FOR SHARE`, [actor.userId, source.channelType, actor.providerUserId])
+    if (!linked.rows.length) throw denied()
+  }
+}
+async function transaction<T>(source: ExternalApprovalSource, fn: (client: PoolClient) => Promise<T>, userId?: string, actor?: HumanApprovalActor): Promise<T> {
   const c = await getPool().connect()
   try {
     await c.query('BEGIN')
-    await authorize(c, source)
+    if (userId) await c.query("SELECT set_config('app.current_user_id',$1,true)", [userId])
+    // All scope-policy changes advance this private epoch. Holding the epoch
+    // row prevents a concurrent ACL revocation from committing past our read.
+    if (source.audience === 'conversation_members') {
+      const epoch = await c.query('SELECT workspace_id FROM application_policy_workspace_epochs WHERE workspace_id=$1 FOR SHARE', [source.workspaceId])
+      if (!epoch.rows.length) throw new ExternalApprovalError(404, 'Approval source unavailable')
+    }
+    await authorize(c, source, userId)
+    if (actor) await assertHumanActor(c, source, actor)
     const result = await fn(c)
-    await authorize(c, source)
+    await authorize(c, source, userId)
+    if (actor) await assertHumanActor(c, source, actor)
     await c.query('COMMIT')
     return result
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e } finally { c.release() }
@@ -36,7 +77,7 @@ async function transaction<T>(source: ExternalApprovalSource, fn: (client: PoolC
 async function locked(c: PoolClient, s: ExternalApprovalSource, id: string, byApproval = false): Promise<ExternalApprovalState | null> {
   const rows = await c.query(`SELECT ${projection} FROM external_approval_requests e JOIN pending_approvals p ON p.id=e.approval_id
     WHERE e.source_id=$1 AND e.source_binding=$2 AND ${byApproval ? 'p.id::text' : 'e.external_request_id'}=$3
-      AND p.kind='external_action' AND p.workspace_id=$4 AND p.originating_assistant_id=$5 AND p.approver_user_id=$6
+      AND p.kind='external_action' AND p.workspace_id=$4 AND p.originating_assistant_id=$5 AND p.approver_user_id IS NOT DISTINCT FROM $6::uuid
     FOR UPDATE OF p,e`, [s.id, sourceBinding(s), id, s.workspaceId, s.assistantId, s.approverUserId])
   if (!rows.rows[0]) return null
   let current = state(rows.rows[0])
@@ -112,18 +153,20 @@ export function createExternalApprovalSqlStore(): ExternalApprovalStore {
       if (result) notifyWorkspaceChange(s.workspaceId,'approval','update',result.approvalId)
       return result
     },
-    decide: async (s,id,userId,decision) => {
-      if (userId !== s.approverUserId) return null
+    decide: async (s,id,userId,decision,actor) => {
+      if (s.audience !== 'conversation_members' && userId !== s.approverUserId) return null
+      if (s.audience === 'conversation_members' && (!actor || actor.userId !== userId)) return null
       const result = await transaction(s, async c => {
         const current = await locked(c,s,id,true)
         if (!current || current.status !== 'pending') return current
         const changed = await c.query(`UPDATE pending_approvals SET status=$2,responded_by=$3,responded_at=clock_timestamp(),resolution_origin='human'
-          WHERE id=$1 AND kind='external_action' AND status='pending' AND approver_user_id=$3
-            AND expires_at>clock_timestamp() RETURNING id`, [id,decision,userId])
+          WHERE id=$1 AND kind='external_action' AND status='pending'
+            AND (approver_user_id=$3 OR ($4::boolean AND approver_user_id IS NULL))
+            AND expires_at>clock_timestamp() RETURNING id`, [id,decision,userId,s.audience === 'conversation_members'])
         // Expiry is enforced in the final write, not merely on the UI read.
         if (!changed.rows.length) return locked(c,s,id,true)
         return { ...current, status: decision }
-      })
+      }, s.audience === 'conversation_members' ? userId : undefined, s.audience === 'conversation_members' ? actor : undefined)
       if (result) notifyWorkspaceChange(s.workspaceId,'approval','update',id)
       return result
     },
@@ -135,7 +178,12 @@ export async function canReadExternalApproval(userId: string, id: string): Promi
     const service = externalApprovals()
     const binding = await service.store.sourceForApproval(id)
     const source = binding && await service.sources.get(binding.sourceId)
-    if (!source || !binding || sourceBinding(source) !== binding.binding || source.approverUserId !== userId) return false
-    return !!await transaction(source, c => locked(c, source, id, true))
-  } catch { return false }
+    if (!source || !binding || sourceBinding(source) !== binding.binding || (source.audience !== 'conversation_members' && source.approverUserId !== userId)) return false
+    return !!await transaction(source, c => locked(c, source, id, true), source.audience === 'conversation_members' ? userId : undefined)
+  } catch (error) {
+    if (error instanceof ExternalApprovalError && [403,404].includes(error.status)) return false
+    // A transient database failure is not evidence that access was revoked.
+    // Propagate it so recovery clients retain mounted cards and can retry.
+    throw error
+  }
 }
