@@ -28,4 +28,14 @@ describe('[COMP:app-web/application-consent] canonical native application consen
   fetch.mockResolvedValueOnce(new Response(null,{status:401}));await expect(fetchApplicationConsent(appId,'signed')).rejects.toThrow('application_signin_required');expect(fetch).toHaveBeenCalledTimes(1);expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer fictional-native-token');
  });
 
+ it('routes external-service consent through its distinct audience and preserves the service continuation',async()=>{
+  fetch.mockResolvedValueOnce(new Response(JSON.stringify(review))).mockResolvedValueOnce(new Response(JSON.stringify({redirectUrl:'https://service.example/callback?code=fictional'})));
+  const current=await fetchApplicationConsent(appId,'service-request',undefined,true);
+  expect(fetch.mock.calls[0][0]).toBe(`http://localhost:4100/api/external-services/${appId}/oauth/consent?req=service-request`);
+  await decideApplicationConsent(appId,'service-request',current,'allow',true);
+  expect(fetch.mock.calls[1][0]).toBe(`http://localhost:4100/api/external-services/${appId}/oauth/consent`);
+  const login=new URL(applicationConsentSignInUrl(appId,'service-request','http://localhost:3003/oauth/authorize',true));
+  expect(new URL(login.searchParams.get('next')!).searchParams.get('service')).toBe('1');
+ });
+
 });

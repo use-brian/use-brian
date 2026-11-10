@@ -37,6 +37,7 @@ import { createCanonicalNativeApplicationModule } from './application-platform/n
 import { createCanonicalGenericApplicationModule } from './application-platform/generic-adapter.js'
 import { buildHomeApplicationMcpProfile } from './application-platform/mcp.js'
 import { captureApplicationHomeBinding } from './application-platform/home-auth.js'
+import { externalServicesRoutes } from './routes/external-services.js'
 import { applicationPlatformRoutes } from './routes/application-platform.js'
 import { ApplicationManagementService } from './application-platform/management.js'
 import { connectorActorMetadataRoutes } from './application-platform/connector-actor-metadata.js'
@@ -6219,6 +6220,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const applicationService = new ApplicationPlatformService([
     createCanonicalNativeApplicationModule(), createCanonicalGenericApplicationModule(), ...(opts.applicationModules ?? []),
   ])
+  app.use('/api/external-services',externalServicesRoutes({clientStore:oauthClientStore,workspaceStore,requireAuth:requireAuth(env.JWT_SECRET),signingSecret:env.JWT_SECRET,webAppUrl:env.AUTHED_APP_URL??env.APP_URL,origins:[env.APP_URL,env.AUTHED_APP_URL].filter(Boolean) as string[]}))
   app.use('/api/applications', applicationPlatformRoutes({ service: applicationService,
     home: { signingSecret: env.JWT_SECRET, consumeBudget: consumeHomeAppBudget },
     oauth: { clientStore: oauthClientStore, workspaceStore, signingSecret: env.JWT_SECRET, webAppUrl: env.APP_URL,

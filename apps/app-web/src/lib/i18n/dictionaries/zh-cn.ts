@@ -101,6 +101,7 @@ export const zhCN: Dictionary = {
     "loading": "正在读取当前权限...",
     "unavailable": "当前无法访问，或审核内容已变更。请打开新的登录请求。",
     "unnamed": "应用",
+    "serviceExplanation": "使用你当前的工作空间身份、部门保密级别和项目访问权限连接此服务。工作空间权限变更时，访问权限也会更新。",
     "explanation": "继续之前，请确认当前工作区、记录、字段与操作范围。",
     "workspace": "工作区",
     "scope": "访问范围",

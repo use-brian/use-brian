@@ -103,6 +103,7 @@ export const en = {
     "loading": "Reading current access...",
     "unavailable": "Access is unavailable or the review changed. Open a fresh sign-in request.",
     "unnamed": "Application",
+    "serviceExplanation": "Connect this service using your current workspace identity, department clearances and Project access. Access updates when your workspace permissions change.",
     "explanation": "Review the current workspace, records, fields and operations before continuing.",
     "workspace": "Workspace",
     "scope": "Access",

@@ -46,7 +46,8 @@ export type OAuthAuthorizationRow = {
   workspaceId: string
   scope: OAuthScope
   /** Legacy mocks/rows without the discriminator retain the Brain audience only. */
-  audience?: 'brain' | 'application' | 'assistant'
+  audience?: 'brain' | 'application' | 'assistant' | 'service'
+  externalServiceId?: string | null
   boundAssistantId?: string | null
   workspaceMcpConsent?: WorkspaceMcpConsent | null
   applicationClientId?: string | null
@@ -96,6 +97,7 @@ export type OAuthAuthorizationStore = {
     redirectUri: string
     /** Only the explicit application audience accepts a reviewed maximum. */
     workspaceMcpConsent?: WorkspaceMcpConsent
+    externalServiceRevision?: string
     applicationConsent?: { grantIds: string[]; maximumHash: string; clientRevision: string;activationVersion?:string|null }
   }): Promise<{ row: OAuthAuthorizationRow; codePlaintext: string }>
 
@@ -167,6 +169,7 @@ const COLS_ROW = `
   (to_jsonb(oauth_authorizations)->>'application_client_id')::uuid AS "applicationClientId",
   (to_jsonb(oauth_authorizations)->>'bound_assistant_id')::uuid AS "boundAssistantId",
   to_jsonb(oauth_authorizations)->'workspace_mcp_consent' AS "workspaceMcpConsent",
+  (to_jsonb(oauth_authorizations)->>'external_service_id')::uuid AS "externalServiceId",
   created_at               AS "createdAt",
   last_used_at             AS "lastUsedAt",
   revoked_at               AS "revokedAt",
@@ -214,21 +217,23 @@ export function parseOAuthBearerToken(
   return { id, secret }
 }
 
-export type OAuthAuthorizationAudience = { audience: 'brain' } | { audience: 'application'; applicationClientId: string } | { audience: 'assistant'; assistantId: string }
+export type OAuthAuthorizationAudience = { audience: 'brain' } | { audience: 'application'; applicationClientId: string } | { audience: 'assistant'; assistantId: string } | { audience: 'service'; serviceId: string }
 
 /** One code/PKCE/refresh implementation, pinned to an explicit credential audience. */
 export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudience = { audience: 'brain' }): OAuthAuthorizationStore {
-  if (profile.audience !== 'brain' && profile.audience !== 'application' && profile.audience !== 'assistant'
+  if (profile.audience !== 'brain' && profile.audience !== 'application' && profile.audience !== 'assistant' && profile.audience !== 'service'
     || profile.audience === 'application' && !UUID_RE.test(profile.applicationClientId)
-    || profile.audience === 'assistant' && !UUID_RE.test(profile.assistantId)) throw new Error('Invalid OAuth audience profile')
+    || profile.audience === 'assistant' && !UUID_RE.test(profile.assistantId)
+    || profile.audience === 'service' && !UUID_RE.test(profile.serviceId)) throw new Error('Invalid OAuth audience profile')
+  const serviceId = profile.audience === 'service' ? profile.serviceId : null
   const applicationClientId = profile.audience === 'application' ? profile.applicationClientId : null
   const assistantId = profile.audience === 'assistant' ? profile.assistantId : null
   // Both pieces are enum/UUID validated above; callers cannot supply SQL vocabulary.
   const audienceSql = (alias = '') => {
     const row = alias ? alias.slice(0,-1) : 'oauth_authorizations'
-    return `coalesce(to_jsonb(${row})->>'audience','brain')='${profile.audience}' AND (to_jsonb(${row})->>'application_client_id') ${applicationClientId ? `='${applicationClientId}'` : 'IS NULL'} AND (to_jsonb(${row})->>'bound_assistant_id') ${assistantId ? `='${assistantId}'` : 'IS NULL'}`
+    return `coalesce(to_jsonb(${row})->>'audience','brain')='${profile.audience}' AND (to_jsonb(${row})->>'application_client_id') ${applicationClientId ? `='${applicationClientId}'` : 'IS NULL'} AND (to_jsonb(${row})->>'bound_assistant_id') ${assistantId ? `='${assistantId}'` : 'IS NULL'} AND (to_jsonb(${row})->>'external_service_id') ${serviceId ? `='${serviceId}'` : 'IS NULL'}`
   }
-  const applicationCurrentSql = () => applicationClientId
+  const applicationCurrentSql = () => serviceId ? ` AND external_service_oauth_current(oauth_authorizations.id,'${serviceId}'::uuid)` : applicationClientId
     ? ` AND application_oauth_binding_current(oauth_authorizations.id,'${applicationClientId}'::uuid)`
     : ` AND (to_jsonb(oauth_authorizations)->>'workspace_mcp_consent' IS NULL OR (
       (to_jsonb(oauth_authorizations)->'workspace_mcp_consent'->>'expiresAt')::timestamptz>clock_timestamp()
@@ -272,6 +277,24 @@ export function createDbOAuthAuthorizationStore(profile: OAuthAuthorizationAudie
         [id,params.clientId,params.userId,params.workspaceId,params.scope,codeHash,codeExpiresAt,params.codeChallenge,params.redirectUri,
           applicationClientId,consent.grantIds,consent.clientRevision,consent.maximumHash,consent.activationVersion??null])
         if (!result.rows[0]) throw new Error('Application consent changed or is not qualified')
+        return { row: result.rows[0], codePlaintext: code.plaintext }
+      }
+
+      if (serviceId) {
+        if (!params.externalServiceRevision || params.applicationConsent || params.workspaceMcpConsent) throw new Error('Service review required')
+        const result = await query<OAuthAuthorizationRow>(`WITH admitted AS MATERIALIZED (
+          SELECT s.id FROM external_services s JOIN workspace_members m ON m.workspace_id=s.workspace_id AND m.user_id=$3
+          WHERE s.id=$10 AND s.workspace_id=$4 AND s.oauth_client_id=$2 AND s.revision::text=$11
+            AND s.status='active' AND $9=ANY(s.redirect_uris)
+        ), revoked AS (
+          UPDATE oauth_authorizations SET revoked_at=now(),access_token_hash=NULL,refresh_token_hash=NULL,code_hash=NULL
+          WHERE client_id=$2 AND user_id=$3 AND workspace_id=$4 AND audience='service' AND external_service_id=$10
+            AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM admitted) RETURNING id
+        ) INSERT INTO oauth_authorizations(id,client_id,user_id,workspace_id,scope,code_hash,code_expires_at,code_challenge,code_redirect_uri,
+          audience,external_service_id,external_service_revision)
+          SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,'service',$10,$11::bigint FROM admitted RETURNING ${COLS_ROW}`,
+          [id,params.clientId,params.userId,params.workspaceId,params.scope,codeHash,codeExpiresAt,params.codeChallenge,params.redirectUri,serviceId,params.externalServiceRevision])
+        if (!result.rows[0]) throw new Error('Service access changed')
         return { row: result.rows[0], codePlaintext: code.plaintext }
       }
 

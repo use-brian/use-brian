@@ -90,6 +90,7 @@ export const zh: Dictionary = {
     "loading": "正在讀取目前權限...",
     "unavailable": "目前無法存取，或審閱內容已變更。請開啟新的登入請求。",
     "unnamed": "應用程式",
+    "serviceExplanation": "使用你目前的工作空間身分、部門機密等級和專案存取權連接此服務。工作空間權限變更時，存取權亦會更新。",
     "explanation": "繼續之前，請確認目前的工作區、記錄、欄位與操作範圍。",
     "workspace": "工作區",
     "scope": "存取範圍",

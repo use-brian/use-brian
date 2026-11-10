@@ -57,3 +57,51 @@ key generation, trust setup route or activation bypass is introduced by this che
 Both offline frozen lockfile-only installs pass without lockfile changes. Existing
 identity opt-ins now include the stable executing-assistant header; untrusted static,
 custom-auth and dynamic header layers cannot replace reserved identity assertions.
+
+
+## Independent service login
+
+Separately deployed services use the `service` OAuth audience and their own
+business backend; native application qualification does not gate their login.
+A native owner/admin registers `{name,redirectUris}` at
+`POST /api/external-services/workspaces/:workspaceId` and configures the returned
+service ID and client ID in the service deployment. Native HTTP/MCP also lists
+and revokes registrations. No shared client secret or additional production
+secret is introduced: PKCE binds each authorization-code exchange.
+
+Use `/api/external-services/:serviceId/oauth/{authorize,token,revoke}` for the
+standard code/S256/rotating-refresh/disconnect flow and `/:serviceId/context`
+for current identity and canonical department/Project authority. The consent UI
+uses the existing native session and exact registered workspace. Consumers must
+revalidate before every business operation and publication; never treat a stored
+context as authority after a permission change or network failure. Canonical
+CRM/Document access uses `/:serviceId/canonical/{query,command,reconcile,mcp}`,
+retaining native owner permissions and OAuth read-only restrictions.
+
+Migration 8257 and the service boundary suite are locally verified against the
+ordinary non-superuser PostgreSQL fixture. Production rollout remains separate.
+
+Service context additionally exports `departmentNames` and `projectNames`, keyed
+only by the already-admitted active department/Project IDs. These display labels
+are included in the context revision and never enumerate hidden scopes.
+
+Canonical query `file_candidates` accepts `{query?:string,limit?:1..100}` and
+returns `{records}` of authorized native file projections (`name`, `mimeType`,
+`sizeBytes`). Discovery uses the current canonical file predicate; every result
+is projected and revalidated by the native owner. Private/unadmitted discovery
+metadata, storage locations and file bytes are never returned by this query.
+
+Canonical query `member_candidates` accepts the same bounded query/limit and
+returns `{members:[{record,displayName}]}`. `record` is the canonical native
+`workspace_member` ID-only projection. `displayName` comes separately from the
+existing workspace roster identity owner, available to current members. Both
+current membership and the roster label are rechecked before disclosure; this
+does not add a native member business field or create an ERP staff record.
+
+Canonical CRM command/reconcile receipts bind the registered service, workspace
+and user, so renewed consent can reconcile the exact original command. The real
+OAuth credential and all current permissions are still checked; the receipt
+namespace grants no authority and cannot be supplied in request JSON. Other
+services/users/workspaces cannot share the receipt, and altered command input
+conflicts. Receipts predating this namespace are not automatically migrated;
+missing receipts remain uncertain.
