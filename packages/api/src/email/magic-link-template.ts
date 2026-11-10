@@ -8,6 +8,7 @@
  */
 
 import type { MagicLinkLocale } from '../db/magic-link-store.js'
+import { BRAND_MARK_CID } from './brand-mark.js'
 
 export type MagicLinkContent = {
   subject: string
@@ -136,7 +137,8 @@ export function renderMagicLinkEmail(
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:540px;background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,0.35);">
         <tr>
           <td align="center" style="background:#0b1020;background:linear-gradient(135deg,#0b1020 0%,#13213a 55%,#0a3a4f 100%);padding:40px 24px 28px;">
-            <div style="font-size:18px;font-weight:600;color:#22d3ee;letter-spacing:0.5px;">${BRAND_WORDMARK}</div>
+            <img src="cid:${BRAND_MARK_CID}" alt="${BRAND_WORDMARK}" width="64" height="64" style="display:block;width:64px;height:64px;border-radius:14px;border:1px solid rgba(34,211,238,0.25);">
+            <div style="margin-top:16px;font-size:18px;font-weight:600;color:#22d3ee;letter-spacing:0.5px;">${BRAND_WORDMARK}</div>
             <div style="margin-top:4px;font-size:12px;color:rgba(255,255,255,0.55);letter-spacing:0.3px;">${escapeHtml(t.tagline)}</div>
           </td>
         </tr>

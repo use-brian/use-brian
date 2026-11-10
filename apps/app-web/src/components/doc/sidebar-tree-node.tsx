@@ -30,8 +30,10 @@
  * The droppable id encodes `nodeId::intent` so the context's
  * `onDragEnd` can decode the target without prop drilling.
  *
- * Indentation is driven by `depth` (12px per level) so deep chains read
- * as a tree without a wall of nested `<ul>`s.
+ * Indentation is driven by `depth` (12px per level) plus an optional
+ * `indentOffset` (a teamspace adds one level so its pages sit in from
+ * the teamspace icon). The offset indents content only; the row box
+ * stays full width so hover pills share an edge.
  *
  * [COMP:app-web/sidebar-tree-node]
  */
@@ -97,6 +99,12 @@ type SidebarTreeNodeProps = {
   keptByAncestry: Set<string>;
   /** Id of the row currently being dragged (for drop-target highlight). */
   draggingId: string | null;
+  /**
+   * Extra content indent in px, added at every depth. Teamspace trees pass
+   * one nesting step so page icons sit in from the teamspace icon while the
+   * row (and its hover pill) stays as wide as the teamspace row.
+   */
+  indentOffset?: number;
 };
 
 export function SidebarTreeNode(props: SidebarTreeNodeProps) {
@@ -116,6 +124,7 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
     draftPruneByid,
     keptByAncestry,
     draggingId,
+    indentOffset = 0,
   } = props;
   const t = useT().docPage;
   const { row, children, depth } = node;
@@ -161,7 +170,7 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
   const ontoActive = !isSelfDragging && dropOnto.isOver;
   const afterActive = !isSelfDragging && dropAfter.isOver;
 
-  const indentStyle = { paddingLeft: `${depth * 12 + 4}px` };
+  const indentStyle = { paddingLeft: `${depth * 12 + 4 + indentOffset}px` };
   const dragStyle = drag.transform
     ? { transform: CSS.Translate.toString(drag.transform), opacity: 0.6 }
     : undefined;
@@ -361,7 +370,7 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
       {pruneDays !== null && (
         <div
           aria-hidden={!revealPrune}
-          style={{ paddingLeft: `${depth * 12 + 30}px` }}
+          style={{ paddingLeft: `${depth * 12 + 30 + indentOffset}px` }}
           className={`grid transition-[grid-template-rows,opacity] duration-200 ease-out motion-reduce:transition-none ${
             revealPrune ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
           }`}
@@ -400,7 +409,7 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
           title (depth indent + the leading-toggle slot). */}
       {isExpanded && !hasChildren && (
         <div
-          style={{ paddingLeft: `${depth * 12 + 30}px` }}
+          style={{ paddingLeft: `${depth * 12 + 30 + indentOffset}px` }}
           className="select-none py-1 text-[13px] text-sidebar-foreground/40"
         >
           {t.sidebarNoPagesInside}

@@ -1,3 +1,4 @@
+import { z } from 'zod'
 /**
  * Channel integration store — per-channel BYO chat-channel credentials.
  *
@@ -325,6 +326,8 @@ export type ChannelIntegrationConfig = {
 export type SlackIntegrationConfig = ChannelIntegrationConfig
 
 export type ChannelIntegration = {
+  /** Immutable identity generation captured before a transport send. */
+  identityGeneration?: number
   id: string
   /** Owning workspace channel (FK → channels, migration 158). */
   channelId: string
@@ -596,18 +599,29 @@ export type ChannelIntegrationStore = {
   ): Promise<void>
 }
 
+const identityGenerationSchema=z.preprocess(value=>typeof value==='string' && /^\d+$/.test(value)?Number(value):value,
+  z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER))
+function normalizeIdentityGeneration(value: unknown): number | undefined {
+  return value === undefined ? undefined : identityGenerationSchema.parse(value)
+}
+
+function normalizedIntegration<T extends {identityGeneration?:unknown}>(row:T):T & {identityGeneration?:number} {
+  return {...row,identityGeneration:normalizeIdentityGeneration(row.identityGeneration)}
+}
+
 // Columns that are safe to expose (no credentials blob).
 const CI_PUBLIC_COLS = `
   id, channel_id as "channelId",
   channel_type as "channelType",
   team_id as "teamId", team_name as "teamName", bot_user_id as "botUserId",
-  bot_username as "botUsername",
+  bot_username as "botUsername", identity_generation AS "identityGeneration",
   config, status, created_at as "createdAt", updated_at as "updatedAt",
   last_event_at as "lastEventAt",
   connector_instance_id as "connectorInstanceId"
 `
 
 type CiRow = {
+  identityGeneration?: number
   id: string
   channelId: string
   channelType: string
@@ -748,7 +762,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
          )`,
         [params.channelId],
       )
-      return result.rows[0]
+      return normalizedIntegration(result.rows[0])
     },
 
     async setBotUsername(id, botUsername) {
@@ -786,6 +800,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
         teamId: row.teamId,
         teamName: row.teamName,
         botUserId: row.botUserId,
+        identityGeneration: normalizeIdentityGeneration(row.identityGeneration),
         botUsername: row.botUsername,
         config: row.config ?? {},
         status: row.status,
@@ -820,6 +835,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
         teamId: row.teamId,
         teamName: row.teamName,
         botUserId: row.botUserId,
+        identityGeneration: normalizeIdentityGeneration(row.identityGeneration),
         botUsername: row.botUsername,
         config: row.config ?? {},
         status: row.status,
@@ -885,6 +901,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
         teamId: row.teamId,
         teamName: row.teamName,
         botUserId: row.botUserId,
+        identityGeneration: normalizeIdentityGeneration(row.identityGeneration),
         botUsername: row.botUsername,
         config: row.config ?? {},
         status: row.status,
@@ -1016,6 +1033,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
         teamId: row.teamId,
         teamName: row.teamName,
         botUserId: row.botUserId,
+        identityGeneration: normalizeIdentityGeneration(row.identityGeneration),
         botUsername: row.botUsername,
         config: row.config ?? {},
         status: row.status,
@@ -1046,6 +1064,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
         teamId: row.teamId,
         teamName: row.teamName,
         botUserId: row.botUserId,
+        identityGeneration: normalizeIdentityGeneration(row.identityGeneration),
         botUsername: row.botUsername,
         config: row.config ?? {},
         status: row.status,
@@ -1066,7 +1085,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
          ORDER BY created_at ASC`,
         [workspaceId],
       )
-      return result.rows
+      return result.rows.map(normalizedIntegration)
     },
 
     async deleteForUser(actingUserId, id) {
@@ -1135,7 +1154,7 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
       if (result.rows.length === 0) {
         throw new Error('Integration not found or not authorized')
       }
-      return result.rows[0]
+      return normalizedIntegration(result.rows[0])
     },
 
     async pinTrustedTelegramUsernameSystem(id, usernameEntry, providerUserId) {

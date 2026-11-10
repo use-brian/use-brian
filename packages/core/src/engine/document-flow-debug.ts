@@ -6,7 +6,7 @@ import { summarizeProviderError } from '../providers/provider-error-summary.js'
 import type { Message, TokenUsage } from '../providers/types.js'
 
 const scope = new AsyncLocalStorage<{ sessionId?: string }>()
-export const documentFlowDebugEnabled = () => process.env.BRIAN_DEBUG_DOCUMENT_FLOW === '1'
+const documentFlowDebugEnabled = () => process.env.BRIAN_DEBUG_DOCUMENT_FLOW === '1'
 const size = (value: unknown) => typeof value === 'string' ? value.length : 0
 const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : 0
 const known = (value: unknown, values: readonly string[]) => typeof value === 'string' && values.includes(value) ? value : 'other'
@@ -132,7 +132,7 @@ function summarizeCodexWire(items: readonly unknown[]) {
 
 // Exact fixed keys only: never emit external names or inspect schemas/arguments.
 const declarationNames = ['listDocumentExtractionConnectors', 'prepareDocumentExtraction', 'startDocumentExtraction', 'readDocumentExtraction', 'proposeOfficeEvidenceFill', 'mcp_search', 'mcp_call'] as const
-export function summarizeDocumentTools(declarations: Iterable<{ name: string }>) {
+function summarizeDocumentTools(declarations: Iterable<{ name: string }>) {
   const presence = Object.fromEntries(declarationNames.map(name => [name, false]))
   let total = 0
   for (const declaration of declarations) {

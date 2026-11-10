@@ -141,7 +141,10 @@ describe("[COMP:app-web/drag-handle] Drop-indicator styling", () => {
 
   it("tames the selected-block default outline into a soft fill", () => {
     expect(css).toMatch(
-      /\.ProseMirror-selectednode\s*\{[\s\S]{0,200}outline:\s*none/,
+      /\.ProseMirror-selectednode\s*\{[\s\S]{0,280}outline:\s*none\s*!important;[\s\S]{0,240}box-shadow:\s*none\s*!important/,
+    );
+    expect(css).toMatch(
+      /li\.ProseMirror-selectednode:after\s*\{[\s\S]{0,80}border:\s*none\s*!important/,
     );
   });
 });

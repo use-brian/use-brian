@@ -62,7 +62,8 @@ describe('[COMP:api/application-lifecycle] approval notification metadata', () =
       expect(providerText.includes(hidden)).toBe(false)
       expect(persisted.includes(hidden)).toBe(false)
     }
-    expect(providerText.includes(`/w/${workspaceId}/approvals?focus=${approvalId}`)).toBe(true)
-    expect(providerText.includes('Approve or reject on the web:')).toBe(true)
+    expect(providerText.includes(`/w/${workspaceId}/p?panel=approvals&approval=${approvalId}`)).toBe(true)
+    expect(providerText.includes('Allow this action?')).toBe(true)
+    expect(providerText.includes('approve ')).toBe(true)
   })
 })

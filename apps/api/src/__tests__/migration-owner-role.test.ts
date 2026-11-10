@@ -95,6 +95,43 @@ async function assertMigrationSecurity(db: PGlite, forceSkillScopeRls: boolean):
   )
 }
 
+describe('[COMP:api/migration-owner-role] RLS checkpoint assertions', () => {
+  it('tracks forced and owner-access checkpoints without weakening application-role RLS', async () => {
+    const db = new PGlite()
+    try {
+      await db.waitReady
+      await db.exec(`
+        CREATE ROLE checkpoint_owner NOSUPERUSER NOBYPASSRLS;
+        CREATE ROLE checkpoint_app NOSUPERUSER NOBYPASSRLS;
+        CREATE TABLE public.workspace_skill_scope_revisions(id integer PRIMARY KEY);
+        ALTER TABLE public.workspace_skill_scope_revisions OWNER TO checkpoint_owner;
+        ALTER TABLE public.workspace_skill_scope_revisions ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE public.workspace_skill_scope_revisions FORCE ROW LEVEL SECURITY;
+        GRANT SELECT ON public.workspace_skill_scope_revisions TO checkpoint_app;
+        SET ROLE checkpoint_owner;
+      `)
+      await assertOrdinaryOwner(db)
+      await assertMigrationSecurity(db, true)
+      await assert.rejects(assertMigrationSecurity(db, false), assert.AssertionError)
+      await assert.rejects(db.exec('INSERT INTO public.workspace_skill_scope_revisions VALUES(1)'), /row-level security/)
+
+      await db.exec(await readFile(`${migrationsDir}/82200_skill_scope_owner_access.sql`, 'utf8'))
+      await assertOrdinaryOwner(db)
+      await assertMigrationSecurity(db, false)
+      await assert.rejects(assertMigrationSecurity(db, true), assert.AssertionError)
+      await db.exec('INSERT INTO public.workspace_skill_scope_revisions VALUES(1)')
+      assert.deepEqual((await db.query('SELECT id FROM public.workspace_skill_scope_revisions')).rows, [{ id: 1 }])
+      await db.exec('RESET ROLE; SET ROLE checkpoint_app')
+      assert.deepEqual((await db.query('SELECT id FROM public.workspace_skill_scope_revisions')).rows, [])
+
+      await db.exec('RESET ROLE; SET ROLE checkpoint_owner; ALTER TABLE public.workspace_skill_scope_revisions DISABLE ROW LEVEL SECURITY')
+      await assert.rejects(assertMigrationSecurity(db, false), assert.AssertionError)
+    } finally {
+      await db.close()
+    }
+  })
+})
+
 describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner role', () => {
   it('preserves application RLS when the skill receipt owner-access repair removes FORCE', async () => {
     const db = await openAsOwner({ appUser: true })

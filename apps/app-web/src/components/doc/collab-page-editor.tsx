@@ -11,8 +11,9 @@
  * Editing affordances layered on the live editor:
  *   - **Slash menu** (`createSlashMenuExtension`) — typing `/` opens the
  *     Notion-identical block picker; most items run `executeSlashItem`, while
- *     Page / Link-to-page are intercepted here (createDraft + child_page link /
- *     `PagePicker`).
+ *     Page / Link-to-page / Template / Emoji are intercepted here
+ *     (createDraft + child_page link / `PagePicker` / template gallery /
+ *     caret emoji picker).
  *   - **Empty-line placeholder + Space→AI** (`createDocPlaceholderExtension`
  *     + `createAiSpaceTriggerExtension`) — "Press 'space' for AI or '/' for
  *     commands" on an empty line; Space hands into the chat anchored to it.
@@ -102,6 +103,7 @@ import {
 } from "./ai-generating-decoration";
 import { createTableTrailingParagraphExtension } from "./table-trailing-paragraph";
 import { subscribeBuildActivity } from "@/lib/build-activity";
+import { CaretEmojiPicker } from "@/components/ui/emoji-picker";
 import { PagePicker } from "./page-picker";
 import { TemplateGallery } from "./template-gallery";
 import { InlineAiPrompt } from "./inline-ai-prompt";
@@ -434,6 +436,13 @@ function CollabEditorInner({
   // capture the insert position the slash was invoked at so a pick (made later,
   // through the modal) lands at the right place even though focus moved.
   const [templateGallery, setTemplateGallery] = useState<{ insertPos: number } | null>(null);
+  // "/emoji" slash item — the caret-anchored picker. The insert position is
+  // the caret after the suggestion plugin has already stripped `/` + query.
+  const [emojiPicker, setEmojiPicker] = useState<{
+    top: number;
+    left: number;
+    insertPos: number;
+  } | null>(null);
   // Workspace custom templates, loaded lazily when the gallery opens.
   const [customTemplates, setCustomTemplates] = useState<CustomPageTemplateSummary[]>([]);
   const refreshCustomTemplates = useCallback(() => {
@@ -518,6 +527,14 @@ function CollabEditorInner({
     setTemplateGallery({ insertPos: ed.state.selection.from });
   }, []);
 
+  // "Emoji" slash item — open the picker at the caret. The chosen glyph is
+  // ordinary text, inserted where `/emoji` was typed.
+  const openEmojiPicker = useCallback((ed: Editor) => {
+    const { from } = ed.state.selection;
+    const coords = ed.view.coordsAtPos(from);
+    setEmojiPicker({ top: coords.bottom + 4, left: coords.left, insertPos: from });
+  }, []);
+
   // Insert a template's blocks at `pos`. Instantiates the shared core template
   // (markdown -> canonical blocks with fresh ids), maps it to ProseMirror nodes
   // via the same `blocksToPMDoc` round-trip the renderer uses, and drops the
@@ -583,6 +600,10 @@ function CollabEditorInner({
     }
     if (item.blockKind === "template") {
       openTemplateGallery(ed);
+      return;
+    }
+    if (item.blockKind === "emoji") {
+      openEmojiPicker(ed);
       return;
     }
     executeSlashItem(ed, item);
@@ -903,7 +924,10 @@ function CollabEditorInner({
     if (!onCommentsPresenceChange || !editor) return;
     const report = () =>
       onCommentsPresenceChange(
-        !!editorWrapRef.current?.querySelector(".ProseMirror [data-thread-id]"),
+        !!draftComment ||
+          !!editorWrapRef.current?.querySelector(
+            ".ProseMirror [data-thread-id], .ProseMirror [data-comment-draft]",
+          ),
       );
     report();
     const raf = window.requestAnimationFrame(report);
@@ -912,7 +936,7 @@ function CollabEditorInner({
       window.cancelAnimationFrame(raf);
       editor.off("transaction", report);
     };
-  }, [onCommentsPresenceChange, commentsRefreshKey, threads, editor]);
+  }, [onCommentsPresenceChange, commentsRefreshKey, threads, editor, draftComment]);
 
   // Floating-toolbar "Comment" action: open a LOCAL draft on the selection — a
   // transient highlight (no `comment` mark, no Yjs write) + the new-comment
@@ -1060,12 +1084,15 @@ function CollabEditorInner({
             }
           : undefined;
         window.requestAnimationFrame(() => {
+          // The highlight, never the gutter badge. The badge is the first
+          // `[data-thread-id]` in the document and is positioned on the editor
+          // frame, so anchoring to it parks the card at the bottom-right.
           const el =
-            (document.querySelector(
-              `[data-thread-id="${thread.id}"]`,
-            ) as HTMLElement | null) ??
+            editor.view.dom.querySelector<HTMLElement>(
+              `[data-thread-id="${CSS.escape(thread.id)}"]:not([data-comment-badge])`,
+            ) ??
             editorWrapRef.current ??
-            document.body;
+            editor.view.dom;
           setActiveThread({ thread, el, ...(seed ? { seed } : {}) });
         });
       } catch {
@@ -1206,22 +1233,22 @@ function CollabEditorInner({
   // anchor the popover to it. Falls back to the editor frame for an orphaned
   // thread (anchor block gone) or an unanchored page thread with no gutter mark.
   const openThreadFromList = useCallback((thread: CommentThread) => {
-    const inDoc = document.querySelector(
-      `[data-thread-id="${thread.id}"]`,
-    ) as HTMLElement | null;
+    const inDoc = editor?.view.dom.querySelector<HTMLElement>(
+      `[data-thread-id="${CSS.escape(thread.id)}"]:not([data-comment-badge])`,
+    );
     const el = inDoc ?? editorWrapRef.current;
     if (!el) return;
     inDoc?.scrollIntoView({ behavior: "smooth", block: "center" });
     setActiveThread({ thread, el });
-  }, []);
+  }, [editor]);
 
   // Expand a thread from its rail card — no scroll (the card is already in view).
   const expandThreadInRail = useCallback((thread: CommentThread) => {
-    const el = document.querySelector(
-      `[data-thread-id="${thread.id}"]`,
-    ) as HTMLElement | null;
-    setActiveThread({ thread, el: el ?? editorWrapRef.current ?? document.body });
-  }, []);
+    const el = editor?.view.dom.querySelector<HTMLElement>(
+      `[data-thread-id="${CSS.escape(thread.id)}"]:not([data-comment-badge])`,
+    );
+    setActiveThread({ thread, el: el ?? editorWrapRef.current ?? editor?.view.dom ?? document.body });
+  }, [editor]);
 
   // A page comment was just posted (`PageComments.post`): add the brand-new
   // unanchored thread to the list so the page-comments band renders it inline as
@@ -1236,6 +1263,21 @@ function CollabEditorInner({
   // used for unanchored / orphaned threads). Otherwise the on-content overlay
   // popover takes the active thread.
   const { hasRoom: railHasRoom, railLeft } = useRailGeometry(editorWrapEl);
+  const columnRight = useCallback(
+    () => editorWrapRef.current?.getBoundingClientRect().right ?? null,
+    [],
+  );
+  const resolveDraftAnchor = useCallback(
+    () => editor?.view.dom.querySelector<HTMLElement>("[data-comment-draft]") ?? null,
+    [editor],
+  );
+  const resolveActiveAnchor = useCallback(() => {
+    const id = activeThread?.thread.id;
+    if (!editor || !id) return null;
+    return editor.view.dom.querySelector<HTMLElement>(
+      `[data-thread-id="${CSS.escape(id)}"]:not([data-comment-badge])`,
+    );
+  }, [editor, activeThread?.thread.id]);
   const openThreads = useMemo(() => threads.filter((th) => !th.resolvedAt), [threads]);
   // A page-level (unanchored) active thread lives INLINE in the page-comments
   // band (the Notion running thread), never the on-content popover or the margin
@@ -1244,11 +1286,11 @@ function CollabEditorInner({
   const activePageThread = !!activeThread && !activeThread.thread.anchorBlockId;
   const activeAnchored =
     !!activeThread &&
-    typeof document !== "undefined" &&
     !activePageThread &&
-    activeThread.el !== editorWrapEl &&
-    activeThread.el !== document.body &&
-    document.contains(activeThread.el);
+    typeof document !== "undefined" &&
+    !!editor?.view.dom.querySelector(
+      `[data-thread-id="${CSS.escape(activeThread.thread.id)}"]:not([data-comment-badge])`,
+    );
   const railExpandsActive = railHasRoom && activeAnchored;
 
   return (
@@ -1345,6 +1387,8 @@ function CollabEditorInner({
           currentUser={user}
           assistant={assistant}
           seed={activeThread.seed}
+          resolveAnchor={resolveActiveAnchor}
+          columnRight={columnRight}
           onClose={() => setActiveThread(null)}
           onChanged={refetchThreads}
         />
@@ -1359,6 +1403,8 @@ function CollabEditorInner({
           workspaceId={ws.workspaceId}
           hasAssistant={!!assistantId}
           {...(assistantId ? { assistantId } : {})}
+          resolveAnchor={resolveDraftAnchor}
+          columnRight={columnRight}
           onSubmit={(payload) => void commitDraftComment(payload)}
           onDismiss={dismissDraftComment}
         />
@@ -1374,6 +1420,22 @@ function CollabEditorInner({
             setPagePicker(null);
           }}
           onClose={() => setPagePicker(null)}
+        />
+      ) : null}
+      {/* "Emoji" slash item — searchable picker at the caret. The chosen
+          glyph is inserted as ordinary text where `/emoji` was typed. */}
+      {emojiPicker && editor ? (
+        <CaretEmojiPicker
+          position={{ top: emojiPicker.top, left: emojiPicker.left }}
+          onPick={(emoji) => {
+            const pos = Math.min(emojiPicker.insertPos, editor.state.doc.content.size);
+            editor.chain().focus().insertContentAt(pos, emoji).run();
+            setEmojiPicker(null);
+          }}
+          onClose={() => {
+            setEmojiPicker(null);
+            editor.commands.focus();
+          }}
         />
       ) : null}
       {/* "Template" slash item — the centered page-template gallery. On pick we

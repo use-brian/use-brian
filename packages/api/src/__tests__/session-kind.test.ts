@@ -32,7 +32,7 @@ describe('[COMP:api/session-kind] classifySession', () => {
   ]
   for (const [name, row, expected] of shapes) {
     it(`classifies ${name}`, () => {
-      expect(classifySession(row)).toEqual(expected)
+      expect(classifySession(row)).toEqual({ providerContext: false, captureEnabled: false, ...expected })
     })
   }
 

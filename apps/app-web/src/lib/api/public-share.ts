@@ -14,6 +14,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import type { Metadata } from "next";
 import type { ViewPayload } from "@use-brian/views-renderer";
 import { INTERNAL_API_URL } from "@/lib/internal-api-url";
+import { SOCIAL_IMAGE_SIZE } from "@/lib/page-social-card";
 
 // The runtime public URL may intentionally be empty in development so browser
 // requests stay relative and the Next.js `/api/*` rewrite proxies them.
@@ -79,6 +80,9 @@ export type PublicPage = {
   /** Custom-domain responses only — canonical site path per referenced page
    *  (breadcrumb + child_page blocks): `/`, `/<slug>`, or `/p/<id>`. */
   paths?: Record<string, string>;
+  /** Workspace mark for the social thumbnail. `url` is the public icon proxy
+   *  when a picture is uploaded; `seed` draws the generated landmark otherwise. */
+  workspaceIcon?: { url: string | null; seed: number } | null;
 };
 
 /** An emoji rendered as an SVG data-URL favicon (Notion uses the page icon). */
@@ -99,19 +103,29 @@ function firstTextSnippet(blocks: PublicBlock[]): string {
 /**
  * Build Next.js page metadata from a shared page: the page's own title +
  * first-paragraph description, the emoji icon as the favicon (so a shared tab
- * shows the page's identity, not a generic app icon), and `noindex` unless the
- * publisher opted into search indexing. Used by both share routes.
+ * shows the page's identity, not a generic app icon), a square social image
+ * when `image` is set, and `noindex` unless the publisher opted into search
+ * indexing. Twitter fields are set explicitly so the app-level product card
+ * does not remain the thumbnail.
  */
-export function buildShareMetadata(page: PublicPage | null, fallbackTitle = "Shared page"): Metadata {
-  if (!page) return { title: fallbackTitle, robots: { index: false, follow: false } };
-  const title = page.title || fallbackTitle;
-  const description = firstTextSnippet(page.blocks) || undefined;
+export function buildShareMetadata(
+  page: PublicPage | null,
+  options?: { fallbackTitle?: string; image?: string; pageUrl?: string },
+): Metadata {
+  const fallbackTitle = options?.fallbackTitle ?? "Shared page";
+  if (!page && !options?.image) return { title: fallbackTitle, robots: { index: false, follow: false } };
+  const title = page?.title || fallbackTitle;
+  const description = (page ? firstTextSnippet(page.blocks) : "") || title;
+  const image = options?.image
+    ? [{ url: options.image, width: SOCIAL_IMAGE_SIZE.width, height: SOCIAL_IMAGE_SIZE.height, alt: title }]
+    : undefined;
   return {
     title,
     description,
-    robots: page.indexable ? undefined : { index: false, follow: false },
-    openGraph: { title, type: "article", description },
-    icons: page.icon ? { icon: emojiFaviconDataUrl(page.icon) } : undefined,
+    robots: page?.indexable ? undefined : { index: false, follow: false },
+    openGraph: { title, type: "article", description, url: options?.pageUrl, images: image },
+    twitter: { card: "summary", title, description, images: image },
+    icons: page?.icon ? { icon: emojiFaviconDataUrl(page.icon) } : undefined,
   };
 }
 

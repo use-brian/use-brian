@@ -45,7 +45,11 @@ function draftNode(id: string): TreeNode {
   };
 }
 
-function render(node: TreeNode, keptByAncestry: Set<string>): string {
+function render(
+  node: TreeNode,
+  keptByAncestry: Set<string>,
+  indentOffset = 0,
+): string {
   return renderToString(
     <I18nProvider locale="en" dict={dict}>
       <DndContext>
@@ -66,6 +70,7 @@ function render(node: TreeNode, keptByAncestry: Set<string>): string {
             draftPruneByid={{ [node.row.id]: in28Days }}
             keptByAncestry={keptByAncestry}
             draggingId={null}
+            indentOffset={indentOffset}
           />
         </ul>
       </DndContext>
@@ -101,5 +106,14 @@ describe("[COMP:app-web/sidebar-tree-node] Temporary-page icon ghost", () => {
     const node = draftNode("child");
     const html = render(node, new Set(["child"]));
     expect(html).not.toContain("doc-icon-temporary");
+  });
+});
+
+describe("[COMP:app-web/sidebar-tree-node] teamspace content indent", () => {
+  it("adds the offset to the row content without changing depth", () => {
+    const node = draftNode("child");
+    expect(render(node, new Set(["child"]))).toContain("padding-left:16px");
+    // depth 1 (12) + slot (4) + one teamspace step (12).
+    expect(render(node, new Set(["child"]), 12)).toContain("padding-left:28px");
   });
 });

@@ -80,6 +80,8 @@ export async function reviewApprovalRequest(params: {
   if (params.requester.kind === 'human' && !await approvals.getById(params.requester.userId, approval.id)) {
     throw new ApprovalReviewError('not_found', 404, 'Not found')
   }
+  // External decisions are human-only even if a stale delegated receipt exists.
+  if (approval.kind === 'external_action') throw new ApprovalReviewError('human_intent_required', 403, 'External actions cannot be delegated.')
   const key = params.idempotencyKey ?? `review:${approval.id}`
   const byKey = await getReceiptByKey(approval.workspaceId, key)
   if (byKey) {
@@ -132,7 +134,7 @@ export async function reviewApprovalRequest(params: {
     const flipped = await client.query(
       `UPDATE pending_approvals SET status = 'approved', responded_at = now(), responded_by = NULL,
          resolution_origin = 'delegated_assistant'
-       WHERE id = $1 AND status = 'pending' AND (expires_at IS NULL OR expires_at > now())
+       WHERE id = $1 AND status = 'pending' AND kind IN ('workflow_step', 'browser_skill_send') AND (expires_at IS NULL OR expires_at > now())
        RETURNING id`, [approval.id])
     if (!flipped.rows[0]) {
       await client.query('ROLLBACK')

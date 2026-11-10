@@ -217,11 +217,6 @@ export async function loadOfflinePackage(artifactId: string, expectedOwner: Offi
   return { ...decrypted, savedAt: record.savedAt };
 }
 
-export async function removeOfflinePackage(artifactId: string, expectedOwner: OfficeOfflineOwner): Promise<void> {
-  const owner = captureOwner(expectedOwner);
-  await writeRecord(owner, PACKAGE_STORE, store => {store.delete(recordKey(owner, artifactId));});
-}
-
 export async function officeOfflineDeviceId(expectedOwner: OfficeOfflineOwner): Promise<string> {
   const owner = captureOwner(expectedOwner);
   return ownerValue(owner, "device-id", crypto.randomUUID());

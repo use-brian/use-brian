@@ -25,6 +25,7 @@ import {
   unwrapListItem,
   joinBackwardIntoVisible,
   toggleSummaryEnter,
+  exitToggleThroughEmptyTail,
   modEnterDisclosure,
 } from "../block-indent";
 
@@ -471,5 +472,61 @@ describe("[COMP:app-web/block-indent] toggleSummaryEnter (Enter, E1–E3)", () =
   it("only fires on the summary line", () => {
     const doc = schema.nodes.doc.create(null, [closedToggle("summary", para("child"))]);
     expect(run(doc, "child", toggleSummaryEnter, "child".length).ok).toBe(false);
+  });
+});
+
+/** Caret inside the nth empty paragraph. */
+function posInEmptyParagraph(doc: PMNode, nth = 0): number {
+  let seen = 0;
+  let pos = -1;
+  doc.descendants((node, p) => {
+    if (pos < 0 && node.type.name === "paragraph" && node.content.size === 0) {
+      if (seen === nth) pos = p + 1;
+      seen += 1;
+    }
+    return pos < 0;
+  });
+  return pos;
+}
+
+function runAt(doc: PMNode, pos: number, cmd: Command) {
+  let state = EditorState.create({ doc, schema });
+  state = state.apply(state.tr.setSelection(TextSelection.create(state.doc, pos)));
+  let next: EditorState | null = null;
+  const ok = cmd(state, (tr) => {
+    next = state.apply(tr);
+  });
+  return { ok, doc: (next ?? state).doc };
+}
+
+describe("[COMP:app-web/block-indent] exitToggleThroughEmptyTail (Enter, empty indented tail)", () => {
+  const empty = () => schema.nodes.paragraph.create();
+
+  it("exits to one paragraph after the toggle when only empty lines follow", () => {
+    const doc = schema.nodes.doc.create(null, [
+      toggle("Title", bullets("one", "last"), empty(), empty()),
+    ]);
+    const { ok, doc: out } = runAt(doc, posInEmptyParagraph(doc), exitToggleThroughEmptyTail);
+    expect(ok).toBe(true);
+    expect(out.childCount).toBe(2);
+    expect(out.child(0).type.name).toBe("toggle");
+    expect(out.child(0).childCount).toBe(2); // summary + list, empty tail dropped
+    expect(out.child(1).type.name).toBe("paragraph");
+    expect(out.child(1).content.size).toBe(0);
+  });
+
+  it("leaves a trailing empty child to the default exit", () => {
+    const doc = schema.nodes.doc.create(null, [toggle("Title", empty())]);
+    expect(runAt(doc, posInEmptyParagraph(doc), exitToggleThroughEmptyTail).ok).toBe(false);
+  });
+
+  it("does not split the toggle when a later sibling has text", () => {
+    const doc = schema.nodes.doc.create(null, [toggle("Title", empty(), para("notes"))]);
+    const { ok, doc: out } = runAt(doc, posInEmptyParagraph(doc), exitToggleThroughEmptyTail);
+    expect(ok).toBe(true);
+    expect(out.childCount).toBe(1);
+    expect(out.child(0).type.name).toBe("toggle");
+    expect(out.child(0).textContent).toContain("notes");
+    expect(out.child(0).child(out.child(0).childCount - 1).textContent).toBe("notes");
   });
 });

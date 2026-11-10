@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { DeploymentAccounts, deploymentAccountKey, deploymentKey, type AccountTarget } from "../deployment-accounts.js";
-import { serializePersistedTarget } from "../target-store.js";
+import { parseDesktopConfig, serializePersistedTarget } from "../target-store.js";
 import type { StoredTokens } from "../desktop-token-store.js";
 
 const state = vi.hoisted(() => ({ browserOptions: undefined as undefined | ConstructorParameters<typeof import("../embedded-browser.js").EmbeddedBrowser>[0], files: new Map<string, Buffer>(), handlers: new Map<string, Function>(), windows: [] as any[], app: null as any, partitions: new Map<string, any>(), makeSession: null as null | (() => any), refresh: vi.fn(), request: vi.fn(), exchange: vi.fn(), openExternal: vi.fn(), servers: [] as any[] }));
@@ -40,7 +40,7 @@ vi.mock("node:fs", async (importOriginal) => ({
 }));
 vi.mock("electron", async () => {
   const { EventEmitter } = await import("node:events");
-  const app = Object.assign(new EventEmitter(), { name: "Use Brian", isPackaged: true,
+  const app = Object.assign(new EventEmitter(), { name: "Use Brian", isPackaged: true, isReady: () => true,
     getPath: () => "/tmp/desktop-switch-test", requestSingleInstanceLock: () => true,
     whenReady: () => new Promise(() => {}), focus: vi.fn(), quit: vi.fn(), relaunch: vi.fn(), exit: vi.fn() });
   state.app = app;
@@ -625,6 +625,135 @@ describe("[COMP:app-desktop/main] add self-hosted account in place", () => {
     expect(store.current(ownerTarget)).toBeNull();
   });
 
+});
+
+describe("[COMP:app-desktop/main] connect a self-hosted PKCE deployment", () => {
+  const targetFor = (appUrl = "https://brain.example.com"): AccountTarget => {
+    const apiUrl = appUrl.replace("https://", "https://api.");
+    const publicConfig = parseDesktopConfig({ apiUrl, edition: "outpost", primaryAuthUrl: "https://auth.example.com" })!.publicConfig;
+    return { kind: "local", appUrl, apiUrl, auth: "pkce", publicConfig };
+  };
+  const configure = async (destination = targetFor()) => {
+    const { net } = await import("electron");
+    const declared = { ...destination.publicConfig, apiUrl: destination.apiUrl, edition: "outpost" };
+    vi.mocked(net.fetch).mockResolvedValue(new Response(JSON.stringify(declared)));
+    targetJar(destination).fetch.mockImplementation(async (url: string) => new Response(JSON.stringify(url.endsWith("/health") ? { status: "ok" } : declared)));
+    return destination;
+  };
+  const phase = () => state.handlers.get("Use Brian:get-sign-in-state")!(sender());
+  const callback = (server = state.servers.at(-1), browserUrl = state.openExternal.mock.calls.at(-1)![0]) => {
+    const nonce = new URL(browserUrl).searchParams.get("state");
+    const response = { writeHead: vi.fn(), end: vi.fn() };
+    server.handler({ url: `/cb?code=fictional-destination-code&state=${nonce}` }, response);
+    return response;
+  };
+  it.each([true, false])("authenticates the destination before switching and preserves the original account (bundled: %s)", async bundled => {
+    await setup("pkce", bundled);
+    const destination = await configure(), originalWindow = state.windows.at(-1);
+    const originalTarget = state.files.get("/tmp/desktop-switch-test/target.json")!.toString();
+    expect(await state.handlers.get("Use Brian:run-local")!(sender(), destination.appUrl)).toEqual({ ok: true, url: destination.appUrl });
+    const browser = new URL(state.openExternal.mock.calls[0][0]);
+    expect(browser.origin).toBe(destination.appUrl);
+    expect(browser.pathname).toBe("/desktop/auth");
+    expect(browser.searchParams.get("challenge")).toBeTruthy();
+    expect(browser.searchParams.get("state")).toBeTruthy();
+    expect(phase()).toEqual({ phase: "browser", appUrl: destination.appUrl });
+    expect(originalWindow.destroyed).toBe(false);
+    expect(state.files.get("/tmp/desktop-switch-test/target.json")!.toString()).toBe(originalTarget);
+    expect(store.current(destination)).toBeNull();
+    state.exchange.mockImplementation(async (api, _code, _verifier, fetch) => {
+      expect(api).toBe(destination.apiUrl);
+      expect(originalWindow.destroyed).toBe(false);
+      await fetch(`${api}/fictional-exchange-probe`, { method: "POST" });
+      return { ...tokens("destination"), accessTokenExpiresIn: 3600 };
+    });
+    callback();
+    await vi.waitFor(() => expect(originalWindow.destroyed).toBe(true));
+    await vi.waitFor(() => expect(phase().phase).toBe("idle"));
+    expect(store.current(destination)?.accessToken).toBe("destination-access");
+    expect(store.current(local)?.accessToken).toBe("local-access");
+    expect(store.current(cloud)?.accessToken).toBe("cloud-access");
+    expect(targetJar(destination).fetch).toHaveBeenCalledWith(`${destination.apiUrl}/fictional-exchange-probe`, expect.objectContaining({ credentials: "include" }));
+    expect(JSON.parse(state.files.get("/tmp/desktop-switch-test/target.json")!.toString())).toMatchObject({ kind: "local", appUrl: destination.appUrl, apiUrl: destination.apiUrl, auth: "pkce" });
+    expect(state.request).not.toHaveBeenCalled(); // No OSS owner-session mint.
+  });
+  it("reopens the same attempt and supersedes a different destination without changing the working window", async () => {
+    const first = await configure(), win = state.windows.at(-1);
+    await state.handlers.get("Use Brian:run-local")!(sender(), first.appUrl);
+    const firstUrl = state.openExternal.mock.calls[0][0], firstServer = state.servers[0];
+    await state.handlers.get("Use Brian:run-local")!(sender(), first.appUrl);
+    expect(state.servers).toHaveLength(1);
+    expect(state.openExternal).toHaveBeenLastCalledWith(firstUrl);
+    const second = await configure(targetFor("https://another.example.com"));
+    await state.handlers.get("Use Brian:run-local")!(sender(), second.appUrl);
+    expect(firstServer.close).toHaveBeenCalled();
+    expect(state.servers).toHaveLength(2);
+    expect(new URL(state.openExternal.mock.calls.at(-1)![0]).origin).toBe(second.appUrl);
+    expect(callback(firstServer, firstUrl).writeHead).toHaveBeenCalledWith(410);
+    expect(state.exchange).not.toHaveBeenCalled();
+    expect(win.destroyed).toBe(false);
+    expect(store.current(local)?.accessToken).toBe("local-access");
+  });
+  it.each(["cancel", "exchange", "storage", "unload"] as const)("keeps the current deployment and credentials after destination %s failure", async failure => {
+    const destination = await configure(), win = state.windows.at(-1);
+    const persisted = state.files.get("/tmp/desktop-switch-test/target.json")!.toString();
+    const { EmbeddedBrowser } = await import("../embedded-browser.js");
+    const dispose = vi.spyOn(EmbeddedBrowser.prototype, "dispose");
+    await state.handlers.get("Use Brian:run-local")!(sender(), destination.appUrl);
+    dispose.mockClear();
+    if (failure === "cancel") state.handlers.get("Use Brian:cancel-sign-in")!(sender());
+    if (failure === "exchange") state.exchange.mockRejectedValue(new Error("Fictional exchange refused"));
+    if (failure === "storage") {
+      const { safeStorage } = await import("electron");
+      vi.spyOn(safeStorage, "isEncryptionAvailable").mockReturnValue(false);
+    }
+    if (failure === "unload") win.preventClose = true;
+    callback();
+    await vi.waitFor(() => expect(phase().phase).toBe(failure === "cancel" ? "idle" : "error"));
+    expect(win.destroyed).toBe(false);
+    expect(state.files.get("/tmp/desktop-switch-test/target.json")!.toString()).toBe(persisted);
+    if (failure !== "storage") expect(store.current(local)?.accessToken).toBe("local-access");
+    if (failure !== "unload") expect(dispose).not.toHaveBeenCalled();
+  });
+  it("discards a cancelled destination exchange before a subsequent connection", async () => {
+    const destination = await configure(), win = state.windows.at(-1);
+    let release!: (value: unknown) => void;
+    state.exchange.mockReturnValue(new Promise(resolve => { release = resolve; }));
+    await state.handlers.get("Use Brian:run-local")!(sender(), destination.appUrl);
+    callback();
+    await vi.waitFor(() => expect(state.exchange).toHaveBeenCalledOnce());
+    const signal = state.exchange.mock.calls[0][4] as AbortSignal;
+    state.handlers.get("Use Brian:cancel-sign-in")!(sender());
+    expect(signal.aborted).toBe(true);
+    const next = await configure(targetFor("https://next.example.com"));
+    const connecting = state.handlers.get("Use Brian:run-local")!(sender(), next.appUrl);
+    release({ ...tokens("late-destination"), accessTokenExpiresIn: 3600 });
+    expect(await connecting).toEqual({ ok: true, url: next.appUrl });
+    expect(JSON.parse(state.files.get("/tmp/desktop-switch-test/pending-signin.json")!.toString()).destination.target.appUrl).toBe(next.appUrl);
+    expect(phase()).toEqual({ phase: "browser", appUrl: next.appUrl });
+    expect(win.destroyed).toBe(false);
+    expect(store.current(destination)).toBeNull();
+    expect(store.current(local)?.accessToken).toBe("local-access");
+  });
+  it.each([true, false])("restores a persisted destination only under its original source deployment (same source: %s)", async same => {
+    const destination = await configure();
+    await state.handlers.get("Use Brian:run-local")!(sender(), destination.appUrl);
+    const pending = state.files.get("/tmp/desktop-switch-test/pending-signin.json")!;
+    await setup("pkce", true, same);
+    state.files.set("/tmp/desktop-switch-test/pending-signin.json", pending);
+    const win = state.windows.at(-1);
+    state.app.emit("open-url", { preventDefault: vi.fn() }, "usebrian://auth?code=fictional-cold-code");
+    await vi.waitFor(() => expect(phase().phase).toBe(same ? "idle" : "error"));
+    if (same) {
+      await vi.waitFor(() => expect(win.destroyed).toBe(true));
+      expect(state.exchange).toHaveBeenCalledWith(destination.apiUrl, "fictional-cold-code", expect.any(String), expect.any(Function), expect.any(AbortSignal));
+      expect(store.current(destination)?.accessToken).toBe("signed-in-access");
+    } else {
+      expect(state.exchange).not.toHaveBeenCalled();
+      expect(win.destroyed).toBe(false);
+      expect(store.current(destination)).toBeNull();
+    }
+  });
 });
 
 

@@ -73,7 +73,7 @@ function makeQuestionRow(over: Partial<PendingApproval> = {}): PendingApproval {
     originatingAssistantId: 'asst-1',
     answerText: null,
     ...over,
-  }
+  } as PendingApproval
 }
 
 function makeToolConfirmationRow(
@@ -92,7 +92,28 @@ function makeToolConfirmationRow(
       turnLeaseToken: 'lease-current',
     },
     ...over,
-  })
+  } as Partial<PendingApproval>)
+}
+
+
+function makeExternalConfirmationRow(
+  over: Partial<PendingApproval> = {},
+): PendingApproval {
+  return makeQuestionRow({
+    id: 'ap-ext-1',
+    kind: 'external_action',
+    toolName: null as unknown as string,
+    arguments: {},
+    blockingSessionId: null,
+    deliveryChannelType: 'web',
+    deliveryChannelId: 'sess-1',
+    expiresAt: new Date('2099-01-01T00:00:00Z'),
+    approvalPayload: {
+      request: { method: 'confirm', title: 'Deploy canary', message: 'Ship revision abc' },
+      allowPersistentApproval: false,
+    },
+    ...over,
+  } as Partial<PendingApproval>)
 }
 
 type StoreStubs = {
@@ -197,6 +218,93 @@ describe('[COMP:api/pending-questions-resume] GET /:sessionId/pending', () => {
       displayLines: ['File: plan.md'],
     })
     expect(JSON.stringify(res.body)).not.toContain('lease-current')
+  })
+
+  it.each([null, { status: 'idle', turnLeaseToken: null }, { status: 'running', turnLeaseToken: 'lease-current' }])(
+    'returns all external confirmations independently of the turn lease (%j)', async (lease) => {
+      mockFindSession.mockResolvedValue({
+        id: 'sess-1', assistantId: 'asst-1', userId: 'u-1', channelType: 'web',
+      } as never)
+      mockFindTurnLeaseState.mockResolvedValue(lease as never)
+      mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+      const { app } = makeApp({
+        listPendingForWorkspace: vi.fn(async () => [
+          makeExternalConfirmationRow(),
+          makeExternalConfirmationRow({ id: 'ap-ext-2', approvalPayload: {
+            request: { method: 'select', title: 'Choose', options: ['Allow once', 'Deny'] },
+          } }),
+          makeToolConfirmationRow(),
+        ]),
+      })
+      const res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+      expect(res.body.externalConfirmations).toEqual([
+        { approvalId: 'ap-ext-1', title: 'Deploy canary', message: 'Ship revision abc', expiresAt: '2099-01-01T00:00:00.000Z' },
+        { approvalId: 'ap-ext-2', title: 'Choose', options: ['Allow once', 'Deny'], expiresAt: '2099-01-01T00:00:00.000Z' },
+      ])
+      if (lease?.status === 'running') {
+        expect(res.body.toolConfirmation).toEqual({
+          approvalId: 'ap-tool-1', toolName: 'fileWrite',
+          input: { path: '/workspace/plan.md', content: '# Plan' },
+          description: 'Write plan.md', displayLines: ['File: plan.md'],
+          allowPersistentApproval: false, expiresAt: null, createdAt: '2026-05-27T00:00:00.000Z',
+        })
+      } else expect(res.body.toolConfirmation).toBeNull()
+    },
+  )
+
+  it('restores unassigned member approvals in a shared web session', async () => {
+    mockFindSession.mockResolvedValue({
+      id: 'sess-1', assistantId: 'asst-1', userId: 'other-user', channelType: 'web',
+      visibility: 'workspace', effectiveClearance: 'internal',
+    } as never)
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    const { app } = makeApp({ listPendingForWorkspace: vi.fn(async () => [
+      makeExternalConfirmationRow({ approverUserId: null }),
+    ]) })
+    const res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(res.body.externalConfirmations).toHaveLength(1)
+    expect(res.body.externalConfirmations[0].approvalId).toBe('ap-ext-1')
+    expect(mockEnqueue).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { originatingAssistantId: 'other-assistant' },
+    { originatingAssistantId: null },
+    { deliveryChannelId: 'other-session' },
+    { deliveryChannelId: null },
+    { deliveryChannelType: 'slack' },
+    { kind: 'question' },
+    { status: 'approved' },
+    { expiresAt: null },
+    { expiresAt: new Date('2000-01-01') },
+    { expiresAt: new Date(NaN) },
+    { approvalPayload: { request: { method: 'execute', title: 'Bad' } } },
+    { approvalPayload: { request: { method: 'confirm', title: 42 } } },
+    { approvalPayload: { request: { method: 'select', title: 'Bad', options: ['Yes', 'No'] } } },
+  ])('does not expose ineligible external rows (%j)', async (over) => {
+    mockFindSession.mockResolvedValue({
+      id: 'sess-1', assistantId: 'asst-1', userId: 'u-1', channelType: 'web',
+    } as never)
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    const { app } = makeApp({ listPendingForWorkspace: vi.fn(async () => [
+      makeExternalConfirmationRow(over as Partial<PendingApproval>),
+    ]) })
+    const res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(res.body.externalConfirmations).toEqual([])
+    expect(res.body.toolConfirmation).toBeNull()
+  })
+
+  it.each([
+    { userId: 'u-1', channelType: 'slack' },
+    { userId: 'u-1' },
+  ])('does not expose external rows to a different session owner or channel (%j)', async (session) => {
+    mockFindSession.mockResolvedValue({ id: 'sess-1', assistantId: 'asst-1', ...session } as never)
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    const { app } = makeApp({ listPendingForWorkspace: vi.fn(async () => [makeExternalConfirmationRow()]) })
+    const res = await request(app).get('/api/sessions/sess-1/pending')
+    // An unauthorized owner may be rejected by the session read gate first.
+    if (res.status === 200) expect(res.body.externalConfirmations).toEqual([])
+    else expect(res.status).toBe(404)
   })
 
   it('does not restore a tool confirmation from an older or idle turn', async () => {

@@ -1,3 +1,5 @@
+import { findTelegramConversationContext } from '../../telegram-conversation-context.js'
+vi.mock('../../telegram-conversation-context.js', () => ({ findTelegramConversationContext: vi.fn(async () => null), assertTelegramConversationCurrent: vi.fn(async () => {}) }))
 import { telegramRecordingEnabled, admitTelegramRecording } from '../../channel-recording.js'
 vi.mock('../../channel-recording.js', () => ({
   telegramRecordingEnabled: vi.fn(async () => true),
@@ -89,6 +91,7 @@ const confirmationOrder: string[] = []
 // path can be asserted without touching api.telegram.org.
 let linkedDiscussionChatId: number | undefined
 let chatLookupFails = false
+let useRealTelegramSend = false
 const setWebhookCalls: Array<{ url: string; secret: string }> = []
 
 // Overridable so a test can fail the DOWNLOAD leg the way Telegram actually
@@ -138,9 +141,11 @@ vi.mock('@use-brian/channels', async () => {
     // the add-protection assertions.
     createTelegramAdapter: (opts: Parameters<typeof actual.createTelegramAdapter>[0]) => {
       const real = actual.createTelegramAdapter(opts)
+      const realSendMessage = real.sendMessage.bind(real)
       return Object.assign(real, {
         sendMessage: vi.fn(async (channelId: string, message: OutgoingMessage) => {
           adapterSendCalls.push({ channelId, ...message })
+          if (useRealTelegramSend) return realSendMessage(channelId, message)
           return 'msg_stub'
         }),
         answerCallbackQuery: vi.fn(async () => { confirmationOrder.push('ack') }),
@@ -205,6 +210,8 @@ vi.mock('../../db/chat-lock.js', () => ({
 // Capture processChannelMessage calls and invoke sendResponse so we can
 // verify the adapter is called with a topic-qualified channel id on reply.
 const pipelineCalls: Array<{
+  conversationContext?: unknown
+  recording?: unknown
   admittedAnswerContext?: { kind: 'continue'; questionAnswer?: string }
   archiveInboundAlreadyPersisted?: boolean
   channelId: string
@@ -238,6 +245,8 @@ beforeAll(async () => {
 
 vi.mock('../channel-pipeline.js', () => ({
   processChannelMessage: vi.fn(async (params: {
+    conversationContext?: unknown
+    recording?: unknown
     admittedAnswerContext?: { kind: 'continue'; questionAnswer?: string }
     archiveInboundAlreadyPersisted?: boolean
     interactionScope?: ChannelInteractionScope
@@ -273,6 +282,7 @@ vi.mock('../channel-pipeline.js', () => ({
     // The real central pipeline owns typed-answer resolution and action registration.
     if (!params.admittedAnswerContext && binding && !params.workflowCallback) resolveChannelQuestion(binding)
     pipelineCalls.push({
+      conversationContext: params.conversationContext, recording: params.recording,
       archiveInboundAlreadyPersisted: params.archiveInboundAlreadyPersisted,
       admittedAnswerContext: params.admittedAnswerContext,
       interactionScope: params.interactionScope,
@@ -443,6 +453,7 @@ function makeIntegrationStore(
       channelType: 'telegram',
       botUsername: 'testbot',
       botUserId: '999999',
+      identityGeneration: 0,
       config,
       credentials: {
         bot_token: 'fake-token',
@@ -475,6 +486,7 @@ function flushMicrotasks(): Promise<void> {
 }
 
 beforeEach(() => {
+  vi.mocked(findTelegramConversationContext).mockReset().mockResolvedValue(null)
   vi.mocked(admitTelegramRecording).mockClear()
   vi.mocked(telegramRecordingEnabled).mockClear()
   archiveUnroutedInbound.mockClear()
@@ -642,6 +654,7 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
   it('explains how an admin can approve an unverified Telegram group', () => {
     expect(telegramIncomingFailureText('-1002000000001', {
       reason: 'delivery_audience_unverified',
+      detail: 'unbound',
     })).toBe(
       'Telegram is connected, but this group is not approved for workspace replies. Ask a workspace owner or admin to approve it in Studio > Channels > Group reply access.',
     )
@@ -679,6 +692,32 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
       detail: 'evidence_exceeds_audience',
     })).toContain('not approved to receive')
   })
+
+  it.each(['source_held', 'source_changed', 'source_unverifiable', 'verification_error', 'shape', 'unknown'])(
+    'uses the access-unverified notice for %s even with a historical coarse detail', diagnostic => {
+      for (const detail of [undefined, 'unbound', 'evidence_exceeds_audience']) {
+        const text = telegramIncomingFailureText('-1002000000001:topic:15', {
+          reason: 'delivery_audience_unverified', detail, diagnostic,
+          message: 'PRIVATE SQL and source ids', verificationPhase: 'native_proof', verificationSqlstateClass: '57',
+        })
+        expect(text).toContain("access to some information couldn't be verified")
+        expect(text).toContain('may already be saved')
+        expect(text).not.toMatch(/not approved|Group reply access|try again|PRIVATE|native_proof|57/)
+      }
+    },
+  )
+
+  it('does not assert missing group approval when the coarse reason and diagnostic are absent', () => {
+    expect(telegramIncomingFailureText('-1002000000001', { reason: 'delivery_audience_unverified' }))
+      .toContain("access to some information couldn't be verified")
+  })
+
+  it.each(['binding_expired', 'binding_audience_mismatch', 'binding_approver_not_admin'])(
+    'retains approval guidance for proven %s', diagnostic => {
+      expect(telegramIncomingFailureText('-1002000000001', { reason: 'delivery_audience_unverified', diagnostic }))
+        .toContain('not approved for workspace replies')
+    },
+  )
 })
 
 describe('[COMP:api/telegram-byo-route] OSS owner pairing', () => {
@@ -3691,6 +3730,94 @@ describe('[COMP:api/telegram-byo-route] original media archive', () => {
 })
 
 describe('[COMP:api/telegram-byo-route] workspace ingress admission', () => {
+  it.each(['document','album'] as const)('interprets a context-only %s without automatic file or Brain intake',async(kind)=>{
+    const { findAssistantById }=await import('../../db/users.js')
+    const previous=await findAssistantById('assistant_1')
+    vi.mocked(findAssistantById).mockResolvedValue({...previous,workspaceId:'ws_1'} as never)
+    const context={id:'approved-topic-context',workspaceId:'ws_1',providerConversationContext:true}
+    vi.mocked(findTelegramConversationContext).mockResolvedValue(context as never)
+    vi.mocked(telegramRecordingEnabled).mockResolvedValue(false)
+    const ingest=vi.fn(),storeBuffer=vi.fn()
+    const instance=createTestApp('/webhook/telegram-byo',telegramByoRoutes({provider:{} as never,systemPrompt:'',tools:new Map(),
+      memoryStore:{} as never,capabilityStore:{} as never,apiUrl:'http://test',
+      integrationStore:makeIntegrationStore({requireMention:false}) as never,ingestChannelMediaRef:ingest,archiveMedia:{storeBuffer} as never}))
+    try {
+      const base={message_id:6701,date:1,from:{id:42},chat:{id:-100,type:'supergroup',is_forum:true},message_thread_id:898,caption:'Please review this'}
+      if(kind==='document')await postUpdate(instance,{message:{...base,document:{file_id:'context-doc',file_name:'notes.pdf',mime_type:'application/pdf'}}})
+      else {
+        await postUpdate(instance,{message:{...base,media_group_id:'context-album',photo:[{file_id:'context-photo-1'}]}})
+        await postUpdate(instance,{message:{...base,message_id:6702,media_group_id:'context-album',photo:[{file_id:'context-photo-2'}]}})
+      }
+      await vi.waitFor(()=>expect(pipelineCalls).toHaveLength(1),{timeout:3000})
+      expect(pipelineCalls[0].conversationContext).toBe(context)
+      expect(vi.mocked(findTelegramConversationContext).mock.calls[0]?.[0].expectedIdentity).toEqual({integrationId:'integ_1',botId:'999999',generation:0})
+      expect(pipelineCalls[0].recording).toBeUndefined()
+      expect(pipelineCalls[0].userContentBlocks).toEqual(expect.arrayContaining([expect.objectContaining({type:'image'})]))
+      expect(mediaDownloadCalls.length).toBeGreaterThan(0)
+      expect(ingest).not.toHaveBeenCalled()
+      expect(storeBuffer).not.toHaveBeenCalled()
+      expect(archiveUnroutedInbound).not.toHaveBeenCalled()
+      expect(admitTelegramRecording).not.toHaveBeenCalled()
+    } finally {
+      vi.mocked(findAssistantById).mockResolvedValue(previous)
+      vi.mocked(telegramRecordingEnabled).mockResolvedValue(true)
+    }
+  })
+
+  it.each([false, true])('formats no-recording replies at the provider boundary (HTML rejected: %s)', async (rejectHtml) => {
+    const { findAssistantById } = await import('../../db/users.js')
+    const previous = await findAssistantById('assistant_1')
+    vi.mocked(findAssistantById).mockResolvedValue({ ...previous, workspaceId: 'ws_1' } as never)
+    vi.mocked(telegramRecordingEnabled).mockResolvedValue(false)
+    const text = [
+      '**跑鞋 A** 與 **跑鞋 B**', '',
+      '| 項目 | 跑鞋 A | 跑鞋 B |', '|---|---|---|',
+      '| 用途 | 日常訓練 | 速度訓練 |', '',
+      '### 怎樣選', '- **日常跑**：選 A', '- **速度課**：選 B',
+    ].join('\n')
+    const stream = vi.fn(async function* () { yield { type: 'text_delta', text } })
+    const sends: Array<Record<string, unknown>> = []
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      sends.push(body)
+      return new Response(JSON.stringify(rejectHtml && body.parse_mode === 'HTML'
+        ? { ok: false, error_code: 400, description: "Bad Request: can't parse entities" }
+        : { ok: true, result: { message_id: 77 } }), { status: 200 })
+    })
+    useRealTelegramSend = true
+    const instance = createTestApp('/webhook/telegram-byo', telegramByoRoutes({
+      provider: { stream } as never, systemPrompt: '', tools: new Map(), memoryStore: {} as never,
+      integrationStore: makeIntegrationStore({ requireMention: false }) as never,
+      capabilityStore: {} as never, apiUrl: 'http://test',
+    }))
+    try {
+      await postUpdate(instance, { message: message({ text: 'Compare two running shoes' }) })
+      await vi.waitFor(() => expect(sends).toHaveLength(rejectHtml ? 2 : 1))
+      expect(sends[0]).toMatchObject({ chat_id: '-100', message_thread_id: 898, parse_mode: 'HTML' })
+      expect(sends[0].text).toContain('<b>跑鞋 A</b> 與 <b>跑鞋 B</b>')
+      expect(sends[0].text).toContain('<b>跑鞋 A:</b> 日常訓練')
+      expect(sends[0].text).toContain('<b>怎樣選</b>')
+      expect(sends[0].text).toContain('• <b>日常跑</b>：選 A')
+      const delivered = sends.at(-1)!
+      expect(delivered.text).not.toMatch(/\*\*|###|\|/)
+      if (rejectHtml) {
+        expect(delivered).toMatchObject({ chat_id: '-100', message_thread_id: 898 })
+        expect(delivered.parse_mode).toBeUndefined()
+        expect(delivered.text).toContain('跑鞋 A: 日常訓練')
+        expect(delivered.text).not.toContain('<b>')
+      }
+      expect(admitTelegramRecording).not.toHaveBeenCalled()
+      expect(dispatchIncomingMessageEvent).not.toHaveBeenCalled()
+      expect(archiveUnroutedInbound).not.toHaveBeenCalled()
+      expect(pipelineCalls).toHaveLength(0)
+    } finally {
+      useRealTelegramSend = false
+      fetch.mockRestore()
+      vi.mocked(telegramRecordingEnabled).mockResolvedValue(true)
+      vi.mocked(findAssistantById).mockResolvedValue(previous)
+    }
+  })
+
   it.each([
     { label: 'explicit mention', config: { requireMention: true }, text: '@testbot help', entities: [{ type: 'mention', offset: 0, length: 8 }] },
     { label: 'configured topic without mention', config: { requireMention: true, requireMentionOverrides: [{ chatId: '-100', topicId: 898 }] }, text: 'help', entities: [] },

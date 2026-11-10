@@ -1,3 +1,5 @@
+import { externalAnswerSchema } from '../external-approvals/contracts.js'
+import { externalApprovals, ExternalApprovalError } from '../external-approvals/service.js'
 /**
  * Unified approval queue routes (company-brain — `approvals.md`).
  *
@@ -127,6 +129,7 @@ const PdfSignatureArguments = z.object({
 
 /** Where a non-workflow approval kind is actually resolved. */
 const NATIVE_SURFACE: Record<Exclude<ApprovalKind, 'workflow_step'>, string> = {
+  external_action: 'web',
   department_access: 'workspace-access',
   tool_invocation: 'chat',
   distribution_draft: 'feed',
@@ -337,6 +340,25 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
     }
     const id = req.params.id
     const body = (req.body ?? {}) as { decision?: string; reason?: string; grantAlways?: boolean }
+    // Answer-shaped bodies never reach native decision validation or execution.
+    if (Object.prototype.hasOwnProperty.call(body, 'answer')) {
+      const parsed = z.object({ answer: externalAnswerSchema }).strict().safeParse(req.body)
+      if (!parsed.success) return void res.status(400).json({ error: 'Invalid answer body' })
+      const approval = await opts.approvalsStore.getById(userId, id)
+      if (!approval) return void res.status(404).json({ error: 'Approval not found' })
+      if (approval.kind !== 'external_action' || !isExternalQuestion(approval)) {
+        return void res.status(400).json({ error: 'Only external questions accept answers' })
+      }
+      if (!req.authSessionId) return void res.status(403).json({ error: 'Human authentication required' })
+      try {
+        const state = await externalApprovals().answer(id, parsed.data.answer, { userId, authSessionId: req.authSessionId, human: true, origin: 'ui' })
+        res.json({ kind: 'external_action', ...state })
+      } catch (error) {
+        if (error instanceof ExternalApprovalError) res.status(error.status).json({ error: error.message })
+        else throw error
+      }
+      return
+    }
     if (body.decision !== 'approved' && body.decision !== 'rejected') {
       res.status(400).json({ error: "decision must be 'approved' or 'rejected'" })
       return
@@ -348,6 +370,21 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
     const approval = await opts.approvalsStore.getById(userId, id)
     if (!approval) {
       res.status(404).json({ error: 'Approval not found' })
+      return
+    }
+    if (approval.kind === 'external_action') {
+      if (isExternalQuestion(approval)) return void res.status(400).json({ error: 'Question requires an answer' })
+      if (!req.authSessionId) {
+        res.status(403).json({ error: 'Human authentication required' })
+        return
+      }
+      try {
+        const state = await externalApprovals().resolve(id, decision, { userId, authSessionId: req.authSessionId, human: true, origin: 'ui', grantAlways: body.grantAlways })
+        res.json({ kind: 'external_action', ...state })
+      } catch (error) {
+        if (error instanceof ExternalApprovalError) res.status(error.status).json({ error: error.message })
+        else throw error
+      }
       return
     }
     if (approval.approverUserId !== userId) {
@@ -559,4 +596,9 @@ function serializeApproval(r: PendingApproval) {
     createdAt: r.createdAt.toISOString(),
     expiresAt: r.expiresAt?.toISOString() ?? null,
   }
+}
+
+function isExternalQuestion(approval: PendingApproval): boolean {
+  const request = approval.approvalPayload?.request
+  return !!request && typeof request === 'object' && !Array.isArray(request) && (request as Record<string, unknown>).method === 'question'
 }

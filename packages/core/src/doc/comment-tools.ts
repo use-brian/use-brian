@@ -253,7 +253,11 @@ export function createGetCommentThreadTool(deps: CommentToolDeps): Tool {
       if (!thread) {
         return { data: threadNotFound(input.threadId), isError: true }
       }
-      const messages = (await store.listThreadComments(context.userId, input.threadId)) ?? []
+      const authority = context.executionContext?.security.access.sharedAudience && context.scopeAccumulator
+        ? { execution: context.executionContext, accumulator: context.scopeAccumulator } : undefined
+      const messages = await (authority ? store.listThreadComments(context.userId, input.threadId, authority)
+        : store.listThreadComments(context.userId, input.threadId))
+      if (!messages) return { data: threadNotFound(input.threadId), isError: true }
 
       return {
         data: {

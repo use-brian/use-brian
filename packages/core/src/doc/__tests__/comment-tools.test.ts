@@ -209,11 +209,18 @@ describe('[COMP:doc/comment-tools] getCommentThread', () => {
     expect(store.listThreadComments).not.toHaveBeenCalled()
   })
 
-  it('tolerates a thread with no messages', async () => {
-    const store = fakeStore({ listThreadComments: vi.fn().mockResolvedValue(null) })
+  it('tolerates a readable thread with no messages', async () => {
+    const store = fakeStore({ listThreadComments: vi.fn().mockResolvedValue([]) })
     const tool = createGetCommentThreadTool({ commentThreadStore: store })
     const res = await tool.execute({ threadId: 't-1' }, ctx())
     expect(res.isError).toBeUndefined()
     expect((res.data as { messages: unknown[] }).messages).toEqual([])
+  })
+
+  it('does not present an unavailable discussion as an empty conversation', async () => {
+    const store = fakeStore({ listThreadComments: vi.fn().mockResolvedValue(null) })
+    const res = await createGetCommentThreadTool({ commentThreadStore: store }).execute({ threadId: 't-1' }, ctx())
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('not readable')
   })
 })

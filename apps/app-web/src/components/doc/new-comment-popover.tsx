@@ -73,6 +73,10 @@ type Props = {
   onSubmit: (payload: NewCommentSubmit) => void;
   /** Dismiss without committing — clears the draft highlight, no backend write. */
   onDismiss: () => void;
+  /** Live draft highlight. Re-queried so the card tracks the selection. */
+  resolveAnchor?: () => HTMLElement | null;
+  /** Page column's right edge. The card parks just past it when the margin fits. */
+  columnRight?: () => number | null;
 };
 
 export function NewCommentPopover({
@@ -83,6 +87,8 @@ export function NewCommentPopover({
   assistantId,
   onSubmit,
   onDismiss,
+  resolveAnchor,
+  columnRight,
 }: Props) {
   const t = useT().comments;
   const tAttach = useT().attachments;
@@ -93,7 +99,7 @@ export function NewCommentPopover({
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   // Pass the panel element so an inside-the-panel scroll (e.g. the model picker's
   // own scroll) doesn't trigger a reposition — see `scrollMovesAnchor`.
-  const pos = useAnchoredPosition(anchorEl, open, panelRef);
+  const pos = useAnchoredPosition(anchorEl, open, panelRef, resolveAnchor, columnRight);
   const positioned = pos !== null;
 
   const controls = useComposerControls(workspaceId);
@@ -210,7 +216,7 @@ export function NewCommentPopover({
         left: pos.left,
         top: pos.top,
         bottom: pos.bottom,
-        width: COMMENT_PANEL_WIDTH,
+        width: pos.width ?? COMMENT_PANEL_WIDTH,
         maxHeight: pos.maxHeight,
       }}
       className="z-40 flex max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-lg"

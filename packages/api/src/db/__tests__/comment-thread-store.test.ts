@@ -348,7 +348,8 @@ describe('[COMP:api/comment-thread-store] createDbCommentThreadStore', () => {
     const store = createDbCommentThreadStore()
     const msgs = await store.listThreadComments(USER, 't-1')
 
-    expect(mockQuery.mock.calls[0][1]).toContain('SELECT session_id')
+    expect(mockQuery.mock.calls[0][1]).toContain('ct.session_id')
+    expect(mockQuery.mock.calls[0][1]).toContain('JOIN saved_views')
     expect(mockGetSessionMessages).toHaveBeenCalledWith('sess-1')
     expect(msgs).toHaveLength(2) // the 'tool' row is dropped
     expect(msgs?.[0]).toMatchObject({ id: 'm-1', role: 'user', body: 'why top 5?' })

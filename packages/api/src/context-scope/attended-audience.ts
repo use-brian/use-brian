@@ -16,16 +16,21 @@ import {classifySession,isWebTransport,policyFor} from '../session-kind.js'
 import {readSessionById} from '../db/sessions.js'
 import {hasWorkspaceMcpRetainedAuthority} from '../db/session-context-revisions.js'
 import {findAssistantById} from '../db/users.js'
+import {deliveryFailureMetadata,type DeliveryVerificationPhase} from './delivery-failure.js'
 
 type Prepare=(execution:ExecutionContext,sources:readonly ScopeSource[],action:'context'|'deliver')=>Promise<PreparedExternalSourceAuthority>
 type Options={integrationStore?:ChannelIntegrationStore;prepareSource?:Prepare}
-function denied():never{throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable')}
+function denied(phase?:DeliveryVerificationPhase):never{throw new DeliveryAudienceUnverifiedError(undefined,'source_unverifiable',deliveryFailureMetadata(undefined,phase))}
 /** A destination narrows data access, never the original invocation identity. */
 export async function validateAttendedAudienceEvidence(execution:ExecutionContext,rawEvidence:ScopeEvidence,rawRecipient:AccessCeiling,
- options:{prepareSource?:Prepare;directHumanSource?:boolean}={}):Promise<ScopeEvidence>{
+ options:{prepareSource?:Prepare;directHumanSource?:boolean;pageThreadSessionId?:string}={}):Promise<ScopeEvidence>{
  try{
   const evidence=new ContextScopeAccumulator(execution.security.provenance);evidence.note(structuredClone(rawEvidence))
   const recipient=structuredClone(rawRecipient),workspaceId=execution.security.access.workspaceId,actor=execution.security.access.userId
+  const pageAudience=options.pageThreadSessionId===execution.lifecycle.sessionId&&execution.security.access.sharedAudience
+   ?{sessionId:options.pageThreadSessionId,actorUserId:actor}:undefined
+  const validateAudience=(value:ScopeEvidence,ceiling:AccessCeiling,client?:import('pg').PoolClient)=>
+   validateAudienceScopeEvidence(value,ceiling,client,pageAudience)
   const machine=hasWorkspaceMcpRetainedAuthority(execution)
   if(execution.ownership.kind!=='workspace'||!machine&&(execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
    ||execution.identity.principal.userId!==actor)||recipient.workspaceId!==workspaceId||recipient.userId!==''&&recipient.userId!==actor)denied()
@@ -33,7 +38,7 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
   let sources=evidence.evidence.sources??[]
   if(sources.some(source=>source.workspaceId!==workspaceId))denied()
   if(!sources.length){
-   const current=await validateAudienceScopeEvidence(evidence.evidence,recipient)
+   const current=await validateAudience(evidence.evidence,recipient)
    await execution.security.authority.assertCurrent();return current
   }
   const native=await tryNativeInvocationEvidence(execution,evidence.evidence,recipient,'audience')
@@ -47,7 +52,7 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
   // envelopes. Field, context and independent-source evidence requires the
   // bound non-owner transaction below; no admission result is cached.
   if(!fields.length&&!external.length&&!sources.some(source=>['application_field','external_source','session_context_revision'].includes(source.resourceKind))){
-   const current=await validateAudienceScopeEvidence(evidence.evidence,recipient)
+   const current=await validateAudience(evidence.evidence,recipient)
    await execution.security.authority.assertCurrent();return current
   }
   let nativeFieldProof:ScopeSource[]=[]
@@ -94,7 +99,7 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
     // machine identity never exempts a field from proof. Keep all original
     // roots and validate the complete mixed ancestry below under these locks.
     const current=await tryValidateNativeScopeEvidence({sources:nativeFieldProof},recipient,client,'audience')
-    if(!current)denied()
+    if(!current)denied('anonymous_field_proof')
     evidence.note(current)
    }
    await applyApplicationRLSContext(client,execution)
@@ -103,7 +108,7 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
     await validateCallerScopeEvidence(evidence.evidence,recipient,client)
    }
    if(prepared)await pinPreparedExternalSourceAuthority(client,execution,prepared)
-   const admitted=await validateAudienceScopeEvidence(evidence.evidence,recipient,client)
+   const admitted=await validateAudience(evidence.evidence,recipient,client)
    // This transaction is read-only. The current lease is checked again on
    // return, after COMMIT and current source-proof checks.
    assertWiring();await client.query('COMMIT');return admitted
@@ -113,7 +118,7 @@ export async function validateAttendedAudienceEvidence(execution:ExecutionContex
   await execution.security.authority.assertCurrent();assertWiring();return result
  }catch(error){
   if(error instanceof DeliveryAudienceUnverifiedError)throw error
-  throw Object.assign(new DeliveryAudienceUnverifiedError(undefined,scopeEvidenceFailureOf(error)??'verification_error'),{cause:error})
+  throw Object.assign(new DeliveryAudienceUnverifiedError(undefined,scopeEvidenceFailureOf(error)??'verification_error',error),{cause:error})
  }
 }
 /** Existing destination resolution, with a current original-actor SQL validator. */
@@ -126,6 +131,7 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
    validateEvidence:(evidence,recipient)=>validateAttendedAudienceEvidence(execution,evidence,recipient,{
     ...(dependencies.prepareSource?{prepareSource:dependencies.prepareSource}:{}),
     directHumanSource:isWebTransport(pinned.channelType)||pinned.recipientType==='individual',
+    pageThreadSessionId:pinned.sessionId,
    })})(pinned)
   if(!isWebTransport(pinned.channelType)||pinned.sessionId!==execution.lifecycle.sessionId
    ||execution.lifecycle.sessionPersisted===false||execution.security.access.sharedAudience
@@ -154,7 +160,7 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
    await execution.security.authority.assertCurrent()
    return{allowed:true,evidence}
   }catch(error){
-   return{allowed:false,reason:'delivery_audience_unverified',diagnostic:scopeEvidenceFailureOf(error)??'verification_error'}
+   return{allowed:false,reason:'delivery_audience_unverified',diagnostic:scopeEvidenceFailureOf(error)??'verification_error',...deliveryFailureMetadata(error)}
   }
  }
 }

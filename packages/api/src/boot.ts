@@ -1,3 +1,4 @@
+import { recordDeliveredTelegramConversation } from './telegram-conversation-context.js'
 import { createOfficeVersionRuntime } from './office/version-runtime.js'
 import { workspaceCredentialDelegation } from '@use-brian/core'
 import { captureWorkspaceMcpDelegation, restoreWorkspaceMcpDelegation } from './workspace-mcp/delegation.js'
@@ -5,9 +6,16 @@ import { injectDocTools } from './doc/inject.js'
 import { resolvePinnedContext } from './resolve-session-pins.js'
 import { injectWorkspaceMcpSkills } from './workspace-mcp/skills.js'
 import { findSessionById } from './db/sessions.js'
+import { providerChannelIdFromSession } from './db/session-channel-id.js'
+import { destinationThreadRef } from './external-approvals/destinations.js'
 import { classifySession } from './session-kind.js'
 import { createSessionPinTools } from './session-pin-tools.js'
 import { createWorkspaceMcpProfile } from './workspace-mcp/profile.js'
+import { createExternalApprovalSourceRegistry } from './external-approvals/source-registry.js'
+import { externalApprovalSourceRoutes } from './external-approvals/source-routes.js'
+import { ExternalApprovalService, configureExternalApprovals } from './external-approvals/service.js'
+import { createExternalApprovalSqlStore } from './external-approvals/sql-store.js'
+import { externalApprovalRoutes } from './external-approvals/routes.js'
 import { createRecoverRecordingTool, resolveCurrentRecordingId } from './recordings/recovery.js'
 import { feishuNotificationRoutes } from './routes/feishu-notifications.js'
 import { enqueueNativeSessionStateJob } from './db/session-state-jobs.js'
@@ -29,6 +37,7 @@ import { createCanonicalNativeApplicationModule } from './application-platform/n
 import { createCanonicalGenericApplicationModule } from './application-platform/generic-adapter.js'
 import { buildHomeApplicationMcpProfile } from './application-platform/mcp.js'
 import { captureApplicationHomeBinding } from './application-platform/home-auth.js'
+import { externalServicesRoutes } from './routes/external-services.js'
 import { applicationPlatformRoutes } from './routes/application-platform.js'
 import { ApplicationManagementService } from './application-platform/management.js'
 import { connectorActorMetadataRoutes } from './application-platform/connector-actor-metadata.js'
@@ -2469,7 +2478,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // providers through this registration, so a route that forgets to thread
   // them cannot change which model answers a turn.
   configureTurnKernel({ resolveWorkspaceCustomLlm, configuredProviders })
-  configureTelegramTextDeliveryObserver(recordDeliveredTelegramMessage)
+  configureTelegramTextDeliveryObserver(async delivery => {
+    await Promise.all([recordDeliveredTelegramMessage(delivery),recordDeliveredTelegramConversation(delivery)])
+  })
   // Accepted Brief grounding + revision boundary for every runner's prepare stage.
   configureBriefTurnContext(resolveBriefTurn)
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
@@ -3783,6 +3794,47 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     webBaseUrl: env.APP_URL,
     telegramBotToken: env.TELEGRAM_BOT_TOKEN,
   })
+
+  const externalApprovalSources = createExternalApprovalSourceRegistry()
+  const externalApprovalService = new ExternalApprovalService(
+    externalApprovalSources, createExternalApprovalSqlStore(),
+    async (source, state) => {
+      // Live destination session provides only a transport carrier, not an approver.
+      const destination = source.audience === 'conversation_members' && source.destinationSessionId
+        ? await findSessionById(source.destinationSessionId) : null
+      if (source.audience === 'conversation_members' && (!destination
+        || destination.workspaceId !== source.workspaceId || destination.assistantId !== source.assistantId
+        || destination.channelType !== source.channelType
+        || (source.channelType !== 'web' && (providerChannelIdFromSession(destination.channelType, destination.channelId) !== source.channelId
+          || destinationThreadRef(destination.channelType, destination.channelId) !== source.threadRef))
+        || (source.channelType === 'web' && destination.id !== source.channelId))) return
+      const deliveryUserId = destination?.userId ?? source.approverUserId
+      if (!deliveryUserId) return
+      // Load the frozen request so channel/web cards can show title + details.
+      const row = await pendingApprovalsStore.getByIdSystem(state.approvalId)
+      const request = (row?.approvalPayload as { request?: { title?: string; message?: string; method?: string; options?: string[]; allowCustom?: boolean } } | undefined)?.request
+      const recentTarget = source.channelType === 'web'
+        ? (source.channelId !== 'queue'
+          ? { channelType: 'web' as const, channelId: source.channelId }
+          : undefined)
+        : { channelType: source.channelType, channelId: source.channelId,
+            channelIntegrationId: source.channelIntegrationId, threadRef: source.threadRef }
+      await approvalDeliveries({
+        approvalId: state.approvalId, workspaceId: source.workspaceId,
+        workflowName: '', stepId: '', toolName: '', arguments: {},
+        approverUserId: source.approverUserId, deliveryUserId, externalAction: true,
+        deliveryChannelType: source.channelType, deliveryChannelId: source.channelId,
+        assistantId: source.assistantId,
+        ...(request?.title ? { prompt: { title: request.title, details: request.message,
+          ...(request.method === 'question' ? { method: 'question' as const, options: request.options, allowCustom: request.allowCustom } : {}),
+        } } : {}),
+        ...(recentTarget ? { recentTarget } : {}),
+      })
+    },
+  )
+  configureExternalApprovals(externalApprovalService)
+  // Dedicated source authentication; before user-authenticated /api routers.
+  app.use('/internal/external-approvals', externalApprovalRoutes(externalApprovalService))
 
   const approvalBridgeDeps: ApprovalBridgeDeps = {
     resolveRecentChannel: resolveRecentApprovalChannel,
@@ -6168,6 +6220,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const applicationService = new ApplicationPlatformService([
     createCanonicalNativeApplicationModule(), createCanonicalGenericApplicationModule(), ...(opts.applicationModules ?? []),
   ])
+  app.use('/api/external-services',externalServicesRoutes({clientStore:oauthClientStore,workspaceStore,requireAuth:requireAuth(env.JWT_SECRET),signingSecret:env.JWT_SECRET,webAppUrl:env.AUTHED_APP_URL??env.APP_URL,origins:[env.APP_URL,env.AUTHED_APP_URL].filter(Boolean) as string[]}))
   app.use('/api/applications', applicationPlatformRoutes({ service: applicationService,
     home: { signingSecret: env.JWT_SECRET, consumeBudget: consumeHomeAppBudget },
     oauth: { clientStore: oauthClientStore, workspaceStore, signingSecret: env.JWT_SECRET, webAppUrl: env.APP_URL,
@@ -6822,6 +6875,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/invitations', optionalAuth(env.JWT_SECRET), invitationRouter)
 
   app.use('/api/workspaces/:workspaceId/brain-keys', requireAuth(env.JWT_SECRET), brainKeysRoutes({ brainKeyStore, workspaceStore, workspaceProfile: workspaceMcpProfile }))
+  app.use('/api/workspaces/:workspaceId/external-approval-sources', requireAuth(env.JWT_SECRET), externalApprovalSourceRoutes({ workspaceStore, store: externalApprovalSources }))
   if(engineeringHistory)app.use('/api/workspaces/:workspaceId/engineering-history',requireAuth(env.JWT_SECRET),engineeringHistoryRoutes({service:engineeringHistory,workspaceStore}))
   app.use(
     '/api/workspaces/:workspaceId/programmatic-capture-profiles',

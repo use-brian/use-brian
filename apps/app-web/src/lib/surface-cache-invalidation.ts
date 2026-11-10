@@ -156,7 +156,7 @@ export function staleMarksFor(event: string, workspaceId: string): string[] {
       // Feed shell's record carries (name, role, canDraft) - report E's
       // "Feed gate" row names this as its one stale trigger. The Settings
       // detail row (name, icon, purpose, roster) rides the same signal.
-      return [`projects:${workspaceId}`, `project:${workspaceId}:`, `feed-workspace:${workspaceId}`, `workspace-detail:${workspaceId}`, `feed-collaboration:${workspaceId}`];
+      return [`external-approval-sources:${workspaceId}:`, `projects:${workspaceId}`, `project:${workspaceId}:`, `feed-workspace:${workspaceId}`, `workspace-detail:${workspaceId}`, `feed-collaboration:${workspaceId}`];
     case SKILL_REFRESH_EVENT:
       // `brain-skill:<wid>:` is the skill editor's row. Mark-stale only: the
       // editor body is an editable draft, and the page adopts a revalidated

@@ -152,8 +152,10 @@ export function ApprovalsPanel() {
   );
   // Failed loads are unavailable, never a successful empty queue. Hide stale
   // actionable rows until the queue is authoritative again.
+  // External human requests are tool-style confirmation cards in Chat/Attention,
+  // not a second decision queue. Keep the legacy native-kind surface unchanged.
   const rows: PendingApprovalRow[] | null = authorityLost || queue.error
-    ? null : queue.data ?? (queue.loading ? null : []);
+    ? null : queue.data?.filter((row) => row.kind !== "external_action") ?? (queue.loading ? null : []);
   // Target-skill snapshots for staged_skill_* cards, keyed by approval id.
   // null = not answered yet (cards degrade); {} = answered (possibly failed).
   const skillDetails = snapshots.data ?? null;
@@ -861,7 +863,7 @@ function ApprovalCard({
       return;
     }
     setBusy(false);
-    setError("error" in result ? result.error : t.approvalsPage.respondError);
+    setError("error" in result && result.error !== "external_approval_changed" ? result.error : t.approvalsPage.respondError);
   }
 
   async function saveEmailRevision() {

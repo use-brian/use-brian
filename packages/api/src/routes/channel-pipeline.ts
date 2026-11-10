@@ -1,7 +1,8 @@
+import { assertTelegramConversationCurrent } from '../telegram-conversation-context.js'
 import { recordingInputScope, type RecordingAdmission } from '../channel-recording.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
 import { isInputAuthorityError } from '@use-brian/core'
-import { classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
+import { captureAttendedSessionClassification, classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
 import { getPool } from '../db/client.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
@@ -116,7 +117,7 @@ import {
   publishTurnCompleted,
 } from '../session-live-publisher.js'
 import {
-  findOrCreateSession, addSessionMessage, readSessionMessageScopeSource, setSessionMessageChannelId,
+  findOrCreateSession, addSessionMessage, readSessionMessageScopeSource, setSessionMessageChannelId, type Session,
   getSessionMessages, getPreferredChannel,
   getSessionTopicLabels, coalesceConsecutiveUserMessages,
   markDowngradeNoticeSent, clearDowngradeNotice,
@@ -156,6 +157,7 @@ import {
   isDeliveryAudienceUnverifiedError,
 } from '../context-scope/delivery-authority.js'
 import { validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
+import { deliveryFailureAnalytics } from '../context-scope/delivery-failure.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import {
   buildChannelSessionKey,
@@ -374,6 +376,8 @@ export type ChannelHooks = {
 
 export type ChannelPipelineParams = AdmittedChannelMessage & {
   recording?: RecordingAdmission
+  /** Newly admitted shared provider context; recorder/Brain consent stays separate. */
+  conversationContext?: Session
 
   /**
    * Background-lane model, resolved once at boot against the configured
@@ -1159,10 +1163,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   const sessionChannelId = params.sessionChannelId ?? channelId
   // A group bound to the assistant's workspace is ONE room every sender
   // shares (unified-sessions §4.4, D15); anything else keeps its per-user row.
-  const roomBinding = params.recording ? null : await resolveRoomBinding({
+  const roomBinding = params.recording || params.conversationContext ? null : await resolveRoomBinding({
     assistant, channelType, channelIntegrationId: params.channelIntegrationId, isGroupChat,
   })
-  const room = params.recording?.session ?? (roomBinding
+  const room = params.conversationContext ?? params.recording?.session ?? (roomBinding
     ? (await findOrCreateChannelRoom({
         ...roomBinding,
         assistantId: assistant.id,
@@ -1275,9 +1279,9 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     ? await resolveDeliveryAudienceEnvelope(audienceInput)
     : null
   if (audienceEnvelope && !audienceEnvelope.allowed) {
-    throw new DeliveryAudienceUnverifiedError(audienceEnvelope.detail, audienceEnvelope.diagnostic)
+    throw new DeliveryAudienceUnverifiedError(audienceEnvelope.detail, audienceEnvelope.diagnostic, audienceEnvelope)
   }
-  const publicAudienceTurn = privateRecording || audienceEnvelope?.allowed === true
+  const publicAudienceTurn = Boolean(params.conversationContext) || privateRecording || audienceEnvelope?.allowed === true
     && audienceEnvelope.source === 'public'
   const currentAudienceMaximum = audienceEnvelope?.allowed
     ? async (): Promise<AccessCeiling | null> => {
@@ -1339,7 +1343,11 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
       },
       attribution: { billingUserId },
       sessionAuthority: privateRecording ? undefined : session,
-      credentialCurrent: params.credentialCurrent,
+      credentialCurrent: params.conversationContext ? async () => {
+        if(params.credentialCurrent && !await params.credentialCurrent())return false
+        await assertTelegramConversationCurrent(params.conversationContext!)
+        return true
+      } : params.credentialCurrent,
       ...(audienceEnvelope?.allowed
         ? {
             maximumAccess: {
@@ -1425,13 +1433,14 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   }
   const authority = executionContext.security.authority
   const assertDeliveryAudience = async (): Promise<void> => {
+    if (params.conversationContext) await assertTelegramConversationCurrent(params.conversationContext)
     // The native authorizer owns the same original lease at entry and return.
     if (!nativeTranscriptAuthority) await authority.assertCurrent()
     const decision = await authorizeDeliveryAudience({
       ...audienceInput,
       scopeEvidence: scopeAccumulator.evidence,
     })
-    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic)
+    if (!decision.allowed) throw new DeliveryAudienceUnverifiedError(decision.detail, decision.diagnostic, decision)
     // Current labels of a source that changed since it was read join the floor.
     scopeAccumulator.note({
       sensitivity: decision.evidence.sensitivity,
@@ -1463,6 +1472,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         metadata: {
           error_type: sanitizeAnalytics((err as Error).name),
           stage: sanitizeAnalytics('pre_generation'),
+          ...Object.fromEntries(Object.entries(deliveryFailureAnalytics(err)).map(([key, value]) => [key, sanitizeAnalytics(value)])),
           ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
             ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
             : {}),
@@ -1576,7 +1586,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     const input = {
       sessionId: session.id,
       role: 'user' as const,
-      content: userContentBlocks,
+      content: params.conversationContext ? userContentBlocks.map(block => block.type === 'text' ? block
+        : { type: 'text' as const, text: `[${block.type}]` }) : userContentBlocks,
       replyToText: replyResolved?.text ?? null,
       topicLabel: classification?.topic_label ?? null,
       topicConfidence: classification?.confidence ?? null,
@@ -1584,6 +1595,8 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         ? String(room ? providerInputId : incomingChannelMessageId) : null,
       senderUserId: roomShape.attributeSenders ? userId : senderUserId ?? null,
       scope: inputMessageScope,
+      ...(params.conversationContext?.providerContextIdentity && params.conversationContext.providerContextGeneration != null
+        ? { providerContext: { identity: params.conversationContext.providerContextIdentity, generation: params.conversationContext.providerContextGeneration } } : {}),
     }
     if (!room) return addSessionMessage(input, client)
     const result = await appendChannelRoomMessage(input, client)
@@ -1610,13 +1623,16 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     : await persistUserMessage()
   const earlyUserMessageRow = nativeTranscriptAuthority ? await persistInboundMessage() : undefined
 
-  // Load the pre-turn transcript once and reuse it for adaptive research +
-  // topic classification. Follow-up detection needs actual dialogue, not an
-  // isolated current sentence (2026-08-09 Snapio incident on web; channels
-  // share the same classifier contract).
-  const preExistingDbMessages = privateRecording ? [] : nativeTranscriptAuthority
+  // Native classifiers share admitted bytes, while each retains its fresh
+  // input-authority check. Legacy classifiers need their pre-turn dialogue.
+  if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
+  const nativeClassificationCapture = nativeTranscriptAuthority && earlyUserMessageRow
+    ? await captureAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow })
+    : undefined
+  const preExistingDbMessages = privateRecording || nativeClassificationCapture ? [] : nativeTranscriptAuthority
     ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, undefined, earlyUserMessageRow ? earlyUserMessageRow.sequenceNum - 1 : undefined)
     : await filterHistoryForAudience(await getSessionMessages(session.id, { excludeHeld: true }))
+  if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
   const adaptiveRecentConversation = preExistingDbMessages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .filter((m) => !(
@@ -1663,6 +1679,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         ? await classifyAttendedResearchMessage({
             authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
             provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
+            capture: nativeClassificationCapture,
           })
         : await classifyResearchIntent({
         provider: backgroundProvider,
@@ -1784,6 +1801,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     ? await classifyAttendedSessionMessage({
         authority: nativeTranscriptAuthority, session, message: earlyUserMessageRow,
         provider: backgroundProvider, model: backgroundLaneModel, decisionRuntime: params.decisionRuntime,
+        capture: nativeClassificationCapture,
         reply: { channelType, replyToMessageId: replyToMessageId ?? null },
       })
     : undefined
@@ -1800,6 +1818,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     anchorTimezone,
   })
 
+  if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
   const storedReply = privateRecording ? null : nativeClassification ? nativeClassification.reply : await resolveReplyText({
     channelType,
     replyToMessageId: replyToMessageId ?? null,
@@ -1966,6 +1985,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // ── Load history ──
   // `fromSequence` skips rows already compacted into the most recent
   // boundary; null (never compacted) loads full history.
+  if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
   let dbMessages = privateRecording ? [] : nativeTranscriptAuthority
     ? await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, isolatedAudience || room ? null : session.compactBoundarySequence)
     : await filterHistoryForAudience(await getSessionMessages(session.id, {
@@ -1974,6 +1994,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         // per-source audience evidence. Rebuild from filtered provider history.
         fromSequence: isolatedAudience || room ? null : session.compactBoundarySequence,
       }))
+  if(params.conversationContext)await assertTelegramConversationCurrent(params.conversationContext)
   if (room && !privateRecording) {
     const currentHistory = overlayCurrentRoomMessage(dbMessages, { id: userMessageRow.id, content: userContentBlocks })
     if (!currentHistory) {
@@ -2685,7 +2706,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // A managed recorder is a transcript of the provider conversation. Its
     // only assistant writer is the successful-delivery receipt observer;
     // model/tool rounds are private execution state, not published messages.
-    if (params.recording) return
+    if (params.recording || params.conversationContext) return
     // Attachments (sendFile) belong to the final reply — the last turn
     // with content. Intermediate tool_use turns never carry them.
     const lastContentIdx = (() => {
@@ -3541,6 +3562,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         metadata: {
           error_type: sanitizeAnalytics((err as Error).name),
           stage: sanitizeAnalytics('live_authority'),
+          ...Object.fromEntries(Object.entries(deliveryFailureAnalytics(err)).map(([key, value]) => [key, sanitizeAnalytics(value)])),
           ...(isDeliveryAudienceUnverifiedError(err) && err.diagnostic
             ? { denial_diagnostic: sanitizeAnalytics(err.diagnostic) }
             : {}),

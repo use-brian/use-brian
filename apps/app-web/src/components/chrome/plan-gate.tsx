@@ -251,7 +251,7 @@ export function PlanGate({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 backdrop-blur-sm p-6" role="dialog" aria-modal="true" aria-labelledby="plan-required-title">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-6" role="dialog" aria-modal="true" aria-labelledby="plan-required-title">
       <div className="w-full max-w-md rounded-2xl border border-border bg-card p-8 shadow-lg">
         <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-5">
           <LockIcon className="w-6 h-6 text-primary" />

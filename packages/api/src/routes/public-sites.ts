@@ -38,6 +38,7 @@ import { listPublicThreadsForPage } from '../db/comment-thread-store.js'
 import { subscribeToPageShareChanges } from '../page-share-fanout.js'
 import { getLinkBreadcrumb } from '../db/page-grant-store.js'
 import { mountGuestCommentRoutes } from './_public-guest-comments.js'
+import { getPublicWorkspaceIcon } from '../db/workspace-icon.js'
 
 export type PublicSiteRouteOptions = PublicRenderDeps & {
   pageDomainStore: PageDomainStore
@@ -105,11 +106,12 @@ export function publicSiteRoutes(opts: PublicSiteRouteOptions): Router {
         page ?? { blocks: [] },
         rootPageId,
       )
-      const [comments, breadcrumb, recording] = await Promise.all([
+      const [comments, breadcrumb, recording, workspaceIcon] = await Promise.all([
         listPublicThreadsForPage(target.pageId),
         getLinkBreadcrumb(target.pageId, rootPageId),
         // The page's recording chrome — same surface the brief carries in-app.
         publicRecordingSummaryFor(target.pageId, target.workspaceId),
+        getPublicWorkspaceIcon(target.workspaceId),
       ])
       const paths = await buildSitePaths(pageDomainStore, domain, rendered.blocks, breadcrumb)
       res.setHeader('Cache-Control', 'public, max-age=15')
@@ -127,6 +129,7 @@ export function publicSiteRoutes(opts: PublicSiteRouteOptions): Router {
         pageId: target.pageId,
         canonicalPath,
         paths,
+        workspaceIcon,
       })
     } catch (err) {
       console.error('[public-sites] render failed:', err)

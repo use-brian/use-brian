@@ -7,6 +7,18 @@ import { createTelegramWebhookHandler, verifyTelegramWebhook } from '../telegram
 import { escapeHtml, markdownToTelegramHTML, stripMarkdown } from '../telegram/markdown.js'
 
 describe('[COMP:channels/telegram] provider-confirmed text delivery recording', () => {
+  it('captures immutable integration and identity generation before provider I/O', async () => {
+    const origin={integrationId:'fictional-integration',generation:2}
+    const receipts:TelegramTextDelivery[]=[]
+    vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>({ok:true,result:{message_id:3,text:'Visible reply'}})})))
+    try {
+      const adapter=createTelegramAdapter({token:'12345:fictional',deliveryOrigin:origin,onTextDelivered:receipt=>{receipts.push(receipt)}})
+      origin.generation=9
+      await adapter.sendMessage('-1000000001:topic:21',{text:'Visible reply'})
+      expect(receipts[0].origin).toEqual({integrationId:'fictional-integration',generation:2})
+    } finally { vi.unstubAllGlobals() }
+  })
+
   async function run(options: { failAt?: number; recorderFails?: boolean; fallbackTopic?: boolean } = {}) {
     const deliveries: TelegramTextDelivery[] = []
     let sends = 0
@@ -282,6 +294,23 @@ describe('[COMP:channels/telegram] markdownToTelegramHTML', () => {
 })
 
 describe('[COMP:channels/telegram] stripMarkdown', () => {
+  it('preserves empty comparison cells without shifting later column labels', () => {
+    const input = '| Task | Owner | Deadline |\n|---|---|---|\n| Setup | | Friday |'
+    expect(stripMarkdown(input)).toBe('Task: Setup\nOwner: \nDeadline: Friday\n')
+    expect(markdownToTelegramHTML(input)).toBe('<b>Task:</b> Setup\n<b>Owner:</b> \n<b>Deadline:</b> Friday\n')
+  })
+
+  it('keeps table comparisons vertical after an HTML rejection', () => {
+    const input = '| Item | Shoe A | Shoe B |\n|---|---|---|\n| Use | Daily | Speed |'
+    expect(stripMarkdown(input)).toBe('Item: Use\nShoe A: Daily\nShoe B: Speed\n')
+  })
+
+  it('preserves code literals while normalising surrounding tables', () => {
+    const code = '| Field | Value |\n|---|---|\n| bold | **literal** |'
+    const input = '```txt\n' + code + '\n```\n\n`**literal**`\n\n' + code
+    expect(stripMarkdown(input)).toBe(code + '\n\n\n**literal**\n\nField: bold\nValue: literal\n')
+  })
+
   it('strips bold, italic, strike, links', () => {
     expect(stripMarkdown('**bold** and *italic* and ~~gone~~')).toBe('bold and italic and gone')
     expect(stripMarkdown('[click here](https://example.com)')).toBe('click here (https://example.com)')

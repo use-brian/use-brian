@@ -90,6 +90,10 @@ export type Session = {
   channelType: string
   channelId: string
   appId: string
+  providerConversationContext?: boolean
+  providerContextIdentity?: { integrationId: string; botId: string; generation: number } | null
+  roomCapture?: boolean
+  providerContextGeneration?: number | null
   /**
    * Which app surface the session was created from (`brain`, `studio`,
    * `workflow`, `doc`, `chat`). Null for sessions older than
@@ -247,47 +251,10 @@ export type SessionMessageAttachment = {
 
 
 
-/** Storage-only delimiter for a thread-qualified session channel id. */
-const THREAD_SESSION_DELIMITER = ':thread:'
-/** Storage delimiter retained for Slack callers that need to decode a root. */
-export const SLACK_THREAD_SESSION_DELIMITER = THREAD_SESSION_DELIMITER
-
-/** Encode a provider delivery channel plus a stable thread root for storage. */
-export function buildThreadSessionChannelId(
-  channelId: string,
-  threadRoot?: string | null,
-): string {
-  return threadRoot
-    ? `${channelId}${THREAD_SESSION_DELIMITER}${threadRoot}`
-    : channelId
-}
-
-/**
- * Turn a Slack channel + root `thread_ts` into the conversation id
- * stored on `sessions.channel_id`. A missing root preserves the legacy
- * channel-level session used when the integration does not reply in threads.
- *
- * Slack API calls must keep using the base channel id plus a separate
- * `thread_ts`; this encoded id is only for Brian's session-scoped state.
- */
-export function buildSlackSessionChannelId(
-  channelId: string,
-  threadTs?: string | null,
-): string {
-  return buildThreadSessionChannelId(channelId, threadTs)
-}
-
-/** Convert a stored session conversation id back to a provider destination. */
-export function providerChannelIdFromSession(
-  channelType: string,
-  sessionChannelId: string,
-): string {
-  if (channelType !== 'slack' && channelType !== 'feishu') return sessionChannelId
-  const delimiterIndex = sessionChannelId.indexOf(THREAD_SESSION_DELIMITER)
-  return delimiterIndex === -1
-    ? sessionChannelId
-    : sessionChannelId.slice(0, delimiterIndex)
-}
+// Keep existing imports compatible while metadata-only consumers avoid loading
+// the entire session/authority graph merely to normalize an address.
+import { providerChannelIdFromSession } from './session-channel-id.js'
+export { buildThreadSessionChannelId, buildSlackSessionChannelId, providerChannelIdFromSession, SLACK_THREAD_SESSION_DELIMITER } from './session-channel-id.js'
 
 /**
  * Create a workspace-shared chat session (the Chat app's "New workspace chat").
@@ -712,6 +679,7 @@ export async function readSessionById(id: string): Promise<Session | null> {
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             workspace_id as "workspaceId",
+            provider_conversation_context AS "providerConversationContext", provider_context_identity AS "providerContextIdentity", provider_context_generation AS "providerContextGeneration", room_capture AS "roomCapture",
             channel_type as "channelType", channel_id as "channelId",
             app_id as "appId", app_origin as "appOrigin", status, turn_started_at as "turnStartedAt", NULL::text as "compactSummary",
             compaction_count as "compactionCount",
@@ -848,6 +816,7 @@ export const TURN_LEASE_STALE_AFTER_MS = 90_000
 /** Why a turn's lock was released. Persisted so a heal can explain itself. */
 export type TurnEndReason =
   | 'completed'
+  | 'failed'
   | 'stopped_by_user'
   | 'stalled_reclaimed'
   | 'timeout'
@@ -965,7 +934,8 @@ export async function requestTurnCancel(sessionId: string): Promise<boolean> {
  * blocks nothing but preserves the debugging signal that this turn did not end
  * the way it was supposed to.
  */
-function restingStatusFor(reason: TurnEndReason): 'idle' | 'timeout' {
+function restingStatusFor(reason: TurnEndReason): 'idle' | 'timeout' | 'failed' {
+  if (reason === 'failed') return 'failed'
   return reason === 'completed' || reason === 'stopped_by_user' ? 'idle' : 'timeout'
 }
 

@@ -8,9 +8,9 @@
  * request is still with them), decisions a reviewer made on their behalf,
  * and workflow route blockers. Opening the panel marks items seen;
  * resolving a request removes it. No timers, reminders or outbound sends.
- * The panel also offers explicit reviewer assignment for one request,
- * "review now", and pattern inspection/revocation. Every action is the
- * signed-in person acting through the shared server services.
+ * External requests reuse ChatConfirmationCard in place with full frozen
+ * details and human-only Allow/Deny, never reviewer delegation or a queue
+ * deep link. Native reviewer and legacy request behavior stays unchanged.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -37,6 +37,7 @@ import {
   type ApprovalPatternView,
   type AttentionItem,
 } from "@/lib/api/approval-review";
+import { ExternalActionConfirmation } from "@/components/chrome/external-action-confirmation";
 
 type Dict = ReturnType<typeof useT>["chatApp"]["approvalReview"];
 
@@ -46,15 +47,22 @@ export function reasonText(t: Dict, reason: string): string {
   return known[reason] ?? known[head] ?? format(t.reasons.other, { code: reason });
 }
 
-export function ApprovalReviewAttention({ workspaceId, sessionId, projectId }: {
+export function ApprovalReviewAttention({ workspaceId, sessionId, projectId, openRequestId }: {
   workspaceId: string
   sessionId: string | null
   projectId: string | null
+  openRequestId?: string | null
 }) {
   const t = useT().chatApp.approvalReview;
   const [open, setOpen] = useState(false);
   const [everywhere, setEverywhere] = useState(false);
   const [tab, setTab] = useState<"work" | "patterns">("work");
+  useEffect(() => {
+    if (!openRequestId) return;
+    setOpen(true);
+    setEverywhere(true);
+    setTab("work");
+  }, [workspaceId, openRequestId]);
   const scoped = !everywhere && (projectId || sessionId) ? { projectId, sessionId } : {};
   const key = attentionCacheKey(workspaceId, scoped);
   const badgeKey = attentionCacheKey(workspaceId, {});
@@ -101,7 +109,7 @@ export function ApprovalReviewAttention({ workspaceId, sessionId, projectId }: {
           </span>
         )}
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-[min(26rem,calc(100vw-1rem))] gap-2">
+      <PopoverContent align="end" className="max-h-[calc(100dvh-5rem)] w-[min(26rem,calc(100vw-1rem))] gap-2 overflow-y-auto">
         <div className="flex items-center justify-between gap-2">
           <p className="text-sm font-semibold">{t.title}</p>
           <div role="tablist" aria-label={t.title} className="flex items-center gap-0.5 rounded-md bg-muted/60 p-0.5 text-xs">
@@ -117,7 +125,7 @@ export function ApprovalReviewAttention({ workspaceId, sessionId, projectId }: {
                 <button type="button" aria-pressed={everywhere} onClick={() => setEverywhere(true)} className={tabCls(everywhere)}>{t.scopeAll}</button>
               </div>
             )}
-            <AttentionList t={t} workspaceId={workspaceId} state={list} />
+            <AttentionList t={t} workspaceId={workspaceId} state={list} requestId={openRequestId} />
           </>
         ) : (
           <PatternList t={t} workspaceId={workspaceId} />
@@ -131,7 +139,7 @@ function tabCls(active: boolean) {
   return cn("min-h-7 rounded px-2 py-0.5 max-md:min-h-11", active ? "bg-background font-medium shadow-sm" : "text-muted-foreground hover:text-foreground");
 }
 
-function AttentionList({ t, workspaceId, state }: { t: Dict; workspaceId: string; state: ReturnType<typeof useCachedResource<{ items: AttentionItem[] }>> }) {
+function AttentionList({ t, workspaceId, state, requestId }: { t: Dict; workspaceId: string; state: ReturnType<typeof useCachedResource<{ items: AttentionItem[] }>>; requestId?: string | null }) {
   if (state.loading && !state.data) return <div className="h-16 animate-pulse rounded-md bg-muted/50" aria-label={t.loading} />;
   if (state.error && !state.data) {
     return (
@@ -141,7 +149,8 @@ function AttentionList({ t, workspaceId, state }: { t: Dict; workspaceId: string
       </div>
     );
   }
-  const items = state.data?.items ?? [];
+  const items = [...(state.data?.items ?? [])].sort((a, b) =>
+    Number("approvalId" in b && b.approvalId === requestId) - Number("approvalId" in a && a.approvalId === requestId));
   if (!items.length) return <p className="text-xs text-muted-foreground">{t.empty}</p>;
   return (
     <ul className="flex flex-col gap-2" data-testid="approval-review-items">
@@ -186,6 +195,15 @@ function AttentionRow({ t, workspaceId, item, onChanged }: { t: Dict; workspaceI
         <p className="font-medium">{format(item.invalidated ? t.decidedInvalid : t.decided, { name })}</p>
         {item.toolName && <p className="truncate text-muted-foreground">{item.toolName}</p>}
         <Link className="mt-1 inline-block underline" href={`/w/${workspaceId}/p?panel=approvals&approval=${item.approvalId}`}>{t.open}</Link>
+      </li>
+    );
+  }
+  if (item.approvalKind === "external_action") {
+    return (
+      <li data-kind={item.kind}>
+        {item.confirmation ? (
+          <ExternalActionConfirmation key={`${workspaceId}:${item.approvalId}`} workspaceId={workspaceId} request={item.confirmation} onResolved={onChanged} />
+        ) : <p role="status" className="text-xs text-muted-foreground">{t.changed}</p>}
       </li>
     );
   }

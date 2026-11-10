@@ -42,6 +42,7 @@ import { mountGuestCommentRoutes } from './_public-guest-comments.js'
 import { listPublicThreadsForPage } from '../db/comment-thread-store.js'
 import { subscribeToPageShareChanges } from '../page-share-fanout.js'
 import { getLinkBreadcrumb, getPublicBreadcrumb, type ResolvedLink } from '../db/page-grant-store.js'
+import { getPublicWorkspaceIcon } from '../db/workspace-icon.js'
 
 export type PublicShareRouteOptions = PublicRenderDeps & {
   pageGrantStore: PageGrantStore
@@ -98,7 +99,7 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
     try {
       const shareRootId = link.rootPageId ?? link.pageId
       const rendered = await renderPublicPage(opts, link.workspaceId, page ?? { blocks: [] }, shareRootId,token?{kind:'link',token}:{kind:'published'})
-      const [comments, breadcrumb, recording] = await Promise.all([
+      const [comments, breadcrumb, recording, workspaceIcon] = await Promise.all([
         listPublicThreadsForPage(link.pageId),
         link.rootPageId
           ? getLinkBreadcrumb(link.pageId, link.rootPageId)
@@ -107,6 +108,7 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
         // [H:MM:SS] citations) — resolved from the page's OWN pointer, so the
         // shared view carries the same surface the brief page does in-app.
         publicRecordingSummaryFor(link.pageId, link.workspaceId),
+        getPublicWorkspaceIcon(link.workspaceId),
       ])
       // Light cache so polling clients don't hammer the render path.
       res.setHeader('Cache-Control', 'public, max-age=15')
@@ -121,6 +123,7 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
         comments,
         breadcrumb,
         recording,
+        workspaceIcon,
       })
     } catch (err) {
       console.error('[public-share] render failed:', err)

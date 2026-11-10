@@ -47,6 +47,17 @@ const ceiling: AccessCeiling = {
 beforeEach(() => { state.read.length = 0; state.next = null })
 
 describe('[COMP:api/caller-scope-evidence] per-source audience validation', () => {
+  it('preserves safe native-proof cancellation metadata without changing the refusal', async () => {
+    const databaseError = Object.assign(new Error('PRIVATE SQL and source id'), { code: '57014' })
+    const client = { query: vi.fn(async (_sql: string) => { throw databaseError }) }
+    await expect(validateAudienceScopeEvidence({ sources: [source('field', { resourceKind: 'application_field' })] }, ceiling, client as never))
+      .rejects.toMatchObject({ reason: 'delivery_audience_unverified', retrySafe: false, diagnostic: 'source_unverifiable',
+        verificationPhase: 'native_proof', verificationSqlstateClass: '57', cause: databaseError })
+    expect(client.query).toHaveBeenCalledOnce()
+    expect(client.query.mock.calls[0][0]).toContain('read_native_turn_scope_evidence')
+    expect(state.read).toHaveLength(0)
+  })
+
   it('admits a newly saved note without treating the note as private context read by the group', async () => {
     const memory = bindScopeSource({ id: 'just-created', summary: 'Remember the course registration deadline' }, source('just-created'))
     const group = { ...ceiling, userId: '' }

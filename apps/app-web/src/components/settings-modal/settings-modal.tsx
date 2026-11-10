@@ -7,7 +7,8 @@
  * Notion-style two-rail overlay. Houses ADMIN-only sections (account,
  * members, billing, workspace settings). FUNCTIONAL config (connectors,
  * skills, assistants, channels, sensitivity, ingest rules) lives in the
- * core web app's Studio, NOT here.
+ * core web app's Studio. Scoped external approval credentials are workspace
+ * administration and belong here.
  *
  * Below `sm`, a compact section picker sits above the requested section.
  * Deep links open their body immediately; desktop keeps the two-rail layout.
@@ -35,6 +36,7 @@ import { format, useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { deploymentCapabilities, isOssEdition, HOSTED_UPGRADE_URL } from "@/lib/edition";
 import type { DeploymentCapabilities } from "@use-brian/shared/deployment-capabilities";
+import { ExternalApprovalsSection } from "./sections/external-approvals-section";
 import { AccountSection } from "./sections/account-section";
 import { GeneralSection } from "./sections/general-section";
 import { PrivacySection } from "./sections/privacy-section";
@@ -69,6 +71,7 @@ const ACCOUNT_SECTIONS: SettingsSection[] = [
 const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-organization",
   "ws-general",
+  "ws-external-approvals",
   // Provider connections and model routing share the Models section.
   // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
   // manager for published-page hostnames. Open feature, so OSS keeps it too.
@@ -86,6 +89,7 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
 const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-organization",
   "ws-general",
+  "ws-external-approvals",
   "ws-models",
   "ws-domains",
   "ws-usage",
@@ -117,6 +121,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
   const labels: Record<SettingsSection, string> = {
     "ws-organization": t.organization.title,
     "ws-access": t.workspaceAccess.title,
+    "ws-external-approvals": t.externalApprovals.title,
     "ws-general": t.chrome.settingsModal.workspace.general,
     "ws-members": oss
       ? t.chrome.settingsModal.upgrade.teammatesNav
@@ -184,7 +189,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
   return (
     <Dialog.Root open={open} onOpenChange={(next) => { if (!next && !pickerOpen) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Backdrop forceRender className="fixed inset-0 z-50 bg-background/40 backdrop-blur-sm" />
+        <Dialog.Backdrop forceRender className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm" />
         <div className="pointer-events-none fixed inset-0 z-50 overflow-y-auto">
       <div className="min-h-full flex items-center justify-center p-0 sm:p-6">
         <Dialog.Popup
@@ -377,6 +382,8 @@ function SectionBody({
       return <PrivacySection onOpenChat={onClose} />;
     case "notifications":
       return <NotificationsSection />;
+    case "ws-external-approvals":
+      return <ExternalApprovalsSection />;
     case "ws-general":
       return <WorkspaceGeneralSection onWorkspaceDeleted={onClose} />;
     case "ws-members":

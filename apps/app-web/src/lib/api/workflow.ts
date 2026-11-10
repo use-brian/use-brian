@@ -1055,7 +1055,7 @@ export async function listWorkspaceSlackChannels(
 }
 
 /** Authorized web sessions use their stable DB id as the event source id. */
-export async function listWorkspaceWebChatOptions(
+async function listWorkspaceWebChatOptions(
   workspaceId: string,
 ): Promise<WorkspaceChannelOption[]> {
   const res = await authFetch(

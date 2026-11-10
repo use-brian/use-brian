@@ -150,6 +150,7 @@ function createDelivery(
     channelId,
     channelIntegrationId,
     text,
+    actions,
     scopeEvidence,
     publication,
     question,
@@ -242,6 +243,7 @@ function createDelivery(
       return {
         token,
         text: deliverable + (token && question ? workflowQuestionReplyHint(token, question, !!questionResponse) : ''),
+        actions: actions ?? (token && question && questionResponse ? workflowQuestionActions(token, question) : undefined),
       }
     }
     const attachQuestion = async (token: string | undefined, messageId: string | void) => {
@@ -310,7 +312,7 @@ function createDelivery(
           ? credentials.graph_api_version
           : undefined,
         recipientType: replyToTrigger.recipientType,
-      }).sendMessage(targetChannelId, { text: prepared.text, format: 'markdown' })
+      }).sendMessage(targetChannelId, { text: prepared.text, format: 'markdown', actions: prepared.actions })
       await attachQuestion(prepared.token, messageId)
       return {
         status: 'delivered',
@@ -340,7 +342,7 @@ function createDelivery(
     }
 
     if (channelType === 'telegram') {
-      const tokens: Array<{ token: string; integrationId?: string }> = []
+      const tokens: Array<{ token: string; integrationId?: string; generation?: number }> = []
       if (options.integrationStore) {
         const integ = channelIntegrationId
           ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
@@ -352,7 +354,7 @@ function createDelivery(
             )
           : await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'telegram')
         const byoToken = integ && (integ.credentials as { bot_token?: string }).bot_token
-        if (byoToken) tokens.push({ token: byoToken, integrationId: integ.id })
+        if (byoToken) tokens.push({ token: byoToken, integrationId: integ.id, generation: integ.identityGeneration })
       }
       if (!channelIntegrationId && options.defaultTelegramBotToken && (tokens.length === 0 || !question)) {
         tokens.push({ token: options.defaultTelegramBotToken })
@@ -361,17 +363,18 @@ function createDelivery(
       // `threadRef` (an earlier delivery's message id) posts this one as a
       // reply; the returned message id lets a later `deliver.thread` step
       // reply under THIS message. See workflow.md → deliver `thread`.
-      for (const [index, { token, integrationId }] of tokens.entries()) {
+      for (const [index, { token, integrationId, generation }] of tokens.entries()) {
         try {
           if (question && !integrationId) return { status: 'skipped', channelType, reason: 'no_integration' }
           const store = options.questionStore ?? createChannelQuestionStore()
           const questionToken = question && integrationId ? await store.create({
             integrationId, workspaceId, assistantId, userId, channelId, question, response: questionResponse, threadRef,
           }) : undefined
-          const send = () => createTelegramAdapter({ token, strictTopic: !!questionToken || !!publicationApprovalId }).sendMessage(
+          const send = () => createTelegramAdapter({ token, strictTopic: !!questionToken || !!publicationApprovalId,
+            ...(integrationId && generation != null ? { deliveryOrigin: { integrationId, generation } } : {}) }).sendMessage(
             channelId,
             { text: deliverable + (questionToken && question ? workflowQuestionReplyHint(questionToken, question, !!questionResponse) : ''), format: 'markdown',
-              actions: questionToken && question && questionResponse ? workflowQuestionActions(questionToken, question) : undefined },
+              actions: actions ?? (questionToken && question && questionResponse ? workflowQuestionActions(questionToken, question) : undefined) },
             threadRef ? { threadTs: threadRef } : undefined,
           )
           let tgMessageId: string | void
@@ -430,7 +433,7 @@ function createDelivery(
         sendStarted = true
         const slackTs = await adapter.sendMessage(
           channelId,
-          { text: prepared.text, format: 'markdown' },
+          { text: prepared.text, format: 'markdown', actions: prepared.actions },
           threadRef ? { threadTs: threadRef } : undefined,
         )
         if (!slackTs || missingAcknowledgement) throw new Error('slack_acknowledgement_unavailable')
@@ -476,7 +479,7 @@ function createDelivery(
       const prepared = await prepareQuestion(integ.id)
       const messageId = await adapter.sendMessage(
         channelId,
-        { text: prepared.text, format: 'markdown' },
+        { text: prepared.text, format: 'markdown', actions: prepared.actions },
         threadRef ? { threadTs: threadRef } : undefined,
       )
       await attachQuestion(prepared.token, messageId)
@@ -503,7 +506,7 @@ function createDelivery(
         tenantId: creds.tenant_id,
         serviceUrl,
         botId: integ.botUserId ?? undefined,
-      }).sendMessage(channelId, { text: prepared.text, format: 'markdown' })
+      }).sendMessage(channelId, { text: prepared.text, format: 'markdown', actions: prepared.actions })
       await attachQuestion(prepared.token, msgId)
       return { status: 'delivered', channelType, channelId, messageId: msgId || undefined }
     }
@@ -534,6 +537,7 @@ function createDelivery(
       }).sendMessage(channelId, {
         text: prepared.text,
         format: 'markdown',
+        actions: prepared.actions,
       })
       await attachQuestion(prepared.token, outboxId)
       return { status: 'delivered', channelType, channelId, messageId: outboxId || undefined }
@@ -546,17 +550,18 @@ function createDelivery(
       if (!targetChannelId.includes('@')) {
         return { status: 'skipped', channelType, reason: 'no_integration' }
       }
-      const integ = question && options.integrationStore && channelIntegrationId
+      const integ = options.integrationStore && channelIntegrationId
         ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
             workspaceId, assistantId, channelIntegrationId, 'whatsapp', targetChannelId)
         : undefined
-      if (question && (!integ || (integ.credentials as { provider?: string }).provider === 'cloud_api')) return { status: 'skipped', channelType, reason: 'no_integration' }
-      const prepared = integ ? await prepareQuestion(integ.id) : { text: deliverable, token: undefined }
+      // Explicit integration is pinned: never silently deliver through system.
+      if ((question || channelIntegrationId) && (!integ || (integ.credentials as { provider?: string }).provider === 'cloud_api' || !integ.channelId)) return { status: 'skipped', channelType, reason: 'no_integration' }
+      const prepared = integ ? await prepareQuestion(integ.id) : { text: deliverable, token: undefined, actions }
       const messageId = await createWhatsAppAdapter({
         connectorUrl: options.waConnectorUrl,
         connectorSecret: options.waConnectorSecret,
         connectionId: integ?.channelId ?? 'system',
-      }).sendMessage(targetChannelId, { text: prepared.text, format: 'plain' })
+      }).sendMessage(targetChannelId, { text: prepared.text, format: 'plain', actions: prepared.actions })
       await attachQuestion(prepared.token, messageId)
       return { status: 'delivered', channelType, channelId: targetChannelId, messageId: messageId || undefined }
     }

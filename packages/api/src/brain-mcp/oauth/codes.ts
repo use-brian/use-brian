@@ -30,7 +30,7 @@ export type OAuthConsentRequest = {
   state: string | null
   /** Epoch seconds when this consent request is no longer valid. */
   exp: number
-  audience?: 'brain' | 'application' | 'assistant'
+  audience?: 'brain' | 'application' | 'assistant' | 'service'
   assistantId?: string
   applicationId?: string
   applicationRevision?: string
@@ -80,8 +80,8 @@ export function verifyConsentRequest(
     return null
   }
   if (req.exp <= Math.floor(Date.now() / 1000)) return null
-  if (req.audience !== undefined && req.audience !== 'brain' && req.audience !== 'application' && req.audience !== 'assistant') return null
-  if (req.audience === 'application') {
+  if (req.audience !== undefined && req.audience !== 'brain' && req.audience !== 'application' && req.audience !== 'assistant' && req.audience !== 'service') return null
+  if ((req.audience === 'application' || req.audience === 'service')) {
     if (typeof req.applicationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.applicationId)
       || typeof req.applicationRevision !== 'string' || !/^[1-9][0-9]*$/.test(req.applicationRevision)) return null
   } else if (req.applicationId !== undefined || req.applicationRevision !== undefined) return null
@@ -98,6 +98,6 @@ export function verifyConsentRequest(
     exp: req.exp,
     ...(req.audience ? { audience: req.audience } : {}),
     ...(req.audience === 'assistant' ? { assistantId: req.assistantId } : {}),
-    ...(req.audience === 'application' ? { applicationId: req.applicationId, applicationRevision: req.applicationRevision } : {}),
+    ...((req.audience === 'application' || req.audience === 'service') ? { applicationId: req.applicationId, applicationRevision: req.applicationRevision } : {}),
   }
 }

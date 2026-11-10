@@ -160,7 +160,7 @@ export async function resolveExecutionContextSystem(
   // Stored web-room audiences constrain inputs, not just output delivery. Provider
   // groups have separate approved maxima. Anchored Office/feed threads use their
   // anchor's audience, not the session's usually empty Team/Project labels.
-  const anchored = input.session?.anchorKind && input.session.anchorKind !== 'none'
+  const anchored = input.session?.anchorKind && !['none', 'doc_thread'].includes(input.session.anchorKind)
   const workspaceMachineRoom = input.identity.kind === 'programmatic'
     && (input.identity.principal.kind === 'brain_key' || input.identity.principal.kind === 'assistant_key')
     && (input.lifecycle.channelType === 'programmatic' || input.lifecycle.channelType === 'assistant_mcp')

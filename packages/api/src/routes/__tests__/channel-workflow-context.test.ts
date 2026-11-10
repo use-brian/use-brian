@@ -34,6 +34,7 @@ describe('production workflow context assembly', () => {
     expect(await maybeHandleChannelWorkflowContext({ ...params(), integrationId: undefined })).toBeNull()
     expect(maybeHandleChannelWorkflowReply).not.toHaveBeenCalled()
     expect(await maybeHandleChannelWorkflowContext({ ...params(), integrationId: undefined, messageText: 'approve abc123' })).toContain('unavailable')
+    expect(await maybeHandleChannelWorkflowContext({ ...params(), integrationId: undefined, messageText: 'answer abc123 text' })).toContain('unavailable')
   })
   it('injects the boot approval service, not a separately constructed executor', async () => {
     const bridge = { approvalsStore: {} } as ApprovalBridgeDeps

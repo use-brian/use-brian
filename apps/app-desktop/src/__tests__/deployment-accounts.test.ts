@@ -146,6 +146,38 @@ describe("[COMP:app-desktop/deployment-accounts] saved sessions", () => {
     expect(deploymentKind({ ...local, appUrl: "http://[::1]:3003" })).toBe("local");
     expect(deploymentKind({ ...local, appUrl: "https://brain.example.com" })).toBe("self-hosted");
   });
+  it("serves later reads from memory and does not rewrite an unchanged listing", () => {
+    let disk: Buffer = Buffer.alloc(0);
+    let decrypts = 0;
+    let writes = 0;
+    const cipher = {
+      isAvailable: () => true,
+      encryptString: (text: string) => Buffer.from(text).reverse(),
+      decryptString: (blob: Buffer) => { decrypts += 1; return Buffer.from(blob).reverse().toString(); },
+    };
+    const store = new DeploymentAccounts(cipher, () => disk, (blob) => { writes += 1; disk = blob; });
+    expect(store.put(local, tokens("one"), false)).toBe(true);
+    const decryptsAfterSave = decrypts;
+    const writesAfterSave = writes;
+    expect(store.rows(local)).toHaveLength(1);
+    expect(store.rows(local)[0].active).toBe(false);
+    expect(decrypts).toBe(decryptsAfterSave);
+    expect(store.syncListedSessions(local, [{ tokens: tokens("one"), activate: false }])).toBe(false);
+    expect(writes).toBe(writesAfterSave);
+    expect(decrypts).toBe(decryptsAfterSave);
+    expect(store.syncListedSessions(local, [{ tokens: tokens("one", "rotated"), activate: true }])).toBe(true);
+    expect(writes).toBe(writesAfterSave + 1);
+    expect(store.current(local)?.refreshToken).toBe("rotated");
+    expect(store.rows(local)[0].active).toBe(true);
+    const writesAfterChange = writes;
+    const decryptsAfterChange = decrypts;
+    expect(store.syncListedSessions(local, [{ tokens: tokens("one", "rotated"), activate: true }])).toBe(false);
+    expect(writes).toBe(writesAfterChange);
+    expect(decrypts).toBe(decryptsAfterChange);
+    expect(store.put({ ...cloud, apiUrl: "https://user:password@api.example.com" }, tokens("two"))).toBe(false);
+    expect(store.rows(local).map((row) => row.id)).toEqual(["one"]);
+    expect(writes).toBe(writesAfterChange);
+  });
   it("drains pending work and returns a bounded failure while work remains", async () => {
     const operations = new TargetOperations();
     let finish!: () => void;

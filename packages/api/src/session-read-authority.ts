@@ -5,7 +5,7 @@
 import { findFeedThreadDraft } from './content-planning/collaboration-service.js'
 import { getFeedCollaboration } from './db/feed-collaboration-store.js'
 import { getUserAssistant } from './db/users.js'
-import { query } from './db/client.js'
+import { query, queryWithRLS } from './db/client.js'
 import { getWorkspaceMembershipWithReadScopeSystem } from './db/workspace-store.js'
 import { decideSessionRead } from './session-read-access.js'
 import { findOfficeArtifactForSessionSystem } from './db/office-artifact-sessions.js'
@@ -49,6 +49,12 @@ export async function anchorReadGate(
   switch (policy.read.anchorGate) {
     case 'none':
       return 'continue'
+    case 'doc_page': {
+      const page = session.id ? await queryWithRLS(jwtUserId,
+        `SELECT p.id FROM comment_threads ct JOIN saved_views p ON p.id=ct.page_id AND p.workspace_id=ct.workspace_id
+         WHERE ct.session_id=$1`, [session.id]) : null
+      return page?.rows.length ? 'continue' : { status: 404, error: 'Session not found' }
+    }
     case 'feed_draft_audience':
       if (session.id && !(await query('SELECT feed_draft_audience_allowed($1) AS allowed', [session.id])).rows[0]?.allowed) {
         return { status: 403, error: 'Draft source access required' }

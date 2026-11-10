@@ -37,11 +37,20 @@ export function ToggleView(props: NodeViewProps) {
   // Tag the summary's block kind (`p` / `h1`…`h4`) so the chevron can be
   // vertically centred on that line's height (see globals.css `.doc-toggle`).
   const summary = props.node.firstChild;
-  const summaryKind =
-    summary?.type.name === "heading" ? `h${Number(summary.attrs.level) || 1}` : "p";
+  // The summary slot is a paragraph or heading. A list (or any other block)
+  // parked there is body content: collapsing must hide it, and the chevron
+  // needs a text line to sit beside. `missing` is that shape.
+  const summaryIsText =
+    !summary || summary.type.name === "paragraph" || summary.type.name === "heading";
+  const summaryKind = !summaryIsText
+    ? "missing"
+    : summary?.type.name === "heading"
+      ? `h${Number(summary.attrs.level) || 1}`
+      : "p";
   // An OPEN toggle with no body (just the summary) shows Notion's empty-state
   // row; clicking it creates the first child and puts the caret there.
-  const showEmptyPrompt = open && props.node.childCount === 1 && props.editor.isEditable;
+  const showEmptyPrompt =
+    open && summaryIsText && props.node.childCount === 1 && props.editor.isEditable;
   return (
     <NodeViewWrapper
       className="doc-toggle my-1"
@@ -67,6 +76,27 @@ export function ToggleView(props: NodeViewProps) {
         </svg>
       </button>
       <div className="doc-toggle-col">
+        {summaryIsText ? null : (
+          <button
+            type="button"
+            contentEditable={false}
+            tabIndex={-1}
+            className="doc-toggle-summary-missing"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => {
+              const pos = props.getPos();
+              if (typeof pos !== "number") return;
+              const insertAt = pos + 1; // start of the toggle's content
+              props.editor
+                .chain()
+                .insertContentAt(insertAt, { type: "paragraph" })
+                .focus(insertAt + 1)
+                .run();
+            }}
+          >
+            {t.blocks.toggleTextPlaceholder}
+          </button>
+        )}
         <NodeViewContent className="doc-toggle-content" />
         {showEmptyPrompt ? (
           <button

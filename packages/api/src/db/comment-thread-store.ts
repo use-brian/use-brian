@@ -28,10 +28,12 @@ import type {
   CommentThreadSummary,
   CreateThreadParams,
   InboxPendingReply,
+  SessionContextAuthority,
 } from '@use-brian/core'
-import { deriveCommentTitle } from '@use-brian/core'
+import { deriveCommentTitle, DerivedScopeError } from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
 import { findOrCreateSession, addSessionMessage, getSessionMessages } from './sessions.js'
+import { readAdmittedSessionQuery } from './session-query-reader.js'
 
 /** The channel_type that marks a session as a comment thread's transcript.
  *  Distinct from 'web' so thread sessions never surface in the page chat
@@ -460,11 +462,13 @@ export function createDbCommentThreadStore(): CommentThreadStore {
     async listThreadComments(
       userId: string,
       threadId: string,
+      authority?: SessionContextAuthority,
     ): Promise<CommentMessage[] | null> {
       // RLS gate: only resolves for a thread on a page the user can access.
       const t = await queryWithRLS<{ sessionId: string }>(
         userId,
-        `SELECT session_id as "sessionId" FROM comment_threads WHERE id = $1`,
+        `SELECT ct.session_id as "sessionId" FROM comment_threads ct
+         JOIN saved_views p ON p.id=ct.page_id AND p.workspace_id=ct.workspace_id WHERE ct.id = $1`,
         [threadId],
       )
       const sessionId = t.rows[0]?.sessionId
@@ -472,7 +476,15 @@ export function createDbCommentThreadStore(): CommentThreadStore {
 
       // Messages read system-side (access established above). Keep only the
       // human/assistant comments — system/tool rows aren't part of the thread.
-      const rows = await getSessionMessages(sessionId)
+      if (authority && (authority.execution.security.access.userId !== userId
+        || authority.execution.lifecycle.sessionId !== sessionId)) throw new DerivedScopeError('scope_source_changed')
+      const through = authority ? (await query<{ sequence: number }>(
+        'SELECT coalesce(max(sequence_num),0)::int AS sequence FROM session_messages WHERE workspace_id=$1 AND session_id=$2',
+        [authority.execution.security.access.workspaceId,sessionId])).rows[0].sequence : 0
+      // Shared model input uses the canonical source-admitting reader. Its
+      // accumulator retains ancestry before plain comment bodies are returned.
+      const rows = authority ? (await readAdmittedSessionQuery({ sessionId,throughSequence:through,authority })).history
+        : await getSessionMessages(sessionId)
       return rows
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .map((m) => ({

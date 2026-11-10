@@ -46,6 +46,8 @@ vi.mock('../route-helpers.js', async original => ({
 
 import { processChannelMessage, type ChannelPipelineParams } from '../channel-pipeline.js'
 import { channelConfirmations } from '../channel-interactions.js'
+import { channelUserErrorText } from '../_channel-error-text.js'
+import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 
 const scope = { channelType: 'feishu', integrationId: 'integration', conversationId: 'conversation', senderId: 'sender' }
 
@@ -54,7 +56,7 @@ function turn() {
     onProcessingStart: vi.fn(async () => {}),
     onCleanup: vi.fn(async () => {}),
     sendResponse: vi.fn(async () => {}),
-    sendError: vi.fn(async () => {}),
+    sendError: vi.fn(async (_error: Error) => {}),
   }
   const params = {
     admittedAnswerContext: { kind: 'continue' },
@@ -77,6 +79,43 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/channel-pipeline-audience-refusal] processing feedback lifetime', () => {
+  it('carries safe verifier diagnostics from the actual authorizer into the receiving analytics event and notice', async () => {
+    const { createDeliveryAudienceAuthorizer } = await vi.importActual<typeof import('../../context-scope/delivery-authority.js')>('../../context-scope/delivery-authority.js')
+    const sourceFailure = Object.assign(new Error('PRIVATE source metadata', {
+      cause: Object.assign(new Error('PRIVATE SQL statement'), { code: '57014', detail: 'PRIVATE row' }),
+    }), { diagnostic: 'source_unverifiable', verificationPhase: 'native_proof' })
+    mocks.audience.mockImplementation(createDeliveryAudienceAuthorizer({
+      integrationStore: {
+        getCredentialsForAssistantSystem: async () => ({ config: { deliveryAudienceBindings: [{
+          version: 1, channelId: 'conversation', audienceType: 'individual', clearance: 'internal',
+          compartments: [], projectIds: [], approvedByUserId: 'admin', approvedAt: '2026-01-01T00:00:00Z',
+        }] } }),
+      } as unknown as ChannelIntegrationStore,
+      findChannelSession: async () => null,
+      getWorkspaceRole: async () => 'admin',
+      validateEvidence: async () => { throw sourceFailure },
+    }))
+    const { params, hooks } = turn()
+    const logEvent = vi.fn()
+    params.analytics = { logEvent } as unknown as ChannelPipelineParams['analytics']
+    await processChannelMessage(params)
+    expect(logEvent).toHaveBeenCalledOnce()
+    expect(logEvent.mock.calls[0][0]).toEqual({
+      userId: 'user', assistantId: 'assistant', sessionId: 'session', channelType: 'feishu', eventName: 'chat_route_error',
+      metadata: { error_type: 'DeliveryAudienceUnverifiedError', stage: 'pre_generation', denial_diagnostic: 'source_unverifiable',
+        verification_phase: 'native_proof', verification_sqlstate_class: '57' },
+    })
+    expect(JSON.stringify(logEvent.mock.calls)).not.toContain('PRIVATE')
+    expect(hooks.sendError).toHaveBeenCalledOnce()
+    const error = hooks.sendError.mock.calls[0][0]
+    expect(error).toMatchObject({ reason: 'delivery_audience_unverified', retrySafe: false, detail: undefined })
+    expect(channelUserErrorText(error)).toContain("access to some information couldn't be verified")
+    expect(hooks.sendResponse).not.toHaveBeenCalled()
+    expect(hooks.onProcessingStart).not.toHaveBeenCalled()
+    expect(hooks.onCleanup).toHaveBeenCalledOnce()
+    expect(mocks.history).not.toHaveBeenCalled()
+  })
+
   it('shows progress while setup is pending and cleans it once when setup fails', async () => {
     const failure = new Error('Synthetic history failure')
     let rejectHistory!: (error: Error) => void

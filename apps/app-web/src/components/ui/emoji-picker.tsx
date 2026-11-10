@@ -22,6 +22,8 @@
  */
 
 import { useAppPopupBoundary } from "@/lib/app-viewport";
+import { clampPopupRect, measureViewport, onViewportChange } from "@/lib/popup-clamp";
+import { isPhoneViewport } from "@/lib/viewport";
 
 import * as React from "react";
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
@@ -124,7 +126,13 @@ export function EmojiPicker({
  * heavy data import is deferred to first use. Mounts once; the latest
  * `onSelect` is read through a ref so picking always hits the live row.
  */
-function EmojiMart({ onSelect }: { onSelect: (native: string) => void }) {
+function EmojiMart({
+  onSelect,
+  perLine = 8,
+}: {
+  onSelect: (native: string) => void;
+  perLine?: number;
+}) {
   const ref = React.useRef<HTMLDivElement>(null);
   const onSelectRef = React.useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -144,7 +152,7 @@ function EmojiMart({ onSelect }: { onSelect: (native: string) => void }) {
         previewPosition: "none",
         skinTonePosition: "none",
         navPosition: "top",
-        perLine: 8,
+        perLine,
         maxFrequentRows: 1,
         onEmojiSelect: (e: { native: string }) => onSelectRef.current(e.native),
       });
@@ -154,7 +162,7 @@ function EmojiMart({ onSelect }: { onSelect: (native: string) => void }) {
       cancelled = true;
       host?.replaceChildren();
     };
-  }, []);
+  }, [perLine]);
 
   return <div ref={ref} />;
 }
@@ -218,5 +226,80 @@ export function PageIconButton({
         </button>
       }
     />
+  );
+}
+
+/**
+ * Slash-menu emoji chooser. Anchored at the caret (viewport coords), same
+ * searchable emoji-mart set as the page-icon picker, without the icon
+ * "Remove" action. Picking inserts the native glyph; Esc and outside click
+ * dismiss.
+ */
+export function CaretEmojiPicker({
+  position,
+  onPick,
+  onClose,
+}: {
+  position: { top: number; left: number };
+  onPick: (emoji: string) => void;
+  onClose: () => void;
+}) {
+  const t = useT().docPage.emojiPicker;
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  const [placed, setPlaced] = React.useState(position);
+  const perLine = isPhoneViewport() ? 7 : 8;
+
+  React.useLayoutEffect(() => {
+    const place = () => {
+      const el = rootRef.current;
+      if (!el) return;
+      const next = clampPopupRect(
+        { top: position.top, bottom: position.top, left: position.left },
+        { width: el.offsetWidth || 320, height: el.offsetHeight || 420 },
+        measureViewport(),
+      );
+      setPlaced((cur) =>
+        cur.top === next.top && cur.left === next.left ? cur : { top: next.top, left: next.left },
+      );
+    };
+    place();
+    return onViewportChange(place);
+  }, [position.top, position.left]);
+
+  React.useEffect(() => {
+    const onDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Node && rootRef.current?.contains(target)) return;
+      onClose();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onClose();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={rootRef}
+      role="dialog"
+      aria-label={t.insertTitle}
+      data-caret-emoji-picker="root"
+      className="fixed z-50 max-h-[calc(100dvh-1rem)] w-max max-w-[calc(100vw-1rem)] overflow-auto rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10"
+      style={{ top: placed.top, left: placed.left }}
+    >
+      <div className="border-b border-border px-2.5 py-1.5">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          {t.insertTitle}
+        </span>
+      </div>
+      <EmojiMart perLine={perLine} onSelect={onPick} />
+    </div>
   );
 }

@@ -102,6 +102,8 @@ const SHAPES: Shape[] = [
     expectAnchor: 'feed_draft', expectVisibility: 'workspace', expectChannelType: 'web', readers: MEMBERS_AT_CLEARANCE },
   { name: 'doc comment thread', insert: { user_id: MEMBER, channel_type: 'doc_thread', channel_id: 'thread-1', visibility: 'workspace' },
     expectAnchor: 'doc_thread', expectVisibility: 'workspace', expectChannelType: 'web', readers: MEMBERS_AT_CLEARANCE },
+  { name: 'orphaned doc comment thread', insert: { user_id: MEMBER, channel_type: 'doc_thread', channel_id: 'orphan-thread', visibility: 'workspace' },
+    expectAnchor: 'doc_thread', expectVisibility: 'workspace', expectChannelType: 'web', readers: [] },
   { name: 'office file thread', insert: { user_id: MEMBER, channel_type: 'office_thread', channel_id: 'office-1', visibility: 'workspace' },
     expectAnchor: 'office_file', expectVisibility: 'workspace', expectChannelType: 'web', readers: MEMBERS_AT_CLEARANCE },
   { name: 'feed thread', insert: { user_id: MEMBER, channel_type: 'feed_thread', channel_id: 'feed-thread:1', visibility: 'workspace' },
@@ -173,6 +175,20 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
         `INSERT INTO session_state (session_id, user_id, assistant_id, key, status, summary, source)
          VALUES ($1, $2, $3, 'k', 'open', 's', 'tool')`, [id, shape.insert.user_id, ASSISTANT])
     }
+    // A real Page thread carries its stored Page lineage. A bare doc_thread
+    // session remains an orphan and must fail the current Page read gate.
+    const space = (await db.query<{ id: string }>(
+      `INSERT INTO teamspaces(workspace_id,name,sensitivity,created_by)
+       VALUES($1,'Session schema Pages','internal',$2) RETURNING id`, [W, OWNER])).rows[0].id
+    await db.query(`INSERT INTO teamspace_members(teamspace_id,user_id) VALUES($1,$2),($1,$3)`,
+      [space, OWNER, MEMBER])
+    const page = (await db.query<{ id: string }>(
+      `INSERT INTO saved_views(workspace_id,created_by,name,entity,view_type,page,state,clearance,teamspace_id)
+       VALUES($1,$2,'Session schema Page','tasks','table','{"blocks":[]}','saved','internal',$3) RETURNING id`,
+      [W, OWNER, space])).rows[0].id
+    await db.query(
+      `INSERT INTO comment_threads(page_id,workspace_id,session_id,anchor_kind,created_by,effective_clearance)
+       VALUES($1,$2,$3,'human_range',$4,'internal')`, [page, W, ids.get('doc comment thread'), MEMBER])
     // These plaintext rows genuinely predate persistent evidence. Apply the
     // full current chain without manufacturing a revision or source graph.
     assert.ok((await migratePglite(db, migrationsDir)) > 0)
@@ -290,11 +306,33 @@ describe('[COMP:api/session-schema] Unified session schema', () => {
     assert.equal((await db.query('SELECT id FROM session_state WHERE key=$1', ['uncertified-new'])).rows.length, 0)
   })
 
-  it('keeps one room per provider conversation, whoever speaks', async () => {
+  it('keeps one active room per provider conversation, whoever speaks', async () => {
+    // Quarantined history is excluded from the active-room identity. Use the
+    // readable Slack room to prove that a different speaker cannot duplicate it.
     await assert.rejects(db.query(
       `INSERT INTO sessions (assistant_id, workspace_id, user_id, channel_type, channel_id, visibility, anchor_kind)
-       VALUES ($1, $2, $3, 'telegram', '-1001', 'workspace', 'channel')`, [ASSISTANT, W, OWNER]),
+       VALUES ($1, $2, $3, 'slack', 'C_SAMPLE', 'workspace', 'channel')`, [ASSISTANT, W, OWNER]),
     /sessions_channel_room_key/)
+  })
+
+  it('keeps held Telegram history outside the active-room identity without releasing it', async () => {
+    const original = ids.get('legacy Telegram channel room')!
+    const row = (await db.query<{ id: string; recording_privacy_held: boolean }>(
+      `INSERT INTO sessions (assistant_id, workspace_id, user_id, channel_type, channel_id, visibility, anchor_kind)
+       VALUES ($1, $2, $3, 'telegram', '-1001', 'workspace', 'channel')
+       RETURNING id,recording_privacy_held`, [ASSISTANT, W, OWNER])).rows[0]
+    try {
+      assert.notEqual(row.id, original)
+      assert.equal(row.recording_privacy_held, true)
+      assert.deepEqual((await db.query('SELECT recording_privacy_held FROM sessions WHERE id=$1', [original])).rows,
+        [{ recording_privacy_held: true }])
+      for (const user of [OWNER, MEMBER]) {
+        assert.deepEqual(await asUser(user, 'SELECT id FROM sessions WHERE id=ANY($1::uuid[])', [[original, row.id]]), [])
+      }
+      await assert.rejects(db.query(
+        `INSERT INTO session_messages(session_id,role,content,sequence_num) VALUES($1,'user','[]'::jsonb,$2)`,
+        [row.id, ++sequence]), /recording_privacy_review_required/)
+    } finally { await db.query('DELETE FROM sessions WHERE id=$1', [row.id]) }
   })
 
   it('requires a creation receipt for a workspace session on the classic ready model', async () => {

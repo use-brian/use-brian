@@ -48,9 +48,21 @@ export type PendingToolConfirmation = {
   createdAt: string | null;
 };
 
+export type ExternalActionConfirmation = {
+  method?: "question";
+  allowCustom?: boolean;
+  approvalId: string;
+  title: string;
+  message?: string;
+  options?: string[];
+  expiresAt: string;
+};
+
 export type PendingSessionInput = {
   pending: PendingQuestion | null;
   toolConfirmation: PendingToolConfirmation | null;
+  /** Independent human requests; never suspend or resume a Brian turn. */
+  externalConfirmations?: ExternalActionConfirmation[];
 };
 
 export function toRestoredConfirmation(
@@ -106,11 +118,16 @@ export async function fetchPendingSessionInput(
   const res = await authFetch(
     `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/pending`,
   );
-  if (!res.ok) return { pending: null, toolConfirmation: null };
+  if (!res.ok) return {
+    pending: null,
+    toolConfirmation: null,
+    ...([401, 403, 404].includes(res.status) ? { externalConfirmations: [] } : {}),
+  };
   const body = (await res.json()) as Partial<PendingSessionInput>;
   return {
     pending: body.pending ?? null,
     toolConfirmation: body.toolConfirmation ?? null,
+    externalConfirmations: body.externalConfirmations ?? [],
   };
 }
 

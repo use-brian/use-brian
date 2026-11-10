@@ -184,10 +184,10 @@ export function BlockActionMenu({
   const [sub, setSub] = useState<null | "turn" | "color">(null);
 
   // Hover submenus open on enter and close on a short INTENT DELAY, not
-  // instantly — see SUBMENU_CLOSE_DELAY_MS. The flyout is a DOM child of its
-  // row, so re-entering it re-fires the row's `onMouseEnter` (→ `openSub`),
-  // which clears the pending close; opening one submenu also cancels the other's
-  // scheduled close so they never both linger.
+  // instantly — see SUBMENU_CLOSE_DELAY_MS. The panel is portalled beside
+  // the row, so it wires its own enter/leave to the same open/close pair:
+  // re-entering the panel clears the pending close; opening one submenu also
+  // cancels the other's scheduled close so they never both linger.
   const openSub = (name: "turn" | "color") => {
     window.clearTimeout(subCloseTimer.current);
     setSub(name);
@@ -202,11 +202,6 @@ export function BlockActionMenu({
   // as a second level INSIDE the menu (a hover fly-out beside a 240px menu
   // has nowhere to go on a 390px phone), and every row is a 44px target.
   const coarse = useCoarsePointer();
-  // Desktop fly-outs open to the right; when the menu sits against the right
-  // edge (a wide-column layout, a narrow window) the fly-out would run
-  // off-screen, so it opens to the LEFT instead.
-  const [flyoutSide, setFlyoutSide] = useState<"right" | "left">("right");
-
   // Position against the grip's viewport rect (fixed; the portal escapes the
   // tippy transform). Opens just below the grip, clamped inside the viewport:
   // on a phone the grip sits at the block's RIGHT edge, so an unclamped menu
@@ -215,18 +210,21 @@ export function BlockActionMenu({
   // paint; re-run when a submenu opens or closes (`sub`).
   useLayoutEffect(() => {
     if (!anchorEl) return;
-    const r = anchorEl.getBoundingClientRect();
-    const margin = 8;
-    const menuWidth = ref.current?.offsetWidth || 240;
-    const menuHeight = ref.current?.offsetHeight || 0;
-    const left = Math.max(margin, Math.min(r.left, window.innerWidth - menuWidth - margin));
-    let top = r.bottom + 4;
-    if (menuHeight > 0 && top + menuHeight > window.innerHeight - margin) {
-      top = Math.max(margin, window.innerHeight - margin - menuHeight);
-    }
-    setStyle({ position: "fixed", top, left });
-    // The widest fly-out is the colour grid (`w-56` = 224px) plus its 4px gap.
-    setFlyoutSide(left + menuWidth + 4 + 224 > window.innerWidth - margin ? "left" : "right");
+    const updatePosition = () => {
+      const r = anchorEl.getBoundingClientRect();
+      const margin = 8;
+      const menuWidth = ref.current?.offsetWidth || 240;
+      const menuHeight = ref.current?.offsetHeight || 0;
+      const left = Math.max(margin, Math.min(r.left, window.innerWidth - menuWidth - margin));
+      let top = r.bottom + 4;
+      if (menuHeight > 0 && top + menuHeight > window.innerHeight - margin) {
+        top = Math.max(margin, window.innerHeight - margin - menuHeight);
+      }
+      setStyle({ position: "fixed", top, left });
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    return () => window.removeEventListener("resize", updatePosition);
   }, [anchorEl, sub]);
 
   // Outside-click + Esc dismissal (turn-into-menu.tsx idiom).
@@ -235,6 +233,10 @@ export function BlockActionMenu({
       const node = e.target as Node;
       if (ref.current?.contains(node)) return;
       if (anchorEl?.contains(node)) return; // re-clicking the grip is handled there
+      // The hover panel is portalled beside the menu, so it is not inside
+      // `ref`. A press on it is part of the menu, not an outside dismiss.
+      const el = node instanceof Element ? node : node.parentElement;
+      if (el?.closest("[data-popover='block-actions-flyout']")) return;
       onClose();
     }
     function onKey(e: KeyboardEvent) {
@@ -367,7 +369,7 @@ export function BlockActionMenu({
       onMouseDown={(e) => e.preventDefault()}
       data-coarse={coarse ? "true" : undefined}
       className={
-        "z-[60] w-60 max-w-[calc(100vw-1rem)] max-h-[calc(100dvh-1rem)] overflow-y-auto rounded-md border border-border bg-popover py-1 text-sm shadow-lg" +
+        "z-[60] w-60 max-w-[calc(100vw-1rem)] max-h-[calc(100dvh-1rem)] overflow-x-hidden overflow-y-auto overscroll-contain rounded-md border border-border bg-popover py-1 text-sm shadow-lg" +
         // 44px rows on touch (M3): every menu item and radio swatch.
         (coarse
           ? " [&_[role=menuitem]]:min-h-11 [&_[role=menuitemradio]]:min-h-11 [&_[role=menuitemradio]]:min-w-11"
@@ -382,7 +384,6 @@ export function BlockActionMenu({
           onOpen={() => openSub("turn")}
           onClose={scheduleCloseSub}
           inline={coarse}
-          flyoutSide={flyoutSide}
           onToggle={() => setSub((cur) => (cur === "turn" ? null : "turn"))}
         >
           {turnIntoItems.map((it) => {
@@ -413,7 +414,6 @@ export function BlockActionMenu({
           onOpen={() => openSub("color")}
           onClose={scheduleCloseSub}
           inline={coarse}
-          flyoutSide={flyoutSide}
           onToggle={() => setSub((cur) => (cur === "color" ? null : "color"))}
           wide
         >
@@ -529,19 +529,24 @@ function MenuButton({
 }
 
 /**
- * A row that flies a child list out to the right on hover (Notion submenu).
+ * A row that opens its child list as its own panel on hover (Notion submenu).
  *
  * `inline` is the touch mode (responsive contract M2 / M5): there is no hover
  * to open on and no room beside a 240px menu on a phone, so the row toggles on
  * TAP (`onToggle`) and the child list renders as a second level INSIDE the
  * menu, directly under the row, with the chevron turned down. The hover
  * handlers are not bound in that mode: a tap fires a synthetic `mouseenter`
- * first, which would open the fly-out before the tap could toggle it.
+ * first, which would open the panel before the tap could toggle it.
  *
- * In fly-out mode a CLICK (or Enter / Space on the focused row) opens the
- * fly-out too, so a keyboard user and a hover-capable device with a stylus
- * have a path that does not depend on `mouseenter`. `flyoutSide` flips the
- * fly-out to the left when the menu sits against the right edge.
+ * On a fine pointer the panel is portalled to `document.body`. The parent
+ * menu scrolls (`overflow-y-auto`) when the viewport is short; a flyout
+ * inside that box is clipped and becomes more scroll height, so hovering
+ * Turn into made people scroll the menu to see the options. The panel sits
+ * beside the row instead. A click (or Enter / Space) opens it too, so a
+ * keyboard user and a stylus have a path that does not depend on
+ * `mouseenter`. Positioning flips it to the left when the menu sits against
+ * the right edge. Entering the panel cancels the row's close delay; the
+ * panel is not a DOM child, so it wires that itself.
  */
 function SubmenuRow({
   icon: Icon,
@@ -551,7 +556,6 @@ function SubmenuRow({
   onClose,
   onToggle,
   inline = false,
-  flyoutSide = "right",
   wide,
   children,
 }: {
@@ -562,20 +566,95 @@ function SubmenuRow({
   onClose: () => void;
   /** Tap toggle for `inline` mode. */
   onToggle?: () => void;
-  /** Render the child list inside the menu instead of a hover fly-out. */
+  /** Render the child list inside the menu instead of a hover panel. */
   inline?: boolean;
-  /** Which side the fly-out opens on (fly-out mode only). */
-  flyoutSide?: "right" | "left";
   wide?: boolean;
   children: React.ReactNode;
 }) {
+  const rowRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [panelSide, setPanelSide] = useState<"right" | "left">("right");
+  const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({
+    position: "fixed",
+    visibility: "hidden",
+  });
+
+  useLayoutEffect(() => {
+    if (inline || !open || !rowRef.current || !panelRef.current) return;
+    const rowEl = rowRef.current;
+    const panelEl = panelRef.current;
+    const menuEl = rowEl.closest<HTMLElement>('[data-popover="block-actions"]');
+    const updatePosition = () => {
+      const row = rowEl.getBoundingClientRect();
+      const menu = menuEl?.getBoundingClientRect() ?? row;
+      const panel = panelEl.getBoundingClientRect();
+      const margin = 8;
+      const gap = 4;
+      const width = panel.width || (wide ? 224 : 208);
+      const openLeft = menu.right + gap + width > window.innerWidth - margin;
+      const top = Math.max(margin, Math.min(row.top, window.innerHeight - margin - panel.height));
+      const left = openLeft ? menu.left - gap - width : menu.right + gap;
+      // The scroller can move the trigger out of sight without unmounting it.
+      // Never leave a detached, actionable panel floating over another row.
+      const visible = row.bottom > menu.top && row.top < menu.bottom;
+      setPanelSide(openLeft ? "left" : "right");
+      setPanelStyle({
+        position: "fixed",
+        top,
+        left: Math.max(margin, Math.min(left, window.innerWidth - margin - width)),
+        visibility: visible ? "visible" : "hidden",
+      });
+    };
+    updatePosition();
+    // Scroll does not bubble. Capture also follows the editor's scroll pane;
+    // scrolling the flyout itself must not reposition either scroll box.
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Node && panelEl.contains(event.target)) return;
+      updatePosition();
+    };
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", updatePosition);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updatePosition);
+    observer?.observe(panelEl);
+    if (menuEl) observer?.observe(menuEl);
+    return () => {
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", updatePosition);
+      observer?.disconnect();
+    };
+  }, [inline, open, wide, children]);
+
+  const panel =
+    open && !inline && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            ref={panelRef}
+            role="menu"
+            data-submenu="flyout"
+            data-flyout-side={panelSide}
+            data-popover="block-actions-flyout"
+            style={panelStyle}
+            onMouseEnter={onOpen}
+            onMouseLeave={onClose}
+            onMouseDown={(e) => e.preventDefault()}
+            className={
+              "z-[61] max-h-[min(24rem,calc(100dvh-1rem))] overflow-x-hidden overflow-y-auto overscroll-contain rounded-md border border-border bg-popover p-1 shadow-lg " +
+              (wide ? "w-56" : "w-52")
+            }
+          >
+            {children}
+          </div>,
+          document.body,
+        )
+      : null;
+
   return (
     <div
-      className="relative"
       onMouseEnter={inline ? undefined : onOpen}
       onMouseLeave={inline ? undefined : onClose}
     >
       <button
+        ref={rowRef}
         type="button"
         role="menuitem"
         aria-haspopup="menu"
@@ -591,22 +670,16 @@ function SubmenuRow({
           aria-hidden
         />
       </button>
-      {open ? (
+      {inline && open ? (
         <div
           role="menu"
-          data-submenu={inline ? "inline" : "flyout"}
-          data-flyout-side={inline ? undefined : flyoutSide}
-          className={
-            inline
-              ? "mx-2 mb-1 rounded-md border border-border/70 bg-muted/30 p-1"
-              : "absolute top-0 z-[61] rounded-md border border-border bg-popover p-1 shadow-lg " +
-                (flyoutSide === "left" ? "right-full mr-1 " : "left-full ml-1 ") +
-                (wide ? "w-56" : "w-52")
-          }
+          data-submenu="inline"
+          className="mx-2 mb-1 rounded-md border border-border/70 bg-muted/30 p-1"
         >
           {children}
         </div>
       ) : null}
+      {panel}
     </div>
   );
 }

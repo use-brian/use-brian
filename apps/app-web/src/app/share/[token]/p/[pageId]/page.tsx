@@ -14,15 +14,24 @@
  */
 
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import { buildShareMetadata, getPublicPage } from "@/lib/api/public-share";
+import { joinSocialImageUrl, requestPublicOrigin } from "@/lib/page-social-card";
 import { PublicPageView } from "../../public-page-view";
 
 type Params = { params: Promise<{ token: string; pageId: string }> };
 
 export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const { token, pageId } = await params;
-  return buildShareMetadata(await getPublicPage(token, pageId));
+  const h = await headers();
+  const origin = requestPublicOrigin(h.get("x-forwarded-proto"), h.get("x-forwarded-host") ?? h.get("host"));
+  const page = await getPublicPage(token, pageId);
+  const path = `/share/${encodeURIComponent(token)}/p/${encodeURIComponent(pageId)}`;
+  return buildShareMetadata(page, {
+    image: joinSocialImageUrl(origin, `${path}/opengraph-image`),
+    pageUrl: `${origin}${path}`,
+  });
 }
 
 export default async function SharedSubPage({ params }: Params) {

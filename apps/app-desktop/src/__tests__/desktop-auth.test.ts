@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
+import { parseDesktopConfig } from "../target-store.js";
 
 import {
   deriveChallenge,
@@ -22,6 +23,7 @@ import {
   parsePendingVerifier,
   PENDING_VERIFIER_TTL_MS,
   type DesktopSession,
+  type AuthDestinationBinding,
 } from "../desktop-auth.js";
 
 /** A structurally-valid unsigned JWT carrying the given `exp`. */
@@ -76,6 +78,40 @@ describe("[COMP:app-desktop/desktop-auth] pending-verifier persistence", () => {
     expect(parsePendingVerifier("not json", 0)).toBeNull();
     expect(parsePendingVerifier(JSON.stringify({ verifier: "has space", createdAt: 0 }), 0)).toBeNull();
     expect(parsePendingVerifier(JSON.stringify({ createdAt: 0 }), 0)).toBeNull();
+  });
+  const destination: AuthDestinationBinding = {
+    source: { kind: "cloud", appUrl: "https://app.usebrian.ai", apiUrl: "https://api.usebrian.ai", auth: "pkce" },
+    target: { kind: "local", appUrl: "https://brain.example.com", apiUrl: "https://api.brain.example.com", auth: "pkce",
+      publicConfig: parseDesktopConfig({ apiUrl: "https://api.brain.example.com", edition: "outpost", primaryAuthUrl: "https://auth.example.com" })!.publicConfig },
+  };
+  it("round-trips only the validated destination and its source binding under the existing TTL", () => {
+    const raw = serializePendingVerifier("verifier-abc_123", 1000, false, undefined, destination);
+    expect(parsePendingVerifier(raw, 1001)).toEqual({ verifier: "verifier-abc_123", addAccount: false, destination });
+    expect(parsePendingVerifier(raw, 1000 + PENDING_VERIFIER_TTL_MS + 1)).toBeNull();
+    expect(JSON.parse(raw)).not.toHaveProperty("accessToken");
+  });
+  it.each([
+    (value: Record<string, any>) => { value.source.kind = "unknown"; },
+    (value: Record<string, any>) => { value.source.apiUrl = "file:///tmp/api"; },
+    (value: Record<string, any>) => { value.target.auth = "local-session"; },
+    (value: Record<string, any>) => { value.target.apiUrl = "https://api.usebrian.ai"; },
+    (value: Record<string, any>) => { value.target.appUrl = "https://user:password@brain.example.com"; },
+    (value: Record<string, any>) => { value.target.apiUrl += "?forward=elsewhere"; },
+    (value: Record<string, any>) => { value.target.publicConfig.apiUrl = "https://other.example.com"; },
+    (value: Record<string, any>) => { value.target.publicConfig.edition = "oss"; },
+    (value: Record<string, any>) => { value.target.publicConfig.accessToken = "not-public-config"; },
+    (value: Record<string, any>) => { value.target.publicConfig.pageLinkHandoffVersion = 2; },
+    (value: Record<string, any>) => { value.target.extra = true; },
+    (value: Record<string, any>) => { value.unrecognized = true; },
+  ])("rejects malformed or expanded persisted destination metadata (%#)", mutate => {
+    const raw = JSON.parse(serializePendingVerifier("verifier-abc_123", 1000, false, undefined, destination));
+    mutate(raw.destination);
+    expect(parsePendingVerifier(JSON.stringify(raw), 1001)).toBeNull();
+  });
+  it("does not carry a source workspace return route into a different deployment", () => {
+    const raw = serializePendingVerifier("verifier-abc_123", 1000, false,
+      { appUrl: destination.source.appUrl, apiUrl: destination.source.apiUrl, route: "/w/fictional-workspace" }, destination);
+    expect(parsePendingVerifier(raw, 1001)).toBeNull();
   });
 });
 

@@ -59,6 +59,7 @@ export type OAuthRoutesOptions = {
   /** Explicit app audience adapts consent policy while retaining this protocol. */
   applicationConsent?: {
     applicationId: string
+    audience?: 'application' | 'service'
     authorize(clientId: string, redirectUri: string): Promise<{ revision: string } | null>
     choices(userId: string, request: OAuthConsentRequest): Promise<{ workspaces: Array<{ id: string; name: string }>; application: unknown } | null>
     issue(params: { userId: string; workspaceId: string; request: OAuthConsentRequest; review: string; scope: OAuthScope }): Promise<{ codePlaintext: string } | { error: 'application_not_qualified' } | null>
@@ -245,14 +246,14 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
       state,
       exp: Math.floor(Date.now() / 1000) + CONSENT_REQUEST_TTL_SECONDS,
       ...(opts.assistantId ? { audience: 'assistant' as const, assistantId: opts.assistantId } : {}),
-      ...(opts.applicationConsent ? { audience: 'application' as const, applicationId: opts.applicationConsent.applicationId, applicationRevision: application!.revision } : {}),
+      ...(opts.applicationConsent ? { audience: opts.applicationConsent.audience ?? 'application', applicationId: opts.applicationConsent.applicationId, applicationRevision: application!.revision } : {}),
     }
     const signed = signConsentRequest(consentReq, opts.signingSecret)
 
     const consentUrl = new URL('/oauth/authorize', opts.webAppUrl)
     consentUrl.searchParams.set('req', signed)
     if (opts.assistantId) consentUrl.searchParams.set('assistant', opts.assistantId)
-    if (opts.applicationConsent) consentUrl.searchParams.set('application', opts.applicationConsent.applicationId)
+    if (opts.applicationConsent) { consentUrl.searchParams.set('application', opts.applicationConsent.applicationId); if (opts.applicationConsent.audience === 'service') consentUrl.searchParams.set('service','1') }
     res.redirect(consentUrl.toString())
   })
 
@@ -267,8 +268,8 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
     }
     const signed = String(req.query.req ?? '')
     const consentReq = verifyConsentRequest(signed, opts.signingSecret)
-    if (!consentReq || (consentReq.audience === 'assistant') !== !!opts.assistantId || consentReq.assistantId !== opts.assistantId || (consentReq.audience === 'application') !== !!opts.applicationConsent
-      || opts.applicationConsent && consentReq.applicationId !== opts.applicationConsent.applicationId) {
+    if (!consentReq || (consentReq.audience === 'assistant') !== !!opts.assistantId || consentReq.assistantId !== opts.assistantId || ((consentReq.audience === 'application' || consentReq.audience === 'service') !== !!opts.applicationConsent)
+      || opts.applicationConsent && (consentReq.applicationId !== opts.applicationConsent.applicationId || consentReq.audience !== (opts.applicationConsent.audience ?? 'application'))) {
       res.status(400).json({ error: 'invalid_or_expired_request' })
       return
     }
@@ -318,8 +319,8 @@ export function oauthRoutes(opts: OAuthRoutesOptions): Router {
       return
     }
     const consentReq = verifyConsentRequest(parsed.data.req, opts.signingSecret)
-    if (!consentReq || (consentReq.audience === 'assistant') !== !!opts.assistantId || consentReq.assistantId !== opts.assistantId || (consentReq.audience === 'application') !== !!opts.applicationConsent
-      || opts.applicationConsent && consentReq.applicationId !== opts.applicationConsent.applicationId) {
+    if (!consentReq || (consentReq.audience === 'assistant') !== !!opts.assistantId || consentReq.assistantId !== opts.assistantId || ((consentReq.audience === 'application' || consentReq.audience === 'service') !== !!opts.applicationConsent)
+      || opts.applicationConsent && (consentReq.applicationId !== opts.applicationConsent.applicationId || consentReq.audience !== (opts.applicationConsent.audience ?? 'application'))) {
       res.status(400).json({ error: 'invalid_or_expired_request' })
       return
     }

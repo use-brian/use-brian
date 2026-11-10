@@ -190,6 +190,13 @@ describe('[COMP:api/turn-lease] ownership guards', () => {
     expect(mockQuery.mock.calls[0]?.[1]).toEqual(['idle', 'stopped_by_user', 's-1'])
   })
 
+  it('retains a terminal failure for reconnect and reopening without blocking a later send', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    await releaseTurnLease('s-1', 'failed', 'tok-1')
+    expect(mockQuery.mock.calls[0]?.[1]).toEqual(['failed', 'failed', 's-1', 'tok-1'])
+    expect(sqlOf()).toContain('turn_lease_token = $4')
+  })
+
   it('rests an abnormal ending at timeout, keeping the debugging signal', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
     await releaseTurnLease('s-1', 'stalled_reclaimed', null)

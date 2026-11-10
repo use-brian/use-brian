@@ -1,12 +1,12 @@
 "use client";
 
-/** [COMP:app-web/channel-recordings] Exact conversation, future-only destination commands. */
+/** [COMP:app-web/channel-recordings] Exact conversation destinations and reviewed shared-text recovery. */
 import { useState } from "react";
 import Link from "next/link";
 import { useT, format } from "@/lib/i18n/client";
-import { useCachedResource } from "@/lib/surface-cache";
-import { surfaceDataKey, channelRecordingsCacheKey } from "@/lib/surface-prefetch";
-import { getChannelRecordings, confirmRecordingOwner, updateChannelRecording, type ChannelRecording } from "@/lib/api/channels";
+import { useCachedResource, markSurfaceCacheStale } from "@/lib/surface-cache";
+import { surfaceDataKey, channelRecordingsCacheKey, channelsCacheKey } from "@/lib/surface-prefetch";
+import { getChannelRecordings, confirmRecordingOwner, updateChannelRecording, type ChannelRecording, previewLegacyGroupRecovery, restoreLegacyGroupContext, type LegacyGroupRecoveryCandidate } from "@/lib/api/channels";
 import { listContextProjects, type ContextProject } from "@/lib/api/context-scopes";
 import { dispatchChatSessionsRefresh } from "@/lib/chat-session-events";
 import { Button } from "@/components/ui/button";
@@ -40,6 +40,7 @@ export function ChannelRecordingsPanel({ workspaceId, channelId }: { workspaceId
       {state.data.recordings.map(row => <RecordingRow key={`${row.id}:${row.revision}`} row={row} projects={projects.data ?? []}
         workspaceId={workspaceId} channelId={channelId} refresh={state.refresh} />)}
     </>}
+    {state.data && state.data.ownership !== "other" && <LegacyGroupRecovery key={channelRecordingsCacheKey(workspaceId, channelId)} workspaceId={workspaceId} channelId={channelId} refresh={state.refresh} />}
     <p className="text-sm text-muted-foreground">{t.history}</p>
   </section>;
 }
@@ -81,5 +82,63 @@ function RecordingRow({ row, projects, workspaceId, channelId, refresh }: {
       {row.enabled && <Button className="max-sm:min-h-11" variant="outline" disabled={busy} onClick={() => void save(false)}>{t.stop}</Button>}
     </div>
     {failed && <p role="alert" className="text-sm text-destructive">{t.failed}</p>}
+  </div>;
+}
+
+/** A preview is fetched only on request; restoration reviews one exact session snapshot. */
+function LegacyGroupRecovery({ workspaceId, channelId, refresh }: {
+  workspaceId: string; channelId: string; refresh: () => Promise<unknown>;
+}) {
+  const t = useT().channelRecordings;
+  const [candidates, setCandidates] = useState<LegacyGroupRecoveryCandidate[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [restored, setRestored] = useState(false);
+  async function review() {
+    setBusy(true); setFailed(false); setRestored(false);
+    try { setCandidates((await previewLegacyGroupRecovery(workspaceId, channelId)).candidates); }
+    catch { setFailed(true); setCandidates(null); } finally { setBusy(false); }
+  }
+  async function restore(candidate: LegacyGroupRecoveryCandidate) {
+    setBusy(true);
+    try {
+      if (!await confirmDialog({ title: t.restoreContext, confirmLabel: t.restoreContext,
+        description: format(t.restoreConfirm, { conversation: candidate.conversationId,
+          title: candidate.title ?? t.untitledGroup, count: String(candidate.messageCount), skipped: String(candidate.skippedMessageCount) }) })) return;
+      setFailed(false); setRestored(false);
+      try {
+        await restoreLegacyGroupContext(workspaceId, channelId, { sessionId: candidate.sessionId, snapshotToken: candidate.snapshotToken });
+      } catch {
+        // Effects may be uncertain or the snapshot may be stale. Review again before any retry.
+        setCandidates(null); setFailed(true); return;
+      }
+      setCandidates(current => current?.filter(row => row.sessionId !== candidate.sessionId) ?? null);
+      setRestored(true);
+      markSurfaceCacheStale(channelsCacheKey(workspaceId));
+      markSurfaceCacheStale(channelRecordingsCacheKey(workspaceId, channelId));
+      dispatchChatSessionsRefresh(workspaceId);
+      await refresh().catch(() => undefined);
+    } finally { setBusy(false); }
+  }
+  return <div className="space-y-3 border-t pt-3">
+    <h4 className="text-sm font-medium">{t.recoveryTitle}</h4>
+    <p className="text-sm text-muted-foreground">{t.recoveryHint}</p>
+    <Button variant="outline" className="max-sm:min-h-11" disabled={busy} onClick={() => void review()}>{t.reviewContext}</Button>
+    {busy && <Skeleton className="h-11 w-full" />}
+    {failed && <p role="alert" className="text-sm text-destructive">{t.recoveryFailed}</p>}
+    {restored && <p role="status" className="text-sm">{t.contextRestored}</p>}
+    {candidates?.length === 0 && !restored && <p className="text-sm text-muted-foreground">{t.noRecovery}</p>}
+    {candidates?.map(candidate => <div key={`${candidate.sessionId}:${candidate.snapshotToken}`} className="space-y-2 rounded-md border p-3 text-sm">
+      <p className="break-words font-medium">{candidate.title ?? t.untitledGroup}</p>
+      <dl className="space-y-1 break-words">
+        <div><dt className="inline text-muted-foreground">{t.recoveryConversation}: </dt><dd className="inline break-all">{candidate.conversationId}</dd></div>
+        <div><dt className="inline text-muted-foreground">{t.recoveryAssistant}: </dt><dd className="inline">{candidate.assistantName ?? candidate.assistantId}</dd></div>
+        <div><dt className="inline text-muted-foreground">{t.recoveryMessages}: </dt><dd className="inline">{candidate.messageCount}</dd></div>
+        <div><dt className="inline text-muted-foreground">{t.recoverySkipped}: </dt><dd className="inline">{candidate.skippedMessageCount}</dd></div>
+        <div><dt className="inline text-muted-foreground">{t.recoveryAudience}: </dt><dd className="inline">{t.originalGroup}</dd></div>
+        <div><dt className="inline text-muted-foreground">{t.recoveryLabels}: </dt><dd className="inline">{[candidate.sensitivity, ...candidate.compartments, candidate.projectName ?? candidate.projectId].filter(Boolean).join(", ")}</dd></div>
+      </dl>
+      <Button className="max-sm:min-h-11" disabled={busy} onClick={() => void restore(candidate)}>{t.restoreContext}</Button>
+    </div>)}
   </div>;
 }

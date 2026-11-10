@@ -259,6 +259,8 @@ export type TelegramTextDelivery = {
   text: string
   botId?: string
   botUsername?: string
+  /** Captured at adapter construction, never inferred after provider I/O. */
+  origin?: { integrationId: string; generation: number }
 }
 export type TelegramTextDeliveryObserver = (delivery: TelegramTextDelivery) => void | Promise<void>
 let textDeliveryObserver: TelegramTextDeliveryObserver | undefined
@@ -269,6 +271,7 @@ export function configureTelegramTextDeliveryObserver(observer?: TelegramTextDel
 }
 
 export type TelegramAdapterOptions = {
+  deliveryOrigin?: { integrationId: string; generation: number }
   /** Overrides the process observer; failure is reported after delivery, never resent. */
   onTextDelivered?: TelegramTextDeliveryObserver
   /** Correlated questions must not silently move out of a deleted topic. */
@@ -348,6 +351,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
    */
   leaveChat(chatId: string): Promise<void>
 } {
+  const deliveryOrigin = options.deliveryOrigin ? Object.freeze({ ...options.deliveryOrigin }) : undefined
   const api = createTelegramApi({ token: options.token })
   const mediaGroups = new Map<string, BufferedGroup>()
   const textFragments = new Map<string, TextFragment>()
@@ -1041,7 +1045,8 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
         if (observer && !response.ephemeral) {
           const delivery = { channelId: delivered.threadFallback ? chatId : channelId,
             providerMessageId: String(delivered.message_id), text: delivered.text ?? chunk.text,
-            botId: botIdFromToken, botUsername: options.botUsername }
+            botId: botIdFromToken, botUsername: options.botUsername,
+            ...(deliveryOrigin ? { origin: deliveryOrigin } : {}) }
           try { await observer(delivery) } catch (error) {
             console.error('[telegram] delivered text recording failed:', {
               channelId: delivery.channelId, providerMessageId: delivery.providerMessageId,

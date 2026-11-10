@@ -98,7 +98,7 @@ export function KindPickerDialogProvider() {
       <Dialog.Portal>
         <Dialog.Backdrop
           className={cn(
-            "fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity duration-150",
+            "fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm transition-opacity duration-150",
             "data-[starting-style]:opacity-0 data-[ending-style]:opacity-0",
           )}
         />

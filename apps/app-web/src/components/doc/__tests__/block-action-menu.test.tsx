@@ -52,6 +52,7 @@ afterEach(() => {
   anchor?.remove();
   anchor = null;
   mocks.bestInternalShareLink.mockReset();
+  vi.restoreAllMocks();
 });
 
 function mountMenu(opts: { extensions: AnyExtension[]; pageContext?: boolean }) {
@@ -101,6 +102,19 @@ function rowLabels(): string[] {
   ).map((b) => b.textContent ?? "");
 }
 
+/** The portalled hover panel (Turn into / Color). Not inside the menu scroller. */
+function flyoutEl(): HTMLElement {
+  const el = document.querySelector<HTMLElement>('[data-submenu="flyout"]');
+  expect(el).not.toBeNull();
+  return el!;
+}
+
+function radioLabels(root: ParentNode = menuEl()): string[] {
+  return Array.from(root.querySelectorAll('[role="menuitemradio"]')).map(
+    (b) => b.textContent ?? "",
+  );
+}
+
 /** Open a hover submenu (React derives mouseenter from a bubbling mouseover). */
 function openSubmenu(label: string) {
   const row = Array.from(
@@ -123,9 +137,7 @@ describe("[COMP:app-web/block-action-menu] capability gating", () => {
     expect(labels.some((l) => l.includes(ba.delete))).toBe(true);
 
     openSubmenu(ba.turnInto);
-    const kinds = Array.from(
-      menuEl().querySelectorAll('[role="menuitemradio"]'),
-    ).map((b) => b.textContent ?? "");
+    const kinds = radioLabels(flyoutEl());
     expect(kinds).toHaveLength(12);
     expect(kinds.some((l) => l.includes(slashItems.heading_4))).toBe(true);
     expect(kinds.some((l) => l.includes(slashItems.to_do))).toBe(true);
@@ -143,9 +155,7 @@ describe("[COMP:app-web/block-action-menu] capability gating", () => {
     expect(labels.some((l) => l.includes(ba.delete))).toBe(true);
 
     openSubmenu(ba.turnInto);
-    const kinds = Array.from(
-      menuEl().querySelectorAll('[role="menuitemradio"]'),
-    ).map((b) => b.textContent ?? "");
+    const kinds = radioLabels(flyoutEl());
     // paragraph, h1-3, bulleted, numbered, quote, code — the md set.
     expect(kinds).toHaveLength(8);
     expect(kinds.some((l) => l.includes(slashItems.heading_4))).toBe(false);
@@ -237,13 +247,50 @@ describe("[COMP:app-web/block-action-menu] touch mode", () => {
     expect(menuEl().querySelector('[data-submenu]')).toBeNull();
   });
 
-  it("keeps the hover fly-out on a fine pointer", () => {
+  it("keeps the hover panel beside the menu, outside its scroll box", () => {
     mountMenu({ extensions: browserDocExtensions(), pageContext: true });
     expect(menuEl().getAttribute("data-coarse")).toBeNull();
     openSubmenu(ba.turnInto);
-    const sub = menuEl().querySelector<HTMLElement>('[data-submenu]');
-    expect(sub).not.toBeNull();
-    expect(sub!.getAttribute("data-submenu")).toBe("flyout");
-    expect(sub!.className).toContain("left-full");
+    const sub = flyoutEl();
+    expect(menuEl().contains(sub)).toBe(false);
+    expect(sub.getAttribute("data-popover")).toBe("block-actions-flyout");
+    expect(sub.className).not.toContain("left-full");
+    expect(sub.className).toContain("overflow-y-auto");
+    expect(radioLabels(sub).length).toBeGreaterThan(0);
+  });
+});
+
+describe("[COMP:app-web/block-action-menu] flyout geometry", () => {
+  it("tracks the scroll box edge and row position through scrolling and resizing", () => {
+    let rowTop = 80;
+    let menuLeft = 40;
+    const rect = (left: number, top: number, width: number, height: number) =>
+      ({ left, top, right: left + width, bottom: top + height, width, height, x: left, y: top, toJSON() {} });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.popover === "block-actions") return rect(menuLeft, 40, 240, 200);
+      if (this.dataset.submenu === "flyout") return rect(0, 0, 208, 160);
+      if (this.getAttribute("aria-haspopup") === "menu") return rect(menuLeft + 1, rowTop, 238, 32);
+      return rect(40, 16, 24, 24);
+    });
+    mountMenu({ extensions: browserDocExtensions(), pageContext: true });
+    openSubmenu(ba.turnInto);
+    expect(flyoutEl().style.left).toBe("284px");
+    expect(flyoutEl().style.top).toBe("80px");
+
+    rowTop = 52;
+    act(() => { menuEl().dispatchEvent(new Event("scroll")); });
+    expect(flyoutEl().style.top).toBe("52px");
+    // Scrolling the child leaves the parent's scroll position alone.
+    act(() => { flyoutEl().dispatchEvent(new Event("scroll")); });
+    expect(menuEl().scrollTop).toBe(0);
+
+    menuLeft = 800;
+    act(() => { window.dispatchEvent(new Event("resize")); });
+    expect(flyoutEl().style.left).toBe("588px");
+    expect(flyoutEl().dataset.flyoutSide).toBe("left");
+
+    rowTop = 0;
+    act(() => { menuEl().dispatchEvent(new Event("scroll")); });
+    expect(flyoutEl().style.visibility).toBe("hidden");
   });
 });

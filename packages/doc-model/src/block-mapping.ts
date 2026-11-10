@@ -514,13 +514,18 @@ export function nodeToBlock(node: PMNode): Block {
     }
     case 'toggle': {
       const content = node.content ?? []
+      // The summary is a paragraph or heading. A list (or any other block)
+      // parked in that first slot is body: collapsing must be able to hide it,
+      // and the AI must not read the points as the title.
+      const head = content[0]
+      const headIsSummary = !!head && (head.type === 'paragraph' || head.type === 'heading')
       const blk: Record<string, unknown> = {
         kind: 'toggle',
         id,
         expanded: !!node.attrs?.open,
-        richText: contentToRichText(content.length ? [content[0]] : undefined),
+        richText: contentToRichText(headIsSummary ? [head] : [emptyParagraph()]),
       }
-      const rest = content.slice(1)
+      const rest = headIsSummary ? content.slice(1) : content
       if (rest.length) blk.children = nodesToBlocks(rest)
       return blk as Block
     }

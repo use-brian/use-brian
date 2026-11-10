@@ -33,6 +33,14 @@
   --selection-2: var(--interaction);
 }
 
+/* Fade the page behind every open dialog. A background-colored wash
+   (`bg-background/80`) is invisible on a light page, so the scrim always
+   uses the foreground tint. The inbox panel is a desktop popover and
+   keeps its own backdrop. Hand-rolled modals use the same tint directly. */
+[role="presentation"][data-open]:not([data-inbox-backdrop]) {
+  background-color: color-mix(in srgb, var(--foreground) 40%, transparent);
+}
+
 /* The `custom` palette — an AI-generated theme whose core tokens are injected as
    a <style> at runtime (see lib/theme.tsx) — keeps its branded sidebar surface.
    Navigation and selection use neutral interaction feedback. Filled actions stay
@@ -247,7 +255,10 @@
     accent-color: var(--interaction);
   }
 
-  /* Custom scrollbar — slim, primary-tinted, not in your face. */
+  /* Custom scrollbar — slim, primary-tinted, not in your face.
+     Styling these pseudos opts a box out of macOS overlay scrollbars, so the
+     gutter is classic everywhere. The page body opts into a stable gutter
+     below, instead of letting that bar appear and shift the column. */
   ::-webkit-scrollbar {
     width: 10px;
     height: 10px;
@@ -270,6 +281,51 @@
     scrollbar-width: thin;
     scrollbar-color: color-mix(in srgb, var(--muted-foreground) 30%, transparent)
       transparent;
+  }
+
+  /* Page body. The gutter is reserved even while the page is short, so a new
+     line cannot narrow the centered column. The thumb is a faint 4px pill
+     inside an 8px track, clear of the floating recorder at the pane edge.
+     `scrollbar-width` / `scrollbar-color` must be `auto` where WebKit
+     pseudos apply: a non-auto value replaces the 8px padded thumb with the
+     thicker classic thin bar. */
+  .doc-page-scroll {
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--muted-foreground) 16%, transparent)
+      transparent;
+  }
+  @supports selector(::-webkit-scrollbar) {
+    .doc-page-scroll {
+      scrollbar-width: auto;
+      scrollbar-color: auto;
+    }
+    .doc-page-scroll::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    .doc-page-scroll::-webkit-scrollbar-thumb,
+    .doc-page-scroll::-webkit-scrollbar-thumb:hover {
+      border: 2px solid transparent;
+      border-radius: 999px;
+      background-clip: content-box;
+    }
+    .doc-page-scroll::-webkit-scrollbar-thumb {
+      background-color: color-mix(in srgb, var(--muted-foreground) 16%, transparent);
+    }
+    .doc-page-scroll::-webkit-scrollbar-thumb:hover {
+      background-color: color-mix(in srgb, var(--muted-foreground) 32%, transparent);
+    }
+  }
+  @media (forced-colors: active) {
+    .doc-page-scroll {
+      scrollbar-color: auto;
+      scrollbar-width: auto;
+    }
+    .doc-page-scroll::-webkit-scrollbar-thumb,
+    .doc-page-scroll::-webkit-scrollbar-thumb:hover {
+      background-color: CanvasText;
+    }
   }
 
   /* Hidden at rest, with a wider native drag target and no hover layout shift. */
@@ -332,6 +388,21 @@
      ChatComposer usage in empty-page-landing.tsx. */
   :focus {
     outline: none !important;
+  }
+  /* Discrete actions lose any shadow used as a focus halo. An open menu,
+     listbox, or popover uses that same property as its edge, and the surface
+     itself is focused until hover moves focus onto an item. Leaving the edge
+     intact keeps the card framed the moment it opens. */
+  :focus:not(
+    :is(
+      [role="menu"],
+      [role="listbox"],
+      [data-slot="dropdown-menu-content"],
+      [data-slot="select-content"],
+      [data-slot="popover-content"],
+      [data-slot="emoji-picker"]
+    )
+  ) {
     box-shadow: none !important;
   }
   /* Override legacy utilities on primitives AND ad-hoc controls. A translucent
@@ -1192,9 +1263,13 @@
   .doc-collab-editor .ProseMirror :not(pre) > code,
   .doc-public-body :not(pre) > code {
     font-size: 0.875em;
-    background: var(--muted);
-    padding: 0.1em 0.35em;
+    font-weight: 500;
+    color: var(--inline-code-fg, #c0594e);
+    background: var(--inline-code-bg, #f4f3f3);
+    padding: 0.12em 0.4em;
     border-radius: 0.25rem;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
   }
   .doc-collab-editor .ProseMirror pre,
   .doc-public-body pre {
@@ -1666,6 +1741,24 @@
   .doc-collab-editor .ProseMirror .doc-toggle-content > * > .doc-embed:not(:first-child) {
     margin-top: 0.125rem;
   }
+  /* A list (or any non-text block) parked in the summary slot. The placeholder
+     is the summary line; the real first child is body and hides with the rest
+     while the toggle is closed. */
+  .doc-collab-editor .ProseMirror .doc-toggle-summary-missing {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0;
+    color: var(--muted-foreground);
+    cursor: text;
+    line-height: 1.5;
+  }
+  .doc-collab-editor
+    .ProseMirror
+    .doc-toggle[data-open="false"][data-summary="missing"]
+    .doc-toggle-content {
+    display: none;
+  }
   /* Collapsed: hide the nested children, keep the summary. */
   .doc-collab-editor
     .ProseMirror
@@ -1715,13 +1808,19 @@
   }
   /* The dragged / selected block. prosemirror-view's default is a harsh
      `outline: 2px solid #8cf` — the stray light-blue rectangle that framed a
-     whole toggle mid-drag. Swap it for Notion's soft rounded fill (the
-     "selected-block fill" the editor's focus-ring rule above anticipates). */
+     whole block mid-drag — and list items repeat it on an :after border.
+     `!important` is required: that stylesheet is unlayered, and a layered
+     `outline: none` loses to it. The selection is the soft fill only. No
+     outline and no box-shadow frame. */
   .doc-collab-editor .ProseMirror-selectednode {
-    outline: none;
+    outline: none !important;
     border-radius: 6px;
     background-color: color-mix(in oklab, var(--interaction) 9%, transparent);
-    box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--interaction) 30%, transparent);
+    box-shadow: none !important;
+  }
+  .doc-collab-editor li.ProseMirror-selectednode:after {
+    content: none;
+    border: none !important;
   }
 
   /* ── Multi-block area selection (NodeRange) ─────────────────────────
@@ -1754,14 +1853,12 @@
      must match a plain block — just the flat band, NO single-node selection ring.
      ProseMirror's node-view machinery stamps `.ProseMirror-selectednode` on EVERY
      node-view inside the range (plain text blocks aren't node-views, so they
-     escape it), which (a) framed a selected toggle differently from every other
-     block — the band PLUS the box-shadow ring (`.ProseMirror-selectednode` above)
-     — and (b) drew a boxed ring around a NESTED toggle that carries no band of its
-     own (the inner box). Strip the ring wherever it lands on, or inside, a range
-     selection. A genuine lone `.ProseMirror-selectednode` (click-to-select one
-     block) is untouched — matching here needs both classes or a selected-range
-     ancestor. The container keeps its band (only the ring's box-shadow is killed);
-     the nested node-view is flattened entirely so the parent band shows through. */
+     escape it), which stacked the single-block fill on the range band and boxed
+     a nested toggle that carries no band of its own. Flatten that fill wherever
+     it lands on, or inside, a range selection. A genuine lone
+     `.ProseMirror-selectednode` (click-to-select one block) keeps its fill and
+     still has no frame. The container keeps its band; the nested node-view is
+     flattened entirely so the parent band shows through. */
   .doc-collab-editor .ProseMirror-selectednoderange.ProseMirror-selectednode {
     box-shadow: none;
     border-radius: 4px; /* the band's radius, not the 6px ring */
@@ -2489,6 +2586,9 @@ html[data-vt-back="true"]::view-transition-new(root) {
    hover so they stay legible, but the title button (`.doc-nav-title`) is
    excluded — it spans the whole row as the nav target, so a hover chip behind its
    text read as a stray inner-hover rectangle. The row pill is its hover feedback.
+   The same button is also the keyboard target, and the shared focus fill would
+   paint a second, square highlight inside the rounded pill. The pill is the
+   selected and focused state of that title.
    Applied as `.doc-nav-active` in doc-sidebar-row.tsx, sidebar-tree-node.tsx,
    and doc-sidebar.tsx. */
 .doc-nav-active {
@@ -2505,6 +2605,11 @@ html[data-vt-back="true"]::view-transition-new(root) {
 }
 .doc-nav-active button:not(.doc-nav-title):hover {
   background-color: color-mix(in srgb, var(--nav-active-fg) 18%, transparent);
+}
+.doc-nav-active .doc-nav-title,
+.doc-nav-active .doc-nav-title:focus-visible {
+  background-color: transparent;
+  background-image: none !important;
 }
 
 /* ── App chrome is not text-selectable ─────────────────────────────────────
@@ -2828,8 +2933,15 @@ html[data-vt-back="true"]::view-transition-new(root) {
 
 /* Gutter badge: a quiet count chip in the right margin (Notion-style) — a
    small speech-bubble glyph + the count; muted, darkens on hover. */
+/* The badge is taken out of flow. Its containing block must be the commented
+   block (the widget is inserted inside it), not the editor frame — otherwise
+   `right` with no `top` drops the chip at the bottom of the page. */
+.doc-collab-editor .ProseMirror :is(p, h1, h2, h3, h4, blockquote, li) {
+  position: relative;
+}
 .doc-comment-badge {
   position: absolute;
+  top: 0.15em;
   right: -1.9rem;
   display: inline-flex;
   align-items: center;
@@ -2959,9 +3071,13 @@ button.doc-comment-card:hover {
 .chat-markdown h2 { font-size: 1.125em; }
 .chat-markdown h3 { font-size: 1em; }
 .chat-markdown code {
-  font-size: max(0.875em, 0.8125rem); padding: 0.15em 0.35em;
-  background: var(--muted); border-radius: 0.25rem;
+  font-size: max(0.875em, 0.8125rem); padding: 0.12em 0.4em;
+  font-weight: 500;
+  color: var(--inline-code-fg, #c0594e);
+  background: var(--inline-code-bg, #f4f3f3); border-radius: 0.25rem;
   font-family: var(--font-code);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 .chat-markdown pre {
   margin: 0.5rem 0; padding: 0.75rem 1rem;
@@ -2970,6 +3086,8 @@ button.doc-comment-card:hover {
 }
 .chat-markdown pre code {
   font-size: inherit;
+  font-weight: inherit;
+  color: inherit;
   padding: 0; background: none; border-radius: 0;
 }
 /* Leave room for the always-visible touch copy action above the first line. */

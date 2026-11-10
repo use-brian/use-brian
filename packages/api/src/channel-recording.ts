@@ -37,7 +37,7 @@ async function lockWorkspace(db: PoolClient, integrationId: string) {
     JOIN channel_integrations ci ON ci.channel_id=c.id WHERE ci.id=$1) FOR UPDATE`, [integrationId])
 }
 
-async function destinationScope(db: PoolClient, input: { integrationId: string; conversationId: string; assistantId: string },
+export async function recordingDestinationScope(db: PoolClient, input: { integrationId: string; conversationId: string; assistantId: string },
   owner: { ownerUserId: string; workspaceId: string }, policy: RecordingPolicy) {
   const assistant = (await db.query<{ clearance: string }>('SELECT clearance FROM assistants WHERE id=$1 AND workspace_id=$2 FOR SHARE', [input.assistantId,owner.workspaceId])).rows[0]
   if (!assistant) throw unavailable()
@@ -125,7 +125,7 @@ async function appendTelegramRecording(input: RecordingMessage): Promise<Recordi
     await db.query('UPDATE channel_recording_policies SET integration_id=$2 WHERE id=$1', [policy.id,input.integrationId])
     const prior = (await db.query<{ sessionId: string | null }>(`SELECT session_id AS "sessionId" FROM channel_recording_messages WHERE policy_id=$1 AND provider_message_id=$2`, [policy.id, input.providerMessageId])).rows[0]
     if (prior) { await db.query('COMMIT'); return null }
-    const scope = await destinationScope(db,input,owner,policy)
+    const scope = await recordingDestinationScope(db,input,owner,policy)
     if (policy.sessionId) {
       const current = (await db.query<{ clearance: string; compartments: string[]; assistantId: string; projectId: string | null; groupId: string | null }>(
         'SELECT effective_clearance AS clearance,context_compartments AS compartments,assistant_id AS "assistantId",context_project_id AS "projectId",context_group_id AS "groupId" FROM sessions WHERE id=$1 FOR SHARE', [policy.sessionId])).rows[0]
@@ -239,7 +239,7 @@ export async function changeChannelRecording(input: { integrationId: string; act
     if (input.enabled && input.destination === 'workspace') {
       const prior = (await db.query<{ assistantId: string }>('SELECT assistant_id AS "assistantId" FROM sessions WHERE recording_policy_id=$1 ORDER BY recording_revision DESC LIMIT 1', [input.id])).rows[0]
       if (!prior) throw unavailable()
-      await destinationScope(db, { integrationId: input.integrationId, conversationId: current.conversationId, assistantId: prior.assistantId }, owner,
+      await recordingDestinationScope(db, { integrationId: input.integrationId, conversationId: current.conversationId, assistantId: prior.assistantId }, owner,
         { ...current, destination: input.destination, projectId: input.projectId })
     }
     // Project admission is repeated at the first write with the actual routed assistant.

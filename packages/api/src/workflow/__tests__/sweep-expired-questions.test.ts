@@ -39,7 +39,7 @@ function row(over: Partial<PendingApproval> = {}): PendingApproval {
     originatingAssistantId: 'asst-1',
     answerText: null,
     ...over,
-  }
+  } as PendingApproval
 }
 
 function makeDeps(rows: PendingApproval[]) {

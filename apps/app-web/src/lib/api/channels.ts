@@ -1004,3 +1004,32 @@ export async function updateChannelRecording(workspaceId: string, channelId: str
   if (!response.ok) throw new Error("recording_unavailable");
   return response.json();
 }
+
+/** Reviewed metadata only. No retained message or tool content is returned. */
+export type LegacyGroupRecoveryCandidate = {
+  sessionId: string; conversationId: string; assistantId: string; assistantName: string | null;
+  title: string | null; messageCount: number; skippedMessageCount: number; snapshotToken: string;
+  sensitivity: string; compartments: string[]; projectId: string | null; projectName: string | null;
+};
+export type LegacyGroupRecoveryPreview = { candidates: LegacyGroupRecoveryCandidate[] };
+class LegacyGroupRecoveryError extends Error {
+  constructor(readonly status: number) { super("legacy_group_recovery_unavailable"); }
+}
+function legacyGroupRecoveryUrl(workspaceId: string, channelId: string): string {
+  return `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(channelId)}/recordings/legacy-recovery`;
+}
+export async function previewLegacyGroupRecovery(workspaceId: string, channelId: string): Promise<LegacyGroupRecoveryPreview> {
+  const response = await authFetch(legacyGroupRecoveryUrl(workspaceId, channelId));
+  if (!response.ok) throw new LegacyGroupRecoveryError(response.status);
+  return response.json();
+}
+export async function restoreLegacyGroupContext(workspaceId: string, channelId: string,
+  reviewed: Pick<LegacyGroupRecoveryCandidate, "sessionId" | "snapshotToken">): Promise<{ sessionId: string; policyId: string; revision: number }> {
+  const response = await authFetch(legacyGroupRecoveryUrl(workspaceId, channelId), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId: reviewed.sessionId, snapshotToken: reviewed.snapshotToken,
+      confirmConnectedByMe: true, confirmHistoryReview: true }),
+  });
+  if (!response.ok) throw new LegacyGroupRecoveryError(response.status);
+  return response.json();
+}

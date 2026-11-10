@@ -1230,7 +1230,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                 style={
                   commentGutter > 0 ? { paddingRight: commentGutter } : undefined
                 }
-                className="flex-1 min-h-0 overflow-y-auto overflow-x-clip px-4 py-4 transition-[padding] duration-200 md:px-10 md:py-6 lg:px-16"
+                className="doc-page-scroll flex-1 min-h-0 overflow-y-auto overflow-x-clip px-4 py-4 transition-[padding] duration-200 md:px-10 md:py-6 lg:px-16"
               >
                 {/* Page-width wrapper. Default (false) is a centered constrained
                     reading column (~720px via `.doc-page-content`); `true` is

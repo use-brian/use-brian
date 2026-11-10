@@ -9,6 +9,7 @@ import { ApplicationPlatformError, WORKSPACE_MODULES, applicationCommandSchema, 
 import { getAppPool } from '../db/client.js'
 import { lockWorkspaceModule, requireWorkspaceModuleAdmission } from '../db/workspace-modules-store.js'
 import { getApplicationExecutionBinding, runApplicationTransaction } from './execution-context.js'
+import { externalServiceReceiptIdentity } from './external-service-receipt-identity.js'
 import { z } from 'zod'
 import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js'
 
@@ -127,7 +128,7 @@ export class ApplicationPlatformService {
     const workspaceId = execution.security.access.workspaceId, actorUserId = execution.security.access.userId
     const actorKey = hash(application ? { kind: 'application', appId: application.state.appId, workspaceId,
       principal: application.state.principal, serviceUserId: application.state.serviceUserId ?? null, assistant: execution.assistant }
-      : { identity: execution.identity, assistant: execution.assistant, actorUserId })
+      : externalServiceReceiptIdentity(execution, moduleKey) ?? { identity: execution.identity, assistant: execution.assistant, actorUserId })
     const identity = [workspaceId, moduleKey, commandKey, actorKey, command.data.idempotencyKey]
     return this.transaction(execution, async transaction => {
       await this.assertDeployedModuleCurrent(transaction, moduleKey)
@@ -169,7 +170,7 @@ export class ApplicationPlatformService {
     const workspaceId = execution.security.access.workspaceId, actorUserId = execution.security.access.userId
     const actorKey = hash(application ? { kind: 'application', appId: application.state.appId, workspaceId,
       principal: application.state.principal, serviceUserId: application.state.serviceUserId ?? null, assistant: execution.assistant }
-      : { identity: execution.identity, assistant: execution.assistant, actorUserId })
+      : externalServiceReceiptIdentity(execution, moduleKey) ?? { identity: execution.identity, assistant: execution.assistant, actorUserId })
     const identity = [workspaceId, moduleKey, commandKey, actorKey, command.data.idempotencyKey]
     return this.transaction(execution, async (transaction, afterCommit) => {
       await this.assertDeployedModuleCurrent(transaction,moduleKey)

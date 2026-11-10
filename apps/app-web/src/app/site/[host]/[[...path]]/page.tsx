@@ -16,6 +16,7 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { notFound, permanentRedirect } from "next/navigation";
 import { buildShareMetadata, getSitePage } from "@/lib/api/public-share";
+import { hostForPublicUrl, siteSocialImageUrl } from "@/lib/page-social-card";
 import { isAppHost, normalizeHostHeader } from "@/lib/site-hosts";
 import { PublicPageView } from "@/app/share/[token]/public-page-view";
 
@@ -43,10 +44,18 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
     return { robots: { index: false, follow: false } };
   }
   const page = result.page;
+  const canonicalPath = page.canonicalPath ?? "/";
+  const h = await headers();
+  const proto = (h.get("x-forwarded-proto") ?? "").split(",")[0].trim().toLowerCase();
+  const scheme = proto === "http" ? "http" : "https";
+  const publicHost = hostForPublicUrl(host, h.get("x-forwarded-host") ?? h.get("host"));
   return {
-    ...buildShareMetadata(page),
+    ...buildShareMetadata(page, {
+      image: siteSocialImageUrl(publicHost, canonicalPath, scheme),
+      pageUrl: `${scheme}://${publicHost}${canonicalPath === "/" ? "/" : canonicalPath}`,
+    }),
     alternates: {
-      canonical: `https://${host}${page.canonicalPath ?? "/"}`,
+      canonical: `https://${host}${canonicalPath}`,
     },
   };
 }

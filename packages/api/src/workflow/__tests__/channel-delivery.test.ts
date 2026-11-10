@@ -49,6 +49,7 @@ import type { WorkflowRunRecord } from '@use-brian/core'
 import {
   createSlackAdapter as mockedCreateSlackAdapter,
   createTelegramAdapter as mockedCreateTelegramAdapter,
+  createWhatsAppAdapter as mockedCreateWhatsAppAdapter,
   createWhatsAppCloudAdapter as mockedCreateWhatsAppCloudAdapter,
   SlackApiError,
 } from '@use-brian/channels'
@@ -664,4 +665,25 @@ it('binds a WhatsApp Cloud trigger reply after provider/access/window validation
   expect(result).toMatchObject({ status: 'delivered', messageId: 'cloud-message' })
   expect(create).toHaveBeenCalledWith(expect.objectContaining({ integrationId: 'int-wa', channelId: '15551234567' }))
   expect(attach).toHaveBeenCalledWith('a'.repeat(24), 'cloud-message')
+})
+
+describe('explicit WhatsApp integration pinning', () => {
+  it.each([null, { id: 'pinned', channelId: 'connection', credentials: { provider: 'cloud_api' } },
+    { id: 'pinned', credentials: {} }])('never falls back to system for unavailable/unsupported explicit integration (%j)', async integration => {
+    vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockResolvedValueOnce(integration as never)
+    const result = await createWorkflowChannelDelivery({ integrationStore, waConnectorUrl: 'http://connector', waConnectorSecret: 'secret' })({
+      ...baseParams(), channelType: 'whatsapp', channelId: 'group@g.us', channelIntegrationId: 'pinned',
+    })
+    expect(result).toMatchObject({ status: 'skipped', reason: 'no_integration' })
+    expect(sendMessage).not.toHaveBeenCalled()
+  })
+  it('uses only the selected connector connection for non-question notifications', async () => {
+    vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockResolvedValueOnce({ id: 'pinned', channelId: 'selected-connection', credentials: {} } as never)
+    sendMessage.mockResolvedValueOnce('sent')
+    const result = await createWorkflowChannelDelivery({ integrationStore, waConnectorUrl: 'http://connector', waConnectorSecret: 'secret' })({
+      ...baseParams(), channelType: 'whatsapp', channelId: 'group@g.us', channelIntegrationId: 'pinned',
+    })
+    expect(result).toMatchObject({ status: 'delivered' })
+    expect(mockedCreateWhatsAppAdapter).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: 'selected-connection' }))
+  })
 })

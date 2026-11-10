@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs'
 import { describe, it, expect, vi } from 'vitest'
 import { createTransport } from 'nodemailer'
+import { BRAND_MARK_CID, brandMarkPng } from '../brand-mark.js'
 import {
   createSmtpClient,
   resolveSmtpTransportOptions,
@@ -116,6 +118,13 @@ describe('[COMP:api/smtp-client] sendMagicLink', () => {
 
     expect(calls[0].html).toContain('482917')
     expect(calls[0].text).toContain('482917')
+    expect(calls[0].attachments).toEqual([{
+      filename: 'brian-mark.png',
+      content: brandMarkPng(),
+      cid: BRAND_MARK_CID,
+      contentType: 'image/png',
+      contentDisposition: 'inline',
+    }])
   })
 
   it('propagates transport errors', async () => {
@@ -151,6 +160,7 @@ describe('[COMP:api/smtp-client] sendWorkspaceInvitation', () => {
       address: 'contact@usebrian.ai',
     })
     expect(calls[0].to).toBe('a@b.com')
+    expect(calls[0].attachments).toBeUndefined()
   })
 
   it('sends from the bare mailbox when the configured From: carries a display name', async () => {
@@ -280,5 +290,13 @@ describe('[COMP:api/smtp-client] renderMagicLinkEmail', () => {
     const { html } = renderMagicLinkEmail('https://x', 'en', 'abc<script>')
     expect(html).not.toContain('abc')
     expect(html).not.toContain('<script>')
+  })
+
+  it('places the product icon above the wordmark without a remote image URL', () => {
+    const { html } = renderMagicLinkEmail('https://x', 'en')
+    expect(html).toContain(`<img src="cid:${BRAND_MARK_CID}" alt="Use Brian" width="64" height="64"`)
+    expect(html).not.toMatch(/<img[^>]+src="https?:/)
+    const productIcon = readFileSync(new URL('../../../../../apps/app-web/public/icon.png', import.meta.url))
+    expect(brandMarkPng()).toEqual(productIcon)
   })
 })

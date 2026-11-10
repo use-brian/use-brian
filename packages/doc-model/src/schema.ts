@@ -89,11 +89,18 @@ export const Toggle = Node.create({
     // `> ` wraps the current block in a toggle. Created OPEN so the summary
     // line is visible to type into — a collapsed toggle hides everything but
     // its first child (see the node-view + globals.css `.doc-toggle`).
+    //
+    // Never join with the previous toggle. The default wrapping rule merges
+    // a same-type sibling, which is right for a quote (`| ` continues the
+    // quote) and wrong for a toggle: `> ` on the empty line after a toggle
+    // would delete the marker and nest that line into the previous body.
+    // Nesting stays a Tab action; each `> ` is its own toggle.
     return [
       wrappingInputRule({
         find: TOGGLE_INPUT_REGEX,
         type: this.type,
         getAttributes: () => ({ open: true }),
+        joinPredicate: () => false,
       }),
     ]
   },

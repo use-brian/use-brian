@@ -127,7 +127,7 @@ export function CreateWorkflowModal({ onClose }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-background/40 backdrop-blur-sm overflow-y-auto"
+      className="fixed inset-0 z-50 bg-foreground/40 backdrop-blur-sm overflow-y-auto"
       onClick={() => {
         if (!submitting) onClose();
       }}

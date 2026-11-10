@@ -3,6 +3,28 @@
 The open BYO Telegram integration supports private chats, groups, forum topics,
 broadcast-channel posts, and comments in linked discussion supergroups.
 
+## Reply formatting
+
+Model replies use Telegram HTML formatting, including when conversation saving
+is unavailable. Headings and emphasis render as bold text, bullets use readable
+bullet characters, and Markdown tables become vertical labelled comparisons.
+If Telegram rejects the HTML, a plain-text version preserves the same comparison
+layout and literal code. Conversation saving and output formatting are separate.
+
+## Topic conversation history
+
+An explicitly bound topic with an approved workspace audience can keep one shared
+conversation history even when the bot has no recording owner. Authorized
+workspace members can read it at the topic's sensitivity and Department/Project
+scope. Replies use the preceding exchange and can interpret a current image.
+Different topics stay separate, and history survives a server restart or a
+reconnect of the same bot.
+
+Conversation history starts with Brain capture off. It does not automatically
+file images/documents, enable private tools or turn the chat into learned memory.
+Explicit recording stops are honored. Held historical captures are not restored
+or merged into this new history. These changes require an updated server release.
+
 ## Setup and operation
 
 1. Connect your bot in **Studio → Channels** with a public HTTPS webhook.
@@ -211,3 +233,24 @@ Public Telegram references:
 - [sendMessage](https://core.telegram.org/bots/api#sendmessage) and
   [ReplyParameters](https://core.telegram.org/bots/api#replyparameters)
 - [Update types](https://core.telegram.org/bots/api#update)
+
+## Recovering legacy group context
+
+A legacy bot can reply without loading history or tools when its original
+recording ownership is unavailable. Confirming recording ownership by itself
+does not restore old group context: Personal recording remains a private
+transcript destination, and its group replies use the current message only.
+
+The recorded owner can use **Studio → Channels → Group recording → Review group
+context** to preview an eligible legacy shared conversation. Review the exact
+bot, conversation/topic, original audience and eligible/excluded message counts
+before restoring. Recovery creates a new Work recording epoch and releases only
+provider-id-bearing, tool-free text into that epoch. The original held session
+is retained. Private sessions, tool rounds, attachment contents and messages
+without delivery evidence are not published into the group.
+
+Future group replies use the actual linked sender and current group permissions.
+Recovery does not grant the recorder's private memories or account credentials
+to other group members. Verify a follow-up turn and the intended connected tool
+through the normal Telegram account; a successful recovery write alone does not
+prove tool access.

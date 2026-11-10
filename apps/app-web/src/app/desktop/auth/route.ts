@@ -4,6 +4,7 @@ import { loopbackRedirectBase } from "@/lib/desktop-loopback";
 import {
   buildDelegatedLoginUrl,
   primaryAuthUrl,
+  publicAppUrl,
 } from "@/lib/primary-auth";
 
 /**
@@ -86,7 +87,7 @@ function redirectToLogin(
 }
 
 export async function GET(request: Request) {
-  const url = new URL(request.url);
+  const url = publicAppUrl(request.url);
   const challenge = url.searchParams.get("challenge") ?? "";
   const loopbackBase = loopbackRedirectBase(url.searchParams.get("redirect"));
   const stateRaw = url.searchParams.get("state");

@@ -403,13 +403,11 @@ describe('[COMP:api/workspace-scope-review] durable classification with real dat
       f=await fixture()
       for(let i=0;i<rootCount;i++){
         const root=await f.create();roots.push(root.id)
-        // This exercises impact bounds, not hundreds of independent memory admissions.
-        // Copy the canonical root's private envelope; keep every database trigger enabled.
-        const outputs=(await pool.query<{id:string}>(`INSERT INTO memories(
-          workspace_id,user_id,assistant_id,created_by_user_id,summary,sensitivity,scope,compartments,project_ids)
-          SELECT workspace_id,user_id,assistant_id,created_by_user_id,summary,sensitivity,scope,compartments,project_ids
-            FROM memories CROSS JOIN generate_series(1,$2::int) WHERE id=$1 RETURNING id`,
-        [root.id,rootCount===1?501:251])).rows.map(row=>row.id)
+        const outputs:string[]=[]
+        for(let j=0;j<(rootCount===1?501:251);j++){
+          const output=await f.create()
+          outputs.push(output.id)
+        }
         const derivations=(await pool.query<{id:string}>(`INSERT INTO scope_derivations(workspace_id,resource_kind,resource_id,resource_version,producer,user_id,assistant_id,sensitivity,compartments,project_ids,source_policy_revision)
           SELECT workspace_id,'memory',id,scope_version::text,'impact-bound-fixture',user_id,assistant_id,sensitivity,compartments,project_ids,1 FROM memories WHERE id=ANY($1::uuid[]) RETURNING id`,[outputs])).rows.map(row=>row.id)
         // Trigger-heavy provenance construction has its own fixture budget.

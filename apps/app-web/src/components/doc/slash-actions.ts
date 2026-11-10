@@ -42,6 +42,7 @@ export type SlashAction =
   | { command: 'createChildPage' }
   | { command: 'linkToPage' }
   | { command: 'openTemplateGallery' }
+  | { command: 'openEmojiPicker' }
 
 /** Every slash kind, for exhaustiveness checks + tests. */
 export const ALL_SLASH_KINDS: readonly SlashMenuBlockKind[] = [
@@ -69,6 +70,7 @@ export const ALL_SLASH_KINDS: readonly SlashMenuBlockKind[] = [
   'child_page',
   'link_to_page',
   'template',
+  'emoji',
 ]
 
 export function slashActionFor(kind: SlashMenuBlockKind): SlashAction {
@@ -112,5 +114,7 @@ export function slashActionFor(kind: SlashMenuBlockKind): SlashAction {
       return { command: 'linkToPage' }
     case 'template':
       return { command: 'openTemplateGallery' }
+    case 'emoji':
+      return { command: 'openEmojiPicker' }
   }
 }

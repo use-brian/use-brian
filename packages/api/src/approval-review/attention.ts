@@ -12,6 +12,7 @@
  *
  * [COMP:api/approval-review-resolution]
  */
+import { externalActionConfirmation, type ExternalActionConfirmation } from '../external-approvals/confirmation.js'
 import { getPool, queryWithRLS } from '../db/client.js'
 import { createPendingApprovalsStore, type PendingApproval } from '../db/pending-approvals-store.js'
 import {
@@ -37,7 +38,7 @@ export type AttentionReview = {
 
 export type AttentionItem =
   | { key: string; kind: 'approval_waiting'; approvalId: string; approvalKind: string; toolName: string | null; summary: string | null
-      createdAt: string; sessionId: string | null; workflowRunId: string | null; projectIds: string[]; review: AttentionReview; seen: boolean }
+      confirmation?: ExternalActionConfirmation; createdAt: string; sessionId: string | null; workflowRunId: string | null; projectIds: string[]; review: AttentionReview; seen: boolean }
   | { key: string; kind: 'delegated_decision'; approvalId: string; receiptId: string; reviewerAssistantId: string; reviewerName: string | null
       toolName: string | null; decidedAt: string; invalidated: boolean; sessionId: string | null; projectIds: string[]; seen: boolean }
   | { key: string; kind: 'route_blocker'; eventId: string; workflowId: string; blocker: string; createdAt: string; projectIds: string[]; seen: boolean }
@@ -61,18 +62,25 @@ export async function listAttention(actor: ReviewActor, workspaceId: string, fil
   const store = createPendingApprovalsStore()
   const seen = await listAttentionSeen(actor.userId, workspaceId)
   const pending = (await store.listPendingForWorkspace(actor.userId, workspaceId))
-    .filter((a) => a.approverUserId === actor.userId && a.kind !== 'department_access').slice(0, 100)
+    .filter((a) => (a.kind === 'external_action' || a.approverUserId === actor.userId) && a.kind !== 'department_access')
+    // Native history remains bounded, but every live external request needs a
+    // confirmation surface now that it is intentionally absent from the queue.
+    .filter((a, index) => index < 100 || a.kind === 'external_action')
   const attempts = await latestAttemptsForViewer(actor.userId, pending.map((a) => a.id))
   const items: AttentionItem[] = []
   const reviewers: string[] = []
   for (const a of pending) {
     const facts = await loadRequestFacts(a)
-    const assignment = await effectiveAssignmentFor(facts)
+    const assignment = a.kind === 'external_action' ? null : await effectiveAssignmentFor(facts)
     if (assignment) reviewers.push(assignment.reviewerAssistantId)
     const attempt = attempts.get(a.id)
+    const confirmation = a.kind === 'external_action' ? externalActionConfirmation(a) : null
     items.push({
+      ...(confirmation ? { confirmation } : {}),
       key: `approval:${a.id}`, kind: 'approval_waiting', approvalId: a.id, approvalKind: a.kind, toolName: a.toolName ?? null,
-      summary: summaryOf(a), createdAt: a.createdAt.toISOString(), sessionId: a.blockingSessionId, workflowRunId: a.workflowRunId ?? null,
+      summary: summaryOf(a), createdAt: a.createdAt.toISOString(), sessionId: a.kind === 'external_action'
+        ? (a.deliveryChannelType === 'web' && a.deliveryChannelId !== 'queue' ? a.deliveryChannelId : null)
+        : a.blockingSessionId, workflowRunId: a.workflowRunId ?? null,
       projectIds: facts.projectIds, seen: seen.has(`approval:${a.id}`),
       review: assignment ? {
         assignmentId: assignment.id, reviewerAssistantId: assignment.reviewerAssistantId, reviewerName: null,
@@ -130,7 +138,7 @@ export async function inspectRequest(actor: ReviewActor, workspaceId: string, ap
   const approval = await store.getById(actor.userId, approvalId)
   if (!approval || approval.workspaceId !== workspaceId) throw new ApprovalReviewError('not_found', 404, 'Not found')
   const facts = await loadRequestFacts(approval)
-  const assignment = await effectiveAssignmentFor(facts)
+  const assignment = approval.kind === 'external_action' ? null : await effectiveAssignmentFor(facts)
   const receipt = await getReceiptForViewer(actor.userId, approvalId)
   const attempt = (await latestAttemptsForViewer(actor.userId, [approvalId])).get(approvalId) ?? null
   const dryRun = approval.status === 'pending' ? await checkReview(approval, facts, assignment, { kind: 'system' }) : null

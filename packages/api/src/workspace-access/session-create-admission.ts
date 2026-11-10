@@ -154,7 +154,10 @@ export async function admitAnchoredSession<T extends Input & {
   await client.query('SELECT id FROM workspaces WHERE id=$1 FOR UPDATE', [workspaceId])
   const policy = await readAdmissionPolicy(client, workspaceId)
   const effectiveClearance = params.effectiveClearance ?? assistant.clearance ?? 'internal'
-  if (!usesClassicModeAdmission(policy)) return { ...params, workspaceId, effectiveClearance }
+  // Anchored provenance is independent of classic/default-context admission.
+  // The SQL creation guard requires this receipt in ready v2 workspaces too;
+  // the Page/file/feed anchor still supplies the actual audience and RLS gate.
+  if (!policy || policy.setupState === 'legacy') return { ...params, workspaceId, effectiveClearance }
   if (assistant.workspaceId !== workspaceId) throw new WorkspaceAccessError('context_not_available', 404)
   await client.query("SELECT set_config('app.session_creation_admission',$1,true)", [JSON.stringify({
     protocol: '1', provenance: 'anchored_thread', workspaceId,

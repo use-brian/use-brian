@@ -36,6 +36,7 @@ import { authFetch } from "@/lib/auth-fetch";
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type ApprovalKind =
+  | "external_action"
   | "department_access"
   | "workflow_step"
   | "tool_invocation"
@@ -61,6 +62,8 @@ export type PendingApprovalRow = {
     description?: string;
     displayLines?: string[];
     allowPersistentApproval?: boolean;
+    /** Frozen external request, display only; never a Brian tool invocation. */
+    request?: { method: "confirm" | "select" | "question"; title: string; message?: string; options?: string[]; allowCustom?: boolean };
     // staged_write provenance (kind='staged_write' only)
     surface?: StagedWriteSurface;
     credentialId?: string;
@@ -369,6 +372,10 @@ export function respondByKind(
   reason?: string,
   extra?: { grantAlways?: boolean; attach?: boolean; attachStepId?: string },
 ): Promise<RespondResult> {
+  // External consent has no attach/grant/reason authority; a lost decision race
+  // must not be reported as the decision this human just attempted.
+  if (row.kind === "external_action") return respondToApproval(row.id, decision).then(result =>
+    result.ok && result.status !== decision ? { ok: false as const, error: "external_approval_changed", status: 409 } : result);
   if (isRoutineProposal(row)) return decideRoutineProposal(row.id,decision==='approved'?'apply':'reject',Number(row.arguments?.expectedRevision),crypto.randomUUID())
     .then(()=>({ok:true as const,status:decision})).catch(()=>({ok:false as const,error:'routine_operation_unavailable'}));
   return isSkillApprovalKind(row.kind)
@@ -378,4 +385,20 @@ export function respondByKind(
 
 export function isRoutineProposal(row:{kind:string;arguments?:Record<string,unknown>}):boolean {
   return row.kind==='workflow_refinement' && row.arguments?.operation==='routine_intake';
+}
+
+/** One-time human answer, with no native turn/tool execution authority. */
+export async function answerExternalQuestion(id: string, answer: string): Promise<RespondResult> {
+  const res = await authFetch(`${API_URL}/api/approvals/${encodeURIComponent(id)}/respond`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answer }),
+  });
+  const data = await res.json().catch(() => ({})) as { kind?: string; status?: string; answer?: string; error?: string };
+  if (res.ok) {
+    return data.kind === "external_action" && data.status === "answered" && data.answer === answer
+      ? { ok: true, status: "answered" }
+      : { ok: false, status: 409, error: "external_approval_changed" };
+  }
+  return { ok: false, status: res.status, error: data.error ?? "Request failed" };
 }

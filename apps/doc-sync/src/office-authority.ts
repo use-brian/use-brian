@@ -3,7 +3,7 @@
 import type { ResolvedOfficeAccess } from '@use-brian/api/office/access.js'
 import { parseSyncDocumentName } from './document-router.js'
 
-export type OfficeConnectionContext = {
+type OfficeConnectionContext = {
   service?: true
   userId?: string
   sessionId?: string

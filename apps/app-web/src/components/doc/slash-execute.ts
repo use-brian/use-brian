@@ -106,14 +106,15 @@ export function executeSlashItem(editor: Editor, item: SlashMenuItem): boolean {
   if (editor.isEditable === false) return false;
   const action = slashActionFor(item.blockKind);
 
-  // child_page / link_to_page / template are handled by the editor's slash
-  // `onSelect` (it owns the workspace context, router, page picker, and template
-  // gallery these need). Reaching here means a caller bypassed that intercept —
-  // no synchronous chain to run.
+  // child_page / link_to_page / template / emoji are handled by the editor's
+  // slash `onSelect` (it owns the workspace context, router, page picker,
+  // template gallery, and caret emoji picker these need). Reaching here means
+  // a caller bypassed that intercept — no synchronous chain to run.
   if (
     action.command === "createChildPage" ||
     action.command === "linkToPage" ||
-    action.command === "openTemplateGallery"
+    action.command === "openTemplateGallery" ||
+    action.command === "openEmojiPicker"
   ) {
     return false;
   }

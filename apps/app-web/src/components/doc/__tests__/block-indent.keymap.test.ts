@@ -339,6 +339,52 @@ describe("[COMP:app-web/block-indent] Enter on a toggle summary (E1–E3)", () =
     expect(top[1].content![0].content![0].text).toBe("summary"); // title intact
   });
 
+  it("three Enters from the last bullet exit to a root paragraph even with an empty indented tail", () => {
+    const ed = mountContent([
+      {
+        type: "toggle",
+        attrs: { open: true },
+        content: [
+          p("Title"),
+          {
+            type: "bulletList",
+            content: [li("one"), li("last")],
+          },
+          { type: "paragraph" },
+        ],
+      },
+    ]);
+    ed.commands.setTextSelection(posInText(ed.state.doc, "last") + "last".length);
+    press(ed, "Enter");
+    press(ed, "Enter");
+    press(ed, "Enter");
+    const top = ed.getJSON().content!;
+    expect(top.map((node) => node.type)).toEqual(["toggle", "paragraph"]);
+    expect(top[0].content!.map((node) => node.type)).toEqual(["paragraph", "bulletList"]);
+    expect(top[1].content).toBeUndefined();
+    expect(ed.state.selection.$from.depth).toBe(1);
+  });
+
+  it("three Enters from the last bullet still exit when the list is the end of the toggle", () => {
+    const ed = mountContent([
+      {
+        type: "toggle",
+        attrs: { open: true },
+        content: [
+          p("Title"),
+          { type: "bulletList", content: [li("last")] },
+        ],
+      },
+    ]);
+    ed.commands.setTextSelection(posInText(ed.state.doc, "last") + "last".length);
+    press(ed, "Enter");
+    press(ed, "Enter");
+    press(ed, "Enter");
+    const top = ed.getJSON().content!;
+    expect(top.map((node) => node.type)).toEqual(["toggle", "paragraph"]);
+    expect(ed.state.selection.$from.depth).toBe(1);
+  });
+
   it("open toggle: Enter keeps the default split into the first child (E4)", () => {
     const ed = mountContent([
       { type: "toggle", attrs: { open: true }, content: [p("summary")] },
@@ -384,5 +430,56 @@ describe("[COMP:app-web/block-indent] toggle caret guard", () => {
     expect(ed.getJSON().content![0].attrs!.open).toBe(false); // stays collapsed
     const { $head } = ed.state.selection;
     expect($head.parent.textContent).toBe("summary"); // caret escaped the hidden body
+  });
+});
+
+describe("[COMP:app-web/block-indent] toggle summary slot", () => {
+  const points = {
+    type: "bulletList",
+    content: [li("Start with the brief"), li("Next step")],
+  };
+
+  it("inserts an empty summary in front of a list on the next local edit", () => {
+    const ed = mountContent([
+      { type: "toggle", attrs: { open: true }, content: [points] },
+    ]);
+    // Load does not dispatch, so the broken shape survives until an edit.
+    expect(ed.getJSON().content![0].content![0].type).toBe("bulletList");
+    ed.chain().focus("end").insertContent("!").run();
+    const content = ed.getJSON().content![0].content!;
+    expect(content[0].type).toBe("paragraph");
+    expect(content[0].content).toBeUndefined();
+    expect(content[1].type).toBe("bulletList");
+    expect(content[1].content![1].content![0].content![0].text).toBe("Next step!");
+  });
+
+  it("puts an empty paragraph back when the summary node is deleted", () => {
+    const ed = mountContent([
+      { type: "toggle", attrs: { open: true }, content: [p("Title"), points] },
+    ]);
+    const summary = ed.state.doc.child(0).child(0);
+    ed.view.dispatch(ed.state.tr.delete(1, 1 + summary.nodeSize));
+    const content = ed.getJSON().content![0].content!;
+    expect(content[0].type).toBe("paragraph");
+    expect(content[0].content).toBeUndefined();
+    expect(content[1].type).toBe("bulletList");
+    expect(content[1].content![0].content![0].content![0].text).toBe("Start with the brief");
+  });
+
+  it("leaves a heading summary alone", () => {
+    const ed = mountContent([
+      {
+        type: "toggle",
+        attrs: { open: true },
+        content: [
+          { type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: "Title" }] },
+          points,
+        ],
+      },
+    ]);
+    ed.chain().focus("end").insertContent("!").run();
+    const content = ed.getJSON().content![0].content!;
+    expect(content[0].type).toBe("heading");
+    expect(content).toHaveLength(2);
   });
 });

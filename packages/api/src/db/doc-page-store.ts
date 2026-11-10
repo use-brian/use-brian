@@ -30,10 +30,12 @@ import type { DocPageRead, DocPageStore, NameOrigin, Page, ScopeSource, ToolCont
 import { validateCallerScopeEvidence, validateAudienceScopeEvidence } from '../context-scope/caller-evidence.js'
 import { runWithAgentAccess } from './agent-access-context.js'
 import { queryWithRLS } from './client.js'
+import { readPageThreadAudienceAuthority } from '../context-scope/page-thread-audience.js'
 
 // ── Row projections ────────────────────────────────────────────────────
 
 type VersionedPageRow = {
+  pageRevision?: string
   source?: (ScopeSource & { requiredSources: ScopeSource[] }) | null
   page: Page | null
   version: number
@@ -80,7 +82,7 @@ export function createDbDocPageStore(): DocPageStore {
                 COALESCE(cd.snapshot_title, sv.name)  AS name,
                 sv.name_origin                        AS "nameOrigin",
                 sv.icon                               AS icon
-                ${execution ? ",read_entity_derivation_source(sv.workspace_id,'page_event_changed',sv.page_event_revision) AS source" : ''}
+                ${execution ? ",sv.page_event_revision AS \"pageRevision\",read_entity_derivation_source(sv.workspace_id,'page_event_changed',sv.page_event_revision) AS source" : ''}
            FROM saved_views sv
            LEFT JOIN documents cd ON cd.page_id = sv.id
           WHERE sv.id = $1`,
@@ -90,10 +92,21 @@ export function createDbDocPageStore(): DocPageStore {
       const row = result.rows[0]
       if (!row) return null
       if (execution) {
+        // A private Page can have its own Page-gated discussion. Prove that
+        // exact destination with the original actor before admitting its receipt;
+        // the generic shared entity reader intentionally refuses private roots.
+        if (!row.source && execution.security.access.sharedAudience && row.pageRevision) {
+          const proof = await readPageThreadAudienceAuthority(execution.security.access.workspaceId,
+            { resourceKind:'page_event_changed',resourceId:row.pageRevision },
+            { sessionId:execution.lifecycle.sessionId,actorUserId:userId })
+          if (!proof?.source) throw new Error('page_source_unavailable')
+          row.source = { ...proof.source,requiredSources:proof.requiredSources }
+        }
         if (!row.source || !Array.isArray(row.source.requiredSources)) throw new Error('page_source_unavailable')
         const { requiredSources, ...source } = row.source
         const evidence = { sources: [source, ...requiredSources] }
-        if (execution.security.access.sharedAudience && evidence.sources.some(value => value.userId !== null)) throw new Error('page_source_unavailable')
+        if (execution.security.access.sharedAudience && evidence.sources.some(value => value.userId !== null
+          && !['page_event_changed','page_event_destination','page_live_changed','page_live_destination'].includes(value.resourceKind))) throw new Error('page_source_unavailable')
         const checked = await validateCallerScopeEvidence(evidence, execution.security.ceiling)
         await validateAudienceScopeEvidence(checked, execution.security.ceiling)
         await execution.security.authority.assertCurrent()

@@ -1,11 +1,16 @@
 /** App sign-in reuses verified native accounts without staff enrollment. [COMP:api/application-auth] */
 import { verifyConsentRequest } from '../brain-mcp/oauth/codes.js'
+import { loadExternalServiceSystem } from '../external-services/consent.js'
 import { loadApplicationOAuthClientSystem } from './oauth-consent.js'
 
 export async function applicationOnboardingRequestValid(signed: unknown, secret: string): Promise<boolean> {
   if (typeof signed !== 'string' || signed.length > 8192) return false
   const request = verifyConsentRequest(signed, secret)
-  if (!request || request.audience !== 'application' || !request.applicationId) return false
+  if (!request || !['application','service'].includes(request.audience??'') || !request.applicationId) return false
+  if (request.audience === 'service') {
+    const service=await loadExternalServiceSystem(request.applicationId)
+    return !!service&&service.clientId===request.clientId&&service.revision===request.applicationRevision&&service.redirectUris.includes(request.redirectUri)
+  }
   const client = await loadApplicationOAuthClientSystem(request.applicationId)
   return !!client && client.clientId === request.clientId && client.revision === request.applicationRevision
     && client.redirectUris.includes(request.redirectUri) && client.origins.includes(new URL(request.redirectUri).origin)

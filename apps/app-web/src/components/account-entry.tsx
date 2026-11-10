@@ -9,6 +9,7 @@ import { safeAccountReturn } from "@/lib/app-session";
 import { primaryAuthUrl, buildDelegatedLoginUrl } from "@/lib/primary-auth";
 import { ossSignedOutRedirect } from "@/lib/oss-entry";
 import { getUserInfo } from "@/lib/user";
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { useLocale, useT } from "@/lib/i18n/client";
 import { Button } from "./ui/button";
 import { DesktopAccounts } from "./desktop-accounts";
@@ -52,6 +53,7 @@ export function AccountEntry({ mode = "signed-out", recovery, retry }: {
   const { state, controller } = useAppSession();
   const auth = useSignInState();
   const native = desktopBridge();
+  const selectedOutpost = !!native && publicRuntimeConfig().edition === "outpost";
   const router = useRouter();
   const [browserAccounts] = useState(() => typeof document !== "undefined" ? getAccountsDir() : []);
   const [failed, setFailed] = useState(false);
@@ -125,7 +127,8 @@ export function AccountEntry({ mode = "signed-out", recovery, retry }: {
             <div className="flex flex-wrap gap-3">
               {unavailable && <Button className="max-md:min-h-11" onClick={retryEntry}>{t.desktopSession.retry}</Button>}
               {reconnect && <Button className="max-md:min-h-11" onClick={() => signIn()}>{t.desktopSession.reconnect}</Button>}
-              {!unavailable && !denied && !reconnect && <Button className="max-md:min-h-11" onClick={() => signIn(!recovery || recovery === "signed-out")}>{native ? t.workspaceSwitcher.addAccountDialog.cloud : t.desktopSession.signIn}</Button>}
+              {!unavailable && !denied && !reconnect && <Button className="max-md:min-h-11" onClick={() => signIn(!selectedOutpost && (!recovery || recovery === "signed-out"))}>{native && !selectedOutpost ? t.workspaceSwitcher.addAccountDialog.cloud : t.desktopSession.signIn}</Button>}
+              {selectedOutpost && !unavailable && !denied && !reconnect && <Button className="max-md:min-h-11" variant="outline" onClick={() => signIn(true)}>{t.workspaceSwitcher.addAccountDialog.cloud}</Button>}
               {native && !denied && !reconnect && <Button className="max-md:min-h-11" variant="outline" onClick={() => void connectServer()}>{t.desktopSession.connectServer}</Button>}
               {(denied || state.session === "authenticated") && <Button className="max-md:min-h-11" variant="outline" onClick={() => router.push("/teams")}>{t.desktopSession.chooseWorkspace}</Button>}
               {(!native || denied || reconnect) && <Button className="max-md:min-h-11" variant="ghost" onClick={() => native ? openDesktopAddAccount() : signIn(false, true)}>{t.desktopSession.switchAccount}</Button>}
@@ -148,7 +151,7 @@ export function AccountSignInDialog() {
   const explicitEntry = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("accountEntry") && path === "/";
   const open = path !== "/accounts" && !explicitEntry && state.session === "authenticated" && (!workspaceId || state.admissions[workspaceId]?.kind === "allowed") && auth.phase !== "idle";
   return <Dialog.Root open={open} onOpenChange={(value) => { if (!value) desktopBridge()?.cancelSignIn?.(); }}>
-    <Dialog.Portal><Dialog.Backdrop className="fixed inset-0 z-[70] bg-background/80 backdrop-blur-sm" />
+    <Dialog.Portal><Dialog.Backdrop className="fixed inset-0 z-[70] bg-foreground/40 backdrop-blur-sm" />
       <Dialog.Popup className="fixed left-1/2 top-1/2 z-[70] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 space-y-5 rounded-2xl border border-border bg-background p-6 shadow-xl">
         <Dialog.Title className="text-lg font-semibold">{t.signIn}</Dialog.Title>
         <Dialog.Description className="sr-only">{t.browserWaiting}</Dialog.Description>
