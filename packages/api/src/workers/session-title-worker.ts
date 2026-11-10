@@ -6,6 +6,7 @@ import { generateAttendedSessionTitle } from '../routes/attended-session-title.j
 import { readSessionTitle } from '../db/session-title-store.js'
 import { attendedSessionTurnCount, readAttendedSessionHistory } from '../routes/attended-session-context.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
+import { inheritPrivateTranscriptCredential } from '../db/private-transcript.js'
 
 type Runtime = { provider: LLMProvider; model: string; providerKeySource: 'user' | 'platform' }
 type Generated = Awaited<ReturnType<typeof generateAttendedSessionTitle>>
@@ -41,7 +42,7 @@ export function restrictTitleJobAuthority(authority: SessionContextAuthority, jo
   if (!await current()) throw new TitleJobChanged()
   signal.throwIfAborted()
  }
- return { accumulator: authority.accumulator, execution: { ...execution,
+ const restricted: SessionContextAuthority = { accumulator: authority.accumulator, execution: { ...execution,
   lifecycle: { ...execution.lifecycle, abortSignal: signal },
   security: { ...execution.security, authority: { ...original, assertCurrent,
    async execute<T>(operation: () => Promise<T>): Promise<T> {
@@ -52,6 +53,8 @@ export function restrictTitleJobAuthority(authority: SessionContextAuthority, jo
    },
   } },
  } }
+ inheritPrivateTranscriptCredential(execution,restricted.execution)
+ return restricted
 }
 
 export function createSessionTitleWorker(options: {

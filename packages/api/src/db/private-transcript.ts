@@ -20,6 +20,24 @@ export function bindPrivateTranscriptCredential(execution:ExecutionContext,crede
  nativeCredentials.set(execution,Object.freeze({...credential}))
 }
 
+/** Preserve the native credential when a trusted host wraps an execution's
+ * lease/deadline. Do not manufacture transcript authority from queued claims.
+ * The wrapper must retain the exact original access, identity and session;
+ * readPrivateTranscript still checks its live (restricted) authority and SQL
+ * revalidates the native credential before selecting any dialogue bytes. */
+export function inheritPrivateTranscriptCredential(original:ExecutionContext,restricted:ExecutionContext):void{
+ const credential=nativeCredentials.get(original)
+ if(!credential)return
+ const {abortSignal:originalSignal,...originalLifecycle}=original.lifecycle
+ const {abortSignal:restrictedSignal,...restrictedLifecycle}=restricted.lifecycle
+ if(restricted.identity!==original.identity||restricted.ownership!==original.ownership
+  ||restricted.assistant!==original.assistant||restricted.surface!==original.surface
+  ||restricted.security.access!==original.security.access||restricted.security.ceiling!==original.security.ceiling
+  ||restricted.security.provenance!==original.security.provenance
+  ||JSON.stringify(restrictedLifecycle)!==JSON.stringify(originalLifecycle))throw new DerivedScopeError('scope_source_changed')
+ nativeCredentials.set(restricted,credential)
+}
+
 /** Automatic repair for a native owner's next turn in a frozen legacy chat. */
 export async function resumePrivateLegacySession(workspaceId:string,sessionId:string,credential:{userId:string;sessionId:string;authVersion:number}):Promise<boolean>{
  const client=await getAppPool().connect()

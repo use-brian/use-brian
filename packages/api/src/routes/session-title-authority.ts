@@ -174,9 +174,21 @@ async function tryTitleGroup(claims:NativeClaims,entries:PreparedTitle[],context
   throw error
  }
 }
-/** Original per-row authority and sources are checked again at the actual collection boundary. */
+/** Titles are optional list decoration. A database timeout must withhold all
+ * provisional bytes, not fail the session list or reuse an earlier admission.
+ * Do not retry per row: a workspace lock can block the whole page. */
 export async function sessionTitleProjections(input:{claims:NativeClaims|null;sessionIds:readonly string[]}):Promise<Map<string,TitleProjection>>{
- const command=structuredClone(input),prepared:Array<{id:string;projection:TitleProjection}>=[]
+ const command=structuredClone(input)
+ try{return await collectSessionTitleProjections(command)}
+ catch(error){
+  if(typeof error!=='object'||error===null||!('code'in error)||!['57014','55P03'].includes(String(error.code)))throw error
+  console.warn('Session list titles withheld after database timeout:',error)
+  return new Map(command.sessionIds.map(id=>[id,heldTitleProjection()]))
+ }
+}
+/** Original per-row authority and sources are checked again at the actual collection boundary. */
+async function collectSessionTitleProjections(command:{claims:NativeClaims|null;sessionIds:readonly string[]}):Promise<Map<string,TitleProjection>>{
+ const prepared:Array<{id:string;projection:TitleProjection}>=[]
  if(!command.sessionIds.length)return new Map()
  if(!command.claims)return new Map(command.sessionIds.map(id=>[id,heldTitleProjection()]))
  // Presence metadata can only withhold a label. Missing canonical parents,
