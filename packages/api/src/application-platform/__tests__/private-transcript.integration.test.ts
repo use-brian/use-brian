@@ -22,6 +22,8 @@ import {publishNativeSessionMessageBatch} from '../../db/session-message-publica
 import {readPrivateTranscript} from '../../db/private-transcript.js'
 import * as privateTranscripts from '../../db/private-transcript.js'
 import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
+import {restrictTitleJobAuthority} from '../../workers/session-title-worker.js'
+import {restrictStateJobAuthority} from '../../workers/session-state-worker.js'
 import {readAttendedSessionHistory,captureAttendedSessionClassification,assessAttendedSessionMessage,readClassifiedSessionHistory} from '../../routes/attended-session-context.js'
 import {assertSourceModelInputAuthority,assertSourceModelOutputAuthority} from '../model-source-authority.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
@@ -52,6 +54,31 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
    messages:[{role:'assistant',senderAssistantId:f.assistantId,content:[{type:'text',text:'We chose the amber notebook. The office opens at nine.'}]}]})
   return{f,session,scope,input,reply,memory,fresh,claims,userId,device,original}
  }
+ it.each(['title','state'] as const)('preserves private dialogue and current Memory reads through the %s job wrapper',async kind=>{
+  const c=await setup(),fresh=await c.fresh(),signal=new AbortController().signal
+  let current=true
+  const titleJob={sessionId:c.session.id,workspaceId:c.f.workspaceId,assistantId:c.f.assistantId,actorUserId:c.userId,
+   userMessageId:c.input.id,claims:c.claims,authoring:{version:1 as const,assistantId:c.f.assistantId,ceiling:fresh.execution.security.ceiling},
+   generation:'1',claimedGeneration:'1',leaseToken:randomUUID(),attempts:1}
+  const authority=kind==='title'?restrictTitleJobAuthority(fresh,titleJob,async()=>current,signal)
+   :restrictStateJobAuthority(fresh,{...titleJob,assistantMessageId:c.reply.id,firstSequence:1,throughSequence:c.reply.sequenceNum},async()=>current,signal)
+  const fallback=vi.spyOn(queryFrames,'readJointSessionQueryFrame')
+  const query=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:c.reply.sequenceNum,topicThroughSequence:0,authority})
+  expect(query.history.map(row=>row.id)).toEqual([c.input.id,c.reply.id])
+  expect(boundScopeSources(query).map(source=>source.resourceKind)).toEqual(['private_transcript'])
+  expect(fallback).not.toHaveBeenCalled()
+  // The credential handoff changes neither Memory retrieval nor its current-source obligations.
+  const memory=await createDbMemoryStore().getIndex(authority.execution.security.access,false,authority)
+  expect(JSON.stringify(memory)).toContain('The fictional office currently opens at nine.')
+  expect(boundScopeSources(memory).some(source=>source.resourceKind==='application_field')).toBe(true)
+  await assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fixture:job-dialogue-memory'}),scopeAccumulator:authority.accumulator})
+  const [reply]=await publishNativeSessionMessageBatch({sessionId:c.session.id,authority,derivationTarget:c.scope,
+   derivation:{producer:'fixture:job-dialogue-memory',sources:authority.accumulator.evidence.sources??[]},
+   messages:[{role:'assistant',content:[{type:'text',text:'We still chose the amber notebook; the current Memory says nine.'}]}]})
+  expect(reply.sequenceNum).toBe(c.reply.sequenceNum+1)
+  current=false
+  await expect(readPrivateTranscript(authority,c.session.id,reply.sequenceNum)).rejects.toThrow(`${kind}_job_changed`)
+ })
  it.each(['edit','delete','hold','growth'])('remembers prior dialogue after source %s and can publish the next reply',async change=>{
   const c=await setup()
   if(change==='edit')await c.f.pool.query('UPDATE memories SET summary=$2,scope_version=scope_version+1 WHERE id=$1',[c.memory.id,'Office now opens at ten.'])
