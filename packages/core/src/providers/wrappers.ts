@@ -873,6 +873,7 @@ export function wrapProvider(
     name: base.name,
     models: base.models,
     toolSchemaMode: model => base.toolSchemaMode?.(model) ?? 'eager',
+    supportedThinkingLevels: (model, route) => base.supportedThinkingLevels?.(model, route) ?? [],
     stream: wrappedStream,
     createSession(sessionOpts: SessionOptions): ProviderSession {
       let inner: ProviderSession | undefined

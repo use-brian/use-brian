@@ -25,14 +25,27 @@ export const LLM_DECISION_CAPABILITIES: DecisionCapabilities = {
   uncertainty: ['self_reported', 'unavailable'],
 }
 
-/** Gemini reasoning and answer tokens share the cap; other routes retain their answer budget. */
-export function decisionLlmOutputBudget(provider: Pick<LLMProvider, 'name'>,
-  model: { catalogId?: string; wireId: string }, answerTokens: number) {
+/** Gemini shares reasoning/answer tokens; other caps stay unchanged. Prefer
+ * low classifier effort only when the serving route explicitly advertises it.
+ */
+export function decisionLlmOutputBudget(provider: Pick<LLMProvider, 'name' | 'supportedThinkingLevels'>,
+  model: { catalogId?: string; wireId: string }, answerTokens: number,
+  route?: { allowProviderFallback?: boolean }) {
   const gemini = provider.name === 'gemini'
     || registryRowForPricing(model.catalogId ?? model.wireId)?.provider === 'gemini'
     || registryRowForPricing(model.wireId)?.provider === 'gemini'
+  let low = gemini
+  if (!low) {
+    try {
+      const levels = provider.supportedThinkingLevels?.(model.wireId, route)
+      low = Array.isArray(levels) && levels.includes('low')
+    } catch (error) {
+      // Optional descriptive metadata must not break otherwise-valid dispatch.
+      if (isInputAuthorityError(error)) throw error
+    }
+  }
   return { maxTokens: Math.max(gemini ? 1024 : 0, answerTokens),
-    ...(gemini ? { thinkingLevel: 'low' as const } : {}) }
+    ...(low ? { thinkingLevel: 'low' as const } : {}) }
 }
 
 function responseSchema(request: DecisionRequest): Record<string, unknown> {
@@ -130,11 +143,37 @@ function assertTargetSchemaBudget(provider: LLMProvider, model: DecisionRequest[
 }
 
 function buildPrompt(request: Pick<DecisionRequest, 'state' | 'questions'>): string {
-  return JSON.stringify({
+  const output = 'Return one answers entry per question. Do not add prose.'
+  const original = JSON.stringify({ state: request.state, questions: request.questions, output })
+  // Prompt-local references share complete serialized option arrays, not just
+  // values. Never change caller questions or the independent response schema.
+  const domains = new Map<string, { options: unknown; uses: number; ref?: string }>()
+  for (const question of request.questions) {
+    if (question.kind !== 'choice') continue
+    const key = JSON.stringify(question.options)
+    const existing = domains.get(key)
+    if (existing) existing.uses++
+    else domains.set(key, { options: question.options, uses: 1 })
+  }
+  const choiceOptions: Record<string, unknown> = {}
+  for (const domain of domains.values()) {
+    if (domain.uses < 2) continue
+    const name = `choice${Object.keys(choiceOptions).length}`
+    choiceOptions[name] = domain.options
+    domain.ref = `#/choiceOptions/${name}`
+  }
+  if (!Object.keys(choiceOptions).length) return original
+  const compact = JSON.stringify({
     state: request.state,
-    questions: request.questions,
-    output: 'Return one answers entry per question. Do not add prose.',
+    questions: request.questions.map(question => {
+      if (question.kind !== 'choice') return question
+      const domain = domains.get(JSON.stringify(question.options))!
+      return domain.ref ? { ...question, options: { $ref: domain.ref } } : question
+    }),
+    choiceOptions,
+    output: `${output} In this prompt, each question options.$ref names the complete ordered option array in choiceOptions (JSON Pointer #/choiceOptions/<name>); substitute that array before evaluating. References are prompt serialization only, not answer fields.`,
   })
+  return compact.length < original.length ? compact : original
 }
 
 /** The fixed typed completion and its owner qualify the same complete bytes. */
@@ -227,7 +266,7 @@ export function createLlmDecisionProvider(options: {
           messages,
           responseFormat: 'json',
           responseSchema: schema,
-          ...decisionLlmOutputBudget(provider, request.model, Math.max(256, request.questions.length * 96)),
+          ...decisionLlmOutputBudget(provider, request.model, Math.max(256, request.questions.length * 96), { allowProviderFallback: false }),
           temperature: 0,
           signal: controller.signal,
         }))

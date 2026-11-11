@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { ProviderRequest } from '../../providers/types.js'
+import type { LLMProvider, ProviderRequest, ThinkingLevel } from '../../providers/types.js'
 import { buildToolSelectionQuestions } from '../../engine/tool-selection.js'
 import type { DecisionRequest } from '../types.js'
-import { createLlmDecisionProvider } from '../adapters/llm.js'
+import { buildLlmDecisionMessages, createLlmDecisionProvider, decisionLlmOutputBudget } from '../adapters/llm.js'
 import { decisionRequest, llmProviderWithJson } from './fixtures.js'
 
 type Schema = {
@@ -59,7 +59,7 @@ function mixedRequest(): DecisionRequest {
   return request
 }
 
-async function captureSchema(request: DecisionRequest, name = 'fixture-llm'): Promise<Schema> {
+async function captureCall(request: DecisionRequest, name = 'fixture-llm'): Promise<ProviderRequest> {
   const calls: ProviderRequest[] = []
   const answers = Object.fromEntries(request.questions.map(question => [question.id, {
     value: question.kind === 'choice' ? question.options[0]!.value : question.kind === 'boolean' ? false : 0,
@@ -69,7 +69,24 @@ async function captureSchema(request: DecisionRequest, name = 'fixture-llm'): Pr
   const llm = llmProviderWithJson({ answers }, calls)
   llm.name = name
   await createLlmDecisionProvider({ provider: llm }).evaluate(request)
-  return calls[0]!.responseSchema as Schema
+  return calls[0]!
+}
+
+async function captureSchema(request: DecisionRequest, name = 'fixture-llm'): Promise<Schema> {
+  return (await captureCall(request, name)).responseSchema as Schema
+}
+
+function originalPrompt(request: DecisionRequest): string {
+  return JSON.stringify({ state: request.state, questions: request.questions,
+    output: 'Return one answers entry per question. Do not add prose.' })
+}
+
+function expandPrompt(content: string) {
+  const parsed = JSON.parse(content) as { state: unknown; questions: Record<string, unknown>[]; choiceOptions?: Record<string, unknown> }
+  return { state: parsed.state, questions: parsed.questions.map(question => {
+    const options = question.options as { $ref?: string } | undefined
+    return options?.$ref ? { ...question, options: parsed.choiceOptions![options.$ref.split('/')[2]!] } : question
+  }) }
 }
 
 function resolvedValue(schema: Schema, id: string): Schema {
@@ -86,6 +103,96 @@ describe('[COMP:decisions/llm] constrained LLM adapter', () => {
     expect(calls[0]!.maxTokens).toBe(name === 'gemini' ? 1024 : 256)
     expect(calls[0]!.thinkingLevel).toBe(name === 'gemini' ? 'low' : undefined)
   })
+  it.each([
+    ['low', ['low'], 'low'],
+    ['both', ['low', 'high'], 'low'],
+    ['high only', ['high'], undefined],
+    ['none', [], undefined],
+    ['missing', undefined, undefined],
+  ] as const)('requests low only with explicit support: %s', async (_label, levels, expected) => {
+    const calls: ProviderRequest[] = []
+    const llm = llmProviderWithJson({ answers: { intent: { value: 'ordinary' } } }, calls)
+    const models: string[] = []
+    const routes: unknown[] = []
+    if (levels) llm.supportedThinkingLevels = function (this: LLMProvider, model, route): readonly ThinkingLevel[] {
+      expect(this).toBe(llm)
+      models.push(model)
+      routes.push(route)
+      return levels
+    }
+    const request = decisionRequest()
+    await createLlmDecisionProvider({ provider: llm }).evaluate(request)
+    expect(calls[0]!.thinkingLevel).toBe(expected)
+    expect(calls[0]!.maxTokens).toBe(256)
+    expect(models).toEqual(levels ? [request.model.wireId] : [])
+    expect(routes).toEqual(levels ? [{ allowProviderFallback: false }] : [])
+  })
+
+  it('does not let broken optional metadata fail an otherwise valid decision', async () => {
+    const calls: ProviderRequest[] = []
+    const llm = llmProviderWithJson({ answers: { intent: { value: 'ordinary' } } }, calls)
+    llm.supportedThinkingLevels = () => { throw new Error('Synthetic metadata unavailable') }
+    await createLlmDecisionProvider({ provider: llm }).evaluate(decisionRequest())
+    expect(calls[0]!.thinkingLevel).toBeUndefined()
+    expect(calls[0]!.maxTokens).toBe(256)
+  })
+
+  it('does not swallow an authority refusal from metadata or dispatch after it', async () => {
+    const calls: ProviderRequest[] = []
+    const refusal = Object.assign(new Error('Synthetic authority refusal'), { reason: 'authority_changed' })
+    const llm = llmProviderWithJson({}, calls)
+    llm.supportedThinkingLevels = () => { throw refusal }
+    await expect(createLlmDecisionProvider({ provider: llm }).evaluate(decisionRequest())).rejects.toBe(refusal)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('does not guess support from unknown wire names and preserves answer caps', () => {
+    for (const wireId of ['unknown-thinking-model', 'gpt-unknown', 'claude-unknown']) {
+      expect(decisionLlmOutputBudget({ name: 'fixture' }, { wireId }, 1500)).toEqual({ maxTokens: 1500 })
+    }
+    expect(decisionLlmOutputBudget({ name: 'gemini', supportedThinkingLevels: () => ['high'] },
+      { wireId: 'unknown' }, 1500)).toEqual({ maxTokens: 1500, thinkingLevel: 'low' })
+  })
+
+  it('keeps original bytes when references would not save space or no domains repeat', () => {
+    for (const repeated of [false, true]) {
+      const request = decisionRequest()
+      request.questions = [{ kind: 'choice', id: 'a', prompt: '?', options: [{ value: 'x' }] }]
+      if (repeated) request.questions.push({ ...request.questions[0]!, id: 'b' })
+      expect(buildLlmDecisionMessages(request)[0]!.content).toBe(originalPrompt(request))
+    }
+  })
+
+  it('losslessly shares only identical full ordered options, leaving all other data intact', () => {
+    const request = mixedRequest()
+    const options = [
+      { value: '__proto__/~雪😀', description: 'Quoted "description" with Unicode 雪'.repeat(30), metadata: { nested: ['α', 1] } },
+      { value: 'constructor', description: 'Second choice'.repeat(30) },
+    ]
+    request.state = { special: { '__proto__/雪': ['😀', false] } }
+    request.questions.unshift(...Array.from({ length: 3 }, (_, i) => ({
+      kind: 'choice' as const, id: `special/~雪😀${i}`, prompt: `Keep wording ${i}.`, options: structuredClone(options),
+    })))
+    request.questions.push(
+      { kind: 'choice', id: 'reordered', prompt: 'Order differs', options: [...options].reverse() },
+      { kind: 'choice', id: 'description', prompt: 'Description differs', options: options.map(o => ({ ...o, description: `${o.description}!` })) },
+      { kind: 'choice', id: 'metadata', prompt: 'Metadata differs', options: options.map(o => ({ ...o, metadata: { nested: ['β', 1] } })) },
+    )
+    const before = structuredClone(request)
+    const messages = buildLlmDecisionMessages(request)
+    const content = messages[0]!.content
+    expect(content.length).toBeLessThan(originalPrompt(request).length)
+    expect(expandPrompt(content)).toEqual({ state: request.state, questions: request.questions })
+    const prompt = JSON.parse(content)
+    expect(Object.keys(prompt.choiceOptions)).toEqual(['choice0'])
+    expect(prompt.choiceOptions.choice0).toEqual(options)
+    for (const id of ['reordered', 'description', 'metadata']) {
+      expect(Array.isArray(prompt.questions.find((q: { id: string }) => q.id === id).options)).toBe(true)
+    }
+    expect(messages).toEqual(buildLlmDecisionMessages(request))
+    expect(request).toEqual(before)
+  })
+
   it('preserves a provider authority refusal without transport reclassification', async () => {
     const refusal = Object.assign(new Error('Synthetic provider authority refusal'), { reason: 'authority_changed', retrySafe: false })
     const llm = llmProviderWithJson({})
@@ -216,11 +323,33 @@ describe('[COMP:decisions/llm] constrained LLM adapter', () => {
     request.questions[0] = { kind: 'choice', id: 'intent', prompt: 'Choose intent.', options:
       ['ordinary', 'research_focused', 'research', 'research_deep', 'operate_site'].map(value => ({ value })) }
     request.questions.push(...plan.questions)
+    // Include the full catalog as the real combined classifier does; measuring
+    // only the repeated question options would overstate the total saving.
+    request.state = { currentMessage: 'Compare fictional capabilities.', recentConversation: [], tools: plan.catalog }
     const before = structuredClone(request)
     expect(request.questions).toHaveLength(7)
     const inlineEnums = request.questions.reduce((sum, question) => sum + (question.kind === 'choice' ? question.options.length : 0), 0)
     if (count === 357) expect(inlineEnums).toBe(1082)
-    const schema = await captureSchema(request, 'openai-codex')
+    const call = await captureCall(request, 'openai-codex')
+    const schema = call.responseSchema as Schema
+    expect(call.messages).toEqual(buildLlmDecisionMessages(request))
+    const content = buildLlmDecisionMessages(request)[0]!.content
+    expect(expandPrompt(content)).toEqual({ state: request.state, questions: request.questions })
+    expect(content.length).toBeLessThan(originalPrompt(request).length)
+    // Descriptions do not affect the wire schema. Make each array distinct to
+    // force the original prompt representation and compare the entire schema.
+    const unshared = structuredClone(request)
+    for (const question of unshared.questions) {
+      if (question.kind === 'choice') question.options = question.options.map(option => ({
+        ...option, description: `${option.description ?? ''} (${question.id})`,
+      }))
+    }
+    expect(buildLlmDecisionMessages(unshared)[0]!.content).toBe(originalPrompt(unshared))
+    expect(await captureSchema(unshared, 'openai-codex')).toEqual(schema)
+    if (count === 357) console.info('Synthetic prompt size metadata', {
+      tools: count, questions: request.questions.length,
+      beforeChars: originalPrompt(request).length, afterChars: content.length,
+    })
     expect(inspectSchema(schema)).toBe(count + 7) // two domains with "none", plus five intent labels
     expect(inspectSchema(schema)).toBeLessThanOrEqual(1000)
     expect(Object.keys(schema.$defs!)).toEqual(['choice0', 'choice1'])

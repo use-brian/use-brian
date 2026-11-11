@@ -101,8 +101,8 @@ describe('[COMP:providers/codex-classifier-schema] offline pinned runtime', () =
     expect(result.invocations).toBe(2)
     expect(result.terminals).toEqual(['completed', 'completed'])
     expect(result.wire).toEqual([
-      { enumValues: 364, leafRefs: 6, definitions: 2, strict: true },
-      { enumValues: 0, leafRefs: 0, definitions: 0, strict: true },
+      { enumValues: 364, leafRefs: 6, definitions: 2, strict: true, effort: 'low' },
+      { enumValues: 0, leafRefs: 0, definitions: 0, strict: true, effort: 'low' },
     ])
     expect(result.responses[0]!.answers).toEqual(choices.map(question => ({
       kind: 'choice', questionId: question.id,
@@ -125,7 +125,7 @@ async function runFixture(batches: DecisionQuestion[][]) {
   let rpc: CodexRpcPeer | undefined
   let invocations = 0
   let invalidRequests = 0
-  const wire: { enumValues: number; leafRefs: number; definitions: number; strict: boolean }[] = []
+  const wire: { enumValues: number; leafRefs: number; definitions: number; strict: boolean; effort: string }[] = []
   const terminals: string[] = []
   const server = createServer((request, response) => {
     const chunks: Buffer[] = []
@@ -137,7 +137,9 @@ async function runFixture(batches: DecisionQuestion[][]) {
         expect(request.url).toBe('/v1/responses')
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
           text?: { format?: { type?: string; strict?: boolean; schema?: Schema } }
+          reasoning?: { effort?: string }
         }
+        expect(body.reasoning?.effort).toBe('low')
         const format = body.text?.format
         expect(format?.type).toBe('json_schema')
         expect(format?.strict).toBe(true)
@@ -146,7 +148,8 @@ async function runFixture(batches: DecisionQuestion[][]) {
         expect(questions).toBeDefined()
         const inspected = inspectSchema(format!.schema!, questions!)
         wire.push({ enumValues: inspected.enumValues, leafRefs: inspected.leafRefs,
-          definitions: Object.keys(format!.schema!.$defs ?? {}).length, strict: format!.strict === true })
+          definitions: Object.keys(format!.schema!.$defs ?? {}).length, strict: format!.strict === true,
+          effort: body.reasoning!.effort! })
         const id = `fictional-response-${invocations}`
         const item = { type: 'message', id: `fictional-item-${invocations}`, role: 'assistant',
           content: [{ type: 'output_text', text: JSON.stringify({ answers: inspected.output }), annotations: [] }] }
@@ -196,7 +199,11 @@ async function runFixture(batches: DecisionQuestion[][]) {
     await rpc.notify('initialized', {})
     const model = 'gpt-6-luna'
     const provider = createCodexAppServerProvider({ transport: { rpc, cwd }, models: [model], toolBatchQuietMs: 1 })
-    const decisions = createLlmDecisionProvider({ provider })
+    // Synthetic advertised catalog metadata; the API manager independently
+    // tests the authenticated catalog -> proxy -> router -> adapter path.
+    const decisions = createLlmDecisionProvider({ provider: {
+      ...provider, supportedThinkingLevels: id => id === model ? ['low'] : [],
+    } })
     const responses = []
     for (const [index, questions] of batches.entries()) {
       const request: DecisionRequest = {

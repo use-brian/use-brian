@@ -22,10 +22,33 @@ and property budgets before dispatch, including known models behind the routing
 provider. Other providers do not inherit these target-specific caps. Cyclic
 state is rejected before serialization.
 
-Existing decision-model thinking defaults and answer-token budgets are
-unchanged, including Gemini's low reasoning and shared-token accommodation.
-The registry's general thinking capability is not treated as proof that every
-native model supports a particular reasoning-effort setting.
+Classifier LLM calls prefer low reasoning only when the provider explicitly
+advertises it for the serving model. Codex obtains this descriptive metadata
+from its already authenticated, reviewed catalog; capability queries never
+start a process, refresh accounts, resolve credentials or acquire leases.
+Routing honors the call's exact/Auto mode, exact bindings pin their model, and
+fallback wrappers conservatively intersect supported levels. Missing, unknown
+or ordinary broken metadata retains the existing default; authority refusals
+still propagate. The registry's generic thinking bit is not proof of a specific
+effort level. Existing Gemini low/shared-token behavior and answer-token caps
+are unchanged. Main assistant reasoning is not lowered by this classifier
+policy.
+
+## Lossless prompt compaction
+
+Repeated choice-option arrays share a deterministic prompt-local `choiceOptions`
+table. Each affected question references the complete ordered array with a JSON
+Pointer; fixed host instructions explain expansion. Equality includes all option
+metadata, not just values. Different ordering, descriptions or metadata do not
+merge. State, question wording/order/IDs and response-schema constraints remain
+unchanged, and the original representation is retained unless sharing is
+smaller. Dispatch and input-ownership qualification use the same message builder.
+There is no cross-request prompt or permission cache.
+
+A fictional 357-tool fixture including the complete tool catalog and seven
+questions shrinks from 87,649 to 51,142 prompt characters (41.7%). This is a
+serialized-character measurement, not a production token count or latency
+promise. Tests expand the references back to the exact original state/questions.
 
 An offline integration test uses the pinned Codex runtime, production inference
 hardening, isolated temporary home/cwd, no credentials and a loopback fake
@@ -47,6 +70,22 @@ These are generation deadlines, not permission-proof timeouts. Returning a
 fallback must still join pending authority checks and validate current access.
 A stalled authority proof can therefore extend total wall time beyond the
 model-generation deadline. Timeout never manufactures permission.
+
+## Deferred tools versus classifier data
+
+The main answer already opts into deferred registration. A verified
+native-deferred driver registers the full admitted catalog while keeping only
+foundation/selected tools eager; native discovery loads others on demand.
+Dynamic and eager routes retain their existing behavior and canonical executor.
+
+The research classifier's tool names/descriptions and ranking choices are plain
+prompt data, not executable tool registrations. Marking that JSON `deferLoading`
+would not defer it. This change shares repeated data without dropping tools or
+silently omitting advisory ranking. In particular, the background classifier's
+provider does not prove the final answer provider: budget, research promotion,
+workspace custom/BYO and media routing occur later. Skipping preparation would
+require a separately verified final-route/recovery design; existing preselected
+results are still consumed as before. Classifier calls gain no executable tools.
 
 ## Parallel preparation, not early worker execution
 
