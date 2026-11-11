@@ -4,6 +4,7 @@ import type {PoolClient} from 'pg'
 import {ContextScopeAccumulator,DerivedScopeError,resourceScopeKey,type ScopeSource} from '@use-brian/core'
 import {applicationJsonSchema} from '@use-brian/shared'
 import type {readNativeSessionEvidence} from './native-session-evidence.js'
+import {nativeSessionCurrentScopeSchema} from './native-session-evidence.js'
 
 export type NativeSessionQuerySelection=Readonly<{sessionId:string;throughSequence:number;topicThroughSequence:number}>
 const source=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
@@ -22,7 +23,7 @@ export const nativeSessionAnnotationSchema=z.object({id:z.string().uuid(),sequen
 // ordinary fallback, so malformed payloads cannot commit observations.
 const captures=z.object({history:z.array(capture.extend({row:body.nullable()})).min(1),
  annotations:z.array(capture.extend({row:nativeSessionAnnotationSchema.nullable()})).min(1)}).strict()
-const packet=captures.extend({proof:z.object({admitted:z.literal(true),immutable:z.array(source),current:z.array(source)}).strict()})
+const packet=captures.extend({proof:z.object({admitted:z.literal(true),immutable:z.array(source),current:z.array(nativeSessionCurrentScopeSchema)}).strict()})
 export type NativeSessionQueryCaptures=z.infer<typeof captures>
 type CompleteNativeEvidence=Extract<Awaited<ReturnType<typeof readNativeSessionEvidence>>,{kind:'complete'}>
 

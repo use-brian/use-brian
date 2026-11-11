@@ -8,7 +8,7 @@
  * [COMP:api/department-isolation-lifecycle]
  */
 
-export const DEPARTMENT_ISOLATION_MANIFEST_REVISION = 2
+export const DEPARTMENT_ISOLATION_MANIFEST_REVISION = 3
 
 export const DEPARTMENT_ISOLATION_CASE_IDS = Object.freeze([
   'A01','A02','A03','A04','A05','A06','A07','A08','A09',
@@ -47,7 +47,13 @@ export const DEPARTMENT_ISOLATION_SUITES: readonly DepartmentIsolationSuite[] = 
     'src/consolidation/__tests__/bi-temporal-filter.test.ts']},
   {id:'derived-store',packageDir:'packages/api',integration:true,testFiles:[
     'src/db/__tests__/derived-scope-store.integration.test.ts','src/db/__tests__/reflection-evidence.integration.test.ts',
-    'src/db/__tests__/reader-source-evidence.integration.test.ts']},
+    'src/db/__tests__/reader-source-evidence.integration.test.ts',
+    'src/application-platform/__tests__/native-session-parent-audience.integration.test.ts',
+    'src/__tests__/native-query-capture-capacity.integration.test.ts',
+    'src/__tests__/native-recording-ancestry-migration.integration.test.ts',
+    'src/application-platform/__tests__/native-recording-file-ancestry.integration.test.ts',
+    'src/__tests__/channel-recording-recovery.integration.test.ts',
+    'src/__tests__/channel-calendar-recovery.integration.test.ts']},
   {id:'operation-stores',packageDir:'packages/api',integration:true,testFiles:[
     'src/db/__tests__/entity-mutation-scope.integration.test.ts','src/db/__tests__/file-mutation-scope.integration.test.ts',
     'src/db/__tests__/execution-read-ceiling.integration.test.ts','src/db/__tests__/external-principal-scope.test.ts',

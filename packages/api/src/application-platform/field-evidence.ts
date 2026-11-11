@@ -154,20 +154,31 @@ export async function readApplicationFieldAncestors(workspaceId: string, rawRoot
   const roots = structuredClone(rawRoots)
   if (roots.some(source => source.workspaceId !== workspaceId)) unavailable()
   const sources = new Map<string, ScopeSource>()
-  for (let offset = 0; offset < roots.length; offset += 100) {
-    const part = roots.slice(offset, offset + 100)
-    const rows = (await (client ?? getPool()).query<{ nodeVersion: string; source: unknown }>(
-      `SELECT node_version AS "nodeVersion",source FROM ${client ? 'read_native_session_field_dependencies' : 'read_application_field_dependencies'}($1,$2,$3,$4)`,
-      [workspaceId,part.map(source => source.resourceKind),part.map(source => source.resourceId),part.map(source => source.version)],
-    )).rows
-    for (const row of rows) {
-      const parsed = sourceSchema.safeParse(row.source)
-      if (!parsed.success || parsed.data.resourceKind !== 'application_field' || parsed.data.workspaceId !== workspaceId
-        || parsed.data.version !== row.nodeVersion) unavailable()
-      const source = parsed.data, key = `${source.resourceId}:${source.version}`
-      const prior = sources.get(key)
-      if (prior && resourceScopeKey(prior) !== resourceScopeKey(source)) unavailable()
-      sources.set(key, source)
+  // Keep every original root on its existing reader. Mixing optional file
+  // roots into a native history batch defeats its canonical cohort planning,
+  // even when the files themselves contribute no field ancestors.
+  const cohorts = new Map<ScopeSource['resourceKind'], ScopeSource[]>()
+  for (const root of roots) {
+    const cohort = cohorts.get(root.resourceKind)
+    if (cohort) cohort.push(root)
+    else cohorts.set(root.resourceKind, [root])
+  }
+  for (const cohort of cohorts.values()) {
+    for (let offset = 0; offset < cohort.length; offset += 100) {
+      const part = cohort.slice(offset, offset + 100)
+      const rows = (await (client ?? getPool()).query<{ nodeVersion: string; source: unknown }>(
+        `SELECT node_version AS "nodeVersion",source FROM ${client ? 'read_native_session_field_dependencies' : 'read_application_field_dependencies'}($1,$2,$3,$4)`,
+        [workspaceId,part.map(source => source.resourceKind),part.map(source => source.resourceId),part.map(source => source.version)],
+      )).rows
+      for (const row of rows) {
+        const parsed = sourceSchema.safeParse(row.source)
+        if (!parsed.success || parsed.data.resourceKind !== 'application_field' || parsed.data.workspaceId !== workspaceId
+          || parsed.data.version !== row.nodeVersion) unavailable()
+        const source = parsed.data, key = `${source.resourceId}:${source.version}`
+        const prior = sources.get(key)
+        if (prior && resourceScopeKey(prior) !== resourceScopeKey(source)) unavailable()
+        sources.set(key, source)
+      }
     }
   }
   return [...sources.values()]

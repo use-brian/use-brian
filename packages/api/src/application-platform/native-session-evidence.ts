@@ -6,6 +6,9 @@ import {ContextScopeAccumulator,resourceScopeKey,type ResourceScope,type ScopeEv
 const scope=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),
  resourceKind:z.enum(['application_field','session_context_revision','session_message','memory','workspace_file']),resourceId:z.string().uuid(),version:z.string().min(1)}).strict()
+// Canonical media ancestors remain current-scope obligations for every receiver.
+// They do not widen accepted roots or become newly declared factual inputs.
+export const nativeSessionCurrentScopeSchema=scope.extend({resourceKind:z.enum([...scope.shape.resourceKind.options,'episode','recording'] as const)}).strict()
 const labelScope=scope.pick({workspaceId:true,userId:true,assistantId:true,sensitivity:true,compartments:true,projectIds:true}).strict()
 const historyResult=z.discriminatedUnion('available',[
  z.object({purpose:z.literal('memory_history'),available:z.literal(false)}).strict(),
@@ -16,9 +19,9 @@ type NativeEvidence=CompleteNativeEvidence
  |{kind:'memory_history';available:false}|{kind:'memory_history';available:true;root:ScopeSource;scopes:ResourceScope[]}
 const result=z.discriminatedUnion('admitted',[
  z.object({admitted:z.literal(false)}).strict(),
- z.object({admitted:z.literal(true),immutable:z.array(scope),current:z.array(scope)}).strict(),
+ z.object({admitted:z.literal(true),immutable:z.array(scope),current:z.array(nativeSessionCurrentScopeSchema)}).strict(),
 ])
-const cohortProof=z.object({immutable:z.array(scope),current:z.array(scope)}).strict()
+const cohortProof=z.object({immutable:z.array(scope),current:z.array(nativeSessionCurrentScopeSchema)}).strict()
 const publicationResult=z.object({admitted:z.literal(true),cohorts:z.tuple([cohortProof,cohortProof])}).strict()
 
 /** Private host acquisition: the database independently projects each exact

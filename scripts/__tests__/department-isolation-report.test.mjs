@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync } from 'node:fs'
+import { readdirSync, statSync } from 'node:fs'
 import { embeddedTestFiles } from '../testing/embedded-database-tests.mjs'
 import {
   DEPARTMENT_ISOLATION_BOUNDARIES, DEPARTMENT_ISOLATION_CASES, DEPARTMENT_ISOLATION_SUITES,
@@ -31,6 +31,14 @@ function receipts(profile = 'full') {
 }
 
 describe('[COMP:ci/execution-topology] complete acceptance across isolated runners', () => {
+  it('registers existing test files within their owning packages', () => {
+    for (const suite of DEPARTMENT_ISOLATION_SUITES) {
+      for (const file of suite.testFiles) {
+        const path = new URL(`../../${suite.packageDir}/${file}`, import.meta.url)
+        assert.equal(statSync(path).isFile(), true, `${suite.id}: ${file}`)
+      }
+    }
+  })
   it('keeps heavy embedded replays apart and automatically includes new files', () => {
     const files = readdirSync(new URL('../../apps/api/src/__tests__/', import.meta.url))
     files.push('future-fixture.test.ts', 'helper.ts')
@@ -104,6 +112,27 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     ]) {
       const parts = receipts(); mutate(parts[0])
       assert.throws(() => mergeAcceptanceReports(parts, metadata), /incomplete or failed/)
+    }
+  })
+
+  it('requires executed recovered-topic and Calendar journeys in every upgrade profile', () => {
+    const journeys = [
+      'src/application-platform/__tests__/native-session-parent-audience.integration.test.ts',
+      'src/__tests__/native-query-capture-capacity.integration.test.ts',
+      'src/__tests__/native-recording-ancestry-migration.integration.test.ts',
+      'src/application-platform/__tests__/native-recording-file-ancestry.integration.test.ts',
+      'src/__tests__/channel-recording-recovery.integration.test.ts',
+      'src/__tests__/channel-calendar-recovery.integration.test.ts',
+    ]
+    for (const profile of ['current', 'full']) {
+      for (const file of journeys) {
+        const parts = receipts(profile)
+        const selected = parts.flatMap(part => part.suites.filter(suite => suite.testFiles.includes(file)))
+        assert.equal(selected.length, 1)
+        assert.equal(DEPARTMENT_ISOLATION_SUITES.find(suite => suite.id === selected[0].id).integration, true)
+        for (const part of parts) part.assertions = part.assertions.filter(assertion => assertion.testFile !== file)
+        assert.throws(() => mergeAcceptanceReports(parts, metadata, profile), /incomplete or failed/)
+      }
     }
   })
 
