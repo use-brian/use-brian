@@ -293,7 +293,7 @@ BEGIN
    IF memory_source IS DISTINCT FROM memory_rows#>ARRAY[memory_candidate.id::text,'source'] OR memory_lineage IS DISTINCT FROM memory_rows#>ARRAY[memory_candidate.id::text,'lineage'] THEN RETURN NULL;END IF;
   END LOOP;
  END IF;
- 
+
  IF application_memory_statement_helpers_current() IS NOT TRUE
   OR (SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex') FROM pg_proc
    WHERE oid='public.read_native_session_cohort_evidence(uuid,text[],uuid[],text[],boolean)'::regprocedure)
