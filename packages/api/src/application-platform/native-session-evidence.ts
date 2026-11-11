@@ -1,5 +1,6 @@
 /** Closed native session evidence read. [COMP:api/application-persistence] */
 import {z} from 'zod'
+import {readNativePrivateTitleEvidence} from './native-private-title-evidence.js'
 import type {PoolClient} from 'pg'
 import {ContextScopeAccumulator,resourceScopeKey,type ResourceScope,type ScopeEvidence,type ScopeSource} from '@use-brian/core'
 const scope=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
@@ -45,6 +46,10 @@ export async function readNativePublicationCohorts(client:Pick<PoolClient,'query
 }
 /** Null means an unchanged original-family fallback; no authorization result is cached. */
 export async function readNativeSessionEvidence(client:Pick<PoolClient,'query'>,workspaceId:string,roots:readonly ScopeSource[]):Promise<NativeEvidence|null>{
+ if(roots.length===1&&roots[0].resourceKind==='session_context_revision'&&roots[0].version==='1'){
+  const privateTitle=await readNativePrivateTitleEvidence(client,workspaceId,roots)
+  if(privateTitle)return privateTitle
+ }
  if(!roots.length||roots.length>4096||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')||roots.some(root=>!['application_field','session_context_revision','session_message','memory','workspace_file'].includes(root.resourceKind)))return null
  // Field observations can hide Memory ancestors too. The closed validator
  // discovers the complete native closure and preserves its original fallback.

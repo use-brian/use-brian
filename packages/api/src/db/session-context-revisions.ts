@@ -12,7 +12,7 @@ import {
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from './client.js'
 import { recordDerivedResource, validateDerivedWriteInputs } from './derived-scope-store.js'
-import { validateCallerScopeEvidence,readValidatedNativeTitleGroup,readValidatedNativeSessionQuery,readValidatedNativePublicationCohorts } from '../context-scope/caller-evidence.js'
+import { validateCallerScopeEvidence,readValidatedNativeTitleGroup,readValidatedNativePrivateTitle,readValidatedNativeSessionQuery,readValidatedNativePublicationCohorts } from '../context-scope/caller-evidence.js'
 import type {NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
 import {readOriginalNativeSessionQueryCaptures,nativeSessionQueryCaptureSources,type NativeSessionQuerySelection,type NativeSessionQueryCaptures} from '../application-platform/native-session-query-evidence.js'
 import { readExternalSourceAncestors } from '../application-platform/external-source-ancestry.js'
@@ -435,8 +435,12 @@ export async function readSessionContextRevisions(sessionId: string, kind: Sessi
   requireAuthority(authority)
   await authority.execution.security.authority.assertCurrent()
   const workspaceId = authority.execution.security.access.workspaceId
-  const candidates = (await getPool().query<Omit<SessionContextRevision,'content'> & { source: ScopeSource }>(`SELECT r.id,r.parent_id AS "parentId",r.session_id AS "sessionId",
+  const candidates = (await getPool().query<Omit<SessionContextRevision,'content'> & { source: ScopeSource; privateTitleCandidate:boolean }>(`SELECT r.id,r.parent_id AS "parentId",r.session_id AS "sessionId",
     read_scope_source(r.workspace_id,'session_context_revision',r.id) AS source,s.user_id AS "userId",s.assistant_id AS "assistantId",
+    EXISTS(SELECT 1 FROM scope_derivations d JOIN scope_derivation_sources edge
+      ON edge.workspace_id=d.workspace_id AND edge.derivation_id=d.id
+      WHERE d.workspace_id=r.workspace_id AND d.resource_kind='session_context_revision' AND d.resource_id=r.id
+        AND r.parent_kind='session_title' AND edge.source_kind='private_transcript') AS "privateTitleCandidate",
     r.created_at AS "createdAt",coalesce(e.last_accessed_at,r.created_at) AS "lastAccessedAt",
     coalesce(e.access_count,0) AS "accessCount",coalesce(e.survival_count,0) AS "survivalCount"
     FROM session_context_scope_revisions r JOIN sessions s ON s.workspace_id=r.workspace_id AND s.id=r.session_id
@@ -448,14 +452,24 @@ export async function readSessionContextRevisions(sessionId: string, kind: Sessi
       AND (title.session_id IS NOT NULL OR annotation.message_id IS NOT NULL OR st.id IS NOT NULL OR e.id IS NOT NULL AND ($4::boolean OR e.promoted_memory_id IS NULL) OR r.parent_kind='compact_summary' AND s.compact_scope_revision_id=r.id)
     ORDER BY r.id`, [workspaceId,sessionId,kind,options?.includePromoted === true,options?.parentId ?? null])).rows
   const rows: SessionContextRevision[] = []
-  for (const candidate of candidates) {
+  for (const {privateTitleCandidate,...candidate} of candidates) {
     if (!candidate.source || candidate.source.resourceKind !== 'session_context_revision' || (candidate.source as ScopeSource & { held?: boolean }).held !== false) continue
     const {workspaceId: sourceWorkspace,userId,assistantId,sensitivity,compartments,projectIds,resourceKind,resourceId,version}=candidate.source
     const source:ScopeSource={workspaceId:sourceWorkspace,userId,assistantId,sensitivity,compartments,projectIds,resourceKind,resourceId,version}
     // A withdrawn independent source holds this entry. It must not poison a
     // different entry or another reader's immutable observation.
     try {
-      const content = await transaction(authority,[source],'context',false,async client =>
+      const {execution}=authority
+      // An identity-only acquisition may select payload before TS inspects its
+      // proof, so SQL access must fit the original caller ceiling. Keep the
+      // original lease, workspace locks and a separate fresh output boundary.
+      // A direct transcript edge is an eligibility hint only: absent/indirect
+      // private ancestry keeps the original acquisition, without an extra frame.
+      // The SQL operation still rediscovers and admits the entire fresh closure.
+      const acquired=kind==='session_title'&&privateTitleCandidate&&accessCeilingContains(execution.security.ceiling,pinAccessCeiling(execution.security.access))
+        ?await transaction(authority,[],'context',false,client=>readValidatedNativePrivateTitle(
+          {sessionId,revisionId:candidate.id},{sources:[source]},execution.security.ceiling,client)):null
+      const content = acquired?acquired.content:await transaction(authority,[source],'context',false,async client =>
         (await client.query<{ content: Record<string,unknown> | null }>(kind === 'session_title'
           ? 'SELECT read_native_empty_query_session_title_revision($1,$2,$3) AS content' : 'SELECT read_session_context_revision($1,$2) AS content',
           kind === 'session_title' ? [workspaceId,sessionId,candidate.id] : [workspaceId,candidate.id])).rows[0]?.content)
