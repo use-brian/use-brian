@@ -78,6 +78,7 @@ export function wrapCredentialPoolProvider(options: {
   return registerInputAdmissionOwner({
     name: template.name,
     models: template.models,
+    toolSchemaMode: template.toolSchemaMode?.bind(template) ?? (() => 'eager'),
 
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
       const resolved = await resolveProvider()

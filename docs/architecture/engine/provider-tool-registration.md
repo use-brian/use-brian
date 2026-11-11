@@ -8,7 +8,9 @@
 - `dynamic`: declarations can grow between sends in an existing session.
 - `native-deferred`: the provider registers a complete catalog once and its runtime discovers schemas internally.
 
-The engine's `deferToolSchemas` option is an opt-in to this capability, not a vendor-name check. Unsupported drivers remain eager; they do not acquire the reserved `discoverTools` name or a new auxiliary executor. Routing, exact-model binding, document adaptation, admission capture, retry wrappers and fallback wrappers preserve the selected model's capability.
+The engine's `deferToolSchemas` option is an opt-in to this capability, not a vendor-name check. Unsupported drivers remain eager; they do not acquire the reserved `discoverTools` name or a new auxiliary executor. Routing, exact-model binding, document adaptation, admission capture, retry/fallback wrappers, credential-pool wrappers and the API's stable Codex manager proxy preserve the selected model's capability.
+
+Stable proxies are part of the contract: testing only a concrete adapter misses a proxy that silently drops the optional capability and turns the real route eager. The Codex manager queries its **current** runtime adapter, so the same captured proxy function survives process replacement and safely reports eager while unavailable. Credential pools consult their existing template; capability lookup must not resolve a lease, construct a new provider, read an account or start a process. These metadata lookups do not establish entitlement or input authority.
 
 Capable requests/sessions receive a separate `toolRegistration` plan:
 
@@ -67,6 +69,11 @@ No running app, account endpoint, real model endpoint or existing database is ne
 # Provider + engine unit suites; integration suites are excluded by this config.
 node packages/core/node_modules/vitest/vitest.mjs run --root packages/core \
   --maxWorkers 1 src/providers src/engine
+
+# The actual API manager → wrapper → router → engine path, with in-memory RPC.
+node packages/core/node_modules/vitest/vitest.mjs run --root packages/api \
+  --maxWorkers 1 src/__tests__/codex-provider-manager.test.ts \
+  src/routes/__tests__/codex-provider.test.ts
 
 # Only this explicitly synthetic pinned-runtime integration suite.
 node packages/core/node_modules/vitest/vitest.mjs run --root packages/core \

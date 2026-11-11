@@ -349,6 +349,9 @@ class ManagedCodexProvider implements CodexProviderManager {
     return {
       name: PROVIDER_ID,
       models: [...this.#reviewedModels],
+      // The proxy survives runtime replacement: query the current adapter's
+      // presentation capability without starting a process or reading accounts.
+      toolSchemaMode: model => this.#runtime?.provider.toolSchemaMode?.(model) ?? 'eager',
       stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
         return current().stream(request)
       },
