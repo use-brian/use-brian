@@ -11,6 +11,13 @@
 
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
+import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
+import { DerivedScopeError } from '../security/derived-scope.js'
+import type { SessionContextAuthority } from '../memory/session-state-types.js'
+import { assertInputAuthority, assertProviderInputPreparation, captureInputAdmissionProvider, isInputAuthorityError, ownsInputAdmission } from '../providers/input-authority.js'
+import { captureClassifierDecisionRuntime, assertClassifierBookkeeping, registerClassifierLlmCompletion } from '../decisions/authority-ownership.js'
+import { decisionCompletionInput } from '../decisions/invocation.js'
+import type { DecisionExecutionOperation } from '../decisions/index.js'
 import type { DecisionExecutionPort, DecisionResponse } from '../decisions/index.js'
 
 const CLASSIFIER_SYSTEM_PROMPT = `You decide if a user message requires parallel independent research.
@@ -44,6 +51,11 @@ const MIN_MESSAGE_LENGTH = 40
 const CLASSIFIER_MODEL = 'gemini-3.5-flash-lite'
 
 export type SplitOptions = {
+  /** Host-only, privately scope-bound canonical input authority. */
+  authority?: SessionContextAuthority
+  signal?: AbortSignal
+  assertInputAuthority?: () => Promise<void>
+  deadlineAt?: number
   provider: LLMProvider
   message: string
   minMessageLength?: number
@@ -100,16 +112,27 @@ async function classifySplitWithLlm(params: {
   provider: LLMProvider
   model: string
   message: string
+  signal?: AbortSignal
+  assertInputAuthority?: () => Promise<void>
+  deadlineAt?: number
 }): Promise<SplitResult> {
-  const stream = params.provider.stream({
+  const provider = captureInputAdmissionProvider(params.provider)
+  const messages = [{ role: 'user' as const, content: params.message }]
+  await assertProviderInputPreparation(provider, { model: params.model, messages }, params.assertInputAuthority)
+  params.signal?.throwIfAborted()
+  const stream = provider.stream({
+    signal: params.signal,
+    assertInputAuthority: params.assertInputAuthority,
     model: params.model,
     systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: params.message }],
+    messages,
     maxTokens: 512,
     temperature: 0,
   })
 
   const response = await collectStream(stream)
+  params.signal?.throwIfAborted()
+  await assertInputAuthority(params.assertInputAuthority)
   const text = response.content
     .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
     .map((b) => b.text)
@@ -139,7 +162,7 @@ async function classifySplitWithLlm(params: {
  * is needed) together with the token usage + model so the caller can record
  * the classifier cost as `overhead:splitter`.
  */
-export async function classifySplit(options: SplitOptions): Promise<SplitResult> {
+async function classifySplitCurrent(options: SplitOptions): Promise<SplitResult> {
   const model = options.model ?? CLASSIFIER_MODEL
   const { provider, message, minMessageLength = MIN_MESSAGE_LENGTH } = options
 
@@ -154,6 +177,9 @@ export async function classifySplit(options: SplitOptions): Promise<SplitResult>
         runId: options.runId ?? `research-split-${Date.now()}`,
         operation: SPLIT_OPERATION,
         state: { message },
+        signal: options.signal,
+        deadlineAt: options.deadlineAt,
+        assertInputAuthority: options.assertInputAuthority,
         questions: [{
           kind: 'boolean',
           id: 'split',
@@ -164,7 +190,8 @@ export async function classifySplit(options: SplitOptions): Promise<SplitResult>
           },
         }],
       },
-      operation: {
+      operation: registerClassifierLlmCompletion<DecisionExecutionOperation<SplitResult>>({
+        assertInputAuthority: options.assertInputAuthority,
         decide(response, { profile }) {
           const answer = response.answers[0]
           if (answer?.kind !== 'boolean') return { kind: 'unavailable', reason: 'invalid_response' }
@@ -194,6 +221,8 @@ export async function classifySplit(options: SplitOptions): Promise<SplitResult>
         async completeWithLlm(context) {
           const result = await classifySplitWithLlm({
             provider: context.llm.provider,
+            ...decisionCompletionInput(context, options),
+            deadlineAt: options.deadlineAt,
             model: context.llm.modelId,
             message,
           })
@@ -209,16 +238,109 @@ export async function classifySplit(options: SplitOptions): Promise<SplitResult>
             } : {}),
           }
         },
-      },
+      }, route => ownsInputAdmission(route.provider, {
+        model: route.modelId, messages: [{ role: 'user', content: message }],
+      })),
     })
     return result.result
   }
 
   try {
-    return await classifySplitWithLlm({ provider, model, message })
-  } catch {
+    return await classifySplitWithLlm({ provider, model, message, signal: options.signal, assertInputAuthority: options.assertInputAuthority, deadlineAt: options.deadlineAt })
+  } catch (error) {
+    if (isInputAuthorityError(error)) throw error
+    options.signal?.throwIfAborted()
+    await assertInputAuthority(options.assertInputAuthority)
     // Any failure in classification → safe default, no split. Usage is lost
     // because the stream didn't complete — caller records nothing.
     return { tasks: null, usage: null, model: null }
+  }
+}
+
+
+/** One continuous authority window, including deadline/cancellation recovery. */
+export async function classifySplit(incoming: SplitOptions): Promise<SplitResult> {
+  // Pin authored bytes, callbacks, and dispatch implementations before any await.
+  const options = { ...incoming, message: structuredClone(incoming.message),
+    provider: captureInputAdmissionProvider(incoming.provider) }
+  const sources = boundScopeSources(incoming), authority = options.authority
+  const execution = authority?.execution, accumulator = authority?.accumulator
+  const current = execution?.security.authority.assertCurrent.bind(execution.security.authority)
+  const lifecycle = execution?.lifecycle.abortSignal
+  if (authority) {
+    if (!sources.length || typeof options.assertInputAuthority !== 'function') throw new DerivedScopeError('scope_evidence_missing')
+    accumulator!.note({ sources })
+  } else if (sources.length) throw new DerivedScopeError('scope_evidence_missing')
+  const observed = accumulator ? structuredClone(accumulator.evidence.sources ?? []) : sources
+  const controller = new AbortController()
+  const signal = AbortSignal.any([controller.signal, ...(options.signal ? [options.signal] : []), ...(lifecycle ? [lifecycle] : [])])
+  let closed = false, refusal: unknown, pending: Promise<void> | undefined
+  const closedError = new Error('The splitter authority window has closed')
+  const lease = async () => {
+    if (current) await assertInputAuthority(current)
+    if (lifecycle?.aborted) throw Object.assign(new Error('The splitter context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
+  }
+  // Caller/deadline cancellation never skips or poisons the live authority proof.
+  const proof = async () => {
+    try { await lease(); await assertInputAuthority(options.assertInputAuthority); await lease() }
+    catch (error) { refusal = error; throw error }
+  }
+  const check = async () => {
+    if (closed) throw closedError
+    if (refusal) throw refusal
+    if (pending) return pending
+    pending = proof()
+    try { await pending } finally { pending = undefined }
+  }
+  const active = async () => {
+    if (closed) throw closedError
+    if (pending) await pending
+    if (refusal) throw refusal
+    try { await lease() } catch (error) { refusal = error; throw error }
+    signal.throwIfAborted()
+  }
+  const decisionRuntime = captureClassifierDecisionRuntime(options.decisionRuntime, check, active)
+  const deadlineAt = Number.isFinite(options.deadlineAt) ? options.deadlineAt : undefined
+  const timeoutError = new Error('splitter deadline exceeded')
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let interrupt!: (error: unknown) => void
+  const interrupted = new Promise<never>((_, reject) => { interrupt = reject })
+  const onAbort = () => interrupt(signal.reason)
+  signal.addEventListener('abort', onAbort, { once: true })
+  if (deadlineAt !== undefined) {
+    const expire = () => { controller.abort(timeoutError); interrupt(timeoutError) }
+    if (Date.now() >= deadlineAt) expire()
+    else timer = setTimeout(expire, deadlineAt - Date.now())
+  }
+  const noSplit: SplitResult = { tasks: null, usage: null, model: null }
+  try {
+    let result = noSplit
+    let failure: unknown
+    try {
+      result = await Promise.race([interrupted, (async () => {
+        signal.throwIfAborted()
+        await assertClassifierBookkeeping(check)
+        signal.throwIfAborted()
+        return classifySplitCurrent({ ...options, decisionRuntime, signal, deadlineAt, assertInputAuthority: check })
+      })()])
+    } catch (error) {
+      if (isInputAuthorityError(error)) refusal = error
+      else if (!signal.aborted) failure = error
+    }
+    // Close first: losing transports cannot start more proofs or obtain receipts.
+    closed = true
+    if (pending) await pending
+    if (refusal) throw refusal
+    await proof() // fresh validation AFTER joining any in-flight admission
+    if (refusal) throw refusal
+    options.signal?.throwIfAborted()
+    if (failure) throw failure
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt) result = noSplit
+    return bindScopeSources(result, observed)
+  } finally {
+    closed = true
+    if (timer !== undefined) clearTimeout(timer)
+    signal.removeEventListener('abort', onAbort)
+    controller.abort()
   }
 }

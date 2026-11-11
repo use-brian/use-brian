@@ -102,3 +102,44 @@ describe('[COMP:workers/preflight] runPreflight', () => {
     expect(mgr.setMaxConcurrent).not.toHaveBeenCalled()
   })
 })
+
+describe('host-only preclassified reuse', () => {
+  it('reuses a negative split without an LLM or workers', async () => {
+    const classify = vi.fn(async () => ({ tasks: null, usage: { inputTokens: 2, outputTokens: 1 }, model: 'early-model' }))
+    expect(await runPreflight({ ...base, context: ctx, classify })).toEqual({ type: 'passthrough', usage: { inputTokens: 2, outputTokens: 1 }, model: 'early-model' })
+    expect(classify).toHaveBeenCalledOnce()
+    expect(mockClassify).not.toHaveBeenCalled()
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('reuses a positive split preserving worker context, read-only tools, and events', async () => {
+    const mgr = makeManager(); mockCreate.mockReturnValue(mgr)
+    const read = { isReadOnly: true }, write = { isReadOnly: false }
+    const tools = new Map([['read', read], ['write', write]]) as never
+    const onEvent = vi.fn(), onStatus = vi.fn()
+    const classify = vi.fn(async () => ({ tasks: ['first', 'second'], usage: null, model: 'early-model' }))
+    const result = await runPreflight({ ...base, context: ctx, tools, classify, onEvent, onStatus })
+    expect(result).toEqual({ type: 'researched', context: 'FINDING', usage: null, model: 'early-model' })
+    expect(mockClassify).not.toHaveBeenCalled()
+    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ provider: base.provider, model: base.model,
+      tools: new Map([['read', read]]), preserveExecutionContext: true, maxTurns: 2 }))
+    expect(mgr.spawn.mock.calls).toEqual([['first', ctx, tools], ['second', ctx, tools]])
+    expect(mgr.waitAll).toHaveBeenCalledOnce()
+    expect(onStatus).toHaveBeenCalledWith('Researching in parallel...')
+    mgr.setOnEvent.mock.calls[0][0]('w1', { type: 'fixture' })
+    expect(onEvent).toHaveBeenCalledWith({ type: 'fixture' }, 'w1', 'desc')
+  })
+
+  it('propagates host authority refusal without classification retry or workers', async () => {
+    const error = Object.assign(new Error('authority revoked'), { reason: 'authority_changed' })
+    await expect(runPreflight({ ...base, context: ctx, classify: async () => { throw error } })).rejects.toBe(error)
+    expect(mockClassify).not.toHaveBeenCalled()
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('keeps default standard classification free of model/runtime overrides', async () => {
+    mockClassify.mockResolvedValue({ tasks: null, usage: null, model: null })
+    await runPreflight({ ...base, context: ctx })
+    expect(mockClassify).toHaveBeenCalledExactlyOnceWith({ provider: base.provider, message: base.message })
+  })
+})

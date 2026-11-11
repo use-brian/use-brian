@@ -14,7 +14,7 @@ import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import type { Tool, ToolContext } from '../tools/types.js'
 import type { QueryEvent } from '../engine/query-loop.js'
 import { createWorkerManager, type WorkerRunsStore } from './worker.js'
-import { classifySplit } from './splitter.js'
+import { classifySplit, type SplitResult } from './splitter.js'
 
 /**
  * Classifier LLM usage from the initial `classifySplit` call. Exposed so the
@@ -31,6 +31,8 @@ export type PreflightResult =
   | ({ type: 'researched'; context: string } & PreflightClassifierUsage)
 
 export type PreflightOptions = {
+  /** Host-only preclassified result reuse; never persisted or supplied by request data. */
+  classify?: () => Promise<SplitResult>
   provider: LLMProvider
   /** Model for workers — same as main conversation model. */
   model: string
@@ -84,7 +86,7 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
 
   // Step 1: Classify — does this message need splitting? Classifier usage is
   // returned on the result so the caller can record it as `overhead:splitter`.
-  const { tasks, usage, model: classifierModel } = await classifySplit({ provider, message })
+  const { tasks, usage, model: classifierModel } = await (options.classify ? options.classify() : classifySplit({ provider, message }))
   const classifierUsage: PreflightClassifierUsage = { usage, model: classifierModel }
   // A workflow research step always researches: if the splitter declines to
   // split, fall back to a single worker on the whole prompt. Chat preflight

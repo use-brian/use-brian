@@ -22,6 +22,7 @@
  * Cost: ~1 Flash call per user turn (~$0.0001 each at current pricing).
  */
 
+import { registryRow } from '@use-brian/shared/model-registry'
 import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
 import { isTrivialChatMessage } from '../classification/trivial-chat.js'
 import { DerivedScopeError } from '../security/derived-scope.js'
@@ -61,7 +62,7 @@ export type ClassifierRecentTurn = {
 
 export type TopicClassifierOptions = {
   provider: LLMProvider
-  /** Cheap model — production should pass Gemini Flash. */
+  /** Cheap model, or the host's configured standard fallback. */
   model: string
   recentUserTurns: ClassifierRecentTurn[]
   /**
@@ -85,6 +86,8 @@ export type TopicClassifierOptions = {
   assertInputAuthority?: () => Promise<void>
   /** Cancels classifier transports with the containing turn. */
   signal?: AbortSignal
+  /** Optional absolute host deadline; can only narrow the classifier budget. */
+  deadlineAt?: number
 }
 
 type BoundedTopicClassifierOptions = TopicClassifierOptions & {
@@ -93,6 +96,22 @@ type BoundedTopicClassifierOptions = TopicClassifierOptions & {
 }
 
 const TOPIC_CLASSIFIER_TIMEOUT_MS = 2_000
+const SLOW_TOPIC_CLASSIFIER_TIMEOUT_MS = 8_000
+
+/** Routing hides the serving provider's name; use its exact registry identity,
+ * not model-name substrings. Unknown models retain the fast default. The
+ * standard OpenAI-compatible lane may also serve the host's background work
+ * when Flash is unavailable. Neither lane gets an unbounded generation wait.
+ */
+function topicClassifierTimeoutMs({ provider, model }: TopicClassifierOptions): number {
+  const row = registryRow(model)
+  const servingProvider = provider.name === 'routing' ? row?.provider : provider.name
+  if (servingProvider === 'openai-codex') return SLOW_TOPIC_CLASSIFIER_TIMEOUT_MS
+  if (servingProvider?.startsWith('openai-compat:') && row?.class === 'standard-pro') {
+    return SLOW_TOPIC_CLASSIFIER_TIMEOUT_MS
+  }
+  return TOPIC_CLASSIFIER_TIMEOUT_MS
+}
 
 const CLASSIFIER_SYSTEM_PROMPT =
   'You are a topic classifier for a conversational assistant. ' +
@@ -503,14 +522,22 @@ export async function classifyTopic(incoming: TopicClassifierOptions): Promise<T
     ...(opts.signal ? [opts.signal] : []),
     ...(lifecycleSignal ? [lifecycleSignal] : []),
   ])
-  const deadlineAt = Date.now() + TOPIC_CLASSIFIER_TIMEOUT_MS
+  const startedAt = Date.now()
+  const deadlineAt = Math.min(startedAt + topicClassifierTimeoutMs(opts),
+    Number.isFinite(opts.deadlineAt) ? opts.deadlineAt! : Infinity)
+  const timeoutMs = Math.max(0, deadlineAt - startedAt)
   const timeoutError = new Error('topic classifier deadline exceeded')
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<never>((_resolve, reject) => {
+    if (timeoutMs === 0) {
+      controller.abort(timeoutError)
+      reject(timeoutError)
+      return
+    }
     timer = setTimeout(() => {
       controller.abort(timeoutError)
       reject(timeoutError)
-    }, TOPIC_CLASSIFIER_TIMEOUT_MS)
+    }, timeoutMs)
   })
   let result: TopicClassification
   let timedOut = false
@@ -535,7 +562,7 @@ export async function classifyTopic(incoming: TopicClassifierOptions): Promise<T
     closed = true
     await finalCheck
     if (timedOut) console.warn('[topic-classifier] deadline exceeded; using uncategorized fallback', {
-      timeoutMs: TOPIC_CLASSIFIER_TIMEOUT_MS,
+      timeoutMs,
     })
     return bindScopeSources(result, observed)
   } finally {
