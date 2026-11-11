@@ -295,6 +295,24 @@ export const ThreadTokenUsageUpdatedNotificationSchema = z
   })
   .passthrough()
 
+// Exact agent-message snapshot shape from the pinned runtime. Other lifecycle
+// items are metadata only here; reasoning/tool snapshots must never become text.
+export const AgentMessageItemSchema = z.object({
+  type: z.literal('agentMessage'), id: z.string().min(1).max(256),
+  text: z.string().max(8 * 1024 * 1024),
+  phase: z.enum(['commentary', 'partial_answer', 'final_answer']).nullable().optional(),
+}).passthrough()
+const CompletedItemSchema = z.union([
+  AgentMessageItemSchema,
+  z.object({ type: z.string().min(1).max(64).refine(type => type !== 'agentMessage'),
+    id: z.string().min(1).max(256) }).passthrough(),
+])
+export const ItemCompletedNotificationSchema = z.object({
+  threadId: z.string().min(1).max(256), turnId: z.string().min(1).max(256),
+  item: CompletedItemSchema,
+}).passthrough()
+export type AgentMessageItem = z.infer<typeof AgentMessageItemSchema>
+
 export const TurnCompletedNotificationSchema = z
   .object({
     threadId: z.string().min(1).max(256),
@@ -302,6 +320,9 @@ export const TurnCompletedNotificationSchema = z
       .object({
         id: z.string().min(1).max(256),
         status: CodexTurnStatusSchema,
+        // Optional for older peers/fixtures; only present completed items are
+        // reconciled. Absence never manufactures visible output.
+        items: z.array(CompletedItemSchema).max(1024).optional(),
         error: z
           .object({
             message: z.string().min(1).max(16_384),

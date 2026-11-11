@@ -249,6 +249,7 @@ export function wrapEndpointFallback(
   return {
     name: primary.name,
     models: primary.models,
+    toolSchemaMode: model => primary.toolSchemaMode?.(model) ?? 'eager',
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
       return attempt(

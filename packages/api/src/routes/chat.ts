@@ -7578,10 +7578,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           runtimeSystemContext: preparedRun.trustedContext,
           messages,
           tools: preparedRun.tools,
-          // These built-in adapters (including Gemini's Anthropic fallback)
-          // re-read the session declarations. Snapshot-based adapters do not.
-          deferToolSchemas: customLlmRuntime?.routeKind !== 'custom' &&
-            registryRow(customLlmRuntime?.selector ?? preparedRun.model.model)?.provider === 'gemini',
+          // Presentation-only opt-in: capable drivers use the registration plan;
+          // legacy/custom and eager fallback drivers retain the complete tools list.
+          deferToolSchemas: true,
           routineCalendarRead: routineDeclineReason === null && options.decisionRuntime ? {
               runtime:options.decisionRuntime, llm:{provider:preparedRun.model.provider,modelId:preparedRun.model.model},
               workspaceId:assistant.workspaceId??undefined, calendarTools:boundRoutineCalendarTools,historyCalls:routineHistoryCalls,

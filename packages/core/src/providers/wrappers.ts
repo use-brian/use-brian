@@ -872,6 +872,7 @@ export function wrapProvider(
   return registerInputAdmissionOwner({
     name: base.name,
     models: base.models,
+    toolSchemaMode: model => base.toolSchemaMode?.(model) ?? 'eager',
     stream: wrappedStream,
     createSession(sessionOpts: SessionOptions): ProviderSession {
       let inner: ProviderSession | undefined
@@ -897,6 +898,7 @@ export function wrapProvider(
             runtimeSystemContext: sessionOpts.runtimeSystemContext,
             messages,
             tools: sessionOpts.tools,
+            toolRegistration: sessionOpts.toolRegistration,
             maxTokens: sessionOpts.maxTokens,
             inputTokenLimit: sessionOpts.inputTokenLimit,
             temperature: sessionOpts.temperature,

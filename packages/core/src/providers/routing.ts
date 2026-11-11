@@ -44,6 +44,7 @@ export function bindExactModelProvider(provider: LLMProvider, model: string): LL
   return registerInputAdmissionOwner({
     name: child.name,
     models: child.models,
+    toolSchemaMode: () => child.toolSchemaMode?.(model) ?? 'eager',
     stream(request) {
       const actual = { ...request, model, allowProviderFallback: false }
       return (async function* () {
@@ -174,6 +175,10 @@ export function createRoutingProvider(
 
   return registerInputAdmissionOwner({
     name: 'routing',
+    toolSchemaMode(requestedModel) {
+      const model = options?.resolveModel?.(requestedModel) ?? requestedModel
+      return effectiveFor(model).toolSchemaMode?.(model) ?? 'eager'
+    },
     models: Object.values(providers).flatMap((p) => p.models),
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
