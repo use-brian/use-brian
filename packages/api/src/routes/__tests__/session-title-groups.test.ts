@@ -105,6 +105,27 @@ describe('[COMP:api/application-persistence] bounded title group context partiti
    expect(mocks.output).toHaveBeenCalledTimes(1)
   }finally{warning.mockRestore()}
  })
+ for(const code of ['57014','55P03'])it(`discards provisional bytes on wrapped final-output timeout ${code}`,async()=>{
+  const warning=vi.spyOn(console,'warn').mockImplementation(()=>{})
+  try{
+   const sql=Object.assign(new Error('Fictional SQL timeout'),{code})
+   const validation=Object.assign(new Error('Fictional caller proof unavailable'),{cause:sql,reason:'caller_evidence_unavailable'})
+   const output=Object.assign(new Error('Fictional output source unavailable'),{cause:validation,reason:'authority_changed'})
+   mocks.output.mockResolvedValueOnce(undefined).mockRejectedValueOnce(output)
+   const result=await sessionTitleProjections({claims,sessionIds:['first','second','first','second']})
+   expect([...result.values()]).toEqual(['first','second'].map(()=>({title:null,titleRevisionId:null})))
+   expect(mocks.read).toHaveBeenCalledTimes(2)
+   expect(mocks.output).toHaveBeenCalledTimes(2)
+   expect(warning).toHaveBeenCalledExactlyOnceWith('Session list titles withheld after database timeout:',sql)
+  }finally{warning.mockRestore()}
+ })
+ it('does not treat a cyclic ordinary authority cause as a database timeout',async()=>{
+  const error=Object.assign(new Error('Fictional changed authority'),{reason:'authority_changed',cause:null as unknown})
+  error.cause=error
+  mocks.output.mockRejectedValue(error)
+  const result=await sessionTitleProjections({claims,sessionIds:['first']})
+  expect(result.get('first')).toEqual({title:null,titleRevisionId:null})
+ })
  it('keeps shared-audience readers on their individual authority path',async()=>{
   mocks.resolve.mockImplementation(async input=>{const result=execution(input);result.executionContext.security.access.sharedAudience=true;return result})
   await sessionTitleProjections({claims,sessionIds:ids})

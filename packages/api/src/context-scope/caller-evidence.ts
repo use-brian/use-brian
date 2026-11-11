@@ -1,5 +1,6 @@
 import { readNativeSessionEvidence,readNativePublicationCohorts } from '../application-platform/native-session-evidence.js'
 import {readNativeTitleGroupEvidence,type NativeTitleHead} from '../application-platform/native-title-group-evidence.js'
+import {readNativePrivateTitleAcquisition} from '../application-platform/native-private-title-evidence.js'
 import {readNativeSessionQueryEvidence,type NativeSessionQuerySelection,type NativeSessionQueryCaptures} from '../application-platform/native-session-query-evidence.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
 import {
@@ -424,6 +425,31 @@ export async function readValidatedNativeTitleGroup(heads:readonly NativeTitleHe
  }
  const checked=await validateScopeEvidence(evidence,ceiling,'caller',client,undefined,true,read)
  return checked&&titles?{titles,checked}:null
+}
+
+/** The scalar/source floor is checked by the original validator before this
+ * private alternate reader may invoke the identity-only payload operation. */
+export async function readValidatedNativePrivateTitle(head:NativeTitleHead,evidence:ScopeEvidence,
+ ceiling:AccessCeiling,client:Pick<PoolClient,'query'>):Promise<{content:Record<string,unknown>;checked:ScopeEvidence}|null>{
+ const identity=structuredClone(head)
+ let content:Record<string,unknown>|undefined
+ let timeout:unknown
+ const read:typeof readNativeSessionEvidence=async(connection,workspaceId,roots)=>{
+  try{
+   const captured=await readNativePrivateTitleAcquisition(connection,workspaceId,identity,roots)
+   if(!captured)return null
+   content=captured.title.content;return captured.native
+  }catch(error){
+   // Optional list decoration must withhold the whole page on a SQL timeout,
+   // not normalize it into a per-row source denial in the retained frame.
+   if(typeof error==='object'&&error!==null&&'code'in error&&['57014','55P03'].includes(String(error.code)))timeout=error
+   throw error
+  }
+ }
+ try{
+  const checked=await validateScopeEvidence(evidence,ceiling,'caller',client,undefined,true,read)
+  return checked&&content?{content,checked}:null
+ }catch(error){throw timeout??error}
 }
 
 /** Identity-based acquisition owns its private alternate reader. The original
