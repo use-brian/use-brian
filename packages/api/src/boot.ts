@@ -2331,7 +2331,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     console.warn('[decision-routing] deployment operator override active', {
       mode: operatorDecisionDefault.mode,
       modelAlias: operatorDecisionDefault.modelAlias,
-      scope: 'workspaces_without_explicit_setting',
+      scope: operatorDecisionDefault.mode === 'classifier_first'
+        ? 'unset_or_matching_hybrid_workspaces'
+        : 'workspaces_without_explicit_setting',
       operations: operatorDecisionDefault.operationIds ?? 'all',
       llmFailover: true,
     })

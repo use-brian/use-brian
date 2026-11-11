@@ -307,13 +307,15 @@ export function ModelsSection() {
       const model = decisionRouting?.models.find((candidate) => candidate.alias === modelAlias);
       if (!model) return;
       const hybrid = mode === "hybrid";
+      const classifierFirst = hybrid && !!model.classifierFirst;
       const ok = await confirmDialog({
-        title: hybrid ? t.decisionHybridConfirmTitle : t.decisionConfirmTitle,
-        description: (hybrid ? t.decisionHybridConfirmBody : t.decisionConfirmBody)
+        title: classifierFirst ? t.decisionFirstConfirmTitle : hybrid ? t.decisionHybridConfirmTitle : t.decisionConfirmTitle,
+        description: (classifierFirst ? t.decisionFirstConfirmBody : hybrid ? t.decisionHybridConfirmBody : t.decisionConfirmBody)
+          .replace("{scope}", model.classifierFirst?.operationIds?.join(", ") ?? t.decisionFirstAllEligible)
           .replace("{model}", model.displayName)
           .replace("{percent}", String(Math.round((decisionRouting?.shadowSampleRate ?? 0.1) * 100)))
           .replace("{count}", String(model.hybridOperations.length)),
-        confirmLabel: hybrid ? t.decisionHybridConfirmCta : t.decisionConfirmCta,
+        confirmLabel: classifierFirst ? t.decisionFirstConfirmCta : hybrid ? t.decisionHybridConfirmCta : t.decisionConfirmCta,
       });
       if (!ok) return;
     }
@@ -513,7 +515,7 @@ export function ModelsSection() {
                   <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
                     {decisionRouting?.mode === "hybrid"
                       ? decisionRouting.operatorOverride
-                        ? t.decisionOperatorOverrideBadge
+                        ? selectedDecisionModel?.classifierFirst ? t.decisionFirstBadge : t.decisionOperatorOverrideBadge
                         : selectedHybridOperationCount > 0
                         ? t.decisionHybridBadge.replace("{count}", String(selectedHybridOperationCount))
                         : t.decisionHybridFallbackBadge
@@ -543,7 +545,12 @@ export function ModelsSection() {
                           String(Math.round((decisionRouting?.shadowSampleRate ?? 0.1) * 100)),
                         ),
                       },
-                      ...(model.hybridOperations.length > 0 ? [{
+                      ...(model.classifierFirst ? [{
+                        value: `hybrid:${model.alias}`,
+                        label: t.decisionFirstOption.replace("{model}", model.displayName),
+                        hint: t.decisionFirstScope.replace("{scope}", model.classifierFirst.operationIds?.join(", ") ?? t.decisionFirstAllEligible),
+                        badge: t.decisionFirstBadge,
+                      }] : model.hybridOperations.length > 0 ? [{
                         value: `hybrid:${model.alias}`,
                         label: t.decisionHybridOption.replace("{model}", model.displayName),
                         hint: t.decisionHybridHint.replace("{count}", String(model.hybridOperations.length)),
@@ -552,6 +559,7 @@ export function ModelsSection() {
                     ]),
                     ...(decisionRouting?.mode === "hybrid"
                       && selectedDecisionModel
+                      && !selectedDecisionModel.classifierFirst
                       && selectedHybridOperationCount === 0
                       ? [{
                           value: `hybrid:${selectedDecisionModel.alias}`,
@@ -582,12 +590,18 @@ export function ModelsSection() {
                   <p className="text-[11.5px] leading-relaxed text-muted-foreground">{t.decisionUnavailable}</p>
                 ) : null}
                 <p className="text-[11.5px] leading-relaxed text-muted-foreground">
-                  {(decisionRouting?.operatorOverride
+                  {(decisionRouting?.mode === "hybrid" && selectedDecisionModel?.classifierFirst
+                    ? t.decisionFirstConfirmBody
+                    : decisionRouting?.operatorOverride
                     ? t.decisionOperatorOverrideNotice
+                    : decisionRouting?.models.some((model) => model.classifierFirst)
+                    ? t.decisionFirstAvailable
                     : selectedHybridOperationCount > 0
                     ? t.decisionHybridAvailable
                     : t.decisionHybridGate
-                  ).replace("{count}", String(selectedHybridOperationCount))}
+                  ).replace("{count}", String(selectedHybridOperationCount))
+                    .replace("{model}", selectedDecisionModel?.displayName ?? "")
+                    .replace("{scope}", selectedDecisionModel?.classifierFirst?.operationIds?.join(", ") ?? t.decisionFirstAllEligible)}
                 </p>
               </div>
             </div>

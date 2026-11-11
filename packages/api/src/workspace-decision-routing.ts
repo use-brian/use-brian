@@ -1,6 +1,7 @@
 /**
  * Resolve a workspace's persisted classifier choice into a safe decision
- * route. Hybrid authority is granted only by an exact approved profile.
+ * route. Hybrid authority requires exact approved evidence or an explicit,
+ * scoped deployment-operator override. Key presence never grants authority.
  *
  * [COMP:decisions/workspace-routing]
  */
@@ -18,7 +19,7 @@ export const WORKSPACE_DECISION_PRIMARY_TIMEOUT_MS = 1_000
 export const WORKSPACE_DECISION_TOTAL_TIMEOUT_MS = 120_000
 
 export type OperatorDecisionDefault = {
-  mode: 'operator_hybrid'
+  mode: 'operator_hybrid' | 'classifier_first'
   modelAlias: string
   operationIds?: readonly string[]
 }
@@ -30,21 +31,35 @@ export function parseOperatorDecisionDefault(
 ): OperatorDecisionDefault | undefined {
   const mode = modeValue?.trim()
   const modelAlias = modelValue?.trim()
-  if (!mode && !modelAlias && !operationsValue) return undefined
-  if (mode !== 'operator_hybrid' || !modelAlias) {
+  const operations = operationsValue?.trim()
+  if (!mode && !modelAlias && !operations) return undefined
+  if ((mode !== 'operator_hybrid' && mode !== 'classifier_first') || !modelAlias) {
     throw new Error(
-      'decision-routing: DECISION_DEFAULT_MODE=operator_hybrid and DECISION_DEFAULT_MODEL are required together',
+      'decision-routing: DECISION_DEFAULT_MODE=operator_hybrid or classifier_first and DECISION_DEFAULT_MODEL are required together',
     )
   }
   const row = registryRow(modelAlias)
   if (!row || row.status !== 'active' || !isDecisionModelRow(row)) {
     throw new Error(`decision-routing: operator default '${modelAlias}' is not an active decision model`)
   }
-  const operationIds = operationsValue?.split(',').map(value => value.trim())
+  const operationIds = operations ? operations.split(',').map(value => value.trim()) : undefined
   if (operationIds?.some(value => !/^[a-z][a-z0-9.-]+$/.test(value))) {
     throw new Error('decision-routing: operation scope must contain exact operation IDs')
   }
   return { mode, modelAlias: row.alias, ...(operationIds ? { operationIds: [...new Set(operationIds)] } : {}) }
+}
+
+/** Explicit deployment grant, separate from approved evaluation evidence. */
+export function classifierFirstGrant(
+  operatorDefault: OperatorDecisionDefault | undefined,
+  modelAlias: string | null,
+): { operationIds: readonly string[] | null } | null {
+  if (
+    operatorDefault?.mode !== 'classifier_first' ||
+    operatorDefault.modelAlias !== modelAlias ||
+    operatorDefault.operationIds?.length === 0
+  ) return null
+  return { operationIds: operatorDefault.operationIds ? [...operatorDefault.operationIds] : null }
 }
 
 export function createWorkspaceDecisionRouteResolver(options: {
@@ -60,7 +75,13 @@ export function createWorkspaceDecisionRouteResolver(options: {
 
     try {
       const setting = await options.store.getSystem(context.workspaceId)
-      if (!setting && options.operatorDefault
+      // Legacy operator_hybrid remains no-row-only. classifier_first is an
+      // explicit deployment grant for matching hybrid selections as well;
+      // workspace LLM-only/shadow choices are always opt-outs. Outside its
+      // operation scope, an existing hybrid row still needs exact approval.
+      const selectedClassifierFirst = setting?.mode === 'hybrid'
+        && classifierFirstGrant(options.operatorDefault, setting.modelAlias)
+      if ((!setting || selectedClassifierFirst) && options.operatorDefault
         && (!options.operatorDefault.operationIds || options.operatorDefault.operationIds.includes(context.operation.id))) {
         const row = registryRow(options.operatorDefault.modelAlias)
         if (

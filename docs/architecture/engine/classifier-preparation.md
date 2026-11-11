@@ -5,6 +5,58 @@ The correlated response diagnostics distinguish these calls. In particular, the
 historical clean Codex `end_turn` with no public text remains unexplained until
 it reproduces with diagnostics; this change does not claim to fix that case.
 
+## Explicit 100% Jev-first routing
+
+`TYPESAFE_API_KEY` registers the Jev transport; key presence alone never enables
+classifier authority. To explicitly authorize classifier-first execution, set:
+
+```dotenv
+DECISION_DEFAULT_MODE=classifier_first
+DECISION_DEFAULT_MODEL=typesafe-jev-1.13
+```
+
+This is a deployment-operator override, **not approved quality evidence**. It
+reuses the existing exact-version `operator_override` profiles and Hydra
+cascade, rather than weakening approval validation or introducing another
+classifier pipeline. There is no database migration or new persisted mode.
+
+The policy applies to workspaces without an explicit decision-routing row and
+to saved `hybrid` selections for the exact configured model. Explicit `llm_only`
+and `shadow` rows remain opt-outs. In Settings → Models → Decision routing,
+select **Jev first (100%)** to replace an existing opt-out with matching hybrid
+routing; confirmation explains the operator authority and fallback behavior.
+The API accepts this selection only from an owner/admin with the configured
+adapter and deployment grant. A key or a client-supplied flag cannot grant it.
+
+Optional `DECISION_DEFAULT_OPERATIONS=research.intent,memory.topic,chat.tool-selection`
+limits the override to those exact operation IDs; blank/unset means every
+eligible operation. Outside this scope, a saved hybrid row still needs its
+ordinary exact approved profile or degrades to 10% shadow. Other models retain
+the ordinary approval gate. The legacy `operator_hybrid` deployment mode keeps
+its no-workspace-row-only behavior.
+
+100% means no execution sampling for eligible typed operations already using
+`DecisionRuntime`. A successful Jev decision completes directly, without an
+LLM classification. Observation-only consumers remain shadow-only, with full
+sampling inside the deployment override scope; they gain no execution
+authority. Jev still has its existing capability, context-capacity, cancellation
+and one-second primary transport bounds. The shared invocation/profile limits
+and pending/final authority checks are unchanged. Unsupported-capacity inputs
+retain the existing owned fallback, without truncating state or options.
+
+Jev cannot generate new topic labels or worker task prompts. Generation,
+uncertainty review and allowed operational recovery can still need a bounded
+LLM follow-up. The main chat model is unchanged. In particular, Standard's
+legacy splitter is not moved onto a decision-runtime route by this setting.
+Fresh Memory, source/recipient admission, event/final output validation, worker
+launch and publication boundaries remain unchanged.
+
+The menu reports the deployment grant as a separate `classifierFirst`
+capability with its operation scope; it does not fabricate approved entries in
+`hybridOperations`. Scoped routes are labeled as operator overrides, including
+when matching hybrid routing has already been saved. Tests use mocked stores
+and a fictional Jev transport; they do not establish live latency or quality.
+
 ## Strict decision schemas
 
 The common LLM decision adapter emits closed objects with every property in

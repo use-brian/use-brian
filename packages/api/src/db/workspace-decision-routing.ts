@@ -2,7 +2,8 @@
  * Workspace decision-classifier preference (migration 604).
  *
  * A hybrid workspace preference is only a request: runtime authority still
- * requires a non-revoked exact-version profile for each operation.
+ * requires a non-revoked exact-version profile or an explicit scoped
+ * deployment-operator override. The persisted selection grants neither.
  *
  * [COMP:decisions/workspace-routing]
  */

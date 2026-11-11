@@ -27,6 +27,9 @@ vi.mock("@/lib/workspace-context", () => ({
 
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
+import { ja } from "@/lib/i18n/dictionaries/ja";
+import { zh } from "@/lib/i18n/dictionaries/zh";
+import { zhCN } from "@/lib/i18n/dictionaries/zh-cn";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { ModelsSection } from "../models-section";
 
@@ -57,6 +60,19 @@ describe("[COMP:app-web/models-settings] Models section", () => {
     expect(html).toContain(tm.viewProviders);
     expect(html).toContain(tm.viewAdvanced);
     expect(html).not.toContain(en.workspaceLlmKey.heading);
+  });
+
+  it("keeps full-routing copy and placeholders aligned across all four locales", () => {
+    const keys = Object.keys(tm).filter(key => key.startsWith("decisionFirst")) as Array<keyof typeof tm>;
+    expect(keys).toContain("decisionFirstOption");
+    expect(keys).toContain("decisionFirstAvailable");
+    for (const locale of [ja, zh, zhCN]) {
+      for (const key of keys) {
+        const text = locale.chrome.settingsModal.models[key];
+        expect(text.length).toBeGreaterThan(0);
+        expect(text.match(/\{\w+\}/g) ?? []).toEqual(tm[key].match(/\{\w+\}/g) ?? []);
+      }
+    }
   });
 
   it("every user-facing string flows through the dictionary (i18n contract)", () => {

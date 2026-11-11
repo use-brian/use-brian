@@ -57,6 +57,8 @@ type DecisionModel = {
   displayName: string;
   provider: string;
   adapterId: string;
+  /** Deployment-granted full routing; absent on older servers. Not approval evidence. */
+  classifierFirst?: { operationIds: string[] | null } | null;
   hybridOperations: Array<{
     operationId: string;
     operationVersion: string;

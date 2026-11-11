@@ -36,6 +36,24 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
     expect(menu.meteredBillingAvailable).toBe(true);
   });
 
+  it.each([undefined, null, { operationIds: null }, { operationIds: ["research.intent", "chat.route"] }])(
+    "preserves optional deployment capability from the menu: %j", async (classifierFirst) => {
+      const model = {
+        alias: "typesafe-jev-1.13", displayName: "Jev 1.13", provider: "typesafe", adapterId: "typesafe",
+        hybridOperations: [], ...(classifierFirst === undefined ? {} : { classifierFirst }),
+      };
+      const decisionRouting = {
+        mode: "hybrid", modelAlias: model.alias, updatedAt: "now", operatorOverride: !!classifierFirst,
+        shadowSampleRate: 0.1, models: [model],
+      };
+      mockFetch.mockResolvedValueOnce(ok({ decisionRouting }));
+      const menu = await fetchModelMenu("ws-1");
+      expect(menu.decisionRouting).toEqual(decisionRouting);
+      expect(menu.decisionRouting.models[0].classifierFirst).toEqual(classifierFirst);
+      expect(menu.decisionRouting.models[0].hybridOperations).toEqual([]);
+    },
+  );
+
   it("posts estimate requests at the chosen budget", async () => {
     mockFetch.mockResolvedValueOnce(ok({ estimate: { modelAlias: "qwen3.7-max", toolRounds: 100, minCredits: 9, maxCredits: 120 } }));
     const est = await fetchMeteredEstimate("ws-1", "qwen3.7-max", 100);
@@ -119,7 +137,7 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
     expect(setting.mode).toBe("shadow");
   });
 
-  it("sets a workspace classifier to hybrid where approved", async () => {
+  it("selects hybrid with the same wire request for approvals or deployment-granted full routing", async () => {
     mockFetch.mockResolvedValueOnce(ok({
       decisionRouting: {
         mode: "hybrid",

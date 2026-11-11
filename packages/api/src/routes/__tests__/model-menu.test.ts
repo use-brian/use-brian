@@ -498,3 +498,162 @@ describe('[COMP:decisions/workspace-routing] workspace decision classifier', () 
     expect(decisionRoutingStore.set).not.toHaveBeenCalled()
   })
 })
+
+describe('[COMP:api/model-menu] explicit classifier-first grant', () => {
+  const WID = '00000000-0000-0000-0000-000000000001'
+  const modelAlias = 'typesafe-jev-1.13'
+  const operatorDecisionDefault = { mode: 'classifier_first' as const, modelAlias }
+  const options = {
+    decisionRoutingStore: decisionRoutingStore as never,
+    configuredDecisionAdapters: new Set(['typesafe']),
+    operatorDecisionDefault,
+  }
+  const saved = (mode: string, alias: string | null = modelAlias) => ({
+    workspaceId: WID, mode, modelAlias: alias, updatedAt: 'now',
+  })
+  const put = (overrides: Partial<ModelMenuRouteOptions> = {}) => request(makeApp({ ...options, ...overrides }))
+    .put(`/api/workspaces/${WID}/decision-routing`).send({ mode: 'hybrid', modelAlias })
+
+  it.each([undefined, ['chat.tool-selection']])('advertises the grant separately from approved evidence (scope=%j)', async operationIds => {
+    decisionRoutingStore.get.mockResolvedValue(saved('hybrid'))
+    const res = await request(makeApp({ ...options,
+      operatorDecisionDefault: { ...operatorDecisionDefault, ...(operationIds ? { operationIds } : {}) },
+    })).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+    expect(res.body.decisionRouting).toMatchObject({ mode: 'hybrid', modelAlias, updatedAt: 'now', operatorOverride: true })
+    expect(res.body.decisionRouting.models).toEqual([expect.objectContaining({
+      alias: modelAlias, classifierFirst: { operationIds: operationIds ?? null }, hybridOperations: [],
+    })])
+    expect(Object.values(res.body.classes).flat()).not.toContainEqual(expect.objectContaining({ alias: modelAlias }))
+  })
+
+  it('inherits the classifier-first deployment default without a saved row', async () => {
+    const res = await request(makeApp(options)).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+    expect(res.body.decisionRouting).toMatchObject({ mode: 'hybrid', modelAlias, updatedAt: null, operatorOverride: true })
+  })
+
+  it.each(['llm_only', 'shadow'])('does not label explicit %s opt-out an override', async mode => {
+    decisionRoutingStore.get.mockResolvedValue(saved(mode, mode === 'llm_only' ? null : modelAlias))
+    const res = await request(makeApp(options)).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+    expect(res.body.decisionRouting).toMatchObject({ mode, operatorOverride: false, updatedAt: 'now' })
+    // Capability remains visible, without changing the selected policy.
+    expect(res.body.decisionRouting.models[0].classifierFirst).toEqual({ operationIds: null })
+  })
+
+  it.each(['adapter-only', 'legacy', 'other-model', 'empty-scope'] as const)
+    ('does not advertise new-mode authority for %s', async variant => {
+      decisionRoutingStore.get.mockResolvedValue(saved('hybrid'))
+      const defaults = variant === 'adapter-only' ? undefined : variant === 'legacy'
+        ? { mode: 'operator_hybrid' as const, modelAlias }
+        : variant === 'other-model' ? { ...operatorDecisionDefault, modelAlias: 'not-this-model' }
+        : { ...operatorDecisionDefault, operationIds: [] }
+      const res = await request(makeApp({ ...options, operatorDecisionDefault: defaults }))
+        .get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+      expect(res.body.decisionRouting.operatorOverride).toBe(false)
+      expect(res.body.decisionRouting.models[0]).toMatchObject({ classifierFirst: null, hybridOperations: [] })
+    })
+
+  it('hides an unavailable adapter even with an explicit grant', async () => {
+    const res = await request(makeApp({ ...options, configuredDecisionAdapters: new Set() }))
+      .get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+    expect(res.body.decisionRouting.models).toEqual([])
+    getRole.mockResolvedValue('admin')
+    await put({ configuredDecisionAdapters: new Set() }).expect(400)
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+  })
+
+  it.each(['owner', 'admin'])('lets an %s persist exact granted hybrid without any profile registry', async role => {
+    getRole.mockResolvedValue(role)
+    decisionRoutingStore.set.mockResolvedValue(saved('hybrid'))
+    const res = await put().expect(200)
+    expect(res.body.decisionRouting).toEqual(saved('hybrid'))
+    expect(decisionRoutingStore.set).toHaveBeenCalledWith({ actingUserId: 'u1', workspaceId: WID, mode: 'hybrid', modelAlias })
+    expect(decisionEvaluationProfileStore.listApproved).not.toHaveBeenCalled()
+  })
+
+  it('does not consult a broken registry on granted writes; menu remains explicit, not approved', async () => {
+    getRole.mockResolvedValue('admin')
+    decisionRoutingStore.set.mockResolvedValue(saved('hybrid'))
+    decisionEvaluationProfileStore.listApproved.mockRejectedValue(new Error('registry unavailable'))
+    const overrides = { decisionEvaluationProfileStore: decisionEvaluationProfileStore as never }
+    await put(overrides).expect(200)
+    expect(decisionEvaluationProfileStore.listApproved).not.toHaveBeenCalled()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const res = await request(makeApp({ ...options, ...overrides }))
+        .get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+      expect(res.body.decisionRouting.models[0]).toMatchObject({ classifierFirst: { operationIds: null }, hybridOperations: [] })
+      expect(warn).toHaveBeenCalledOnce()
+    } finally { warn.mockRestore() }
+  })
+
+  it('keeps approved hybrid operations separate from a scoped deployment grant', async () => {
+    decisionEvaluationProfileStore.listApproved.mockResolvedValue([{
+      id: 'approved-research', version: '7', operationId: 'research.intent', operationVersion: '1',
+      stateVersion: '1', questionVersion: '1', modelCatalogId: modelAlias, modelWireId: 'jev-1.13.0',
+      evaluationSegment: 'global', reportSha256: 'a'.repeat(64), approvedAt: 'now',
+    }])
+    const res = await request(makeApp({ ...options,
+      operatorDecisionDefault: { ...operatorDecisionDefault, operationIds: ['chat.tool-selection'] },
+      decisionEvaluationProfileStore: decisionEvaluationProfileStore as never,
+    })).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+    expect(res.body.decisionRouting.models[0]).toMatchObject({
+      classifierFirst: { operationIds: ['chat.tool-selection'] },
+      hybridOperations: [{ operationId: 'research.intent', operationVersion: '1', evaluationSegment: 'global',
+        profileId: 'approved-research', profileVersion: '7' }],
+    })
+  })
+
+  it.each(['adapter-only', 'legacy', 'other-model', 'empty-scope'] as const)
+    ('still requires the approval registry for %s writes', async variant => {
+      getRole.mockResolvedValue('admin')
+      const defaults = variant === 'adapter-only' ? undefined : variant === 'legacy'
+        ? { mode: 'operator_hybrid' as const, modelAlias }
+        : variant === 'other-model' ? { ...operatorDecisionDefault, modelAlias: 'not-this-model' }
+        : { ...operatorDecisionDefault, operationIds: [] }
+      await put({ operatorDecisionDefault: defaults }).expect(503)
+      decisionEvaluationProfileStore.listApproved.mockResolvedValue([])
+      await put({ operatorDecisionDefault: defaults,
+        decisionEvaluationProfileStore: decisionEvaluationProfileStore as never }).expect(400)
+      decisionEvaluationProfileStore.listApproved.mockRejectedValue(new Error('registry unavailable'))
+      await put({ operatorDecisionDefault: defaults,
+        decisionEvaluationProfileStore: decisionEvaluationProfileStore as never }).expect(503)
+      expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+    })
+
+  it.each([
+    { operatorOverride: true },
+    { classifierFirst: { operationIds: null } },
+    { mode: 'classifier_first' },
+  ])('rejects client-supplied deployment authority %j', async authority => {
+    getRole.mockResolvedValue('admin')
+    await request(makeApp({ ...options, operatorDecisionDefault: undefined }))
+      .put(`/api/workspaces/${WID}/decision-routing`)
+      .send({ mode: 'hybrid', modelAlias, ...authority }).expect(400)
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+    expect(decisionEvaluationProfileStore.listApproved).not.toHaveBeenCalled()
+  })
+
+  it('allows scoped grants without claiming all operations are approved', async () => {
+    getRole.mockResolvedValue('admin')
+    decisionRoutingStore.set.mockResolvedValue(saved('hybrid'))
+    await put({ operatorDecisionDefault: { ...operatorDecisionDefault, operationIds: ['chat.tool-selection'] } }).expect(200)
+    expect(decisionEvaluationProfileStore.listApproved).not.toHaveBeenCalled()
+  })
+
+  it.each(['member', null])('does not bypass membership/admin checks for %s', async role => {
+    getRole.mockResolvedValue(role)
+    await put().expect(403)
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+    expect(decisionEvaluationProfileStore.listApproved).not.toHaveBeenCalled()
+  })
+
+  it('does not bypass routing store availability or model validation', async () => {
+    getRole.mockResolvedValue('admin')
+    await put({ decisionRoutingStore: undefined }).expect(503)
+    for (const alias of ['not-a-model', 'gemini-3.6-flash-standard', 'typesafe-jev-1.13 ']) {
+      await request(makeApp(options)).put(`/api/workspaces/${WID}/decision-routing`)
+        .send({ mode: 'hybrid', modelAlias: alias }).expect(400)
+    }
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+  })
+})
