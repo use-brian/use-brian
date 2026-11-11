@@ -117,6 +117,18 @@ export type ToolDefinition = {
  */
 export type ThinkingLevel = 'low' | 'high'
 
+/** Schema presentation only; the executor remains the capability authority. */
+export type ToolSchemaRegistrationMode = 'eager' | 'dynamic' | 'native-deferred'
+export type ToolSchemaRegistration = {
+  mode: 'deferred'
+  /** Complete capability-filtered, model-visible catalog; no discovery helper.
+   * Names remain canonical executor identities, not provider wire aliases. */
+  catalog: readonly ToolDefinition[]
+  /** Initial/per-send declarations, including the host discovery helper for
+   * dynamic drivers. The host preserves array identity as schemas are loaded. */
+  active: readonly ToolDefinition[]
+}
+
 export type SessionOptions = {
   /** Host-only current input admission; never serialized to a provider. */
   assertInputAuthority?: () => Promise<void>
@@ -131,6 +143,7 @@ export type SessionOptions = {
   /** Per-turn system context, separate from the reusable systemPrompt prefix. */
   runtimeSystemContext?: string
   tools?: ToolDefinition[]
+  toolRegistration?: ToolSchemaRegistration
   maxTokens?: number
   /** Request-scoped context window for models that are not in the registry. */
   inputTokenLimit?: number
@@ -194,6 +207,7 @@ export type ProviderRequest = {
   /** Per-turn system context. Never map this field to a user message. */
   runtimeSystemContext?: string
   tools?: ToolDefinition[]
+  toolRegistration?: ToolSchemaRegistration
   maxTokens?: number
   /** Request-scoped context window for models that are not in the registry. */
   inputTokenLimit?: number
@@ -236,6 +250,9 @@ export type StreamFn = (request: ProviderRequest) => AsyncIterable<StreamChunk>
 export type LLMProvider = {
   name: string
   models: string[]
+  /** Per-model presentation support, propagated by routing/wrappers. Omission
+   * means eager. Drivers must opt in before the engine builds a deferred plan. */
+  toolSchemaMode?(model: string): ToolSchemaRegistrationMode
   /** Stateless single-shot streaming (for simple calls) */
   stream: StreamFn
   /** Create a stateful session for multi-turn tool use */

@@ -292,6 +292,7 @@ export function wrapFallback(
   return registerInputAdmissionOwner({
     name: primary.name,
     models: [...new Set([...primary.models, ...fallback.models])],
+    toolSchemaMode: model => primary.toolSchemaMode?.(model) ?? 'eager',
     stream: runStream,
     createSession: makeSession,
   })

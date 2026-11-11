@@ -291,6 +291,7 @@ export function wrapDocumentAdaptation(
   return registerInputAdmissionOwner({
     name: provider.name,
     models: provider.models,
+    toolSchemaMode: model => provider.toolSchemaMode?.(model) ?? 'eager',
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
       // `stream` is synchronous by signature, so the async swap happens inside

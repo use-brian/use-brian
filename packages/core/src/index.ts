@@ -164,3 +164,6 @@ export { prepareLinkedInImage } from './media/linkedin-image.js'
 export * from './application-platform/index.js'
 
 export { countDecisionEvidence } from './decision-learning/evidence.js'
+
+export { registeredToolDefinitions } from './providers/tool-registration.js'
+export type { ToolSchemaRegistration, ToolSchemaRegistrationMode } from './providers/types.js'
