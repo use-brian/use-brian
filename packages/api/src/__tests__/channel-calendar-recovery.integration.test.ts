@@ -317,8 +317,16 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    expect((await query<{body:string}>('SELECT prosrc body FROM pg_proc WHERE oid=$1::regprocedure',[`${port}(uuid,uuid,text,uuid,uuid,jsonb,text,jsonb,uuid,bigint,integer)`])).rows[0].body.replace(guard,'')).toBe(original.body.replace(dispatch,''))
    const annotation=await withSessionMessagePublication(authority,sources,async client=>{
     expect((await client.query('SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0]).toEqual({current_user:'app_user',rolsuper:false,rolbypassrls:false})
-    return(await client.query(`SELECT public.${port}($1,$2,'message_annotation',$3,$4,$5,'session:message-annotation',$6,NULL,NULL,NULL) value`,
+    // Constructing this historical generic graph is fixture setup. Flush all
+    // original deferred checks here, then restore the interactive SQL budget
+    // before the ordinary Calendar continuation and its publications run.
+    expect((await client.query("SELECT current_setting('statement_timeout') value")).rows[0].value).toBe('15s')
+    await client.query("SET LOCAL statement_timeout='60s'")
+    const value=(await client.query(`SELECT public.${port}($1,$2,'message_annotation',$3,$4,$5,'session:message-annotation',$6,NULL,NULL,NULL) value`,
      [workspace,recovered,message.id,annotationId,{topicLabel:'Fictional historical topic',topicConfidence:0.9,replyToText:null},JSON.stringify(sources)])).rows[0].value
+    await client.query('SET CONSTRAINTS ALL IMMEDIATE')
+    await client.query("SET LOCAL statement_timeout='15s'")
+    return value
    })
    expect(annotation).not.toBeNull()
   }finally{await query(`DROP FUNCTION IF EXISTS public.${port}(uuid,uuid,text,uuid,uuid,jsonb,text,jsonb,uuid,bigint,integer)`)}

@@ -14,6 +14,11 @@ import {assertRetainedNativeQueryCapacity} from './fixtures/native-session-capac
 // production and the Calendar/client regressions retain their 15-second limit.
 vi.hoisted(()=>{vi.stubEnv('PG_STATEMENT_TIMEOUT_MS','60000')})
 
+// Each synthetic turn performs independent acquisition, annotation, a second
+// acquisition and reply publication. Bound that complete sequence separately
+// from the unchanged per-statement capacity budget above.
+const retainedCapacityTurnTimeout=180_000
+
 const {assertLocalFixture}=await import(new URL('../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
 
@@ -77,7 +82,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] real retained query capaci
    derivation:{producer:'fixture:retained-answer',sources:current.accumulator.evidence.sources??[]}})
   expect(reply.sequenceNum).toBe(retainedRows+index*2)
   expect(await history()).toEqual(initialHistory)
- },90_000)
+ },retainedCapacityTurnTimeout)
 
  it('admits a fresh real query beyond the former estimate and rolls every staged capture back',async()=>{
   const input=await addSessionMessage({sessionId:fixture.session.id,role:'user',senderUserId:fixture.ownerId,
