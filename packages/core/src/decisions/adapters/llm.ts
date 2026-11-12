@@ -14,6 +14,19 @@ import type {
 } from '../types.js'
 import { DecisionProviderError } from '../types.js'
 import { assertDecisionCapabilities, validateDecisionResponse } from '../validate.js'
+import { compactDecisionPromptTables } from './prompt-tables.js'
+
+/** Host-only completion encoding; the provider-neutral answer contract is unchanged. */
+export type LlmDecisionAnswerFormat = 'detailed' | 'choice_values'
+
+function assertAnswerFormat(request: Pick<DecisionRequest, 'questions'>, format: LlmDecisionAnswerFormat): void {
+  if (format !== 'detailed' && format !== 'choice_values') {
+    throw new DecisionProviderError('invalid_request', 'Unknown LLM decision answer format')
+  }
+  if (format === 'choice_values' && request.questions.some(question => question.kind !== 'choice')) {
+    throw new DecisionProviderError('unsupported_capability', 'Compact answers require choice-only questions')
+  }
+}
 
 export const LLM_DECISION_CAPABILITIES: DecisionCapabilities = {
   primitives: ['choice', 'boolean', 'score'],
@@ -48,7 +61,8 @@ export function decisionLlmOutputBudget(provider: Pick<LLMProvider, 'name' | 'su
     ...(low ? { thinkingLevel: 'low' as const } : {}) }
 }
 
-function responseSchema(request: DecisionRequest): Record<string, unknown> {
+function responseSchema(request: DecisionRequest, format: LlmDecisionAnswerFormat): Record<string, unknown> {
+  assertAnswerFormat(request, format)
   // Share only identical, ordered domains: ranking questions intentionally reuse
   // options. Local leaf refs preserve that order without multiplying enum budgets.
   // Gemini's provider forwards responseJsonSchema (not its older Schema dialect),
@@ -79,25 +93,26 @@ function responseSchema(request: DecisionRequest): Record<string, unknown> {
         type: 'object',
         additionalProperties: false,
         required: request.questions.map((question) => question.id),
-        properties: Object.fromEntries(request.questions.map((question) => [question.id, {
-          type: 'object',
-          additionalProperties: false,
-          required: question.kind === 'boolean' ? ['value', 'confidence', 'pTrue'] : ['value', 'confidence'],
-          properties: {
-            value: question.kind === 'choice'
-              ? (() => {
-                const domain = domains.get(JSON.stringify(question.options.map(option => option.value)))!
-                return domain.ref ? { $ref: domain.ref } : { type: 'string', enum: domain.values }
-              })()
-              : question.kind === 'boolean'
-                ? { type: 'boolean' }
-                : { type: 'number' },
-            // Strict decoders require every property. Null means not supplied,
-            // not zero confidence (and never an invented probability).
-            confidence: { type: ['number', 'null'] },
-            ...(question.kind === 'boolean' ? { pTrue: { type: ['number', 'null'] } } : {}),
-          },
-        }])),
+        properties: Object.fromEntries(request.questions.map(question => {
+          const value = question.kind === 'choice'
+            ? (() => {
+              const domain = domains.get(JSON.stringify(question.options.map(option => option.value)))!
+              return domain.ref ? { $ref: domain.ref } : { type: 'string', enum: domain.values }
+            })()
+            : { type: question.kind === 'boolean' ? 'boolean' : 'number' }
+          if (format === 'choice_values') return [question.id, value]
+          return [question.id, {
+            type: 'object',
+            additionalProperties: false,
+            required: question.kind === 'boolean' ? ['value', 'confidence', 'pTrue'] : ['value', 'confidence'],
+            properties: {
+              value,
+              // Null means unavailable, not zero confidence or a probability.
+              confidence: { type: ['number', 'null'] },
+              ...(question.kind === 'boolean' ? { pTrue: { type: ['number', 'null'] } } : {}),
+            },
+          }]
+        })),
       },
     },
   }
@@ -135,16 +150,31 @@ function assertTargetSchemaBudget(provider: LLMProvider, model: DecisionRequest[
   if (enumValues > 1000) {
     throw new DecisionProviderError('unsupported_capability', 'decision enums exceed target schema budget')
   }
-  // This compiler has a fixed three-object depth and emits no consts. Check
+  // This compiler has at most three-object depth and emits no consts. Check
   // the other size budgets that unbounded caller IDs/options could exceed.
   if (properties > 5000 || vocabularyCharacters > 120_000) {
     throw new DecisionProviderError('unsupported_capability', 'decision schema exceeds target size budget')
   }
 }
 
-function buildPrompt(request: Pick<DecisionRequest, 'state' | 'questions'>): string {
-  const output = 'Return one answers entry per question. Do not add prose.'
-  const original = JSON.stringify({ state: request.state, questions: request.questions, output })
+function buildPrompt(request: Pick<DecisionRequest, 'state' | 'questions'>, format: LlmDecisionAnswerFormat): string {
+  assertAnswerFormat(request, format)
+  const output = format === 'choice_values'
+    ? 'Return one answers entry per question, mapping each question id directly to its selected string value. Do not add confidence, prose or extra fields.'
+    : 'Return one answers entry per question. Do not add prose.'
+  const originalPayload = { state: request.state, questions: request.questions, output }
+  const original = JSON.stringify(originalPayload)
+  let best = original
+  const consider = (payload: Record<string, unknown>) => {
+    const plain = JSON.stringify(payload)
+    if (plain.length < best.length) best = plain
+    const packed = compactDecisionPromptTables(payload)
+    if (packed) {
+      const text = JSON.stringify(packed)
+      if (text.length < best.length) best = text
+    }
+  }
+  consider(originalPayload)
   // Prompt-local references share complete serialized option arrays, not just
   // values. Never change caller questions or the independent response schema.
   const domains = new Map<string, { options: unknown; uses: number; ref?: string }>()
@@ -162,8 +192,8 @@ function buildPrompt(request: Pick<DecisionRequest, 'state' | 'questions'>): str
     choiceOptions[name] = domain.options
     domain.ref = `#/choiceOptions/${name}`
   }
-  if (!Object.keys(choiceOptions).length) return original
-  const compact = JSON.stringify({
+  if (!Object.keys(choiceOptions).length) return best
+  consider({
     state: request.state,
     questions: request.questions.map(question => {
       if (question.kind !== 'choice') return question
@@ -173,12 +203,13 @@ function buildPrompt(request: Pick<DecisionRequest, 'state' | 'questions'>): str
     choiceOptions,
     output: `${output} In this prompt, each question options.$ref names the complete ordered option array in choiceOptions (JSON Pointer #/choiceOptions/<name>); substitute that array before evaluating. References are prompt serialization only, not answer fields.`,
   })
-  return compact.length < original.length ? compact : original
+  return best
 }
 
 /** The fixed typed completion and its owner qualify the same complete bytes. */
-export function buildLlmDecisionMessages(request: Pick<DecisionRequest, 'state' | 'questions'>) {
-  return [{ role: 'user' as const, content: buildPrompt(request) }]
+export function buildLlmDecisionMessages(request: Pick<DecisionRequest, 'state' | 'questions'>,
+  format: LlmDecisionAnswerFormat = 'detailed') {
+  return [{ role: 'user' as const, content: buildPrompt(request, format) }]
 }
 
 function parseObject(text: string): Record<string, unknown> {
@@ -193,17 +224,32 @@ function parseObject(text: string): Record<string, unknown> {
   }
 }
 
-function answersFromJson(request: DecisionRequest, parsed: Record<string, unknown>): DecisionAnswer[] {
+function answersFromJson(request: DecisionRequest, parsed: Record<string, unknown>, format: LlmDecisionAnswerFormat): DecisionAnswer[] {
   if (typeof parsed.answers !== 'object' || parsed.answers === null || Array.isArray(parsed.answers)) {
     throw new DecisionProviderError('invalid_response', 'LLM decision response has no answers object', { dispatched: true })
   }
   const answers = parsed.answers as Record<string, unknown>
+  if (format === 'choice_values' && (!Object.hasOwn(parsed, 'answers') || Object.keys(parsed).length !== 1
+    || Object.keys(answers).length !== request.questions.length
+    || request.questions.some(question => !Object.hasOwn(answers, question.id)))) {
+    throw new DecisionProviderError('invalid_response', 'Compact decision answers do not match the questions', { dispatched: true })
+  }
   return request.questions.map((question): DecisionAnswer => {
     const raw = answers[question.id]
+    if (format === 'choice_values' && typeof raw === 'string') {
+      return { kind: 'choice', questionId: question.id, value: raw, evidence: { source: 'unavailable' } }
+    }
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
       throw new DecisionProviderError('invalid_response', `LLM answer '${question.id}' is missing`, { dispatched: true })
     }
     const row = raw as Record<string, unknown>
+    // Compatible custom providers may still return detailed rows. Keep their
+    // actual self-report, but never coerce labels or manufacture uncertainty.
+    if (format === 'choice_values' && (!Object.hasOwn(row, 'value') || typeof row.value !== 'string'
+      || Object.keys(row).some(key => key !== 'value' && key !== 'confidence')
+      || row.confidence !== undefined && row.confidence !== null && typeof row.confidence !== 'number')) {
+      throw new DecisionProviderError('invalid_response', 'Compact decision answer is malformed', { dispatched: true })
+    }
     const evidence = typeof row.confidence === 'number'
       ? { source: 'self_reported' as const, confidence: row.confidence, definition: 'LLM self-reported confidence' }
       : { source: 'unavailable' as const }
@@ -233,8 +279,10 @@ export function createLlmDecisionProvider(options: {
   provider: LLMProvider
   providerId?: string
   capabilities?: DecisionCapabilities
+  answerFormat?: LlmDecisionAnswerFormat
 }): DecisionProvider {
   const capabilities = options.capabilities ?? LLM_DECISION_CAPABILITIES
+  const format = options.answerFormat ?? 'detailed'
   return {
     id: options.providerId ?? `llm:${options.provider.name}`,
     capabilities,
@@ -243,9 +291,9 @@ export function createLlmDecisionProvider(options: {
       const provider = captureInputAdmissionProvider(options.provider)
       // Validate finite, acyclic state before serializing the prompt.
       assertDecisionCapabilities(request, capabilities)
-      const schema = responseSchema(request)
+      const schema = responseSchema(request, format)
       assertTargetSchemaBudget(provider, request.model, schema)
-      const messages = buildLlmDecisionMessages(request)
+      const messages = buildLlmDecisionMessages(request, format)
       await assertProviderInputPreparation(provider, { model: request.model.wireId, messages, allowProviderFallback: false }, request.assertInputAuthority)
       if (request.signal?.aborted) throw new DecisionProviderError('cancelled', 'decision call cancelled')
       if (request.deadlineAt !== undefined && request.deadlineAt <= Date.now()) {
@@ -281,7 +329,7 @@ export function createLlmDecisionProvider(options: {
             catalogId: request.model.catalogId,
             wireId: assembled.model || request.model.wireId,
           },
-          answers: answersFromJson(request, parseObject(text)),
+          answers: answersFromJson(request, parseObject(text), format),
           usage: {
             inputTokens: assembled.usage.inputTokens,
             outputTokens: assembled.usage.outputTokens,

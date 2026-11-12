@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { createLlmDecisionProvider } from '../../../decisions/adapters/llm.js'
+import { createLlmDecisionProvider, type LlmDecisionAnswerFormat } from '../../../decisions/adapters/llm.js'
 import type { DecisionQuestion, DecisionRequest } from '../../../decisions/types.js'
 import { buildToolSelectionQuestions } from '../../../engine/tool-selection.js'
 import { buildCodexEnvironment, buildCodexToolSurfaceArgs, resolvePinnedCodexCommand } from '../process.js'
@@ -24,7 +24,7 @@ type Schema = {
 }
 
 /** Validate the actual wire schema, not a repaired copy or compiled dist artifact. */
-function inspectSchema(root: Schema, questions: DecisionQuestion[]) {
+function inspectSchema(root: Schema, questions: DecisionQuestion[], format: LlmDecisionAnswerFormat = 'detailed') {
   let enumValues = 0
   let leafRefs = 0
   const resolve = (node: Schema): Schema => {
@@ -58,6 +58,14 @@ function inspectSchema(root: Schema, questions: DecisionQuestion[]) {
   const output: Record<string, unknown> = {}
   for (const question of questions) {
     const answer = answers.properties![question.id]!
+    if (format === 'choice_values') {
+      if (question.kind !== 'choice') throw new Error('Compact fixture must be choice-only')
+      const value = resolve(answer)
+      expect(value.type).toBe('string')
+      expect(value.enum).toEqual(question.options.map(option => option.value))
+      output[question.id] = value.enum![0]
+      continue
+    }
     expect(answer.type).toBe('object')
     expect(Object.keys(answer.properties!).sort()).toEqual(question.kind === 'boolean'
       ? ['confidence', 'pTrue', 'value'] : ['confidence', 'value'])
@@ -96,13 +104,14 @@ describe('[COMP:providers/codex-classifier-schema] offline pinned runtime', () =
       { kind: 'score', id: 'fictional_score', prompt: 'Rate the fictional item.',
         rubric: [{ value: 0, description: 'Absent' }, { value: 1, description: 'Present' }] },
     ]
-    const result = await runFixture([choices, mixed])
+    const result = await runFixture([choices, mixed, choices], ['detailed', 'detailed', 'choice_values'])
     expect(result.invalidRequests).toBe(0)
-    expect(result.invocations).toBe(2)
-    expect(result.terminals).toEqual(['completed', 'completed'])
+    expect(result.invocations).toBe(3)
+    expect(result.terminals).toEqual(['completed', 'completed', 'completed'])
     expect(result.wire).toEqual([
       { enumValues: 364, leafRefs: 6, definitions: 2, strict: true, effort: 'low' },
       { enumValues: 0, leafRefs: 0, definitions: 0, strict: true, effort: 'low' },
+      { enumValues: 364, leafRefs: 6, definitions: 2, strict: true, effort: 'low' },
     ])
     expect(result.responses[0]!.answers).toEqual(choices.map(question => ({
       kind: 'choice', questionId: question.id,
@@ -113,12 +122,13 @@ describe('[COMP:providers/codex-classifier-schema] offline pinned runtime', () =
       { kind: 'boolean', questionId: 'fictional_flag', value: false, evidence: { source: 'unavailable' } },
       { kind: 'score', questionId: 'fictional_score', value: 1, evidence: { source: 'unavailable' } },
     ])
+    expect(result.responses[2]!.answers).toEqual(result.responses[0]!.answers)
     for (const response of result.responses) expect(response.usage).toMatchObject({ inputTokens: 5, outputTokens: 5 })
   }, 30_000)
 })
 
 /** No credentials, inherited config/proxies, account client, or real model endpoint. */
-async function runFixture(batches: DecisionQuestion[][]) {
+async function runFixture(batches: DecisionQuestion[][], formats: LlmDecisionAnswerFormat[] = []) {
   const home = await mkdtemp(join(tmpdir(), 'brian-classifier-home-'))
   let cwd: string | undefined
   let child: ChildProcessWithoutNullStreams | undefined
@@ -146,7 +156,7 @@ async function runFixture(batches: DecisionQuestion[][]) {
         expect(format?.schema).toBeDefined()
         const questions = batches[invocations - 1]
         expect(questions).toBeDefined()
-        const inspected = inspectSchema(format!.schema!, questions!)
+        const inspected = inspectSchema(format!.schema!, questions!, formats[invocations - 1])
         wire.push({ enumValues: inspected.enumValues, leafRefs: inspected.leafRefs,
           definitions: Object.keys(format!.schema!.$defs ?? {}).length, strict: format!.strict === true,
           effort: body.reasoning!.effort! })
@@ -201,11 +211,11 @@ async function runFixture(batches: DecisionQuestion[][]) {
     const provider = createCodexAppServerProvider({ transport: { rpc, cwd }, models: [model], toolBatchQuietMs: 1 })
     // Synthetic advertised catalog metadata; the API manager independently
     // tests the authenticated catalog -> proxy -> router -> adapter path.
-    const decisions = createLlmDecisionProvider({ provider: {
-      ...provider, supportedThinkingLevels: id => id === model ? ['low'] : [],
-    } })
     const responses = []
     for (const [index, questions] of batches.entries()) {
+      const decisions = createLlmDecisionProvider({ provider: {
+        ...provider, supportedThinkingLevels: id => id === model ? ['low'] : [],
+      }, answerFormat: formats[index] })
       const request: DecisionRequest = {
         runId: `fictional-classifier-${index}`,
         operation: { id: 'fixture.classifier', version: '1', stateVersion: '1', questionVersion: '1' },

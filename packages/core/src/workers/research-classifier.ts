@@ -380,7 +380,9 @@ async function classifyResearchIntentCurrent(
         safeFailure: () => ({ research: false, operateSite: false, reason: null, usage: null, model: null, ...(combined ? { toolNames: [] } : {}) }),
         async completeWithLlm(context) {
           if (combined) {
-            const response = await createLlmDecisionProvider({ provider: context.llm.provider }).evaluate({
+            // This completion consumes only selected labels, not LLM self-report.
+            // Keep every intent/rank question while avoiding unused answer wrappers.
+            const response = await createLlmDecisionProvider({ provider: context.llm.provider, answerFormat: 'choice_values' }).evaluate({
               ...context.request, model: { catalogId: context.llm.modelId, wireId: context.llm.modelId },
               ...decisionCompletionInput(context, options),
             })
@@ -408,7 +410,7 @@ async function classifyResearchIntentCurrent(
           }
         },
       }, (route, request) => ownsInputAdmission(route.provider, combined ? {
-        model: route.modelId, messages: buildLlmDecisionMessages(request), allowProviderFallback: false,
+        model: route.modelId, messages: buildLlmDecisionMessages(request, 'choice_values'), allowProviderFallback: false,
       } : {
         model: route.modelId, messages: buildResearchClassifierMessages(message, recentConversation),
       })),
