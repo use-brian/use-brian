@@ -468,14 +468,33 @@ describe('[COMP:providers/model-registry] decision-only models', () => {
     })
   })
 
+  it('keeps native OpenAI decisions distinct from same-wire subscription chat', () => {
+    const native = registryRow('openai-decisions-gpt-6-luna')!
+    const subscription = registryRow('gpt-6-luna')!
+    expect(native).toMatchObject({
+      provider: 'openai-decisions', apiModelId: 'gpt-6-luna', inference: 'decision', recordAlias: true,
+      decisionCapabilities: { adapterId: 'openai-decisions', wireModelId: 'gpt-6-luna',
+        maxQuestions: 400, maxOptions: 255, maxRubricLevels: 10, maxInputTokens: 64_000, maxQuestionInputTokens: 32_000 },
+    })
+    expect(subscription.provider).toBe('openai-codex')
+    expect(registryRowForPricing('gpt-6-luna')).toBe(subscription)
+    expect(modelRates(native.alias)).toMatchObject({
+      brackets: [{ inPerMTok: 0.1, outPerMTok: 0 }], cacheReadPerMTok: 0.01, cacheWritePerMTok: 0.125,
+    })
+    expect(modelRates(subscription.alias)?.brackets[0]?.inPerMTok).toBe(0)
+  })
+
   it('never leaks a decision row into chat defaults, menus, provider lists, or fallbacks', () => {
-    const jev = registryRow('typesafe-jev-1.13')!
-    expect(isChatModelRow(jev)).toBe(false)
-    expect(Object.values(chatTierDefaults())).not.toContain(jev.alias)
-    expect(menuForClass('background')).not.toContainEqual(jev)
-    expect(providerModelIds('typesafe')).toEqual([])
-    for (const row of MODEL_REGISTRY) {
-      if (isChatModelRow(row)) expect(row.fallbackAlias).not.toBe(jev.alias)
+    for (const decision of decisionModelRows()) {
+      expect(isChatModelRow(decision)).toBe(false)
+      expect(Object.values(chatTierDefaults())).not.toContain(decision.alias)
+      for (const cls of ['background', 'standard-pro', 'max', 'research', 'metered'] as const) {
+        expect(menuForClass(cls, new Set([decision.provider]))).not.toContainEqual(decision)
+      }
+      expect(providerModelIds(decision.provider)).toEqual([])
+      for (const row of MODEL_REGISTRY) {
+        if (isChatModelRow(row)) expect(row.fallbackAlias).not.toBe(decision.alias)
+      }
     }
   })
 })

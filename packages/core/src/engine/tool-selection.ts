@@ -1,3 +1,4 @@
+import { decisionUsageModelId } from '../decisions/usage.js'
 import { createLlmDecisionProvider } from '../decisions/adapters/llm.js'
 import type { DecisionCompletionRoute, DecisionExecutionPort } from '../decisions/hydra.js'
 import type { DecisionQuestion, DecisionResponse } from '../decisions/types.js'
@@ -113,7 +114,7 @@ export async function selectInitialToolSchemas(input: ToolSelectionOptions & {
     })
     input.signal.throwIfAborted()
     return { names: result.result, path: result.path, failureKind: result.failureKind, durationMs: Date.now() - started,
-      model: completionModel ?? result.primaryResponse?.model.wireId ?? null,
+      model: completionModel ?? (result.primaryResponse ? decisionUsageModelId(result.primaryResponse.model) : null),
       usage: completionUsage ?? result.primaryResponse?.usage ?? null }
   } catch (error) {
     if (isInputAuthorityError(error) || input.signal.aborted) throw error

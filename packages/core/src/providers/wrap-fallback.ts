@@ -293,6 +293,11 @@ export function wrapFallback(
     name: primary.name,
     models: [...new Set([...primary.models, ...fallback.models])],
     toolSchemaMode: model => primary.toolSchemaMode?.(model) ?? 'eager',
+    // Any possible serving provider must support the advertised effort.
+    supportedThinkingLevels: (model, route) => {
+      const other = fallback.supportedThinkingLevels?.(fallbackModelName, route) ?? []
+      return (primary.supportedThinkingLevels?.(model, route) ?? []).filter(level => other.includes(level))
+    },
     stream: runStream,
     createSession: makeSession,
   })

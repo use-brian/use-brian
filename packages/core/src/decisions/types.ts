@@ -115,8 +115,11 @@ export type DecisionRequest = {
 }
 
 export type DecisionUsage = {
+  /** Fresh input; cached reads/writes are separate, matching TokenUsage. */
   inputTokens: number
   outputTokens: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
   /** Absent when the provider did not report or price the call. */
   costUsd?: number
 }

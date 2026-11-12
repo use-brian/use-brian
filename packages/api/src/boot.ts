@@ -930,6 +930,8 @@ export interface OpenApiEnv {
   GEMINI_API_KEY?: string
   /** Optional TypeSafe System One credential. Absence keeps decisions LLM-only. */
   TYPESAFE_API_KEY?: string
+  /** Dedicated key for the native OpenAI Decisions endpoint, separate from subscription chat. */
+  OPENAI_DECISIONS_API_KEY?: string
   /** Both values are required to activate the audited deployment-wide decision override. */
   DECISION_DEFAULT_MODE?: string
   DECISION_DEFAULT_MODEL?: string
@@ -2309,6 +2311,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     llmProvider: provider,
     defaultLlmModel: () => backgroundModelFor(configuredProviders),
     typesafeApiKey: env.TYPESAFE_API_KEY,
+    openaiDecisionsApiKey: env.OPENAI_DECISIONS_API_KEY,
     configureAdapters: ports.configureDecisionAdapters,
     resolveRoute: workspaceDecisionRouteResolver,
     onAttempt: ports.recordDecisionAttempt ? async (attempt) => {
@@ -2331,7 +2334,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     console.warn('[decision-routing] deployment operator override active', {
       mode: operatorDecisionDefault.mode,
       modelAlias: operatorDecisionDefault.modelAlias,
-      scope: 'workspaces_without_explicit_setting',
+      scope: operatorDecisionDefault.mode === 'classifier_first'
+        ? 'unset_or_matching_hybrid_workspaces'
+        : 'workspaces_without_explicit_setting',
       operations: operatorDecisionDefault.operationIds ?? 'all',
       llmFailover: true,
     })

@@ -57,6 +57,8 @@ type DecisionModel = {
   displayName: string;
   provider: string;
   adapterId: string;
+  /** Legacy hybrid deployment grant; absent on older servers. Not approval evidence. */
+  classifierFirst?: { operationIds: string[] | null } | null;
   hybridOperations: Array<{
     operationId: string;
     operationVersion: string;
@@ -67,13 +69,18 @@ type DecisionModel = {
 };
 
 export type WorkspaceDecisionRouting = {
-  mode: "llm_only" | "shadow" | "hybrid";
+  mode: "llm_only" | "shadow" | "hybrid" | "classifier_first";
   modelAlias: string | null;
   updatedAt: string | null;
   operatorOverride: boolean;
   shadowSampleRate: number;
   models: DecisionModel[];
 };
+
+/** Older servers may omit the persisted sample rate from write responses. */
+export type WorkspaceDecisionRoutingSetting =
+  Omit<WorkspaceDecisionRouting, "shadowSampleRate" | "models" | "operatorOverride">
+  & { shadowSampleRate?: number };
 
 export type ModelMenu = {
   classes: Record<string, MenuModel[]>;
@@ -145,8 +152,9 @@ export async function setWorkspaceDecisionRouting(
   workspaceId: string,
   target:
     | { mode: "llm_only" }
-    | { mode: "shadow" | "hybrid"; modelAlias: string },
-): Promise<Omit<WorkspaceDecisionRouting, "shadowSampleRate" | "models" | "operatorOverride">> {
+    | { mode: "shadow"; modelAlias: string; shadowSampleRate?: 0.1 | 1 }
+    | { mode: "hybrid" | "classifier_first"; modelAlias: string },
+): Promise<WorkspaceDecisionRoutingSetting> {
   const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/decision-routing`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -157,7 +165,7 @@ export async function setWorkspaceDecisionRouting(
     throw new Error(body?.error ?? `decision route update failed (${res.status})`);
   }
   return ((await res.json()) as {
-    decisionRouting: Omit<WorkspaceDecisionRouting, "shadowSampleRate" | "models" | "operatorOverride">;
+    decisionRouting: WorkspaceDecisionRoutingSetting;
   }).decisionRouting;
 }
 

@@ -24,6 +24,7 @@ import {
   type CreateDecisionRuntimeOptions,
 } from '../decision-runtime.js'
 
+import { createWorkspaceDecisionRouteResolver } from '../workspace-decision-routing.js'
 import { createWorkspaceCustomLlmResolver } from '../custom-llm-runtime.js'
 import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
 
@@ -845,7 +846,7 @@ describe('[COMP:decisions/runtime] decision composition', () => {
     await runtime.run({ request: request(), operation: resultOperation() })
 
     expect(attempts).toHaveLength(1)
-    expect(attempts[0]).toMatchObject({ effectiveMode: 'hybrid', operatorOverride: false, usage: { costUsd: 8 * 0.042 / 1_000_000 } })
+    expect(attempts[0]).toMatchObject({ effectiveMode: 'hybrid', operatorOverride: false, usage: { costUsd: expect.closeTo(8 * 0.042 / 1_000_000, 15) } })
     expect(outcomes).toEqual([expect.objectContaining({ path: 'primary_complete', effectiveMode: 'hybrid', operatorOverride: false })])
   })
 
@@ -884,7 +885,7 @@ describe('[COMP:decisions/runtime] decision composition', () => {
       model: 'jev-1.13.0',
       inputTokens: 8,
       outputTokens: 0,
-      actualCostUsd: 8 * 0.042 / 1_000_000,
+      actualCostUsd: expect.closeTo(8 * 0.042 / 1_000_000, 15),
       source: 'overhead:classifier',
       triggerKey: 'adaptive_research_classifier',
       providerKeySource: 'platform',
@@ -1066,5 +1067,121 @@ describe('[COMP:decisions/runtime] complete invocation deadlines', () => {
       await Promise.all([refusal, vi.advanceTimersByTimeAsync(100)])
       expect(outcome).toHaveBeenCalledOnce()
     } finally { vi.useRealTimers() }
+  })
+})
+
+
+describe('[COMP:decisions/runtime] workspace classifier-first integration', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  const workspaceId = 'workspace-fictional'
+  const modelAlias = 'typesafe-jev-1.13'
+  const operatorDefault = { mode: 'classifier_first' as const, modelAlias }
+
+  function integratedRuntime(extra: Partial<CreateDecisionRuntimeOptions> = {}, saved = true) {
+    return createDecisionRuntime({
+      llmProvider: fixtureLlm(), defaultLlmModel: 'fixture-llm', typesafeApiKey: 'fictional-test-only-key',
+      resolveRoute: createWorkspaceDecisionRouteResolver({
+        store: { getSystem: vi.fn(async () => saved ? ({ workspaceId, mode: 'hybrid' as const, modelAlias, updatedAt: 'now' }) : null) },
+        configuredAdapterIds: () => ['typesafe'], operatorDefault,
+      }),
+      ...extra,
+    })
+  }
+
+  function jevResponse() {
+    return new Response(JSON.stringify({
+      model: 'jev-1.13.0', answers: {
+        intent: { type: 'choice', choice: 'ordinary', probabilities: { ordinary: 1, research: 0 } },
+      }, usage: { input_tokens: 8, output_tokens: 0 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+
+  it.each([false, true])('dispatches Jev for every successful typed execution, never LLM (saved hybrid=%s)', async saved => {
+    const fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+      expect(String(url)).toContain('typesafe.ai')
+      expect(JSON.parse(String(init?.body)).model).toBe('jev-1.13.0')
+      return jevResponse()
+    })
+    vi.stubGlobal('fetch', fetch)
+    const complete = vi.fn(resultOperation().completeWithLlm)
+    const onAttempt = vi.fn(), onOutcome = vi.fn()
+    const llm = fixtureLlm()
+    llm.stream = vi.fn(llm.stream)
+    const runtime = integratedRuntime({ llmProvider: llm, onAttempt, onOutcome }, saved)
+    for (let index = 0; index < 20; index++) {
+      const result = await runtime.run({ workspaceId, request: { ...request(), runId: `classifier-first-${index}` }, operation: resultOperation(complete) })
+      expect(result).toMatchObject({ path: 'primary_complete', attempts: 1, result: { verdict: 'ordinary' } })
+    }
+    expect(fetch).toHaveBeenCalledTimes(20)
+    expect(onAttempt).toHaveBeenCalledTimes(20)
+    expect(onOutcome).toHaveBeenCalledTimes(20)
+    for (const [attempt] of onAttempt.mock.calls) expect(attempt).toMatchObject({ effectiveMode: 'hybrid', operatorOverride: true })
+    for (const [outcome] of onOutcome.mock.calls) expect(outcome).toMatchObject({ path: 'primary_complete', operatorOverride: true })
+    expect(complete).not.toHaveBeenCalled()
+    expect(llm.stream).not.toHaveBeenCalled()
+  })
+
+  it('does not turn the API key alone into classifier authority', async () => {
+    const fetch = vi.fn(async () => jevResponse())
+    vi.stubGlobal('fetch', fetch)
+    const complete = vi.fn(resultOperation().completeWithLlm)
+    const runtime = integratedRuntime({ resolveRoute: createWorkspaceDecisionRouteResolver({
+      store: { getSystem: vi.fn(async () => null) }, configuredAdapterIds: () => ['typesafe'],
+    }) })
+    expect(runtime.configuredAdapterIds()).toContain('typesafe')
+    const result = await runtime.run({ workspaceId, request: request(), operation: resultOperation(complete) })
+    expect(result).toMatchObject({ path: 'llm_only', attempts: 1 })
+    expect(complete).toHaveBeenCalledOnce()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('allows only one generation follow-up after the typed decision', async () => {
+    const fetch = vi.fn(async () => jevResponse())
+    vi.stubGlobal('fetch', fetch)
+    const complete = vi.fn(resultOperation().completeWithLlm)
+    const operation: DecisionRuntimeOperation<Result> = {
+      ...resultOperation(complete), decide: () => ({ kind: 'follow_up', reason: 'generation_required' }),
+    }
+    const result = await integratedRuntime().run({ workspaceId, request: request(), operation })
+    expect(result).toMatchObject({ path: 'generation', attempts: 2, result: { verdict: 'research' } })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(complete).toHaveBeenCalledOnce()
+    expect(complete.mock.calls[0]![0]).toMatchObject({ kind: 'generation', followUpReason: 'generation_required' })
+  })
+
+  it.each(['transport', 'invalid_response'] as const)('bounds %s recovery to one Jev and one LLM completion', async failure => {
+    const fetch = vi.fn(async () => failure === 'transport'
+      ? new Response('{}', { status: 503 })
+      : new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetch)
+    const complete = vi.fn(resultOperation().completeWithLlm)
+    const result = await integratedRuntime().run({ workspaceId, request: request(), operation: resultOperation(complete) })
+    expect(result).toMatchObject({ path: 'operational_failover', attempts: 2, result: { verdict: 'research' } })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(complete).toHaveBeenCalledOnce()
+  })
+
+  it('does not retry or dispatch a third attempt if the single LLM fallback fails', async () => {
+    const fetch = vi.fn(async () => new Response('{}', { status: 503 }))
+    vi.stubGlobal('fetch', fetch)
+    const complete = vi.fn<DecisionRuntimeOperation<Result>['completeWithLlm']>(async () => { throw new Error('fictional LLM outage') })
+    const result = await integratedRuntime().run({ workspaceId, request: request(), operation: resultOperation(complete) })
+    expect(result).toMatchObject({ path: 'safe_default', attempts: 2, result: { verdict: 'safe' } })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(complete).toHaveBeenCalledOnce()
+  })
+
+  it.each(['before', 'after'] as const)('propagates authority refusal %s Jev without LLM recovery', async boundary => {
+    let dispatched = false
+    const fetch = vi.fn(async () => { dispatched = true; return jevResponse() })
+    vi.stubGlobal('fetch', fetch)
+    const refusal = authorityRefusal()
+    const complete = vi.fn(resultOperation().completeWithLlm)
+    const operation = { ...resultOperation(complete), assertInputAuthority: async () => {
+      if (boundary === 'before' || dispatched) throw refusal
+    } }
+    await expect(integratedRuntime().run({ workspaceId, request: request(), operation })).rejects.toBe(refusal)
+    expect(fetch).toHaveBeenCalledTimes(boundary === 'before' ? 0 : 1)
+    expect(complete).not.toHaveBeenCalled()
   })
 })

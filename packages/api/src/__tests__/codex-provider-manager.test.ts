@@ -14,6 +14,9 @@ import {
 import { MutableProviderAvailability } from '@use-brian/shared/model-registry'
 import { startCodexProviderManager } from '../codex-provider-manager.js'
 import { z } from 'zod'
+import { captureInputAdmissionProvider } from '../../../core/src/providers/input-authority.js'
+import { createLlmDecisionProvider } from '../../../core/src/decisions/adapters/llm.js'
+import { decisionRequest } from '../../../core/src/decisions/__tests__/fixtures.js'
 
 type Frame = { id?: number | string; method?: string; params?: unknown; result?: unknown }
 
@@ -101,6 +104,55 @@ function catalogModel(model: string, overrides: Record<string, unknown> = {}) {
 }
 
 describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
+  it.each(['low', 'high', 'medium'])('uses only cached advertised %s effort through manager/log/router/capture/decision', async effort => {
+    const inference = processHarness(), account = processHarness()
+    const startProcess = vi.fn(async options => options?.surface === 'account' ? account.process : inference.process)
+    const starting = startCodexProviderManager({ availability: new MutableProviderAvailability(), startProcess })
+    respond(account, await waitForMethod(account, 'account/read'), {
+      account: { type: 'chatgpt', email: 'fixture@example.test', planType: 'plus' }, requiresOpenaiAuth: true,
+    })
+    respond(account, await waitForMethod(account, 'model/list'), { data: [catalogModel('gpt-6.1-sol', {
+      supportedReasoningEfforts: [effort, 'xhigh'].map(reasoningEffort => ({ reasoningEffort, description: 'Synthetic' })),
+    })], nextCursor: null })
+    const manager = await starting
+    try {
+      const provider = captureInputAdmissionProvider(createRoutingProvider({ 'openai-codex': wrapProvider(manager.provider) }))
+      const levels = effort === 'medium' ? [] : [effort]
+      expect(provider.supportedThinkingLevels?.('gpt-6.1-sol-pro')).toEqual(levels)
+      expect(manager.provider.supportedThinkingLevels?.('gpt-6.1-sol')).toEqual(levels)
+      for (const unknown of ['unknown', 'gpt-5.2', 'gemini-3.8-flash']) {
+        expect(manager.provider.supportedThinkingLevels?.(unknown)).toEqual([])
+      }
+      expect(inference.outbound).toEqual([])
+      expect(account.outbound.map(frame => frame.method)).toEqual(['account/read', 'model/list'])
+      expect(startProcess).toHaveBeenCalledTimes(2)
+      const request = decisionRequest()
+      request.model = { catalogId: 'gpt-6.1-sol-pro', wireId: 'gpt-6.1-sol-pro' }
+      const run = createLlmDecisionProvider({ provider }).evaluate(request)
+      const start = await waitForMethod(inference, 'thread/start')
+      respond(inference, start, { thread: { id: 'fixture-thread' }, model: 'gpt-6.1-sol', modelProvider: 'openai' })
+      const turn = await waitForMethod(inference, 'turn/start')
+      expect((turn.params as { effort?: string }).effort).toBe(effort === 'low' ? 'low' : undefined)
+      respond(inference, turn, { turn: { id: 'fixture-turn', status: 'inProgress' } })
+      const item = { type: 'agentMessage', id: 'fixture-message',
+        text: JSON.stringify({ answers: { intent: { value: 'ordinary', confidence: null } } }), phase: 'final_answer' }
+      inference.inbound.write([
+        { method: 'item/completed', params: { threadId: 'fixture-thread', turnId: 'fixture-turn', item } },
+        { method: 'turn/completed', params: { threadId: 'fixture-thread', turn: { id: 'fixture-turn', status: 'completed', items: [item] } } },
+      ].map(frame => JSON.stringify(frame)).join('\n') + '\n')
+      respond(inference, await waitForMethod(inference, 'thread/unsubscribe'), {})
+      await expect(run).resolves.toMatchObject({ answers: [{ value: 'ordinary' }] })
+      const logout = manager.logout()
+      respond(account, await waitForMethod(account, 'account/logout'), {})
+      await logout
+      expect(provider.supportedThinkingLevels?.('gpt-6.1-sol-pro')).toEqual([])
+    } finally {
+      await manager.close()
+      expect(manager.provider.supportedThinkingLevels?.('gpt-6.1-sol')).toEqual([])
+      inference.peer.close(); account.peer.close()
+    }
+  })
+
   it.each(['gpt-6-luna', 'gpt-5.2'].flatMap(model => [false, true].map(stateless => ({ model, stateless }))))('preserves registration through the production manager/wrapper/router ($model, stateless: $stateless)', async ({ model, stateless }) => {
     const inference = processHarness(), account = processHarness()
     const startProcess = vi.fn(async options => options?.surface === 'account' ? account.process : inference.process)
@@ -321,6 +373,8 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
     const manager = await starting
 
     expect(availability.has('openai-codex')).toBe(false)
+    expect(manager.provider.supportedThinkingLevels?.('gpt-6-luna')).toEqual([])
+    expect(harness.outbound.map(frame => frame.method)).toEqual(['account/read'])
     const loginPromise = manager.startDeviceCodeLogin()
     const loginRequest = await waitForMethod(harness, 'account/login/start')
     respond(harness, loginRequest, {
@@ -354,24 +408,32 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
       restartBackoffMs: 1,
     })
     const firstAccount = await waitForMethod(first, 'account/read')
-    respond(first, firstAccount, { account: null, requiresOpenaiAuth: true })
+    respond(first, firstAccount, { account: { type: 'chatgpt', email: 'fixture@example.test', planType: 'plus' }, requiresOpenaiAuth: true })
+    respond(first, await waitForMethod(first, 'model/list'), { data: [catalogModel('gpt-6-luna')], nextCursor: null })
     const manager = await starting
     const proxy = manager.provider
+    const levels = captureInputAdmissionProvider(proxy).supportedThinkingLevels!
+    expect(levels('gpt-6-luna')).toEqual(['low'])
     const mode = proxy.toolSchemaMode!
     expect(mode('gpt-6-luna')).toBe('native-deferred')
 
     ;(surface === 'account' ? first : firstInference).peer.close(new CodexRpcClosedError('crash'))
     expect(mode('gpt-6-luna')).toBe('eager')
+    expect(levels('gpt-6-luna')).toEqual([])
     const secondAccount = await waitForMethod(second, 'account/read')
-    respond(second, secondAccount, { account: null, requiresOpenaiAuth: true })
+    expect(levels('gpt-6-luna')).toEqual([])
+    respond(second, secondAccount, { account: { type: 'chatgpt', email: 'fixture@example.test', planType: 'plus' }, requiresOpenaiAuth: true })
+    respond(second, await waitForMethod(second, 'model/list'), { data: [catalogModel('gpt-6-luna', { supportedReasoningEfforts: [{ reasoningEffort: 'high', description: 'Synthetic' }] })], nextCursor: null })
+    await vi.waitFor(() => expect(levels('gpt-6-luna')).toEqual(['high']))
     await vi.waitFor(() => expect(startProcess).toHaveBeenCalledTimes(4))
     expect(first.close).toHaveBeenCalledOnce()
     expect(firstInference.close).toHaveBeenCalledOnce()
-    expect(availability.has('openai-codex')).toBe(false)
+    expect(availability.has('openai-codex')).toBe(true)
     expect(manager.provider).toBe(proxy)
     expect(mode('gpt-6-luna')).toBe('native-deferred')
     await manager.close()
     expect(mode('gpt-6-luna')).toBe('eager')
+    expect(levels('gpt-6-luna')).toEqual([])
     expect(startProcess).toHaveBeenCalledTimes(4)
   })
 
@@ -402,6 +464,11 @@ describe('[COMP:api/codex-provider] OSS Codex provider manager', () => {
     const manager = await startCodexProviderManager({ availability: new MutableProviderAvailability(), startProcess })
     expect(startProcess.mock.calls.map(call => call[0].surface)).toEqual(['inference', 'account'])
     expect(inference.close).toHaveBeenCalledOnce()
+    const levels = captureInputAdmissionProvider(manager.provider).supportedThinkingLevels!
+    expect(levels('gpt-6-luna')).toEqual([])
+    expect(levels('unknown')).toEqual([])
+    expect(startProcess).toHaveBeenCalledTimes(2)
+    expect(inference.outbound).toEqual([])
     await manager.close()
   })
 
