@@ -66,7 +66,9 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(remainingCommand).toContain("--filter='!app-web'");
     expect(remainingCommand).toContain("--filter='!@use-brian/app-desktop'");
     expect(remainingCommand).toContain("--filter='!@use-brian/api-open'");
-    expect(remainingCommand).toContain('--concurrency=4');
+    // The collector starts six real hook processes. Keep package fan-out at
+    // the root unit command's limit so sibling builds cannot starve them.
+    expect(remainingCommand).toContain('--concurrency=1');
     const embedded = workflow.jobs['embedded-database-tests'];
     expect(embedded.strategy.matrix.group).toEqual(['owner-legacy', 'owner-fresh', 'owner-cutover', 'owner-successor', 'owner-prerequisites', 'session', 'remaining']);
     expect(embedded['timeout-minutes']).toBe(10);

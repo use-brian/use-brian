@@ -276,6 +276,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # These tests also compile the API through their transitive build graph.
+      # Match the root unit command: hook subprocesses must not compete with
+      # sibling package tests and compiler pools on the same runner.
       - name: Unit tests
         env:
           NODE_OPTIONS: --max-old-space-size=6144
@@ -286,7 +288,7 @@ jobs:
           --filter='!app-web'
           --filter='!@use-brian/app-desktop'
           --filter='!@use-brian/api-open'
-          --concurrency=4
+          --concurrency=1
 
   embedded-current-tests:
     needs: ci-scope
