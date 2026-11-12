@@ -311,7 +311,6 @@ export const ItemCompletedNotificationSchema = z.object({
   threadId: z.string().min(1).max(256), turnId: z.string().min(1).max(256),
   item: CompletedItemSchema,
 }).passthrough()
-export type AgentMessageItem = z.infer<typeof AgentMessageItemSchema>
 
 export const TurnCompletedNotificationSchema = z
   .object({

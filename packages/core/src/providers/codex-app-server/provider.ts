@@ -1,6 +1,6 @@
 import { debugDocumentFlow } from '../../engine/document-flow-debug.js'
 import { Buffer } from 'node:buffer'
-import { providerAliasMap } from '@use-brian/shared/model-registry'
+import { MODEL_REGISTRY, providerAliasMap } from '@use-brian/shared/model-registry'
 import { renderSystemContext } from '../system-context.js'
 import { assertInputAuthority, isInputAuthorityError } from '../input-authority.js'
 import { registeredToolDefinitions } from '../tool-registration.js'
@@ -47,10 +47,9 @@ const MODEL_ALIASES = providerAliasMap('openai-codex')
 // Verified against the pinned runtime's model-specific wire surfaces. GPT-5.2
 // accepts registration but exposes no tool_search: deferring would hide tools
 // permanently. Unknown/new models stay eager until the offline contract passes.
-const NATIVE_DEFERRED_MODELS = new Set([
-  'gpt-5.6-luna', 'gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol',
-  'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.5', 'gpt-6-sol', 'gpt-6-astra',
-])
+const NATIVE_DEFERRED_MODELS = new Set(MODEL_REGISTRY
+  .filter(row => row.provider === 'openai-codex' && row.codexNativeDeferredTools === true)
+  .map(row => row.apiModelId))
 
 export function codexToolSchemaMode(model: string): ToolSchemaRegistrationMode {
   return NATIVE_DEFERRED_MODELS.has(MODEL_ALIASES[model] ?? model) ? 'native-deferred' : 'eager'

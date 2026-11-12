@@ -198,6 +198,8 @@ type ModelRegistryBase = {
   maxOutput: number
   /** Model-specific minimum initial-response window; provider idle and loop liveness share it. */
   firstResponseTimeoutMs?: number
+  /** Pinned Codex runtime's reviewed native tool-search contract. Absent stays eager. */
+  codexNativeDeferredTools?: boolean
   /** Per-provider quirk-wrapper stack override (plan L2; consumed by the
    * routing provider, not yet by boot). */
   wrappers?: readonly string[]
@@ -687,6 +689,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   // hosted never configures `openai-codex`.
   {
     alias: 'gpt-5.6-luna',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-5.6 Luna',
     provider: 'openai-codex',
     apiModelId: 'gpt-5.6-luna',
@@ -703,6 +706,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-6-luna',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-6 Luna',
     provider: 'openai-codex',
     apiModelId: 'gpt-6-luna',
@@ -718,6 +722,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   {
     // Pro prefers Terra when entitled, then Sol, before older Pro models.
     alias: 'gpt-6.1-terra',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-6.1 Terra',
     provider: 'openai-codex',
     apiModelId: 'gpt-6.1-terra',
@@ -748,6 +753,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-5.6-terra',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-5.6 Terra',
     provider: 'openai-codex',
     apiModelId: 'gpt-5.6-terra',
@@ -762,6 +768,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-5.6-sol',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-5.6 Sol',
     provider: 'openai-codex',
     apiModelId: 'gpt-5.6-sol',
@@ -776,6 +783,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-5.5',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-5.5',
     provider: 'openai-codex',
     apiModelId: 'gpt-5.5',
@@ -806,6 +814,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   // Older Pro selections remain callable; Max and Research retain Auto priority.
   {
     alias: 'gpt-6-sol',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-6 Sol',
     provider: 'openai-codex',
     apiModelId: 'gpt-6-sol',
@@ -820,6 +829,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-6.1-sol',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-6.1 Sol',
     provider: 'openai-codex',
     apiModelId: 'gpt-6.1-sol',
@@ -834,6 +844,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-6-astra',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-6 Astra',
     provider: 'openai-codex',
     apiModelId: 'gpt-6-astra',

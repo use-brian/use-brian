@@ -9,6 +9,7 @@ import type { Message, StreamChunk, ToolDefinition } from '../../types.js'
 import {
   CodexProviderProtocolError,
   CodexTurnError,
+  codexToolSchemaMode,
   createCodexAppServerProvider,
 } from '../provider.js'
 import { CodexRpcPeer } from '../rpc.js'
@@ -1239,7 +1240,14 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
     } finally { harness.peer.close() }
   })
 
-  it.each(['gpt-5.2', 'future-unverified-model'])('ignores a deferred plan and retains eager registration for %s', async model => {
+  it.each([
+    'gpt-5.5', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra',
+    'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6.1-sol-pro',
+  ])('retains registry-reviewed native deferred registration for %s', model => {
+    expect(codexToolSchemaMode(model)).toBe('native-deferred')
+  })
+
+  it.each(['gpt-5.2', 'future-unverified-model', 'gemini-3.6-flash', 'gpt-future-sol'])('ignores a deferred plan and retains eager registration for %s', async model => {
     const harness = createHarness()
     try {
       const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' }, models: [model] })

@@ -25,6 +25,17 @@ import {
 } from '../model-registry.js'
 
 describe('[COMP:providers/model-registry] registry integrity', () => {
+  it('pins native Codex deferred tools to the reviewed wire models', () => {
+    const reviewed = MODEL_REGISTRY.filter(row => row.codexNativeDeferredTools === true)
+    expect(reviewed.map(row => row.alias).sort()).toEqual([
+      'gpt-5.5', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra',
+      'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra',
+    ].sort())
+    expect(reviewed.every(row => row.provider === 'openai-codex' && row.status === 'active' && isChatModelRow(row))).toBe(true)
+    expect(registryRow('gpt-5.2')?.codexNativeDeferredTools).toBeUndefined()
+    expect(registryRow('gpt-6.1-sol-pro')?.apiModelId).toBe('gpt-6.1-sol')
+  })
+
   it('every id (alias / idAliases / priceAliases) belongs to exactly one row', () => {
     // The module throws at import time on collision; assert the invariant
     // directly too so the failure reads as a test, not an import crash.
