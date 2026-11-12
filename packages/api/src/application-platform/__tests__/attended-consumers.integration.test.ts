@@ -174,14 +174,15 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
     adapters.register('typesafe', () => createTypeSafeDecisionProvider({ apiKey: 'fixture-key', transport }))
     return createDecisionRuntime({ llmProvider: llm, defaultLlmModel: 'fixture', adapters,
       resolveRoute: () => ({ mode: 'hybrid', primaryModelId: 'typesafe-jev-1.13', allowSyntheticProfile: true,
-        profile: { id: 'fixture-topic', version: '1', mode: 'hybrid', operationId: 'memory.topic', operationVersion: '1',
-          stateVersion: '1', questionVersion: '1', modelCatalogId: 'typesafe-jev-1.13', modelWireId: 'jev-1.13.0',
+        profile: { id: 'fixture-topic', version: '1', mode: 'hybrid', operationId: 'memory.topic', operationVersion: '2',
+          stateVersion: '2', questionVersion: '2', modelCatalogId: 'typesafe-jev-1.13', modelWireId: 'jev-1.13.0',
           evaluationSegment: 'global', status: 'approved', evidence: 'synthetic', totalTimeoutMs: 5000, primaryTimeoutMs: 3000, maxAttempts: 2 } }),
     })
   }
   const topicResponse = () => ({ status: 200, body: { model: 'jev-1.13.0', answers: {
     state: { type: 'choice', choice: 'resume', confidence: 0.9, probabilities: { continue: 0.05, shift: 0.03, resume: 0.9, 'cross-topic': 0.02 } },
-    topic: { type: 'choice', choice: 'fictional earlier request', confidence: 0.9, probabilities: { 'fictional earlier request': 0.9, 'fictional earlier response': 0.05, __new_topic__: 0.03, __uncategorized__: 0.02 } },
+    topic: { type: 'choice', choice: 'k1', confidence: 0.9, probabilities: { k0: 0.05, k1: 0.9, new: 0.03, unknown: 0.02 } },
+    related_k0: { type: 'noul', noul: 0 }, related_k1: { type: 'noul', noul: 1 },
   } } })
 
   it('keeps full topic input ancestry through the actual API runtime and primary decision adapter', async () => {
@@ -195,7 +196,7 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
     })
     options.decisionRuntime = topicRuntime(options.provider, transport)
     const result = await classifyTopic(options)
-    expect(result).toMatchObject({ topic_label: 'fictional earlier request', state: 'resume' })
+    expect(result).toMatchObject({ topic_label: 'fictional earlier response', state: 'resume' })
     expect(boundScopeSources(result)).toEqual(sources)
     expect(transport).toHaveBeenCalledOnce()
     expect(stream).not.toHaveBeenCalled()
@@ -215,7 +216,7 @@ describe.sequential('[COMP:api/application-persistence] current attended compact
     expect(stream).not.toHaveBeenCalled()
     const other = await topicOptions(f, stream, f.secondId)
     other.options.decisionRuntime = topicRuntime(other.options.provider, async () => topicResponse())
-    expect(await classifyTopic(other.options)).toMatchObject({ topic_label: 'fictional earlier request', state: 'resume' })
+    expect(await classifyTopic(other.options)).toMatchObject({ topic_label: 'fictional earlier response', state: 'resume' })
     expect(stream).not.toHaveBeenCalled()
   })
 

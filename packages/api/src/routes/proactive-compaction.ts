@@ -23,11 +23,11 @@ import {
   isContextOverflowError,
   sanitize as sanitizeAnalytics,
   ContextScopeAccumulator, executionToolContext, scopeEvidenceFromRows,
-  boundScopeSources, bindScopeSources, DerivedScopeError,
+  boundScopeSources, bindScopeSources, DerivedScopeError, isTopicIdentity,
 } from '@use-brian/core'
 import type {
   Message, LLMProvider, MemoryStore, AnalyticsLogger,
-  CompactionTier, CompactionProfile, ChannelClass, EpisodeSection,
+  CompactionTier, CompactionProfile, ChannelClass, EpisodeSection, CompactionTopicGroup,
   EpisodicStore, EpisodicMemoryRecord, UsageStore,
   SessionStateStore,
   CurrentAuthorityBoundary,
@@ -544,6 +544,39 @@ export async function runProactiveCompaction(
     // Preserve its content and evidence without treating it as a DB anchor.
     const compactableForLLM = priorSummary ? [stampedWithSummary[0], ...stampedCompactable] : stampedCompactable
 
+    // Derive membership only from the already admitted, compactable DB rows.
+    // Tool results (represented as user messages) continue the annotated turn;
+    // a genuine unclassified user turn breaks inheritance.
+    const compactedRows = sessionMessages.slice(0, firstRecentDbIdx)
+    const topicGroups: CompactionTopicGroup[] | undefined = profile === 'multi-topic'
+      && compactedRows.some(row => typeof row.topicLabel === 'string' && isTopicIdentity(row.topicLabel))
+      ? [] : undefined
+    if (topicGroups) {
+      const byKey = new Map<string, CompactionTopicGroup>()
+      let currentKey: string | undefined
+      compactedRows.forEach((row, index) => {
+        // Inspect original admitted blocks: stamping can prepend text to tool results.
+        const content = row.content
+        const toolContext = Array.isArray(content) && content.length > 0
+          && content.every(block => block.type === 'tool_result')
+        const userTurn = row.role === 'user' && !toolContext
+        if (userTurn) currentKey = typeof row.topicLabel === 'string' && row.topicLabel.trim()
+          && row.topicLabel !== '(uncategorized)' ? row.topicLabel : undefined
+        if (!currentKey) return
+        let group = byKey.get(currentKey)
+        if (!group) {
+          group = { topicLabel: currentKey, messageIndexes: [], messageSpan: {
+            fromSequence: row.sequenceNum, toSequence: row.sequenceNum, turnCount: 0,
+          } }
+          byKey.set(currentKey, group)
+          topicGroups.push(group)
+        }
+        group.messageIndexes.push(index + (priorSummary ? 1 : 0))
+        group.messageSpan.toSequence = row.sequenceNum
+        if (userTurn) group.messageSpan.turnCount++
+      })
+    }
+
     // Degenerate: nothing new to summarize. Return the pass-through
     // unchanged — no boundary update, no LLM spend.
     if (stampedCompactable.length === 0) {
@@ -629,6 +662,7 @@ export async function runProactiveCompaction(
       provider,
       model: compactionModel,
       messages: compactableForLLM,
+      topicGroups,
       systemPrompt: modelContext?.scopeAccumulator.evidence.sources?.some(source => source.resourceKind === 'private_transcript')
         ? systemPrompt + '\n' + PRIVATE_TRANSCRIPT_INSTRUCTION : systemPrompt,
       profile,

@@ -93,7 +93,9 @@ function refusal() { return Object.assign(new Error('Fictional source withdrawn'
 type NativeQuestion = { name: string; type: string; instructions: string; choices: Array<{ value: string; description?: string }> }
 function answerQuestions(init?: RequestInit, selected: Record<string, string> = {}) {
   const body = JSON.parse(String(init?.body)) as { questions: NativeQuestion[] }
-  return nativeResponse(body.questions.map(q => choice(q.name, q.choices.map(c => c.value), selected[q.name] ?? (q.name === 'intent' ? 'ordinary' : q.name === 'state' ? 'continue' : q.name === 'topic' ? 'calendar' : 'none'))))
+  return nativeResponse(body.questions.map(q => q.type === 'predicate'
+    ? { name: q.name, type: 'predicate', probability: 1 }
+    : choice(q.name, q.choices.map(c => c.value), selected[q.name] ?? (q.name === 'intent' ? 'ordinary' : q.name === 'state' ? 'continue' : q.name === 'topic' ? 'k0' : 'none'))))
 }
 
 describe('OpenAI Decisions API runtime registration and isolated routing', () => {
@@ -322,8 +324,9 @@ describe('practical primary domain results preserve native alias and admitted st
     const provider = llm(), currentMessage = 'Check my calendar today, including Ω and "quoted" details.\nFinal sentinel.'
     vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)), state = JSON.parse(body.input)
-      expect(state).toEqual({ currentMessage, recentUserTurns: [{ text: 'Plan tomorrow', topicLabel: 'calendar' }], replyToText: null, knownTopics: ['calendar'] })
-      expect(body.questions.map((q: NativeQuestion) => q.name)).toEqual(['state', 'topic'])
+      expect(state).toEqual({ currentMessage, recentUserTurns: [{ text: 'Plan tomorrow', topicLabel: 'calendar' }], replyToText: null,
+        priorTopicToken: 'k0', topicCatalog: [{ token: 'k0', topicLabel: 'calendar' }], topicAnchors: [] })
+      expect(body.questions.map((q: NativeQuestion) => q.name)).toEqual(['state', 'topic', 'related_k0'])
       return answerQuestions(init)
     }))
     expect(await classifyTopic({ provider, workspaceId, model: 'fictional-llm', currentMessage,

@@ -1,4 +1,5 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
+import { createTopicIdentity, isTopicIdentity } from '../topic-identity.js'
 import { classifyTopic } from '../topic-classifier.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
 import { createRoutingProvider } from '../../providers/routing.js'
@@ -480,14 +481,14 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
         model: request.model,
         answers: [
           { questionId: 'state', kind: 'choice', value: 'resume', evidence: { source: 'native_distribution', confidence: 0.94 } },
-          { questionId: 'topic', kind: 'choice', value: 'pricing review', evidence: { source: 'native_distribution', confidence: 0.91 } },
+          { questionId: 'topic', kind: 'choice', value: 'k1', evidence: { source: 'native_distribution', confidence: 0.91 } },
         ],
       })),
     })
     const result = await classifyTopic({
       provider: llm,
       model: 'mock',
-      recentUserTurns: [{ text: 'Earlier pricing discussion', topicLabel: 'pricing review' }],
+      recentUserTurns: [{ text: 'Earlier pricing discussion', topicLabel: 'other topic' }],
       replyToText: null,
       currentMessage: 'Back to that pricing point',
       knownTopicsThisSession: ['pricing review'],
@@ -511,7 +512,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
           usage: { inputTokens: 37, outputTokens: 4 },
           answers: [
             { questionId: 'state', kind: 'choice', value: state, evidence: { source: 'native_distribution', confidence: 0.9 } },
-            { questionId: 'topic', kind: 'choice', value: '__uncategorized__', evidence: { source: 'native_distribution', confidence: 0.9 } },
+            { questionId: 'topic', kind: 'choice', value: 'unknown', evidence: { source: 'native_distribution', confidence: 0.9 } },
           ],
         })),
       })
@@ -532,14 +533,14 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     })
 
     it.each([
-      { state: 'continue', topic: '__uncategorized__', confidence: 0.2, policy: { reviewBelow: 0.5 }, reason: 'uncertain' },
-      { state: 'resume', topic: '__uncategorized__', confidence: 0.2, policy: { reviewBelow: 0.5 }, reason: 'uncertain' },
-      { state: 'shift', topic: '__uncategorized__', confidence: 0.9, policy: null, reason: 'generation_required' },
-      { state: 'cross-topic', topic: '__uncategorized__', confidence: 0.9, policy: null, reason: 'generation_required' },
-      { state: 'continue', topic: '__new_topic__', confidence: 0.9, policy: null, reason: 'generation_required' },
-      { state: 'resume', topic: '__new_topic__', confidence: 0.9, policy: null, reason: 'generation_required' },
+      { state: 'continue', topic: 'unknown', confidence: 0.2, policy: { reviewBelow: 0.5 }, reason: 'uncertain' },
+      { state: 'resume', topic: 'unknown', confidence: 0.2, policy: { reviewBelow: 0.5 }, reason: 'uncertain' },
+      { state: 'shift', topic: 'unknown', confidence: 0.9, policy: null, reason: 'invalid_response' },
+      { state: 'cross-topic', topic: 'unknown', confidence: 0.9, policy: null, reason: 'invalid_response' },
+      { state: 'continue', topic: 'new', confidence: 0.9, policy: null, reason: 'invalid_response' },
+      { state: 'resume', topic: 'new', confidence: 0.9, policy: null, reason: 'invalid_response' },
     ])('preserves $reason for $state / $topic', async ({ state, topic, confidence, policy, reason }) => {
-      const llm = mockProvider('{"topic_label":"launch planning","state":"shift","confidence":0.8}')
+      const llm = mockProvider('{"topic":"new","state":"shift","confidence":0.8}')
       const stream = vi.spyOn(llm, 'stream')
       const decisionRuntime = executionFixture({ llm, profilePolicy: policy,
         primary: fixtureDecisionProvider(async request => ({ providerId: 'fixture-decision', model: request.model,
@@ -562,9 +563,14 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       }
       const result = await classifyTopic({ provider: llm, model: 'mock', recentUserTurns: [], replyToText: null,
         currentMessage: 'Fictional ambiguous request', knownTopicsThisSession: [], decisionRuntime })
-      expect(decisions).toContainEqual({ kind: 'follow_up', reason })
-      expect(result.topic_label).toBe('launch planning')
-      expect(stream).toHaveBeenCalledTimes(1)
+      expect(decisions).toContainEqual({ kind: reason === 'uncertain' ? 'follow_up' : 'unavailable', reason })
+      if (reason === 'uncertain') {
+        expect(isTopicIdentity(result.topic_label)).toBe(true)
+        expect(stream).toHaveBeenCalledTimes(1)
+      } else {
+        expect(result.confidence).toBe(0)
+        expect(stream).not.toHaveBeenCalled()
+      }
     })
 
     it('does not turn a native insufficient-signal answer into an authority bypass', async () => {
@@ -577,7 +583,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
           revoked = true
           return { providerId: 'fixture-decision', model: request.model, answers: [
             { questionId: 'state', kind: 'choice', value: 'continue', evidence: { source: 'native_distribution', confidence: 0.9 } },
-            { questionId: 'topic', kind: 'choice', value: '__uncategorized__', evidence: { source: 'native_distribution', confidence: 0.9 } },
+            { questionId: 'topic', kind: 'choice', value: 'unknown', evidence: { source: 'native_distribution', confidence: 0.9 } },
           ] }
         }),
       })
@@ -595,11 +601,11 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       decisionRuntime.run = input => {
         const choice = (questionId: string, value: string) => ({ questionId, kind: 'choice' as const, value,
           evidence: { source: 'native_distribution' as const, confidence: 0.9 } })
-        const state = choice('state', 'continue'), topic = choice('topic', '__uncategorized__')
+        const state = choice('state', 'continue'), topic = choice('topic', 'unknown')
         const malformed = [[], [state], [topic],
           [{ questionId: 'state', kind: 'boolean' as const, value: true, evidence: state.evidence }, topic],
           [state, { questionId: 'topic', kind: 'boolean' as const, value: true, evidence: topic.evidence }],
-          [choice('state', 'unknown'), topic], [state, choice('topic', 'unknown')]]
+          [choice('state', 'unknown'), topic], [state, choice('topic', 'not-a-token')]]
         for (const answers of malformed) {
           expect(input.operation.decide({ providerId: 'fixture-decision',
             model: { catalogId: 'fixture-decision', wireId: 'fixture-decision-v1' }, answers }, {}))
@@ -612,7 +618,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     })
   })
 
-  it('uses one LLM completion to generate a new topic label', async () => {
+  it('allocates a native new topic without an LLM call', async () => {
     let llmCalls = 0
     const base = mockProvider('{"topic_label":"launch planning","state":"shift","confidence":0.8}')
     const originalStream = base.stream.bind(base)
@@ -627,7 +633,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
         model: request.model,
         answers: [
           { questionId: 'state', kind: 'choice', value: 'shift', evidence: { source: 'native_distribution', confidence: 0.9 } },
-          { questionId: 'topic', kind: 'choice', value: '__new_topic__', evidence: { source: 'native_distribution', confidence: 0.9 } },
+          { questionId: 'topic', kind: 'choice', value: 'new', evidence: { source: 'native_distribution', confidence: 0.9 } },
         ],
       })),
     })
@@ -640,8 +646,9 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       knownTopicsThisSession: [],
       decisionRuntime,
     })
-    expect(result).toMatchObject({ topic_label: 'launch planning', state: 'shift' })
-    expect(llmCalls).toBe(1)
+    expect(result.state).toBe('shift')
+    expect(isTopicIdentity(result.topic_label)).toBe(true)
+    expect(llmCalls).toBe(0)
   })
 
   it('parses a continue classification', async () => {
