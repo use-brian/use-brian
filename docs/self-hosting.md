@@ -18,6 +18,22 @@ Model requests go only to the backend you configure. Connectors and upgraded
 search providers make outbound calls only when you turn them on. Your local
 database and files are never moved to a Brian-hosted service.
 
+### Local Outpost authentication
+
+The local launcher defaults to the single-user OSS edition. Set
+`USEBRIAN_EDITION=outpost` before `pnpm dev` to start the multi-user auth portal
+on port 3105 alongside the app on port 3003. `USEBRIAN_AUTH_WEB_PORT` changes the
+portal port. Document sync defaults to 8080 in OSS and 8180 in local Outpost;
+`USEBRIAN_DOC_SYNC_PORT` changes that sidecar port and its browser URL together.
+An explicit `PUBLIC_DOC_SYNC_URL` remains the browser-facing deployment override.
+
+With no SMTP settings, local Outpost starts a **synthetic test mailbox** on port
+2525 and defaults the bootstrap identity to `admin@fixture.example`. That mailbox
+captures only `.example` recipients; it is not a production email server. Any
+nonempty `SMTP_*` configuration disables the synthetic mailbox. For real email,
+provide the complete external SMTP configuration and your bootstrap identities;
+the launcher does not start another listener or substitute fixture credentials.
+
 ## Model backends
 
 | Backend | Status | Authentication |
@@ -41,11 +57,16 @@ does not enable the OSS local-owner login. The ChatGPT connection is shared by
 the installation, rather than stored separately for each member or workspace.
 Hosted deployments and Cloud Run (`K_SERVICE`) do not start this local runtime.
 
-TypeSafe Jev is an optional classifier for small typed decisions, not a chat
-backend. `TYPESAFE_API_KEY` registers its transport, but every operation stays
-LLM-only until the deployment supplies an operation-specific, version-matched
-recorded evaluation profile and explicitly selects bounded shadow or hybrid
-routing. The key alone changes no production decision path.
+TypeSafe Jev and OpenAI Decisions are optional backends for typed decisions,
+not chat generation. `TYPESAFE_API_KEY` and `OPENAI_DECISIONS_API_KEY` register
+their respective transports. In Settings → Models → Decision routing, a
+workspace owner/admin can choose **Shadow 10%**, **Shadow 100%**, or explicit
+**Classifier first (100%)** replacement for the selected configured model.
+Shadow mode keeps the LLM authoritative; classifier-first is an explicit admin
+override, not approved quality evidence. Approved hybrid routing remains
+operation-specific and version-matched. Registration alone activates nothing.
+See [Native decision adapters](architecture/engine/decision-adapters.md) for
+credentials, migration requirements, selection and bounded fallback behavior.
 
 ## Optional keys
 
