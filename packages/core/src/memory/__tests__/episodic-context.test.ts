@@ -63,6 +63,26 @@ describe('[COMP:memory/episodic-context] fetchEpisodicContext', () => {
     expect(result).toBeNull()
   })
 
+  it('retrieves exact opaque identities without presenting them as topic names', async () => {
+    const primary = 'topic:v2:' + 'a'.repeat(64)
+    const related = 'topic:v2:' + 'b'.repeat(64)
+    const store = makeStore([
+      record(primary, 'The fictional Acorn launch needs a revised timeline.'),
+      record(related, 'The fictional Birch budget was approved.'),
+    ])
+    const result = await fetchEpisodicContext({ store, sessionId: 's1', classification: {
+      topic_label: primary, state: 'cross-topic', confidence: 0.9, related_topics: [related],
+    } })
+    expect(store.fetchByTopic).toHaveBeenCalledWith({ sessionId: 's1', topicLabel: primary, limit: 2 })
+    expect(store.fetchByTopic).toHaveBeenCalledWith({ sessionId: 's1', topicLabel: related, limit: 1 })
+    expect(result).toContain('Earlier topic 1')
+    expect(result).toContain('Earlier topic 2')
+    expect(result).toContain('Acorn launch')
+    expect(result).toContain('Birch budget')
+    expect(result).not.toContain(primary)
+    expect(result).not.toContain(related)
+  })
+
   it('injects topic history on resume', async () => {
     const store = makeStore([
       record('brian', 'User confirmed Brian is Deloitte Tax Manager, CUHK grad'),

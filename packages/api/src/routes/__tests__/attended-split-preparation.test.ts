@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { bindScopeSources, boundScopeSources, ContextScopeAccumulator, type SessionContextAuthority, type LLMProvider, type SplitResult } from '@use-brian/core'
+import { bindScopeSources, boundScopeSources, ContextScopeAccumulator, type SessionContextAuthority, type LLMProvider, type SplitResult, type SplitOptions } from '@use-brian/core'
 import type { Session, SessionMessage } from '../../db/sessions.js'
 import { captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage } from '../attended-session-context.js'
 
@@ -43,6 +43,8 @@ describe('admitted early Standard splitter result', () => {
     expect(options.provider).toBe(f.provider)
     expect(options.model).toBeUndefined()
     expect(options.decisionRuntime).toBeUndefined()
+    expect(options.workspaceId).toBe('workspace-fixture')
+    expect(options.runId).toBe('research-split-message-fixture')
     expect(options.deadlineAt).toBeGreaterThanOrEqual(start + 8000)
     expect(boundScopeSources(options)).toEqual([f.source])
     expect(prepared!.matches(body, f.provider)).toBe(true)
@@ -53,6 +55,32 @@ describe('admitted early Standard splitter result', () => {
     expect(spies.proof.mock.calls.length).toBe(before + 1)
     expect(spies.classify).toHaveBeenCalledTimes(1)
     await expect(prepared!.read()).rejects.toMatchObject({ reason: 'authority_changed' })
+  })
+  it('pins the optional runtime and includes it in the late dispatch match', async () => {
+    const f = await fixture()
+    const runtime = { run: vi.fn() } as unknown as SplitOptions['decisionRuntime']
+    const input = { ...f.input, decisionRuntime: runtime }
+    const prepared = await prepareAttendedSplitMessage(input)
+    expect(spies.classify.mock.calls[0]![0].decisionRuntime).toBe(runtime)
+    expect(prepared!.matches(body, f.provider, runtime)).toBe(true)
+    expect(prepared!.matches(body, f.provider)).toBe(false)
+    input.decisionRuntime = { run: vi.fn() } as unknown as SplitOptions['decisionRuntime']
+    expect(prepared!.matches(body, f.provider, input.decisionRuntime)).toBe(false)
+    await expect(prepared!.read()).rejects.toMatchObject({ reason: 'authority_changed' })
+  })
+  it.each(['decisionRuntime', 'provider', 'rawMessage'] as const)('fences %s mutation during query admission before dispatch', async field => {
+    const f = await fixture()
+    const input = { ...f.input, capture: undefined, decisionRuntime: { run: vi.fn() } as unknown as SplitOptions['decisionRuntime'] }
+    let release!: () => void
+    spies.query.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(bindScopeSources({ history: [input.message] }, [f.source])) }))
+    // A standalone caller also pins the route before its first asynchronous query.
+    const pending = prepareAttendedSplitMessage(input)
+    if (field === 'rawMessage') input.rawMessage += ' changed'
+    else if (field === 'provider') input.provider = { ...input.provider }
+    else input.decisionRuntime = { run: vi.fn() } as unknown as SplitOptions['decisionRuntime']
+    release()
+    await expect(pending).rejects.toThrow()
+    expect(spies.classify).not.toHaveBeenCalled()
   })
   it.each([
     { content: [{ type: 'text', text: body + ' changed' }] },

@@ -38,6 +38,10 @@ const {assertLocalFixture}=await import(new URL('../../../../scripts/crm/local-f
 await assertLocalFixture()
 const [owner,workspace,assistant,channel,integration,legacy]=Array.from({length:6},()=>randomUUID())
 const conversation='-1000008246:topic:26',historyRows=255,privateRows=289
+// Full retained-history journeys cross several model/tool/publication proof
+// boundaries. This is a test-runner budget, not an application deadline;
+// the capacity oracle still requires the real 15-second SQL statement limit.
+const retainedJourneyTestTimeout=180_000
 const timeMin='2030-12-09T00:00:00Z',timeMax='2030-12-10T00:00:00Z'
 const eventMarker='Fictional observatory planning meeting'
 const finalText=`Your calendar has ${eventMarker} on December 9 at 10:00 UTC.`
@@ -333,7 +337,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   await recordDeliveredTelegramMessage({channelId:conversation,providerMessageId:'legacy-topic-reply',
    text:'The fictional historical topic was received.',botId:'987658246',botUsername:'fictional_calendar_bot'})
   expect((await query('SELECT sequence_num FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[recovered,'legacy-topic-reply'])).rows[0].sequence_num).toBe(historyRows+2)
- },90_000)
+ },retainedJourneyTestTimeout)
 
  it('retains the intervening greeting and delivered reply without inventing a generated annotation',async()=>{
   const result=await runCalendarTurn('prior-trivial-topic','trivial-topic')
@@ -341,7 +345,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   expect(result.sent).toEqual([result.priorReply]);expect(result.googleRequests).toHaveLength(0)
   expect((await query('SELECT count(*)::int count FROM session_message_annotation_heads WHERE session_id=$1',[recovered])).rows[0].count).toBe(1)
   expect((await query('SELECT sequence_num FROM session_messages WHERE session_id=$1 AND channel_message_id=$2',[recovered,'prior-trivial-topic'])).rows[0].sequence_num).toBe(historyRows+3)
- },90_000)
+ },retainedJourneyTestTimeout)
 
  it.each([1,2,3,4,5])('retains prior topic turn %i and its immutable annotation before the Calendar request',async(index)=>{
   const id=`prior-topic-${index}`
@@ -361,7 +365,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
     WHERE m.session_id=$1 AND m.channel_message_id=$2`,[recovered,id])).rows[0]
    expect(annotation).toMatchObject({confidence:0,label:'(uncategorized)'})
   }
- },90_000)
+ },retainedJourneyTestTimeout)
 
  it('executes the connected speaker Calendar read and delivers its actual result after a second model request',async()=>{
   expect(await readAnnotationShape()).toEqual({heads:6,frames:5})
@@ -387,7 +391,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   expect(stillIndexed[0].id).toBe(transcriptFileId)
   expect(stillIndexed.map(row=>row.id).sort()).toEqual([...indexedFileIds].sort())
   expect((await query('SELECT status,turn_lease_token FROM sessions WHERE id=$1',[recovered])).rows[0]).toEqual({status:'idle',turn_lease_token:null})
- },90_000)
+ },retainedJourneyTestTimeout)
  it('retains exact native query capacity after the delivered Calendar reply without changing stored state',async()=>{
   expect((await query('SELECT max(sequence_num)::int sequence FROM session_messages WHERE session_id=$1',[recovered])).rows[0].sequence).toBe(historyRows+16)
   await assertRetainedNativeQueryCapacity(await recordingAuthority())
@@ -398,7 +402,7 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
    expect(result.mainRequests).toHaveLength(1);expect(result.googleRequests).toHaveLength(0)
    expect(JSON.stringify(result.sent)).not.toContain(eventMarker)
   }finally{await instances.setConnectedSystem(calendar.id,true)}
- },90_000)
+ },retainedJourneyTestTimeout)
  it.each([
   {label:'recording media ancestor',id:'3103-file',change:'hold-file-before-continuation'},
   {label:'historical message',id:'3103-history',change:'hold-before-continuation'},
@@ -411,5 +415,5 @@ describe.sequential('[COMP:api/channel-recording] recovered Telegram Calendar co
   }finally{
    if(change==='hold-file-before-continuation')await query("DELETE FROM scope_resource_states WHERE workspace_id=$1 AND resource_kind='workspace_file' AND resource_id=$2",[workspace,mediaFileId])
   }
- },90_000)
+ },retainedJourneyTestTimeout)
 })

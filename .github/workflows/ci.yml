@@ -342,7 +342,9 @@ jobs:
       github.event.pull_request.head.repo.full_name != github.repository
     name: Department isolation (${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Includes PG18 setup/full migration replay plus indivisible retained-history
+    # journeys. Per-test and application/model deadlines remain unchanged.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

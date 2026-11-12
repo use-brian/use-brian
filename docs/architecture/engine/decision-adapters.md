@@ -80,8 +80,10 @@ Content-Type: application/json
 
 The native classifier replaces LLM classification for eligible execution
 operations. A successful native decision returns directly without the ordinary
-LLM classification call. The LLM remains for generated topic labels/task
-prompts, uncertainty review and permitted bounded operational fallback. Main
+LLM classification call. Version-2 topic classification allocates host-owned
+identities without generating names. The LLM remains for generated task prompts,
+explicit uncertainty review and permitted bounded operational fallback. Legacy
+LLM-only/shadow topic naming is retained only without opaque topic history. Main
 chat generation is unchanged; observation-only operations stay non-authoritative
 100% shadow comparisons. Existing legacy operations without a decision-runtime
 route are not automatically migrated by this setting.
@@ -160,8 +162,12 @@ cascade, with an allowed configured LLM completion for generation, uncertainty
 review or bounded operational recovery. There is no fallback to a different
 native vendor. Source-authority refusal/cancellation still propagates. Main
 assistant routing, full fresh Memory retrieval, worker launch, executor checks
-and publication boundaries are unchanged. Standard's legacy splitter is not
-migrated by adding this adapter.
+and publication boundaries are unchanged. Eligible Standard speculative split
+preparation now passes its selected runtime and workspace scope to the existing
+`research.split` operation: a native no-split verdict avoids the LLM, while
+positive/uncertain decisions retain bounded LLM generation/review. The historic
+LLM model, fresh consumption proof and single-charge accounting are preserved.
+Other late legacy splitter paths remain unchanged.
 
 ## Usage and model identity
 
