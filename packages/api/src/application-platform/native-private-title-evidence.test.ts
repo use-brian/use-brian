@@ -14,7 +14,13 @@ const head={sessionId,revisionId}
 const privateLeaf:ScopeSource={...root,userId:sessionId,resourceKind:'private_transcript',resourceId:sessionId}
 const allowed=()=>({admitted:true,immutable:[structuredClone(root),structuredClone(privateLeaf)],current:[structuredClone(root),structuredClone(privateLeaf)]})
 function connection(values:unknown[]){
- const query=vi.fn(async()=>({rows:[values.shift()]}))
+ const query=vi.fn(async(sql:string,args?:unknown[])=>{
+  if(sql==='SELECT to_regprocedure($1) IS NOT NULL AS available'){
+   expect(args).toEqual(['public.read_native_retained_scope_evidence(uuid,jsonb)'])
+   return{rows:[{available:false}]}
+  }
+  return{rows:[values.shift()]}
+ })
  return{query,client:{query} as unknown as Pick<PoolClient,'query'>}
 }
 
@@ -48,9 +54,11 @@ describe('optional singleton private title proof',()=>{
  it('tries the singleton proof before the original ladder and preserves NULL fallback',async()=>{
   const {client,query}=connection([{available:true},{value:null},{value:{admitted:true,immutable:[root],current:[root]}}])
   expect((await readNativeSessionEvidence(client,workspaceId,[root]))?.kind).toBe('complete')
-  expect(query.mock.calls).toHaveLength(3)
-  expect(query).toHaveBeenNthCalledWith(3,'SELECT read_native_turn_scope_evidence($1,$2) AS value',
-   [workspaceId,JSON.stringify([{kind:root.resourceKind,id:revisionId,version:'1'}])])
+  const reads=query.mock.calls.filter(([sql])=>!sql.includes('to_regprocedure'))
+  expect(reads.map(([sql])=>sql)).toEqual([
+   'SELECT read_native_private_title_evidence($1,$2) AS value','SELECT read_native_turn_scope_evidence($1,$2) AS value',
+  ])
+  expect(reads[1][1]).toEqual([workspaceId,JSON.stringify([{kind:root.resourceKind,id:revisionId,version:'1'}])])
  })
  it('rejects denial without falling through to another proof',async()=>{
   const {client,query}=connection([{available:true},{value:{admitted:false}}])

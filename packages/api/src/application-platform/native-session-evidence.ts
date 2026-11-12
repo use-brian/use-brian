@@ -1,6 +1,7 @@
 /** Closed native session evidence read. [COMP:api/application-persistence] */
 import {z} from 'zod'
 import {readNativePrivateTitleEvidence} from './native-private-title-evidence.js'
+import {readRetainedNativePacket} from './native-retained-reader.js'
 import type {PoolClient} from 'pg'
 import {ContextScopeAccumulator,resourceScopeKey,type ResourceScope,type ScopeEvidence,type ScopeSource} from '@use-brian/core'
 const scope=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
@@ -35,8 +36,9 @@ export async function readNativePublicationCohorts(client:Pick<PoolClient,'query
   "SELECT to_regprocedure('public.read_native_turn_publication_cohorts(uuid,jsonb)') IS NOT NULL AS available")).rows[0]?.available===true
  if(!installed)return null
  const identities=cohorts.map(roots=>roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version})))
- const raw=(await client.query<{value:unknown}>('SELECT read_native_turn_publication_cohorts($1,$2) AS value',
-  [workspaceId,JSON.stringify(identities)])).rows[0]?.value
+ const args=[workspaceId,JSON.stringify(identities)]
+ let raw:unknown=await readRetainedNativePacket(client,'cohorts',args)
+ if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_turn_publication_cohorts($1,$2) AS value',args)).rows[0]?.value
  if(raw===null)return null
  const parsed=publicationResult.parse(raw)
  return parsed.cohorts.map((proof,index)=>{
@@ -57,8 +59,9 @@ export async function readNativeSessionEvidence(client:Pick<PoolClient,'query'>,
  // Field observations can hide Memory ancestors too. The closed validator
  // discovers the complete native closure and preserves its original fallback.
  const args=[workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)]
- let raw:unknown=(await client.query<{value:unknown}>('SELECT read_native_turn_scope_evidence($1,$2) AS value',
-  [workspaceId,JSON.stringify(roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version})))])).rows[0]?.value
+ const identities=[workspaceId,JSON.stringify(roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version})))]
+ let raw:unknown=await readRetainedNativePacket(client,'scope',identities)
+ if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_turn_scope_evidence($1,$2) AS value',identities)).rows[0]?.value
  if(raw===null&&roots.length>100){
   raw=(await client.query<{value:unknown}>('SELECT read_native_covered_session_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value
  }else if(raw===null){

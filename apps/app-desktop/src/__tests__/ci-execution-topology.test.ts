@@ -75,7 +75,8 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     expect(nodeTests.run).toContain('scripts/testing/embedded-database-tests.mjs ${{ matrix.group }}');
     expect(embedded.steps.find((step: { name?: string }) => step.name === 'Runtime unit tests').if).toBe("matrix.group == 'remaining'");
     const acceptance = workflow.jobs['department-isolation-shards'];
-    expect(acceptance.strategy.matrix.shard).toContain('fromJSON(needs.ci-scope.outputs.shards)');
+    expect(acceptance.strategy.matrix).toContain('fromJSON(needs.ci-scope.outputs.matrix)');
+    expect(workflow.jobs['ci-scope'].outputs.matrix).toBe('${{ steps.scope.outputs.matrix }}');
     expect(workflow.jobs['embedded-current-tests'].if).toBe("needs.ci-scope.outputs.historical == 'false'");
     expect(embedded.if).toBe("needs.ci-scope.outputs.historical == 'true'");
     expect(workflow.on.schedule).toHaveLength(1);
@@ -137,7 +138,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     const build = workflow.jobs['build-typecheck'];
     const acceptance = workflow.jobs['department-isolation-shards'];
     expect(acceptance.needs).toEqual(['ci-scope', 'build-typecheck']);
-    expect(acceptance['timeout-minutes']).toBe(20);
+    expect(acceptance['timeout-minutes']).toBe('${{ matrix.timeoutMinutes }}');
     const step = (job: any, name: string) => job.steps.find((item: { name?: string }) => item.name === name);
     const upload = step(build, 'Retain database test dependencies');
     const download = step(acceptance, 'Download database test dependencies');

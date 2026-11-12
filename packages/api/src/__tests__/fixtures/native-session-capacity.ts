@@ -75,3 +75,25 @@ export async function assertRetainedNativeQueryCapacity(authority: SessionContex
     expect((await query<{ body: string }>('SELECT prosrc body FROM pg_proc WHERE oid=$1::regprocedure', [signature])).rows[0].body).toBe(original.body)
   }
 }
+
+/** Count the original expanded graph from genuine admitted sources without
+ * using the legacy compiler's representation budget or changing any reader.
+ * This is metadata only; the caller separately proves admission through the
+ * actual app_user reader and publisher. native_turn_edges remains the shared
+ * original edge definition, including every physical domain candidate. */
+export async function countRetainedNativeExpandedGraph(authority:SessionContextAuthority):Promise<{nodes:number;edges:number}>{
+ const sources=authority.accumulator.evidence.sources??[]
+ expect(sources.length).toBeGreaterThan(0)
+ const roots=sources.map(source=>({tag:'source',kind:source.resourceKind,id:source.resourceId,version:source.version}))
+ const row=(await query<{nodes:number;edges:number}>(`WITH RECURSIVE nodes(n) AS(
+  SELECT value FROM jsonb_array_elements($2::jsonb)
+  UNION
+  SELECT e.child FROM nodes n CROSS JOIN LATERAL native_turn_edges($1::uuid,jsonb_build_array(n.n)) e
+ ), expanded AS MATERIALIZED(SELECT jsonb_agg(n) frontier,count(*)::integer nodes FROM nodes),
+ edges AS(SELECT DISTINCT e.parent,e.child,e.edge_kind FROM expanded
+  CROSS JOIN LATERAL native_turn_edges($1::uuid,expanded.frontier) e)
+ SELECT expanded.nodes,(SELECT count(*)::integer FROM edges) edges FROM expanded`,
+ [authority.execution.security.access.workspaceId,JSON.stringify(roots)])).rows[0]
+ expect(row.nodes).toBeGreaterThan(0);expect(row.edges).toBeGreaterThan(0)
+ return row
+}

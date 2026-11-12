@@ -5,7 +5,7 @@ import { embeddedTestFiles } from '../testing/embedded-database-tests.mjs'
 import {
   DEPARTMENT_ISOLATION_BOUNDARIES, DEPARTMENT_ISOLATION_CASES, DEPARTMENT_ISOLATION_SUITES,
 } from '../../packages/shared/src/department-isolation-coverage.ts'
-import { acceptanceShards, createAcceptanceReport, mergeAcceptanceReports, parseShard, suitesForShard } from '../testing/department-isolation-report.mjs'
+import { acceptanceMatrix, acceptanceShards, createAcceptanceReport, mergeAcceptanceReports, parseShard, suitesForShard } from '../testing/department-isolation-report.mjs'
 
 const metadata = { revision: 'fixture-revision', sourceHashes: { 'fixture.ts': 'hash' }, dirtySourceHashes: {},
   migration: { latest: 'fixture.sql', count: 1, ledgerHash: 'fixture-ledger' } }
@@ -66,13 +66,19 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
 
   it('isolates capacity and recovered-history workloads while covering every suite and file exactly once in both production profiles', () => {
     const capacityFile = 'packages/api/src/__tests__/native-query-capture-capacity.integration.test.ts'
-    assert.deepEqual(acceptanceShards('full'), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-    assert.deepEqual(acceptanceShards('current'), [1, 2, 3, 4, 5, 6, 7])
+    assert.deepEqual(acceptanceShards('full'), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+    assert.deepEqual(acceptanceShards('current'), [1, 2, 3, 4, 5, 6, 7, 8])
     assert.throws(() => acceptanceShards('unknown'), /Unknown/)
     for (const profile of ['current', 'full']) {
       const indexes = acceptanceShards(profile)
       const partitions = indexes.map(index => suitesForShard(parseShard(`${index}/${indexes.length}`), profile))
-      for (const id of ['native-query-capacity', 'recovered-topic-history', 'recovered-calendar-history']) {
+      const matrix = acceptanceMatrix(profile).include
+      assert.deepEqual(matrix.map(entry => entry.shard), indexes)
+      assert.deepEqual(matrix.filter(entry => entry.timeoutMinutes === 45)
+        .flatMap(entry => partitions[entry.shard - 1].map(suite => suite.id)).sort(),
+      ['recovered-calendar-history', 'retained-conversation'])
+      assert.equal(matrix.filter(entry => entry.timeoutMinutes === 20).length, indexes.length - 2)
+      for (const id of ['native-query-capacity', 'retained-conversation', 'recovered-topic-history', 'recovered-calendar-history']) {
         const owners = partitions.filter(suites => suites.some(suite => suite.id === id))
         assert.equal(owners.length, 1)
         assert.deepEqual(owners[0].map(suite => suite.id), [id])
@@ -87,7 +93,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
 
   it('cannot certify missing, failed or skipped capacity or recovered-history execution', () => {
     for (const profile of ['current', 'full']) {
-      for (const id of ['native-query-capacity', 'recovered-topic-history', 'recovered-calendar-history']) {
+      for (const id of ['native-query-capacity', 'retained-conversation', 'recovered-topic-history', 'recovered-calendar-history']) {
         const missing = receipts(profile).filter(part => !part.suites.some(suite => suite.id === id))
         assert.throws(() => mergeAcceptanceReports(missing, metadata, profile), /Missing/)
         for (const status of ['failed', 'skipped']) {
@@ -122,7 +128,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     assert.throws(() => mergeAcceptanceReports(parts.slice(1), metadata, 'current'), /Missing/)
     parts[0].assertions[0].status = 'failed'
     assert.throws(() => mergeAcceptanceReports(parts, metadata, 'current'), /incomplete or failed/)
-    assert.throws(() => suitesForShard(parseShard('1/3'), 'current'), /7 shards/)
+    assert.throws(() => suitesForShard(parseShard('1/3'), 'current'), /8 shards/)
   })
 
   it('rejects missing, duplicate, stale and mixed-migration receipts', () => {
@@ -156,6 +162,11 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     const journeys = [
       'src/application-platform/__tests__/native-session-parent-audience.integration.test.ts',
       'src/__tests__/native-query-capture-capacity.integration.test.ts',
+      'src/__tests__/native-retained-conversation.integration.test.ts',
+      'src/application-platform/__tests__/native-retained-acquisition.integration.test.ts',
+      'src/application-platform/__tests__/native-retained-edge-parity.integration.test.ts',
+      'src/application-platform/__tests__/native-retained-graph.integration.test.ts',
+      'src/__tests__/session-annotation-scan.integration.test.ts',
       'src/__tests__/native-recording-ancestry-migration.integration.test.ts',
       'src/application-platform/__tests__/native-recording-file-ancestry.integration.test.ts',
       'src/__tests__/channel-recording-recovery.integration.test.ts',

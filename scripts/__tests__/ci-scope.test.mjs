@@ -35,8 +35,8 @@ describe('[COMP:ci/execution-topology] historical coverage selection', () => {
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim()
     try {
       for (const [event, profile, shards] of [
-        ['schedule', 'full', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]],
-        ['push', 'current', [1, 2, 3, 4, 5, 6, 7]],
+        ['schedule', 'full', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]],
+        ['push', 'current', [1, 2, 3, 4, 5, 6, 7, 8]],
       ]) {
         const eventPath = join(directory, `${event}-event.json`)
         const outputPath = join(directory, `${event}-output`)
@@ -49,6 +49,9 @@ describe('[COMP:ci/execution-topology] historical coverage selection', () => {
         assert.equal(output.historical, String(profile === 'full'))
         assert.deepEqual(JSON.parse(output.shards), shards)
         assert.equal(Number(output.total), shards.length)
+        assert.deepEqual(JSON.parse(output.matrix), { include: shards.map(shard => ({
+          shard, timeoutMinutes: (profile === 'full' ? [9, 11] : [6, 8]).includes(shard) ? 45 : 20,
+        })) })
       }
     } finally { rmSync(directory, { recursive: true, force: true }) }
   })

@@ -8,7 +8,7 @@
  * [COMP:api/department-isolation-lifecycle]
  */
 
-export const DEPARTMENT_ISOLATION_MANIFEST_REVISION = 6
+export const DEPARTMENT_ISOLATION_MANIFEST_REVISION = 7
 
 export const DEPARTMENT_ISOLATION_CASE_IDS = Object.freeze([
   'A01','A02','A03','A04','A05','A06','A07','A08','A09',
@@ -60,6 +60,12 @@ export const DEPARTMENT_ISOLATION_SUITES: readonly DepartmentIsolationSuite[] = 
   // otherwise exhaust the derived-store shard's bounded CI time budget.
   {id:'native-query-capacity',packageDir:'packages/api',integration:true,testFiles:[
     'src/__tests__/native-query-capture-capacity.integration.test.ts']},
+  {id:'retained-conversation',packageDir:'packages/api',integration:true,testFiles:[
+    'src/__tests__/native-retained-conversation.integration.test.ts',
+    'src/__tests__/session-annotation-scan.integration.test.ts',
+    'src/application-platform/__tests__/native-retained-acquisition.integration.test.ts',
+    'src/application-platform/__tests__/native-retained-edge-parity.integration.test.ts',
+    'src/application-platform/__tests__/native-retained-graph.integration.test.ts']},
   {id:'operation-stores',packageDir:'packages/api',integration:true,testFiles:[
     'src/db/__tests__/entity-mutation-scope.integration.test.ts','src/db/__tests__/file-mutation-scope.integration.test.ts',
     'src/db/__tests__/execution-read-ceiling.integration.test.ts','src/db/__tests__/external-principal-scope.test.ts',

@@ -128,7 +128,9 @@ describe.sequential('[COMP:api/native-chat-read-cost] recording-derived file anc
         return validateCallerScopeEvidence({ sources }, authority.execution.security.ceiling, observed)
       })).rejects.toMatchObject({ reason: 'caller_evidence_unavailable', diagnostic: 'source_unverifiable',
         verificationPhase: 'native_proof', verificationSqlstateClass: '42' })
-      expect(queries).toHaveLength(1)
+      const proofQueries = queries.filter(sql => !sql.includes('to_regprocedure'))
+      expect(proofQueries).toHaveLength(1)
+      expect(proofQueries[0]).toMatch(/^SELECT read_native_(?:retained|turn)_scope_evidence\(/)
       expect(queries.some(sql => sql.includes('read_native_session_field_dependencies'))).toBe(false)
     } finally { await rollbackAndRelease(client) }
   })
