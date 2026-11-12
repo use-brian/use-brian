@@ -47,6 +47,7 @@ vi.mock('../route-helpers.js', async original => ({
 import { processChannelMessage, type ChannelPipelineParams } from '../channel-pipeline.js'
 import { channelConfirmations } from '../channel-interactions.js'
 import { channelUserErrorText } from '../_channel-error-text.js'
+import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 
 const scope = { channelType: 'feishu', integrationId: 'integration', conversationId: 'conversation', senderId: 'sender' }
@@ -79,6 +80,34 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/channel-pipeline-audience-refusal] processing feedback lifetime', () => {
+  it('reports a real authority refusal once without starting model context or a successful reply', async () => {
+    const refusal = new AuthorityChangedError(true)
+    refusal.message = 'PRIVATE connector state'
+    mocks.current.mockRejectedValue(refusal)
+    const { params, hooks } = turn()
+    await processChannelMessage(params)
+    expect(hooks.sendError).toHaveBeenCalledExactlyOnceWith(refusal)
+    expect(channelUserErrorText(hooks.sendError.mock.calls[0][0])).toContain('Check their status before repeating')
+    expect(channelUserErrorText(refusal)).not.toContain('PRIVATE')
+    expect(hooks.sendResponse).not.toHaveBeenCalled()
+    expect(hooks.onCleanup).toHaveBeenCalledOnce()
+    expect(mocks.history).not.toHaveBeenCalled()
+    expect(channelConfirmations.handle(scope, { kind: 'text', text: 'stop' }).handled).toBe(false)
+  })
+
+  it('does not replace an explicit Stop with an authority failure notice', async () => {
+    const { params, hooks } = turn()
+    mocks.current.mockImplementation(async () => {
+      params.abortController.abort()
+      throw new AuthorityChangedError()
+    })
+    await processChannelMessage(params)
+    expect(hooks.sendError).not.toHaveBeenCalled()
+    expect(hooks.sendResponse).not.toHaveBeenCalled()
+    expect(hooks.onCleanup).toHaveBeenCalledOnce()
+    expect(mocks.history).not.toHaveBeenCalled()
+  })
+
   it('carries safe verifier diagnostics from the actual authorizer into the receiving analytics event and notice', async () => {
     const { createDeliveryAudienceAuthorizer } = await vi.importActual<typeof import('../../context-scope/delivery-authority.js')>('../../context-scope/delivery-authority.js')
     const sourceFailure = Object.assign(new Error('PRIVATE source metadata', {

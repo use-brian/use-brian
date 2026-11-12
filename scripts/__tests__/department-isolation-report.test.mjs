@@ -115,7 +115,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     }
   })
 
-  it('requires executed recovered-topic and Calendar journeys in every upgrade profile', () => {
+  it('requires executed recovered-topic, Calendar and connector-state journeys in every upgrade profile', () => {
     const journeys = [
       'src/application-platform/__tests__/native-session-parent-audience.integration.test.ts',
       'src/__tests__/native-query-capture-capacity.integration.test.ts',
@@ -123,6 +123,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
       'src/application-platform/__tests__/native-recording-file-ancestry.integration.test.ts',
       'src/__tests__/channel-recording-recovery.integration.test.ts',
       'src/__tests__/channel-calendar-recovery.integration.test.ts',
+      'src/__tests__/channel-connector-operational-state.integration.test.ts',
     ]
     for (const profile of ['current', 'full']) {
       for (const file of journeys) {

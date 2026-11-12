@@ -1478,7 +1478,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             : {}),
         },
       })
-      if (isDeliveryAudienceUnverifiedError(err)) {
+      if (!abortController.signal.aborted) {
         await hooks.sendError(err)
       }
       await hooks.onCleanup?.()
@@ -2993,6 +2993,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // Taken here, directly before the `try` whose `finally` releases it, so no
   // setup failure can strand it until the sweeper.
   const turnLeaseToken = slot.token
+  let turnFailed = false
 
   // ── Query loop ──
   try {
@@ -3554,6 +3555,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         .catch((err) => console.debug(`[${channelType}] memory nudge failed:`, err))
     }
   } catch (err) {
+    turnFailed = true
     if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) {
       console.warn(`[${channelType}] channel turn stopped by live authority:`, (err as Error).name)
       analytics?.logEvent({
@@ -3568,7 +3570,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             : {}),
         },
       })
-      if (isDeliveryAudienceUnverifiedError(err)) {
+      if (!abortController.signal.aborted) {
         await hooks.sendError(err)
       }
       return
@@ -3594,7 +3596,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     } catch (authErr) {
       if (!isAuthorityChangedError(authErr) && !isDeliveryAudienceUnverifiedError(authErr)) throw authErr
       console.warn(`[${channelType}] recovery withheld: live authority refused`, (authErr as Error).name)
-      if (isDeliveryAudienceUnverifiedError(authErr)) await hooks.sendError(authErr)
+      if (!abortController.signal.aborted) await hooks.sendError(authErr)
       return
     }
 
@@ -3641,6 +3643,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // Watch viewers clear their "Working" card on the terminal bus event —
     // published in the finally, not on the paths we happened to think of.
     publishTurnCompleted({ sessionId: session.id, senderUserId: userId, publishSessionEvent })
-    await releaseTurn(session.id, turnLeaseToken, 'completed')
+    await releaseTurn(session.id, turnLeaseToken, turnFailed ? 'failed' : 'completed')
   }
 }
