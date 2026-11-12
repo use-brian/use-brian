@@ -161,7 +161,9 @@ export function createWorkspaceDecisionRouteResolver(options: {
           totalTimeoutMs: WORKSPACE_DECISION_TOTAL_TIMEOUT_MS,
           primaryTimeoutMs: WORKSPACE_DECISION_PRIMARY_TIMEOUT_MS,
           maxAttempts: 2,
-          shadowSampleRate: WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
+          shadowSampleRate: setting.mode === 'shadow'
+            ? setting.shadowSampleRate ?? WORKSPACE_DECISION_SHADOW_SAMPLE_RATE
+            : WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
         },
       })
 

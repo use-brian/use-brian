@@ -109,7 +109,7 @@ describe('[COMP:decisions/workspace-routing] workspace decision route resolver',
     await expect(resolver(context)).resolves.toEqual({ mode: 'llm_only' })
   })
 
-  it('builds a version-matched 10% shadow profile for a configured adapter', async () => {
+  it('builds a version-matched default-sample shadow profile for a configured adapter', async () => {
     const resolver = createWorkspaceDecisionRouteResolver({
       store: { getSystem: vi.fn(async () => ({
         workspaceId: context.workspaceId,
@@ -214,7 +214,7 @@ describe('[COMP:decisions/workspace-routing] workspace decision route resolver',
     expect(onError).toHaveBeenCalledOnce()
   })
 
-  it('keeps observation callers in bounded shadow without consulting authority evidence', async () => {
+  it('keeps observation callers in default-sample shadow without consulting authority evidence', async () => {
     const getApprovedExact = vi.fn()
     const resolver = createWorkspaceDecisionRouteResolver({
       store: { getSystem: vi.fn(async () => ({
@@ -377,6 +377,40 @@ describe('[COMP:decisions/workspace-routing] explicit classifier-first authority
       expect(observation).not.toHaveProperty('operatorOverride')
       expect(getApprovedExact).not.toHaveBeenCalled()
     })
+
+  it.each([
+    { modelAlias: 'typesafe-jev-1.13', adapterId: 'typesafe', wireId: 'jev-1.13.0' },
+    { modelAlias: 'openai-decisions-gpt-6-luna', adapterId: 'openai-decisions', wireId: 'gpt-6-luna' },
+  ])('keeps explicit $modelAlias shadow at its saved sample rate and non-authoritative under a matching classifier-first override', async ({ modelAlias, adapterId, wireId }) => {
+    for (const shadowSampleRate of [undefined, 0.1, 1] as const) {
+      const getApprovedExact = vi.fn()
+      const resolver = createWorkspaceDecisionRouteResolver({
+        store: { getSystem: vi.fn(async () => ({ ...setting('shadow', modelAlias), shadowSampleRate })) },
+        profileStore: { getApprovedExact },
+        configuredAdapterIds: () => [adapterId],
+        operatorDefault: { mode: 'classifier_first', modelAlias, operationIds: [context.operation.id] },
+      })
+
+      for (const kind of ['execution', 'observation'] as const) {
+        const route = await resolver({ ...context, kind })
+        expect(route).toMatchObject({
+          mode: 'shadow', primaryModelId: modelAlias,
+          profile: {
+            mode: 'shadow', shadowSampleRate: shadowSampleRate ?? 0.1,
+            operationId: context.operation.id, operationVersion: context.operation.version,
+            stateVersion: context.operation.stateVersion, questionVersion: context.operation.questionVersion,
+            modelCatalogId: modelAlias, modelWireId: wireId,
+            status: 'evaluation', evidence: 'synthetic',
+          },
+        })
+        expect(route).not.toHaveProperty('operatorOverride')
+        expect(route).not.toHaveProperty('allowOperationalFailover')
+        expect(route).not.toHaveProperty('allowInvalidResponseRecovery')
+        expect(route.profile).not.toHaveProperty('policy.authority')
+      }
+      expect(getApprovedExact).not.toHaveBeenCalled()
+    }
+  })
 
   it('does not broaden legacy operator_hybrid to an explicit hybrid selection', async () => {
     const resolver = createWorkspaceDecisionRouteResolver({

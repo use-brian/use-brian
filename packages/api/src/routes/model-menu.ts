@@ -123,7 +123,11 @@ const setModelRouteSchema = z.union([
 
 const setDecisionRoutingSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('llm_only') }).strict(),
-  z.object({ mode: z.literal('shadow'), modelAlias: z.string().min(1) }).strict(),
+  z.object({
+    mode: z.literal('shadow'),
+    modelAlias: z.string().min(1),
+    shadowSampleRate: z.union([z.literal(0.1), z.literal(1)]).optional(),
+  }).strict(),
   z.object({ mode: z.literal('hybrid'), modelAlias: z.string().min(1) }).strict(),
 ])
 
@@ -275,7 +279,7 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
         operatorOverride: (!decisionSetting && Boolean(opts.operatorDecisionDefault))
           || (decisionSetting?.mode === 'hybrid'
             && Boolean(classifierFirstGrant(opts.operatorDecisionDefault, decisionSetting.modelAlias))),
-        shadowSampleRate: WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
+        shadowSampleRate: decisionSetting?.shadowSampleRate ?? WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
         models: decisionModelRows()
           .filter((row) => opts.configuredDecisionAdapters?.has(row.decisionCapabilities.adapterId))
           .map((row) => ({
@@ -523,8 +527,14 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
       workspaceId: req.params.wid,
       mode: parsed.data.mode,
       modelAlias: parsed.data.mode === 'llm_only' ? null : parsed.data.modelAlias,
+      shadowSampleRate: parsed.data.mode === 'shadow'
+        ? parsed.data.shadowSampleRate ?? WORKSPACE_DECISION_SHADOW_SAMPLE_RATE
+        : WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
     })
-    res.json({ decisionRouting: setting })
+    res.json({ decisionRouting: {
+      ...setting,
+      shadowSampleRate: setting.shadowSampleRate ?? WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
+    } })
   })
 
   return router

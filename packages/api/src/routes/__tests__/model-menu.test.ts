@@ -399,6 +399,7 @@ describe('[COMP:decisions/workspace-routing] workspace decision classifier', () 
       workspaceId: WID,
       mode: 'shadow',
       modelAlias: 'typesafe-jev-1.13',
+      shadowSampleRate: 0.1,
     })
 
     await request(makeApp({
@@ -456,6 +457,7 @@ describe('[COMP:decisions/workspace-routing] workspace decision classifier', () 
       workspaceId: WID,
       mode: 'hybrid',
       modelAlias: 'typesafe-jev-1.13',
+      shadowSampleRate: 0.1,
     })
   })
 
@@ -565,8 +567,8 @@ describe('[COMP:api/model-menu] explicit classifier-first grant', () => {
     getRole.mockResolvedValue(role)
     decisionRoutingStore.set.mockResolvedValue(saved('hybrid'))
     const res = await put().expect(200)
-    expect(res.body.decisionRouting).toEqual(saved('hybrid'))
-    expect(decisionRoutingStore.set).toHaveBeenCalledWith({ actingUserId: 'u1', workspaceId: WID, mode: 'hybrid', modelAlias })
+    expect(res.body.decisionRouting).toEqual({ ...saved('hybrid'), shadowSampleRate: 0.1 })
+    expect(decisionRoutingStore.set).toHaveBeenCalledWith({ actingUserId: 'u1', workspaceId: WID, mode: 'hybrid', modelAlias, shadowSampleRate: 0.1 })
     expect(decisionEvaluationProfileStore.listApproved).not.toHaveBeenCalled()
   })
 
@@ -654,6 +656,55 @@ describe('[COMP:api/model-menu] explicit classifier-first grant', () => {
       await request(makeApp(options)).put(`/api/workspaces/${WID}/decision-routing`)
         .send({ mode: 'hybrid', modelAlias: alias }).expect(400)
     }
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+  })
+})
+
+describe('selectable workspace shadow sampling', () => {
+  const WID = '00000000-0000-0000-0000-000000000001'
+  it.each(['typesafe-jev-1.13', 'openai-decisions-gpt-6-luna'])('round trips both rates for %s without authority', async modelAlias => {
+    getRole.mockResolvedValue('admin')
+    const options = {
+      decisionRoutingStore: decisionRoutingStore as never,
+      configuredDecisionAdapters: new Set(['typesafe', 'openai-decisions']),
+      operatorDecisionDefault: { mode: 'classifier_first' as const, modelAlias },
+    }
+    for (const rate of [undefined, 0.1, 1]) {
+      const saved = { workspaceId: WID, mode: 'shadow', modelAlias, shadowSampleRate: rate ?? 0.1, updatedAt: 'now' }
+      decisionRoutingStore.set.mockResolvedValue(saved)
+      decisionRoutingStore.get.mockResolvedValue(saved)
+      const response = await request(makeApp(options)).put(`/api/workspaces/${WID}/decision-routing`)
+        .send({ mode: 'shadow', modelAlias, ...(rate === undefined ? {} : { shadowSampleRate: rate }) }).expect(200)
+      expect(response.body.decisionRouting).toEqual(saved)
+      expect(decisionRoutingStore.set).toHaveBeenLastCalledWith({
+        actingUserId: 'u1', workspaceId: WID, mode: 'shadow', modelAlias, shadowSampleRate: rate ?? 0.1,
+      })
+      const menu = await request(makeApp(options)).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+      expect(menu.body.decisionRouting).toMatchObject({ mode: 'shadow', modelAlias, shadowSampleRate: rate ?? 0.1, operatorOverride: false })
+    }
+  })
+
+  it.each([0, 0.2, 10, 100, -1, null, '1', true])('rejects invalid shadow rate %j', async shadowSampleRate => {
+    getRole.mockResolvedValue('admin')
+    await request(makeApp({ decisionRoutingStore: decisionRoutingStore as never }))
+      .put(`/api/workspaces/${WID}/decision-routing`)
+      .send({ mode: 'shadow', modelAlias: 'typesafe-jev-1.13', shadowSampleRate }).expect(400)
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+  })
+
+  it.each(['llm_only', 'hybrid'])('rejects a rate on %s', async mode => {
+    getRole.mockResolvedValue('admin')
+    await request(makeApp({ decisionRoutingStore: decisionRoutingStore as never }))
+      .put(`/api/workspaces/${WID}/decision-routing`)
+      .send({ mode, ...(mode === 'hybrid' ? { modelAlias: 'typesafe-jev-1.13' } : {}), shadowSampleRate: 1 }).expect(400)
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+  })
+
+  it.each(['member', null])('forbids full shadow writes by %s', async role => {
+    getRole.mockResolvedValue(role)
+    await request(makeApp({ decisionRoutingStore: decisionRoutingStore as never }))
+      .put(`/api/workspaces/${WID}/decision-routing`)
+      .send({ mode: 'shadow', modelAlias: 'typesafe-jev-1.13', shadowSampleRate: 1 }).expect(403)
     expect(decisionRoutingStore.set).not.toHaveBeenCalled()
   })
 })
