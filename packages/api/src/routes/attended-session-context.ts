@@ -1,6 +1,6 @@
 /** Current native attended history and annotations. [COMP:api/application-persistence] */
 import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,classifySplit,isTrivialChatMessage,DerivedScopeError,executionToolContext,
- type ResearchClassifyOptions,type ResearchClassifyResult,type SplitResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
+ type ResearchClassifyOptions,type ResearchClassifyResult,type SplitOptions,type SplitResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
 import {getPool} from '../db/client.js'
 import {readAdmittedSessionQuery,captureSessionTopics,sessionQueryRootMetadata} from '../db/session-query-reader.js'
 import {readSessionQueryFrame} from '../db/session-context-revisions.js'
@@ -332,14 +332,15 @@ export async function classifyAttendedResearchMessage(input:{
  * preflight boundary after a NEW input proof. This object is never an allow receipt.
  */
 export async function prepareAttendedSplitMessage(input:ClassificationInput&{
- provider:ResearchClassifyOptions['provider'];rawMessage:string;signal:AbortSignal;measure?:ClassificationMeasure;
-}):Promise<{usage:SplitResult['usage'];model:SplitResult['model'];matches:(message:string,provider:ResearchClassifyOptions['provider'])=>boolean;read:()=>Promise<SplitResult>}|undefined>{
- const {authority,session,message,provider,rawMessage,signal,measure}=input
+ provider:ResearchClassifyOptions['provider'];rawMessage:string;signal:AbortSignal;measure?:ClassificationMeasure;decisionRuntime?:SplitOptions['decisionRuntime'];
+}):Promise<{usage:SplitResult['usage'];model:SplitResult['model'];matches:(message:string,provider:ResearchClassifyOptions['provider'],decisionRuntime?:SplitOptions['decisionRuntime'])=>boolean;read:()=>Promise<SplitResult>}|undefined>{
+ const {authority,session,message,provider,rawMessage,signal,measure,decisionRuntime}=input
  const {execution,accumulator}=authority
  const sessionId=session.id,messageId=message.id,sequence=message.sequenceNum,capture=input.capture
  const captured=capture?classificationCaptures.get(capture):undefined
  const assertBinding=()=>{
   if(input.authority!==authority||input.session!==session||input.message!==message||input.capture!==capture
+   ||input.provider!==provider||input.rawMessage!==rawMessage||input.decisionRuntime!==decisionRuntime
    ||session.id!==sessionId||message.id!==messageId||message.sequenceNum!==sequence||message.sessionId!==sessionId||message.role!=='user'
    ||authority.execution!==execution||authority.accumulator!==accumulator
    ||captured&&(captured.rootAuthority.execution!==captured.rootExecution||captured.rootAuthority.accumulator!==captured.rootAccumulator))throw new DerivedScopeError('scope_source_changed')
@@ -366,16 +367,17 @@ export async function prepareAttendedSplitMessage(input:ClassificationInput&{
   }catch(error){throw Object.assign(error instanceof Error?error:new Error('The assessment context is unavailable.'),{reason:'authority_changed',retrySafe:false})}
  }
  const options=bindScopeSources({provider,message:rawMessage,authority,signal,deadlineAt:Date.now()+8_000,
+  decisionRuntime,workspaceId:execution.security.access.workspaceId,runId:'research-split-'+messageId,
   assertInputAuthority:check},structuredClone(boundScopeSources(query)))
- // No model/decisionRuntime override: this MUST match the Standard preflight's
- // historical classifySplit({provider,message}) route, not the coordinator's.
+ // Keep the historical standalone LLM model; the selected runtime may resolve
+ // a native no-split decision, but task generation still uses that LLM route.
  const result=await classifySplit(options)
  const snapshot=structuredClone(result)
  if(snapshot.tasks)Object.freeze(snapshot.tasks)
  if(snapshot.usage)Object.freeze(snapshot.usage)
  Object.freeze(snapshot)
  let consumed=false
- return Object.freeze({usage:snapshot.usage,model:snapshot.model,matches:(message:string,candidate:ResearchClassifyOptions['provider'])=>message===rawMessage&&candidate===provider,read:async()=>{
+ return Object.freeze({usage:snapshot.usage,model:snapshot.model,matches:(message:string,candidate:ResearchClassifyOptions['provider'],runtime?:SplitOptions['decisionRuntime'])=>message===rawMessage&&candidate===provider&&runtime===decisionRuntime,read:async()=>{
   if(consumed)throw Object.assign(new DerivedScopeError('scope_source_changed'),{reason:'authority_changed',retrySafe:false})
   // Claim before awaiting: concurrent reads and retries after a refusal must not
   // turn this data-only preparation into a reusable permission receipt.

@@ -160,8 +160,12 @@ cascade, with an allowed configured LLM completion for generation, uncertainty
 review or bounded operational recovery. There is no fallback to a different
 native vendor. Source-authority refusal/cancellation still propagates. Main
 assistant routing, full fresh Memory retrieval, worker launch, executor checks
-and publication boundaries are unchanged. Standard's legacy splitter is not
-migrated by adding this adapter.
+and publication boundaries are unchanged. Eligible Standard speculative split
+preparation now passes its selected runtime and workspace scope to the existing
+`research.split` operation: a native no-split verdict avoids the LLM, while
+positive/uncertain decisions retain bounded LLM generation/review. The historic
+LLM model, fresh consumption proof and single-charge accounting are preserved.
+Other late legacy splitter paths remain unchanged.
 
 ## Usage and model identity
 

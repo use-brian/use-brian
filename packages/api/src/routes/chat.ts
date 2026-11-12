@@ -4202,7 +4202,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           try {
             return await turnTiming.time('split_classify', () => prepareAttendedSplitMessage({
               authority: splitAssessmentBranch.authority, session, message: earlyStoredUserMsg,
-              provider: backgroundProvider, rawMessage, capture: splitAssessmentBranch.capture,
+              provider: backgroundProvider, rawMessage, capture: splitAssessmentBranch.capture, decisionRuntime: options.decisionRuntime,
               signal: AbortSignal.any([abortController.signal, splitPreparationAbort.signal]), measure: turnTiming.time,
             }))
           } catch (error) {
@@ -6804,7 +6804,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           // wastes worker calls and biases the turn toward synthesis-from-
           // snippets instead of the browse the user asked for.
           try {
-            const preparedSplit = standardSplitPreparation?.matches(message, backgroundProvider) ? standardSplitPreparation : undefined
+            const preparedSplit = standardSplitPreparation?.matches(message, backgroundProvider, options.decisionRuntime) ? standardSplitPreparation : undefined
             const preflight = await runPreflight({
               provider: backgroundProvider,
               model: backgroundModel,

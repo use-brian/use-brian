@@ -83,8 +83,9 @@ retain the existing owned fallback, without truncating state or options.
 
 Native decision endpoints cannot generate new topic labels or worker task prompts. Generation,
 uncertainty review and allowed operational recovery can still need a bounded
-LLM follow-up. The main chat model is unchanged. In particular, Standard's
-legacy splitter is not moved onto a decision-runtime route by this setting.
+LLM follow-up. The main chat model is unchanged. Eligible Standard split
+preparation now uses the selected decision runtime for `research.split`;
+other late legacy splitter paths are unchanged.
 Fresh Memory, source/recipient admission, event/final output validation, worker
 launch and publication boundaries remain unchanged.
 
@@ -189,10 +190,15 @@ late canonical classifier. `research: false` is **not** interpreted as no split.
 
 The splitter reads the same admitted authored message and complete source
 cohort, with a separate accumulator and privately bound authority. Mixed or
-transformed input stays on the late path. The legacy provider/default-model
-route is preserved: no decision-runtime override is introduced into Standard
-preflight. Its generation is cancellable and bounded to 8 seconds. A positive
-research/site assessment cancels unnecessary speculative classification.
+transformed input stays on the late path. Preparation passes the captured
+workspace-selected decision runtime, workspace identity and a split-specific
+run ID through the existing `research.split` operation. A native no-split result
+can complete without LLM classification; a positive split still needs the LLM
+to generate task prompts. The historical provider/default LLM model is retained
+for generation and permitted recovery. LLM-only/shadow opt-outs and hybrid
+approval/deployment scope gates remain unchanged. Its generation is cancellable
+and bounded to 8 seconds. A positive research/site assessment cancels
+unnecessary speculative classification.
 
 Every sibling settles before admission continues or fails, and accumulated
 source evidence is merged. Successful preparation usage is recorded once even
@@ -201,11 +207,13 @@ No completed result is charged again on reuse. Interrupted calls without a
 completed result do not fabricate usage.
 
 Preparation contains data, not a permission receipt. At the original preflight
-boundary, exact message bytes and provider identity must match. Consumption is
+boundary, exact message bytes, provider and decision-runtime identities must
+match. Consumption is
 one-shot and requires a new current source proof, captured root/fork identity
 checks and cancellation checks. Worker spawning, plan seeding, events and other
 preflight effects remain at the original late boundary. Fresh Memory retrieval,
 per-event/final output authority and publication checks are unchanged.
 
-Overlap removes an avoidable serial classification window; it does not promise
-production latency percentiles or equate native wait with pure inference time.
+Overlap removes an avoidable serial classification window; a native no-split
+verdict additionally avoids an unnecessary LLM call. Neither change promises
+production latency percentiles or equates native wait with pure inference time.
