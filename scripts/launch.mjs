@@ -144,7 +144,12 @@ function reserveAvailablePort(preferredPort) {
 
 // The embedded brain uses a distinctive high port so it never collides with a
 // developer's local Postgres on the default 5432 (verified failure mode).
-const PORTS = { pglite: 54329, api: resolveApiPort(process.env.USEBRIAN_API_PORT), docSync: 8080, appWeb: 3003, discordConnector: 8090, waConnector: 8091, messageStore: 8092, wechatConnector: 8093, feishuConnector: 8095 }
+const PORTS = { pglite: 54329, api: resolveApiPort(process.env.USEBRIAN_API_PORT), docSync: Number(process.env.USEBRIAN_DOC_SYNC_PORT || 8180), appWeb: 3003, authWeb: Number(process.env.USEBRIAN_AUTH_WEB_PORT || 3105), discordConnector: 8090, waConnector: 8091, messageStore: 8092, wechatConnector: 8093, feishuConnector: 8095 }
+// Agentbox/local Outpost: honor USEBRIAN_EDITION=outpost so auth-web + email OTP
+// can run beside a prod stack. Default auth-web :3105 / doc-sync :8180 avoid prod.
+const outpostLocal = !adminOnly && (process.env.USEBRIAN_EDITION ?? '').trim().toLowerCase() === 'outpost'
+const edition = outpostLocal ? 'outpost' : 'oss'
+const smtpPort = Number(process.env.SMTP_PORT || (outpostLocal ? 2525 : 0))
 
 // ── config (ChatGPT sign-in OR one API credential) ──────────────────
 mkdirSync(CONFIG_DIR, { recursive: true })
@@ -317,14 +322,10 @@ const env = {
   // note + oss-local-brain-wedge.md §12.4). The external-Postgres escape hatch
   // leaves it unset — a real Postgres isolates statements per connection.
   ...(useEmbedded ? { PG_SINGLE_CONNECTION: '1' } : {}),
-  // This is the single-player open edition: app-web hides hosted-only surfaces
-  // (billing, teammates) and shows the upgrade affordance instead. The flag
-  // defaults to the full hosted edition when unset, so only the local launcher
-  // opts into 'oss'.
-  NEXT_PUBLIC_USEBRIAN_EDITION: 'oss',
-  // Server-side edition mirror (the api gates the local-owner session on this)
-  // + the owner's display name, both consumed by /auth/local-session.
-  USEBRIAN_EDITION: 'oss',
+  // Local launcher defaults to OSS; set USEBRIAN_EDITION=outpost for the
+  // multi-user auth portal path used by home-server style deployments.
+  NEXT_PUBLIC_USEBRIAN_EDITION: edition,
+  USEBRIAN_EDITION: edition,
   USEBRIAN_OWNER_NAME: ownerName,
   API_URL: `http://localhost:${PORTS.api}`,
   APP_URL: `http://localhost:${PORTS.appWeb}`,
@@ -333,6 +334,23 @@ const env = {
   // API_URL above remains the server-side target on this machine.
   PUBLIC_API_URL: process.env.PUBLIC_API_URL ?? '',
   PORT: String(PORTS.api),
+  ...(outpostLocal ? {
+    AUTH_PORTAL_URL: process.env.AUTH_PORTAL_URL || `http://localhost:${PORTS.authWeb}`,
+    AUTHED_APP_URL: process.env.AUTHED_APP_URL || `http://localhost:${PORTS.appWeb}`,
+    PUBLIC_PRIMARY_AUTH_URL: process.env.PUBLIC_PRIMARY_AUTH_URL || `http://localhost:${PORTS.authWeb}`,
+    NEXT_PUBLIC_PRIMARY_AUTH_URL: process.env.NEXT_PUBLIC_PRIMARY_AUTH_URL || `http://localhost:${PORTS.authWeb}`,
+    INTERNAL_API_URL: process.env.INTERNAL_API_URL || `http://127.0.0.1:${PORTS.api}`,
+    OUTPOST_AUTH_EMAIL_ENABLED: process.env.OUTPOST_AUTH_EMAIL_ENABLED || 'true',
+    OUTPOST_AUTH_OIDC_ENABLED: process.env.OUTPOST_AUTH_OIDC_ENABLED || 'false',
+    // rig-mailbox only accepts *.example addresses.
+    OUTPOST_AUTH_BOOTSTRAP_EMAILS: process.env.OUTPOST_AUTH_BOOTSTRAP_EMAILS || 'admin@fixture.example',
+    SMTP_HOST: process.env.SMTP_HOST || '127.0.0.1',
+    SMTP_PORT: String(smtpPort),
+    SMTP_SECURE: process.env.SMTP_SECURE || 'false',
+    SMTP_USER: process.env.SMTP_USER || 'capture@fixture.example',
+    SMTP_PASSWORD: process.env.SMTP_PASSWORD || 'fixture-only',
+    EMAIL_FROM_ADDRESS: process.env.EMAIL_FROM_ADDRESS || 'auth@fixture.example',
+  } : {}),
 }
 
 // ── helpers ────────────────────────────────────────────────────────
@@ -342,7 +360,7 @@ const children = []
 // OOMs alone, run()'s exit handler names it, and the launcher shuts down
 // cleanly. The platform repo already caps its API dev process the same way.
 // Sized generously above observed steady-state; override with USEBRIAN_HEAP_MB.
-const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'browser-relay': 512, 'discord-connector': 512, 'wa-connector': 512, 'wechat-connector': 512, 'feishu-connector': 512 }
+const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'auth-web': 1024, mailbox: 256, 'browser-relay': 512, 'discord-connector': 512, 'wa-connector': 512, 'wechat-connector': 512, 'feishu-connector': 512 }
 function run(label, cmd, args, extraEnv = {}, cwd = ROOT) {
   const heapMb = Number(process.env.USEBRIAN_HEAP_MB) || HEAP_MB[label]
   const nodeOptions = heapMb
@@ -576,6 +594,14 @@ if(adminOnly){
  await waitForPort(Number(env.SMTP_PORT),'synthetic SMTP capture')
  run('auth-web','pnpm',['--filter','@use-brian/auth-web','dev'])
  await waitForPort(3005,'application sign-in portal')
+} else if (outpostLocal) {
+  const mailboxDir = join(CONFIG_DIR, 'mailbox')
+  mkdirSync(mailboxDir, { recursive: true })
+  console.log(`[launch] starting outpost mailbox (:${smtpPort}) + auth-web (:${PORTS.authWeb}) ...`)
+  run('mailbox', process.execPath, [join(ROOT, 'scripts/rig-mailbox.mjs'), mailboxDir, String(smtpPort)])
+  await waitForPort(smtpPort, 'synthetic SMTP capture')
+  run('auth-web', 'pnpm', ['--filter', '@use-brian/auth-web', 'exec', 'next', 'dev', '--port', String(PORTS.authWeb)])
+  await waitForPort(PORTS.authWeb, 'application sign-in portal', 120_000)
 }
 
 console.log(`[launch] starting api (:${PORTS.api}), doc-sync (:${PORTS.docSync}), app-web (:${PORTS.appWeb}) ...`)
@@ -633,7 +659,9 @@ if (useLocalFeishuConnector) {
   })
   await waitForPort(PORTS.feishuConnector, 'Feishu/Lark connector')
 }
-const entryUrl = `http://localhost:${PORTS.appWeb}/api/auth/local-session`
+const entryUrl = outpostLocal
+  ? (env.AUTH_PORTAL_URL || `http://localhost:${PORTS.authWeb}`)
+  : `http://localhost:${PORTS.appWeb}/api/auth/local-session`
 // A bridge is `off` when core-only skipped it and `external` only when some
 // other deployment owns it — the two are not the same thing to a reader
 // wondering why a channel is silent.
@@ -645,8 +673,9 @@ const messageStoreStatus = messageStoreLaunch.enabled ? ` · chat-archive :${POR
 const wechatStatus = bridgeStatus('wechat', useLocalWechatConnector, PORTS.wechatConnector)
 const feishuStatus = bridgeStatus('feishu', useLocalFeishuConnector, PORTS.feishuConnector)
 const browserRelayStatus = bridgeStatus('browser-relay', useLocalBrowserRelay, browserRelayPort)
+const authWebStatus = outpostLocal ? ` · auth-web :${PORTS.authWeb} · smtp :${smtpPort}` : ''
 const noBrowser = ['1', 'true'].includes((process.env.USEBRIAN_NO_BROWSER ?? '').trim().toLowerCase())
-console.log(`\n[launch] Use Brian is up. ${noBrowser ? `Entry URL: ${entryUrl}` : `Opening ${entryUrl}`}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus}${messageStoreStatus}${wechatStatus}${feishuStatus}${browserRelayStatus})\n  Ctrl-C to stop everything.\n`)
+console.log(`\n[launch] Use Brian is up. ${noBrowser ? `Entry URL: ${entryUrl}` : `Opening ${entryUrl}`}\n  (edition ${edition} · api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${authWebStatus}${discordStatus}${waStatus}${messageStoreStatus}${wechatStatus}${feishuStatus}${browserRelayStatus})\n  Ctrl-C to stop everything.\n`)
 if (preferredProvider === 'openai-codex') {
   console.log('[launch] Open Settings → AI providers to complete ChatGPT sign-in.')
 }
