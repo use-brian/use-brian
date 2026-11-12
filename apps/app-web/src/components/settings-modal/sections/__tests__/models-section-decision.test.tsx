@@ -133,7 +133,7 @@ describe("workspace decision routing", () => {
     await render({ models: [{ ...model, classifierFirst: { operationIds: ["research.intent", "chat.route"] } }] });
     const option = choices(`hybrid:${alias}`);
     expect(option).toHaveLength(1);
-    expect(option[0].textContent).toContain("Jev first (100%)");
+    expect(option[0].textContent).toContain("Classifier first (100%)");
     expect(option[0].textContent).toContain("research.intent, chat.route");
     expect(option[0].textContent).toContain(t.decisionFirstBadge);
     expect(container.textContent).toContain(t.decisionFirstAvailable);
@@ -151,6 +151,69 @@ describe("workspace decision routing", () => {
     } else {
       expect(setWorkspaceDecisionRouting).not.toHaveBeenCalled();
       expect(fetchModelMenu).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it.each([false, true])("grants full routing only to the exact OpenAI model, with Jev approved=%s", async (jevApproved) => {
+    const openaiAlias = "openai-decisions-gpt-6-luna";
+    const openai = {
+      alias: openaiAlias, displayName: "GPT-6 Luna Decisions",
+      provider: "openai-decisions", adapterId: "openai-decisions",
+      hybridOperations: [approved], classifierFirst: { operationIds: ["research.intent"] },
+    };
+    await render({ models: [
+      { ...model, hybridOperations: jevApproved ? [approved] : [], classifierFirst: null },
+      openai,
+    ] });
+    const fullRouting = choices(`hybrid:${openaiAlias}`);
+    expect(fullRouting).toHaveLength(1);
+    expect(fullRouting[0].textContent).toContain("GPT-6 Luna Decisions - Classifier first (100%)");
+    expect(fullRouting[0].textContent).toContain("research.intent");
+    expect(fullRouting[0].textContent).not.toContain("chat.route");
+    expect(fullRouting[0].textContent).toContain(t.decisionFirstBadge);
+    expect(choices(`shadow:${openaiAlias}`)).toHaveLength(1);
+    expect(choices(`shadow:${alias}`)).toHaveLength(1);
+    expect(choices(`shadow:${alias}`)[0].textContent).toContain("Jev 1.13");
+    const jevHybrid = choices(`hybrid:${alias}`);
+    expect(jevHybrid).toHaveLength(jevApproved ? 1 : 0);
+    if (jevApproved) {
+      expect(jevHybrid[0].textContent).toContain(t.decisionHybridBadge.replace("{count}", "1"));
+      expect(jevHybrid[0].textContent).not.toContain("Classifier first (100%)");
+    }
+    expect(container.textContent?.match(/Classifier first \(100%\)/g)).toHaveLength(2); // One choice + availability notice.
+    vi.mocked(confirmDialog).mockResolvedValueOnce(true);
+    await choose(`hybrid:${openaiAlias}`);
+    expect(confirmDialog).toHaveBeenCalledExactlyOnceWith({
+      title: t.decisionFirstConfirmTitle,
+      description: t.decisionFirstConfirmBody.replace("{model}", openai.displayName).replace("{scope}", "research.intent"),
+      confirmLabel: t.decisionFirstConfirmCta,
+    });
+    expect(setWorkspaceDecisionRouting).toHaveBeenCalledExactlyOnceWith("ws-1", { mode: "hybrid", modelAlias: openaiAlias });
+  });
+
+  it.each(["llm_only", "shadow"] as const)("rolls OpenAI full routing back to %s without changing the contract", async (mode) => {
+    const openaiAlias = "openai-decisions-gpt-6-luna";
+    await render({ mode: "hybrid", modelAlias: openaiAlias, operatorOverride: true,
+      models: [model, {
+        alias: openaiAlias, displayName: "GPT-6 Luna Decisions",
+        provider: "openai-decisions", adapterId: "openai-decisions",
+        hybridOperations: [], classifierFirst: { operationIds: ["research.intent"] },
+      }],
+    });
+    expect(container.querySelector(`[data-value="hybrid:${openaiAlias}"]`)).not.toBeNull();
+    expect(container.textContent).toContain(t.decisionFirstConfirmBody.replace("{model}", "GPT-6 Luna Decisions").replace("{scope}", "research.intent"));
+    vi.mocked(confirmDialog).mockResolvedValueOnce(true);
+    await choose(mode === "llm_only" ? mode : `shadow:${openaiAlias}`);
+    if (mode === "llm_only") {
+      expect(confirmDialog).not.toHaveBeenCalled();
+      expect(setWorkspaceDecisionRouting).toHaveBeenCalledExactlyOnceWith("ws-1", { mode });
+    } else {
+      expect(confirmDialog).toHaveBeenCalledExactlyOnceWith({
+        title: t.decisionConfirmTitle,
+        description: t.decisionConfirmBody.replace("{model}", "GPT-6 Luna Decisions").replace("{percent}", "10"),
+        confirmLabel: t.decisionConfirmCta,
+      });
+      expect(setWorkspaceDecisionRouting).toHaveBeenCalledExactlyOnceWith("ws-1", { mode, modelAlias: openaiAlias });
     }
   });
 
@@ -196,7 +259,7 @@ describe("workspace decision routing", () => {
     expect(choices(`hybrid:${alias}`)).toHaveLength(1);
     expect(container.textContent).toContain(t.decisionOperatorOverrideNotice);
     expect(container.textContent).toContain(t.decisionOperatorOverrideBadge);
-    expect(container.textContent).not.toContain("Jev first (100%)");
+    expect(container.textContent).not.toContain("Classifier first (100%)");
   });
 
   it("retains revoked hybrid selections", async () => {

@@ -66,13 +66,16 @@ describe("[COMP:app-web/models-settings] Models section", () => {
     const keys = Object.keys(tm).filter(key => key.startsWith("decisionFirst")) as Array<keyof typeof tm>;
     expect(keys).toContain("decisionFirstOption");
     expect(keys).toContain("decisionFirstAvailable");
-    for (const locale of [ja, zh, zhCN]) {
+    for (const locale of [en, ja, zh, zhCN]) {
       for (const key of keys) {
         const text = locale.chrome.settingsModal.models[key];
         expect(text.length).toBeGreaterThan(0);
+        expect(text).not.toContain("Jev");
         expect(text.match(/\{\w+\}/g) ?? []).toEqual(tm[key].match(/\{\w+\}/g) ?? []);
       }
+      expect(locale.chrome.settingsModal.models.decisionOperatorOverrideNotice).not.toContain("Jev");
     }
+    expect(tm.decisionFirstOption).toBe("{model} - Classifier first (100%)");
   });
 
   it("every user-facing string flows through the dictionary (i18n contract)", () => {

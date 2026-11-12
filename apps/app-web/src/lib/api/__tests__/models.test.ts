@@ -54,6 +54,37 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
     },
   );
 
+  it("preserves model-local grants and the selected OpenAI decision alias in a two-backend menu", async () => {
+    const openaiAlias = "openai-decisions-gpt-6-luna";
+    const models = [
+      {
+        alias: "typesafe-jev-1.13", displayName: "Jev 1.13", provider: "typesafe", adapterId: "typesafe",
+        hybridOperations: [], classifierFirst: null,
+      },
+      {
+        alias: openaiAlias, displayName: "GPT-6 Luna Decisions",
+        provider: "openai-decisions", adapterId: "openai-decisions",
+        hybridOperations: [], classifierFirst: { operationIds: ["research.intent"] },
+      },
+    ];
+    mockFetch.mockResolvedValueOnce(ok({ decisionRouting: {
+      mode: "hybrid", modelAlias: openaiAlias, updatedAt: "now", operatorOverride: true,
+      shadowSampleRate: 0.1, models,
+    } }));
+    const menu = await fetchModelMenu("ws-1");
+    expect(menu.decisionRouting.modelAlias).toBe(openaiAlias);
+    expect(menu.decisionRouting.models).toEqual(models);
+    expect(menu.decisionRouting.models.filter(model => model.classifierFirst).map(model => model.alias)).toEqual([openaiAlias]);
+
+    mockFetch.mockResolvedValueOnce(ok({ decisionRouting: {
+      mode: "hybrid", modelAlias: openaiAlias, updatedAt: "now",
+    } }));
+    const setting = await setWorkspaceDecisionRouting("ws-1", { mode: "hybrid", modelAlias: openaiAlias });
+    const [, init] = mockFetch.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ mode: "hybrid", modelAlias: openaiAlias });
+    expect(setting.modelAlias).toBe(openaiAlias);
+  });
+
   it("posts estimate requests at the chosen budget", async () => {
     mockFetch.mockResolvedValueOnce(ok({ estimate: { modelAlias: "qwen3.7-max", toolRounds: 100, minCredits: 9, maxCredits: 120 } }));
     const est = await fetchMeteredEstimate("ws-1", "qwen3.7-max", 100);

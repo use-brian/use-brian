@@ -1,19 +1,26 @@
 # Foreground classifiers and Standard split preparation
 
 Classifier failures are not evidence of an empty main assistant generation.
-The correlated response diagnostics distinguish these calls. In particular, the
-historical clean Codex `end_turn` with no public text remains unexplained until
-it reproduces with diagnostics; this change does not claim to fix that case.
+The changes here repair classifier schemas and bounded preparation; they do not
+claim to fix empty main assistant responses.
 
-## Explicit 100% Jev-first routing
+## Explicit 100% classifier-first routing
 
-`TYPESAFE_API_KEY` registers the Jev transport; key presence alone never enables
-classifier authority. To explicitly authorize classifier-first execution, set:
+`TYPESAFE_API_KEY` registers the Jev transport. The separate
+`OPENAI_DECISIONS_API_KEY` registers the native OpenAI Decisions transport;
+neither key alone enables classifier authority. To explicitly authorize
+classifier-first execution using Jev, set:
 
 ```dotenv
 DECISION_DEFAULT_MODE=classifier_first
 DECISION_DEFAULT_MODEL=typesafe-jev-1.13
 ```
+
+To explicitly select OpenAI instead, use
+`DECISION_DEFAULT_MODEL=openai-decisions-gpt-6-luna` with its dedicated key.
+Registering that adapter does not replace an existing Jev selection or reuse
+Codex login. See [Decision adapters](decision-adapters.md) for the native wire
+contract, separate recording identity, usage normalization and extension seam.
 
 This is a deployment-operator override, **not approved quality evidence**. It
 reuses the existing exact-version `operator_override` profiles and Hydra
@@ -23,7 +30,7 @@ classifier pipeline. There is no database migration or new persisted mode.
 The policy applies to workspaces without an explicit decision-routing row and
 to saved `hybrid` selections for the exact configured model. Explicit `llm_only`
 and `shadow` rows remain opt-outs. In Settings → Models → Decision routing,
-select **Jev first (100%)** to replace an existing opt-out with matching hybrid
+select the model's **Classifier first (100%)** option to replace an existing opt-out with matching hybrid
 routing; confirmation explains the operator authority and fallback behavior.
 The API accepts this selection only from an owner/admin with the configured
 adapter and deployment grant. A key or a client-supplied flag cannot grant it.
@@ -36,15 +43,15 @@ the ordinary approval gate. The legacy `operator_hybrid` deployment mode keeps
 its no-workspace-row-only behavior.
 
 100% means no execution sampling for eligible typed operations already using
-`DecisionRuntime`. A successful Jev decision completes directly, without an
+`DecisionRuntime`. A successful native decision completes directly, without an
 LLM classification. Observation-only consumers remain shadow-only, with full
 sampling inside the deployment override scope; they gain no execution
-authority. Jev still has its existing capability, context-capacity, cancellation
+authority. Each adapter retains its capability, context-capacity, cancellation
 and one-second primary transport bounds. The shared invocation/profile limits
 and pending/final authority checks are unchanged. Unsupported-capacity inputs
 retain the existing owned fallback, without truncating state or options.
 
-Jev cannot generate new topic labels or worker task prompts. Generation,
+Native decision endpoints cannot generate new topic labels or worker task prompts. Generation,
 uncertainty review and allowed operational recovery can still need a bounded
 LLM follow-up. The main chat model is unchanged. In particular, Standard's
 legacy splitter is not moved onto a decision-runtime route by this setting.
