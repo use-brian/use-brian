@@ -2,11 +2,43 @@
 
 /** Task-focused catalogue controls over existing Association reads. [COMP:app-web/association] */
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import { ArrowLeft, Search, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { AssociationField, AssociationListState, AssociationToggle, useAssociationPage } from "./operator-controls";
+
+/** Keep authored edits when staff navigate away through links or reload. */
+export function useAssociationDraftGuard(dirty: boolean) {
+  const t = useT().associationPage;
+  const router = useRouter();
+  useEffect(() => {
+    if (!dirty) return;
+    let asking = false;
+    const unload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    const click = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      const link = event.target instanceof Element ? event.target.closest("a[href]") as HTMLAnchorElement | null : null;
+      if (!link || link.download || (link.target && link.target !== "_self")) return;
+      const to = new URL(link.href);
+      if (to.origin !== location.origin || (to.pathname === location.pathname && to.search === location.search)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (asking) return;
+      asking = true;
+      void confirmDialog({ title: t.ux.cancelEdit, description: t.ux.cancelHelp, confirmLabel: t.eventPage.discard, cancelLabel: t.ux.keepEditing })
+        .then(leave => { if (leave) router.push(to.pathname + to.search + to.hash); })
+        .finally(() => { asking = false; });
+    };
+    window.addEventListener("beforeunload", unload);
+    document.addEventListener("click", click, true);
+    return () => {
+      window.removeEventListener("beforeunload", unload);
+      document.removeEventListener("click", click, true);
+    };
+  }, [dirty, router, t]);
+}
 
 export function AssociationEditor({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   const t = useT().associationPage;

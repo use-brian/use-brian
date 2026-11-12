@@ -3,7 +3,7 @@
 /** Staff-console building blocks: page headers, tiles, status pills, responsive tables, choice controls. [COMP:app-web/association] */
 import Link from "next/link";
 import { useRef, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
-import { ArrowLeft, type LucideIcon } from "lucide-react";
+import { ArrowLeft, ChevronDown, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
@@ -53,17 +53,6 @@ export function PageHeader({ eyebrow, title, description, back, actions, childre
     </div>
     {children}
   </header>;
-}
-
-export function StatTile({ label, value, suffix, hint, href, tone = "neutral" }: { label: string; value: number | string; suffix?: string; hint?: string; href?: string; tone?: AssociationTone }) {
-  const body = <>
-    <p className="text-sm text-muted-foreground">{label}</p>
-    <p className={cn("mt-1 text-3xl font-semibold tracking-tight tabular-nums", tone === "danger" ? "text-destructive" : tone === "warning" ? "text-amber-700 dark:text-amber-300" : "")}>{value}{suffix ? <span className="text-lg text-muted-foreground">{suffix}</span> : null}</p>
-    {hint ? <p className="mt-1 text-xs text-muted-foreground">{hint}</p> : null}
-  </>;
-  const className = "block min-h-8 max-sm:min-h-11 rounded-2xl border border-border bg-background p-5";
-  return href ? <Link href={href} className={cn(className, "transition-colors hover:border-primary/50 focus-visible:outline-2 focus-visible:outline-ring")} data-stat-tile>{body}</Link>
-    : <div className={className} data-stat-tile>{body}</div>;
 }
 
 export function EmptyState({ icon: Icon, title, description, action }: { icon?: LucideIcon; title: string; description?: string; action?: ReactNode }) {
@@ -125,18 +114,21 @@ export function SwitchField({ label, checked, onChange, help, disabled = false }
   </label>;
 }
 
-export function FormSection({ title, description, collapsible = false, defaultOpen = false, children }: { title: string; description?: string; collapsible?: boolean; defaultOpen?: boolean; children: ReactNode }) {
+export function FormSection({ title, id, description, collapsible = false, defaultOpen = false, children }: { title: string; id?: string; description?: string; collapsible?: boolean; defaultOpen?: boolean; children: ReactNode }) {
   const grid = <div className="grid min-w-0 gap-4 pt-4 md:grid-cols-2">{children}</div>;
-  if (collapsible) return <details open={defaultOpen || undefined} className="col-span-full min-w-0 rounded-xl border border-border px-4 pb-4">
-    <summary className="-mx-4 min-h-8 max-sm:min-h-11 cursor-pointer list-none px-4 text-sm font-semibold content-center focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">{title}{description ? <span className="block text-xs font-normal text-muted-foreground">{description}</span> : null}</summary>{grid}
+  if (collapsible) return <details open={defaultOpen || undefined} className="group col-span-full min-w-0 rounded-xl border border-border px-4 open:pb-4">
+    <summary className="-mx-4 flex min-h-11 cursor-pointer list-none items-center md:min-h-9 justify-between gap-3 px-4 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
+      <span>{title}{description ? <span className="block text-xs font-normal text-muted-foreground">{description}</span> : null}</span>
+      <ChevronDown aria-hidden className="size-4 shrink-0 text-muted-foreground group-open:rotate-180" />
+    </summary>{grid}
   </details>;
-  return <section className="col-span-full min-w-0 border-t border-border pt-5 first:border-0 first:pt-0">
+  return <section id={id} tabIndex={id ? -1 : undefined} className="col-span-full min-w-0 scroll-mt-4 border-t border-border pt-5 first:border-0 first:pt-0">
     <h3 className="text-sm font-semibold">{title}</h3>{description ? <p className="mt-0.5 text-xs text-muted-foreground">{description}</p> : null}{grid}
   </section>;
 }
 
 export function FormFooter({ children }: { children: ReactNode }) {
-  return <div className="sticky bottom-0 -mx-4 mt-2 flex flex-wrap items-center gap-2 border-t border-border bg-background/95 px-4 py-3 backdrop-blur md:-mx-6 md:px-6" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>{children}</div>;
+  return <div className="md:sticky md:bottom-0 -mx-4 mt-2 flex flex-wrap items-center gap-2 border-t border-border bg-background/95 px-4 py-3 backdrop-blur md:-mx-6 md:px-6" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>{children}</div>;
 }
 
 export function TechnicalDetails({ rows, children }: { rows?: [string, string][]; children?: ReactNode }) {

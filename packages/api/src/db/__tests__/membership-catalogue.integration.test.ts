@@ -35,10 +35,13 @@ describe.skipIf(!pool)('[COMP:crm/membership-catalogue] actual PostgreSQL public
   await pool!.query("INSERT INTO entities(id,workspace_id,kind,display_name,created_by_user_id,source) VALUES($1,$2,'person','Synthetic member',$3,'manual')",[contact,workspace,actor.actingUserId]);
   const membership=(await pool!.query("INSERT INTO association_memberships(workspace_id,contact_id,plan_id,idempotency_key,request_fingerprint,status,starts_at,renewal_mode,provider,provider_membership_id) VALUES($1,$2,$3,$4,$5,'active',now(),'auto','stripe','sub_synthetic_catalogue') RETURNING *",[workspace,contact,first.plans[0].planId,randomUUID(),'a'.repeat(64)])).rows[0];
   const next=(await store.draft(workspace)).document!;next.plans[0].feeMinor=150000
+  next.plans[0].application.optionalFields=['special_request']
   await store.save(workspace,1,next,actor)
   expect((await store.read(workspace,'oasa')).plans[0].feeMinor).toBe(120000)
+  expect((await store.read(workspace,'sea')).plans[0].application.optionalFields).toBeUndefined()
   await expect(store.publish(workspace,1,actor)).rejects.toMatchObject({code:'conflict'})
   await store.publish(workspace,2,actor)
+  expect((await store.read(workspace,'sea')).plans[0].application.optionalFields).toEqual(['special_request'])
   expect((await pool!.query('SELECT fee_minor FROM association_membership_plans WHERE workspace_id=$1',[workspace])).rows[0].fee_minor).toBe('150000')
   expect((await pool!.query('SELECT * FROM association_memberships WHERE id=$1',[membership.id])).rows[0]).toEqual(membership);
   await store.observe(workspace,'oasa',1);expect((await store.draft(workspace)).observations.oasa).toBeUndefined()

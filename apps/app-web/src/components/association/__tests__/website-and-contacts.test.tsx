@@ -2,9 +2,9 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
-const api=vi.hoisted(()=>({module:vi.fn(),list:vi.fn(),catalogue:vi.fn(),status:vi.fn(),settings:vi.fn(),definitions:vi.fn(),submissions:vi.fn(),records:vi.fn(),segments:vi.fn(),preview:vi.fn(),query:''}));
+const api=vi.hoisted(()=>({module:vi.fn(),list:vi.fn(),catalogue:vi.fn(),status:vi.fn(),settings:vi.fn(),definitions:vi.fn(),submissions:vi.fn(),submission:vi.fn(),records:vi.fn(),segments:vi.fn(),preview:vi.fn(),query:''}));
 vi.mock('@/lib/api/association',async original=>({...await original<typeof import('@/lib/api/association')>(),getAssociationModuleSnapshot:api.module,listAssociationPage:api.list,getMembershipCatalogueDraft:api.catalogue,getWebsiteStatus:api.status,getSiteContentDraft:api.settings}));
-vi.mock('@/lib/api/crm',async original=>({...await original<typeof import('@/lib/api/crm')>(),listCrmIntakeDefinitions:api.definitions,listCrmSubmissionPage:api.submissions,fetchCrmRecordPage:api.records,listCrmSegments:api.segments,previewCrmSegment:api.preview}));
+vi.mock('@/lib/api/crm',async original=>({...await original<typeof import('@/lib/api/crm')>(),listCrmIntakeDefinitions:api.definitions,listCrmSubmissionPage:api.submissions,getCrmSubmission:api.submission,fetchCrmRecordPage:api.records,listCrmSegments:api.segments,previewCrmSegment:api.preview}));
 vi.mock('@/lib/surface-prefetch',()=>({associationModuleCacheKey:(w:string)=>`association-module:${w}:viewer`,associationPageCacheKey:(w:string,r:string,q={})=>`crm:${w}:viewer:${r}:${JSON.stringify(q)}`}));
 vi.mock('next/navigation',()=>({useRouter:()=>({replace:vi.fn(),push:vi.fn()}),useSearchParams:()=>new URLSearchParams(api.query)}));
 import { AssociationPlansPanel } from '../plans-panel';
@@ -47,11 +47,11 @@ describe('[COMP:app-web/site-content] publication status in staff words',()=>{
 describe('[COMP:app-web/association] membership plans with a published membership page',()=>{
   it('keeps every plan listed and sends catalogue plans to the membership page editor',async()=>{
     api.list.mockImplementation(async(_w:string,resource:string)=>({items:resource==='plans'?[plan('annual','Annual'),plan('legacy','Legacy')]:[],nextCursor:null}));
-    api.catalogue.mockResolvedValue({version:1,publishedRevision:1,document:{},published:{plans:[{key:'annual'}]},observations:{},issues:[]});
+    api.catalogue.mockResolvedValue({version:1,publishedRevision:1,document:{plans:[]},published:{plans:[{key:'annual'}]},observations:{},issues:[]});
     await render(<AssociationPlansPanel workspaceId="w"/>);
     expect(host.querySelectorAll('[data-plan-card]')).toHaveLength(2);
     expect(host.textContent).toContain(u.onMembershipPage);
-    expect(hrefs()).toContain('/w/w/association?section=website&page=membership&plan=annual');
+    expect(hrefs()).toContain('/w/w/association?section=plans&view=website&plan=annual');
     expect([...host.querySelectorAll('button')].filter(button=>button.textContent===en.associationPage.manage.edit)).toHaveLength(1);
   });
   it('shows members the plans read-only, without edit or create actions',async()=>{
@@ -65,15 +65,25 @@ describe('[COMP:app-web/association] membership plans with a published membershi
 });
 
 describe('[COMP:app-web/association] Contacts & forms',()=>{
-  it('groups submissions by the form definitions the workspace has and opens each row in the CRM',async()=>{
+  it('groups submissions by form and links to the exact record inside Association',async()=>{
     api.query='view=forms';
     api.definitions.mockResolvedValue([{definitionKey:'general-enquiry',label:'General enquiry',active:true},{definitionKey:'old-form',label:'Retired form',active:false}]);
     api.submissions.mockResolvedValue({submissions:[{id:'sub-1',contactId:'c1',contactName:'Fictional Person',definitionLabel:'General enquiry',status:'new',submittedAt:'2027-01-01T00:00:00Z'}],nextCursor:'more'});
     await render(<AssociationContactsSection workspaceId="w"/>);
     expect(host.textContent).toContain('General enquiry');expect(host.textContent).not.toContain('Retired form');
-    expect(api.submissions).toHaveBeenCalledWith('w',expect.objectContaining({status:'new',cursor:null}));
-    expect(hrefs()).toContain('/w/w/crm?review=submissions&submission=sub-1');
+    expect(api.submissions).toHaveBeenCalledWith('w',expect.objectContaining({status:undefined,cursor:null}));
+    expect(hrefs()).toContain('/w/w/association?section=contacts&view=forms&submission=sub-1');
     expect([...host.querySelectorAll('button')].find(button=>button.textContent===en.associationPage.next)?.disabled).toBe(false);
+  });
+  it('opens the exact submission and preserves the selected form and status on return', async () => {
+    api.query='view=forms&form=general-enquiry&status=new&submission=sub-1';
+    api.submission.mockResolvedValue({id:'sub-1',contactId:'c1',contactName:'Fictional Person',definitionLabel:'General enquiry',status:'new',submittedAt:'2027-01-01T00:00:00Z',fields:{ask:'Sample answer'},definitionSchemaSnapshot:{fields:[{key:'ask',label:'Your question'}]}});
+    await render(<AssociationContactsSection workspaceId="w"/>);
+    expect(api.submission).toHaveBeenCalledWith('w','sub-1');
+    expect(host.textContent).toContain('Your question');
+    expect(host.textContent).toContain('Sample answer');
+    expect(hrefs()).toContain('/w/w/association?section=contacts&view=forms&form=general-enquiry&status=new');
+    expect(api.submissions).not.toHaveBeenCalled();
   });
   it('lists saved audiences with a live count and links to the CRM segment',async()=>{
     api.query='view=newsletter';
@@ -84,15 +94,17 @@ describe('[COMP:app-web/association] Contacts & forms',()=>{
     expect(host.textContent).toContain(format(u.showingFirst,{count:1}));
     expect(hrefs()).toContain('/w/w/crm?review=segments&segment=seg-1');
   });
-  it('shows contacts one page at a time with CRM links',async()=>{
+  it('shows contacts one page at a time with links to their member record and CRM',async()=>{
+    api.query='view=people';
     api.records.mockResolvedValue({items:[{kind:'contact',id:'c1',name:'Fictional Person',email:null,phone:null,companyId:null,tags:[]}],nextCursor:null,hasMore:false});
     await render(<AssociationContactsSection workspaceId="w"/>);
     expect(api.records).toHaveBeenCalledWith('w',expect.objectContaining({kind:'contact',limit:25}));
-    expect(host.textContent).toContain(u.noEmail);expect(hrefs()).toContain('/w/w/crm/contact/c1');
+    expect(host.textContent).toContain(u.noEmail);expect(hrefs()).toContain('/w/w/crm/contact/c1');expect(hrefs()).toContain('/w/w/association?section=memberships&contactId=c1');
   });
   it('renews open contact, submission and audience lists so revoked department records disappear within the 30-second bound',async()=>{
     vi.useFakeTimers({toFake:['setTimeout','clearTimeout','setInterval','clearInterval','performance']});
     try{
+      api.query='view=people';
       let authorized=true;
       api.records.mockImplementation(async()=>({items:authorized?[{kind:'contact',id:'c1',name:'Fictional Departmental Person',email:null,phone:null,companyId:null,tags:[]}]:[],nextCursor:null,hasMore:false}));
       await render(<AssociationContactsSection workspaceId="w"/>);
