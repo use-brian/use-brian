@@ -56,11 +56,15 @@ const modelResponse=(parts:unknown[])=>new Response('data: '+JSON.stringify({can
 
 describe.sequential('[COMP:api/channel-recording] connector operational progress during retained Telegram turns',()=>{
  beforeAll(async()=>{
-  expect((await query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0])
-   .toEqual({rolsuper:false,rolbypassrls:false})
+  // query()/getPool() intentionally use the fixture owner for system work and
+  // seeding. Request RLS must be checked on the real app pool, including table
+  // ownership (an owner can bypass RLS even without either role flag).
   const app=await getAppPool().connect()
-  try{expect((await app.query('SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0])
-   .toEqual({current_user:'app_user',rolsuper:false,rolbypassrls:false})}finally{app.release()}
+  try{expect((await app.query(`SELECT current_user,r.rolsuper,r.rolbypassrls,
+   EXISTS(SELECT 1 FROM pg_class c WHERE c.relowner=r.oid
+    AND c.oid IN ('sessions'::regclass,'session_messages'::regclass)) AS owns_recording_tables
+   FROM pg_roles r WHERE r.rolname=current_user`)).rows[0])
+   .toEqual({current_user:'app_user',rolsuper:false,rolbypassrls:false,owns_recording_tables:false})}finally{app.release()}
   await query("INSERT INTO users(id,auth_provider,auth_provider_id,name) VALUES($1::uuid,'test',$1::text,'Fictional archive speaker')",[owner])
   await query("INSERT INTO workspaces(id,name,owner_user_id,plan,department_read_v2,project_shared_spaces) VALUES($1,'Fictional operational continuity',$2,'pro',true,false)",[workspace,owner])
   await query("INSERT INTO workspace_members(workspace_id,user_id,role,clearance) VALUES($1,$2,'owner','confidential')",[workspace,owner])
