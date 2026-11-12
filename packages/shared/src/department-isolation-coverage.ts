@@ -57,7 +57,7 @@ export const DEPARTMENT_ISOLATION_SUITES: readonly DepartmentIsolationSuite[] = 
   {id:'recovered-calendar-history',packageDir:'packages/api',integration:true,testFiles:[
     'src/__tests__/channel-calendar-recovery.integration.test.ts']},
   // Retained query graph capacity owns a runner: serial full-history proofs
-  // otherwise exhaust the derived-store shard's unchanged CI time budget.
+  // otherwise exhaust the derived-store shard's bounded CI time budget.
   {id:'native-query-capacity',packageDir:'packages/api',integration:true,testFiles:[
     'src/__tests__/native-query-capture-capacity.integration.test.ts']},
   {id:'operation-stores',packageDir:'packages/api',integration:true,testFiles:[
