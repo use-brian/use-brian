@@ -35,8 +35,8 @@ describe('[COMP:ci/execution-topology] historical coverage selection', () => {
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim()
     try {
       for (const [event, profile, shards] of [
-        ['schedule', 'full', [1, 2, 3, 4, 5, 6, 7, 8]],
-        ['push', 'current', [1, 2, 3, 4, 5]],
+        ['schedule', 'full', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]],
+        ['push', 'current', [1, 2, 3, 4, 5, 6, 7]],
       ]) {
         const eventPath = join(directory, `${event}-event.json`)
         const outputPath = join(directory, `${event}-output`)

@@ -25,6 +25,8 @@ const nativeGroups = [
   ['workflow-authority', 'operation-stores', 'access-policy', 'review-lifecycle'],
   ['organization'],
   ['native-query-capacity'],
+  ['recovered-topic-history'],
+  ['recovered-calendar-history'],
 ]
 
 /** The CI matrix and receipt partition must use the same production topology. */

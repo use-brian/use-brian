@@ -8,7 +8,7 @@
  * [COMP:api/department-isolation-lifecycle]
  */
 
-export const DEPARTMENT_ISOLATION_MANIFEST_REVISION = 5
+export const DEPARTMENT_ISOLATION_MANIFEST_REVISION = 6
 
 export const DEPARTMENT_ISOLATION_CASE_IDS = Object.freeze([
   'A01','A02','A03','A04','A05','A06','A07','A08','A09',
@@ -50,10 +50,12 @@ export const DEPARTMENT_ISOLATION_SUITES: readonly DepartmentIsolationSuite[] = 
     'src/db/__tests__/reader-source-evidence.integration.test.ts',
     'src/application-platform/__tests__/native-session-parent-audience.integration.test.ts',
     'src/__tests__/native-recording-ancestry-migration.integration.test.ts',
-    'src/application-platform/__tests__/native-recording-file-ancestry.integration.test.ts',
+    'src/application-platform/__tests__/native-recording-file-ancestry.integration.test.ts']},
+  {id:'recovered-topic-history',packageDir:'packages/api',integration:true,testFiles:[
     'src/__tests__/channel-recording-recovery.integration.test.ts',
-    'src/__tests__/channel-calendar-recovery.integration.test.ts',
     'src/__tests__/channel-connector-operational-state.integration.test.ts']},
+  {id:'recovered-calendar-history',packageDir:'packages/api',integration:true,testFiles:[
+    'src/__tests__/channel-calendar-recovery.integration.test.ts']},
   // Retained query graph capacity owns a runner: serial full-history proofs
   // otherwise exhaust the derived-store shard's unchanged CI time budget.
   {id:'native-query-capacity',packageDir:'packages/api',integration:true,testFiles:[
