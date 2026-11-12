@@ -1,6 +1,6 @@
 /** Current native attended history and annotations. [COMP:api/application-persistence] */
 import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,classifySplit,isTrivialChatMessage,DerivedScopeError,executionToolContext,
- type ResearchClassifyOptions,type ResearchClassifyResult,type SplitResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
+ type ResearchClassifyOptions,type ResearchClassifyResult,type SplitOptions,type SplitResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
 import {getPool} from '../db/client.js'
 import {readAdmittedSessionQuery,captureSessionTopics,sessionQueryRootMetadata} from '../db/session-query-reader.js'
 import {readSessionQueryFrame} from '../db/session-context-revisions.js'
@@ -125,6 +125,34 @@ async function classifiedTranscriptCurrent(execution:SessionContextAuthority['ex
   [execution.security.access.workspaceId,receipt.sessionId,receipt.through,receipt.messageId,receipt.annotationId??null])).rows[0]?.current===true
 }
 
+/** Group only already-admitted history; keys are exact storage identities, not names.
+ * Assistant context follows the preceding annotated user, never a global bucket.
+ */
+export function topicEvidenceFromHistory(history: ReadonlyArray<{role:string;content:unknown;topicLabel?:string|null}>) {
+ const groups=new Map<string,{topicLabel:string;messages:Array<{role:'user'|'assistant'|'system';text:string}>}>()
+ const recent:string[]=[]
+ let preceding:string|null=null
+ for(const row of history){
+  const toolContext=row.role==='user'&&Array.isArray(row.content)&&row.content.length>0&&row.content.every(block=>
+   typeof block==='object'&&block!==null&&'type' in block&&block.type==='tool_result')
+  if(row.role==='user'&&!toolContext)preceding=row.topicLabel?.trim()&&row.topicLabel!=='(uncategorized)'?row.topicLabel:null
+  const key=row.role==='assistant'||toolContext?preceding:row.topicLabel
+  if(!key?.trim()||key==='(uncategorized)'||!['user','assistant','system'].includes(row.role))continue
+  const text=typeof row.content==='string'?row.content:Array.isArray(row.content)?row.content.flatMap(block=>{
+   if(typeof block!=='object'||block===null||!('type' in block))return []
+   if(block.type==='text'&&'text' in block&&typeof block.text==='string')return [block.text]
+   if(block.type==='tool_result'&&'content' in block&&typeof block.content==='string')return [`Tool result: ${block.content}`]
+   if(block.type==='tool_use'&&'name' in block&&'input' in block)return [`Tool call ${String(block.name)}: ${JSON.stringify(block.input)}`]
+   return []
+  }).join(' '):''
+  let group=groups.get(key)
+  if(!group){group={topicLabel:key,messages:[]};groups.set(key,group)}
+  if(text)group.messages.push({role:row.role as 'user'|'assistant'|'system',text})
+  recent.push(key)
+ }
+ return {topicAnchors:[...groups.values()],knownTopicsThisSession:[...new Set(recent.reverse())].slice(0,20).reverse()}
+}
+
 /** The actual current authored row is selected and scoped before text is formatted. */
 export async function assessAttendedSessionMessage(input:{
  authority:SessionContextAuthority;session:Session;message:SessionMessage;
@@ -175,7 +203,7 @@ export async function assessAttendedSessionMessage(input:{
  const options=bindScopeSources<TopicClassifierOptions>({provider:input.provider,model:input.model,decisionRuntime:input.decisionRuntime,
   allowTrivialShortcut,currentMessage:text(current),recentUserTurns:history.filter(row=>row.sequenceNum<message.sequenceNum&&row.role==='user'&&(!ephemeral||row.topicLabel)).slice(-8)
    .map(row=>({text:text(row),topicLabel:row.topicLabel})).filter(turn=>turn.text.length>0),
-  knownTopicsThisSession:[...new Set(query.annotations.map(row=>row.topicLabel))].slice(-20),replyToText:reply?.text??null,
+  ...topicEvidenceFromHistory(history.filter(row=>row.sequenceNum<message.sequenceNum)),replyToText:reply?.text??null,
   authority,assertInputAuthority:check,workspaceId:authority.execution.security.access.workspaceId,
   runId:'memory-topic-'+message.id},boundScopeSources(query))
  const classification=await classifyTopic(options)
@@ -332,14 +360,15 @@ export async function classifyAttendedResearchMessage(input:{
  * preflight boundary after a NEW input proof. This object is never an allow receipt.
  */
 export async function prepareAttendedSplitMessage(input:ClassificationInput&{
- provider:ResearchClassifyOptions['provider'];rawMessage:string;signal:AbortSignal;measure?:ClassificationMeasure;
-}):Promise<{usage:SplitResult['usage'];model:SplitResult['model'];matches:(message:string,provider:ResearchClassifyOptions['provider'])=>boolean;read:()=>Promise<SplitResult>}|undefined>{
- const {authority,session,message,provider,rawMessage,signal,measure}=input
+ provider:ResearchClassifyOptions['provider'];rawMessage:string;signal:AbortSignal;measure?:ClassificationMeasure;decisionRuntime?:SplitOptions['decisionRuntime'];
+}):Promise<{usage:SplitResult['usage'];model:SplitResult['model'];matches:(message:string,provider:ResearchClassifyOptions['provider'],decisionRuntime?:SplitOptions['decisionRuntime'])=>boolean;read:()=>Promise<SplitResult>}|undefined>{
+ const {authority,session,message,provider,rawMessage,signal,measure,decisionRuntime}=input
  const {execution,accumulator}=authority
  const sessionId=session.id,messageId=message.id,sequence=message.sequenceNum,capture=input.capture
  const captured=capture?classificationCaptures.get(capture):undefined
  const assertBinding=()=>{
   if(input.authority!==authority||input.session!==session||input.message!==message||input.capture!==capture
+   ||input.provider!==provider||input.rawMessage!==rawMessage||input.decisionRuntime!==decisionRuntime
    ||session.id!==sessionId||message.id!==messageId||message.sequenceNum!==sequence||message.sessionId!==sessionId||message.role!=='user'
    ||authority.execution!==execution||authority.accumulator!==accumulator
    ||captured&&(captured.rootAuthority.execution!==captured.rootExecution||captured.rootAuthority.accumulator!==captured.rootAccumulator))throw new DerivedScopeError('scope_source_changed')
@@ -366,16 +395,17 @@ export async function prepareAttendedSplitMessage(input:ClassificationInput&{
   }catch(error){throw Object.assign(error instanceof Error?error:new Error('The assessment context is unavailable.'),{reason:'authority_changed',retrySafe:false})}
  }
  const options=bindScopeSources({provider,message:rawMessage,authority,signal,deadlineAt:Date.now()+8_000,
+  decisionRuntime,workspaceId:execution.security.access.workspaceId,runId:'research-split-'+messageId,
   assertInputAuthority:check},structuredClone(boundScopeSources(query)))
- // No model/decisionRuntime override: this MUST match the Standard preflight's
- // historical classifySplit({provider,message}) route, not the coordinator's.
+ // Keep the historical standalone LLM model; the selected runtime may resolve
+ // a native no-split decision, but task generation still uses that LLM route.
  const result=await classifySplit(options)
  const snapshot=structuredClone(result)
  if(snapshot.tasks)Object.freeze(snapshot.tasks)
  if(snapshot.usage)Object.freeze(snapshot.usage)
  Object.freeze(snapshot)
  let consumed=false
- return Object.freeze({usage:snapshot.usage,model:snapshot.model,matches:(message:string,candidate:ResearchClassifyOptions['provider'])=>message===rawMessage&&candidate===provider,read:async()=>{
+ return Object.freeze({usage:snapshot.usage,model:snapshot.model,matches:(message:string,candidate:ResearchClassifyOptions['provider'],runtime?:SplitOptions['decisionRuntime'])=>message===rawMessage&&candidate===provider&&runtime===decisionRuntime,read:async()=>{
   if(consumed)throw Object.assign(new DerivedScopeError('scope_source_changed'),{reason:'authority_changed',retrySafe:false})
   // Claim before awaiting: concurrent reads and retries after a refusal must not
   // turn this data-only preparation into a reusable permission receipt.

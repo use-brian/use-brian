@@ -137,7 +137,7 @@ describe('[COMP:ci/execution-topology] bounded CI test execution', () => {
     const build = workflow.jobs['build-typecheck'];
     const acceptance = workflow.jobs['department-isolation-shards'];
     expect(acceptance.needs).toEqual(['ci-scope', 'build-typecheck']);
-    expect(acceptance['timeout-minutes']).toBe(10);
+    expect(acceptance['timeout-minutes']).toBe(20);
     const step = (job: any, name: string) => job.steps.find((item: { name?: string }) => item.name === name);
     const upload = step(build, 'Retain database test dependencies');
     const download = step(acceptance, 'Download database test dependencies');

@@ -15,6 +15,7 @@ export {
 export type {
   CompactionResult,
   CompactionOptions,
+  CompactionTopicGroup,
   CompactionTier,
   CompactionProfile,
   ChannelClass,

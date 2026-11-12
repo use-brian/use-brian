@@ -12,7 +12,8 @@ type Capacity = { admitted: boolean; available: boolean; initialCounts: Counts; 
 /** Replace only the result projection, never admission or reservation, in a
  * disposable copy of the installed reader. Its complete canonical materialize /
  * fresh-proof path executes as app_user and rolls back before returning. */
-export async function assertRetainedNativeQueryCapacity(authority: SessionContextAuthority): Promise<Capacity> {
+export async function assertRetainedNativeQueryCapacity(authority: SessionContextAuthority,
+  expectedStatementTimeout: '15s' | '1min' = '15s'): Promise<Capacity> {
   const { execution } = authority
   const workspace = execution.security.access.workspaceId, session = execution.lifecycle.sessionId
   const signature = 'read_native_turn_session_query(uuid,uuid,integer,integer)'
@@ -53,7 +54,7 @@ export async function assertRetainedNativeQueryCapacity(authority: SessionContex
     const result = await withSessionMessagePublication(authority, [], async client => {
       expect((await client.query('SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows[0])
         .toEqual({ current_user: 'app_user', rolsuper: false, rolbypassrls: false })
-      expect((await client.query("SELECT current_setting('statement_timeout') value")).rows[0].value).toBe('15s')
+      expect((await client.query("SELECT current_setting('statement_timeout') value")).rows[0].value).toBe(expectedStatementTimeout)
       await client.query('SAVEPOINT capacity_oracle')
       try {
         return (await client.query<{ value: Capacity | null }>(`SELECT public.${port}($1,$2,$3,$3) value`, [workspace, session, through])).rows[0].value

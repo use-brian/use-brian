@@ -4,6 +4,7 @@ import { globSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, lstat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { command, cleanOutputs, cleanupDatabases, resetSnapshot } from './preflight-source.mjs'
+import { acceptanceShards } from './department-isolation-report.mjs'
 
 // Reuse the declared YAML dependency of the existing CI topology tooling.
 const yaml = createRequire(new URL('../../apps/app-desktop/package.json', import.meta.url))('js-yaml')
@@ -53,10 +54,12 @@ export function expand(value, context) {
   return value.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, source) => String(expression(source, context)))
 }
 export function workflowContext({ historical = true, sha = 'local-snapshot', branch = 'develop', runnerTemp = '/tmp/local-preflight' } = {}) {
+  const profile = historical ? 'full' : 'current'
+  const shards = acceptanceShards(profile)
   return { github: { event_name: 'push', head_ref: '', repository: 'local/snapshot', ref: `refs/heads/${branch}`, sha,
     event: { pull_request: { head: { repo: { full_name: 'local/snapshot' } } } } }, runner: { temp: runnerTemp }, matrix: {},
-    needs: { 'ci-scope': { result: 'success', outputs: { historical: String(historical), profile: historical ? 'full' : 'current',
-      shards: historical ? '[1,2,3,4,5,6,7]' : '[1,2,3,4]', total: historical ? '7' : '4' } } } }
+    needs: { 'ci-scope': { result: 'success', outputs: { historical: String(historical), profile,
+      shards: JSON.stringify(shards), total: String(shards.length) } } } }
 }
 export function compileWorkflow(source, context) {
   const workflow = yaml.load(source)
