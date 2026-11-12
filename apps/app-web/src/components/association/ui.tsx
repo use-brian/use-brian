@@ -3,7 +3,7 @@
 /** Staff-console building blocks: page headers, tiles, status pills, responsive tables, choice controls. [COMP:app-web/association] */
 import Link from "next/link";
 import { useRef, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
-import { ArrowLeft, type LucideIcon } from "lucide-react";
+import { ArrowLeft, ChevronDown, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
@@ -114,12 +114,15 @@ export function SwitchField({ label, checked, onChange, help, disabled = false }
   </label>;
 }
 
-export function FormSection({ title, description, collapsible = false, defaultOpen = false, children }: { title: string; description?: string; collapsible?: boolean; defaultOpen?: boolean; children: ReactNode }) {
+export function FormSection({ title, id, description, collapsible = false, defaultOpen = false, children }: { title: string; id?: string; description?: string; collapsible?: boolean; defaultOpen?: boolean; children: ReactNode }) {
   const grid = <div className="grid min-w-0 gap-4 pt-4 md:grid-cols-2">{children}</div>;
-  if (collapsible) return <details open={defaultOpen || undefined} className="col-span-full min-w-0 rounded-xl border border-border px-4 pb-4">
-    <summary className="-mx-4 min-h-8 max-sm:min-h-11 cursor-pointer list-none px-4 text-sm font-semibold content-center focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">{title}{description ? <span className="block text-xs font-normal text-muted-foreground">{description}</span> : null}</summary>{grid}
+  if (collapsible) return <details open={defaultOpen || undefined} className="group col-span-full min-w-0 rounded-xl border border-border px-4 open:pb-4">
+    <summary className="-mx-4 flex min-h-11 cursor-pointer list-none items-center md:min-h-9 justify-between gap-3 px-4 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
+      <span>{title}{description ? <span className="block text-xs font-normal text-muted-foreground">{description}</span> : null}</span>
+      <ChevronDown aria-hidden className="size-4 shrink-0 text-muted-foreground group-open:rotate-180" />
+    </summary>{grid}
   </details>;
-  return <section className="col-span-full min-w-0 border-t border-border pt-5 first:border-0 first:pt-0">
+  return <section id={id} tabIndex={id ? -1 : undefined} className="col-span-full min-w-0 scroll-mt-4 border-t border-border pt-5 first:border-0 first:pt-0">
     <h3 className="text-sm font-semibold">{title}</h3>{description ? <p className="mt-0.5 text-xs text-muted-foreground">{description}</p> : null}{grid}
   </section>;
 }

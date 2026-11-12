@@ -191,7 +191,7 @@ function SitePreview({ url, device, payload }: { url: string; device: "desktop" 
   </div>;
 }
 
-export function EventPageEditor({ workspaceId, event, tickets = [], details, onDirtyChange, onPublishEvent, canPublishEvent = true, disabled = false }: { workspaceId: string; event: AssociationEvent; tickets?: AssociationTicket[]; details?: ReactNode; onDirtyChange?: (dirty: boolean) => void; onPublishEvent?: () => Promise<boolean>; disabled?: boolean; canPublishEvent?: boolean }) {
+export function EventPageEditor({ workspaceId, event, tickets = [], onDirtyChange, onPublishEvent, canPublishEvent = true, disabled = false }: { workspaceId: string; event: AssociationEvent; tickets?: AssociationTicket[]; onDirtyChange?: (dirty: boolean) => void; onPublishEvent?: () => Promise<boolean>; disabled?: boolean; canPublishEvent?: boolean }) {
   const t = useT().associationPage, e = t.eventPage, c = t.content;
   const pages = useCachedResource(associationPageCacheKey(workspaceId, "site-content:event-pages"), () => getSiteContentDraft(workspaceId, "event-pages"));
   const settings = useCachedResource(associationPageCacheKey(workspaceId, "site-content:settings"), () => getSiteContentDraft(workspaceId, "settings"));
@@ -276,7 +276,6 @@ export function EventPageEditor({ workspaceId, event, tickets = [], details, onD
   }
 
   return <>
-    <div className="space-y-3" hidden={layout === "preview"}>{details}</div>
     <AssociationListState {...pages}>
     <div ref={editor} className="space-y-4" data-event-page-editor>
       <div className="sticky top-0 z-20 -mx-1 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-background/95 p-2 backdrop-blur">

@@ -1,19 +1,19 @@
 "use client";
 
 /** Website event index and direct entry to the single event workspace. [COMP:app-web/association] */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CalendarDays, Plus } from "lucide-react";
+import { ArrowDown, CalendarDays, Plus } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { getSiteContentDraft, type AssociationEvent, type EventPagesDocument } from "@/lib/api/association";
 import { useCachedResource } from "@/lib/surface-cache";
 import { associationPageCacheKey } from "@/lib/surface-prefetch";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { useAssociationModule } from "./module-controls";
 import { ReadOnlyNotice } from "./access";
 import { AssociationListState, useAssociationPage } from "./operator-controls";
 import { AssociationEventForm } from "./catalog-forms";
-import { AssociationEditor } from "./workspace-ui";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { AssociationEventDetail, type EventDetailTab } from "./event-detail";
 import { associationHref } from "./navigation";
 import { sameEventPage } from "./events/event-page-editor";
@@ -24,7 +24,7 @@ export function eventWhere(event: AssociationEvent, labels: { venue: string; onl
   return event.mode === "online" ? labels.online : event.venue || labels[event.mode];
 }
 
-export function AssociationEventsPanel({ workspaceId, initialEventId = "", initialEventSlug = "", initialNew = false, initialView = "event", initialFilter = "website" }: { workspaceId: string; initialEventId?: string; initialEventSlug?: string; initialNew?: boolean; initialView?: EventDetailTab; initialFilter?: EventView }) {
+export function AssociationEventsPanel({ workspaceId, initialEventId = "", initialEventSlug = "", initialNew = false, initialView = "details", initialFilter = "website" }: { workspaceId: string; initialEventId?: string; initialEventSlug?: string; initialNew?: boolean; initialView?: EventDetailTab; initialFilter?: EventView }) {
   const t = useT().associationPage, u = t.ux, m = t.manage, e = t.eventPage;
   const router = useRouter();
   const [view, setView] = useState<EventView>(initialFilter);
@@ -38,6 +38,13 @@ export function AssociationEventsPanel({ workspaceId, initialEventId = "", initi
   const [dismissedLink, setDismissedLink] = useState(false);
   const [created, setCreated] = useState<AssociationEvent | null>(null);
   const [creating, setCreating] = useState(initialNew);
+  const [createDirty, setCreateDirty] = useState(false);
+  const createRegion = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (creating) createRegion.current?.scrollIntoView?.({ block: "start", behavior: "instant" });
+  }, [creating]);
+  const plans = useAssociationPage(workspaceId, "plans", {}, creating && configure);
+  const currencies = [...new Set(plans.data?.items.map(plan => plan.currency) ?? [])];
   // Resolve every selection directly, including newly created drafts outside the current list.
   const direct = useAssociationPage(workspaceId, "events", selectedId ? { id: selectedId } : { slug: initialEventSlug }, !!(selectedId || (!dismissedLink && initialEventSlug)));
   const selected = selectedId
@@ -48,15 +55,26 @@ export function AssociationEventsPanel({ workspaceId, initialEventId = "", initi
     const published = (pages.data?.published as EventPagesDocument | null)?.pages.find(page => page.event === event.slug);
     return !sameEventPage(saved ?? null, published ?? null);
   }
-  if (creating) return <AssociationEditor title={m.newEvent} onClose={() => { setCreating(false); router.replace(eventHref()); }}>
-    <InlineNotice tone="neutral">{e.createHelp}</InlineNotice>
-    <AssociationEventForm workspaceId={workspaceId} disabled={!configure || !!rows.error} onSaved={record => {
+  async function cancelCreate() {
+    if (createDirty && !await confirmDialog({ title: u.cancelEdit, description: u.cancelHelp, confirmLabel: e.discard, cancelLabel: u.keepEditing })) return;
+    setCreating(false);
+    router.replace(eventHref());
+  }
+  if (creating) return <section ref={createRegion} className="mx-auto w-full max-w-4xl space-y-6" data-new-event>
+    <PageHeader title={m.newEvent} description={t.eventSetup.draftHelp} back={{label:u.backEvents,onClick:()=>void cancelCreate()}}
+      actions={<a href="#event-admission" onClick={event => {
+        event.preventDefault();
+        const admission = createRegion.current?.querySelector<HTMLElement>("#event-admission");
+        admission?.focus({ preventScroll: true });
+        admission?.scrollIntoView({ block: "start", behavior: "instant" });
+      }} className={buttonVariants({variant:"outline",className:"min-h-11 md:min-h-9"})}><ArrowDown aria-hidden className="size-4"/>{t.eventSetup.admission}</a>} />
+    <AssociationEventForm workspaceId={workspaceId} disabled={!configure} canSell={enabled} currencies={currencies} onDirtyChange={setCreateDirty} onSaved={record => {
       setCreated(record); setSelectedId(record.id); setCreating(false); router.replace(eventHref({ eventId: record.id }, "drafts")); void rows.refresh();
     }} />
-  </AssociationEditor>;
+  </section>;
   if (selected) return <AssociationEventDetail key={selected.id} workspaceId={workspaceId} event={selected} initialView={initialView} enabled={enabled} canManage={configure} loadFailed={!!direct.error}
     onBack={() => { setSelectedId(null); setDismissedLink(true); router.push(eventHref()); }}
-    onViewChange={tab => router.push(eventHref({ eventId: selected.id, ...(tab === "event" ? {} : { view: tab }) }))} onChanged={() => { void rows.refresh(); void direct.refresh(); }} />;
+    onViewChange={tab => router.push(eventHref({ eventId: selected.id, ...(tab === "details" ? {} : { view: tab }) }))} onChanged={() => { void rows.refresh(); void direct.refresh(); }} />;
   if ((selectedId || (!dismissedLink && initialEventSlug)) && !direct.data && !direct.error) return <AssociationListState {...direct}><span /></AssociationListState>;
   return <section className="space-y-5">
     <PageHeader title={u.eventsNav} description={configure ? e.indexHelp : u.eventsHelp} actions={configure ? <Button type="button" className="min-h-11 md:min-h-9" disabled={!!rows.error} onClick={() => { setCreating(true); router.push(eventHref({ new: "1" })); }}><Plus aria-hidden className="size-4" />{m.newEvent}</Button> : undefined}>

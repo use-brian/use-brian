@@ -26,7 +26,7 @@ const questionnaireSchema = z.object({ version: z.string(), questions: z.array(q
 type Question = z.infer<typeof questionSchema>;
 type QuestionDraft = Omit<Question, "options"> & { optionLines: string };
 
-function readForm(metadata: Record<string, unknown>) {
+export function readEventRegistration(metadata: Record<string, unknown>) {
   const questionnaire = questionnaireSchema.safeParse(metadata.questionnaire);
   const shown = Array.isArray(metadata.attendeeFields) ? metadata.attendeeFields : [];
   const required = Array.isArray(metadata.requiredAttendeeFields) ? metadata.requiredAttendeeFields : [];
@@ -48,107 +48,61 @@ function validQuestion(question: ReturnType<typeof normalizedQuestion>) {
     (!question.options || new Set(question.options).size === question.options.length);
 }
 
+export type EventRegistrationDraft = ReturnType<typeof readEventRegistration>;
+
+export function invalidRegistrationQuestion(draft: EventRegistrationDraft) {
+  return draft.questions.map(normalizedQuestion).find(question => !validQuestion(question))?.key ?? "";
+}
+
+export function eventRegistrationMetadata(metadata: Record<string, unknown>, draft: EventRegistrationDraft, baseline: EventRegistrationDraft) {
+  const next = {
+    ...metadata,
+    attendeeFields: attendeeFields.filter(field => draft.fields[field] !== "hidden"),
+    requiredAttendeeFields: attendeeFields.filter(field => draft.fields[field] === "required"),
+  } as Record<string, unknown>;
+  if (JSON.stringify(draft.questions) !== JSON.stringify(baseline.questions)) {
+    if (draft.questions.length) next.questionnaire = { version: `form-${crypto.randomUUID()}`, questions: draft.questions.map(normalizedQuestion) };
+    else delete next.questionnaire;
+  }
+  return next;
+}
+
 export function EventRegistrationForm({ workspaceId, event, disabled, onDirtyChange, onSaved }: {
   workspaceId: string; event: AssociationEvent; disabled: boolean; onDirtyChange: (dirty: boolean) => void; onSaved: () => void;
 }) {
   const t = useT().associationPage, s = t.staff;
-  const [baseline, setBaseline] = useState(() => readForm(event.metadata));
+  const [baseline, setBaseline] = useState(() => readEventRegistration(event.metadata));
   const [draft, setDraft] = useState(baseline);
-  const [preview, setPreview] = useState(false);
   const [error, setError] = useState("");
-  const [focusQuestion, setFocusQuestion] = useState("");
-  const editor = useRef<HTMLElement>(null);
-  useEffect(() => {
-    if (focusQuestion && !preview) {
-      editor.current?.querySelector<HTMLInputElement>(`[data-question="${focusQuestion}"] input`)?.focus();
-      setFocusQuestion("");
-    }
-  }, [focusQuestion, preview]);
+  const [invalidQuestion, setInvalidQuestion] = useState("");
   const action = useAssociationAction(workspaceId);
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
-  const labels = { phone: s.phone, organisation: s.organisation, job_title: s.jobTitle };
-  const displayLabels = { hidden: s.hidden, optional: s.optional, required: s.required };
-  const questionLabels = { text: s.shortAnswer, textarea: s.longAnswer, select: s.choice };
-  function editQuestion(key: string, changes: Partial<QuestionDraft>) {
-    setDraft(current => ({ ...current, questions: current.questions.map(question => question.key === key ? { ...question, ...changes } : question) }));
-  }
 
   async function save() {
     if (disabled || !dirty || action.pending) return;
-    const questions = draft.questions.map(normalizedQuestion);
-    const firstInvalid = questions.find(question => !validQuestion(question));
-    if (firstInvalid) {
-      setError(s.invalidQuestions);
-      setPreview(false);
-      setFocusQuestion(firstInvalid.key);
-      return;
-    }
+    const invalid = invalidRegistrationQuestion(draft);
+    setInvalidQuestion(invalid);
+    if (invalid) return;
     setError("");
     await action.run(s.saveForm, async () => {
       const page = await listAssociationPage(workspaceId, "events", { id: event.id });
       const latest = page.items.find(row => row.id === event.id);
-      if (!latest || JSON.stringify(readForm(latest.metadata)) !== JSON.stringify(baseline) ||
+      if (!latest || JSON.stringify(readEventRegistration(latest.metadata)) !== JSON.stringify(baseline) ||
         latest.metadata.registrationKind === "none" || latest.metadata.registrationKind === "external") {
         setError(s.formChanged);
         throw new Error("stale_registration_form");
       }
       const { id: _id, ...body } = latest;
-      const metadata = {
-        ...body.metadata,
-        attendeeFields: attendeeFields.filter(field => draft.fields[field] !== "hidden"),
-        requiredAttendeeFields: attendeeFields.filter(field => draft.fields[field] === "required"),
-      } as Record<string, unknown>;
-      if (JSON.stringify(draft.questions) !== JSON.stringify(baseline.questions)) {
-        if (questions.length) metadata.questionnaire = { version: `form-${crypto.randomUUID()}`, questions };
-        else delete metadata.questionnaire;
-      }
-      const response = await saveAssociationEvent(workspaceId, { ...body, metadata });
-      const next = readForm(response.record.metadata);
+      const response = await saveAssociationEvent(workspaceId, { ...body, metadata: eventRegistrationMetadata(body.metadata, draft, baseline) });
+      const next = readEventRegistration(response.record.metadata);
       setBaseline(next); setDraft(next); onSaved();
     }, false);
   }
 
   if (baseline.invalid) return <InlineNotice tone="warning">{s.formChanged}</InlineNotice>;
-  return <section ref={editor} className="space-y-4" data-event-registration-editor>
-    <header className="flex flex-wrap items-start justify-between gap-3">
-      <div><h2 className="text-xl font-semibold">{s.registrationForm}</h2><p className="mt-1 text-sm text-muted-foreground">{s.registrationHelp}</p></div>
-      <Button type="button" variant="outline" className="min-h-11 md:min-h-9" aria-pressed={preview} onClick={() => setPreview(value => !value)}>
-        <Eye aria-hidden className="size-4" />{preview ? s.backToEditor : s.previewForm}
-      </Button>
-    </header>
-    {preview ? <div className="max-w-xl space-y-4 rounded-xl border border-border bg-background p-5" data-registration-preview>
-      <p className="text-sm text-muted-foreground">{s.previewOnly}</p>
-      <h3 className="text-lg font-semibold">{event.title}</h3>
-      <div className="grid gap-3 sm:grid-cols-2"><PreviewText label={s.firstName} required /><PreviewText label={s.lastName} required /></div>
-      <PreviewText label={s.email} type="email" required />
-      {attendeeFields.filter(field => draft.fields[field] !== "hidden").map(field => <PreviewText key={field} label={labels[field]} type={field === "phone" ? "tel" : "text"} required={draft.fields[field] === "required"} />)}
-      {draft.questions.map(question => <PreviewQuestion key={question.key} question={question} />)}
-    </div> : <fieldset disabled={disabled || action.pending} className="min-w-0 space-y-4">
-      <div className="grid gap-4 rounded-xl border border-border bg-background p-5 sm:grid-cols-3">
-        {attendeeFields.map(field => <AssociationChoice key={field} label={labels[field]} value={draft.fields[field] ?? "hidden"}
-          values={field === "phone" ? ["hidden", "required"] : ["hidden", "optional", "required"]}
-          labels={displayLabels} onChange={value => setDraft(current => ({ ...current, fields: { ...current.fields, [field]: value } }))} />)}
-      </div>
-      {draft.questions.map((question, index) => <div key={question.key} data-question={question.key} className="grid min-w-0 gap-4 rounded-xl border border-border bg-background p-5 sm:grid-cols-2">
-        <AssociationField label={s.question} value={question.label} onChange={label => editQuestion(question.key, { label })} maxLength={500} aria-invalid={error === s.invalidQuestions && !question.label.trim()} />
-        <AssociationChoice label={s.answerType} value={question.type} values={types} labels={questionLabels}
-          onChange={value => editQuestion(question.key, { type: value as Question["type"] })} />
-        {question.type === "select" && <AssociationField label={s.choices} multiline value={question.optionLines} onChange={optionLines => editQuestion(question.key, { optionLines })} />}
-        <SwitchField label={s.required} checked={question.required} onChange={required => editQuestion(question.key, { required })} />
-        {error === s.invalidQuestions && !validQuestion(normalizedQuestion(question)) && <p className="text-sm text-destructive sm:col-span-2">{s.invalidQuestions}</p>}
-        <div className="flex flex-wrap gap-2 sm:col-span-2">
-          <Button type="button" variant="outline" className="min-h-11 md:min-h-9" disabled={index === 0} onClick={() => setDraft(current => {
-            const questions = [...current.questions]; [questions[index - 1], questions[index]] = [questions[index]!, questions[index - 1]!];
-            return { ...current, questions };
-          })}>{s.moveUp}</Button>
-          <Button type="button" variant="ghost" className="min-h-11 md:min-h-9" onClick={() => setDraft(current => ({ ...current, questions: current.questions.filter(item => item.key !== question.key) }))}>{t.publishing.remove}</Button>
-        </div>
-      </div>)}
-      <Button type="button" variant="outline" className="min-h-11 md:min-h-9" disabled={draft.questions.length >= 20} onClick={() => setDraft(current => ({
-        ...current, questions: [...current.questions, { key: `question-${crypto.randomUUID()}`, label: "", type: "text", required: false, maxLength: 500, optionLines: "" }],
-      }))}><Plus aria-hidden className="size-4" />{s.addQuestion}</Button>
-    </fieldset>}
+  return <section className="space-y-4" data-event-registration-editor>
+    <EventRegistrationFields title={event.title} draft={draft} setDraft={setDraft} invalidQuestion={invalidQuestion} disabled={disabled || action.pending} />
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     {action.outcome === "failed" && !error && action.feedback}
     {action.outcome === "saved" && !dirty && <InlineNotice tone="success">{t.ux.saved}</InlineNotice>}
@@ -159,12 +113,86 @@ export function EventRegistrationForm({ workspaceId, event, disabled, onDirtyCha
   </section>;
 }
 
-function PreviewText({ label, type = "text", required }: { label: string; type?: "text" | "email" | "tel"; required?: boolean }) {
-  const [value, setValue] = useState("");
-  return <AssociationField label={label} type={type} value={value} onChange={setValue} required={required} />;
+export function EventRegistrationFields({ title, draft, setDraft, invalidQuestion, disabled, embedded = false }: {
+  title: string;
+  draft: EventRegistrationDraft;
+  setDraft: React.Dispatch<React.SetStateAction<EventRegistrationDraft>>;
+  invalidQuestion: string;
+  disabled: boolean;
+  embedded?: boolean;
+}) {
+  const t = useT().associationPage, s = t.staff;
+  const [preview, setPreview] = useState(false);
+  const [focusQuestion, setFocusQuestion] = useState("");
+  const editor = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (invalidQuestion) { setPreview(false); setFocusQuestion(invalidQuestion); }
+  }, [invalidQuestion]);
+  useEffect(() => {
+    if (focusQuestion && !preview) {
+      editor.current?.querySelector<HTMLInputElement>(`[data-question="${focusQuestion}"] input`)?.focus();
+      setFocusQuestion("");
+    }
+  }, [focusQuestion, preview]);
+  const labels = { phone: s.phone, organisation: s.organisation, job_title: s.jobTitle };
+  const displayLabels = { hidden: s.hidden, optional: s.optional, required: s.required };
+  const questionLabels = { text: s.shortAnswer, textarea: s.longAnswer, select: s.choice };
+  function editQuestion(key: string, changes: Partial<QuestionDraft>) {
+    setDraft(current => ({ ...current, questions: current.questions.map(question => question.key === key ? { ...question, ...changes } : question) }));
+  }
+
+  return <section ref={editor} className="space-y-4">
+    <header className="flex flex-wrap items-start justify-between gap-3">
+      <div><h3 className="font-semibold">{s.registrationForm}</h3><p className="mt-1 text-sm text-muted-foreground">{embedded ? s.registrationHelp : t.eventSetup.standardForm}</p></div>
+      <Button type="button" variant="outline" className="min-h-11 md:min-h-9" aria-pressed={preview} onClick={() => setPreview(value => !value)}>
+        <Eye aria-hidden className="size-4" />{preview ? s.backToEditor : t.eventSetup.previewForm}
+      </Button>
+    </header>
+    {preview ? <div className="max-w-xl space-y-4 rounded-xl border border-border bg-background p-5" data-registration-preview>
+      <p className="text-sm text-muted-foreground">{s.previewOnly}</p>
+      <h3 className="text-lg font-semibold">{title || s.registrationForm}</h3>
+      <div className="grid gap-3 sm:grid-cols-2"><PreviewText label={s.firstName} required detached={embedded} /><PreviewText label={s.lastName} required detached={embedded} /></div>
+      <PreviewText label={s.email} type="email" required detached={embedded} />
+      {attendeeFields.filter(field => draft.fields[field] !== "hidden").map(field => <PreviewText key={field} label={labels[field]} type={field === "phone" ? "tel" : "text"} required={draft.fields[field] === "required"} detached={embedded} />)}
+      {draft.questions.map(question => <PreviewQuestion key={question.key} question={question} detached={embedded} />)}
+    </div> : <fieldset disabled={disabled} className="min-w-0 space-y-4">
+      <div className="grid gap-4 rounded-lg bg-muted/30 p-4 sm:grid-cols-3">
+        {attendeeFields.map(field => <AssociationChoice key={field} label={labels[field]} value={draft.fields[field] ?? "hidden"}
+          values={field === "phone" ? ["hidden", "required"] : ["hidden", "optional", "required"]}
+          labels={displayLabels} onChange={value => setDraft(current => ({ ...current, fields: { ...current.fields, [field]: value } }))} />)}
+      </div>
+      {draft.questions.map((question, index) => <div key={question.key} data-question={question.key} className="grid min-w-0 gap-4 rounded-lg bg-muted/30 p-4 sm:grid-cols-2">
+        <AssociationField label={s.question} value={question.label} onChange={label => editQuestion(question.key, { label })} maxLength={500} aria-invalid={!!invalidQuestion && !question.label.trim()} />
+        <AssociationChoice label={s.answerType} value={question.type} values={types} labels={questionLabels}
+          onChange={value => editQuestion(question.key, { type: value as Question["type"] })} />
+        {question.type === "select" && <AssociationField label={s.choices} multiline value={question.optionLines} onChange={optionLines => editQuestion(question.key, { optionLines })} />}
+        <SwitchField label={s.required} checked={question.required} onChange={required => editQuestion(question.key, { required })} />
+        {!!invalidQuestion && !validQuestion(normalizedQuestion(question)) && <p className="text-sm text-destructive sm:col-span-2">{s.invalidQuestions}</p>}
+        <div className="flex flex-wrap gap-2 sm:col-span-2">
+          <Button type="button" variant="outline" className="min-h-11 md:min-h-9" disabled={index === 0} onClick={() => setDraft(current => {
+            const questions = [...current.questions]; [questions[index - 1], questions[index]] = [questions[index]!, questions[index - 1]!];
+            return { ...current, questions };
+          })}>{s.moveUp}</Button>
+          <Button type="button" variant="ghost" className="min-h-11 md:min-h-9" onClick={() => setDraft(current => ({ ...current, questions: current.questions.filter(item => item.key !== question.key) }))}>{t.publishing.remove}</Button>
+        </div>
+      </div>)}
+      <Button type="button" variant="outline" className="min-h-11 md:min-h-9" disabled={draft.questions.length >= 20} onClick={() => {
+        const key = `question-${crypto.randomUUID()}`;
+        setDraft(current => ({
+          ...current, questions: [...current.questions, { key, label: "", type: "text", required: false, maxLength: 500, optionLines: "" }],
+        }));
+        setFocusQuestion(key);
+      }}><Plus aria-hidden className="size-4" />{s.addQuestion}</Button>
+    </fieldset>}
+  </section>;
 }
 
-function PreviewQuestion({ question }: { question: QuestionDraft }) {
+function PreviewText({ label, type = "text", required, detached }: { label: string; type?: "text" | "email" | "tel"; required?: boolean; detached?: boolean }) {
+  const [value, setValue] = useState("");
+  return <AssociationField label={label} type={type} value={value} onChange={setValue} required={required && !detached} aria-required={required} form={detached ? "event-form-preview" : undefined} />;
+}
+
+function PreviewQuestion({ question, detached }: { question: QuestionDraft; detached?: boolean }) {
   const s = useT().associationPage.staff;
   const label = question.label.trim() || s.question;
   const [value, setValue] = useState("");
@@ -176,6 +204,6 @@ function PreviewQuestion({ question }: { question: QuestionDraft }) {
       <SelectContent>{choices.map(option => <SelectItem key={option} value={option}>{option}</SelectItem>)}</SelectContent>
     </Select>
   </div> : question.type === "textarea"
-    ? <AssociationField label={label} value={value} onChange={setValue} multiline required={question.required} maxLength={question.maxLength} />
-    : <AssociationField label={label} value={value} onChange={setValue} maxLength={question.maxLength} required={question.required} />;
+    ? <AssociationField label={label} value={value} onChange={setValue} multiline required={question.required && !detached} maxLength={question.maxLength} />
+    : <AssociationField label={label} value={value} onChange={setValue} maxLength={question.maxLength} required={question.required && !detached} form={detached ? "event-form-preview" : undefined} />;
 }

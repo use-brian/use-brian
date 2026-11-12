@@ -41,7 +41,7 @@ export function AssociationSurface({ workspaceId }: { workspaceId: string }) {
   const eventId = search?.get("eventId") ?? "", eventSlug = search?.get("eventSlug") ?? "", wantsNew = search?.get("new") === "1";
   const contactId = search?.get("contactId") ?? "", plan = search?.get("plan") ?? "";
   const view = search?.get("view");
-  const eventView = view === "guests" || view === "registration" || view === "tickets" ? view : "event";
+  const eventView = view === "guests" || view === "registration" || view === "tickets" || view === "event" || view === "details" ? view : eventSlug ? "event" : "details";
   const filter = search?.get("filter");
   const eventFilter = filter === "drafts" || filter === "all" ? filter : "website";
   const publicPlans = section === "plans" && (search?.get("view") === "website" || search?.get("page") === "membership");
@@ -78,7 +78,7 @@ export function AssociationSurface({ workspaceId }: { workspaceId: string }) {
               <MembershipPublishingPanel key={`${workspaceId}:${plan}:${wantsNew}`} workspaceId={workspaceId} initialPlan={plan} initialNew={wantsNew} />
             </> : <AssociationPlansPanel key={`${workspaceId}:${wantsNew}`} workspaceId={workspaceId} initialNew={wantsNew} />)}
             {section === "sponsorships" && <AssociationSponsorshipsSection key={workspaceId} workspaceId={workspaceId} />}
-            {section === "events" && <AssociationEventsPanel key={`${workspaceId}:${eventId}:${eventSlug}:${wantsNew}:${eventView}:${eventFilter}`} workspaceId={workspaceId} initialEventId={eventId} initialEventSlug={eventSlug} initialNew={wantsNew} initialView={eventView} initialFilter={eventFilter} />}
+            {section === "events" && <AssociationEventsPanel key={`${workspaceId}:${eventId}:${eventSlug}:${wantsNew}:${eventFilter}`} workspaceId={workspaceId} initialEventId={eventId} initialEventSlug={eventSlug} initialNew={wantsNew} initialView={eventView} initialFilter={eventFilter} />}
             {section === "promotions" && <AssociationPromotionsPanel key={`${workspaceId}:${wantsNew}`} workspaceId={workspaceId} initialNew={wantsNew} />}
             {section === "orders" && <AssociationOrdersPanel key={`${workspaceId}:${eventId}`} workspaceId={workspaceId} initialEventId={eventId} />}
             {section === "waitlist" && <AssociationWaitlistPanel key={workspaceId} workspaceId={workspaceId} />}
