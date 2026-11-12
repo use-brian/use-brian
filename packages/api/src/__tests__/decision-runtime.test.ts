@@ -846,7 +846,7 @@ describe('[COMP:decisions/runtime] decision composition', () => {
     await runtime.run({ request: request(), operation: resultOperation() })
 
     expect(attempts).toHaveLength(1)
-    expect(attempts[0]).toMatchObject({ effectiveMode: 'hybrid', operatorOverride: false, usage: { costUsd: 8 * 0.042 / 1_000_000 } })
+    expect(attempts[0]).toMatchObject({ effectiveMode: 'hybrid', operatorOverride: false, usage: { costUsd: expect.closeTo(8 * 0.042 / 1_000_000, 15) } })
     expect(outcomes).toEqual([expect.objectContaining({ path: 'primary_complete', effectiveMode: 'hybrid', operatorOverride: false })])
   })
 
@@ -885,7 +885,7 @@ describe('[COMP:decisions/runtime] decision composition', () => {
       model: 'jev-1.13.0',
       inputTokens: 8,
       outputTokens: 0,
-      actualCostUsd: 8 * 0.042 / 1_000_000,
+      actualCostUsd: expect.closeTo(8 * 0.042 / 1_000_000, 15),
       source: 'overhead:classifier',
       triggerKey: 'adaptive_research_classifier',
       providerKeySource: 'platform',
