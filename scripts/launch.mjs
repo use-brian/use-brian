@@ -46,6 +46,7 @@ import { createInterface } from 'node:readline/promises'
 import { resolveMessageStoreLaunch } from './message-store-launch.mjs'
 import { bridgeEnv } from './bridge-env.mjs'
 import { resolveApiPort } from './launch-ports.mjs'
+import { resolveDocSyncLaunch, resolveOutpostMailbox } from './launch-outpost.mjs'
 import { adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups, adminStateDirectory, stopOwnedAdminGroups } from './rig-admin.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -144,12 +145,12 @@ function reserveAvailablePort(preferredPort) {
 
 // The embedded brain uses a distinctive high port so it never collides with a
 // developer's local Postgres on the default 5432 (verified failure mode).
-const PORTS = { pglite: 54329, api: resolveApiPort(process.env.USEBRIAN_API_PORT), docSync: Number(process.env.USEBRIAN_DOC_SYNC_PORT || 8180), appWeb: 3003, authWeb: Number(process.env.USEBRIAN_AUTH_WEB_PORT || 3105), discordConnector: 8090, waConnector: 8091, messageStore: 8092, wechatConnector: 8093, feishuConnector: 8095 }
-// Agentbox/local Outpost: honor USEBRIAN_EDITION=outpost so auth-web + email OTP
-// can run beside a prod stack. Default auth-web :3105 / doc-sync :8180 avoid prod.
+// Outpost's local auth portal and sidecar avoid the usual production ports.
 const outpostLocal = !adminOnly && (process.env.USEBRIAN_EDITION ?? '').trim().toLowerCase() === 'outpost'
 const edition = outpostLocal ? 'outpost' : 'oss'
-const smtpPort = Number(process.env.SMTP_PORT || (outpostLocal ? 2525 : 0))
+const docSyncLaunch = resolveDocSyncLaunch(process.env, outpostLocal)
+const mailboxLaunch = resolveOutpostMailbox(process.env, outpostLocal)
+const PORTS = { pglite: 54329, api: resolveApiPort(process.env.USEBRIAN_API_PORT), docSync: docSyncLaunch.port, appWeb: 3003, authWeb: Number(process.env.USEBRIAN_AUTH_WEB_PORT || 3105), discordConnector: 8090, waConnector: 8091, messageStore: 8092, wechatConnector: 8093, feishuConnector: 8095 }
 
 // ── config (ChatGPT sign-in OR one API credential) ──────────────────
 mkdirSync(CONFIG_DIR, { recursive: true })
@@ -296,7 +297,7 @@ const env = {
   // auto-on-save brain ingest. 127.0.0.1 (not localhost) avoids the IPv6 ::1
   // resolution that the api's IPv4 listener refuses.
   DOC_SYNC_SECRET: docSyncSecret,
-  DOC_SYNC_URL: `ws://127.0.0.1:${PORTS.docSync}`,
+  ...docSyncLaunch.env,
   // Encrypts connector credentials at rest (see generation note above).
   CHANNEL_CREDENTIAL_KEY: channelCredentialKey,
   // Each bridge's URL + secret, exported only when something will answer on it
@@ -342,14 +343,9 @@ const env = {
     INTERNAL_API_URL: process.env.INTERNAL_API_URL || `http://127.0.0.1:${PORTS.api}`,
     OUTPOST_AUTH_EMAIL_ENABLED: process.env.OUTPOST_AUTH_EMAIL_ENABLED || 'true',
     OUTPOST_AUTH_OIDC_ENABLED: process.env.OUTPOST_AUTH_OIDC_ENABLED || 'false',
-    // rig-mailbox only accepts *.example addresses.
-    OUTPOST_AUTH_BOOTSTRAP_EMAILS: process.env.OUTPOST_AUTH_BOOTSTRAP_EMAILS || 'admin@fixture.example',
-    SMTP_HOST: process.env.SMTP_HOST || '127.0.0.1',
-    SMTP_PORT: String(smtpPort),
-    SMTP_SECURE: process.env.SMTP_SECURE || 'false',
-    SMTP_USER: process.env.SMTP_USER || 'capture@fixture.example',
-    SMTP_PASSWORD: process.env.SMTP_PASSWORD || 'fixture-only',
-    EMAIL_FROM_ADDRESS: process.env.EMAIL_FROM_ADDRESS || 'auth@fixture.example',
+    // Synthetic defaults apply only when the launcher owns the mailbox.
+    // External SMTP settings already flow through ...process.env unchanged.
+    ...mailboxLaunch.env,
   } : {}),
 }
 
@@ -595,11 +591,14 @@ if(adminOnly){
  run('auth-web','pnpm',['--filter','@use-brian/auth-web','dev'])
  await waitForPort(3005,'application sign-in portal')
 } else if (outpostLocal) {
-  const mailboxDir = join(CONFIG_DIR, 'mailbox')
-  mkdirSync(mailboxDir, { recursive: true })
-  console.log(`[launch] starting outpost mailbox (:${smtpPort}) + auth-web (:${PORTS.authWeb}) ...`)
-  run('mailbox', process.execPath, [join(ROOT, 'scripts/rig-mailbox.mjs'), mailboxDir, String(smtpPort)])
-  await waitForPort(smtpPort, 'synthetic SMTP capture')
+  if (mailboxLaunch.enabled) {
+    const mailboxDir = join(CONFIG_DIR, 'mailbox')
+    mkdirSync(mailboxDir, { recursive: true })
+    console.log(`[launch] starting synthetic outpost mailbox (:${mailboxLaunch.port}) ...`)
+    run('mailbox', process.execPath, [join(ROOT, 'scripts/rig-mailbox.mjs'), mailboxDir, String(mailboxLaunch.port)])
+    await waitForPort(mailboxLaunch.port, 'synthetic SMTP capture')
+  }
+  console.log(`[launch] starting auth-web (:${PORTS.authWeb}) ...`)
   run('auth-web', 'pnpm', ['--filter', '@use-brian/auth-web', 'exec', 'next', 'dev', '--port', String(PORTS.authWeb)])
   await waitForPort(PORTS.authWeb, 'application sign-in portal', 120_000)
 }
@@ -673,7 +672,7 @@ const messageStoreStatus = messageStoreLaunch.enabled ? ` · chat-archive :${POR
 const wechatStatus = bridgeStatus('wechat', useLocalWechatConnector, PORTS.wechatConnector)
 const feishuStatus = bridgeStatus('feishu', useLocalFeishuConnector, PORTS.feishuConnector)
 const browserRelayStatus = bridgeStatus('browser-relay', useLocalBrowserRelay, browserRelayPort)
-const authWebStatus = outpostLocal ? ` · auth-web :${PORTS.authWeb} · smtp :${smtpPort}` : ''
+const authWebStatus = outpostLocal ? ` · auth-web :${PORTS.authWeb} · smtp ${mailboxLaunch.enabled ? 'fixture :' + mailboxLaunch.port : 'external'}` : ''
 const noBrowser = ['1', 'true'].includes((process.env.USEBRIAN_NO_BROWSER ?? '').trim().toLowerCase())
 console.log(`\n[launch] Use Brian is up. ${noBrowser ? `Entry URL: ${entryUrl}` : `Opening ${entryUrl}`}\n  (edition ${edition} · api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${authWebStatus}${discordStatus}${waStatus}${messageStoreStatus}${wechatStatus}${feishuStatus}${browserRelayStatus})\n  Ctrl-C to stop everything.\n`)
 if (preferredProvider === 'openai-codex') {
