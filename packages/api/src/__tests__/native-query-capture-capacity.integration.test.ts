@@ -1,6 +1,6 @@
 /** [COMP:api/native-chat-read-cost] Genuine retained native turns cross the old estimate under the real graph limits. */
 import {ContextScopeAccumulator,type SessionContextAuthority} from '@use-brian/core'
-import {afterAll,beforeAll,describe,expect,it} from 'vitest'
+import {afterAll,beforeAll,describe,expect,it,vi} from 'vitest'
 import {getAppPool,getPool} from '../db/client.js'
 import {addSessionMessage,readSessionById} from '../db/sessions.js'
 import {readAdmittedSessionQuery} from '../db/session-query-reader.js'
@@ -8,6 +8,11 @@ import {writeSessionContextRevision} from '../db/session-context-revisions.js'
 import {publishNativeSessionMessageBatch} from '../db/session-message-publication.js'
 import {persistentContextFixture} from '../application-platform/__tests__/fixtures/persistent-context.js'
 import {assertRetainedNativeQueryCapacity} from './fixtures/native-session-capacity.js'
+
+// This synthetic suite measures graph capacity, not interactive SQL latency.
+// Pin only this test process before db/client captures its startup options;
+// production and the Calendar/client regressions retain their 15-second limit.
+vi.hoisted(()=>{vi.stubEnv('PG_STATEMENT_TIMEOUT_MS','60000')})
 
 const {assertLocalFixture}=await import(new URL('../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -25,6 +30,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] real retained query capaci
  }
  beforeAll(async()=>{
   fixture=await persistentContextFixture()
+  expect((await getAppPool().query("SELECT current_setting('statement_timeout') value")).rows[0].value).toBe('1min')
   await fixture.pool.query('UPDATE workspaces SET department_read_v2=true,project_shared_spaces=false WHERE id=$1',[fixture.workspaceId])
   // Historical fixture rows carry no fabricated derivation. Every later
   // observation, annotation, reply and capacity proof uses canonical ports.
@@ -39,7 +45,10 @@ describe.sequential('[COMP:api/native-chat-read-cost] real retained query capaci
  })
  // Retain a failing graph for diagnosis; the maintained owner disposes the
  // complete synthetic database after the suite, including immutable ancestry.
- afterAll(async()=>{await getAppPool().end();await getPool().end()})
+ afterAll(async()=>{
+  try{await Promise.all([getAppPool().end(),getPool().end()])}
+  finally{vi.unstubAllEnvs()}
+ })
 
  it.each([1,2,3,4,5,6,7,8])('retains genuine native annotation and reply %i',async(index)=>{
   const input=await addSessionMessage({sessionId:fixture.session.id,role:'user',senderUserId:fixture.ownerId,
@@ -74,7 +83,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] real retained query capaci
   const input=await addSessionMessage({sessionId:fixture.session.id,role:'user',senderUserId:fixture.ownerId,
    content:[{type:'text',text:'Fictional pending capacity request.'}],scope:fixture.envelope})
   expect(input.sequenceNum).toBe(272)
-  const result=await assertRetainedNativeQueryCapacity(await authority())
+  const result=await assertRetainedNativeQueryCapacity(await authority(),'1min')
   console.info('[retained native capacity]',result)
   expect(result.oldSemanticEstimate).toBeGreaterThan(16_384)
   expect(await history()).toEqual(initialHistory)
