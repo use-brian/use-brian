@@ -142,7 +142,7 @@ describe("[COMP:app-web/models-settings] custom profile editing", () => {
     });
     expect(container.textContent).toContain(en.chrome.settingsModal.models.decisionRoutingTitle);
     expect(container.textContent).toContain(en.chrome.settingsModal.models.decisionLlmOnly);
-    expect(container.textContent).toContain(en.chrome.settingsModal.models.decisionHybridGate);
+    expect(container.textContent).toContain(en.chrome.settingsModal.models.decisionWorkspaceFirstAvailable);
     await act(async () => root.unmount());
   });
 

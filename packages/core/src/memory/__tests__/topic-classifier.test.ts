@@ -1,6 +1,10 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import { classifyTopic } from '../topic-classifier.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
+import { createRoutingProvider } from '../../providers/routing.js'
+import { bindScopeSources, boundScopeSources } from '../../security/source-evidence.js'
+import { ContextScopeAccumulator } from '../../security/context-scope.js'
+import type { SessionContextAuthority } from '../session-state-types.js'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 
 /**
@@ -39,6 +43,25 @@ function slowProvider(onAbort: (signal: AbortSignal) => void): LLMProvider {
         signal.addEventListener('abort', abort, { once: true })
       })
     }
+  }
+  return provider
+}
+
+/** Delayed complete JSON, with no model or account traffic. */
+function delayedProvider(name: string, delayMs: number): LLMProvider {
+  const provider = mockProvider('unused')
+  provider.name = name
+  provider.models = []
+  provider.stream = async function* (request) {
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(request.signal!.reason) }
+      const timer = setTimeout(() => {
+        request.signal?.removeEventListener('abort', abort)
+        resolve()
+      }, delayMs)
+      request.signal?.addEventListener('abort', abort, { once: true })
+    })
+    yield { type: 'text_delta', text: '{"topic_label":"planning","state":"continue","confidence":0.9}' }
   }
   return provider
 }
@@ -107,7 +130,147 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('does not re-enter the original authority window after a timed-out classifier returns', async () => {
+  it.each([
+    ['openai-codex', 'gpt-6-luna'],
+    ['routing', 'gpt-6-luna'],
+    // An explicit configured endpoint can serve the standard fallback id.
+    ['openai-compat:workspace', 'gpt-6-luna'],
+  ])('allows delayed %s standard classification within the bounded budget', async (name, model) => {
+    vi.useFakeTimers()
+    const provider = delayedProvider(name, 4_500)
+    const stream = vi.spyOn(provider, 'stream')
+    const returned = vi.fn()
+    const classification = classifyTopic({ provider, model, recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [] })
+    void classification.then(returned)
+    await vi.advanceTimersByTimeAsync(2_001)
+    expect(returned).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(2_499)
+    await expect(classification).resolves.toMatchObject({ topic_label: 'planning', confidence: 0.9 })
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: 'low' }))
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([
+    ['openai-codex', 'gpt-6-luna', 8_000],
+    ['routing', 'gpt-6-luna', 8_000],
+    ['gemini', 'gemini-3.6-flash-standard', 2_000],
+    ['routing', 'gemini-3.6-flash-standard', 2_000],
+    ['routing', 'unknown-codex-looking-model', 2_000],
+    ['openai-compat:workspace', 'unknown-model', 2_000],
+    ['routing', 'qwen3.5-flash', 2_000],
+  ])('enforces exact budget for %s / %s', async (name, model, budget) => {
+    vi.useFakeTimers()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const aborted = vi.fn()
+    const provider = slowProvider(aborted)
+    provider.name = name
+    const classification = classifyTopic({ provider, model, recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [] })
+    await vi.advanceTimersByTimeAsync(budget - 1)
+    expect(aborted).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(classification).resolves.toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
+    expect(aborted).toHaveBeenCalledOnce()
+    expect(warning).toHaveBeenCalledWith('[topic-classifier] deadline exceeded; using uncategorized fallback', { timeoutMs: budget })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([false, true])('retains fallback when the Codex registry route is unavailable (entitlement=%s)', async entitlement => {
+    vi.useFakeTimers()
+    const codex = delayedProvider('openai-codex', 4_500)
+    const stream = vi.spyOn(codex, 'stream')
+    const availability = Object.assign(new Set(['openai-codex']), { isModelAvailable: () => false })
+    const provider = createRoutingProvider(entitlement ? { 'openai-codex': codex } : {},
+      entitlement ? { availability } : undefined)
+    await expect(classifyTopic({ provider, model: 'gpt-6-luna', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [] }))
+      .resolves.toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
+    expect(stream).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('allows a delayed Codex answer through the real generic router', async () => {
+    vi.useFakeTimers()
+    const provider = createRoutingProvider({ 'openai-codex': delayedProvider('openai-codex', 3_500) })
+    const classification = classifyTopic({ provider, model: 'gpt-6-luna', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [] })
+    await vi.advanceTimersByTimeAsync(3_500)
+    await expect(classification).resolves.toMatchObject({ topic_label: 'planning', confidence: 0.9 })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('cancels Codex with the canonical lifecycle and preserves the authority refusal', async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController(), aborted = vi.fn()
+    const provider = Object.assign(slowProvider(aborted), { name: 'openai-codex' })
+    const assertCurrent = vi.fn(async () => {})
+    const authority = {
+      execution: { security: { authority: { assertCurrent } }, lifecycle: { abortSignal: controller.signal } },
+      accumulator: new ContextScopeAccumulator(),
+    } as unknown as SessionContextAuthority
+    const options = bindScopeSources({ provider, model: 'gpt-6-luna', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], authority, assertInputAuthority: async () => {} }, [{
+      workspaceId: 'fixture-workspace', userId: null, assistantId: null, sensitivity: 'confidential',
+      compartments: ['finance'], projectIds: [], resourceKind: 'memory', resourceId: 'fixture-memory', version: '1',
+    }])
+    const classification = classifyTopic(options)
+    const rejected = expect(classification).rejects.toMatchObject({ reason: 'authority_changed' })
+    await vi.advanceTimersByTimeAsync(100)
+    controller.abort()
+    await rejected
+    expect(aborted).toHaveBeenCalledOnce()
+    expect(assertCurrent).toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps the bound source snapshot and fresh final admission after the Codex timeout', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const provider = Object.assign(slowProvider(vi.fn()), { name: 'openai-codex' })
+    const accumulator = new ContextScopeAccumulator()
+    const authority = {
+      execution: { security: { authority: { assertCurrent: async () => {} } },
+        lifecycle: { abortSignal: new AbortController().signal } }, accumulator,
+    } as unknown as SessionContextAuthority
+    const source = { workspaceId: 'fixture-workspace', userId: null, assistantId: null, sensitivity: 'confidential' as const,
+      compartments: ['finance'], projectIds: [], resourceKind: 'memory', resourceId: 'fixture-memory', version: '1' }
+    const check = vi.fn(async () => {})
+    const options = bindScopeSources({ provider, model: 'gpt-6-luna', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], authority, assertInputAuthority: check }, [source])
+    const classification = classifyTopic(options)
+    await vi.advanceTimersByTimeAsync(7_999)
+    const checksBeforeTimeout = check.mock.calls.length
+    // Later evidence must not replace the admitted classifier's source snapshot.
+    accumulator.note({ sources: [{ ...source, resourceId: 'later-evidence' }] })
+    await vi.advanceTimersByTimeAsync(1)
+    const result = await classification
+    expect(result).toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
+    expect(check.mock.calls.length).toBeGreaterThan(checksBeforeTimeout)
+    expect(boundScopeSources(result)).toEqual([source])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('narrows the Codex budget to an explicit host deadline', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const aborted = vi.fn(), provider = slowProvider(aborted)
+    provider.name = 'openai-codex'
+    const deadlineAt = Date.now() + 700
+    const decisionRuntime = executionFixture({ mode: 'llm_only', llm: provider })
+    const run = vi.spyOn(decisionRuntime, 'run')
+    const classification = classifyTopic({ provider, model: 'gpt-6-luna', recentUserTurns: [], replyToText: null,
+      currentMessage: 'Fictional request', knownTopicsThisSession: [], deadlineAt, decisionRuntime })
+    await vi.advanceTimersByTimeAsync(699)
+    expect(aborted).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(classification).resolves.toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({ deadlineAt }) }))
+    expect(aborted).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('does not re-enter the original authority window after a timed-out classifier returns (%s)', async (model, budget) => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const assertInputAuthority = vi.fn(async () => {})
@@ -115,6 +278,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     const transport = new Promise<void>((resolve) => { releaseTransport = resolve })
     let signal: AbortSignal | undefined
     const provider = mockProvider('unused')
+    provider.name = 'routing'
     provider.stream = async function* (request) {
       signal = request.signal
       // A transport can finish unwinding after cancellation and fallback.
@@ -122,10 +286,10 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       await transport
       throw request.signal?.reason ?? new Error('Fictional delayed transport cancellation')
     }
-    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+    const classification = classifyTopic({ provider, model, recentUserTurns: [], replyToText: null,
       currentMessage: 'Fictional request', knownTopicsThisSession: [], assertInputAuthority })
 
-    await vi.advanceTimersByTimeAsync(2_000)
+    await vi.advanceTimersByTimeAsync(budget)
     await expect(classification).resolves.toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
     expect(signal?.aborted).toBe(true)
     const checksAtReturn = assertInputAuthority.mock.calls.length
@@ -137,7 +301,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('drains a losing cascade authority check before returning the timeout fallback', async () => {
+  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('drains a losing cascade authority check before returning the timeout fallback (%s)', async (model, budget) => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     let checksStarted = 0
@@ -149,6 +313,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       finally { activeChecks-- }
     })
     const provider = mockProvider('unused')
+    provider.name = 'routing'
     const decisionRuntime = executionFixture({ mode: 'llm_only', llm: provider })
     decisionRuntime.run = async ({ request, operation }) => {
       await new Promise<void>(resolve => request.signal!.addEventListener('abort', () => resolve(), { once: true }))
@@ -157,10 +322,10 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
       for (let i = 0; i < 10; i++) await operation.assertInputAuthority!()
       return { runId: request.runId, result: operation.safeFailure('timeout'), path: 'safe_default', attempts: 0, failureKind: 'timeout' }
     }
-    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+    const classification = classifyTopic({ provider, model, recentUserTurns: [], replyToText: null,
       currentMessage: 'Fictional request', knownTopicsThisSession: [], decisionRuntime, assertInputAuthority })
 
-    await vi.advanceTimersByTimeAsync(2_040)
+    await vi.advanceTimersByTimeAsync(budget + 40)
     await expect(classification).resolves.toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
     const activeChecksAtReturn = activeChecks
     const checksAtReturn = assertInputAuthority.mock.calls.length
@@ -196,34 +361,34 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('passes the same total budget through the decision runtime to its LLM transport', async () => {
+  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('passes the same total budget through the decision runtime to its LLM transport (%s)', async (model, budget) => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const aborted = vi.fn()
-    const provider = slowProvider(aborted)
+    const provider = Object.assign(slowProvider(aborted), { name: 'routing' })
     const decisionRuntime = executionFixture({ mode: 'llm_only', llm: provider })
     const run = vi.spyOn(decisionRuntime, 'run')
     const startedAt = Date.now()
-    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+    const classification = classifyTopic({ provider, model, recentUserTurns: [], replyToText: null,
       currentMessage: 'Fictional request', knownTopicsThisSession: [], decisionRuntime })
 
-    await vi.advanceTimersByTimeAsync(2_000)
+    await vi.advanceTimersByTimeAsync(budget)
     await expect(classification).resolves.toMatchObject({ topic_label: '(uncategorized)', confidence: 0 })
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({
-      signal: expect.any(AbortSignal), deadlineAt: startedAt + 2_000,
+      signal: expect.any(AbortSignal), deadlineAt: startedAt + budget,
     }) }))
     expect(aborted).toHaveBeenCalledOnce()
     expect(aborted.mock.calls[0]![0].aborted).toBe(true)
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('cancels the transport with the caller and propagates its current authority refusal', async () => {
+  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('cancels the transport with the caller and propagates its current authority refusal (%s)', async (model, budget) => {
     vi.useFakeTimers()
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const refusal = Object.assign(new Error('Synthetic turn authority revoked'), { reason: 'authority_changed', retrySafe: false })
     const controller = new AbortController()
     const aborted = vi.fn()
-    const classification = classifyTopic({ provider: slowProvider(aborted), model: 'mock', recentUserTurns: [], replyToText: null,
+    const classification = classifyTopic({ provider: Object.assign(slowProvider(aborted), { name: 'routing' }), model, recentUserTurns: [], replyToText: null,
       currentMessage: 'Fictional request', knownTopicsThisSession: [], signal: controller.signal,
       assertInputAuthority: async () => { if (controller.signal.aborted) throw refusal } })
     const rejected = expect(classification).rejects.toBe(refusal)
@@ -236,12 +401,13 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('cancels decision-provider and follow-up transports at shorter cascade deadlines', async () => {
+  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('cancels decision-provider and follow-up transports at shorter cascade deadlines (%s)', async (model, budget) => {
     vi.useFakeTimers()
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const decisionAborted = vi.fn()
     const llmAborted = vi.fn()
     const provider = slowProvider(llmAborted)
+    provider.name = 'routing'
     const decisionRuntime = executionFixture({
       llm: provider,
       primary: fixtureDecisionProvider(async (request) => new Promise<never>((_resolve, reject) => {
@@ -251,7 +417,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
         }, { once: true })
       })),
     })
-    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+    const classification = classifyTopic({ provider, model, recentUserTurns: [], replyToText: null,
       currentMessage: 'Fictional request', knownTopicsThisSession: [], decisionRuntime })
 
     await vi.advanceTimersByTimeAsync(100)
@@ -262,7 +428,7 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('waits for an in-flight authority refusal when the classification deadline expires', async () => {
+  it.each([['gemini-3.6-flash-standard', 2_000], ['gpt-6-luna', 8_000]] as const)('waits for an in-flight authority refusal when the classification deadline expires (%s)', async (model, budget) => {
     vi.useFakeTimers()
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const refusal = Object.assign(new Error('Synthetic input authority revoked'), { reason: 'authority_changed', retrySafe: false })
@@ -270,18 +436,19 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     const pendingAuthority = new Promise<void>((_resolve, reject) => { rejectAuthority = reject })
     let providerComplete = false
     const provider = mockProvider('unused')
+    provider.name = 'routing'
     provider.stream = async function* () {
       yield { type: 'text_delta', text: '{"topic_label":"planning","state":"continue","confidence":0.9}' } as StreamChunk
       providerComplete = true
     }
     const check = vi.fn(async () => { if (providerComplete) await pendingAuthority })
-    const classification = classifyTopic({ provider, model: 'mock', recentUserTurns: [], replyToText: null,
+    const classification = classifyTopic({ provider, model, recentUserTurns: [], replyToText: null,
       currentMessage: 'Fictional request', knownTopicsThisSession: [], assertInputAuthority: check })
     const rejected = expect(classification).rejects.toBe(refusal)
     let settled = false
     void classification.then(() => { settled = true }, () => { settled = true })
 
-    await vi.advanceTimersByTimeAsync(2_000)
+    await vi.advanceTimersByTimeAsync(budget)
     expect(settled).toBe(false)
     expect(check).toHaveBeenCalledTimes(3)
     rejectAuthority(refusal)

@@ -36,6 +36,67 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
     expect(menu.meteredBillingAvailable).toBe(true);
   });
 
+  it.each([undefined, null, { operationIds: null }, { operationIds: ["research.intent", "chat.route"] }])(
+    "preserves optional deployment capability from the menu: %j", async (classifierFirst) => {
+      const model = {
+        alias: "typesafe-jev-1.13", displayName: "Jev 1.13", provider: "typesafe", adapterId: "typesafe",
+        hybridOperations: [], ...(classifierFirst === undefined ? {} : { classifierFirst }),
+      };
+      const decisionRouting = {
+        mode: "hybrid", modelAlias: model.alias, updatedAt: "now", operatorOverride: !!classifierFirst,
+        shadowSampleRate: 0.1, models: [model],
+      };
+      mockFetch.mockResolvedValueOnce(ok({ decisionRouting }));
+      const menu = await fetchModelMenu("ws-1");
+      expect(menu.decisionRouting).toEqual(decisionRouting);
+      expect(menu.decisionRouting.models[0].classifierFirst).toEqual(classifierFirst);
+      expect(menu.decisionRouting.models[0].hybridOperations).toEqual([]);
+    },
+  );
+
+  it("preserves model-local grants and the selected OpenAI decision alias in a two-backend menu", async () => {
+    const openaiAlias = "openai-decisions-gpt-6-luna";
+    const models = [
+      {
+        alias: "typesafe-jev-1.13", displayName: "Jev 1.13", provider: "typesafe", adapterId: "typesafe",
+        hybridOperations: [], classifierFirst: null,
+      },
+      {
+        alias: openaiAlias, displayName: "GPT-6 Luna Decisions",
+        provider: "openai-decisions", adapterId: "openai-decisions",
+        hybridOperations: [], classifierFirst: { operationIds: ["research.intent"] },
+      },
+    ];
+    mockFetch.mockResolvedValueOnce(ok({ decisionRouting: {
+      mode: "hybrid", modelAlias: openaiAlias, updatedAt: "now", operatorOverride: true,
+      shadowSampleRate: 0.1, models,
+    } }));
+    const menu = await fetchModelMenu("ws-1");
+    expect(menu.decisionRouting.modelAlias).toBe(openaiAlias);
+    expect(menu.decisionRouting.models).toEqual(models);
+    expect(menu.decisionRouting.models.filter(model => model.classifierFirst).map(model => model.alias)).toEqual([openaiAlias]);
+
+    mockFetch.mockResolvedValueOnce(ok({ decisionRouting: {
+      mode: "hybrid", modelAlias: openaiAlias, updatedAt: "now",
+    } }));
+    const setting = await setWorkspaceDecisionRouting("ws-1", { mode: "hybrid", modelAlias: openaiAlias });
+    const [, init] = mockFetch.mock.calls[1] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ mode: "hybrid", modelAlias: openaiAlias });
+    expect(setting.modelAlias).toBe(openaiAlias);
+  });
+
+  it.each(["typesafe-jev-1.13", "openai-decisions-gpt-6-luna"])("persists explicit classifier_first for %s without client authority flags", async (modelAlias) => {
+    const decisionRouting = { mode: "classifier_first" as const, modelAlias, updatedAt: "now" };
+    mockFetch.mockResolvedValueOnce(ok({ decisionRouting: { ...decisionRouting, models: [], operatorOverride: true, shadowSampleRate: 0.1 } }));
+    expect((await fetchModelMenu("ws-1")).decisionRouting.mode).toBe("classifier_first");
+    mockFetch.mockResolvedValueOnce(ok({ decisionRouting }));
+    expect(await setWorkspaceDecisionRouting("ws-1", { mode: "classifier_first", modelAlias })).toEqual(decisionRouting);
+    const [url, init] = mockFetch.mock.calls[1] as [string, RequestInit];
+    expect(url).toContain("/api/workspaces/ws-1/decision-routing");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ mode: "classifier_first", modelAlias });
+  });
+
   it("posts estimate requests at the chosen budget", async () => {
     mockFetch.mockResolvedValueOnce(ok({ estimate: { modelAlias: "qwen3.7-max", toolRounds: 100, minCredits: 9, maxCredits: 120 } }));
     const est = await fetchMeteredEstimate("ws-1", "qwen3.7-max", 100);
@@ -119,7 +180,20 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
     expect(setting.mode).toBe("shadow");
   });
 
-  it("sets a workspace classifier to hybrid where approved", async () => {
+  it.each(["typesafe-jev-1.13", "openai-decisions-gpt-6-luna"])("preserves explicit shadow rates for %s", async (modelAlias) => {
+    for (const shadowSampleRate of [0.1, 1] as const) {
+      const decisionRouting = { mode: "shadow" as const, modelAlias, shadowSampleRate, updatedAt: "now" };
+      mockFetch.mockResolvedValueOnce(ok({ decisionRouting }));
+      const setting = await setWorkspaceDecisionRouting("ws-1", { mode: "shadow", modelAlias, shadowSampleRate });
+      const [url, init] = mockFetch.mock.calls.at(-1)!;
+      expect(String(url)).toContain("/api/workspaces/ws-1/decision-routing");
+      expect(JSON.parse(init!.body as string)).toEqual({ mode: "shadow", modelAlias, shadowSampleRate });
+      expect(setting.shadowSampleRate).toBe(shadowSampleRate);
+      expect(setting).toEqual(decisionRouting);
+    }
+  });
+
+  it("selects hybrid with the same wire request for approvals or deployment-granted full routing", async () => {
     mockFetch.mockResolvedValueOnce(ok({
       decisionRouting: {
         mode: "hybrid",

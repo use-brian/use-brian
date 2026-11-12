@@ -352,6 +352,18 @@ class ManagedCodexProvider implements CodexProviderManager {
       // The proxy survives runtime replacement: query the current adapter's
       // presentation capability without starting a process or reading accounts.
       toolSchemaMode: model => this.#runtime?.provider.toolSchemaMode?.(model) ?? 'eager',
+      supportedThinkingLevels: model => {
+        // Catalog metadata only: never start/refresh a runtime for a capability.
+        const runtime = this.#runtime
+        const status = this.#lastStatus
+        if (this.#closed || !runtime || runtime.process.rpc.closed || runtime.accountProcess.rpc.closed ||
+          !status.runtimeAvailable || !status.account.connected || status.account.authType !== 'chatgpt') return []
+        const row = registryRow(model)
+        if (!row || row.provider !== PROVIDER_ID || row.status !== 'active') return []
+        const advertised = status.models.find(item => item.model === row.apiModelId)
+        return [...new Set(advertised?.supportedReasoningEfforts.map(item => item.reasoningEffort)
+          .filter((level): level is 'low' | 'high' => level === 'low' || level === 'high') ?? [])]
+      },
       stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
         return current().stream(request)
       },

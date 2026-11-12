@@ -56,7 +56,7 @@ export type DecisionRoute = {
   allowInvalidResponseRecovery?: boolean
   /** Test/evaluation harness only. Production activation never sets this. */
   allowSyntheticProfile?: boolean
-  /** Explicit deployment-owner authority; requires matching operator_override profile metadata. */
+  /** Explicit deployment-owner or workspace-admin authority; requires matching override profile metadata. */
   operatorOverride?: boolean
 }
 

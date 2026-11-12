@@ -57,6 +57,10 @@ describe('[COMP:providers/credential-pool] credential-resolving provider', () =>
       return 'eager'
     })
     template.toolSchemaMode = mode
+    template.supportedThinkingLevels = function (model) {
+      expect(this).toBe(template)
+      return model === 'low-fixture' ? ['low', 'high'] : []
+    }
     const create = vi.fn(() => template)
     const provider = wrapCredentialPoolProvider({
       providerId: 'fixture', pool, systemFallback: 'template', create,
@@ -70,6 +74,10 @@ describe('[COMP:providers/credential-pool] credential-resolving provider', () =>
     expect(mode.mock.calls.map(([model]) => model)).toEqual([
       'gemini-fixture', 'codex-fixture', 'legacy-fixture', 'gemini-fixture',
     ])
+    const captured = provider.supportedThinkingLevels!
+    template.supportedThinkingLevels = () => []
+    expect(captured('low-fixture')).toEqual(['low', 'high'])
+    expect(captured('unknown')).toEqual([])
     expect(session).toBeDefined()
     expect(create).toHaveBeenCalledExactlyOnceWith('template')
     expect(pool.resolve).not.toHaveBeenCalled()

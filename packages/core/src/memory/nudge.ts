@@ -8,6 +8,7 @@
  * See docs/architecture/context-engine/memory-consolidation.md for the full design.
  */
 
+import { decisionUsageModelId } from '../decisions/usage.js'
 import type { ContentBlock, TokenUsage } from '../providers/types.js'
 import type { MemoryStore } from './types.js'
 import type {
@@ -172,7 +173,7 @@ function decideMemoryUsefulness(
       usage: response.usage
         ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens }
         : null,
-      model: response.model.wireId,
+      model: decisionUsageModelId(response.model),
     },
   }
 }

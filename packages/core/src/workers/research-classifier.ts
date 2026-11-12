@@ -1,3 +1,4 @@
+import { decisionUsageModelId } from '../decisions/usage.js'
 import {buildToolSelectionQuestions} from '../engine/tool-selection.js'
 import {createLlmDecisionProvider,buildLlmDecisionMessages,decisionLlmOutputBudget} from '../decisions/adapters/llm.js'
 import {bindScopeSources,boundScopeSources} from '../security/source-evidence.js'
@@ -197,7 +198,7 @@ function primaryResearchResult(response: DecisionResponse): ResearchClassifyResu
     usage: response.usage
       ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens }
       : null,
-    model: response.model.wireId,
+    model: decisionUsageModelId(response.model),
   }
   if (['research', 'research_focused', 'research_deep'].includes(answer.value)) {
     const effort = answer.value === 'research_focused' ? 'focused' : answer.value === 'research_deep' ? 'deep' : 'standard'

@@ -253,6 +253,9 @@ export type LLMProvider = {
   /** Per-model presentation support, propagated by routing/wrappers. Omission
    * means eager. Drivers must opt in before the engine builds a deferred plan. */
   toolSchemaMode?(model: string): ToolSchemaRegistrationMode
+  /** Read-only descriptive metadata; must not perform I/O or acquire credentials.
+   * Omission means unknown ([]), not permission, authentication, or entitlement. */
+  supportedThinkingLevels?(model: string, options?: { allowProviderFallback?: boolean }): readonly ThinkingLevel[]
   /** Stateless single-shot streaming (for simple calls) */
   stream: StreamFn
   /** Create a stateful session for multi-turn tool use */

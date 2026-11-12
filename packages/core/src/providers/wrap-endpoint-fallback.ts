@@ -250,6 +250,11 @@ export function wrapEndpointFallback(
     name: primary.name,
     models: primary.models,
     toolSchemaMode: model => primary.toolSchemaMode?.(model) ?? 'eager',
+    // Any possible serving provider must support the advertised effort.
+    supportedThinkingLevels: (model, route) => {
+      const other = fallback.supportedThinkingLevels?.(model, route) ?? []
+      return (primary.supportedThinkingLevels?.(model, route) ?? []).filter(level => other.includes(level))
+    },
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
       return attempt(

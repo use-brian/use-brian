@@ -1,6 +1,6 @@
 /** Current native attended history and annotations. [COMP:api/application-persistence] */
-import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,isTrivialChatMessage,DerivedScopeError,executionToolContext,
- type ResearchClassifyOptions,type ResearchClassifyResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
+import {ContextScopeAccumulator,bindScopeSources,boundScopeSources,classifyTopic,classifyResearchIntent,classifySplit,isTrivialChatMessage,DerivedScopeError,executionToolContext,
+ type ResearchClassifyOptions,type ResearchClassifyResult,type SplitResult,type TopicClassifierOptions,type SessionContextAuthority,type ScopeSource,type TopicClassification} from '@use-brian/core'
 import {getPool} from '../db/client.js'
 import {readAdmittedSessionQuery,captureSessionTopics,sessionQueryRootMetadata} from '../db/session-query-reader.js'
 import {readSessionQueryFrame} from '../db/session-context-revisions.js'
@@ -325,4 +325,64 @@ export async function classifyAttendedResearchMessage(input:{
   assertInputAuthority:()=>input.measure?input.measure('research_authority',()=>assertSourceModelInputAuthority(context)):assertSourceModelInputAuthority(context),workspaceId:authority.execution.security.access.workspaceId,
   runId:'research-intent-'+message.id},boundScopeSources(query))
  return classifyResearchIntent(options)
+}
+
+/** Data-only preparation for the invariant Standard splitter route. Classification
+ * may overlap sibling assessments; task generation is consumed only at the old
+ * preflight boundary after a NEW input proof. This object is never an allow receipt.
+ */
+export async function prepareAttendedSplitMessage(input:ClassificationInput&{
+ provider:ResearchClassifyOptions['provider'];rawMessage:string;signal:AbortSignal;measure?:ClassificationMeasure;
+}):Promise<{usage:SplitResult['usage'];model:SplitResult['model'];matches:(message:string,provider:ResearchClassifyOptions['provider'])=>boolean;read:()=>Promise<SplitResult>}|undefined>{
+ const {authority,session,message,provider,rawMessage,signal,measure}=input
+ const {execution,accumulator}=authority
+ const sessionId=session.id,messageId=message.id,sequence=message.sequenceNum,capture=input.capture
+ const captured=capture?classificationCaptures.get(capture):undefined
+ const assertBinding=()=>{
+  if(input.authority!==authority||input.session!==session||input.message!==message||input.capture!==capture
+   ||session.id!==sessionId||message.id!==messageId||message.sequenceNum!==sequence||message.sessionId!==sessionId||message.role!=='user'
+   ||authority.execution!==execution||authority.accumulator!==accumulator
+   ||captured&&(captured.rootAuthority.execution!==captured.rootExecution||captured.rootAuthority.accumulator!==captured.rootAccumulator))throw new DerivedScopeError('scope_source_changed')
+ }
+ assertBinding()
+ if(message.sessionId!==sessionId||message.role!=='user')throw new DerivedScopeError('scope_evidence_missing')
+ const query=await classificationQuery(input,0)
+ assertBinding()
+ const current=query.history.find(row=>row.id===messageId)
+ if(!current)throw new DerivedScopeError('scope_source_changed')
+ const content=current.content
+ // Never substitute a truncated/formatted/history-derived body for the exact
+ // late splitter input. Mixed blocks and transformed attachments stay late.
+ const body=typeof content==='string'?content:Array.isArray(content)&&content.every(block=>
+  typeof block==='object'&&block!==null&&block.type==='text'&&typeof block.text==='string')
+   ?content.map(block=>(block as {text:string}).text).join(' '):undefined
+ if(body!==rawMessage)return undefined
+ const context={...executionToolContext(execution,{appId:'native-session-split'}),scopeAccumulator:accumulator}
+ const check=async()=>{
+  try{
+   assertBinding()
+   await (measure?measure('split_authority',()=>assertSourceModelInputAuthority(context)):assertSourceModelInputAuthority(context))
+   assertBinding()
+  }catch(error){throw Object.assign(error instanceof Error?error:new Error('The assessment context is unavailable.'),{reason:'authority_changed',retrySafe:false})}
+ }
+ const options=bindScopeSources({provider,message:rawMessage,authority,signal,deadlineAt:Date.now()+8_000,
+  assertInputAuthority:check},structuredClone(boundScopeSources(query)))
+ // No model/decisionRuntime override: this MUST match the Standard preflight's
+ // historical classifySplit({provider,message}) route, not the coordinator's.
+ const result=await classifySplit(options)
+ const snapshot=structuredClone(result)
+ if(snapshot.tasks)Object.freeze(snapshot.tasks)
+ if(snapshot.usage)Object.freeze(snapshot.usage)
+ Object.freeze(snapshot)
+ let consumed=false
+ return Object.freeze({usage:snapshot.usage,model:snapshot.model,matches:(message:string,candidate:ResearchClassifyOptions['provider'])=>message===rawMessage&&candidate===provider,read:async()=>{
+  if(consumed)throw Object.assign(new DerivedScopeError('scope_source_changed'),{reason:'authority_changed',retrySafe:false})
+  // Claim before awaiting: concurrent reads and retries after a refusal must not
+  // turn this data-only preparation into a reusable permission receipt.
+  consumed=true
+  signal.throwIfAborted()
+  await check()
+  signal.throwIfAborted()
+  return bindScopeSources(structuredClone(snapshot),structuredClone(boundScopeSources(query)))
+ }})
 }

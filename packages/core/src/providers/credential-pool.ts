@@ -79,6 +79,7 @@ export function wrapCredentialPoolProvider(options: {
     name: template.name,
     models: template.models,
     toolSchemaMode: template.toolSchemaMode?.bind(template) ?? (() => 'eager'),
+    supportedThinkingLevels: template.supportedThinkingLevels?.bind(template) ?? (() => []),
 
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
       const resolved = await resolveProvider()
