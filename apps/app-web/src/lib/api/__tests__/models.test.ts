@@ -168,6 +168,19 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
     expect(setting.mode).toBe("shadow");
   });
 
+  it.each(["typesafe-jev-1.13", "openai-decisions-gpt-6-luna"])("preserves explicit shadow rates for %s", async (modelAlias) => {
+    for (const shadowSampleRate of [0.1, 1] as const) {
+      const decisionRouting = { mode: "shadow" as const, modelAlias, shadowSampleRate, updatedAt: "now" };
+      mockFetch.mockResolvedValueOnce(ok({ decisionRouting }));
+      const setting = await setWorkspaceDecisionRouting("ws-1", { mode: "shadow", modelAlias, shadowSampleRate });
+      const [url, init] = mockFetch.mock.calls.at(-1)!;
+      expect(String(url)).toContain("/api/workspaces/ws-1/decision-routing");
+      expect(JSON.parse(init!.body as string)).toEqual({ mode: "shadow", modelAlias, shadowSampleRate });
+      expect(setting.shadowSampleRate).toBe(shadowSampleRate);
+      expect(setting).toEqual(decisionRouting);
+    }
+  });
+
   it("selects hybrid with the same wire request for approvals or deployment-granted full routing", async () => {
     mockFetch.mockResolvedValueOnce(ok({
       decisionRouting: {

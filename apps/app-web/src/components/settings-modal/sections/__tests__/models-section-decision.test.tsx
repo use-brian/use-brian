@@ -121,11 +121,70 @@ async function choose(route: string) {
 }
 
 // Old response fixtures intentionally omit classifierFirst.
-describe("workspace decision routing", () => {
+describe("[COMP:app-web/models-settings] workspace decision routing", () => {
+  it.each([
+    [alias, "Jev 1.13", 0.1, true],
+    [alias, "Jev 1.13", 1, true],
+    ["openai-decisions-gpt-6-luna", "GPT-6 Luna Decisions", 0.1, true],
+    ["openai-decisions-gpt-6-luna", "GPT-6 Luna Decisions", 1, true],
+    [alias, "Jev 1.13", 0.1, false],
+    [alias, "Jev 1.13", 1, false],
+    ["openai-decisions-gpt-6-luna", "GPT-6 Luna Decisions", 0.1, false],
+    ["openai-decisions-gpt-6-luna", "GPT-6 Luna Decisions", 1, false],
+  ] as const)("selects shadow %s (%s) at rate %s (confirm=%s)", async (selectedAlias, displayName, rate, confirmed) => {
+    const openai = { ...model, alias: "openai-decisions-gpt-6-luna", displayName: "GPT-6 Luna Decisions",
+      provider: "openai-decisions", adapterId: "openai-decisions" };
+    await render({ models: [model, openai], mode: "shadow", modelAlias: selectedAlias, shadowSampleRate: rate === 1 ? 0.1 : 1 });
+    for (const candidate of [model, openai]) {
+      expect(choices(`hybrid:${candidate.alias}`)).toHaveLength(0);
+      for (const sample of [0.1, 1]) {
+        const option = choices(`shadow:${sample}:${candidate.alias}`);
+        expect(option).toHaveLength(1);
+        expect(option[0].textContent).toContain(t.decisionShadowOption.replace("{model}", candidate.displayName).replace("{percent}", String(sample * 100)));
+      }
+    }
+    vi.mocked(confirmDialog).mockResolvedValueOnce(confirmed);
+    await choose(`shadow:${rate}:${selectedAlias}`);
+    expect(confirmDialog).toHaveBeenCalledExactlyOnceWith({
+      title: t.decisionConfirmTitle,
+      description: t.decisionConfirmBody.replace("{model}", displayName).replace("{percent}", String(rate * 100)),
+      confirmLabel: t.decisionConfirmCta,
+    });
+    if (confirmed) {
+      expect(setWorkspaceDecisionRouting).toHaveBeenCalledExactlyOnceWith("ws-1", {
+        mode: "shadow", modelAlias: selectedAlias, shadowSampleRate: rate,
+      });
+      expect(fetchModelMenu).toHaveBeenCalledTimes(2);
+    } else {
+      expect(setWorkspaceDecisionRouting).not.toHaveBeenCalled();
+      expect(fetchModelMenu).toHaveBeenCalledTimes(1);
+      expect(container.querySelector(`[data-value="shadow:${rate === 1 ? 0.1 : 1}:${selectedAlias}"]`)).not.toBeNull();
+    }
+    expect(choices(`hybrid:${selectedAlias}`)).toHaveLength(0);
+  });
+
+  it.each([alias, "openai-decisions-gpt-6-luna"])("restores persisted 100%% shadow for %s without granting hybrid", async (selectedAlias) => {
+    await render({ mode: "shadow", modelAlias: selectedAlias, shadowSampleRate: 1,
+      models: [{ ...model, alias: selectedAlias }],
+    });
+    expect(container.querySelector(`[data-value="shadow:1:${selectedAlias}"]`)).not.toBeNull();
+    expect(choices(`shadow:1:${selectedAlias}`)).toHaveLength(1);
+    expect(choices(`shadow:0.1:${selectedAlias}`)).toHaveLength(1);
+    expect(choices(`hybrid:${selectedAlias}`)).toHaveLength(0);
+    expect(container.textContent).toContain(t.decisionShadowBadge.replace("{percent}", "100"));
+  });
+
+  it("defaults legacy shadow settings without a rate to 10%", async () => {
+    await render({ mode: "shadow", modelAlias: alias, shadowSampleRate: undefined });
+    expect(container.querySelector(`[data-value="shadow:0.1:${alias}"]`)).not.toBeNull();
+    expect(container.textContent).toContain(t.decisionShadowBadge.replace("{percent}", "10"));
+    expect(container.textContent).not.toContain("NaN");
+  });
+
   it("does not offer full routing or hybrid on credential/model availability alone", async () => {
     await render();
     expect(choices(`hybrid:${alias}`)).toHaveLength(0);
-    expect(choices(`shadow:${alias}`)).toHaveLength(1);
+    expect(choices(`shadow:0.1:${alias}`)).toHaveLength(1);
     expect(container.textContent).toContain(t.decisionHybridGate);
   });
 
@@ -171,9 +230,9 @@ describe("workspace decision routing", () => {
     expect(fullRouting[0].textContent).toContain("research.intent");
     expect(fullRouting[0].textContent).not.toContain("chat.route");
     expect(fullRouting[0].textContent).toContain(t.decisionFirstBadge);
-    expect(choices(`shadow:${openaiAlias}`)).toHaveLength(1);
-    expect(choices(`shadow:${alias}`)).toHaveLength(1);
-    expect(choices(`shadow:${alias}`)[0].textContent).toContain("Jev 1.13");
+    expect(choices(`shadow:0.1:${openaiAlias}`)).toHaveLength(1);
+    expect(choices(`shadow:0.1:${alias}`)).toHaveLength(1);
+    expect(choices(`shadow:0.1:${alias}`)[0].textContent).toContain("Jev 1.13");
     const jevHybrid = choices(`hybrid:${alias}`);
     expect(jevHybrid).toHaveLength(jevApproved ? 1 : 0);
     if (jevApproved) {
@@ -203,7 +262,7 @@ describe("workspace decision routing", () => {
     expect(container.querySelector(`[data-value="hybrid:${openaiAlias}"]`)).not.toBeNull();
     expect(container.textContent).toContain(t.decisionFirstConfirmBody.replace("{model}", "GPT-6 Luna Decisions").replace("{scope}", "research.intent"));
     vi.mocked(confirmDialog).mockResolvedValueOnce(true);
-    await choose(mode === "llm_only" ? mode : `shadow:${openaiAlias}`);
+    await choose(mode === "llm_only" ? mode : `shadow:0.1:${openaiAlias}`);
     if (mode === "llm_only") {
       expect(confirmDialog).not.toHaveBeenCalled();
       expect(setWorkspaceDecisionRouting).toHaveBeenCalledExactlyOnceWith("ws-1", { mode });
@@ -213,7 +272,7 @@ describe("workspace decision routing", () => {
         description: t.decisionConfirmBody.replace("{model}", "GPT-6 Luna Decisions").replace("{percent}", "10"),
         confirmLabel: t.decisionConfirmCta,
       });
-      expect(setWorkspaceDecisionRouting).toHaveBeenCalledExactlyOnceWith("ws-1", { mode, modelAlias: openaiAlias });
+      expect(setWorkspaceDecisionRouting).toHaveBeenCalledExactlyOnceWith("ws-1", { mode, modelAlias: openaiAlias, shadowSampleRate: 0.1 });
     }
   });
 
@@ -222,7 +281,7 @@ describe("workspace decision routing", () => {
       models: [{ ...model, hybridOperations: [approved], classifierFirst: { operationIds: null } }],
     });
     expect(choices(`hybrid:${alias}`)).toHaveLength(1);
-    expect(choices(`shadow:${alias}`)).toHaveLength(1);
+    expect(choices(`shadow:0.1:${alias}`)).toHaveLength(1);
     expect(container.textContent).toContain(t.decisionFirstAllEligible);
     expect(container.textContent).toContain(t.decisionFirstBadge);
     expect(container.textContent).not.toContain(t.decisionHybridAvailable.replace("{count}", "1"));
@@ -245,13 +304,13 @@ describe("workspace decision routing", () => {
       models: [{ ...model, classifierFirst: { operationIds: null } }],
     });
     vi.mocked(confirmDialog).mockResolvedValueOnce(true);
-    await choose(`shadow:${alias}`);
+    await choose(`shadow:0.1:${alias}`);
     expect(confirmDialog).toHaveBeenCalledWith({
       title: t.decisionConfirmTitle,
       description: t.decisionConfirmBody.replace("{model}", "Jev 1.13").replace("{percent}", "10"),
       confirmLabel: t.decisionConfirmCta,
     });
-    expect(setWorkspaceDecisionRouting).toHaveBeenCalledExactlyOnceWith("ws-1", { mode: "shadow", modelAlias: alias });
+    expect(setWorkspaceDecisionRouting).toHaveBeenCalledExactlyOnceWith("ws-1", { mode: "shadow", modelAlias: alias, shadowSampleRate: 0.1 });
   });
 
   it("retains legacy operator_hybrid deployment-default display", async () => {

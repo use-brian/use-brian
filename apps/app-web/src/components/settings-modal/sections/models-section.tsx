@@ -152,7 +152,9 @@ export function ModelsSection() {
   );
   const selectedHybridOperationCount = selectedDecisionModel?.hybridOperations.length ?? 0;
   const decisionRouteValue = decisionRouting?.mode !== "llm_only" && decisionRouting?.modelAlias
-    ? `${decisionRouting.mode}:${decisionRouting.modelAlias}`
+    ? decisionRouting.mode === "shadow"
+      ? `shadow:${decisionRouting.shadowSampleRate === 1 ? 1 : 0.1}:${decisionRouting.modelAlias}`
+      : `${decisionRouting.mode}:${decisionRouting.modelAlias}`
     : "llm_only";
   // Create form state.
   const [newModel, setNewModel] = useState<string>("");
@@ -301,7 +303,9 @@ export function ModelsSection() {
     setError(null);
     const separator = value.indexOf(":");
     const mode = value === "llm_only" ? "llm_only" : value.slice(0, separator);
-    const modelAlias = value === "llm_only" ? null : value.slice(separator + 1);
+    const target = value.slice(separator + 1);
+    const shadowSampleRate = mode === "shadow" && target.startsWith("1:") ? 1 : 0.1;
+    const modelAlias = value === "llm_only" ? null : mode === "shadow" ? target.slice(target.indexOf(":") + 1) : target;
     if (mode !== "llm_only" && mode !== "shadow" && mode !== "hybrid") return;
     if (mode !== "llm_only") {
       const model = decisionRouting?.models.find((candidate) => candidate.alias === modelAlias);
@@ -313,7 +317,7 @@ export function ModelsSection() {
         description: (classifierFirst ? t.decisionFirstConfirmBody : hybrid ? t.decisionHybridConfirmBody : t.decisionConfirmBody)
           .replace("{scope}", model.classifierFirst?.operationIds?.join(", ") ?? t.decisionFirstAllEligible)
           .replace("{model}", model.displayName)
-          .replace("{percent}", String(Math.round((decisionRouting?.shadowSampleRate ?? 0.1) * 100)))
+          .replace("{percent}", String(Math.round((mode === "shadow" ? shadowSampleRate : decisionRouting?.shadowSampleRate ?? 0.1) * 100)))
           .replace("{count}", String(model.hybridOperations.length)),
         confirmLabel: classifierFirst ? t.decisionFirstConfirmCta : hybrid ? t.decisionHybridConfirmCta : t.decisionConfirmCta,
       });
@@ -323,7 +327,9 @@ export function ModelsSection() {
     try {
       await setWorkspaceDecisionRouting(
         workspaceId,
-        mode === "llm_only" ? { mode: "llm_only" } : { mode, modelAlias: modelAlias! },
+        mode === "llm_only" ? { mode: "llm_only" }
+          : mode === "shadow" ? { mode, modelAlias: modelAlias!, shadowSampleRate }
+          : { mode, modelAlias: modelAlias! },
       );
       await reload();
     } catch (err) {
@@ -520,7 +526,7 @@ export function ModelsSection() {
                         ? t.decisionHybridBadge.replace("{count}", String(selectedHybridOperationCount))
                         : t.decisionHybridFallbackBadge
                       : decisionRouting?.mode === "shadow"
-                      ? t.decisionShadowBadge.replace("{percent}", String(Math.round(decisionRouting.shadowSampleRate * 100)))
+                      ? t.decisionShadowBadge.replace("{percent}", String(Math.round((decisionRouting.shadowSampleRate ?? 0.1) * 100)))
                       : t.decisionLlmOnly}
                   </span>
                 </div>
@@ -536,15 +542,12 @@ export function ModelsSection() {
                       badge: t.defaultBadge,
                     },
                     ...(decisionRouting?.models ?? []).flatMap((model) => [
-                      {
-                        value: `shadow:${model.alias}`,
-                        label: t.decisionShadowOption.replace("{model}", model.displayName),
-                        hint: t.decisionShadowHint,
-                        badge: t.decisionShadowBadge.replace(
-                          "{percent}",
-                          String(Math.round((decisionRouting?.shadowSampleRate ?? 0.1) * 100)),
-                        ),
-                      },
+                      ...([0.1, 1] as const).map((rate) => ({
+                        value: `shadow:${rate}:${model.alias}`,
+                        label: t.decisionShadowOption.replace("{model}", model.displayName).replace("{percent}", String(rate * 100)),
+                        hint: t.decisionShadowHint.replace("{percent}", String(rate * 100)),
+                        badge: t.decisionShadowBadge.replace("{percent}", String(rate * 100)),
+                      })),
                       ...(model.classifierFirst ? [{
                         value: `hybrid:${model.alias}`,
                         label: t.decisionFirstOption.replace("{model}", model.displayName),
@@ -577,7 +580,7 @@ export function ModelsSection() {
                       && decisionRouting.modelAlias
                       && !decisionRouting.models.some((model) => model.alias === decisionRouting.modelAlias)
                       ? [{
-                          value: `${decisionRouting.mode}:${decisionRouting.modelAlias}`,
+                          value: decisionRouteValue,
                           label: t.unavailableModel.replace("{model}", decisionRouting.modelAlias),
                           hint: t.decisionUnavailableModelHint,
                         }]

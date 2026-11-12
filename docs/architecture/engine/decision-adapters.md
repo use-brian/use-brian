@@ -27,8 +27,46 @@ the fixed public native Decisions endpoint, not Responses or Chat Completions.
 There is no vendor-to-vendor fallback between Jev and OpenAI.
 
 Registering either or both adapters does not activate or change decision
-routing. Existing Jev selections remain Jev. Activation uses the existing
-approved-profile workflow or the explicit deployment-operator policy:
+routing. Existing Jev selections remain Jev.
+
+### OpenAI setup and shadow comparison
+
+1. Create an OpenAI API key in a project with billing and access to the Decisions
+   API/model. ChatGPT/Codex subscription sign-in does not supply this credential.
+2. Set `OPENAI_DECISIONS_API_KEY` in the API server's environment and restart the
+   API. Do not commit the key. No custom endpoint or chat-model change is needed.
+3. Apply the normal API database migrations, including migration 8259 for the
+   persisted workspace shadow sample rate.
+4. As a workspace owner/admin, open Settings → Models → Decision routing and
+   choose **GPT-6 Luna Decisions - Shadow 10%** or **Shadow 100%**.
+
+Both shadow options keep the LLM authoritative. The selected native classifier
+runs for 10% or 100% of eligible typed decisions respectively, subject to the
+existing capability, input-authority, deadline and capacity checks. Work that
+requires generated text remains on the LLM; shadow results never replace its
+answer. Generation-only operations are not added to the native endpoint.
+100% shadowing adds classifier calls alongside the existing LLM work; it does
+not eliminate LLM classification cost.
+
+The setting is workspace- and model-specific. Existing selections and omitted
+sample rates remain 10%. The API accepts only `0.1` and `1` for shadow mode:
+
+```http
+PUT /api/workspaces/<workspace-id>/decision-routing
+Content-Type: application/json
+
+{"mode":"shadow","modelAlias":"openai-decisions-gpt-6-luna","shadowSampleRate":1}
+```
+
+Use `0.1` for the 10% option, or select `typesafe-jev-1.13` with its separate
+`TYPESAFE_API_KEY` for Jev. No `DECISION_DEFAULT_*` settings or approved hybrid
+profiles are required to select shadow mode. An explicit shadow preference
+remains non-authoritative even with a matching classifier-first deployment grant.
+
+### Classifier-first execution (separate opt-in)
+
+To let a native result control eligible decisions instead of only comparing it,
+use the existing approved-profile workflow or explicit deployment-operator policy:
 
 ```dotenv
 # Optional alternative; do not change an existing Jev selection implicitly.
@@ -38,7 +76,7 @@ DECISION_DEFAULT_MODEL=openai-decisions-gpt-6-luna
 ```
 
 An existing explicit workspace LLM-only/shadow row remains an opt-out; select
-**GPT-6 Luna Decisions — Classifier first (100%)** in Models → Decision routing
+**GPT-6 Luna Decisions - Classifier first (100%)** in Models → Decision routing
 to opt in. An explicit hybrid selection for another model is not replaced by a
 deployment default. `DECISION_DEFAULT_OPERATIONS` can narrow the exact operation
 scope. The UI distinguishes deployment overrides from approved quality evidence.

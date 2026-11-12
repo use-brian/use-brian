@@ -4,6 +4,17 @@ Classifier failures are not evidence of an empty main assistant generation.
 The changes here repair classifier schemas and bounded preparation; they do not
 claim to fix empty main assistant responses.
 
+## Shadow comparison: 10% or 100%
+
+Settings → Models → Decision routing offers separate **Shadow (10%)** and
+**Shadow (100%)** choices for each configured Jev/OpenAI decision model. Both
+keep the LLM authoritative; only the number of eligible native comparison calls
+changes. Existing workspace selections default to 10%. The selected sample rate
+is persisted per workspace and requires no approved hybrid profile or deployment
+execution grant. Text generation remains on the LLM. See
+[Decision adapters](decision-adapters.md#openai-setup-and-shadow-comparison) for
+configuration and the API request.
+
 ## Explicit 100% classifier-first routing
 
 `TYPESAFE_API_KEY` registers the Jev transport. The separate
