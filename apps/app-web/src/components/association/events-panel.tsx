@@ -22,7 +22,7 @@ export function eventWhere(event: AssociationEvent, labels: { venue: string; onl
   return event.mode === "online" ? labels.online : event.venue || labels[event.mode];
 }
 
-export function AssociationEventsPanel({ workspaceId, initialEventId = "", initialEventSlug = "", initialNew = false }: { workspaceId: string; initialEventId?: string; initialEventSlug?: string; initialNew?: boolean }) {
+export function AssociationEventsPanel({ workspaceId, initialEventId = "", initialEventSlug = "", initialNew = false, initialView = "event" }: { workspaceId: string; initialEventId?: string; initialEventSlug?: string; initialNew?: boolean; initialView?: "event" | "guests" | "registration" }) {
   const t = useT().associationPage, u = t.ux, m = t.manage, e = t.eventPage;
   const [view, setView] = useState<EventView>("website");
   // Visibility is filtered before cursor pagination, including past/cancelled public archives.
@@ -50,7 +50,7 @@ export function AssociationEventsPanel({ workspaceId, initialEventId = "", initi
       setCreated(record); setSelectedId(record.id); setCreating(false); void rows.refresh();
     }} />
   </AssociationEditor>;
-  if (selected) return <AssociationEventDetail key={selected.id} workspaceId={workspaceId} event={selected} enabled={enabled} canManage={configure} loadFailed={!!direct.error}
+  if (selected) return <AssociationEventDetail key={selected.id} workspaceId={workspaceId} event={selected} initialView={initialView} enabled={enabled} canManage={configure} loadFailed={!!direct.error}
     onBack={() => { setSelectedId(null); setDismissedLink(true); }} onChanged={() => { void rows.refresh(); void direct.refresh(); }} />;
   if ((selectedId || (!dismissedLink && initialEventSlug)) && !direct.data && !direct.error) return <AssociationListState {...direct}><span /></AssociationListState>;
   return <section className="space-y-5">

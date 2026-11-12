@@ -144,8 +144,8 @@ export function useAssociationContactSources(workspaceId: string, ids: string[])
     ()=>Promise.all(sources.map(id=>readAssociationContact(workspaceId,id))));
 }
 /** Store only identity; every display/mutation consumes the currently readable contact. */
-export function useAssociationContactSelection(workspaceId: string) {
-  const [id,setId]=useState<string|null>(null);
+export function useAssociationContactSelection(workspaceId: string, initialId = "") {
+  const [id,setId]=useState<string|null>(initialId || null);
   const read=useAssociationProjection(id?associationPageCacheKey(workspaceId,"selected-contact",{id}):null,
     ()=>readAssociationContact(workspaceId,id!));
   useEffect(()=>{
@@ -155,7 +155,7 @@ export function useAssociationContactSelection(workspaceId: string) {
     }
   },[id,read.error,workspaceId]);
   const select=useCallback((row:CrmLookupRow|null)=>setId(row?.id ?? null),[]);
-  return [read.data ?? null,select] as const;
+  return [read.data ?? null,select,read] as const;
 }
 /** Debounced person search over CRM contacts; the chosen person renders as a removable chip. */
 export function AssociationContactPicker({workspaceId,onSelect,selected,onClear,label}:{workspaceId:string;onSelect:(row:CrmLookupRow)=>void;selected?:CrmLookupRow|null;onClear?:()=>void;label?:string}) {

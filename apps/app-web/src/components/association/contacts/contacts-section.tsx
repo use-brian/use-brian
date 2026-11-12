@@ -26,7 +26,7 @@ function usePaged<T>(key: string, load: (cursor: string | null) => Promise<{ ite
   const cursor = stack[stack.length - 1] ?? null;
   const page = useAssociationProjection(`${key}:${cursor ?? ""}`, () => load(cursor));
   return { ...page,
-    next: page.data?.nextCursor ? () => setStack(old => [...old, page.data!.nextCursor]) : undefined,
+    next: page.data?.nextCursor && !stack.includes(page.data.nextCursor) ? () => setStack(old => [...old, page.data!.nextCursor]) : undefined,
     previous: stack.length > 1 ? () => setStack(old => old.slice(0, -1)) : undefined };
 }
 
@@ -44,7 +44,7 @@ function PeopleView({ workspaceId }: { workspaceId: string }) {
       <ResponsiveTable rows={page.data?.items ?? []} rowKey={row => row.id} rowData={row => ({ "data-contact-row": row.id })}
         empty={<EmptyState icon={Contact} title={u.noContacts} />}
         columns={[
-          { key: "name", label: m.name, primary: true, cell: row => row.name },
+          { key: "name", label: m.name, primary: true, cell: row => <Link className="inline-flex min-h-11 md:min-h-9 items-center text-primary" href={associationHref(workspaceId, "memberships", { contactId: row.id })}>{row.name}</Link> },
           { key: "email", label: u.columnEmail, cell: row => row.email ?? <span className="text-muted-foreground">{u.noEmail}</span> },
           { key: "phone", label: u.columnPhone, hideBelowMd: true, cell: row => row.phone ?? "" },
         ]}
@@ -118,10 +118,10 @@ function NewsletterView({ workspaceId }: { workspaceId: string }) {
 export function AssociationContactsSection({ workspaceId }: { workspaceId: string }) {
   const t = useT().associationPage, u = t.ux, router = useRouter(), search = useSearchParams();
   const raw = search?.get("view") as View | null;
-  const view: View = raw && VIEWS.includes(raw) ? raw : "people";
+  const view: View = raw && VIEWS.includes(raw) ? raw : "forms";
   const labels: Record<View, string> = { people: u.tabPeople, forms: u.tabForms, newsletter: u.tabNewsletter };
   return <section className="space-y-5" data-association-contacts>
-    <PageHeader title={u.navContacts} description={u.contactsPageHelp} actions={openLink(crmCollectionHref(workspaceId), t.openCrm)}>
+    <PageHeader title={t.staff.submissions} description={t.staff.submissionsHelp} actions={openLink(crmCollectionHref(workspaceId), t.openCrm)}>
       <Segmented label={u.goTo} value={view} onChange={next => router.replace(associationHref(workspaceId, "contacts", { view: next }))} options={VIEWS.map(id => ({ value: id, label: labels[id] }))} />
     </PageHeader>
     {view === "people" ? <PeopleView workspaceId={workspaceId} /> : null}

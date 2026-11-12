@@ -47,11 +47,11 @@ describe('[COMP:app-web/site-content] publication status in staff words',()=>{
 describe('[COMP:app-web/association] membership plans with a published membership page',()=>{
   it('keeps every plan listed and sends catalogue plans to the membership page editor',async()=>{
     api.list.mockImplementation(async(_w:string,resource:string)=>({items:resource==='plans'?[plan('annual','Annual'),plan('legacy','Legacy')]:[],nextCursor:null}));
-    api.catalogue.mockResolvedValue({version:1,publishedRevision:1,document:{},published:{plans:[{key:'annual'}]},observations:{},issues:[]});
+    api.catalogue.mockResolvedValue({version:1,publishedRevision:1,document:{plans:[]},published:{plans:[{key:'annual'}]},observations:{},issues:[]});
     await render(<AssociationPlansPanel workspaceId="w"/>);
     expect(host.querySelectorAll('[data-plan-card]')).toHaveLength(2);
     expect(host.textContent).toContain(u.onMembershipPage);
-    expect(hrefs()).toContain('/w/w/association?section=website&page=membership&plan=annual');
+    expect(hrefs()).toContain('/w/w/association?section=plans&view=website&plan=annual');
     expect([...host.querySelectorAll('button')].filter(button=>button.textContent===en.associationPage.manage.edit)).toHaveLength(1);
   });
   it('shows members the plans read-only, without edit or create actions',async()=>{
@@ -84,15 +84,17 @@ describe('[COMP:app-web/association] Contacts & forms',()=>{
     expect(host.textContent).toContain(format(u.showingFirst,{count:1}));
     expect(hrefs()).toContain('/w/w/crm?review=segments&segment=seg-1');
   });
-  it('shows contacts one page at a time with CRM links',async()=>{
+  it('shows contacts one page at a time with links to their member record and CRM',async()=>{
+    api.query='view=people';
     api.records.mockResolvedValue({items:[{kind:'contact',id:'c1',name:'Fictional Person',email:null,phone:null,companyId:null,tags:[]}],nextCursor:null,hasMore:false});
     await render(<AssociationContactsSection workspaceId="w"/>);
     expect(api.records).toHaveBeenCalledWith('w',expect.objectContaining({kind:'contact',limit:25}));
-    expect(host.textContent).toContain(u.noEmail);expect(hrefs()).toContain('/w/w/crm/contact/c1');
+    expect(host.textContent).toContain(u.noEmail);expect(hrefs()).toContain('/w/w/crm/contact/c1');expect(hrefs()).toContain('/w/w/association?section=memberships&contactId=c1');
   });
   it('renews open contact, submission and audience lists so revoked department records disappear within the 30-second bound',async()=>{
     vi.useFakeTimers({toFake:['setTimeout','clearTimeout','setInterval','clearInterval','performance']});
     try{
+      api.query='view=people';
       let authorized=true;
       api.records.mockImplementation(async()=>({items:authorized?[{kind:'contact',id:'c1',name:'Fictional Departmental Person',email:null,phone:null,companyId:null,tags:[]}]:[],nextCursor:null,hasMore:false}));
       await render(<AssociationContactsSection workspaceId="w"/>);

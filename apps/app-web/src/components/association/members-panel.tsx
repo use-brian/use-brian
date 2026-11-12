@@ -12,6 +12,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { useAssociationModule } from "./module-controls";
 import { AssociationField as Field,AssociationToggle,AssociationContactPicker,AssociationIntentNotice,AssociationListState,useAssociationPage,useAssociationContactSelection,useAssociationAction,useAssociationIntent,associationLocalTime,associationInstant } from "./operator-controls";
 import { AssociationEditor, associationMoney } from "./workspace-ui";
+import { MemberEventHistory } from "./member-event-history";
 import { associationHref } from "./navigation";
 import { EmptyState, FormFooter, InlineNotice, PageHeader, ResponsiveTable, Segmented, StatusPill, associationDate } from "./ui";
 
@@ -43,12 +44,12 @@ export function AssociationMembershipForm({workspaceId,plan,contact,row,disabled
   </form>;
 }
 
-export function AssociationMembersPanel({workspaceId,initialNew=false}:{workspaceId:string;initialNew?:boolean}) {
+export function AssociationMembersPanel({workspaceId,initialNew=false,initialContactId=""}:{workspaceId:string;initialNew?:boolean;initialContactId?:string}) {
   const t=useT().associationPage,u=t.ux,m=t.manage,plans=useAssociationPage(workspaceId,"plans"),module=useAssociationModule(workspaceId);
   const [mode,setMode]=useState<"list"|"add">(initialNew?"add":"list");
-  const [contact,setContact]=useAssociationContactSelection(workspaceId),[effectiveOnly,setEffectiveOnly]=useState(false),[saved,setSaved]=useState(false);
+  const [contact,setContact,contactRead]=useAssociationContactSelection(workspaceId,initialContactId),[effectiveOnly,setEffectiveOnly]=useState(false),[saved,setSaved]=useState(false);
   const [grant,setGrant]=useState<AssociationPlan|null>(null),[adjustId,setAdjustId]=useState<string|null>(null);
-  const memberships=useAssociationPage(workspaceId,"memberships",{...(contact&&mode==="list"?{contactId:contact.id}:{}),activeOnly:effectiveOnly});
+  const memberships=useAssociationPage(workspaceId,"memberships",{...(contact&&mode==="list"?{contactId:contact.id}:{}),activeOnly:!contact&&effectiveOnly});
   const canManage=!!module.data?.canManage&&!module.error;
   const adjust=memberships.data?.items.find(row=>row.id===adjustId);
   useEffect(()=>{if(adjustId&&!adjust)setAdjustId(null);},[adjustId,adjust]);
@@ -65,18 +66,25 @@ export function AssociationMembersPanel({workspaceId,initialNew=false}:{workspac
     </div>
   </AssociationEditor>;
   return <section className="space-y-5">
-    <PageHeader title={u.members} description={u.membersHelp} actions={<Button type="button" className="min-h-11 md:min-h-9" onClick={()=>{setSaved(false);setGrant(null);setMode("add");}}><UserPlus aria-hidden className="size-4"/>{u.addMember}</Button>}/>
+    <PageHeader title={contact?.name ?? u.members} description={contact ? contact.hint ?? undefined : t.staff.membersHelp}
+      back={contact ? initialContactId ? { label: u.members, href: associationHref(workspaceId,"memberships") } : { label: u.members, onClick: ()=>setContact(null) } : undefined}
+      actions={<Button type="button" className="min-h-11 md:min-h-9" onClick={()=>{setSaved(false);setGrant(null);setMode("add");}}><UserPlus aria-hidden className="size-4"/>{contact?t.staff.addMembership:u.addMember}</Button>}/>
     {saved?<InlineNotice tone="success">{u.saved}</InlineNotice>:null}
-    <div className="grid gap-3 rounded-2xl border border-border bg-background p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+    {initialContactId && !!contactRead.error && <InlineNotice tone="danger">{m.loadFailed}</InlineNotice>}
+    {!contact && <div className="grid gap-3 rounded-2xl border border-border bg-background p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
       <AssociationContactPicker workspaceId={workspaceId} label={u.searchPeople} selected={contact} onSelect={setContact} onClear={()=>setContact(null)}/>
       <AssociationToggle label={m.effectiveOnly} checked={effectiveOnly} onChange={setEffectiveOnly}/>
-    </div>
+    </div>}
+    {contact && <div className="flex flex-wrap items-center justify-between gap-3">
+      <h2 className="text-xl font-semibold">{u.navMembership}</h2>
+      <Link className={buttonVariants({variant:"outline",className:"min-h-11 md:min-h-9"})} href={crmRecordHref(workspaceId,"contact",contact.id)}>{t.openCrm}</Link>
+    </div>}
     <AssociationListState {...memberships}>
       <ResponsiveTable rows={memberships.data?.items ?? []} rowKey={row=>row.id} rowData={row=>({"data-membership-row":row.id})}
         empty={<EmptyState icon={Users} title={u.emptyMembers}/>}
         columns={[
-          {key:"person",label:u.person,primary:true,cell:row=><Link className="inline-flex min-h-11 items-center font-medium text-primary md:min-h-0" href={crmRecordHref(workspaceId,"contact",row.contactId)}>{row.contactName}</Link>},
-          {key:"plan",label:u.plan,cell:row=>row.planName},
+          ...(!contact ? [{key:"person",label:u.person,primary:true,cell:(row:AssociationMembership)=><Link className="inline-flex min-h-11 items-center break-words text-primary md:min-h-9" href={associationHref(workspaceId,"memberships",{contactId:row.contactId})}>{row.contactName}</Link>}] : []),
+          {key:"plan",label:u.plan,primary:!!contact,cell:row=>row.planName},
           {key:"status",label:m.status,cell:row=><StatusPill status={row.status}/>},
           {key:"access",label:u.access,cell:row=><StatusPill status="" tone={row.isEffective?"success":row.isEffective===undefined?"neutral":"warning"} label={row.isEffective===undefined?m.unknown:row.isEffective?u.accessActive:u.noAccess}/>},
           {key:"starts",label:u.starts,hideBelowMd:false,cell:row=>associationDate(row.startsAt,"date")},
@@ -84,5 +92,6 @@ export function AssociationMembersPanel({workspaceId,initialNew=false}:{workspac
         ]}
         actions={row=><Button type="button" className="min-h-11 md:min-h-8" size="sm" variant="outline" disabled={!!row.provider||!!memberships.error} title={row.provider?u.providerManagedHint:undefined} onClick={()=>{setSaved(false);setAdjustId(row.id);}}>{u.editMembership}</Button>}/>
     </AssociationListState>
+    {contact && <MemberEventHistory key={contact.id} workspaceId={workspaceId} contact={contact} canManage={canManage}/>}
   </section>;
 }

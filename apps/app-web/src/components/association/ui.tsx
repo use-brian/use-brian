@@ -55,17 +55,6 @@ export function PageHeader({ eyebrow, title, description, back, actions, childre
   </header>;
 }
 
-export function StatTile({ label, value, suffix, hint, href, tone = "neutral" }: { label: string; value: number | string; suffix?: string; hint?: string; href?: string; tone?: AssociationTone }) {
-  const body = <>
-    <p className="text-sm text-muted-foreground">{label}</p>
-    <p className={cn("mt-1 text-3xl font-semibold tracking-tight tabular-nums", tone === "danger" ? "text-destructive" : tone === "warning" ? "text-amber-700 dark:text-amber-300" : "")}>{value}{suffix ? <span className="text-lg text-muted-foreground">{suffix}</span> : null}</p>
-    {hint ? <p className="mt-1 text-xs text-muted-foreground">{hint}</p> : null}
-  </>;
-  const className = "block min-h-8 max-sm:min-h-11 rounded-2xl border border-border bg-background p-5";
-  return href ? <Link href={href} className={cn(className, "transition-colors hover:border-primary/50 focus-visible:outline-2 focus-visible:outline-ring")} data-stat-tile>{body}</Link>
-    : <div className={className} data-stat-tile>{body}</div>;
-}
-
 export function EmptyState({ icon: Icon, title, description, action }: { icon?: LucideIcon; title: string; description?: string; action?: ReactNode }) {
   return <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border px-6 py-12 text-center" data-empty-state>
     {Icon ? <span className="rounded-xl bg-muted p-3 text-muted-foreground"><Icon aria-hidden className="size-6" /></span> : null}

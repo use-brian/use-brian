@@ -5,9 +5,8 @@ import Link from "next/link";
 import { useState } from "react";
 import { ChevronDown, Download, Ticket, Users } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import { checkInAssociationAttendee,correctAssociationCheckIn,exportAssociationAttendees,exportAssociationOperationalRoster,saveAssociationEvent,type AssociationEvent,type AssociationRegistration,type AssociationTicket } from "@/lib/api/association";
+import { checkInAssociationAttendee,correctAssociationCheckIn,exportAssociationAttendees,exportAssociationOperationalRoster,listAssociationPage,saveAssociationEvent,type AssociationEvent,type AssociationRegistration,type AssociationTicket } from "@/lib/api/association";
 import { listCrmConsentPurposes } from "@/lib/api/crm";
-import { crmRecordHref } from "@/lib/crm-view";
 import { associationPageCacheKey } from "@/lib/surface-prefetch";
 import { useCachedResource } from "@/lib/surface-cache";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -16,11 +15,12 @@ import { Select,SelectTrigger,SelectContent,SelectItem,SelectValue } from "@/com
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { AssociationField,useAssociationPage,AssociationListState,useAssociationAction } from "./operator-controls";
 import { AssociationEventForm, AssociationTicketForm } from "./catalog-forms";
-import { AssociationEditor, associationMoney } from "./workspace-ui";
+import { AssociationEditor, associationMoney, useAssociationDraftGuard } from "./workspace-ui";
 import { ReadOnlyNotice } from "./access";
 import { AssociationReservationForm } from "./reservation-form";
 import { associationHref } from "./navigation";
 import { eventWhere } from "./events-panel";
+import { EventRegistrationForm } from "./events/registration-form";
 import { EventPageEditor } from "./events/event-page-editor";
 import { EmptyState, InlineNotice, PageHeader, ResponsiveTable, Segmented, StatusPill, associationDate } from "./ui";
 
@@ -59,7 +59,7 @@ function Guests({workspaceId,eventId,canManage}:{workspaceId:string;eventId:stri
     <AssociationListState {...rows}>
       <ResponsiveTable rows={rows.data?.items ?? []} rowKey={row=>row.id} rowData={row=>({"data-guest-row":row.id})} empty={<EmptyState icon={Users} title={u.emptyGuests}/>}
         columns={[
-          {key:"name",label:m.attendeeName,cell:row=><span>{row.attendeeContactId?<Link className="inline-flex min-h-11 items-center font-medium text-primary md:min-h-0" href={crmRecordHref(workspaceId,"contact",row.attendeeContactId)}>{row.attendeeName}</Link>:<span className="font-medium">{row.attendeeName}</span>}<span className="block break-all text-xs text-muted-foreground">{row.attendeeEmail}</span></span>},
+          {key:"name",label:m.attendeeName,cell:row=><span>{row.attendeeContactId?<Link className="inline-flex min-h-11 items-center font-medium text-primary md:min-h-0" href={associationHref(workspaceId,"memberships",{contactId:row.attendeeContactId})}>{row.attendeeName}</Link>:<span className="font-medium">{row.attendeeName}</span>}<span className="block break-all text-xs text-muted-foreground">{row.attendeeEmail}</span></span>},
           {key:"status",label:m.status,cell:row=><StatusPill status={row.status}/>},
         ]}
         actions={row=><>
@@ -94,21 +94,35 @@ function Tickets({workspaceId,event,enabled,currencies,canManage=true,onDirtyCha
   </section>;
 }
 
-export function AssociationEventDetail({workspaceId,event,enabled,canManage,loadFailed,onBack,onChanged}:{workspaceId:string;event:AssociationEvent;enabled:boolean;canManage:boolean;loadFailed:boolean;onBack:()=>void;onChanged:()=>void}) {
+export function AssociationEventDetail({workspaceId,event,enabled,canManage,loadFailed,onBack,onChanged,initialView="event"}:{workspaceId:string;event:AssociationEvent;enabled:boolean;canManage:boolean;loadFailed:boolean;onBack:()=>void;onChanged:()=>void;initialView?:"event"|"guests"|"registration"}) {
   const t=useT().associationPage,u=t.ux,m=t.manage,e=t.eventPage,action=useAssociationAction(workspaceId);
-  const [tab,setTab]=useState<"event"|"guests">("event");
+  const [tab,setTab]=useState<"event"|"guests"|"registration">(initialView);
   const [dirty,setDirty]=useState(false),[detailsDirty,setDetailsDirty]=useState(false),[feesDirty,setFeesDirty]=useState(false);
+  const [formDirty,setFormDirty]=useState(false);
+  const [showTickets,setShowTickets]=useState(false);
+  useAssociationDraftGuard(dirty || detailsDirty || feesDirty || formDirty);
   const plans=useAssociationPage(workspaceId,"plans"),tickets=useAssociationPage(workspaceId,"tickets",{eventId:event.id});
+  const kind = event.metadata.registrationKind;
+  const hasTicket = tickets.data?.items.some(ticket => ticket.status !== "draft");
+  const localForm = kind !== "external" && kind !== "none" && (event.status === "draft" || kind === "free" || kind === "paid" || hasTicket);
+  const hasForm = !!event.metadata.questionnaire || (Array.isArray(event.metadata.attendeeFields) && event.metadata.attendeeFields.length > 0);
+  const needsTicket = event.status === "draft" && hasForm && kind !== "free" && !hasTicket;
+  const openTickets = () => void leave(() => { setShowTickets(true); setTab("event"); });
   const currencies=[...new Set((plans.data?.items ?? []).map(plan=>plan.currency))];
   async function leave(next:()=>void) {
-    if((dirty||detailsDirty||feesDirty)&&!await confirmDialog({title:u.cancelEdit,description:u.cancelHelp,confirmLabel:e.discard,cancelLabel:u.keepEditing}))return;
-    setDirty(false);setDetailsDirty(false);setFeesDirty(false);next();
+    if((dirty||detailsDirty||feesDirty||formDirty)&&!await confirmDialog({title:u.cancelEdit,description:u.cancelHelp,confirmLabel:e.discard,cancelLabel:u.keepEditing}))return;
+    setDirty(false);setDetailsDirty(false);setFeesDirty(false);setFormDirty(false);next();
   }
   async function changeStatus(status:AssociationEvent["status"]) {
-    const body={...event};
-    Reflect.deleteProperty(body,"id");
     const label=status==="published"?e.publishEvent:status==="draft"?e.removeWebsite:status==="completed"?u.markCompleted:u.cancelEvent;
-    return action.run(label,async()=>{await saveAssociationEvent(workspaceId,{...body,status});onChanged();},status==="cancelled"?{description:u.cancelEventConfirm,destructive:true}:false);
+    return action.run(label,async()=>{
+      const page=await listAssociationPage(workspaceId,"events",{id:event.id});
+      const latest=page.items.find(row=>row.id===event.id);
+      if(!latest||latest.status!==event.status){onChanged();throw new Error("event_changed");}
+      const { id: _id, ...body } = latest;
+      await saveAssociationEvent(workspaceId,{...body,status});
+      onChanged();
+    },status==="cancelled"?{description:u.cancelEventConfirm,destructive:true}:false);
   }
   return <section className="space-y-5" data-event-detail>
     <PageHeader back={{label:u.backEvents,onClick:()=>void leave(onBack)}} title={event.title} description={`${associationDate(event.startsAt)} · ${eventWhere(event,m.options)}`}
@@ -120,22 +134,26 @@ export function AssociationEventDetail({workspaceId,event,enabled,canManage,load
             {event.status!=="cancelled"&&event.status!=="completed"?<DropdownMenuItem className="min-h-11 sm:min-h-0" variant="destructive" onClick={()=>void changeStatus("cancelled")}>{u.cancelEvent}</DropdownMenuItem>:null}
             <DropdownMenuItem className="min-h-11 sm:min-h-0" render={<Link href={associationHref(workspaceId,"orders",{eventId:event.id})}/>}>{t.eventOrders}</DropdownMenuItem>
           </DropdownMenuContent></DropdownMenu>:<Link href={associationHref(workspaceId,"orders",{eventId:event.id})} className={buttonVariants({variant:"ghost",className:"max-sm:min-h-11"})}>{t.eventOrders}</Link>}</>}>
-      <Segmented label={u.goTo} value={tab} onChange={next=>void leave(()=>setTab(next))} options={[{value:"event" as const,label:canManage?e.editEvent:m.tickets},{value:"guests" as const,label:u.guests}]}/>
+      <Segmented label={u.goTo} value={tab} onChange={next=>void leave(()=>setTab(next))} options={[{value:"event" as const,label:canManage?e.editEvent:m.tickets},...(canManage ? [{value:"registration" as const,label:t.staff.registrationForm}] : []),{value:"guests" as const,label:u.guests}]}/>
     </PageHeader>
     {action.feedback}
+    {needsTicket && <InlineNotice tone="warning" action={<Button type="button" variant="outline" className="min-h-11 md:min-h-9" onClick={openTickets}>{m.tickets}</Button>}>{t.staff.formNeedsTicket}</InlineNotice>}
     {detailsDirty||feesDirty?<InlineNotice tone="warning">{e.finishDetails}</InlineNotice>:null}
-    {tab==="event"&&canManage?<EventPageEditor workspaceId={workspaceId} event={event} tickets={tickets.data?.items} onDirtyChange={setDirty} disabled={loadFailed||action.pending||detailsDirty||feesDirty} canPublishEvent={enabled} onPublishEvent={()=>changeStatus("published")} details={<>
+    {tab==="event"&&canManage?<EventPageEditor workspaceId={workspaceId} event={event} tickets={tickets.data?.items} onDirtyChange={setDirty} disabled={loadFailed||action.pending||detailsDirty||feesDirty} canPublishEvent={enabled&&!needsTicket} onPublishEvent={()=>changeStatus("published")} details={<>
       <details className="rounded-2xl border border-border bg-background" data-event-basics>
         <summary className="min-h-8 max-sm:min-h-11 cursor-pointer rounded-2xl p-4 font-semibold focus-visible:outline-2 focus-visible:outline-ring">{e.nameDetails}<span className="mt-1 block text-sm font-normal text-muted-foreground">{event.title} · {eventWhere(event,m.options)}</span></summary>
         <div className="space-y-3 border-t border-border p-4"><InlineNotice tone="neutral">{event.status==="draft"?e.detailsDraftHelp:e.detailsLiveHelp}</InlineNotice>
           <AssociationEventForm key={`${event.id}:${event.title}:${event.startsAt}:${event.endsAt}`} workspaceId={workspaceId} event={event} disabled={loadFailed} onDirtyChange={setDetailsDirty} onSaved={()=>{setDetailsDirty(false);onChanged();}}/></div>
       </details>
-      <details className="rounded-2xl border border-border bg-background" data-event-fees>
+      <details open={showTickets || undefined} onToggle={event=>setShowTickets(event.currentTarget.open)} className="rounded-2xl border border-border bg-background" data-event-fees>
         <summary className="min-h-8 max-sm:min-h-11 cursor-pointer rounded-2xl p-4 font-semibold focus-visible:outline-2 focus-visible:outline-ring">{e.feesTitle}<span className="mt-1 block text-sm font-normal text-muted-foreground">{tickets.data?.items.length?tickets.data.items.map(ticket=>`${ticket.name}: ${associationMoney(ticket.priceMinor,ticket.currency)}`).join(" · "):u.emptyTickets}</span></summary>
         <div className="space-y-3 border-t border-border p-4"><InlineNotice tone="neutral">{e.feesHelp}</InlineNotice><Tickets workspaceId={workspaceId} event={event} enabled={enabled&&!loadFailed} currencies={currencies} onDirtyChange={setFeesDirty}/></div>
       </details>
     </>}/>:null}
     {tab==="event"&&!canManage?<Tickets workspaceId={workspaceId} event={event} enabled={enabled} canManage={false} currencies={currencies}/>:null}
+    {tab==="registration"&&canManage?(localForm
+      ? <EventRegistrationForm key={event.id} workspaceId={workspaceId} event={event} disabled={loadFailed || !!tickets.error} onDirtyChange={setFormDirty} onSaved={onChanged}/>
+      : <AssociationListState {...tickets}><InlineNotice tone="neutral" action={kind!=="external"&&kind!=="none"?<Button type="button" variant="outline" className="min-h-11 md:min-h-9" onClick={openTickets}>{m.tickets}</Button>:undefined}>{kind==="external"||kind==="none"?t.staff.externalForm:t.staff.addTicketFirst}</InlineNotice></AssociationListState>):null}
     {tab==="guests"?<Guests workspaceId={workspaceId} eventId={event.id} canManage={canManage}/>:null}
   </section>;
 }

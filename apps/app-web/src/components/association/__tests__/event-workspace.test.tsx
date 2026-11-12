@@ -8,6 +8,7 @@ vi.mock("@/lib/surface-prefetch", () => ({ associationModuleCacheKey: (w: string
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: api.confirm }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }), useSearchParams: () => new URLSearchParams() }));
 import { AssociationEventsPanel } from "../events-panel";
+import { EventRegistrationForm } from "../events/registration-form";
 import { EventPageEditor } from "../events/event-page-editor";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
@@ -32,6 +33,36 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); resetSurfaceCache(); vi.useRealTimers(); });
 describe("[COMP:app-web/association] Event website workspace", () => {
+  it("previews a new question before saving its version and preserves unrelated event data", async () => {
+    const staff = en.associationPage.staff;
+    const current = { ...event, metadata: { registrationKind: "free", externalImport: { preserved: true }, attendeeFields: ["phone"] } };
+    api.list.mockResolvedValue({ items: [current], nextCursor: null });
+    api.event.mockImplementation(async (_workspaceId, record) => ({ record: { id: event.id, ...record } }));
+    await render(<EventRegistrationForm workspaceId="w" event={current} disabled={false} onDirtyChange={vi.fn()} onSaved={vi.fn()} />);
+    await click(staff.addQuestion);
+    await type(staff.question, "What should we prepare?");
+    await click(staff.previewForm);
+    const preview = host.querySelector("[data-registration-preview]");
+    expect(preview?.textContent).toContain("What should we prepare?");
+    expect(preview?.querySelector<HTMLInputElement>('input[type="tel"]')?.required).toBe(true);
+    expect(api.event).not.toHaveBeenCalled();
+    await click(staff.saveForm);
+    expect(api.event).toHaveBeenCalledWith("w", expect.objectContaining({ metadata: expect.objectContaining({
+      externalImport: { preserved: true },
+      questionnaire: { version: expect.stringMatching(/^form-/), questions: [expect.objectContaining({ label: "What should we prepare?", type: "text" })] },
+    }) }));
+  });
+  it("keeps another staff member's registration edits when the form changed before save", async () => {
+    const staff = en.associationPage.staff;
+    api.list.mockResolvedValue({ items: [{ ...event, metadata: { attendeeFields: ["organisation"] } }], nextCursor: null });
+    await render(<EventRegistrationForm workspaceId="w" event={event} disabled={false} onDirtyChange={vi.fn()} onSaved={vi.fn()} />);
+    await click(staff.addQuestion);
+    await type(staff.question, "Our own edit");
+    await click(staff.saveForm);
+    expect(api.event).not.toHaveBeenCalled();
+    expect(host.textContent).toContain(staff.formChanged);
+    expect(host.querySelector<HTMLInputElement>('input[maxlength="500"]')?.value).toBe("Our own edit");
+  });
   it("requests website visibility before pagination and labels saved page changes", async () => {
     await render(<AssociationEventsPanel workspaceId="w" />);
     expect(api.list).toHaveBeenCalledWith("w", "events", expect.objectContaining({ website: "visible" }));

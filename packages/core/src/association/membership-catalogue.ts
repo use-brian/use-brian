@@ -15,6 +15,10 @@ export const MembershipCopySchema = z.object({
 }).strict()
 const translations = z.object({ en: MembershipCopySchema, 'zh-Hant': MembershipCopySchema, 'zh-Hans': MembershipCopySchema }).strict()
 const overrideTranslations = z.object({en: MembershipCopySchema.partial().optional(), 'zh-Hant': MembershipCopySchema.partial().optional(), 'zh-Hans': MembershipCopySchema.partial().optional()}).strict()
+export const MembershipOptionalFieldSchema = z.enum(['position', 'interests', 'special_request', 'proposer']);
+const optionalApplicationFields = z.array(MembershipOptionalFieldSchema).max(4)
+  .refine(fields => new Set(fields).size === fields.length, 'Application fields must be unique');
+
 export const WebsiteMembershipPlanSchema = z.object({
   key, planId: z.string().uuid().optional(), currency: z.literal('HKD'),
   feeMinor: z.number().int().min(0).max(100_000_000),
@@ -22,7 +26,7 @@ export const WebsiteMembershipPlanSchema = z.object({
   activeFrom: z.string().datetime({ offset: true }).nullable().default(null),
   activeTo: z.string().datetime({ offset: true }).nullable().default(null),
   availability: z.enum(['public', 'invitation', 'enquiry', 'closed']),
-  application: z.object({ type: z.enum(['application', 'enquiry']), proposerRequired: z.boolean(), codeOfConduct: z.literal(true), reviewPipeline: z.literal('charter-review').optional() }).strict(),
+  application: z.object({ type: z.enum(['application', 'enquiry']), proposerRequired: z.boolean(), codeOfConduct: z.literal(true), reviewPipeline: z.literal('charter-review').optional(), optionalFields: optionalApplicationFields.optional() }).strict(),
   sites: z.array(MembershipSiteSchema).max(2), group: key, order: z.number().int().min(0).max(10000),
   i18n: translations,
   overrides: z.object({ oasa: overrideTranslations.optional(), sea: overrideTranslations.optional() }).strict().default({}),

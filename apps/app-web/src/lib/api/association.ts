@@ -246,8 +246,9 @@ export async function exportAssociationOperationalRoster(workspaceId:string,even
 export type MembershipLocale = "en"|"zh-Hant"|"zh-Hans";
 export type MembershipSite = "oasa"|"sea";
 export type MembershipCopy = { name:string;summary:string;audience:string;badge:string;description:string;eligibility:string;benefits:string[];actionLabel:string;billingLabel:string;documents:{label:string;href:string}[] };
+export type MembershipOptionalField = "position" | "interests" | "special_request" | "proposer";
 export type WebsiteMembershipPlan = { key:string;planId?:string;currency:"HKD";feeMinor:number;billingPeriod:"one_time"|"annual"|"lifetime"|"manual";activeFrom:string|null;activeTo:string|null;
-  availability:"public"|"invitation"|"enquiry"|"closed";application:{type:"application"|"enquiry";proposerRequired:boolean;codeOfConduct:true;reviewPipeline?:"charter-review"};
+  availability:"public"|"invitation"|"enquiry"|"closed";application:{type:"application"|"enquiry";proposerRequired:boolean;codeOfConduct:true;reviewPipeline?:"charter-review";optionalFields?:MembershipOptionalField[]};
   sites:MembershipSite[];group:string;order:number;i18n:Record<MembershipLocale,MembershipCopy>;overrides:Partial<Record<MembershipSite,Partial<Record<MembershipLocale,Partial<MembershipCopy>>>>>;promotionId:string|null };
 export type MembershipPageCopy = {title:string;intro:string;groups:{id:string;title:string;intro:string}[];sections:{id:string;title:string;image?:{src:string;alt:string};paragraphs:string[];bullets:string[];documents:{label:string;href:string}[]}[];newsletter?:{name:string;summary:string;benefits:string[];actionLabel:string}};
 export type MembershipCatalogueDocument = {schemaVersion:1;plans:WebsiteMembershipPlan[];pages:Record<MembershipSite,Record<MembershipLocale,MembershipPageCopy>>};
