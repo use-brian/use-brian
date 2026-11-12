@@ -625,7 +625,7 @@ describe('[COMP:api/model-menu] explicit classifier-first grant', () => {
   it.each([
     { operatorOverride: true },
     { classifierFirst: { operationIds: null } },
-    { mode: 'classifier_first' },
+    { profile: { authority: 'workspace_admin_override' } },
   ])('rejects client-supplied deployment authority %j', async authority => {
     getRole.mockResolvedValue('admin')
     await request(makeApp({ ...options, operatorDecisionDefault: undefined }))
@@ -705,6 +705,44 @@ describe('selectable workspace shadow sampling', () => {
     await request(makeApp({ decisionRoutingStore: decisionRoutingStore as never }))
       .put(`/api/workspaces/${WID}/decision-routing`)
       .send({ mode: 'shadow', modelAlias: 'typesafe-jev-1.13', shadowSampleRate: 1 }).expect(403)
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+  })
+})
+
+describe('workspace-admin classifier-first selection', () => {
+  const WID = '00000000-0000-0000-0000-000000000001'
+  const models = ['typesafe-jev-1.13', 'openai-decisions-gpt-6-luna']
+  const options = { decisionRoutingStore: decisionRoutingStore as never, configuredDecisionAdapters: new Set(['typesafe', 'openai-decisions']) }
+  it.each(models)('persists %s for owner/admin without a deployment grant or approval registry', async modelAlias => {
+    for (const role of ['owner', 'admin']) {
+      getRole.mockResolvedValue(role)
+      const saved = { workspaceId: WID, mode: 'classifier_first', modelAlias, updatedAt: 'now' }
+      decisionRoutingStore.set.mockResolvedValue(saved)
+      await request(makeApp(options)).put(`/api/workspaces/${WID}/decision-routing`).send({ mode: 'classifier_first', modelAlias }).expect(200)
+      expect(decisionRoutingStore.set).toHaveBeenLastCalledWith({ actingUserId: 'u1', workspaceId: WID, mode: 'classifier_first', modelAlias, shadowSampleRate: 0.1 })
+      decisionRoutingStore.get.mockResolvedValue(saved)
+      const menu = await request(makeApp(options)).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
+      expect(menu.body.decisionRouting).toMatchObject({ mode: 'classifier_first', modelAlias, operatorOverride: true })
+      expect(menu.body.decisionRouting.models.every((m: { classifierFirst: unknown }) => m.classifierFirst === null)).toBe(true)
+      expect(decisionEvaluationProfileStore.listApproved).not.toHaveBeenCalled()
+    }
+  })
+  it.each(['member', null])('rejects writes by %s', async role => {
+    getRole.mockResolvedValue(role)
+    await request(makeApp(options)).put(`/api/workspaces/${WID}/decision-routing`).send({ mode: 'classifier_first', modelAlias: models[0] }).expect(403)
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+  })
+  it.each([
+    {}, { modelAlias: null }, { modelAlias: 'invalid' }, { modelAlias: 'gemini-3-flash-standard' },
+    ...['authority', 'operatorOverride', 'profile', 'profileId', 'classifierFirst', 'shadowSampleRate'].map(key => ({ modelAlias: models[0], [key]: key === 'shadowSampleRate' ? 1 : true })),
+  ])('rejects invalid selection or client authority %j', async body => {
+    getRole.mockResolvedValue('admin')
+    await request(makeApp(options)).put(`/api/workspaces/${WID}/decision-routing`).send({ mode: 'classifier_first', ...body }).expect(400)
+    expect(decisionRoutingStore.set).not.toHaveBeenCalled()
+  })
+  it('rejects an unconfigured adapter', async () => {
+    getRole.mockResolvedValue('owner')
+    await request(makeApp({ ...options, configuredDecisionAdapters: new Set() })).put(`/api/workspaces/${WID}/decision-routing`).send({ mode: 'classifier_first', modelAlias: models[0] }).expect(400)
     expect(decisionRoutingStore.set).not.toHaveBeenCalled()
   })
 })

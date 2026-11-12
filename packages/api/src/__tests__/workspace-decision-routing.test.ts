@@ -465,3 +465,39 @@ describe('[COMP:decisions/workspace-routing] explicit classifier-first authority
     expect(fallback).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('explicit workspace classifier-first', () => {
+  it.each(['typesafe-jev-1.13', 'openai-decisions-gpt-6-luna'])('selects %s without deployment authority or approval', async modelAlias => {
+    for (const operatorDefault of [undefined, { mode: 'classifier_first' as const, modelAlias: modelAlias === 'typesafe-jev-1.13' ? 'openai-decisions-gpt-6-luna' : 'typesafe-jev-1.13', operationIds: [] }]) {
+      const getApprovedExact = vi.fn()
+      const resolver = createWorkspaceDecisionRouteResolver({
+        store: { getSystem: async () => ({ workspaceId: context.workspaceId, mode: 'classifier_first', modelAlias, updatedAt: 'now' }) },
+        configuredAdapterIds: () => ['typesafe', 'openai-decisions'], operatorDefault,
+        profileStore: { getApprovedExact },
+      })
+      const route = await resolver(context)
+      expect(route).toMatchObject({ mode: 'hybrid', primaryModelId: modelAlias, operatorOverride: true,
+        allowOperationalFailover: true, allowInvalidResponseRecovery: true,
+        profile: { mode: 'hybrid', status: 'operator_override', evidence: 'operator_override',
+          operationId: context.operation.id, operationVersion: '2', stateVersion: '3', questionVersion: '4',
+          evaluationSegment: 'global', modelCatalogId: modelAlias, policy: { authority: 'workspace_admin_override' } } })
+      expect(route.profile?.modelWireId).toBe(modelAlias === 'typesafe-jev-1.13' ? 'jev-1.13.0' : 'gpt-6-luna')
+      const observation = await resolver({ ...context, kind: 'observation' })
+      expect(observation).toMatchObject({ mode: 'shadow', primaryModelId: modelAlias, profile: { mode: 'shadow', shadowSampleRate: 1 } })
+      expect(observation.operatorOverride).toBeUndefined()
+      expect(getApprovedExact).not.toHaveBeenCalled()
+    }
+  })
+
+  it.each(['missing-adapter', 'invalid-alias', 'missing-alias', 'store-error'])('fails closed for %s despite a deployment default', async failure => {
+    const resolver = createWorkspaceDecisionRouteResolver({
+      store: { getSystem: async () => {
+        if (failure === 'store-error') throw new Error('unavailable')
+        return { workspaceId: context.workspaceId, mode: 'classifier_first', modelAlias: failure === 'invalid-alias' ? 'invalid' : failure === 'missing-alias' ? null : 'typesafe-jev-1.13', updatedAt: 'now' }
+      } },
+      configuredAdapterIds: () => failure === 'missing-adapter' ? [] : ['typesafe'],
+      operatorDefault: { mode: 'classifier_first', modelAlias: 'typesafe-jev-1.13' },
+    })
+    await expect(resolver(context)).resolves.toEqual({ mode: 'llm_only' })
+  })
+})

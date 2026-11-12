@@ -85,6 +85,18 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
     expect(setting.modelAlias).toBe(openaiAlias);
   });
 
+  it.each(["typesafe-jev-1.13", "openai-decisions-gpt-6-luna"])("persists explicit classifier_first for %s without client authority flags", async (modelAlias) => {
+    const decisionRouting = { mode: "classifier_first" as const, modelAlias, updatedAt: "now" };
+    mockFetch.mockResolvedValueOnce(ok({ decisionRouting: { ...decisionRouting, models: [], operatorOverride: true, shadowSampleRate: 0.1 } }));
+    expect((await fetchModelMenu("ws-1")).decisionRouting.mode).toBe("classifier_first");
+    mockFetch.mockResolvedValueOnce(ok({ decisionRouting }));
+    expect(await setWorkspaceDecisionRouting("ws-1", { mode: "classifier_first", modelAlias })).toEqual(decisionRouting);
+    const [url, init] = mockFetch.mock.calls[1] as [string, RequestInit];
+    expect(url).toContain("/api/workspaces/ws-1/decision-routing");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ mode: "classifier_first", modelAlias });
+  });
+
   it("posts estimate requests at the chosen budget", async () => {
     mockFetch.mockResolvedValueOnce(ok({ estimate: { modelAlias: "qwen3.7-max", toolRounds: 100, minCredits: 9, maxCredits: 120 } }));
     const est = await fetchMeteredEstimate("ws-1", "qwen3.7-max", 100);

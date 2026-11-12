@@ -138,3 +138,33 @@ it('migrates existing settings to 10% and enforces the persisted rate constraint
     await db.close()
   }
 }, 30_000)
+
+it.each(['typesafe-jev-1.13', 'openai-decisions-gpt-6-luna'])('persists classifier-first %s with the acting user audit', async modelAlias => {
+  const row = { workspace_id: 'w', mode: 'classifier_first', model_alias: modelAlias, shadow_sample_rate: 0.1, updated_at: 'now' }
+  mockQueryWithRLS.mockResolvedValue({ rows: [row] } as never)
+  mockQuery.mockResolvedValue({ rows: [row] } as never)
+  const setting = await store.set({ actingUserId: 'admin', workspaceId: 'w', mode: 'classifier_first', modelAlias })
+  expect(mockQueryWithRLS).toHaveBeenLastCalledWith('admin', expect.stringContaining('updated_by_user_id = EXCLUDED.updated_by_user_id'), ['w', 'classifier_first', modelAlias, 'admin', 0.1])
+  expect(setting.mode).toBe('classifier_first')
+  expect(await store.getSystem('w')).toEqual(setting)
+  expect(await store.get({ actingUserId: 'admin', workspaceId: 'w' })).toEqual(setting)
+})
+
+it('extends the 605 named constraints without changing existing settings', async () => {
+  const { PGlite } = await import('@electric-sql/pglite')
+  const { readFile } = await import('node:fs/promises')
+  const db = new PGlite()
+  try {
+    await db.exec(`CREATE TABLE workspace_decision_routing (
+      mode TEXT NOT NULL CONSTRAINT workspace_decision_routing_mode_check CHECK (mode IN ('llm_only', 'shadow', 'hybrid')),
+      model_alias TEXT,
+      CONSTRAINT workspace_decision_routing_target_check CHECK ((mode = 'llm_only' AND model_alias IS NULL) OR (mode IN ('shadow', 'hybrid') AND model_alias IS NOT NULL)));
+      INSERT INTO workspace_decision_routing VALUES ('llm_only', NULL), ('shadow', 'jev'), ('hybrid', 'jev');`)
+    await db.exec(await readFile(new URL('../../../migrations/8260_workspace_decision_classifier_first.sql', import.meta.url), 'utf8'))
+    expect((await db.query('SELECT * FROM workspace_decision_routing')).rows).toHaveLength(3)
+    await db.exec("INSERT INTO workspace_decision_routing VALUES ('classifier_first', 'jev')")
+    for (const [mode, alias] of [['classifier_first', null], ['hybrid', null], ['shadow', null], ['llm_only', 'jev'], ['invalid', 'jev']]) {
+      await expect(db.query('INSERT INTO workspace_decision_routing VALUES ($1, $2)', [mode, alias])).rejects.toThrow()
+    }
+  } finally { await db.close() }
+}, 30_000)

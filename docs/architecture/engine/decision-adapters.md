@@ -65,8 +65,38 @@ remains non-authoritative even with a matching classifier-first deployment grant
 
 ### Classifier-first execution (separate opt-in)
 
-To let a native result control eligible decisions instead of only comparing it,
-use the existing approved-profile workflow or explicit deployment-operator policy:
+After applying migration **8260**, a workspace owner/admin can select
+**<decision model> - Classifier first (100%)** in Settings → Models → Decision
+routing. Choose either Jev or OpenAI from the configured model options. This
+persists `mode: classifier_first` and the exact selected model; it needs no
+`DECISION_DEFAULT_*` deployment grant and never substitutes a different vendor.
+
+```http
+PUT /api/workspaces/<workspace-id>/decision-routing
+Content-Type: application/json
+
+{"mode":"classifier_first","modelAlias":"openai-decisions-gpt-6-luna"}
+```
+
+The native classifier replaces LLM classification for eligible execution
+operations. A successful native decision returns directly without the ordinary
+LLM classification call. The LLM remains for generated topic labels/task
+prompts, uncertainty review and permitted bounded operational fallback. Main
+chat generation is unchanged; observation-only operations stay non-authoritative
+100% shadow comparisons. Existing legacy operations without a decision-runtime
+route are not automatically migrated by this setting.
+
+This explicit owner/admin override is **not approved quality evidence**. It is
+recorded through the existing updater identity/timestamp and translated to exact
+operation/model/version override metadata with `workspace_admin_override`
+authority. The client cannot submit profile or authority flags. Existing
+shadow/hybrid choices retain their semantics; selecting a key alone grants no
+execution authority. Input admission, final authority checks, capability limits
+and deadlines still apply.
+
+The separate approved-profile workflow and legacy deployment-operator default
+remain available. For a deployment default rather than an explicit workspace
+selection:
 
 ```dotenv
 # Optional alternative; do not change an existing Jev selection implicitly.
@@ -75,11 +105,11 @@ DECISION_DEFAULT_MODE=classifier_first
 DECISION_DEFAULT_MODEL=openai-decisions-gpt-6-luna
 ```
 
-An existing explicit workspace LLM-only/shadow row remains an opt-out; select
-**GPT-6 Luna Decisions - Classifier first (100%)** in Models → Decision routing
-to opt in. An explicit hybrid selection for another model is not replaced by a
-deployment default. `DECISION_DEFAULT_OPERATIONS` can narrow the exact operation
-scope. The UI distinguishes deployment overrides from approved quality evidence.
+Explicit workspace selections take precedence over the deployment default.
+`DECISION_DEFAULT_OPERATIONS` narrows that deployment grant, not a separate
+workspace-admin selection. Legacy deployment-granted hybrid selections retain
+their exact model/scope rules. The UI distinguishes both kinds of override from
+approved quality evidence.
 See [Classifier preparation](classifier-preparation.md#explicit-100-classifier-first-routing).
 
 ## OpenAI wire mapping
@@ -169,8 +199,9 @@ cache counters flow through the existing usage ledger without schema changes.
    endpoint-specific rates and explicit alias recording if the wire name collides.
 4. Register a configured adapter factory through `DecisionAdapterRegistry` /
    `configureDecisionAdapters`. Registration is availability, not activation.
-5. Select that exact model through normal approved evidence or an explicit
-   scoped operator grant. Profiles for another model/version are not transferable.
+5. Select that exact model through normal approved evidence, explicit
+   workspace-admin classifier-first selection or a scoped deployment grant.
+   Profiles for another model/version are not transferable.
 6. Test all primitives, refusals, malformed responses, native usage, capability
    limits, physical/final authority, cancellation, transport/total budgets,
    credential isolation and one-record accounting with synthetic transports.

@@ -306,15 +306,16 @@ export function ModelsSection() {
     const target = value.slice(separator + 1);
     const shadowSampleRate = mode === "shadow" && target.startsWith("1:") ? 1 : 0.1;
     const modelAlias = value === "llm_only" ? null : mode === "shadow" ? target.slice(target.indexOf(":") + 1) : target;
-    if (mode !== "llm_only" && mode !== "shadow" && mode !== "hybrid") return;
+    if (mode !== "llm_only" && mode !== "shadow" && mode !== "hybrid" && mode !== "classifier_first") return;
     if (mode !== "llm_only") {
       const model = decisionRouting?.models.find((candidate) => candidate.alias === modelAlias);
       if (!model) return;
       const hybrid = mode === "hybrid";
-      const classifierFirst = hybrid && !!model.classifierFirst;
+      const workspaceFirst = mode === "classifier_first";
+      const classifierFirst = workspaceFirst || (hybrid && !!model.classifierFirst);
       const ok = await confirmDialog({
         title: classifierFirst ? t.decisionFirstConfirmTitle : hybrid ? t.decisionHybridConfirmTitle : t.decisionConfirmTitle,
-        description: (classifierFirst ? t.decisionFirstConfirmBody : hybrid ? t.decisionHybridConfirmBody : t.decisionConfirmBody)
+        description: (workspaceFirst ? t.decisionWorkspaceFirstConfirmBody : classifierFirst ? t.decisionFirstConfirmBody : hybrid ? t.decisionHybridConfirmBody : t.decisionConfirmBody)
           .replace("{scope}", model.classifierFirst?.operationIds?.join(", ") ?? t.decisionFirstAllEligible)
           .replace("{model}", model.displayName)
           .replace("{percent}", String(Math.round((mode === "shadow" ? shadowSampleRate : decisionRouting?.shadowSampleRate ?? 0.1) * 100)))
@@ -519,7 +520,9 @@ export function ModelsSection() {
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[12.5px] font-medium">{t.decisionClassifierLabel}</span>
                   <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                    {decisionRouting?.mode === "hybrid"
+                    {decisionRouting?.mode === "classifier_first"
+                      ? t.decisionWorkspaceFirstBadge
+                      : decisionRouting?.mode === "hybrid"
                       ? decisionRouting.operatorOverride
                         ? selectedDecisionModel?.classifierFirst ? t.decisionFirstBadge : t.decisionOperatorOverrideBadge
                         : selectedHybridOperationCount > 0
@@ -542,6 +545,12 @@ export function ModelsSection() {
                       badge: t.defaultBadge,
                     },
                     ...(decisionRouting?.models ?? []).flatMap((model) => [
+                      {
+                        value: `classifier_first:${model.alias}`,
+                        label: t.decisionFirstOption.replace("{model}", model.displayName),
+                        hint: t.decisionWorkspaceFirstScope,
+                        badge: t.decisionWorkspaceFirstBadge,
+                      },
                       ...([0.1, 1] as const).map((rate) => ({
                         value: `shadow:${rate}:${model.alias}`,
                         label: t.decisionShadowOption.replace("{model}", model.displayName).replace("{percent}", String(rate * 100)),
@@ -550,10 +559,11 @@ export function ModelsSection() {
                       })),
                       ...(model.classifierFirst ? [{
                         value: `hybrid:${model.alias}`,
-                        label: t.decisionFirstOption.replace("{model}", model.displayName),
+                        label: t.decisionLegacyHybridOption.replace("{model}", model.displayName),
                         hint: t.decisionFirstScope.replace("{scope}", model.classifierFirst.operationIds?.join(", ") ?? t.decisionFirstAllEligible),
                         badge: t.decisionFirstBadge,
-                      }] : model.hybridOperations.length > 0 ? [{
+                      }] : []),
+                      ...(model.hybridOperations.length > 0 && !model.classifierFirst ? [{
                         value: `hybrid:${model.alias}`,
                         label: t.decisionHybridOption.replace("{model}", model.displayName),
                         hint: t.decisionHybridHint.replace("{count}", String(model.hybridOperations.length)),
@@ -593,7 +603,9 @@ export function ModelsSection() {
                   <p className="text-[11.5px] leading-relaxed text-muted-foreground">{t.decisionUnavailable}</p>
                 ) : null}
                 <p className="text-[11.5px] leading-relaxed text-muted-foreground">
-                  {(decisionRouting?.mode === "hybrid" && selectedDecisionModel?.classifierFirst
+                  {(decisionRouting?.mode === "classifier_first"
+                    ? t.decisionWorkspaceFirstConfirmBody
+                    : decisionRouting?.mode === "hybrid" && selectedDecisionModel?.classifierFirst
                     ? t.decisionFirstConfirmBody
                     : decisionRouting?.operatorOverride
                     ? t.decisionOperatorOverrideNotice
@@ -601,9 +613,9 @@ export function ModelsSection() {
                     ? t.decisionFirstAvailable
                     : selectedHybridOperationCount > 0
                     ? t.decisionHybridAvailable
-                    : t.decisionHybridGate
+                    : t.decisionWorkspaceFirstAvailable
                   ).replace("{count}", String(selectedHybridOperationCount))
-                    .replace("{model}", selectedDecisionModel?.displayName ?? "")
+                    .replace("{model}", selectedDecisionModel?.displayName ?? decisionRouting?.modelAlias ?? "")
                     .replace("{scope}", selectedDecisionModel?.classifierFirst?.operationIds?.join(", ") ?? t.decisionFirstAllEligible)}
                 </p>
               </div>

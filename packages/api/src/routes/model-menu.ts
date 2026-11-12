@@ -11,7 +11,7 @@
  *   DELETE /api/workspaces/:wid/metered-profiles/:id — delete
  *   PUT    /api/workspaces/:wid/model-defaults/:cls — set a class default (owner/admin)
  *   DELETE /api/workspaces/:wid/model-defaults/:cls — back to registry default (owner/admin)
- *   PUT    /api/workspaces/:wid/decision-routing  — LLM-only, shadow, or approved/operator-granted hybrid (owner/admin)
+ *   PUT    /api/workspaces/:wid/decision-routing  — LLM-only, shadow, approved hybrid, or admin classifier-first (owner/admin)
  *
  * Menus honor key presence (L12): a model whose provider key is absent at
  * boot is absent from every menu — never listed, never erroring. Metered
@@ -129,6 +129,7 @@ const setDecisionRoutingSchema = z.discriminatedUnion('mode', [
     shadowSampleRate: z.union([z.literal(0.1), z.literal(1)]).optional(),
   }).strict(),
   z.object({ mode: z.literal('hybrid'), modelAlias: z.string().min(1) }).strict(),
+  z.object({ mode: z.literal('classifier_first'), modelAlias: z.string().min(1) }).strict(),
 ])
 
 function configuredProviderForPreference(preference: string): string {
@@ -276,7 +277,8 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
           ? decisionSetting.modelAlias
           : opts.operatorDecisionDefault?.modelAlias ?? null,
         updatedAt: decisionSetting?.updatedAt ?? null,
-        operatorOverride: (!decisionSetting && Boolean(opts.operatorDecisionDefault))
+        operatorOverride: decisionSetting?.mode === 'classifier_first'
+          || (!decisionSetting && Boolean(opts.operatorDecisionDefault))
           || (decisionSetting?.mode === 'hybrid'
             && Boolean(classifierFirstGrant(opts.operatorDecisionDefault, decisionSetting.modelAlias))),
         shadowSampleRate: decisionSetting?.shadowSampleRate ?? WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,

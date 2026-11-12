@@ -408,3 +408,37 @@ describe('native model menu availability and exact classifier-first authority', 
     expect(set).not.toHaveBeenCalled()
   })
 })
+
+describe('persisted workspace classifier-first native execution', () => {
+  it.each([NATIVE, JEV])('executes the saved %s without an env grant and ignores a conflicting default', async selected => {
+    for (const operatorDefault of [undefined, { mode: 'classifier_first' as const, modelAlias: selected === NATIVE ? JEV : NATIVE }]) {
+      const mockedFetch = vi.fn(async (url: unknown) => {
+        expect(String(url)).toBe(selected === NATIVE ? 'https://api.openai.com/v1/decisions' : 'https://api.typesafe.ai/v1/systemone')
+        return selected === NATIVE ? nativeResponse() : jevResponse()
+      })
+      vi.stubGlobal('fetch', mockedFetch)
+      const provider = llm(), { operation, complete } = resultOperation()
+      const rt = runtime({ llmProvider: provider, resolveRoute: createWorkspaceDecisionRouteResolver({
+        store: { getSystem: async () => ({ workspaceId, mode: 'classifier_first', modelAlias: selected, updatedAt: 'now' }) },
+        configuredAdapterIds: () => ['typesafe', 'openai-decisions'], operatorDefault,
+      }) })
+      expect(await rt.run({ workspaceId, request: decisionRequest(), operation })).toMatchObject({ path: 'primary_complete', attempts: 1, result: { verdict: 'ordinary' } })
+      expect(mockedFetch).toHaveBeenCalledOnce()
+      expect(complete).not.toHaveBeenCalled()
+      expect(provider.stream).not.toHaveBeenCalled()
+    }
+  })
+
+  it.each(['generation', 'failure'] as const)('permits bounded LLM %s only after the native attempt', async kind => {
+    vi.stubGlobal('fetch', vi.fn(async () => kind === 'failure' ? json({}, 503) : nativeResponse()))
+    const { operation, complete } = resultOperation()
+    if (kind === 'generation') operation.decide = () => ({ kind: 'follow_up', reason: 'generation_required' })
+    const rt = runtime({ resolveRoute: createWorkspaceDecisionRouteResolver({
+      store: { getSystem: async () => ({ workspaceId, mode: 'classifier_first', modelAlias: NATIVE, updatedAt: 'now' }) },
+      configuredAdapterIds: () => ['openai-decisions'],
+    }) })
+    expect(await rt.run({ workspaceId, request: decisionRequest(), operation })).toMatchObject({ path: kind === 'generation' ? 'generation' : 'operational_failover', attempts: 2, result: { verdict: 'llm' } })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(complete).toHaveBeenCalledOnce()
+  })
+})

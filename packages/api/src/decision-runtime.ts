@@ -59,7 +59,7 @@ export type DecisionRouteConfig = {
   allowInvalidResponseRecovery?: boolean
   /** Offline tests/evaluation only; production resolvers never set this. */
   allowSyntheticProfile?: boolean
-  /** Explicit deployment-wide authority; validated against operator_override profile metadata. */
+  /** Explicit deployment-operator or workspace-admin authority; validated against operator_override profile metadata. */
   operatorOverride?: boolean
 }
 

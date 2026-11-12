@@ -3,14 +3,15 @@
  *
  * A hybrid workspace preference is only a request: runtime authority still
  * requires a non-revoked exact-version profile or an explicit scoped
- * deployment-operator override. The persisted selection grants neither.
+ * deployment-operator override. Explicit classifier_first is instead an
+ * audited workspace-admin opt-in to native execution.
  *
  * [COMP:decisions/workspace-routing]
  */
 import { isDecisionModelRow, registryRow } from '@use-brian/shared/model-registry'
 import { query, queryWithRLS } from './client.js'
 
-export type WorkspaceDecisionRoutingMode = 'llm_only' | 'shadow' | 'hybrid'
+export type WorkspaceDecisionRoutingMode = 'llm_only' | 'shadow' | 'hybrid' | 'classifier_first'
 
 export type WorkspaceDecisionRouting = {
   workspaceId: string

@@ -163,6 +163,41 @@ describe("[COMP:app-web/models-settings] workspace decision routing", () => {
     expect(choices(`hybrid:${selectedAlias}`)).toHaveLength(0);
   });
 
+  it.each([
+    [alias, "Jev 1.13", true], [alias, "Jev 1.13", false],
+    ["openai-decisions-gpt-6-luna", "GPT-6 Luna Decisions", true],
+    ["openai-decisions-gpt-6-luna", "GPT-6 Luna Decisions", false],
+  ] as const)("selects explicit classifier first without grant for %s (confirm=%s)", async (selectedAlias, displayName, confirmed) => {
+    await render({ models: [{ ...model, alias: selectedAlias, displayName }] });
+    const option = choices(`classifier_first:${selectedAlias}`);
+    expect(option).toHaveLength(1);
+    expect(option[0].textContent).toContain(t.decisionFirstOption.replace("{model}", displayName));
+    expect(option[0].textContent).toContain(t.decisionWorkspaceFirstScope);
+    vi.mocked(confirmDialog).mockResolvedValueOnce(confirmed);
+    await choose(`classifier_first:${selectedAlias}`);
+    expect(confirmDialog).toHaveBeenCalledExactlyOnceWith({
+      title: t.decisionFirstConfirmTitle,
+      description: t.decisionWorkspaceFirstConfirmBody.replace("{model}", displayName),
+      confirmLabel: t.decisionFirstConfirmCta,
+    });
+    if (confirmed) {
+      expect(setWorkspaceDecisionRouting).toHaveBeenCalledExactlyOnceWith("ws-1", { mode: "classifier_first", modelAlias: selectedAlias });
+      expect(fetchModelMenu).toHaveBeenCalledTimes(2);
+    } else {
+      expect(setWorkspaceDecisionRouting).not.toHaveBeenCalled();
+      expect(container.querySelector('[data-value="llm_only"]')).not.toBeNull();
+    }
+  });
+
+  it.each([alias, "openai-decisions-gpt-6-luna", "unavailable-adapter"])("restores saved classifier_first for %s independently of grants", async (selectedAlias) => {
+    await render({ mode: "classifier_first", modelAlias: selectedAlias, models: [model] });
+    expect(container.querySelector(`[data-value="classifier_first:${selectedAlias}"]`)).not.toBeNull();
+    expect(choices(`classifier_first:${selectedAlias}`)).toHaveLength(1);
+    expect(container.textContent).toContain(t.decisionWorkspaceFirstBadge);
+    expect(container.textContent).toContain(t.decisionWorkspaceFirstConfirmBody.replace("{model}", selectedAlias === alias ? model.displayName : selectedAlias));
+    expect(container.textContent).not.toContain(t.decisionHybridFallbackBadge);
+  });
+
   it.each([alias, "openai-decisions-gpt-6-luna"])("restores persisted 100%% shadow for %s without granting hybrid", async (selectedAlias) => {
     await render({ mode: "shadow", modelAlias: selectedAlias, shadowSampleRate: 1,
       models: [{ ...model, alias: selectedAlias }],
@@ -181,18 +216,19 @@ describe("[COMP:app-web/models-settings] workspace decision routing", () => {
     expect(container.textContent).not.toContain("NaN");
   });
 
-  it("does not offer full routing or hybrid on credential/model availability alone", async () => {
+  it("offers explicit classifier first but not hybrid on availability alone", async () => {
     await render();
     expect(choices(`hybrid:${alias}`)).toHaveLength(0);
     expect(choices(`shadow:0.1:${alias}`)).toHaveLength(1);
-    expect(container.textContent).toContain(t.decisionHybridGate);
+    expect(container.textContent).toContain(t.decisionWorkspaceFirstAvailable);
+    expect(choices(`classifier_first:${alias}`)).toHaveLength(1);
   });
 
   it.each([false, true])("requires confirmation for full routing without approvals (confirm=%s)", async (confirmed) => {
     await render({ models: [{ ...model, classifierFirst: { operationIds: ["research.intent", "chat.route"] } }] });
     const option = choices(`hybrid:${alias}`);
     expect(option).toHaveLength(1);
-    expect(option[0].textContent).toContain("Classifier first (100%)");
+    expect(option[0].textContent).toContain(t.decisionLegacyHybridOption.replace("{model}", model.displayName));
     expect(option[0].textContent).toContain("research.intent, chat.route");
     expect(option[0].textContent).toContain(t.decisionFirstBadge);
     expect(container.textContent).toContain(t.decisionFirstAvailable);
@@ -226,7 +262,7 @@ describe("[COMP:app-web/models-settings] workspace decision routing", () => {
     ] });
     const fullRouting = choices(`hybrid:${openaiAlias}`);
     expect(fullRouting).toHaveLength(1);
-    expect(fullRouting[0].textContent).toContain("GPT-6 Luna Decisions - Classifier first (100%)");
+    expect(fullRouting[0].textContent).toContain(t.decisionLegacyHybridOption.replace("{model}", openai.displayName));
     expect(fullRouting[0].textContent).toContain("research.intent");
     expect(fullRouting[0].textContent).not.toContain("chat.route");
     expect(fullRouting[0].textContent).toContain(t.decisionFirstBadge);
@@ -239,7 +275,7 @@ describe("[COMP:app-web/models-settings] workspace decision routing", () => {
       expect(jevHybrid[0].textContent).toContain(t.decisionHybridBadge.replace("{count}", "1"));
       expect(jevHybrid[0].textContent).not.toContain("Classifier first (100%)");
     }
-    expect(container.textContent?.match(/Classifier first \(100%\)/g)).toHaveLength(2); // One choice + availability notice.
+    expect(choices(`classifier_first:${openaiAlias}`)).toHaveLength(1);
     vi.mocked(confirmDialog).mockResolvedValueOnce(true);
     await choose(`hybrid:${openaiAlias}`);
     expect(confirmDialog).toHaveBeenCalledExactlyOnceWith({
@@ -318,7 +354,7 @@ describe("[COMP:app-web/models-settings] workspace decision routing", () => {
     expect(choices(`hybrid:${alias}`)).toHaveLength(1);
     expect(container.textContent).toContain(t.decisionOperatorOverrideNotice);
     expect(container.textContent).toContain(t.decisionOperatorOverrideBadge);
-    expect(container.textContent).not.toContain("Classifier first (100%)");
+    expect(choices(`hybrid:${alias}`)[0].textContent).not.toContain("Classifier first (100%)");
   });
 
   it("retains revoked hybrid selections", async () => {

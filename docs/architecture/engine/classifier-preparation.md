@@ -19,8 +19,23 @@ configuration and the API request.
 
 `TYPESAFE_API_KEY` registers the Jev transport. The separate
 `OPENAI_DECISIONS_API_KEY` registers the native OpenAI Decisions transport;
-neither key alone enables classifier authority. To explicitly authorize
-classifier-first execution using Jev, set:
+neither key alone enables classifier authority. After migration **8260**, a
+workspace owner/admin can select **<model> - Classifier first (100%)** in
+Settings → Models → Decision routing. This persists `classifier_first` with the
+selected model and authorizes native execution without deployment environment
+changes. Jev/OpenAI selection follows that workspace option, not a hard-coded
+provider. It is an explicit admin override, **not approved quality evidence**.
+
+The existing updater identity/timestamp records the selection. Runtime creates
+exact operation/model/version override metadata with
+`policy.authority=workspace_admin_override`; clients cannot supply that metadata.
+All capability, capacity, admission, cancellation and final authority checks
+remain in place. There is no automatic promotion from shadow to execution.
+
+### Legacy deployment defaults
+
+To authorize a deployment default instead of an explicit workspace selection,
+set:
 
 ```dotenv
 DECISION_DEFAULT_MODE=classifier_first
@@ -36,15 +51,18 @@ contract, separate recording identity, usage normalization and extension seam.
 This is a deployment-operator override, **not approved quality evidence**. It
 reuses the existing exact-version `operator_override` profiles and Hydra
 cascade, rather than weakening approval validation or introducing another
-classifier pipeline. There is no database migration or new persisted mode.
+classifier pipeline. The legacy deployment mechanism itself is unchanged;
+workspace-admin classifier-first selection is the separate persisted mode added
+by migration 8260.
 
 The policy applies to workspaces without an explicit decision-routing row and
 to saved `hybrid` selections for the exact configured model. Explicit `llm_only`
-and `shadow` rows remain opt-outs. In Settings → Models → Decision routing,
-select the model's **Classifier first (100%)** option to replace an existing opt-out with matching hybrid
-routing; confirmation explains the operator authority and fallback behavior.
-The API accepts this selection only from an owner/admin with the configured
-adapter and deployment grant. A key or a client-supplied flag cannot grant it.
+and `shadow` rows remain opt-outs. A workspace's explicit `classifier_first`
+selection instead uses its saved model, independently of deployment model or
+scope. The legacy deployment-granted hybrid option retains its existing gate;
+no deployment grant is needed for the separate owner/admin classifier-first
+option. Both require a configured adapter. A key or a client-supplied authority
+flag cannot grant execution.
 
 Optional `DECISION_DEFAULT_OPERATIONS=research.intent,memory.topic,chat.tool-selection`
 limits the override to those exact operation IDs; blank/unset means every
@@ -56,7 +74,8 @@ its no-workspace-row-only behavior.
 100% means no execution sampling for eligible typed operations already using
 `DecisionRuntime`. A successful native decision completes directly, without an
 LLM classification. Observation-only consumers remain shadow-only, with full
-sampling inside the deployment override scope; they gain no execution
+sampling for workspace-admin selections or inside the deployment override
+scope; they gain no execution
 authority. Each adapter retains its capability, context-capacity, cancellation
 and one-second primary transport bounds. The shared invocation/profile limits
 and pending/final authority checks are unchanged. Unsupported-capacity inputs
@@ -69,9 +88,11 @@ legacy splitter is not moved onto a decision-runtime route by this setting.
 Fresh Memory, source/recipient admission, event/final output validation, worker
 launch and publication boundaries remain unchanged.
 
-The menu reports the deployment grant as a separate `classifierFirst`
-capability with its operation scope; it does not fabricate approved entries in
-`hybridOperations`. Scoped routes are labeled as operator overrides, including
+The menu offers the explicit workspace-admin classifier-first option for every
+configured decision model. It also reports legacy deployment grants separately
+as `classifierFirst` metadata with operation scope; neither override fabricates
+approved entries in `hybridOperations`. Scoped routes are labeled as operator
+overrides, including
 when matching hybrid routing has already been saved. Tests use mocked stores
 and a fictional Jev transport; they do not establish live latency or quality.
 

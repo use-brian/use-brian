@@ -57,7 +57,7 @@ type DecisionModel = {
   displayName: string;
   provider: string;
   adapterId: string;
-  /** Deployment-granted full routing; absent on older servers. Not approval evidence. */
+  /** Legacy hybrid deployment grant; absent on older servers. Not approval evidence. */
   classifierFirst?: { operationIds: string[] | null } | null;
   hybridOperations: Array<{
     operationId: string;
@@ -69,7 +69,7 @@ type DecisionModel = {
 };
 
 export type WorkspaceDecisionRouting = {
-  mode: "llm_only" | "shadow" | "hybrid";
+  mode: "llm_only" | "shadow" | "hybrid" | "classifier_first";
   modelAlias: string | null;
   updatedAt: string | null;
   operatorOverride: boolean;
@@ -153,7 +153,7 @@ export async function setWorkspaceDecisionRouting(
   target:
     | { mode: "llm_only" }
     | { mode: "shadow"; modelAlias: string; shadowSampleRate?: 0.1 | 1 }
-    | { mode: "hybrid"; modelAlias: string },
+    | { mode: "hybrid" | "classifier_first"; modelAlias: string },
 ): Promise<WorkspaceDecisionRoutingSetting> {
   const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/decision-routing`, {
     method: "PUT",

@@ -1,7 +1,8 @@
 /**
  * Resolve a workspace's persisted classifier choice into a safe decision
  * route. Hybrid authority requires exact approved evidence or an explicit,
- * scoped deployment-operator override. Key presence never grants authority.
+ * scoped deployment-operator override, or explicit workspace-admin classifier_first
+ * selection. Key presence never grants authority.
  *
  * [COMP:decisions/workspace-routing]
  */
@@ -81,9 +82,12 @@ export function createWorkspaceDecisionRouteResolver(options: {
       // operation scope, an existing hybrid row still needs exact approval.
       const selectedClassifierFirst = setting?.mode === 'hybrid'
         && classifierFirstGrant(options.operatorDefault, setting.modelAlias)
-      if ((!setting || selectedClassifierFirst) && options.operatorDefault
-        && (!options.operatorDefault.operationIds || options.operatorDefault.operationIds.includes(context.operation.id))) {
-        const row = registryRow(options.operatorDefault.modelAlias)
+      const workspaceOverride = setting?.mode === 'classifier_first'
+      if (workspaceOverride || ((!setting || selectedClassifierFirst) && options.operatorDefault
+        && (!options.operatorDefault.operationIds || options.operatorDefault.operationIds.includes(context.operation.id)))) {
+        // An explicit workspace selection never inherits the deployment model or scope.
+        const alias = workspaceOverride ? setting.modelAlias : options.operatorDefault?.modelAlias
+        const row = alias ? registryRow(alias) : undefined
         if (
           !row ||
           row.status !== 'active' ||
@@ -93,7 +97,7 @@ export function createWorkspaceDecisionRouteResolver(options: {
           return { mode: 'llm_only' }
         }
         const profileBase = {
-          id: `operator-default:${row.alias}:${context.operation.id}`,
+          id: `${workspaceOverride ? 'workspace-classifier-first' : 'operator-default'}:${row.alias}:${context.operation.id}`,
           version: '1',
           operationId: context.operation.id,
           operationVersion: context.operation.version,
@@ -107,7 +111,7 @@ export function createWorkspaceDecisionRouteResolver(options: {
           totalTimeoutMs: WORKSPACE_DECISION_TOTAL_TIMEOUT_MS,
           primaryTimeoutMs: WORKSPACE_DECISION_PRIMARY_TIMEOUT_MS,
           maxAttempts: 2 as const,
-          policy: { authority: 'deployment_operator_override' },
+          policy: { authority: workspaceOverride ? 'workspace_admin_override' : 'deployment_operator_override' },
         }
         if (context.kind === 'observation') {
           return {
