@@ -35,7 +35,7 @@ routing. Existing Jev selections remain Jev.
    API/model. ChatGPT/Codex subscription sign-in does not supply this credential.
 2. Set `OPENAI_DECISIONS_API_KEY` in the API server's environment and restart the
    API. Do not commit the key. No custom endpoint or chat-model change is needed.
-3. Apply the normal API database migrations, including migration 8259 for the
+3. Apply the normal API database migrations, including migration 8264 for the
    persisted workspace shadow sample rate.
 4. As a workspace owner/admin, open Settings → Models → Decision routing and
    choose **GPT-6 Luna Decisions - Shadow 10%** or **Shadow 100%**.
@@ -65,7 +65,7 @@ remains non-authoritative even with a matching classifier-first deployment grant
 
 ### Classifier-first execution (separate opt-in)
 
-After applying migration **8260**, a workspace owner/admin can select
+After applying migration **8265**, a workspace owner/admin can select
 **<decision model> - Classifier first (100%)** in Settings → Models → Decision
 routing. Choose either Jev or OpenAI from the configured model options. This
 persists `mode: classifier_first` and the exact selected model; it needs no

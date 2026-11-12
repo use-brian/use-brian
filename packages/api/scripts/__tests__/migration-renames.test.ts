@@ -4,6 +4,27 @@ import { orderMigrationFiles } from '../migration-order.js'
 import { findAppliedMigrationRenames, previousMigrationNames } from '../../src/migrations/renames.js'
 
 describe('[COMP:api/migration-order] Migration filename compatibility', () => {
+  it('preserves released decision identities without skipping installed native neighbours', () => {
+    const pairs = [
+      ['8259_workspace_decision_shadow_sampling.sql', '8264_workspace_decision_shadow_sampling.sql'],
+      ['8260_workspace_decision_classifier_first.sql', '8265_workspace_decision_classifier_first.sql'],
+    ]
+    const native = ['8259_native_session_parent_audience_row.sql', '8260_native_query_capture_reservation.sql']
+    expect(findAppliedMigrationRenames(new Set(native))).toEqual([])
+    for (const [previousName, currentName] of pairs) {
+      expect(findAppliedMigrationRenames(new Set([...native, previousName]))).toEqual([{previousName, currentName}])
+      expect(previousMigrationNames(currentName)).toEqual([previousName])
+      expect(findAppliedMigrationRenames(new Set([...native, previousName, currentName]))).toEqual([])
+    }
+    const files = readdirSync(new URL('../../migrations/', import.meta.url))
+    for (const name of native) expect(files).toContain(name)
+    for (const [, currentName] of pairs) {
+      expect(files.filter(file => file.startsWith(`${currentName.split('_')[0]}_`))).toEqual([currentName])
+    }
+    expect(orderMigrationFiles([{dir: 'open', files: [...native, ...pairs.map(([, name]) => name)].reverse()}])
+      .map(row => row.file)).toEqual([...native, ...pairs.map(([, name]) => name)])
+  })
+
   it('preserves each released collision without skipping its same-number neighbour', () => {
     const pairs = [["557_association_membership_catalogue.sql", "5570_association_membership_catalogue.sql"], ["561_association_site_content.sql", "5610_association_site_content.sql"], ["563_department_scope_evidence.sql", "5630_department_scope_evidence.sql"], ["564_crm_intake_existing_or_new.sql", "5640_crm_intake_existing_or_new.sql"], ["8146_explicit_unclassified_legacy_erasure.sql", "81460_explicit_unclassified_legacy_erasure.sql"], ["8147_private_chat_recovery.sql", "81470_private_chat_recovery.sql"]]
     for (const [previousName, currentName] of pairs) {

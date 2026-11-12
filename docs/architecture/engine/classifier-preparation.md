@@ -19,7 +19,7 @@ configuration and the API request.
 
 `TYPESAFE_API_KEY` registers the Jev transport. The separate
 `OPENAI_DECISIONS_API_KEY` registers the native OpenAI Decisions transport;
-neither key alone enables classifier authority. After migration **8260**, a
+neither key alone enables classifier authority. After migration **8265**, a
 workspace owner/admin can select **<model> - Classifier first (100%)** in
 Settings → Models → Decision routing. This persists `classifier_first` with the
 selected model and authorizes native execution without deployment environment
@@ -53,7 +53,7 @@ reuses the existing exact-version `operator_override` profiles and Hydra
 cascade, rather than weakening approval validation or introducing another
 classifier pipeline. The legacy deployment mechanism itself is unchanged;
 workspace-admin classifier-first selection is the separate persisted mode added
-by migration 8260.
+by migration 8265.
 
 The policy applies to workspaces without an explicit decision-routing row and
 to saved `hybrid` selections for the exact configured model. Explicit `llm_only`

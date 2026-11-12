@@ -120,7 +120,7 @@ it('migrates existing settings to 10% and enforces the persisted rate constraint
   try {
     await db.exec(`CREATE TABLE workspace_decision_routing (workspace_id TEXT PRIMARY KEY);
       INSERT INTO workspace_decision_routing VALUES ('existing');`)
-    await db.exec(await readFile(new URL('../../../migrations/8259_workspace_decision_shadow_sampling.sql', import.meta.url), 'utf8'))
+    await db.exec(await readFile(new URL('../../../migrations/8264_workspace_decision_shadow_sampling.sql', import.meta.url), 'utf8'))
     expect((await db.query('SELECT shadow_sample_rate FROM workspace_decision_routing')).rows)
       .toEqual([{ shadow_sample_rate: 0.1 }])
     await db.exec("INSERT INTO workspace_decision_routing (workspace_id) VALUES ('new')")
@@ -160,7 +160,7 @@ it('extends the 605 named constraints without changing existing settings', async
       model_alias TEXT,
       CONSTRAINT workspace_decision_routing_target_check CHECK ((mode = 'llm_only' AND model_alias IS NULL) OR (mode IN ('shadow', 'hybrid') AND model_alias IS NOT NULL)));
       INSERT INTO workspace_decision_routing VALUES ('llm_only', NULL), ('shadow', 'jev'), ('hybrid', 'jev');`)
-    await db.exec(await readFile(new URL('../../../migrations/8260_workspace_decision_classifier_first.sql', import.meta.url), 'utf8'))
+    await db.exec(await readFile(new URL('../../../migrations/8265_workspace_decision_classifier_first.sql', import.meta.url), 'utf8'))
     expect((await db.query('SELECT * FROM workspace_decision_routing')).rows).toHaveLength(3)
     await db.exec("INSERT INTO workspace_decision_routing VALUES ('classifier_first', 'jev')")
     for (const [mode, alias] of [['classifier_first', null], ['hybrid', null], ['shadow', null], ['llm_only', 'jev'], ['invalid', 'jev']]) {

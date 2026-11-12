@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const migrations = new URL('../../../migrations/', import.meta.url)
 const files = ['604_workspace_decision_routing.sql', '605_decision_evaluation_profiles.sql',
-  '8259_workspace_decision_shadow_sampling.sql', '8260_workspace_decision_classifier_first.sql']
+  '8264_workspace_decision_shadow_sampling.sql', '8265_workspace_decision_classifier_first.sql']
 const user = '00000000-0000-4000-8000-000000000001'
 const workspace = '00000000-0000-4000-8000-000000000002'
 const otherWorkspace = '00000000-0000-4000-8000-000000000003'
