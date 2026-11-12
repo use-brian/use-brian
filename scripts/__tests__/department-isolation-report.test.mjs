@@ -5,14 +5,15 @@ import { embeddedTestFiles } from '../testing/embedded-database-tests.mjs'
 import {
   DEPARTMENT_ISOLATION_BOUNDARIES, DEPARTMENT_ISOLATION_CASES, DEPARTMENT_ISOLATION_SUITES,
 } from '../../packages/shared/src/department-isolation-coverage.ts'
-import { createAcceptanceReport, mergeAcceptanceReports, parseShard, suitesForShard } from '../testing/department-isolation-report.mjs'
+import { acceptanceShards, createAcceptanceReport, mergeAcceptanceReports, parseShard, suitesForShard } from '../testing/department-isolation-report.mjs'
 
 const metadata = { revision: 'fixture-revision', sourceHashes: { 'fixture.ts': 'hash' }, dirtySourceHashes: {},
   migration: { latest: 'fixture.sql', count: 1, ledgerHash: 'fixture-ledger' } }
 
 function receipts(profile = 'full') {
-  const total = profile === 'current' ? 4 : 7
-  return Array.from({ length: total }, (_, index) => index + 1).map(index => {
+  const indexes = acceptanceShards(profile)
+  const total = indexes.length
+  return indexes.map(index => {
     const shard = parseShard(`${index}/${total}`)
     const suites = suitesForShard(shard, profile).map(suite => ({ id: suite.id, testFiles: [...suite.testFiles], executionError: null }))
     const assertions = suites.flatMap(suite => suite.testFiles.map(testFile => ({
@@ -63,6 +64,38 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     for (const value of ['0/4', '5/4', '1/1', '1/99', '1/4junk', '1.5/4']) assert.throws(() => parseShard(value))
   })
 
+  it('isolates retained-query capacity while covering every suite and file exactly once in both production profiles', () => {
+    const capacityFile = 'packages/api/src/__tests__/native-query-capture-capacity.integration.test.ts'
+    assert.deepEqual(acceptanceShards('full'), [1, 2, 3, 4, 5, 6, 7, 8])
+    assert.deepEqual(acceptanceShards('current'), [1, 2, 3, 4, 5])
+    assert.throws(() => acceptanceShards('unknown'), /Unknown/)
+    for (const profile of ['current', 'full']) {
+      const indexes = acceptanceShards(profile)
+      const partitions = indexes.map(index => suitesForShard(parseShard(`${index}/${indexes.length}`), profile))
+      const capacity = partitions.filter(suites => suites.some(suite => suite.id === 'native-query-capacity'))
+      assert.equal(capacity.length, 1)
+      assert.deepEqual(capacity[0].map(suite => suite.id), ['native-query-capacity'])
+      const files = partitions.flat().flatMap(suite => suite.testFiles.map(file => `${suite.packageDir}/${file}`))
+      const expected = suitesForShard(null, profile).flatMap(suite => suite.testFiles.map(file => `${suite.packageDir}/${file}`))
+      assert.deepEqual(files.toSorted(), expected.toSorted())
+      assert.equal(new Set(files).size, files.length)
+      assert.equal(files.filter(file => file === capacityFile).length, 1)
+    }
+  })
+
+  it('cannot certify missing, failed or skipped retained-query capacity execution', () => {
+    for (const profile of ['current', 'full']) {
+      const missing = receipts(profile).filter(part => !part.suites.some(suite => suite.id === 'native-query-capacity'))
+      assert.throws(() => mergeAcceptanceReports(missing, metadata, profile), /Missing/)
+      for (const status of ['failed', 'skipped']) {
+        const parts = receipts(profile)
+        const capacity = parts.find(part => part.suites.some(suite => suite.id === 'native-query-capacity'))
+        capacity.assertions[0].status = status
+        assert.throws(() => mergeAcceptanceReports(parts, metadata, profile), /incomplete or failed/)
+      }
+    }
+  })
+
   it('certifies only a complete matching set, regardless of report arrival order', () => {
     const parts = receipts()
     assert.ok(parts.every(part => part.suitesPassed && !part.fullMatrixAccepted))
@@ -85,7 +118,7 @@ describe('[COMP:ci/execution-topology] complete acceptance across isolated runne
     assert.throws(() => mergeAcceptanceReports(parts.slice(1), metadata, 'current'), /Missing/)
     parts[0].assertions[0].status = 'failed'
     assert.throws(() => mergeAcceptanceReports(parts, metadata, 'current'), /incomplete or failed/)
-    assert.throws(() => suitesForShard(parseShard('1/3'), 'current'), /four shards/)
+    assert.throws(() => suitesForShard(parseShard('1/3'), 'current'), /5 shards/)
   })
 
   it('rejects missing, duplicate, stale and mixed-migration receipts', () => {
