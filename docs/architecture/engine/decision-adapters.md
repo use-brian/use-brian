@@ -80,8 +80,10 @@ Content-Type: application/json
 
 The native classifier replaces LLM classification for eligible execution
 operations. A successful native decision returns directly without the ordinary
-LLM classification call. The LLM remains for generated topic labels/task
-prompts, uncertainty review and permitted bounded operational fallback. Main
+LLM classification call. Version-2 topic classification allocates host-owned
+identities without generating names. The LLM remains for generated task prompts,
+explicit uncertainty review and permitted bounded operational fallback. Legacy
+LLM-only/shadow topic naming is retained only without opaque topic history. Main
 chat generation is unchanged; observation-only operations stay non-authoritative
 100% shadow comparisons. Existing legacy operations without a decision-runtime
 route are not automatically migrated by this setting.

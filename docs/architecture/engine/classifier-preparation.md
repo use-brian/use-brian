@@ -81,8 +81,9 @@ and one-second primary transport bounds. The shared invocation/profile limits
 and pending/final authority checks are unchanged. Unsupported-capacity inputs
 retain the existing owned fallback, without truncating state or options.
 
-Native decision endpoints cannot generate new topic labels or worker task prompts. Generation,
-uncertainty review and allowed operational recovery can still need a bounded
+Native decision endpoints cannot generate worker task prompts. Topic identity
+now comes from the host rather than a generated name (see below). Task generation,
+explicit uncertainty review and allowed operational recovery can still need a bounded
 LLM follow-up. The main chat model is unchanged. Eligible Standard split
 preparation now uses the selected decision runtime for `research.split`;
 other late legacy splitter paths are unchanged.
@@ -218,12 +219,59 @@ Overlap removes an avoidable serial classification window; a native no-split
 verdict additionally avoids an unnecessary LLM call. Neither change promises
 production latency percentiles or equates native wait with pure inference time.
 
-## Valid insufficient-signal topic decisions
+## Topic continuity without foreground naming
 
-The topic question explicitly offers `__uncategorized__` for insufficient
-signal. With `continue` or `resume`, this is a valid terminal safe result:
-`(uncategorized) / continue / 0`, retaining native usage/model attribution. It
-must not be mislabeled as a provider `invalid_response`. Explicit low-confidence
-review policy still takes precedence; new topics, shifts and cross-topic
-payloads retain their generation path. Missing/wrong-kind answers and source
-authority refusals are unchanged.
+`memory.topic` operation, state and question versions are **2**. Version-1
+approved profiles do not authorize this incompatible protocol; ordinary hybrid
+routing needs exact version-2 approval. Explicit workspace/deployment overrides
+still use the selected model and exact current operation versions.
+
+The existing `topic_label` field is an **exact grouping/retrieval key**, not
+necessarily a descriptive name. Native new-topic decisions allocate
+`topic:v2:<sha256>` from a domain-separated, framed workspace/run identity. The
+same workspace/run replays the same key; different runs/workspaces stay separate.
+Authored message IDs seed attended runs; other callers capture one fresh run ID
+before awaiting. Keys are not derived from content or permissions, and are never
+permission receipts. Existing descriptive labels remain exact legacy keys.
+No database migration or background naming worker is required.
+
+The host supplies a bounded catalog of up to 20 exact known keys, reserving the
+previous key, with fixed choice tokens `k0`, `k1`, …, `new`, `unknown`. These
+prevent collisions with legacy labels such as `new` or `__uncategorized__`.
+The model decides continue/shift/resume/cross-topic and primary membership;
+per-topic booleans independently identify cross-topic memberships. The host
+excludes the primary from related keys and restores exact stored identities.
+A prior key may still be resumed after compaction or an unclassified gap;
+a previous annotation is not proof that its content is in the live prompt.
+At most 22 typed questions are needed. Valid native decisions, including new
+topics and cross-topic results, complete without an LLM naming call.
+
+Admitted history supplies complete text and assistant/tool context as semantic
+anchors; opaque keys alone have no meaning. Assistants and tool results inherit
+the preceding annotated user topic; genuinely unclassified users break that
+inheritance. Full anchor text is captured before awaiting; it is not clipped to
+the last eight turns. This is still a bounded candidate decision, not unbounded
+historical search. Source cohorts, capacity gates and fresh dispatch/final proofs
+remain intact; oversized inputs use existing permitted recovery, not truncation.
+
+`unknown` with `continue` or `resume` is a valid terminal insufficient-signal result:
+`(uncategorized) / continue / 0`, with native usage/model attribution. Malformed
+or contradictory selections do not allocate keys. An explicit valid
+low-confidence review policy may request bounded LLM review; transport/capacity
+recovery remains bounded too. These completions select catalog tokens rather
+than generate names. LLM-only/shadow retain legacy naming while history contains
+only descriptive labels; once opaque history exists, even their authoritative
+LLM path must select tokens rather than rename identities.
+
+Compaction with opaque keys uses admitted-row membership indexes and host spans,
+including noncontiguous memberships and prior-summary offsets. Summarization
+receives safe `tN` tokens and cannot rename or merge grouping keys. Missing,
+duplicate or unknown sections reject the entire episode set and retain the raw
+summary boundary. Unassigned context stays in the boundary, not an invented
+topic. Legacy-only and linear compaction retain their existing behavior.
+Episodic retrieval still queries exact keys; prompts and graduation present
+unnamed topics neutrally without changing sources, grouping or permissions.
+
+This removes avoidable topic naming work on successful native paths. Synthetic
+Jev/OpenAI transport tests verify direct completion and single-charge accounting;
+they do not establish live latency or model quality.
