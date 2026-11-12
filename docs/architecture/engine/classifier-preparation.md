@@ -100,8 +100,8 @@ and a fictional Jev transport; they do not establish live latency or quality.
 
 ## Strict decision schemas
 
-The common LLM decision adapter emits closed objects with every property in
-`required`. Confidence is required but nullable; boolean answers additionally
+The common LLM decision adapter's default detailed format emits closed objects
+with every property in `required`. Confidence is required but nullable; boolean answers additionally
 have required nullable `pTrue`. Null means unavailable, never a fabricated
 confidence or probability. Choice and score answers do not request `pTrue`.
 Existing value validation, typed decoding, question ordering and decision
@@ -133,21 +133,72 @@ Repeated choice-option arrays share a deterministic prompt-local `choiceOptions`
 table. Each affected question references the complete ordered array with a JSON
 Pointer; fixed host instructions explain expansion. Equality includes all option
 metadata, not just values. Different ordering, descriptions or metadata do not
-merge. State, question wording/order/IDs and response-schema constraints remain
+merge. Decoded state, question wording/order/IDs and response-schema constraints remain
 unchanged, and the original representation is retained unless sharing is
 smaller. Dispatch and input-ownership qualification use the same message builder.
 There is no cross-request prompt or permission cache.
 
-A fictional 357-tool fixture including the complete tool catalog and seven
-questions shrinks from 87,649 to 51,142 prompt characters (41.7%). This is a
-serialized-character measurement, not a production token count or latency
-promise. Tests expand the references back to the exact original state/questions.
+The earlier option-list sharing change reduced a fictional 357-tool fixture
+including the complete catalog and seven questions from 87,649 to 51,142 prompt
+characters (41.7%). Further LLM-only preparation reductions are described below.
+These are serialized-character measurements, not production token counts or
+latency promises. Tests expand references back to the exact state/questions.
 
 An offline integration test uses the pinned Codex runtime, production inference
 hardening, isolated temporary home/cwd, no credentials and a loopback fake
 Responses API enforcing strict schema requirements. It verifies the **source**
 adapter's actual wire request, not a repaired or stale compiled schema. It does
 not establish that a historical live failure had this exact upstream rejection.
+
+## Smaller LLM-only preparation payloads
+
+Successful native classifiers are not the only optimization path. The combined
+research-intent/tool-selection **LLM completion** now uses two additional
+reductions while retaining every question and candidate:
+
+- **Lossless positional tables.** Large homogeneous arrays of scalar records
+  in state/options can be encoded as rows with explicit root `rowTables` paths
+  and ordered columns. Zipping rows to columns at only those literal key/index
+  paths reconstructs every field. User data resembling `$ref` or table metadata
+  is never automatically interpreted. Nested metadata, heterogeneous records,
+  order differences and unsupported values are not silently flattened. The host
+  compares complete serializations, including decoder instructions, and keeps
+  the shortest; small inputs retain the existing representation.
+- **Choice-value answers.** This particular completion consumes intent/ranking
+  labels, not LLM confidence. Its closed schema maps every required question ID
+  directly to the same complete string enum (including shared domain refs).
+  Host decoding restores ordinary typed choice answers with uncertainty marked
+  `unavailable`; it never invents confidence, probabilities or distributions.
+  Compatible custom providers returning detailed rows retain actual valid
+  self-reports. Missing/extra selections, coercions and invalid labels are
+  rejected. Other consumers retain the default detailed format; mixed boolean
+  and score questions cannot opt into this choice-only encoding.
+
+The complete existing tool catalog and its descriptions are retained—there is no
+new truncation, filtering, deferred ranking, or skipped classification. Native
+request/answer protocols, model selection, profile authority, fresh source
+proofs, capacity gates, cancellation, deadlines and worker/executor boundaries
+are unchanged. The completion and its private input-ownership qualifier build
+identical compact bytes. Ordinary LLM usage stays caller-metered once; the
+native central meter does not duplicate it. Shadow and permitted recovery use
+the same optimized LLM completion without gaining native execution authority.
+
+An offline paired comparison used the production combined-request builder,
+357 fictional tools, seven questions, and identical canonical outputs. Relative
+to the already option-shared implementation, prompt text fell **54,625 → 38,023
+characters (30.4%)**, schema JSON **4,123 → 3,115 (24.4%)**, and the response JSON
+**361 → 165 (54.3%)**. The serialized message/system/schema bundle fell
+**66,366 → 45,219 characters (31.9%)**. One local 30-iteration sample increased
+median prompt serialization CPU time from about **0.74ms to 3.27ms**; this small
+cost is not disguised as a CPU optimization.
+
+These measurements establish reduced serialization, exact data/result
+round-tripping and strict schema compatibility—not live model latency or
+classification quality. The pinned offline Codex test exercises both detailed
+and compact schemas through the real hardened runtime without credentials.
+A fresh LLM-only before/after capture is still needed to quantify wall-clock
+savings; all classifiers already overlap, so shortening a non-critical one alone
+may not improve first-text latency.
 
 ## Topic deadline
 
