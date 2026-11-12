@@ -36,8 +36,10 @@
 /* Fade the page behind every open dialog. A background-colored wash
    (`bg-background/80`) is invisible on a light page, so the scrim always
    uses the foreground tint. The inbox panel is a desktop popover and
-   keeps its own backdrop. Hand-rolled modals use the same tint directly. */
-[role="presentation"][data-open]:not([data-inbox-backdrop]) {
+   keeps its own backdrop. Base UI popup positioners also have presentation
+   roles and open state, so only full-screen backdrops receive this fill.
+   Hand-rolled modals use the same tint directly. */
+[role="presentation"][data-open].fixed.inset-0:not([data-inbox-backdrop]) {
   background-color: color-mix(in srgb, var(--foreground) 40%, transparent);
 }
 
