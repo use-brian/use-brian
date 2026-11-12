@@ -1,3 +1,4 @@
+import { decisionUsageModelId } from '../decisions/usage.js'
 import {ownsRoutineCalendarRead,withRoutineCalendarDispatch} from './routine-read-ownership.js'
 import {renderHostObservation,type HostObservation} from '@use-brian/shared'
 import {createToolExecutor} from './tool-executor.js'
@@ -216,11 +217,11 @@ export async function planRoutineCalendarRead(input:{runtime:DecisionExecutionPo
   const selected=validatePlan(result.result)
   const selectedCalls=selected?structuredClone(decodedPlans.get(selected)!.calls):null
   await check();current()
-  if(!selectedCalls)return{...empty(result.path),usedRequestedLlm:result.usedRequestedLlm,scopeCounts,inputCounts,model:model??result.primaryResponse?.model.wireId??null,usage}
+  if(!selectedCalls)return{...empty(result.path),usedRequestedLlm:result.usedRequestedLlm,scopeCounts,inputCounts,model:model??(result.primaryResponse?decisionUsageModelId(result.primaryResponse.model):null),usage}
   const calls=selectedCalls
   const plan:RoutineReadPlan=Object.freeze({kind:'calendar_events'})
   planData.set(plan,{calls,current})
-  return{plan,durationMs:Date.now()-started,model:model??result.primaryResponse?.model.wireId??null,usage,path:result.path,usedRequestedLlm:result.usedRequestedLlm,scopeCounts,inputCounts}
+  return{plan,durationMs:Date.now()-started,model:model??(result.primaryResponse?decisionUsageModelId(result.primaryResponse.model):null),usage,path:result.path,usedRequestedLlm:result.usedRequestedLlm,scopeCounts,inputCounts}
  }catch(error){if(refusal)throw refusal;if(isInputAuthorityError(error)||signal.aborted)throw error;return{...empty('unavailable'),scopeCounts,inputCounts}}
  finally{closed=true;if(pending)await pending}
 }

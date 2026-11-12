@@ -9,6 +9,7 @@
  * (extraction / classification / structured-output bucket).
  */
 
+import { decisionUsageModelId } from '../decisions/usage.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
 import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
@@ -104,7 +105,7 @@ function primaryNoSplit(response: DecisionResponse): SplitResult | null {
     usage: response.usage
       ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens }
       : null,
-    model: response.model.wireId,
+    model: decisionUsageModelId(response.model),
   }
 }
 

@@ -1,3 +1,4 @@
+import { decisionUsageModelId } from '../decisions/usage.js'
 import { collectStream } from '../providers/accumulator.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import type { EntityCandidate, EntityMention } from './types.js'
@@ -239,7 +240,7 @@ function primaryDisambiguation(
         tier: fallbackTier,
         candidates,
         ...(usage ? { usage } : {}),
-        model: response.model.wireId,
+        model: decisionUsageModelId(response.model),
       },
     }
   }
@@ -254,7 +255,7 @@ function primaryDisambiguation(
       score: selectedProbability ?? 0,
       flagged: true,
       ...(usage ? { usage } : {}),
-      model: response.model.wireId,
+      model: decisionUsageModelId(response.model),
     },
   }
 }

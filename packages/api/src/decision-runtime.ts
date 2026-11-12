@@ -19,6 +19,8 @@ import {
   validateDecisionRoute, ownsDecisionInputCapacity, ownsClassifierCapacityFallback, createClassifierCapacityDeferral,
   type DecisionRoute,
   createTypeSafeDecisionProvider,
+  createOpenAiDecisionProvider,
+  decisionUsageModelId,
   executeDecisionCascade,
   executeDecisionObservation,
   type DecisionAttemptRecord,
@@ -38,7 +40,6 @@ import {
 } from '@use-brian/core'
 import type { LLMProvider } from '@use-brian/core'
 import {
-  bracketFor,
   isDecisionModelRow,
   modelRates,
   registryRow,
@@ -157,9 +158,11 @@ export function createDecisionAttemptUsageRecorder(
         assistantId: '',
         workspaceId: attempt.workspaceId,
         sessionId: null,
-        model: attempt.modelWireId,
+        model: decisionUsageModelId({ catalogId: attempt.modelCatalogId, wireId: attempt.modelWireId }),
         inputTokens: attempt.usage.inputTokens,
         outputTokens: attempt.usage.outputTokens,
+        ...(attempt.usage.cacheReadTokens !== undefined ? { cacheReadTokens: attempt.usage.cacheReadTokens } : {}),
+        ...(attempt.usage.cacheWriteTokens !== undefined ? { cacheWriteTokens: attempt.usage.cacheWriteTokens } : {}),
         actualCostUsd: attempt.usage.costUsd
           ?? calculateCost(attempt.modelCatalogId, attempt.usage),
         source: target.source,
@@ -206,8 +209,10 @@ export interface DecisionRuntime {
 export type CreateDecisionRuntimeOptions = {
   llmProvider: LLMProvider
   defaultLlmModel: string | (() => string)
-  /** Optional Jev credential. Its absence leaves the runtime LLM-only. */
+  /** Optional Jev credential. Registration alone never activates a route. */
   typesafeApiKey?: string
+  /** Dedicated OpenAI Decisions API credential; never a Codex subscription credential. */
+  openaiDecisionsApiKey?: string
   /** Optional injected registry for tests and additional transports. */
   adapters?: DecisionAdapterRegistry
   /** Registers additional transport factories without changing this runtime. */
@@ -230,16 +235,13 @@ function modelRef(modelId: string): DecisionModelRef {
 
 function priceUsage(record: DecisionAttemptRecord): DecisionAttemptRecord {
   if (!record.usage || record.usage.costUsd !== undefined) return record
-  const rates = modelRates(record.modelCatalogId) ?? modelRates(record.modelWireId)
-  if (!rates) return record
-  const bracket = bracketFor(rates, record.usage.inputTokens)
+  const pricingId = modelRates(record.modelCatalogId) ? record.modelCatalogId : record.modelWireId
+  if (!modelRates(pricingId)) return record
   return {
     ...record,
     usage: {
       ...record.usage,
-      costUsd:
-        (record.usage.inputTokens * bracket.inPerMTok
-          + record.usage.outputTokens * bracket.outPerMTok) / 1_000_000,
+      costUsd: calculateCost(pricingId, record.usage),
     },
   }
 }
@@ -274,6 +276,10 @@ export function createDecisionRuntime(
   if (options.typesafeApiKey?.trim() && !adapters.has('typesafe')) {
     const apiKey = options.typesafeApiKey
     adapters.register('typesafe', () => createTypeSafeDecisionProvider({ apiKey }))
+  }
+  if (options.openaiDecisionsApiKey?.trim() && !adapters.has('openai-decisions')) {
+    const apiKey = options.openaiDecisionsApiKey
+    adapters.register('openai-decisions', () => createOpenAiDecisionProvider({ apiKey }))
   }
   options.configureAdapters?.(adapters)
   const routeResolver: DecisionRouteResolver = options.resolveRoute

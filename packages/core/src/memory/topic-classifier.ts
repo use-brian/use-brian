@@ -22,6 +22,7 @@
  * Cost: ~1 Flash call per user turn (~$0.0001 each at current pricing).
  */
 
+import { decisionUsageModelId } from '../decisions/usage.js'
 import { registryRow } from '@use-brian/shared/model-registry'
 import { bindScopeSources, boundScopeSources } from '../security/source-evidence.js'
 import { isTrivialChatMessage } from '../classification/trivial-chat.js'
@@ -339,7 +340,7 @@ function decideTopic(
         usage: response.usage
           ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens }
           : null,
-        model: response.model.wireId,
+        model: decisionUsageModelId(response.model),
       } satisfies TopicClassification,
     }
   }

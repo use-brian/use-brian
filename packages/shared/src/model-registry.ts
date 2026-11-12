@@ -47,6 +47,7 @@ export type ModelProvider =
   | 'openai-codex'
   | 'xai'
   | 'typesafe'
+  | 'openai-decisions'
   | `openai-compat:${string}`
 
 /**
@@ -477,6 +478,44 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
       batch: true,
       maxOptions: 255,
       maxQuestions: 64,
+      maxRubricLevels: 10,
+      maxInputTokens: 64_000,
+      maxQuestionInputTokens: 32_000,
+      uncertainty: ['native_distribution'],
+    },
+  },
+
+  {
+    // Native /v1/decisions, NOT Codex subscription chat or Responses.
+    // Keep its selector/recording identity distinct even though the wire
+    // model name is shared with the subscription row. Rates: OpenAI Decisions
+    // guide + GPT-6 Luna pricing, reviewed 2026-11-11. Host admission remains
+    // deliberately narrower than the general model's advertised context.
+    alias: 'openai-decisions-gpt-6-luna',
+    displayName: 'GPT-6 Luna Decisions',
+    provider: 'openai-decisions',
+    apiModelId: 'gpt-6-luna',
+    class: 'background',
+    tier: 'other',
+    status: 'active',
+    menu: false,
+    recordAlias: true,
+    rates: {
+      brackets: [{ upToInputTokens: Infinity, inPerMTok: 0.1, outPerMTok: 0 }],
+      cacheReadPerMTok: 0.01,
+      cacheWritePerMTok: 0.125,
+    },
+    contextWindow: 64_000,
+    maxOutput: 0,
+    capabilities: { tools: false, vision: false, thinking: false, nativePdf: false },
+    inference: 'decision',
+    decisionCapabilities: {
+      adapterId: 'openai-decisions',
+      wireModelId: 'gpt-6-luna',
+      primitives: ['choice', 'boolean', 'score'],
+      batch: true,
+      maxOptions: 255,
+      maxQuestions: 400,
       maxRubricLevels: 10,
       maxInputTokens: 64_000,
       maxQuestionInputTokens: 32_000,
@@ -1072,8 +1111,9 @@ for (const row of MODEL_REGISTRY) {
 
 // apiModelId also prices (an outage-fallback turn records the resolved
 // snapshot id, e.g. `claude-haiku-4-5-20251001`). Rows sharing an apiModelId
-// share a rate blob by construction; first row wins, and it never overrides
-// an id already claimed as an alias.
+// share a rate blob within the same inference lane; native Decisions and
+// subscription chat may deliberately differ and must record their own alias.
+// First row wins, and it never overrides an id already claimed as an alias.
 for (const row of MODEL_REGISTRY) {
   if (!byPricingId.has(row.apiModelId)) byPricingId.set(row.apiModelId, row)
 }
