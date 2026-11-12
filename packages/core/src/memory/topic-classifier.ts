@@ -327,6 +327,23 @@ function decideTopic(
     Math.min(answerConfidence(state), answerConfidence(topic)) < reviewBelow
   ) return { kind: 'follow_up' as const, reason: 'uncertain' as const }
 
+  // Insufficient signal is a declared, valid answer, not a provider failure.
+  // Keep the policy review above this terminal safe classification.
+  if (
+    (state.value === 'continue' || state.value === 'resume') &&
+    topic.value === '__uncategorized__'
+  ) {
+    return {
+      kind: 'complete' as const,
+      result: {
+        ...FALLBACK,
+        usage: response.usage
+          ? { inputTokens: response.usage.inputTokens, outputTokens: response.usage.outputTokens }
+          : null,
+        model: decisionUsageModelId(response.model),
+      } satisfies TopicClassification,
+    }
+  }
   if (
     (state.value === 'continue' || state.value === 'resume') &&
     knownTopics.includes(topic.value)

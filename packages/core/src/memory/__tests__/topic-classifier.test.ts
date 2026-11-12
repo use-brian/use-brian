@@ -497,6 +497,121 @@ describe('[COMP:memory/topic-classifier] classifyTopic', () => {
     expect(llmCalls).toBe(0)
   })
 
+  describe('insufficient topic signal decisions', () => {
+    const cases = ['continue', 'resume'].flatMap(state =>
+      [[], ['pricing review']].map(knownTopics => ({ state, knownTopics })))
+
+    it.each(cases)('terminates $state with known topics $knownTopics and retains native usage', async ({ state, knownTopics }) => {
+      const llm = mockProvider('unused')
+      const stream = vi.spyOn(llm, 'stream')
+      const decisionRuntime = executionFixture({
+        llm,
+        primary: fixtureDecisionProvider(async request => ({
+          providerId: 'fixture-decision', model: request.model,
+          usage: { inputTokens: 37, outputTokens: 4 },
+          answers: [
+            { questionId: 'state', kind: 'choice', value: state, evidence: { source: 'native_distribution', confidence: 0.9 } },
+            { questionId: 'topic', kind: 'choice', value: '__uncategorized__', evidence: { source: 'native_distribution', confidence: 0.9 } },
+          ],
+        })),
+      })
+      const run = decisionRuntime.run.bind(decisionRuntime)
+      const outcomes: unknown[] = []
+      decisionRuntime.run = async input => {
+        const outcome = await run(input)
+        outcomes.push(outcome)
+        return outcome
+      }
+      const result = await classifyTopic({ provider: llm, model: 'mock', recentUserTurns: [],
+        replyToText: null, currentMessage: 'Fictional ambiguous request', knownTopicsThisSession: knownTopics, decisionRuntime })
+      expect(result).toMatchObject({ topic_label: '(uncategorized)', state: 'continue', confidence: 0,
+        usage: { inputTokens: 37, outputTokens: 4 }, model: 'fixture-decision-v1' })
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]).not.toHaveProperty('failureKind')
+      expect(stream).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      { state: 'continue', topic: '__uncategorized__', confidence: 0.2, policy: { reviewBelow: 0.5 }, reason: 'uncertain' },
+      { state: 'resume', topic: '__uncategorized__', confidence: 0.2, policy: { reviewBelow: 0.5 }, reason: 'uncertain' },
+      { state: 'shift', topic: '__uncategorized__', confidence: 0.9, policy: null, reason: 'generation_required' },
+      { state: 'cross-topic', topic: '__uncategorized__', confidence: 0.9, policy: null, reason: 'generation_required' },
+      { state: 'continue', topic: '__new_topic__', confidence: 0.9, policy: null, reason: 'generation_required' },
+      { state: 'resume', topic: '__new_topic__', confidence: 0.9, policy: null, reason: 'generation_required' },
+    ])('preserves $reason for $state / $topic', async ({ state, topic, confidence, policy, reason }) => {
+      const llm = mockProvider('{"topic_label":"launch planning","state":"shift","confidence":0.8}')
+      const stream = vi.spyOn(llm, 'stream')
+      const decisionRuntime = executionFixture({ llm, profilePolicy: policy,
+        primary: fixtureDecisionProvider(async request => ({ providerId: 'fixture-decision', model: request.model,
+          answers: [
+            { questionId: 'state', kind: 'choice', value: state, evidence: { source: 'native_distribution', confidence } },
+            { questionId: 'topic', kind: 'choice', value: topic, evidence: { source: 'native_distribution', confidence } },
+          ],
+        })),
+      })
+      const run = decisionRuntime.run.bind(decisionRuntime)
+      const decisions: unknown[] = []
+      decisionRuntime.run = input => {
+        const decide = input.operation.decide
+        input.operation.decide = (response, context) => {
+          const decision = decide(response, context)
+          decisions.push(decision)
+          return decision
+        }
+        return run(input)
+      }
+      const result = await classifyTopic({ provider: llm, model: 'mock', recentUserTurns: [], replyToText: null,
+        currentMessage: 'Fictional ambiguous request', knownTopicsThisSession: [], decisionRuntime })
+      expect(decisions).toContainEqual({ kind: 'follow_up', reason })
+      expect(result.topic_label).toBe('launch planning')
+      expect(stream).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not turn a native insufficient-signal answer into an authority bypass', async () => {
+      const llm = mockProvider('unused')
+      const stream = vi.spyOn(llm, 'stream')
+      const refusal = Object.assign(new Error('Synthetic authority revoked'), { reason: 'authority_changed', retrySafe: false })
+      let revoked = false
+      const decisionRuntime = executionFixture({ llm,
+        primary: fixtureDecisionProvider(async request => {
+          revoked = true
+          return { providerId: 'fixture-decision', model: request.model, answers: [
+            { questionId: 'state', kind: 'choice', value: 'continue', evidence: { source: 'native_distribution', confidence: 0.9 } },
+            { questionId: 'topic', kind: 'choice', value: '__uncategorized__', evidence: { source: 'native_distribution', confidence: 0.9 } },
+          ] }
+        }),
+      })
+      await expect(classifyTopic({ provider: llm, model: 'mock', recentUserTurns: [], replyToText: null,
+        currentMessage: 'Fictional ambiguous request', knownTopicsThisSession: [], decisionRuntime,
+        assertInputAuthority: async () => { if (revoked) throw refusal },
+      })).rejects.toMatchObject({ reason: 'authority_changed' })
+      expect(stream).not.toHaveBeenCalled()
+    })
+
+    it('keeps missing, wrong-kind, and unknown combinations unavailable', async () => {
+      const llm = mockProvider('unused')
+      const decisionRuntime = executionFixture({ llm, mode: 'llm_only' })
+      const run = decisionRuntime.run.bind(decisionRuntime)
+      decisionRuntime.run = input => {
+        const choice = (questionId: string, value: string) => ({ questionId, kind: 'choice' as const, value,
+          evidence: { source: 'native_distribution' as const, confidence: 0.9 } })
+        const state = choice('state', 'continue'), topic = choice('topic', '__uncategorized__')
+        const malformed = [[], [state], [topic],
+          [{ questionId: 'state', kind: 'boolean' as const, value: true, evidence: state.evidence }, topic],
+          [state, { questionId: 'topic', kind: 'boolean' as const, value: true, evidence: topic.evidence }],
+          [choice('state', 'unknown'), topic], [state, choice('topic', 'unknown')]]
+        for (const answers of malformed) {
+          expect(input.operation.decide({ providerId: 'fixture-decision',
+            model: { catalogId: 'fixture-decision', wireId: 'fixture-decision-v1' }, answers }, {}))
+            .toEqual({ kind: 'unavailable', reason: 'invalid_response' })
+        }
+        return run(input)
+      }
+      await classifyTopic({ provider: llm, model: 'mock', recentUserTurns: [], replyToText: null,
+        currentMessage: 'Fictional ambiguous request', knownTopicsThisSession: [], decisionRuntime })
+    })
+  })
+
   it('uses one LLM completion to generate a new topic label', async () => {
     let llmCalls = 0
     const base = mockProvider('{"topic_label":"launch planning","state":"shift","confidence":0.8}')

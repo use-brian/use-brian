@@ -217,3 +217,13 @@ per-event/final output authority and publication checks are unchanged.
 Overlap removes an avoidable serial classification window; a native no-split
 verdict additionally avoids an unnecessary LLM call. Neither change promises
 production latency percentiles or equates native wait with pure inference time.
+
+## Valid insufficient-signal topic decisions
+
+The topic question explicitly offers `__uncategorized__` for insufficient
+signal. With `continue` or `resume`, this is a valid terminal safe result:
+`(uncategorized) / continue / 0`, retaining native usage/model attribution. It
+must not be mislabeled as a provider `invalid_response`. Explicit low-confidence
+review policy still takes precedence; new topics, shifts and cross-topic
+payloads retain their generation path. Missing/wrong-kind answers and source
+authority refusals are unchanged.
