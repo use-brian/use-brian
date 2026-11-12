@@ -677,3 +677,26 @@ describe('[COMP:prompt/builder] buildSplitSystemPrompt — provenance split', ()
     expect(userPayload.trimEnd().endsWith('呢句咩意思')).toBe(true)
   })
 })
+
+describe('opaque topic identity presentation', () => {
+  const key = 'topic:v2:' + 'a'.repeat(64)
+  const other = 'topic:v2:' + 'b'.repeat(64)
+  it.each(['continue', 'shift', 'resume', 'cross-topic'] as const)('renders %s continuity without treating the key as a topic name', (state) => {
+    const out = buildFullSystemPrompt({ ...baseArgs, topicHint: { topic_label: key, state, confidence: 0.9, related_topics: [other] } })
+    expect(out).toContain('# Current topic')
+    expect(out).not.toContain(key)
+    expect(out).not.toContain(other)
+    if (state === 'resume' || state === 'cross-topic') expect(out).toContain('Relevant topic history')
+    if (state === 'cross-topic') expect(out).toContain('1 earlier topic references')
+  })
+  it('does not dump opaque related identities alongside a legacy active name', () => {
+    const out = buildFullSystemPrompt({ ...baseArgs, topicHint: { topic_label: 'Travel planning', state: 'cross-topic', confidence: 0.9, related_topics: [other, 'Old human label'] } })
+    expect(out).toContain('Active: "Travel planning"')
+    expect(out).toContain('2 earlier topics')
+    expect(out).not.toContain(other)
+  })
+  it('preserves legacy human-readable names and related labels', () => {
+    const out = buildFullSystemPrompt({ ...baseArgs, topicHint: { topic_label: 'Travel planning', state: 'cross-topic', confidence: 0.9, related_topics: ['Budget'] } })
+    expect(out).toContain('Active: "Travel planning" (also references: "Budget")')
+  })
+})

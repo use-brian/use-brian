@@ -125,6 +125,34 @@ async function classifiedTranscriptCurrent(execution:SessionContextAuthority['ex
   [execution.security.access.workspaceId,receipt.sessionId,receipt.through,receipt.messageId,receipt.annotationId??null])).rows[0]?.current===true
 }
 
+/** Group only already-admitted history; keys are exact storage identities, not names.
+ * Assistant context follows the preceding annotated user, never a global bucket.
+ */
+export function topicEvidenceFromHistory(history: ReadonlyArray<{role:string;content:unknown;topicLabel?:string|null}>) {
+ const groups=new Map<string,{topicLabel:string;messages:Array<{role:'user'|'assistant'|'system';text:string}>}>()
+ const recent:string[]=[]
+ let preceding:string|null=null
+ for(const row of history){
+  const toolContext=row.role==='user'&&Array.isArray(row.content)&&row.content.length>0&&row.content.every(block=>
+   typeof block==='object'&&block!==null&&'type' in block&&block.type==='tool_result')
+  if(row.role==='user'&&!toolContext)preceding=row.topicLabel?.trim()&&row.topicLabel!=='(uncategorized)'?row.topicLabel:null
+  const key=row.role==='assistant'||toolContext?preceding:row.topicLabel
+  if(!key?.trim()||key==='(uncategorized)'||!['user','assistant','system'].includes(row.role))continue
+  const text=typeof row.content==='string'?row.content:Array.isArray(row.content)?row.content.flatMap(block=>{
+   if(typeof block!=='object'||block===null||!('type' in block))return []
+   if(block.type==='text'&&'text' in block&&typeof block.text==='string')return [block.text]
+   if(block.type==='tool_result'&&'content' in block&&typeof block.content==='string')return [`Tool result: ${block.content}`]
+   if(block.type==='tool_use'&&'name' in block&&'input' in block)return [`Tool call ${String(block.name)}: ${JSON.stringify(block.input)}`]
+   return []
+  }).join(' '):''
+  let group=groups.get(key)
+  if(!group){group={topicLabel:key,messages:[]};groups.set(key,group)}
+  if(text)group.messages.push({role:row.role as 'user'|'assistant'|'system',text})
+  recent.push(key)
+ }
+ return {topicAnchors:[...groups.values()],knownTopicsThisSession:[...new Set(recent.reverse())].slice(0,20).reverse()}
+}
+
 /** The actual current authored row is selected and scoped before text is formatted. */
 export async function assessAttendedSessionMessage(input:{
  authority:SessionContextAuthority;session:Session;message:SessionMessage;
@@ -175,7 +203,7 @@ export async function assessAttendedSessionMessage(input:{
  const options=bindScopeSources<TopicClassifierOptions>({provider:input.provider,model:input.model,decisionRuntime:input.decisionRuntime,
   allowTrivialShortcut,currentMessage:text(current),recentUserTurns:history.filter(row=>row.sequenceNum<message.sequenceNum&&row.role==='user'&&(!ephemeral||row.topicLabel)).slice(-8)
    .map(row=>({text:text(row),topicLabel:row.topicLabel})).filter(turn=>turn.text.length>0),
-  knownTopicsThisSession:[...new Set(query.annotations.map(row=>row.topicLabel))].slice(-20),replyToText:reply?.text??null,
+  ...topicEvidenceFromHistory(history.filter(row=>row.sequenceNum<message.sequenceNum)),replyToText:reply?.text??null,
   authority,assertInputAuthority:check,workspaceId:authority.execution.security.access.workspaceId,
   runId:'memory-topic-'+message.id},boundScopeSources(query))
  const classification=await classifyTopic(options)

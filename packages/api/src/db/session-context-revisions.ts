@@ -7,7 +7,7 @@ import { createMemory } from './memories.js'
 import { randomUUID } from 'node:crypto'
 import type { PoolClient } from 'pg'
 import {
-  workspaceCredentialDelegation, ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope, intersectAccessCeilings, accessCeilingContains, pinAccessCeiling, RANK, scopeGrantContains,
+  isTopicIdentity, workspaceCredentialDelegation, ContextScopeAccumulator, DerivedScopeError, bindScopeSource, boundScopeSources, deriveWriteScope, intersectAccessCeilings, accessCeilingContains, pinAccessCeiling, RANK, scopeGrantContains,
   type DerivedWriteEvidence, type ScopeEvidence, type ExecutionContext, type ResourceScope, type ScopeSource, type SessionContextAuthority,
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, getPool, rollbackAndRelease, runWithAgentAccess } from './client.js'
@@ -583,6 +583,13 @@ export async function mutateSessionContextParents(authority: SessionContextAutho
   })
 }
 
+/** Presentation only: the episode retains its exact stored grouping identity. */
+export function sessionTopicGraduationPresentation(topicLabel: string): { summary: string; tags: string[] } {
+  return isTopicIdentity(topicLabel)
+    ? { summary: 'Recurring topic from session history', tags: ['episodic-graduation', 'recurring-topic'] }
+    : { summary: `Recurring topic: ${topicLabel}`, tags: ['episodic-graduation', topicLabel] }
+}
+
 /** Canonical episode promotion; only admitted immutable payloads reach the writer. */
 export async function promoteSessionContextEpisode(parentId: string, inputAuthority: SessionContextAuthority): Promise<{ memoryId: string; created: boolean }> {
   const authority = requireAuthority(inputAuthority), { execution } = authority
@@ -607,10 +614,10 @@ export async function promoteSessionContextEpisode(parentId: string, inputAuthor
     const memory = await createMemory({
       workspaceId: row.source.workspaceId, assistantId: execution.assistant.id,
       userId: row.source.userId, derivationTarget: { userId: row.source.userId, assistantId: row.source.assistantId },
-      summary: `Recurring topic: ${topicLabel}`, detail: summary,
+      ...sessionTopicGraduationPresentation(topicLabel), detail: summary,
       scope: row.source.userId ? 'private' : 'shared', sensitivity: row.source.sensitivity,
       compartments: row.source.compartments, projectIds: row.source.projectIds,
-      source: 'episodic-graduation', sourceSessionId: row.sessionId, tags: ['episodic-graduation',topicLabel],
+      source: 'episodic-graduation', sourceSessionId: row.sessionId,
       confidence: 0.7, createdByUserId: execution.security.access.userId, createdByAssistantId: execution.assistant.id,
       derivation,
     }, undefined, client)

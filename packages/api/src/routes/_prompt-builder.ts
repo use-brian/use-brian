@@ -47,7 +47,7 @@
  */
 
 import type { Message, TopicClassification } from '@use-brian/core'
-import { FOLLOW_UP_QUESTIONS_ADDENDUM } from '@use-brian/core'
+import { isTopicIdentity, FOLLOW_UP_QUESTIONS_ADDENDUM } from '@use-brian/core'
 import { renderCharterBlock, type AssistantCharter } from '@use-brian/shared'
 import type { ResolveAppSoul } from '../tool-injection-port.js'
 
@@ -665,6 +665,23 @@ function renderTopicHint(hint: TopicClassification | null | undefined): string |
   if (hint.topic_label === '(uncategorized)') return null
 
   const lines = [`# Current topic`]
+  if (isTopicIdentity(hint.topic_label)) {
+    switch (hint.state) {
+      case 'continue':
+        lines.push('The current message continues the active topic. Stay on this topic.')
+        break
+      case 'shift':
+        lines.push('The current message introduces a NEW topic. Earlier topics in this session are no longer active — do not re-address them unless the user re-raises them.')
+        break
+      case 'resume':
+        lines.push('The user is RESUMING an earlier topic. Use the "Relevant topic history" section above to pick up where you left off.')
+        break
+      case 'cross-topic':
+        lines.push(`The current message spans multiple topics${hint.related_topics?.length ? ` (${hint.related_topics.length} earlier topic references)` : ''}. Use the "Relevant topic history" above for the other topics it references.`)
+        break
+    }
+    return lines.join('\n')
+  }
   switch (hint.state) {
     case 'continue':
       lines.push(
@@ -683,7 +700,7 @@ function renderTopicHint(hint: TopicClassification | null | undefined): string |
       break
     case 'cross-topic': {
       const related = hint.related_topics?.length
-        ? ` (also references: ${hint.related_topics.map((t) => `"${t}"`).join(', ')})`
+        ? ` (also references: ${hint.related_topics.some(isTopicIdentity) ? `${hint.related_topics.length} earlier topics; see Relevant topic history` : hint.related_topics.map((t) => `"${t}"`).join(', ')})`
         : ''
       lines.push(
         `The current message spans multiple topics. Active: "${hint.topic_label}"${related}. Use the "Relevant topic history" above for the other topics it references.`,

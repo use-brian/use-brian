@@ -15,7 +15,7 @@ import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
 import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary,tryAssertNativePreparationCurrent,tryAssertNativePublicationPreparationCurrent} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage, assessAttendedSessionMessage, captureNativeClassifiedAssembly, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
+import { topicEvidenceFromHistory, captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage, assessAttendedSessionMessage, captureNativeClassifiedAssembly, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
@@ -40,7 +40,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, findSessionTurnLeaseState, countSessionHumans, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, type SessionMessage } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, findSessionTurnLeaseState, countSessionHumans, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
@@ -4279,7 +4279,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         })
         .filter((t) => t.text.length > 0)
 
-      const knownTopics = pageBoundTurn || nativeClassification ? [] : await getSessionTopicLabels(session.id, 20)
+      const topicEvidence = topicEvidenceFromHistory(preExistingDbMessages)
 
       let classification: TopicClassification | null = nativeClassification?.classification ?? null
       if (!nativeClassification && !pageBoundTurn) {
@@ -4294,10 +4294,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             recentUserTurns,
             replyToText: replyResolved?.text ?? null,
             currentMessage: userMessageText,
-            knownTopicsThisSession: knownTopics,
+            ...topicEvidence,
             decisionRuntime: options.decisionRuntime,
             workspaceId: assistant.workspaceId ?? undefined,
-            runId: `memory-topic-${session.id}-${Date.now()}`,
+            runId: `memory-topic-${earlyStoredUserMsg?.id ?? crypto.randomUUID()}`,
           })
         } catch (err) {
           console.error('[chat] topic classifier failed:', err)
