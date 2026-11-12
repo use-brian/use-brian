@@ -3,7 +3,8 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { createRequire } from "node:module";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
@@ -158,5 +159,88 @@ describe("[COMP:app-desktop/packaging] retired account page", () => {
     expect(existsSync(join(pkg, "dist/signin.html"))).toBe(false);
     expect(existsSync(join(desktop, "src/signin.html"))).toBe(false);
     expect(existsSync(join(pkg, "dist/preload.cjs"))).toBe(true);
+  });
+});
+
+
+vi.mock("../../scripts/sign-siri-extension.mjs", () => ({ default: vi.fn() }));
+
+const yaml = createRequire(import.meta.url)("js-yaml");
+const desktopRoot = fileURLToPath(new URL("../../", import.meta.url));
+const builder = yaml.load(readFileSync(join(desktopRoot, "electron-builder.yml"), "utf8"));
+const packagingHook = await import(new URL(`../../${builder.afterPack}`, import.meta.url).href);
+const siriSigner = await import(new URL("../../scripts/sign-siri-extension.mjs", import.meta.url).href);
+
+function updateConfigFixture(platform = "darwin") {
+  const root = mkdtempSync(join(tmpdir(), "desktop-update-config-"));
+  dirs.push(root);
+  const resources = join(root, platform === "darwin" ? "Use Brian.app/Contents/Resources" : "resources");
+  mkdirSync(resources, { recursive: true });
+  const configPath = join(resources, "app-update.yml");
+  const context = {
+    appOutDir: root, electronPlatformName: platform, targets: [],
+    packager: {
+      config: { publish: builder.publish }, platformSpecificBuildOptions: {},
+      appInfo: { updaterCacheDirName: "desktop-test-updater" },
+      getResourcesDir: () => resources,
+    },
+  };
+  return { context, configPath };
+}
+
+describe("[COMP:app-desktop/packaging] packaged updater configuration", () => {
+  it.each(["darwin", "win32"])("includes the release feed in a %s directory package before signing", async (platform) => {
+    const { context, configPath } = updateConfigFixture(platform);
+    siriSigner.default.mockImplementationOnce(() => {
+      expect(yaml.load(readFileSync(configPath, "utf8"))).toEqual({
+        provider: builder.publish.provider, owner: builder.publish.owner, repo: builder.publish.repo,
+        updaterCacheDirName: "desktop-test-updater",
+      });
+    });
+    await packagingHook.default(context);
+    expect(siriSigner.default).toHaveBeenCalledWith(context);
+    // Exercise the installed updater library's own config reader, rather than
+    // accepting a file that only our packaging code knows how to parse.
+    const { AppUpdater } = createRequire(import.meta.url)("electron-updater/out/AppUpdater");
+    const updater = new AppUpdater(null, { version: "1.0.0", appUpdateConfigPath: configPath });
+    expect(await updater.configOnDisk.value).toMatchObject(builder.publish);
+  });
+
+  it("preserves builder-generated signing metadata", async () => {
+    const { context, configPath } = updateConfigFixture("win32");
+    const generated = yaml.dump({ ...builder.publish, updaterCacheDirName: "desktop-test-updater", publisherName: ["Example Publisher"] });
+    writeFileSync(configPath, generated);
+    await packagingHook.default(context);
+    expect(readFileSync(configPath, "utf8")).toBe(generated);
+  });
+
+  it.each(["provider", "owner", "repo", "updaterCacheDirName"])("refuses a conflicting %s before signing", async (key) => {
+    const { context, configPath } = updateConfigFixture();
+    writeFileSync(configPath, yaml.dump({ ...builder.publish, updaterCacheDirName: "desktop-test-updater", [key]: "wrong" }));
+    siriSigner.default.mockClear();
+    await expect(packagingHook.default(context)).rejects.toThrow(`app-update.yml: ${key}`);
+    expect(siriSigner.default).not.toHaveBeenCalled();
+  });
+
+  it("refuses malformed existing metadata before signing", async () => {
+    const { context, configPath } = updateConfigFixture();
+    writeFileSync(configPath, "provider: [invalid");
+    siriSigner.default.mockClear();
+    await expect(packagingHook.default(context)).rejects.toThrow();
+    expect(siriSigner.default).not.toHaveBeenCalled();
+  });
+
+  it.each([null, {}, { provider: "github", owner: "", repo: "desktop" }, { provider: "generic", url: "https://example.com" }])("refuses missing or invalid release configuration: %j", async (publish) => {
+    const { context } = updateConfigFixture();
+    context.packager.config.publish = publish;
+    siriSigner.default.mockClear();
+    await expect(packagingHook.default(context)).rejects.toThrow("Desktop packaging requires");
+    expect(siriSigner.default).not.toHaveBeenCalled();
+  });
+
+  it("honors an explicit platform publish override", async () => {
+    const { context } = updateConfigFixture();
+    Object.assign(context.packager.platformSpecificBuildOptions, { publish: null });
+    await expect(packagingHook.default(context)).rejects.toThrow("Desktop packaging requires");
   });
 });

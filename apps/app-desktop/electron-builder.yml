@@ -4,7 +4,7 @@ productName: Use Brian
 # fixed "latest" URL (see apps/web/src/lib/desktop-download.ts and
 # docs/architecture/features/app-desktop.md → "Distribution & download").
 artifactName: usebrian.${ext}
-afterPack: scripts/sign-siri-extension.mjs
+afterPack: scripts/after-pack.mjs
 afterSign: scripts/verify-siri-extension.mjs
 directories:
   output: release
