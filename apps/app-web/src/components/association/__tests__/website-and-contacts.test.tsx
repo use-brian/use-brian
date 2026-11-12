@@ -2,9 +2,9 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
-const api=vi.hoisted(()=>({module:vi.fn(),list:vi.fn(),catalogue:vi.fn(),status:vi.fn(),settings:vi.fn(),definitions:vi.fn(),submissions:vi.fn(),records:vi.fn(),segments:vi.fn(),preview:vi.fn(),query:''}));
+const api=vi.hoisted(()=>({module:vi.fn(),list:vi.fn(),catalogue:vi.fn(),status:vi.fn(),settings:vi.fn(),definitions:vi.fn(),submissions:vi.fn(),submission:vi.fn(),records:vi.fn(),segments:vi.fn(),preview:vi.fn(),query:''}));
 vi.mock('@/lib/api/association',async original=>({...await original<typeof import('@/lib/api/association')>(),getAssociationModuleSnapshot:api.module,listAssociationPage:api.list,getMembershipCatalogueDraft:api.catalogue,getWebsiteStatus:api.status,getSiteContentDraft:api.settings}));
-vi.mock('@/lib/api/crm',async original=>({...await original<typeof import('@/lib/api/crm')>(),listCrmIntakeDefinitions:api.definitions,listCrmSubmissionPage:api.submissions,fetchCrmRecordPage:api.records,listCrmSegments:api.segments,previewCrmSegment:api.preview}));
+vi.mock('@/lib/api/crm',async original=>({...await original<typeof import('@/lib/api/crm')>(),listCrmIntakeDefinitions:api.definitions,listCrmSubmissionPage:api.submissions,getCrmSubmission:api.submission,fetchCrmRecordPage:api.records,listCrmSegments:api.segments,previewCrmSegment:api.preview}));
 vi.mock('@/lib/surface-prefetch',()=>({associationModuleCacheKey:(w:string)=>`association-module:${w}:viewer`,associationPageCacheKey:(w:string,r:string,q={})=>`crm:${w}:viewer:${r}:${JSON.stringify(q)}`}));
 vi.mock('next/navigation',()=>({useRouter:()=>({replace:vi.fn(),push:vi.fn()}),useSearchParams:()=>new URLSearchParams(api.query)}));
 import { AssociationPlansPanel } from '../plans-panel';
@@ -65,15 +65,25 @@ describe('[COMP:app-web/association] membership plans with a published membershi
 });
 
 describe('[COMP:app-web/association] Contacts & forms',()=>{
-  it('groups submissions by the form definitions the workspace has and opens each row in the CRM',async()=>{
+  it('groups submissions by form and links to the exact record inside Association',async()=>{
     api.query='view=forms';
     api.definitions.mockResolvedValue([{definitionKey:'general-enquiry',label:'General enquiry',active:true},{definitionKey:'old-form',label:'Retired form',active:false}]);
     api.submissions.mockResolvedValue({submissions:[{id:'sub-1',contactId:'c1',contactName:'Fictional Person',definitionLabel:'General enquiry',status:'new',submittedAt:'2027-01-01T00:00:00Z'}],nextCursor:'more'});
     await render(<AssociationContactsSection workspaceId="w"/>);
     expect(host.textContent).toContain('General enquiry');expect(host.textContent).not.toContain('Retired form');
-    expect(api.submissions).toHaveBeenCalledWith('w',expect.objectContaining({status:'new',cursor:null}));
-    expect(hrefs()).toContain('/w/w/crm?review=submissions&submission=sub-1');
+    expect(api.submissions).toHaveBeenCalledWith('w',expect.objectContaining({status:undefined,cursor:null}));
+    expect(hrefs()).toContain('/w/w/association?section=contacts&view=forms&submission=sub-1');
     expect([...host.querySelectorAll('button')].find(button=>button.textContent===en.associationPage.next)?.disabled).toBe(false);
+  });
+  it('opens the exact submission and preserves the selected form and status on return', async () => {
+    api.query='view=forms&form=general-enquiry&status=new&submission=sub-1';
+    api.submission.mockResolvedValue({id:'sub-1',contactId:'c1',contactName:'Fictional Person',definitionLabel:'General enquiry',status:'new',submittedAt:'2027-01-01T00:00:00Z',fields:{ask:'Sample answer'},definitionSchemaSnapshot:{fields:[{key:'ask',label:'Your question'}]}});
+    await render(<AssociationContactsSection workspaceId="w"/>);
+    expect(api.submission).toHaveBeenCalledWith('w','sub-1');
+    expect(host.textContent).toContain('Your question');
+    expect(host.textContent).toContain('Sample answer');
+    expect(hrefs()).toContain('/w/w/association?section=contacts&view=forms&form=general-enquiry&status=new');
+    expect(api.submissions).not.toHaveBeenCalled();
   });
   it('lists saved audiences with a live count and links to the CRM segment',async()=>{
     api.query='view=newsletter';

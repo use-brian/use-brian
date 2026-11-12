@@ -125,7 +125,7 @@ export function FormSection({ title, description, collapsible = false, defaultOp
 }
 
 export function FormFooter({ children }: { children: ReactNode }) {
-  return <div className="sticky bottom-0 -mx-4 mt-2 flex flex-wrap items-center gap-2 border-t border-border bg-background/95 px-4 py-3 backdrop-blur md:-mx-6 md:px-6" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>{children}</div>;
+  return <div className="md:sticky md:bottom-0 -mx-4 mt-2 flex flex-wrap items-center gap-2 border-t border-border bg-background/95 px-4 py-3 backdrop-blur md:-mx-6 md:px-6" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>{children}</div>;
 }
 
 export function TechnicalDetails({ rows, children }: { rows?: [string, string][]; children?: ReactNode }) {

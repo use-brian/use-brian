@@ -16,6 +16,13 @@ import { MemberEventHistory } from "./member-event-history";
 import { associationHref } from "./navigation";
 import { EmptyState, FormFooter, InlineNotice, PageHeader, ResponsiveTable, Segmented, StatusPill, associationDate } from "./ui";
 
+const membershipStatuses = {
+  pending: ["pending", "active", "cancelled"],
+  active: ["active", "expired", "cancelled"],
+  expired: ["expired"],
+  cancelled: ["cancelled"],
+} as const;
+
 export function AssociationMembershipForm({workspaceId,plan,contact,row,disabled,onSaved}:{workspaceId:string;plan?:AssociationPlan;contact?:CrmLookupRow;row?:AssociationMembership;disabled:boolean;onSaved:()=>void}) {
   const t=useT().associationPage.manage,u=useT().associationPage.ux,action=useAssociationAction(workspaceId);
   const intent=useAssociationIntent(workspaceId,"membership",`${plan?.id ?? row?.planId}:${contact?.id ?? row?.contactId}`);
@@ -24,7 +31,7 @@ export function AssociationMembershipForm({workspaceId,plan,contact,row,disabled
   const providerManaged=!!row?.provider;
   const unavailable=disabled||providerManaged||(!row&&(!plan||!contact||!!plan.provider||Number(plan.feeMinor)!==0));
   if(providerManaged)return <InlineNotice tone="neutral" title={t.adjust}>{u.providerManagedHint}</InlineNotice>;
-  return <form className="space-y-4" onSubmit={e=>{e.preventDefault();if(unavailable)return;void action.run(row?u.editMembership:u.addFree,async()=>{
+  return <form className="space-y-4" onSubmit={e=>{e.preventDefault();if(unavailable || (end && end <= start))return;void action.run(row?u.editMembership:u.addFree,async()=>{
     const changes={status,endsAt:associationInstant(end),renewalMode:renewal};
     if(row) await updateCrmEntitlement(workspaceId,row.id,changes);
     else await grantCrmEntitlement(workspaceId,{contactId:contact!.id,planId:plan!.id,idempotencyKey:intent.identity(),startsAt:associationInstant(start)!,...changes});
@@ -33,14 +40,15 @@ export function AssociationMembershipForm({workspaceId,plan,contact,row,disabled
     <p className="text-sm text-muted-foreground">{contact?.name ?? row?.contactName} · {plan?.name ?? row?.planName}</p>
     <fieldset disabled={unavailable||action.pending} className="grid gap-4 md:grid-cols-2">
       <Field label={t.start} type="datetime-local" value={start} onChange={setStart} required disabled={!!row} help={t.timeHint}/>
-      <Field label={t.end} type="datetime-local" value={end} onChange={setEnd} help={u.capacityHelp}/>
-      {row?<div className="space-y-1.5 text-sm"><p className="font-medium">{t.status}</p><Segmented label={t.status} value={status} onChange={setStatus} options={(["pending","active","expired","cancelled"] as const).map(value=>({value,label:t.options[value]}))}/></div>:null}
+      <Field label={t.end} type="datetime-local" value={end} onChange={setEnd} help={t.timeHint}/>
+      {row?<div className="space-y-1.5 text-sm"><p className="font-medium">{t.status}</p><Segmented label={t.status} value={status} onChange={setStatus} options={membershipStatuses[row.status].map(value=>({value,label:t.options[value]}))}/></div>:null}
       <div className="space-y-1.5 text-sm"><p className="font-medium">{t.renewal}</p><Segmented label={t.renewal} value={renewal} onChange={setRenewal} options={(["none","manual","auto"] as const).map(value=>({value,label:t.options[value]}))}/></div>
     </fieldset>
+    {end && end <= start && <InlineNotice tone="danger">{u.dateInvalid}</InlineNotice>}
     {!row&&plan&&Number(plan.feeMinor)!==0?<InlineNotice tone="warning">{u.paidPlanHint}</InlineNotice>:null}
     {row?<p className="text-xs text-muted-foreground">{t.renewalHelp}</p>:null}
     {action.feedback}{!row?<AssociationIntentNotice reference={intent.reference} onReset={intent.reset} disabled={action.pending}/>:null}
-    <FormFooter><Button type="submit" className="min-h-11 md:min-h-9" disabled={unavailable||action.pending}>{row?t.save:u.addFree}</Button></FormFooter>
+    <FormFooter><Button type="submit" className="min-h-11 md:min-h-9" disabled={unavailable||action.pending||!!(end && end <= start)}>{row?t.save:u.addFree}</Button></FormFooter>
   </form>;
 }
 
@@ -61,7 +69,7 @@ export function AssociationMembersPanel({workspaceId,initialNew=false,initialCon
       {contact&&!grant?<section className="space-y-2"><h3 className="text-sm font-semibold">{u.choosePlan}</h3>
         <AssociationListState {...plans}><div className="grid gap-3 md:grid-cols-2">{plans.data?.items.filter(plan=>!plan.provider).map(plan=>{const free=Number(plan.feeMinor)===0;return <div key={plan.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border p-4"><div><p className="font-medium">{plan.name}</p><p className="text-sm text-muted-foreground">{free?t.ux.free:associationMoney(plan.feeMinor,plan.currency)}</p></div>
           {free?<Button type="button" className="min-h-11 md:min-h-8" size="sm" variant="outline" disabled={!!plans.error} onClick={()=>setGrant(plan)}>{u.addFree}</Button>
-            :canManage?<Link href={associationHref(workspaceId,"payments",{new:"1"})} className={buttonVariants({size:"sm",variant:"outline",className:"min-h-11 md:min-h-8"})}>{u.recordOfflinePayment}</Link>:<span className="text-xs text-muted-foreground">{u.paidPlanHint}</span>}</div>;})}</div></AssociationListState></section>:null}
+            :canManage?<Link href={associationHref(workspaceId,"payments",{new:"1",contactId:contact.id,plan:plan.id})} className={buttonVariants({size:"sm",variant:"outline",className:"min-h-11 md:min-h-8"})}>{u.recordOfflinePayment}</Link>:<span className="text-xs text-muted-foreground">{u.paidPlanHint}</span>}</div>;})}</div></AssociationListState></section>:null}
       {contact&&grant?<section className="space-y-2"><h3 className="text-sm font-semibold">{u.addFree}</h3><AssociationMembershipForm key={`${grant.id}:${contact.id}`} workspaceId={workspaceId} plan={grant} contact={contact} disabled={!!plans.error} onSaved={done}/></section>:null}
     </div>
   </AssociationEditor>;

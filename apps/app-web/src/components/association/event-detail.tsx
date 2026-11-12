@@ -29,9 +29,33 @@ function downloadCsv(name:string,csv:string) {
   const anchor=document.createElement("a");anchor.href=url;anchor.download=name;anchor.click();setTimeout(()=>URL.revokeObjectURL(url),0);
 }
 
-function Guests({workspaceId,eventId,canManage}:{workspaceId:string;eventId:string;canManage:boolean}) {
+function GuestAnswers({ row, event }: { row: AssociationRegistration; event: AssociationEvent }) {
+  const t = useT().associationPage;
+  const metadata = row.attendeeMetadata;
+  const answers = metadata?.questionAnswers ?? metadata?.questionResponses ?? metadata?.question_responses ?? metadata?.questions;
+  const fields = answers && typeof answers === "object" && !Array.isArray(answers) ? Object.entries(answers) : [];
+  const form = event.metadata.questionnaire as { version?: unknown; questions?: Array<{ key: string; label: string }> } | undefined;
+  const labels = form?.version && form.version === metadata?.questionSchemaVersion && Array.isArray(form.questions)
+    ? new Map(form.questions.map(question => [question.key, question.label])) : null;
+  if (!fields.length) return null;
+  return <details className="min-w-0 rounded-md bg-muted/40 px-3">
+    <summary className="min-h-11 cursor-pointer content-center text-sm font-medium md:min-h-8">{t.staff.registrationAnswers}</summary>
+    <dl className="space-y-2 pb-3 text-sm">
+      {fields.map(([key, value]) => <div key={key}>
+        <dt className="break-words font-medium">{labels?.get(key) ?? key.replaceAll("_", " ")}</dt>
+        <dd className="whitespace-pre-wrap break-words">{typeof value === "string" ? value : JSON.stringify(value)}</dd>
+      </div>)}
+    </dl>
+  </details>;
+}
+
+function Guests({workspaceId,event,canManage}:{workspaceId:string;event:AssociationEvent;canManage:boolean}) {
+  const eventId = event.id;
   const t=useT().associationPage,u=t.ux,m=t.manage,rows=useAssociationPage(workspaceId,"registrations",{eventId}),action=useAssociationAction(workspaceId);
   const purposes=useCachedResource(associationPageCacheKey(workspaceId,"email-purposes"),()=>listCrmConsentPurposes(workspaceId));
+  const [search, setSearch] = useState("");
+  const query = search.trim().toLocaleLowerCase();
+  const guests = (rows.data?.items ?? []).filter(row => !query || [row.attendeeName, row.attendeeEmail].some(value => value?.toLocaleLowerCase().includes(query)));
   const [purpose,setPurpose]=useState(""),[chooser,setChooser]=useState(false),[busy,setBusy]=useState<"door"|"email"|null>(null),[downloadError,setDownloadError]=useState(false);
   const [undoing,setUndoing]=useState<string|null>(null),[reasons,setReasons]=useState<Record<string,string>>({});
   async function download(kind:"door"|"email") {
@@ -59,7 +83,7 @@ function Guests({workspaceId,eventId,canManage}:{workspaceId:string;eventId:stri
     <AssociationListState {...rows}>
       <ResponsiveTable rows={rows.data?.items ?? []} rowKey={row=>row.id} rowData={row=>({"data-guest-row":row.id})} empty={<EmptyState icon={Users} title={u.emptyGuests}/>}
         columns={[
-          {key:"name",label:m.attendeeName,cell:row=><span>{row.attendeeContactId?<Link className="inline-flex min-h-11 items-center font-medium text-primary md:min-h-0" href={associationHref(workspaceId,"memberships",{contactId:row.attendeeContactId})}>{row.attendeeName}</Link>:<span className="font-medium">{row.attendeeName}</span>}<span className="block break-all text-xs text-muted-foreground">{row.attendeeEmail}</span></span>},
+          {key:"name",label:m.attendeeName,cell:row=><div className="space-y-1">{row.attendeeContactId?<Link className="inline-flex min-h-11 items-center font-medium text-primary md:min-h-0" href={associationHref(workspaceId,"memberships",{contactId:row.attendeeContactId})}>{row.attendeeName}</Link>:<span className="font-medium">{row.attendeeName}</span>}<span className="block break-all text-xs text-muted-foreground">{row.attendeeEmail}</span>{canManage && <GuestAnswers row={row} event={event} />}</div>},
           {key:"status",label:m.status,cell:row=><StatusPill status={row.status}/>},
         ]}
         actions={row=><>
@@ -94,20 +118,38 @@ function Tickets({workspaceId,event,enabled,currencies,canManage=true,onDirtyCha
   </section>;
 }
 
-export function AssociationEventDetail({workspaceId,event,enabled,canManage,loadFailed,onBack,onChanged,initialView="event"}:{workspaceId:string;event:AssociationEvent;enabled:boolean;canManage:boolean;loadFailed:boolean;onBack:()=>void;onChanged:()=>void;initialView?:"event"|"guests"|"registration"}) {
+export type EventDetailTab = "event" | "tickets" | "guests" | "registration";
+
+export function AssociationEventDetail({workspaceId,event,enabled,canManage,loadFailed,onBack,onChanged,onViewChange,initialView="event"}:{workspaceId:string;event:AssociationEvent;enabled:boolean;canManage:boolean;loadFailed:boolean;onBack:()=>void;onChanged:()=>void;onViewChange?:(tab:EventDetailTab)=>void;initialView?:EventDetailTab}) {
   const t=useT().associationPage,u=t.ux,m=t.manage,e=t.eventPage,action=useAssociationAction(workspaceId);
-  const [tab,setTab]=useState<"event"|"guests"|"registration">(initialView);
+  const [requestedTab,setTab]=useState<EventDetailTab>(initialView);
+  const tab = !canManage && (requestedTab === "event" || requestedTab === "registration") ? "tickets" : requestedTab;
   const [dirty,setDirty]=useState(false),[detailsDirty,setDetailsDirty]=useState(false),[feesDirty,setFeesDirty]=useState(false);
   const [formDirty,setFormDirty]=useState(false);
-  const [showTickets,setShowTickets]=useState(false);
   useAssociationDraftGuard(dirty || detailsDirty || feesDirty || formDirty);
   const plans=useAssociationPage(workspaceId,"plans"),tickets=useAssociationPage(workspaceId,"tickets",{eventId:event.id});
   const kind = event.metadata.registrationKind;
   const hasTicket = tickets.data?.items.some(ticket => ticket.status !== "draft");
   const localForm = kind !== "external" && kind !== "none" && (event.status === "draft" || kind === "free" || kind === "paid" || hasTicket);
   const hasForm = !!event.metadata.questionnaire || (Array.isArray(event.metadata.attendeeFields) && event.metadata.attendeeFields.length > 0);
-  const needsTicket = event.status === "draft" && hasForm && kind !== "free" && !hasTicket;
-  const openTickets = () => void leave(() => { setShowTickets(true); setTab("event"); });
+  const usesLocalRegistration = kind !== "none" && kind !== "external" && (hasForm || kind === "free" || kind === "paid" || hasTicket);
+  const reservable = tickets.data?.items.some(ticket => ticket.status === "on_sale" &&
+    (!ticket.saleEndsAt || Date.parse(ticket.saleEndsAt) > Date.now()) &&
+    (!ticket.saleStartsAt || Date.parse(ticket.saleStartsAt) < Date.parse(event.registrationClosesAt ?? event.endsAt)) &&
+    (ticket.available === null || ticket.available > 0) && (kind !== "paid" || Number(ticket.priceMinor) > 0));
+  const needsTicket = event.status === "draft" && usesLocalRegistration &&
+    (Date.parse(event.endsAt) > Date.now() ? !reservable : !hasTicket);
+  const publicTickets = tickets.data?.items.filter(ticket => ticket.status !== "draft") ?? [];
+  const paid = kind === "paid" || (kind !== "free" && publicTickets.some(ticket => Number(ticket.priceMinor) > 0));
+  const incompatibleTickets = usesLocalRegistration && (paid
+    ? publicTickets.some(ticket => Number(ticket.priceMinor) === 0 && !ticket.eligibilityRequired)
+    : publicTickets.some(ticket => Number(ticket.priceMinor) > 0));
+  const publishableTickets = !!tickets.data && !tickets.error && !needsTicket && !incompatibleTickets;
+  const openTickets = () => selectTab("tickets");
+  function selectTab(next: EventDetailTab) {
+    if (next === tab) return;
+    void leave(() => { setTab(next); onViewChange?.(next); });
+  }
   const currencies=[...new Set((plans.data?.items ?? []).map(plan=>plan.currency))];
   async function leave(next:()=>void) {
     if((dirty||detailsDirty||feesDirty||formDirty)&&!await confirmDialog({title:u.cancelEdit,description:u.cancelHelp,confirmLabel:e.discard,cancelLabel:u.keepEditing}))return;
@@ -134,26 +176,26 @@ export function AssociationEventDetail({workspaceId,event,enabled,canManage,load
             {event.status!=="cancelled"&&event.status!=="completed"?<DropdownMenuItem className="min-h-11 sm:min-h-0" variant="destructive" onClick={()=>void changeStatus("cancelled")}>{u.cancelEvent}</DropdownMenuItem>:null}
             <DropdownMenuItem className="min-h-11 sm:min-h-0" render={<Link href={associationHref(workspaceId,"orders",{eventId:event.id})}/>}>{t.eventOrders}</DropdownMenuItem>
           </DropdownMenuContent></DropdownMenu>:<Link href={associationHref(workspaceId,"orders",{eventId:event.id})} className={buttonVariants({variant:"ghost",className:"max-sm:min-h-11"})}>{t.eventOrders}</Link>}</>}>
-      <Segmented label={u.goTo} value={tab} onChange={next=>void leave(()=>setTab(next))} options={[{value:"event" as const,label:canManage?e.editEvent:m.tickets},...(canManage ? [{value:"registration" as const,label:t.staff.registrationForm}] : []),{value:"guests" as const,label:u.guests}]}/>
+      <Segmented label={u.goTo} value={tab} onChange={selectTab} options={[...(canManage ? [{value:"event" as const,label:e.editEvent}] : []),{value:"tickets",label:m.tickets},...(canManage ? [{value:"registration" as const,label:t.staff.registrationForm}] : []),{value:"guests",label:u.guests}]}/>
     </PageHeader>
     {action.feedback}
     {needsTicket && <InlineNotice tone="warning" action={<Button type="button" variant="outline" className="min-h-11 md:min-h-9" onClick={openTickets}>{m.tickets}</Button>}>{t.staff.formNeedsTicket}</InlineNotice>}
+    {incompatibleTickets && <InlineNotice tone="warning" action={<Button type="button" variant="outline" className="min-h-11 md:min-h-9" onClick={openTickets}>{m.tickets}</Button>}>{t.staff.incompatibleTickets}</InlineNotice>}
     {detailsDirty||feesDirty?<InlineNotice tone="warning">{e.finishDetails}</InlineNotice>:null}
-    {tab==="event"&&canManage?<EventPageEditor workspaceId={workspaceId} event={event} tickets={tickets.data?.items} onDirtyChange={setDirty} disabled={loadFailed||action.pending||detailsDirty||feesDirty} canPublishEvent={enabled&&!needsTicket} onPublishEvent={()=>changeStatus("published")} details={<>
+    {tab==="event"&&canManage?<EventPageEditor workspaceId={workspaceId} event={event} tickets={tickets.data?.items} onDirtyChange={setDirty} disabled={loadFailed||action.pending||detailsDirty||feesDirty} canPublishEvent={enabled && publishableTickets} onPublishEvent={()=>changeStatus("published")} details={<>
       <details className="rounded-2xl border border-border bg-background" data-event-basics>
         <summary className="min-h-8 max-sm:min-h-11 cursor-pointer rounded-2xl p-4 font-semibold focus-visible:outline-2 focus-visible:outline-ring">{e.nameDetails}<span className="mt-1 block text-sm font-normal text-muted-foreground">{event.title} · {eventWhere(event,m.options)}</span></summary>
         <div className="space-y-3 border-t border-border p-4"><InlineNotice tone="neutral">{event.status==="draft"?e.detailsDraftHelp:e.detailsLiveHelp}</InlineNotice>
           <AssociationEventForm key={`${event.id}:${event.title}:${event.startsAt}:${event.endsAt}`} workspaceId={workspaceId} event={event} disabled={loadFailed} onDirtyChange={setDetailsDirty} onSaved={()=>{setDetailsDirty(false);onChanged();}}/></div>
       </details>
-      <details open={showTickets || undefined} onToggle={event=>setShowTickets(event.currentTarget.open)} className="rounded-2xl border border-border bg-background" data-event-fees>
-        <summary className="min-h-8 max-sm:min-h-11 cursor-pointer rounded-2xl p-4 font-semibold focus-visible:outline-2 focus-visible:outline-ring">{e.feesTitle}<span className="mt-1 block text-sm font-normal text-muted-foreground">{tickets.data?.items.length?tickets.data.items.map(ticket=>`${ticket.name}: ${associationMoney(ticket.priceMinor,ticket.currency)}`).join(" · "):u.emptyTickets}</span></summary>
-        <div className="space-y-3 border-t border-border p-4"><InlineNotice tone="neutral">{e.feesHelp}</InlineNotice><Tickets workspaceId={workspaceId} event={event} enabled={enabled&&!loadFailed} currencies={currencies} onDirtyChange={setFeesDirty}/></div>
-      </details>
     </>}/>:null}
-    {tab==="event"&&!canManage?<Tickets workspaceId={workspaceId} event={event} enabled={enabled} canManage={false} currencies={currencies}/>:null}
+    {tab === "tickets" && <div className="space-y-4" data-event-fees>
+      {canManage && <InlineNotice tone="neutral">{e.feesHelp}</InlineNotice>}
+      <Tickets workspaceId={workspaceId} event={event} enabled={enabled && !loadFailed} canManage={canManage} currencies={currencies} onDirtyChange={setFeesDirty}/>
+    </div>}
     {tab==="registration"&&canManage?(localForm
       ? <EventRegistrationForm key={event.id} workspaceId={workspaceId} event={event} disabled={loadFailed || !!tickets.error} onDirtyChange={setFormDirty} onSaved={onChanged}/>
       : <AssociationListState {...tickets}><InlineNotice tone="neutral" action={kind!=="external"&&kind!=="none"?<Button type="button" variant="outline" className="min-h-11 md:min-h-9" onClick={openTickets}>{m.tickets}</Button>:undefined}>{kind==="external"||kind==="none"?t.staff.externalForm:t.staff.addTicketFirst}</InlineNotice></AssociationListState>):null}
-    {tab==="guests"?<Guests workspaceId={workspaceId} eventId={event.id} canManage={canManage}/>:null}
+    {tab==="guests"?<Guests workspaceId={workspaceId} event={event} canManage={canManage}/>:null}
   </section>;
 }

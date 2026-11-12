@@ -2,11 +2,11 @@
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const api = vi.hoisted(() => ({ module: vi.fn(), list: vi.fn(), read: vi.fn(), media: vi.fn(), save: vi.fn(), publish: vi.fn(), event: vi.fn(), confirm: vi.fn(), upload: vi.fn() }));
+const api = vi.hoisted(() => ({ module: vi.fn(), list: vi.fn(), read: vi.fn(), media: vi.fn(), save: vi.fn(), publish: vi.fn(), event: vi.fn(), confirm: vi.fn(), upload: vi.fn(), push: vi.fn(), replace: vi.fn() }));
 vi.mock("@/lib/api/association", async original => ({ ...await original<typeof import("@/lib/api/association")>(), getAssociationModuleSnapshot: api.module, listAssociationPage: api.list, getSiteContentDraft: api.read, listWebsiteMedia: api.media, saveSiteContentDraft: api.save, publishSiteContent: api.publish, saveAssociationEvent: api.event, uploadWebsiteMedia: api.upload }));
 vi.mock("@/lib/surface-prefetch", () => ({ associationModuleCacheKey: (w: string) => `association-module:${w}:viewer`, associationPageCacheKey: (w: string, r: string, q = {}) => `crm:${w}:viewer:${r}:${JSON.stringify(q)}`, associationIntentKey: () => "fixture" }));
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: api.confirm }));
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }), useSearchParams: () => new URLSearchParams() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: api.push, replace: api.replace }), useSearchParams: () => new URLSearchParams() }));
 import { AssociationEventsPanel } from "../events-panel";
 import { EventRegistrationForm } from "../events/registration-form";
 import { EventPageEditor } from "../events/event-page-editor";
@@ -72,11 +72,38 @@ describe("[COMP:app-web/association] Event website workspace", () => {
   });
   it("creates a hidden event and opens its workspace directly", async () => {
     await render(<AssociationEventsPanel workspaceId="w" initialNew />);
-    await type(u.title, "New community workshop"); await type(m.start, "2027-01-05T12:00");
+    await type(u.title, event.title); await type(m.start, "2027-01-05T12:00");
     await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    expect(api.event).toHaveBeenCalledWith("w", expect.objectContaining({ status: "draft", title: "New community workshop" }));
+    expect(api.event).toHaveBeenCalledWith("w", expect.objectContaining({ status: "draft", title: event.title, slug: expect.stringMatching(/^community-workshop-[0-9a-f]{16}$/) }));
     expect(host.querySelector("[data-event-detail]")).toBeTruthy();
-    expect(host.textContent).toContain(e.nameDetails); expect(host.textContent).toContain(e.feesTitle);
+    expect(host.textContent).toContain(e.nameDetails);
+    expect(api.replace).toHaveBeenCalledWith(`/w/w/association?section=events&filter=drafts&eventId=${event.id}`);
+    await click(m.tickets);
+    expect(host.querySelector("[data-event-tickets]")).toBeTruthy();
+    expect(api.push).toHaveBeenCalledWith(`/w/w/association?section=events&eventId=${event.id}&view=tickets`);
+  });
+  it("preserves the latest registration metadata when staff save event basics", async () => {
+    await render(<AssociationEventsPanel workspaceId="w" initialEventId={event.id} />);
+    const latest = { ...event, metadata: { registrationKind: "free", attendeeFields: ["phone"] } };
+    api.list.mockResolvedValue({ items: [latest], nextCursor: null });
+    api.event.mockImplementation(async (_workspace, body) => ({ record: { id: event.id, ...body } }));
+    await type(m.venue, "Different venue");
+    const form = host.querySelector("[data-event-basics] form")!;
+    await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(api.event).toHaveBeenCalledWith("w", expect.objectContaining({ venue: "Different venue", status: "published", metadata: latest.metadata }));
+  });
+  it("requires confirmation before including other event pages in publication", async () => {
+    const load = api.read.getMockImplementation()!;
+    api.read.mockImplementation(async (workspace, collection) => {
+      const result = await load(workspace, collection);
+      return collection !== "event-pages" ? result : { ...result, document: { schemaVersion: 1, pages: [savedPage, { event: "other-event", sections: [] }] } };
+    });
+    api.confirm.mockResolvedValue(false);
+    await render(<EventPageEditor workspaceId="w" event={event} />);
+    await click(e.publishPage);
+    expect(api.confirm).toHaveBeenCalledOnce();
+    expect(api.publish).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("other event");
   });
   it("keeps create and page-draft controls out of a member's view", async () => {
     api.module.mockResolvedValue({ canManage: false, module: { state: "enabled" } });
@@ -148,6 +175,17 @@ describe("[COMP:app-web/association] Event website workspace", () => {
     await render(null); resetSurfaceCache(); api.read.mockResolvedValue({ version: 2, document: { pages: [savedPage] }, published: { pages: [publishedPage] }, readers: [], issues: ["Missing media"], issueDetails: [] });
     await render(<EventPageEditor workspaceId="w" event={event} />);
     expect([...host.querySelectorAll("button")].find(b => b.textContent === e.publishPage)?.disabled).toBe(true);
+  });
+  it("opens the website that has read the published event pages first", async () => {
+    const load = api.read.getMockImplementation()!;
+    api.read.mockImplementation(async (workspace, collection) => {
+      if (collection === "settings") return { published: { sites: {
+        brand: { websiteUrl: "https://brand.example" }, events: { websiteUrl: "https://events.example" },
+      } } };
+      return { ...await load(workspace, collection), readers: ["brand", "events"], observations: { events: { revision: 1 } } };
+    });
+    await render(<EventPageEditor workspaceId="w" event={event} />);
+    expect(host.querySelector("iframe")?.src).toBe("https://events.example/preview/event/");
   });
   it("accepts ready messages only from the preview frame and compares draft with published content", async () => {
     vi.useFakeTimers(); await render(<EventPageEditor workspaceId="w" event={event} />);

@@ -1,7 +1,7 @@
 "use client";
 
 /** Edit the canonical website registration metadata, with a non-submitting visitor preview. [COMP:app-web/association] */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Eye, Plus } from "lucide-react";
 import { z } from "zod";
 import { useT } from "@/lib/i18n/client";
@@ -35,15 +35,17 @@ function readForm(metadata: Record<string, unknown>) {
   return { fields, questions, invalid: metadata.questionnaire != null && !questionnaire.success };
 }
 
-function normalizedQuestions(questions: QuestionDraft[]) {
-  const result = questions.map(({ optionLines, ...question }) => ({
+function normalizedQuestion({ optionLines, ...question }: QuestionDraft) {
+  return {
     ...question,
     label: question.label.trim(),
     ...(question.type === "select" ? { options: optionLines.split("\n").map(value => value.trim()).filter(Boolean) } : {}),
-  }));
-  if (result.some(question => !questionSchema.safeParse(question).success ||
-    (question.options && new Set(question.options).size !== question.options.length))) return null;
-  return result;
+  };
+}
+
+function validQuestion(question: ReturnType<typeof normalizedQuestion>) {
+  return questionSchema.safeParse(question).success &&
+    (!question.options || new Set(question.options).size === question.options.length);
 }
 
 export function EventRegistrationForm({ workspaceId, event, disabled, onDirtyChange, onSaved }: {
@@ -54,6 +56,14 @@ export function EventRegistrationForm({ workspaceId, event, disabled, onDirtyCha
   const [draft, setDraft] = useState(baseline);
   const [preview, setPreview] = useState(false);
   const [error, setError] = useState("");
+  const [focusQuestion, setFocusQuestion] = useState("");
+  const editor = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (focusQuestion && !preview) {
+      editor.current?.querySelector<HTMLInputElement>(`[data-question="${focusQuestion}"] input`)?.focus();
+      setFocusQuestion("");
+    }
+  }, [focusQuestion, preview]);
   const action = useAssociationAction(workspaceId);
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
@@ -66,8 +76,14 @@ export function EventRegistrationForm({ workspaceId, event, disabled, onDirtyCha
 
   async function save() {
     if (disabled || !dirty || action.pending) return;
-    const questions = normalizedQuestions(draft.questions);
-    if (!questions) { setError(s.invalidQuestions); return; }
+    const questions = draft.questions.map(normalizedQuestion);
+    const firstInvalid = questions.find(question => !validQuestion(question));
+    if (firstInvalid) {
+      setError(s.invalidQuestions);
+      setPreview(false);
+      setFocusQuestion(firstInvalid.key);
+      return;
+    }
     setError("");
     await action.run(s.saveForm, async () => {
       const page = await listAssociationPage(workspaceId, "events", { id: event.id });
@@ -94,7 +110,7 @@ export function EventRegistrationForm({ workspaceId, event, disabled, onDirtyCha
   }
 
   if (baseline.invalid) return <InlineNotice tone="warning">{s.formChanged}</InlineNotice>;
-  return <section className="space-y-4" data-event-registration-editor>
+  return <section ref={editor} className="space-y-4" data-event-registration-editor>
     <header className="flex flex-wrap items-start justify-between gap-3">
       <div><h2 className="text-xl font-semibold">{s.registrationForm}</h2><p className="mt-1 text-sm text-muted-foreground">{s.registrationHelp}</p></div>
       <Button type="button" variant="outline" className="min-h-11 md:min-h-9" aria-pressed={preview} onClick={() => setPreview(value => !value)}>
@@ -114,12 +130,13 @@ export function EventRegistrationForm({ workspaceId, event, disabled, onDirtyCha
           values={field === "phone" ? ["hidden", "required"] : ["hidden", "optional", "required"]}
           labels={displayLabels} onChange={value => setDraft(current => ({ ...current, fields: { ...current.fields, [field]: value } }))} />)}
       </div>
-      {draft.questions.map((question, index) => <div key={question.key} className="grid min-w-0 gap-4 rounded-xl border border-border bg-background p-5 sm:grid-cols-2">
-        <AssociationField label={s.question} value={question.label} onChange={label => editQuestion(question.key, { label })} maxLength={500} />
+      {draft.questions.map((question, index) => <div key={question.key} data-question={question.key} className="grid min-w-0 gap-4 rounded-xl border border-border bg-background p-5 sm:grid-cols-2">
+        <AssociationField label={s.question} value={question.label} onChange={label => editQuestion(question.key, { label })} maxLength={500} aria-invalid={error === s.invalidQuestions && !question.label.trim()} />
         <AssociationChoice label={s.answerType} value={question.type} values={types} labels={questionLabels}
           onChange={value => editQuestion(question.key, { type: value as Question["type"] })} />
         {question.type === "select" && <AssociationField label={s.choices} multiline value={question.optionLines} onChange={optionLines => editQuestion(question.key, { optionLines })} />}
         <SwitchField label={s.required} checked={question.required} onChange={required => editQuestion(question.key, { required })} />
+        {error === s.invalidQuestions && !validQuestion(normalizedQuestion(question)) && <p className="text-sm text-destructive sm:col-span-2">{s.invalidQuestions}</p>}
         <div className="flex flex-wrap gap-2 sm:col-span-2">
           <Button type="button" variant="outline" className="min-h-11 md:min-h-9" disabled={index === 0} onClick={() => setDraft(current => {
             const questions = [...current.questions]; [questions[index - 1], questions[index]] = [questions[index]!, questions[index - 1]!];

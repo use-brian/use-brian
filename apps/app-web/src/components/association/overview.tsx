@@ -24,6 +24,12 @@ export function AssociationOverview({ workspaceId }: { workspaceId: string }) {
         <Plus aria-hidden className="size-4" />{t.manage.newEvent}
       </Link>
     ) : undefined} />
+    <div className="flex flex-wrap gap-2">
+      {canManage && <Link href={associationHref(workspaceId, "events", { filter: "drafts" })}
+        className={buttonVariants({ variant: "outline", className: "min-h-11 md:min-h-9" })}>{t.staff.draftEvents}</Link>}
+      <Link href={associationHref(workspaceId, "contacts", { status: "new" })}
+        className={buttonVariants({ variant: "outline", className: "min-h-11 md:min-h-9" })}>{t.staff.newSubmissions}</Link>
+    </div>
     <div className="grid gap-4 sm:grid-cols-2">
       {destinations.map(({ section, icon: Icon, title, description }) => (
         <Link key={section} href={associationHref(workspaceId, section)}

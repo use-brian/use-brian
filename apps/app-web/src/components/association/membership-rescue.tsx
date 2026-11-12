@@ -14,7 +14,7 @@ import { AssociationField as Field, AssociationIntentNotice, associationInstant,
 import { associationMoney } from "./workspace-ui";
 import { ChoiceCards, FormFooter, InlineNotice } from "./ui";
 
-export function AssociationMembershipRescueForm({workspaceId,plan,contact,disabled,onSaved}:{workspaceId:string;plan:AssociationPlan;contact:CrmLookupRow;disabled:boolean;onSaved:()=>void}) {
+export function AssociationMembershipRescueForm({workspaceId,plan,contact,disabled,onSaved}:{workspaceId:string;plan:Pick<AssociationPlan,"id"|"name"|"currency"|"feeMinor"|"provider"|"providerPlanId">;contact:CrmLookupRow;disabled:boolean;onSaved:()=>void}) {
   const t=useT().associationPage.manage,u=useT().associationPage.ux,action=useAssociationAction(workspaceId);
   const intent=useAssociationIntent(workspaceId,"membership-offline-rescue",`${plan.id}:${contact.id}`);
   const [start,setStart]=useState(""),[end,setEnd]=useState(""),[due,setDue]=useState(""),[reason,setReason]=useState("");

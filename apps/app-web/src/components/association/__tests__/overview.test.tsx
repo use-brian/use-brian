@@ -22,14 +22,14 @@ const destinations=()=>[...host.querySelectorAll("a")].map(link=>link.getAttribu
 describe("[COMP:app-web/association] Staff landing page",()=>{
   it("opens the four staff destinations without fetching technical operational queues",async()=>{
     await render();
-    expect(destinations()).toEqual(["events&new=1","events","plans","memberships","contacts"].map(section=>`/w/w/association?section=${section}`));
+    expect(destinations()).toEqual(["events&new=1","events&filter=drafts","contacts&status=new","events","plans","memberships","contacts"].map(section=>`/w/w/association?section=${section}`));
     expect(api.orders).not.toHaveBeenCalled();
     expect(api.list).not.toHaveBeenCalled();
   });
   it("keeps the read-only destinations available without the new event shortcut",async()=>{
     api.module.mockResolvedValue({module:{workspaceId:"w",state:"enabled",version:1},canManage:false});
     await render();
-    expect(destinations()).toHaveLength(4);
+    expect(destinations()).toHaveLength(5);
     expect(host.textContent).toContain(u.members);
     expect(host.textContent).not.toContain(en.associationPage.manage.newEvent);
   });

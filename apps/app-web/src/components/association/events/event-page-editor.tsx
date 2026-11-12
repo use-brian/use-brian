@@ -221,12 +221,20 @@ export function EventPageEditor({ workspaceId, event, tickets = [], details, onD
   const dirty = editing !== null && !same(editing, saved ?? { event: event.slug, sections: [] });
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
   const unpublished = !dirty && !same(saved ?? null, live ?? null);
-  const othersUnpublished = doc.pages.filter(item => item.event !== event.slug
-    && !same(item, (pages.data?.published as EventPagesDocument | null)?.pages.find(other => other.event === item.event) ?? null)).length;
+  const publishedPages = (pages.data?.published as EventPagesDocument | null)?.pages ?? [];
+  const otherChangedSlugs = [...new Set([...doc.pages, ...publishedPages].map(item => item.event))]
+    .filter(slug => slug !== event.slug
+      && !same(doc.pages.find(item => item.event === slug) ?? null, publishedPages.find(item => item.event === slug) ?? null));
+  const othersUnpublished = otherChangedSlugs.length;
   const sites = Object.entries((settings.data?.published as { sites?: Record<string, { websiteUrl?: string } | undefined> } | null)?.sites ?? {})
     .flatMap(([site, value]) => value?.websiteUrl ? [{ site, url: value.websiteUrl }] : []);
   const previewable = sites.filter(item => !pages.data?.readers.length || pages.data.readers.some(site => site === item.site));
-  const preview = previewable.find(item => item.site === previewSite) ?? previewable[0];
+  const observations = new Map(Object.entries(pages.data?.observations ?? {}));
+  const publishedRevision = pages.data?.publishedRevision;
+  const preview = previewable.find(item => item.site === previewSite)
+    ?? previewable.find(item => publishedRevision !== undefined && observations.get(item.site)?.revision === publishedRevision)
+    ?? previewable.find(item => observations.has(item.site))
+    ?? previewable[0];
   const set = (next: EventPageContent) => { setEditing(next); setPublished(false); };
   const setSections = (sections: EventSection[]) => set({ ...page, sections });
   const ctx: Ctx = { locale, workspaceId, media: media.data ?? [], onUploaded: () => void media.refresh() };
@@ -248,7 +256,9 @@ export function EventPageEditor({ workspaceId, event, tickets = [], details, onD
   }
   async function publish() {
     if (!pages.data || dirty || pages.error || disabled || (event.status === "draft" && (!canPublishEvent || !onPublishEvent)) || pages.data.issueDetails?.length || pages.data.issues.length) return;
-    if (unpublished && !await action.run(c.publish, () => publishSiteContent(workspaceId, "event-pages", pages.data!.version), false)) return;
+    const versionToPublish = pages.data.version;
+    const review = othersUnpublished ? { description: format(e.othersPublishToo, { count: othersUnpublished }) } : false;
+    if (unpublished && !await action.run(c.publish, () => publishSiteContent(workspaceId, "event-pages", versionToPublish), review)) return;
     // Expose a new event only after its saved page has been published. A failed second write stays hidden.
     if (event.status === "draft" && onPublishEvent && !await onPublishEvent()) { await pages.refresh(); return; }
     setPublished(true); await pages.refresh();
@@ -282,7 +292,10 @@ export function EventPageEditor({ workspaceId, event, tickets = [], details, onD
       {event.status === "draft" ? <InlineNotice tone="neutral">{e.draftVisibility}</InlineNotice> : null}
       {action.feedback}
       {published ? <InlineNotice tone="success">{c.publishDone}</InlineNotice> : null}
-      {unpublished && othersUnpublished ? <InlineNotice tone="neutral">{format(e.othersPublishToo, { count: othersUnpublished })}</InlineNotice> : null}
+      {unpublished && othersUnpublished ? <InlineNotice tone="warning">
+        <p>{format(e.othersPublishToo, { count: othersUnpublished })}</p>
+        <ul className="mt-1 list-inside list-disc break-words">{otherChangedSlugs.map(slug => <li key={slug}>{slug.replaceAll("-", " ")}</li>)}</ul>
+      </InlineNotice> : null}
       {(pages.data?.issueDetails ?? []).length ? <InlineNotice tone="danger" title={c.issuesTitle}><ul className="list-inside list-disc">{pages.data!.issueDetails!.map((issue, i) => <li key={i}>{issue.message}</li>)}</ul></InlineNotice> : null}
 
       <div className="space-y-1 border-b border-border pb-4">

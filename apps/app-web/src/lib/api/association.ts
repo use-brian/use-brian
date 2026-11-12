@@ -80,7 +80,7 @@ export function changeAssociationOrder(workspaceId: string, orderId: string, act
 
 // Portable wire types; no server/core runtime enters the browser bundle.
 export type AssociationPlan = { id:string;planKey:string;name:string;currency:string;feeMinor:string;billingPeriod:"one_time"|"monthly"|"annual"|"lifetime"|"manual";benefits:string[];eligibilityNote:string|null;published:boolean;activeFrom:string|null;activeTo:string|null;provider:string|null;providerPlanId:string|null };
-export type AssociationEvent = {id:string;slug:string;title:string;description:string;startsAt:string;endsAt:string;timezone:string;mode:"venue"|"online"|"hybrid";venue:string|null;onlineUrl:string|null;registrationOpensAt:string|null;registrationClosesAt:string|null;capacity:number|null;status:"draft"|"published"|"cancelled"|"completed";canonicalUrl:string|null;programmeKey:string|null;metadata:Record<string,unknown>};
+export type AssociationEvent = {id:string;slug:string;title:string;description:string;startsAt:string;endsAt:string;timezone:string;mode:"venue"|"online"|"hybrid";venue:string|null;onlineUrl:string|null;registrationOpensAt:string|null;registrationClosesAt:string|null;capacity:number|null;status:"draft"|"published"|"cancelled"|"completed";canonicalUrl:string|null;programmeKey:string|null;metadata:Record<string,unknown>;commerceManaged?:boolean};
 export type AssociationTicket = {id:string;key:string;name:string;currency:string;priceMinor:string;memberPriceMinor:string|null;eligiblePlanKeys:string[];eligibilityRequired:boolean;eligibilityScope:"buyer"|"attendees"|"buyer_and_attendees";capacity:number|null;perOrderLimit:number;saleStartsAt:string|null;saleEndsAt:string|null;status:"draft"|"on_sale"|"sold_out"|"closed";reservedCount:number;available:number|null};
 export type AssociationPromotion = {id:string;key:string;name:string;discountType:"percentage"|"fixed_amount"|"full"|"buy_x_get_y";
   percentageBasisPoints:number|null;amountMinor:string|null;currency:string|null;buyQuantity:number|null;getQuantity:number|null;targetKind:"event"|"ticket"|"plan";targetIds:string[];
@@ -88,7 +88,7 @@ export type AssociationPromotion = {id:string;key:string;name:string;discountTyp
   validFrom:string|null;validTo:string|null;maxUses:number|null;maxUsesPerContact:number|null;combinesWithMemberPrice:boolean;
   releaseOnFullRefund:boolean;status:"draft"|"active"|"disabled";hasCode:boolean;reservedUses:number|null;redeemedUses:number|null;
   createdAt:string;updatedAt:string};
-export type AssociationRegistration = {id:string;eventId:string;ticketId:string|null;orderId:string|null;attendeeContactId:string|null;eligibleMembershipId:string|null;attendeeName:string;attendeeEmail:string|null;status:"reserved"|"confirmed"|"checked_in"|"cancelled"|"refunded"|"registered"|"attended"|"no_show";sourceKind:string;checkedInAt:string|null};
+export type AssociationRegistration = {id:string;eventId:string;ticketId:string|null;orderId:string|null;attendeeContactId:string|null;eligibleMembershipId:string|null;attendeeName:string;attendeeEmail:string|null;attendeeMetadata?:Record<string,unknown>;status:"reserved"|"confirmed"|"checked_in"|"cancelled"|"refunded"|"registered"|"attended"|"no_show";sourceKind:string;checkedInAt:string|null};
 export type AssociationOperationalRosterRow = {id:string;eventId:string;orderId:string|null;orderLineId:string|null;ticketId:string|null;ticketKey:string|null;ticketName:string|null;buyerContactId:string|null;attendeeContactId:string|null;attendeeName:string;attendeeEmail:string|null;phone:string|null;organisation:string|null;jobTitle:string|null;status:AssociationRegistration["status"];checkedInAt:string|null;sourceKind:string;sourceId:string|null;historicalImport:boolean;marketingConsent:boolean|null;ticketingConsent:boolean|null;policyVersion:string|null;policyAcceptedAt:string|null;questionResponses:unknown;createdAt:string;updatedAt:string};
 export type AssociationWaitlistRow = {id:string;contactId:string;contactName:string;eventId:string;ticketId:string;waitlistState:"waiting"|"offered"|"converted"|"closed";promotionId:string|null;orderId:string|null;reservationExpiresAt:string|null};
 export type AssociationProviderReceipt = {id:string;provider:string;eventId:string;state:"pending"|"processing"|"applied"|"retry"|"needs_reconciliation";errorCode:string|null;attempts:number;nextAttemptAt:string|null;appliedAt:string|null;orderId:string|null;entitlementId:string|null};
@@ -153,7 +153,7 @@ export function issueAssociationSponsorshipInvitation(workspaceId:string,input:{
 export function revokeAssociationSponsorshipInvitation(workspaceId:string,id:string,input:{requestId:string;reason:string}){
   return request<{invitation:AssociationSponsorshipInvitation;created:boolean}>(`/api/crm/${encodeURIComponent(workspaceId)}/association/sponsorship-invitations/${encodeURIComponent(id)}/revoke`,input);
 }
-export function saveAssociationEvent(workspaceId:string,input:Omit<AssociationEvent,"id">) {
+export function saveAssociationEvent(workspaceId:string,input:Omit<AssociationEvent,"id"|"commerceManaged">) {
   return request<{record:AssociationEvent}>(`/api/crm/${encodeURIComponent(workspaceId)}/operations/events`,input);
 }
 export function saveAssociationTicket(workspaceId:string,eventId:string,input:Omit<AssociationTicket,"id"|"priceMinor"|"memberPriceMinor"|"reservedCount"|"available"> & {priceMinor:number;memberPriceMinor:number|null}) {
@@ -257,8 +257,8 @@ export type MembershipCatalogueDraft = { version:number;document:MembershipCatal
 export async function getMembershipCatalogueDraft(workspaceId:string):Promise<MembershipCatalogueDraft> {
   return (await request<{catalogue:MembershipCatalogueDraft}>(`/api/crm/${encodeURIComponent(workspaceId)}/association/membership-catalogue/draft`)).catalogue;
 }
-export function saveMembershipCatalogueDraft(workspaceId:string,expectedVersion:number,document:MembershipCatalogueDocument) {
-  return request(`/api/crm/${encodeURIComponent(workspaceId)}/association/membership-catalogue/draft`,{expectedVersion,document});
+export async function saveMembershipCatalogueDraft(workspaceId:string,expectedVersion:number,document:MembershipCatalogueDocument) {
+  return (await request<{ catalogue: { version: number; issues: string[] } }>(`/api/crm/${encodeURIComponent(workspaceId)}/association/membership-catalogue/draft`, { expectedVersion, document })).catalogue;
 }
 export function publishMembershipCatalogue(workspaceId:string,expectedVersion:number) {
   return request(`/api/crm/${encodeURIComponent(workspaceId)}/association/membership-catalogue/publish`,{expectedVersion});

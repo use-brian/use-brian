@@ -40,7 +40,10 @@ export function AssociationSurface({ workspaceId }: { workspaceId: string }) {
   const href = (id: AssociationSection) => associationHref(workspaceId, id);
   const eventId = search?.get("eventId") ?? "", eventSlug = search?.get("eventSlug") ?? "", wantsNew = search?.get("new") === "1";
   const contactId = search?.get("contactId") ?? "", plan = search?.get("plan") ?? "";
-  const eventView = search?.get("view") === "guests" ? "guests" : search?.get("view") === "registration" ? "registration" : "event";
+  const view = search?.get("view");
+  const eventView = view === "guests" || view === "registration" || view === "tickets" ? view : "event";
+  const filter = search?.get("filter");
+  const eventFilter = filter === "drafts" || filter === "all" ? filter : "website";
   const publicPlans = section === "plans" && (search?.get("view") === "website" || search?.get("page") === "membership");
   const restricted = Boolean(current.requires || publicPlans);
   const locked = restricted && access.resolved && !access.canManage;
@@ -64,7 +67,7 @@ export function AssociationSurface({ workspaceId }: { workspaceId: string }) {
           className={cn("mb-1 flex min-h-11 md:min-h-9 items-center gap-3 rounded-lg px-3 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-ring", section === id ? "bg-accent font-semibold text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground")}>
           <Icon aria-hidden className="size-4 shrink-0" />{labels[id]}</Link>)}
       </nav>
-      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-muted/10 px-4 py-5 md:px-8 md:py-7">
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-muted/10 px-4 pt-5 pb-24 md:px-8 md:py-7">
         <div className="mx-auto max-w-6xl space-y-6">
           {locked ? <AdminOnlyPage workspaceId={workspaceId} title={labels[section]} /> : waiting ? <div className="h-24 animate-pulse rounded-2xl bg-muted/40" aria-busy /> : <>
             {section === "overview" && <AssociationOverview workspaceId={workspaceId} />}
@@ -75,11 +78,11 @@ export function AssociationSurface({ workspaceId }: { workspaceId: string }) {
               <MembershipPublishingPanel key={`${workspaceId}:${plan}:${wantsNew}`} workspaceId={workspaceId} initialPlan={plan} initialNew={wantsNew} />
             </> : <AssociationPlansPanel key={`${workspaceId}:${wantsNew}`} workspaceId={workspaceId} initialNew={wantsNew} />)}
             {section === "sponsorships" && <AssociationSponsorshipsSection key={workspaceId} workspaceId={workspaceId} />}
-            {section === "events" && <AssociationEventsPanel key={`${workspaceId}:${eventId}:${eventSlug}:${wantsNew}:${eventView}`} workspaceId={workspaceId} initialEventId={eventId} initialEventSlug={eventSlug} initialNew={wantsNew} initialView={eventView} />}
+            {section === "events" && <AssociationEventsPanel key={`${workspaceId}:${eventId}:${eventSlug}:${wantsNew}:${eventView}:${eventFilter}`} workspaceId={workspaceId} initialEventId={eventId} initialEventSlug={eventSlug} initialNew={wantsNew} initialView={eventView} initialFilter={eventFilter} />}
             {section === "promotions" && <AssociationPromotionsPanel key={`${workspaceId}:${wantsNew}`} workspaceId={workspaceId} initialNew={wantsNew} />}
             {section === "orders" && <AssociationOrdersPanel key={`${workspaceId}:${eventId}`} workspaceId={workspaceId} initialEventId={eventId} />}
             {section === "waitlist" && <AssociationWaitlistPanel key={workspaceId} workspaceId={workspaceId} />}
-            {section === "payments" && <AssociationPaymentsPanel key={`${workspaceId}:${wantsNew}`} workspaceId={workspaceId} initialNew={wantsNew} />}
+            {section === "payments" && <AssociationPaymentsPanel key={`${workspaceId}:${wantsNew}:${contactId}:${plan}`} workspaceId={workspaceId} initialNew={wantsNew} initialContactId={contactId} initialPlanId={plan} />}
             {section === "contacts" && <AssociationContactsSection key={workspaceId} workspaceId={workspaceId} />}
           </>}
         </div>

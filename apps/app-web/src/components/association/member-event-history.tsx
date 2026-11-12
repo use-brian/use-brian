@@ -12,11 +12,17 @@ import {
 import { associationPageCacheKey } from "@/lib/surface-prefetch";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { associationHref } from "./navigation";
-import { AssociationChoice, AssociationListState, useAssociationAction, useAssociationIntent, useAssociationProjection } from "./operator-controls";
+import { AssociationChoice, AssociationListState, useAssociationAction, useAssociationIntent, useAssociationPage, useAssociationProjection } from "./operator-controls";
 import { AssociationCatalogPicker } from "./workspace-ui";
 import { EmptyState, InlineNotice, ResponsiveTable, StatusPill, associationDate } from "./ui";
 
 const statuses = ["registered", "attended", "cancelled", "no_show"] as const;
+const participationTransitions = {
+  registered: statuses,
+  attended: ["attended"],
+  cancelled: ["cancelled"],
+  no_show: ["no_show", "attended"],
+} as const;
 
 export function MemberEventHistory({ workspaceId, contact, canManage }: { workspaceId: string; contact: CrmLookupRow; canManage: boolean }) {
   const strings = useT(), t = strings.associationPage, s = t.staff;
@@ -28,10 +34,15 @@ export function MemberEventHistory({ workspaceId, contact, canManage }: { worksp
   const [event, setEvent] = useState<string[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [status, setStatus] = useState<CrmParticipationStatus>("attended");
+  const selectedEvent = useAssociationPage(workspaceId, "events", { id: event[0] }, !!event[0] && adding);
+  const eventRow = selectedEvent.data?.items.find(row => row.id === event[0]);
+  const tickets = useAssociationPage(workspaceId, "tickets", { eventId: event[0] }, !!eventRow && eventRow.commerceManaged === undefined && eventRow.capacity === null);
+  const controlled = !!eventRow && (eventRow.capacity != null || !!eventRow.commerceManaged || !!tickets.data?.items.length);
+  const canRecord = !!eventRow && (eventRow.commerceManaged !== undefined || !!tickets.data) && !controlled && !selectedEvent.error && !tickets.error;
   const intent = useAssociationIntent(workspaceId, "participation", `${contact.id}:${event[0] ?? ""}`);
   async function record() {
     const eventId = event[0];
-    if (!eventId || !canManage || history.error || action.pending || history.data?.some(row => row.eventId === eventId)) return;
+    if (!eventId || !canRecord || !canManage || history.error || action.pending || history.data?.some(row => row.eventId === eventId)) return;
     await action.run(s.addEventRecord, async () => {
       await recordCrmParticipation(workspaceId, {
         contactId: contact.id, attendeeName: contact.name, eventId, sourceKind: "manual", sourceId: intent.identity(), status,
@@ -51,8 +62,13 @@ export function MemberEventHistory({ workspaceId, contact, canManage }: { worksp
       <legend className="sr-only">{s.addEventRecord}</legend>
       <AssociationCatalogPicker workspaceId={workspaceId} resource="events" selected={event} onChange={setEvent} single />
       {history.data?.some(row => row.eventId === event[0]) && <InlineNotice tone="warning">{s.alreadyRecorded}</InlineNotice>}
-      <AssociationChoice label={t.manage.status} values={statuses} labels={labels} value={status} onChange={value => setStatus(value as CrmParticipationStatus)} />
-      <Button type="button" className="min-h-11 md:min-h-9" disabled={!event.length || !history.data || history.data.some(row => row.eventId === event[0])} onClick={() => void record()}>{t.manage.save}</Button>
+      {controlled ? <InlineNotice tone="neutral" action={<Link className={buttonVariants({ variant: "outline", className: "min-h-11 md:min-h-9" })}
+        href={associationHref(workspaceId, "events", { eventId: event[0], view: "tickets" })}>{t.manage.tickets}</Link>}>{s.recordRequiresOrder}</InlineNotice> :
+        event[0] && !canRecord ? <AssociationListState {...(!eventRow || selectedEvent.error ? selectedEvent : tickets)}>
+          <InlineNotice tone="warning">{t.manage.loadFailed}</InlineNotice>
+        </AssociationListState> : null}
+      <AssociationChoice label={t.manage.status} values={statuses} labels={labels} disabled={!canRecord} value={status} onChange={value => setStatus(value as CrmParticipationStatus)} />
+      <Button type="button" className="min-h-11 md:min-h-9" disabled={!canRecord || !history.data || history.data.some(row => row.eventId === event[0])} onClick={() => void record()}>{t.manage.save}</Button>
     </fieldset>}
     {action.feedback}
     <AssociationListState {...history}>
@@ -65,7 +81,7 @@ export function MemberEventHistory({ workspaceId, contact, canManage }: { worksp
         actions={canManage ? row => row.commerceManaged || row.sourceKind === "source_order" ? (
           <Link href={associationHref(workspaceId, "events", { eventId: row.eventId, view: "guests" })} className={buttonVariants({ size: "sm", variant: "outline", className: "min-h-11 md:min-h-9" })}>{t.ux.guests}</Link>
         ) : editing === row.id ? <div className="w-full min-w-0 space-y-2">
-          <AssociationChoice label={t.manage.status} value={status} values={statuses} labels={labels} onChange={value => setStatus(value as CrmParticipationStatus)} />
+          <AssociationChoice label={t.manage.status} value={status} values={participationTransitions[row.status]} labels={labels} onChange={value => setStatus(value as CrmParticipationStatus)} />
           <div className="flex flex-wrap gap-2">
             <Button type="button" className="min-h-11 md:min-h-9" disabled={status === row.status || action.pending || !!history.error} onClick={() => void action.run(t.manage.save, async () => {
               await updateCrmParticipation(workspaceId, row.id, status);
@@ -73,9 +89,9 @@ export function MemberEventHistory({ workspaceId, contact, canManage }: { worksp
             }, status === "cancelled" ? { description: s.cancelEventRecord, destructive: true } : false)}>{t.manage.save}</Button>
             <Button type="button" variant="ghost" className="min-h-11 md:min-h-9" onClick={() => setEditing(null)}>{t.cancel}</Button>
           </div>
-        </div> : <Button type="button" variant="outline" className="min-h-11 md:min-h-9" disabled={!!history.error} onClick={() => {
+        </div> : participationTransitions[row.status].length > 1 ? <Button type="button" variant="outline" className="min-h-11 md:min-h-9" disabled={!!history.error} onClick={() => {
           setAdding(false); setEditing(row.id); setStatus(row.status);
-        }}>{t.manage.edit}</Button> : undefined}
+        }}>{t.manage.edit}</Button> : null : undefined}
       />
     </AssociationListState>
   </section>;
