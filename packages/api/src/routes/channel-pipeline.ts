@@ -2,7 +2,7 @@ import { assertTelegramConversationCurrent } from '../telegram-conversation-cont
 import { recordingInputScope, type RecordingAdmission } from '../channel-recording.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
 import { isInputAuthorityError } from '@use-brian/core'
-import { captureAttendedSessionClassification, classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
+import { topicEvidenceFromHistory, captureAttendedSessionClassification, classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
 import { getPool } from '../db/client.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
@@ -119,7 +119,7 @@ import {
 import {
   findOrCreateSession, addSessionMessage, readSessionMessageScopeSource, setSessionMessageChannelId, type Session,
   getSessionMessages, getPreferredChannel,
-  getSessionTopicLabels, coalesceConsecutiveUserMessages,
+  coalesceConsecutiveUserMessages,
   markDowngradeNoticeSent, clearDowngradeNotice,
 } from '../db/sessions.js'
 import { resolveChatModelSelection, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL, backgroundModelFor } from '../model-resolution.js'
@@ -1846,9 +1846,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     })
     .filter((t) => t.text.length > 0)
 
-  const knownTopics = nativeClassification ? [] : room
-    ? [...new Set(preExistingDbMessages.map(m => m.topicLabel).filter((label): label is string => Boolean(label)))].slice(-20)
-    : await getSessionTopicLabels(session.id, 20)
+  const topicEvidence = topicEvidenceFromHistory(preExistingDbMessages)
 
   classification = nativeClassification?.classification ?? null
   if (!nativeClassification) {
@@ -1863,10 +1861,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         recentUserTurns,
         replyToText: replyResolved?.text ?? null,
         currentMessage: messageText,
-        knownTopicsThisSession: knownTopics,
+        ...topicEvidence,
         decisionRuntime: params.decisionRuntime,
         workspaceId: assistant.workspaceId ?? undefined,
-        runId: `memory-topic-${session.id}-${Date.now()}`,
+        runId: `memory-topic-${earlyUserMessageRow?.id ?? crypto.randomUUID()}`,
       })
     } catch (err) {
       console.error(`[${channelType}] topic classifier failed:`, err)

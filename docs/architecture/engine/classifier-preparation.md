@@ -81,10 +81,12 @@ and one-second primary transport bounds. The shared invocation/profile limits
 and pending/final authority checks are unchanged. Unsupported-capacity inputs
 retain the existing owned fallback, without truncating state or options.
 
-Native decision endpoints cannot generate new topic labels or worker task prompts. Generation,
-uncertainty review and allowed operational recovery can still need a bounded
-LLM follow-up. The main chat model is unchanged. In particular, Standard's
-legacy splitter is not moved onto a decision-runtime route by this setting.
+Native decision endpoints cannot generate worker task prompts. Topic identity
+now comes from the host rather than a generated name (see below). Task generation,
+explicit uncertainty review and allowed operational recovery can still need a bounded
+LLM follow-up. The main chat model is unchanged. Eligible Standard split
+preparation now uses the selected decision runtime for `research.split`;
+other late legacy splitter paths are unchanged.
 Fresh Memory, source/recipient admission, event/final output validation, worker
 launch and publication boundaries remain unchanged.
 
@@ -189,10 +191,15 @@ late canonical classifier. `research: false` is **not** interpreted as no split.
 
 The splitter reads the same admitted authored message and complete source
 cohort, with a separate accumulator and privately bound authority. Mixed or
-transformed input stays on the late path. The legacy provider/default-model
-route is preserved: no decision-runtime override is introduced into Standard
-preflight. Its generation is cancellable and bounded to 8 seconds. A positive
-research/site assessment cancels unnecessary speculative classification.
+transformed input stays on the late path. Preparation passes the captured
+workspace-selected decision runtime, workspace identity and a split-specific
+run ID through the existing `research.split` operation. A native no-split result
+can complete without LLM classification; a positive split still needs the LLM
+to generate task prompts. The historical provider/default LLM model is retained
+for generation and permitted recovery. LLM-only/shadow opt-outs and hybrid
+approval/deployment scope gates remain unchanged. Its generation is cancellable
+and bounded to 8 seconds. A positive research/site assessment cancels
+unnecessary speculative classification.
 
 Every sibling settles before admission continues or fails, and accumulated
 source evidence is merged. Successful preparation usage is recorded once even
@@ -201,11 +208,70 @@ No completed result is charged again on reuse. Interrupted calls without a
 completed result do not fabricate usage.
 
 Preparation contains data, not a permission receipt. At the original preflight
-boundary, exact message bytes and provider identity must match. Consumption is
+boundary, exact message bytes, provider and decision-runtime identities must
+match. Consumption is
 one-shot and requires a new current source proof, captured root/fork identity
 checks and cancellation checks. Worker spawning, plan seeding, events and other
 preflight effects remain at the original late boundary. Fresh Memory retrieval,
 per-event/final output authority and publication checks are unchanged.
 
-Overlap removes an avoidable serial classification window; it does not promise
-production latency percentiles or equate native wait with pure inference time.
+Overlap removes an avoidable serial classification window; a native no-split
+verdict additionally avoids an unnecessary LLM call. Neither change promises
+production latency percentiles or equates native wait with pure inference time.
+
+## Topic continuity without foreground naming
+
+`memory.topic` operation, state and question versions are **2**. Version-1
+approved profiles do not authorize this incompatible protocol; ordinary hybrid
+routing needs exact version-2 approval. Explicit workspace/deployment overrides
+still use the selected model and exact current operation versions.
+
+The existing `topic_label` field is an **exact grouping/retrieval key**, not
+necessarily a descriptive name. Native new-topic decisions allocate
+`topic:v2:<sha256>` from a domain-separated, framed workspace/run identity. The
+same workspace/run replays the same key; different runs/workspaces stay separate.
+Authored message IDs seed attended runs; other callers capture one fresh run ID
+before awaiting. Keys are not derived from content or permissions, and are never
+permission receipts. Existing descriptive labels remain exact legacy keys.
+No database migration or background naming worker is required.
+
+The host supplies a bounded catalog of up to 20 exact known keys, reserving the
+previous key, with fixed choice tokens `k0`, `k1`, …, `new`, `unknown`. These
+prevent collisions with legacy labels such as `new` or `__uncategorized__`.
+The model decides continue/shift/resume/cross-topic and primary membership;
+per-topic booleans independently identify cross-topic memberships. The host
+excludes the primary from related keys and restores exact stored identities.
+A prior key may still be resumed after compaction or an unclassified gap;
+a previous annotation is not proof that its content is in the live prompt.
+At most 22 typed questions are needed. Valid native decisions, including new
+topics and cross-topic results, complete without an LLM naming call.
+
+Admitted history supplies complete text and assistant/tool context as semantic
+anchors; opaque keys alone have no meaning. Assistants and tool results inherit
+the preceding annotated user topic; genuinely unclassified users break that
+inheritance. Full anchor text is captured before awaiting; it is not clipped to
+the last eight turns. This is still a bounded candidate decision, not unbounded
+historical search. Source cohorts, capacity gates and fresh dispatch/final proofs
+remain intact; oversized inputs use existing permitted recovery, not truncation.
+
+`unknown` with `continue` or `resume` is a valid terminal insufficient-signal result:
+`(uncategorized) / continue / 0`, with native usage/model attribution. Malformed
+or contradictory selections do not allocate keys. An explicit valid
+low-confidence review policy may request bounded LLM review; transport/capacity
+recovery remains bounded too. These completions select catalog tokens rather
+than generate names. LLM-only/shadow retain legacy naming while history contains
+only descriptive labels; once opaque history exists, even their authoritative
+LLM path must select tokens rather than rename identities.
+
+Compaction with opaque keys uses admitted-row membership indexes and host spans,
+including noncontiguous memberships and prior-summary offsets. Summarization
+receives safe `tN` tokens and cannot rename or merge grouping keys. Missing,
+duplicate or unknown sections reject the entire episode set and retain the raw
+summary boundary. Unassigned context stays in the boundary, not an invented
+topic. Legacy-only and linear compaction retain their existing behavior.
+Episodic retrieval still queries exact keys; prompts and graduation present
+unnamed topics neutrally without changing sources, grouping or permissions.
+
+This removes avoidable topic naming work on successful native paths. Synthetic
+Jev/OpenAI transport tests verify direct completion and single-charge accounting;
+they do not establish live latency or model quality.

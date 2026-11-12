@@ -23,6 +23,7 @@ import type { SessionContextAuthority } from './session-state-types.js'
 
 import type { EpisodicStore, EpisodicMemoryRecord } from './episodic-types.js'
 import type { TopicClassification } from './topic-classifier.js'
+import { isTopicIdentity } from './topic-identity.js'
 
 const ROUGH_CHARS_PER_TOKEN = 4
 const DEFAULT_TOKEN_BUDGET = 2_000
@@ -105,7 +106,8 @@ function formatEpisodicBlock(rows: EpisodicMemoryRecord[]): string {
   const sections: string[] = []
   for (const [label, topicRows] of byTopic) {
     const bodies = topicRows.map((r) => r.summary.trim()).join('\n\n---\n\n')
-    sections.push(`## ${label}\n\n${bodies}`)
+    const heading = isTopicIdentity(label) ? `Earlier topic ${sections.length + 1}` : label
+    sections.push(`## ${heading}\n\n${bodies}`)
   }
 
   return (

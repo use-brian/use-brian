@@ -24,9 +24,11 @@ export type {
   EpisodicMemoryRecord,
   EpisodicMessageSpan,
 } from './episodic-types.js'
+export { createTopicIdentity, isTopicIdentity } from './topic-identity.js'
 export { classifyTopic } from './topic-classifier.js'
 export type {
   TopicClassification,
+  TopicAnchor,
   TopicClassifierOptions,
   TopicState,
   ClassifierRecentTurn,

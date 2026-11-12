@@ -1,5 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { needsHistoricalTests, selectCiScope } from '../testing/ci-scope.mjs'
 
 describe('[COMP:ci/execution-topology] historical coverage selection', () => {
@@ -23,6 +28,31 @@ describe('[COMP:ci/execution-topology] historical coverage selection', () => {
     assert.equal(selectCiScope('pull_request', { pull_request: { base: { sha: before }, head: { sha: after } } }, git).historical, true)
     assert.deepEqual(commands[1].slice(-2), [mergeBase, after])
   })
+  it('emits the complete production matrix from the same topology used by acceptance receipts', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'brian-ci-scope-'))
+    const cwd = fileURLToPath(new URL('../../', import.meta.url))
+    const script = fileURLToPath(new URL('../testing/ci-scope.mjs', import.meta.url))
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim()
+    try {
+      for (const [event, profile, shards] of [
+        ['schedule', 'full', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]],
+        ['push', 'current', [1, 2, 3, 4, 5, 6, 7]],
+      ]) {
+        const eventPath = join(directory, `${event}-event.json`)
+        const outputPath = join(directory, `${event}-output`)
+        writeFileSync(eventPath, JSON.stringify({ before: head, after: head }))
+        execFileSync(process.execPath, [script], { cwd, env: { ...process.env,
+          GITHUB_EVENT_NAME: event, GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: outputPath,
+        } })
+        const output = Object.fromEntries(readFileSync(outputPath, 'utf8').trim().split('\n').map(line => line.split('=')))
+        assert.equal(output.profile, profile)
+        assert.equal(output.historical, String(profile === 'full'))
+        assert.deepEqual(JSON.parse(output.shards), shards)
+        assert.equal(Number(output.total), shards.length)
+      }
+    } finally { rmSync(directory, { recursive: true, force: true }) }
+  })
+
   it('runs exhaustive coverage on nightly/manual and unavailable or malformed history', () => {
     const unavailable = () => { throw new Error('Missing git history') }
     for (const event of ['schedule', 'workflow_dispatch', 'unknown', 'push', 'pull_request']) {

@@ -357,6 +357,30 @@ describe('[COMP:api/proactive-compaction] canonical native assembly boundaries',
       modelContext, authority, persistLongTermContext: false }
     return { params, modelContext, authority, stream }
   }
+  it('forwards canonical membership with prior-summary offset and leaves prior context unassigned', async () => {
+    const c = native()
+    const key = `topic:v2:${'a'.repeat(64)}`
+    mockReadCompactSummary.mockResolvedValueOnce(bindScopeSources({ id: 'old-summary', summary: 'Earlier context', boundarySequence: 10 }, [source]) as never)
+    mockSetCompactSummaryAndBoundary.mockImplementationOnce(async (_id, summary, boundarySequence) => ({ id: 'new-summary', summary, boundarySequence }))
+    c.stream.mockImplementation(async function* () {
+      yield { type: 'text_delta', text: '## TOPIC: t0\nTrip planning.\n## TOPIC: unassigned\nEarlier context retained.' }
+    })
+    const result = await runProactiveCompaction({ ...c.params, persistSessionSummary: true, unconditional: true, profile: 'multi-topic',
+      sessionMessages: [
+        makeSessionMessage({ sequenceNum: 10, role: 'user', content: 'Trip', topicLabel: key }),
+        makeSessionMessage({ sequenceNum: 20, role: 'assistant', content: 'Answer' }),
+        makeSessionMessage({ sequenceNum: 30, role: 'user', content: 'Previous tail' }),
+        makeSessionMessage({ sequenceNum: 40, role: 'user', content: 'Current' }),
+      ],
+    })
+    expect(result.compacted).toBe(true)
+    const request = c.stream.mock.calls.at(-1)![0]
+    expect(request.messages[0].content).toBe('Earlier context')
+    const prompt = String(request.messages.at(-1)?.content)
+    expect(prompt).toContain('"token":"t0","messageIndexes":[1,2]')
+    expect(prompt).toContain('"token":"unassigned","messageIndexes":[0]')
+    expect(result.messages[0].content).toContain('Earlier context retained.')
+  })
   it('keeps the lease and source tags without repeating the full proof for pure assembly', async () => {
     const c = native(), result = await runProactiveCompaction(c.params)
     expect(result.compacted).toBe(false)
@@ -859,5 +883,70 @@ describe('[COMP:api/proactive-compaction] runProactiveCompaction — self-heal r
       analytics: logger,
     }))
     expect(events.find((e) => e.eventName === 'session_autohealed')).toBeUndefined()
+  })
+})
+
+
+describe('stable-topic proactive compaction membership', () => {
+  it.each([null, '(uncategorized)', '   '])('uses exact keys and host spans; invalid user key %s breaks inheritance', async invalidKey => {
+    const key = `topic:v2:${'b'.repeat(64)}`
+    const rows = [
+      makeSessionMessage({ sequenceNum: 10, role: 'user', content: 'Trip', topicLabel: key }),
+      makeSessionMessage({ sequenceNum: 11, role: 'assistant', content: [{ type: 'tool_use', id: 'call', name: 'search', input: {} }] }),
+      makeSessionMessage({ sequenceNum: 12, role: 'user', content: [{ type: 'tool_result', toolUseId: 'call', name: 'search', content: 'Result' }] }),
+      makeSessionMessage({ sequenceNum: 20, role: 'user', content: 'Legacy topic', topicLabel: 'EXACT Legacy!' }),
+      makeSessionMessage({ sequenceNum: 21, role: 'assistant', content: 'Legacy answer' }),
+      makeSessionMessage({ sequenceNum: 40, role: 'user', content: 'Trip again', topicLabel: key }),
+      makeSessionMessage({ sequenceNum: 41, role: 'assistant', content: 'Trip answer' }),
+      makeSessionMessage({ sequenceNum: 50, role: 'user', content: 'Unclassified', topicLabel: invalidKey }),
+      makeSessionMessage({ sequenceNum: 51, role: 'assistant', content: 'Unknown answer', topicLabel: key }),
+      makeSessionMessage({ sequenceNum: 60, role: 'user', content: 'Previous tail' }),
+      makeSessionMessage({ sequenceNum: 70, role: 'user', content: 'Current' }),
+    ]
+    const requests: Message[][] = []
+    const provider = { ...mockProviderWithSummary(''), async *stream(request: { messages: Message[] }) {
+      requests.push(request.messages)
+      yield { type: 'text_delta' as const, text: '## TOPIC: t0 [ACTIVE]\nTrip facts.\n## TOPIC: t1\nLegacy facts.\n## TOPIC: unassigned\nUnknown facts.' }
+    } }
+    const result = await runProactiveCompaction(baseParams({ sessionMessages: rows, profile: 'multi-topic', unconditional: true, provider }))
+    const prompt = String(requests.at(-1)?.at(-1)?.content)
+    expect(prompt).toContain('"token":"t0","messageIndexes":[0,1,2,5,6]')
+    expect(prompt).toContain('"token":"t1","messageIndexes":[3,4]')
+    expect(prompt).toContain('"token":"unassigned","messageIndexes":[7,8]')
+    expect(result.episodes.map(e => [e.topicLabel, e.messageSpan])).toEqual([
+      [key, { fromSequence: 10, toSequence: 41, turnCount: 2 }],
+      ['EXACT Legacy!', { fromSequence: 20, toSequence: 21, turnCount: 1 }],
+    ])
+    expect(result.messages[0].content).toContain('Unknown facts.')
+  })
+
+  it.each(['unknown', 'unassigned', 'topic:v2:invalid'])('preserves the exact admitted legacy key %s despite token-like spelling', async legacyKey => {
+    const key = `topic:v2:${'e'.repeat(64)}`
+    const result = await runProactiveCompaction(baseParams({ profile: 'multi-topic', unconditional: true,
+      provider: mockProviderWithSummary('## TOPIC: t0\nAcorn facts.\n## TOPIC: t1\nBirch facts.'), sessionMessages: [
+        makeSessionMessage({ sequenceNum: 1, role: 'user', content: 'Acorn planning', topicLabel: key }),
+        makeSessionMessage({ sequenceNum: 2, role: 'assistant', content: 'Acorn reply' }),
+        makeSessionMessage({ sequenceNum: 3, role: 'user', content: 'Birch planning', topicLabel: legacyKey }),
+        makeSessionMessage({ sequenceNum: 4, role: 'assistant', content: 'Birch reply' }),
+        makeSessionMessage({ sequenceNum: 5, role: 'user', content: 'Previous tail' }),
+        makeSessionMessage({ sequenceNum: 6, role: 'user', content: 'Current' }),
+      ],
+    }))
+    expect(result.episodes.map(episode => episode.topicLabel)).toEqual([key, legacyKey])
+  })
+
+  it.each(['multi-topic', 'linear'] as const)('keeps legacy behavior without compacted opaque keys (%s)', async profile => {
+    const stream = vi.fn<LLMProvider['stream']>(async function* () { yield { type: 'text_delta', text: '## TOPIC: legacy name\nFacts' } })
+    const result = await runProactiveCompaction(baseParams({ profile, unconditional: true,
+      provider: { ...mockProviderWithSummary(''), stream }, sessionMessages: [
+        makeSessionMessage({ sequenceNum: 1, role: 'user', content: 'Legacy', topicLabel: 'Legacy CASE' }),
+        makeSessionMessage({ sequenceNum: 2, role: 'assistant', content: 'Answer' }),
+        makeSessionMessage({ sequenceNum: 3, role: 'user', content: 'Previous tail' }),
+        makeSessionMessage({ sequenceNum: 4, role: 'user', content: 'Current', topicLabel: `topic:v2:${'c'.repeat(64)}` }),
+      ],
+    }))
+    expect(result.compacted).toBe(true)
+    expect(String(stream.mock.calls.at(-1)![0].messages.at(-1)?.content)).not.toContain('HOST_GROUPS_JSON')
+    if (profile === 'multi-topic') expect(result.episodes[0].topicLabel).toBe('legacy name')
   })
 })

@@ -56,7 +56,8 @@ function classifierResponse(kind: 'research' | 'topic' = 'research') {
       } },
     } : {
       state: { type: 'choice', choice: 'continue', probabilities: { continue: 1, shift: 0, resume: 0, 'cross-topic': 0 } },
-      topic: { type: 'choice', choice: 'calendar', probabilities: { calendar: 1, __new_topic__: 0, __uncategorized__: 0 } },
+      topic: { type: 'choice', choice: 'k0', probabilities: { k0: 1, new: 0, unknown: 0 } },
+      related_k0: { type: 'noul', noul: 1 },
     },
     usage: { input_tokens: 8, output_tokens: 0 },
   }), { status: 200, headers: { 'content-type': 'application/json' } })

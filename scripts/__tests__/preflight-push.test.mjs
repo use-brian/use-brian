@@ -159,7 +159,7 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
 
   test('plans the complete maintained full/current workflow with no guessed test command list', async () => {
     const source = await readFile(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
-    for (const [historical, count] of [[true, 30], [false, 21]]) {
+    for (const [historical, count] of [[true, 33], [false, 24]]) {
       const context = workflowContext({ historical })
       const jobs = compileWorkflow(source, context).filter(job => job.definition.if === undefined || expression(job.definition.if, context))
       assert.equal(jobs.flatMap(job => job.variants).length, count)
@@ -172,7 +172,10 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
       'ci-scope': { steps: [{ run: 'node scripts/testing/ci-scope.mjs' }] },
       'build-test': { needs: 'ci-scope', steps: [{ run: 'true' }] },
     } })
-    await put(root, 'scripts/testing/ci-scope.mjs', await readFile(new URL('../testing/ci-scope.mjs', import.meta.url)))
+    for (const path of ['scripts/testing/ci-scope.mjs', 'scripts/testing/department-isolation-report.mjs',
+      'packages/shared/src/department-isolation-coverage.ts']) {
+      await put(root, path, await readFile(new URL(`../../${path}`, import.meta.url)))
+    }
     commit(root)
     git(root, ['update-ref', 'refs/remotes/origin/develop', git(root, ['rev-parse', 'HEAD']).toString().trim()])
     git(root, ['checkout', '--quiet', '-b', 'fixture-feature'])
