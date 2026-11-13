@@ -83,8 +83,8 @@ jobs:
       - name: Smoke
         run: pnpm smoke
 
-      - name: Test release-evidence checks
-        run: node --test scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs scripts/__tests__/migration-owner-groups.test.mjs scripts/__tests__/preflight-push.test.mjs scripts/__tests__/docker-build-closure.test.mjs
+      - name: Test build config and release-evidence checks
+        run: node --test scripts/__tests__/api-build-config.test.mjs scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs scripts/__tests__/migration-owner-groups.test.mjs scripts/__tests__/preflight-push.test.mjs scripts/__tests__/docker-build-closure.test.mjs
 
       - name: Archive database test dependencies
         run: tar -czf "$RUNNER_TEMP/database-test-dependencies.tgz" packages/*/dist
