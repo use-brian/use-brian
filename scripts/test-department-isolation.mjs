@@ -158,7 +158,8 @@ async function run() {
   const native = selectedSuites.some(suite => suite.packageDir !== 'apps/api')
   const preparationStarted = Date.now()
   console.log(`Preparing ${native ? 'native PostgreSQL' : 'embedded acceptance'} fixture`)
-  const fixture = native ? await createLocalFixture({ pgBin, prepareTemplate: true, migrationProgress: true }) : {
+  const fixture = native ? await createLocalFixture({ pgBin, prepareTemplate: true, migrationProgress: true,
+    ordinaryOwner: selectedSuites.some(suite => suite.id === 'retained-conversation') }) : {
     directory: await mkdtemp(join(tmpdir(), 'brian-isolation-report-')), env: {},
     async dispose() { await rm(this.directory, { recursive: true, force: true }) },
   }
