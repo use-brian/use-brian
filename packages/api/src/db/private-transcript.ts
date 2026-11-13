@@ -77,6 +77,7 @@ export async function readPrivateTranscript(authority:SessionContextAuthority,se
  await security.authority.assertCurrent()
  return runWithAgentAccess(security.access,async()=>{
   const client=await getAppPool().connect()
+  let captured:{source:ScopeSource;rows:SessionMessage[]}
   try{
    await client.query('BEGIN')
    await applyRLSGucs(client,security.access.userId)
@@ -92,11 +93,15 @@ export async function readPrivateTranscript(authority:SessionContextAuthority,se
      sequenceNum:row.sequence,createdAt:new Date(row.timestamp),replyToText:null,topicLabel:null,topicConfidence:null,
      channelMessageId:null,senderUserId:row.role==='user'?source.userId:null,senderAssistantId:null,attachments:[]},[source])]:[]
    })
-   await security.authority.assertCurrent()
    await client.query('COMMIT')
-   accumulator.note({sources:[source]})
-   return bindScopeSources(rows,[source])
+   captured={source,rows}
   }catch(error){await client.query('ROLLBACK');throw error}
   finally{await rollbackAndRelease(client)}
+  // The observation is data, not an authority receipt. Resolve live authority
+  // only after releasing the app connection and transcript locks: that check
+  // may itself wait on the system pool. No dialogue enters context on denial.
+  await security.authority.assertCurrent()
+  accumulator.note({sources:[captured.source]})
+  return bindScopeSources(captured.rows,[captured.source])
  })
 }
