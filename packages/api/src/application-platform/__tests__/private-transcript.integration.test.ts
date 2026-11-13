@@ -142,6 +142,73 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
   const c=await setup(true);await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memory.id])
   expect((await readAttendedSessionHistory(await c.fresh(),c.session.id)).map(row=>row.id)).toContain(c.reply.id)
  })
+ it.each(['unchanged','device','membership','message-edit','message-hold'] as const)(
+  'releases capture locks and pool capacity before its final live check (%s)',async change=>{
+   const c=await setup(),authority=await c.fresh(),pool=getAppPool()
+   const lease=await takeTurnLease({sessionId:c.session.id,admission:'personal',assistantId:c.f.assistantId})
+   if(!lease.taken)throw new Error('Fixture turn was not admitted')
+   const held:Array<{release:()=>void}>=[]
+   const note=vi.spyOn(authority.accumulator,'note')
+   const before=structuredClone(authority.accumulator.evidence)
+   const current=authority.execution.security.authority.assertCurrent.bind(authority.execution.security.authority)
+   let finish!:()=>void,paused=false,checks=0
+   const resume=new Promise<void>(resolve=>{finish=resolve})
+   // Source withdrawal after the live metadata read must still fail actual
+   // model admission. Credential withdrawal happens before that metadata read.
+   const sourceChange=change==='message-edit'||change==='message-hold'
+   vi.spyOn(authority.execution.security.authority,'assertCurrent').mockImplementation(async()=>{
+    const captureReturn=++checks===2
+    if(captureReturn&&!sourceChange){paused=true;await resume}
+    await current()
+    if(captureReturn&&sourceChange){paused=true;await resume}
+   })
+   let pending:ReturnType<typeof readPrivateTranscript>|undefined
+   let outcome:Promise<{rows:Awaited<ReturnType<typeof readPrivateTranscript>>;error?:never}|{error:unknown;rows?:never}>|undefined
+   let poolProbe:Promise<void>|undefined
+   let heartbeat:ReturnType<typeof storedSessions.touchTurnLease>|undefined
+   let probes:Promise<PromiseSettledResult<unknown>[]>|undefined
+   try{
+    // Leave exactly one application slot for capture. A second checkout can
+    // finish while the lease check is paused only after capture releases it.
+    for(let slot=1;slot<(pool.options.max??10);slot++)held.push(await pool.connect())
+    pending=readPrivateTranscript(authority,c.session.id,c.reply.sequenceNum)
+    outcome=pending.then(rows=>({rows}),error=>({error}))
+    await expect.poll(()=>paused,{timeout:5000}).toBe(true)
+    let poolAvailable=false,heartbeatFinished=false
+    poolProbe=pool.connect().then(client=>{client.release();poolAvailable=true})
+    heartbeat=storedSessions.touchTurnLease(c.session.id,lease.token).then(value=>{heartbeatFinished=true;return value})
+    probes=Promise.allSettled([poolProbe,heartbeat])
+    await expect.poll(()=>poolAvailable&&heartbeatFinished,{timeout:1000}).toBe(true)
+    await poolProbe
+    expect(await heartbeat).toEqual({held:true,cancelRequested:false})
+    expect(note).not.toHaveBeenCalled()
+    if(change==='device')await authSessionStore.revokeForUser(c.userId,c.device.id)
+    if(change==='membership')await c.f.pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[c.f.workspaceId,c.userId])
+    if(change==='message-edit')await c.f.pool.query('UPDATE session_messages SET content=$2 WHERE id=$1',[c.reply.id,JSON.stringify([{type:'text',text:'A changed fictional utterance.'}])])
+    if(change==='message-hold')await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.reply.id])
+    finish()
+    const result=await outcome
+    if(change==='device'||change==='membership'){
+     expect(result.error).toMatchObject({reason:'authority_changed'})
+     expect(note).not.toHaveBeenCalled()
+     expect(authority.accumulator.evidence).toEqual(before)
+    }else{
+     expect(result.error).toBeUndefined()
+     expect(result.rows?.map(row=>row.id)).toEqual([c.input.id,c.reply.id])
+     const admission=assertSourceModelInputAuthority({...executionToolContext(authority.execution,{appId:'fictional-capture-return'}),scopeAccumulator:authority.accumulator})
+     if(sourceChange)await expect(admission).rejects.toBeTruthy()
+     else await expect(admission).resolves.toBeUndefined()
+    }
+   }finally{
+    finish()
+    await outcome
+    // Free reserved slots even on the old implementation's failed probe, then
+    // drain every pending checkout/update before fixture teardown.
+    for(const client of held)client.release()
+    await probes
+    await releaseTurn(c.session.id,lease.token,'completed')
+   }
+  },60_000)
  it('invalidates captured dialogue after a direct message hold',async()=>{
   const c=await setup(),authority=await c.fresh()
   const history=await readPrivateTranscript(authority,c.session.id,c.reply.sequenceNum)
