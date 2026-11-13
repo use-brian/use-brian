@@ -82,7 +82,14 @@ function originalPrompt(request: DecisionRequest): string {
 }
 
 function expandPrompt(content: string) {
-  const parsed = JSON.parse(content) as { state: unknown; questions: Record<string, unknown>[]; choiceOptions?: Record<string, unknown> }
+  const parsed = JSON.parse(content) as { state: unknown; questions: Record<string, unknown>[]; choiceOptions?: Record<string, unknown>;
+    rowTables?: Array<{ path: Array<string | number>; columns: string[] }> }
+  for (const table of parsed.rowTables ?? []) {
+    let target = parsed as unknown as Record<string | number, unknown>
+    for (const key of table.path.slice(0, -1)) target = target[key] as Record<string | number, unknown>
+    const key = table.path.at(-1)!
+    target[key] = (target[key] as unknown[][]).map(row => Object.fromEntries(table.columns.map((column, i) => [column, row[i]])))
+  }
   return { state: parsed.state, questions: parsed.questions.map(question => {
     const options = question.options as { $ref?: string } | undefined
     return options?.$ref ? { ...question, options: parsed.choiceOptions![options.$ref.split('/')[2]!] } : question
@@ -344,7 +351,7 @@ describe('[COMP:decisions/llm] constrained LLM adapter', () => {
         ...option, description: `${option.description ?? ''} (${question.id})`,
       }))
     }
-    expect(buildLlmDecisionMessages(unshared)[0]!.content).toBe(originalPrompt(unshared))
+    expect(expandPrompt(buildLlmDecisionMessages(unshared)[0]!.content)).toEqual({ state: unshared.state, questions: unshared.questions })
     expect(await captureSchema(unshared, 'openai-codex')).toEqual(schema)
     if (count === 357) console.info('Synthetic prompt size metadata', {
       tools: count, questions: request.questions.length,
