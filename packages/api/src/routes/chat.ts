@@ -1,3 +1,4 @@
+import { canPrepareStandardSplit, settleChatAssessments } from './chat-split-preparation.js'
 import {resumePrivateLegacySession,PRIVATE_TRANSCRIPT_INSTRUCTION} from '../db/private-transcript.js'
 import { attachWorkspaceFiles } from '../files/workspace-attachments.js'
 import { bindWorkspaceCredentialDelegation, workspaceCredentialDelegation } from '@use-brian/core'
@@ -14,7 +15,7 @@ import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
 import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary,tryAssertNativePreparationCurrent,tryAssertNativePublicationPreparationCurrent} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { captureAttendedSessionClassification, forkAttendedSessionClassification, assessAttendedSessionMessage, captureNativeClassifiedAssembly, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
+import { topicEvidenceFromHistory, captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage, assessAttendedSessionMessage, captureNativeClassifiedAssembly, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
@@ -39,7 +40,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, findSessionTurnLeaseState, countSessionHumans, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, type SessionMessage } from '../db/sessions.js'
+import { createPersonalWebSession, findOrCreateSession, findSessionByChannel, findSessionById, findSessionTurnLeaseState, countSessionHumans, addSessionMessage, readSessionMessageScopeSource, toStampedMessages, getSessionMessages, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, coalesceConsecutiveUserMessages, touchTurnLease, isTurnLeaseSuperseded, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, type SessionMessage } from '../db/sessions.js'
 import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
@@ -4160,16 +4161,22 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         ? forkAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg, capture: classificationCapture }) : undefined
       const topicAssessmentBranch = classificationCapture && nativeTranscriptAuthority && earlyStoredUserMsg
         ? forkAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg, capture: classificationCapture }) : undefined
-      // The two independent assessments share bytes, never authority receipts.
-      // Settle both before leaving this phase so a rejected sibling cannot keep
-      // background classifier work running after the route has failed.
-      const assessments = await Promise.allSettled([
-        (async () => {
+      const splitAssessmentBranch = classificationCapture && nativeTranscriptAuthority && earlyStoredUserMsg
+        && canPrepareStandardSplit({ message, requestedModel, userPlan, researchMode, operateSiteIntent,
+          assistantKind: assistant.kind, docSurface: !!turnPolicy.docSurface })
+        ? forkAttendedSessionClassification({ authority: nativeTranscriptAuthority, session, message: earlyStoredUserMsg, capture: classificationCapture }) : undefined
+      const splitPreparationAbort = new AbortController()
+      // Independent classifications share data, never permission receipts. Only
+      // the invariant Standard legacy splitter route may overlap here. All three
+      // settle before any later quota refusal, worker or publication effects.
+      // A research/site verdict cancels the now-unneeded speculative splitter.
+      const assessments = await settleChatAssessments(
+        async () => {
           if (pageBoundTurn || !adaptiveResearchEligible || !message) return undefined
           if (!nativeTranscriptAuthority || !earlyStoredUserMsg) {
             throw Object.assign(new Error('The assessment context is unavailable.'), { reason: 'authority_changed', retrySafe: false })
           }
-          return await turnTiming.time('research_classify', () => classifyAttendedResearchMessage({
+          const result = await turnTiming.time('research_classify', () => classifyAttendedResearchMessage({
             authority: researchAssessment?.authority ?? nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
             provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
             toolCandidates: options.decisionRuntime ? [...filterToolsByCapabilities(preparedConnectorTools, activeCapabilities).values()]
@@ -4177,8 +4184,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             capture: researchAssessment?.capture ?? classificationCapture,
             measure: turnTiming.time,
           }))
-        })(),
-        (async () => !pageBoundTurn && nativeTranscriptAuthority && earlyStoredUserMsg
+          if (result.research || result.operateSite) splitPreparationAbort.abort()
+          return result
+        },
+        async () => !pageBoundTurn && nativeTranscriptAuthority && earlyStoredUserMsg
         ? await turnTiming.time('topic_classify', () => assessAttendedSessionMessage({
             authority: topicAssessmentBranch?.authority ?? nativeTranscriptAuthority, session, message: earlyStoredUserMsg,
             provider: backgroundProvider, model: backgroundModel, decisionRuntime: options.decisionRuntime,
@@ -4186,12 +4195,36 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             measure: turnTiming.time,
             reply: { channelType: 'web', replyToMessageId: replyTo?.id ?? null, clientSnippet: replyTo?.text },
           }))
-        : undefined)(),
-      ])
+        : undefined,
+        async () => {
+          if (!splitAssessmentBranch || !earlyStoredUserMsg || !message) return undefined
+          const rawMessage = message
+          try {
+            return await turnTiming.time('split_classify', () => prepareAttendedSplitMessage({
+              authority: splitAssessmentBranch.authority, session, message: earlyStoredUserMsg,
+              provider: backgroundProvider, rawMessage, capture: splitAssessmentBranch.capture, decisionRuntime: options.decisionRuntime,
+              signal: AbortSignal.any([abortController.signal, splitPreparationAbort.signal]), measure: turnTiming.time,
+            }))
+          } catch (error) {
+            if (splitPreparationAbort.signal.aborted && error === splitPreparationAbort.signal.reason && !abortController.signal.aborted) return undefined
+            throw error
+          }
+        },
+        async preparation => {
+          if (preparation) await recordOverheadUsage({
+            usageStore: options.usageStore, userId: user.id, assistantId: assistant.id, sessionId: session.id,
+            userMessageId: earlyStoredUserMsg!.id, model: preparation.model, usage: preparation.usage,
+            source: 'overhead:splitter', triggerKey: 'parallel_split_classifier', ...backgroundUsageAttribution,
+          })
+        },
+      )
+      const standardSplitPreparation = assessments[2].status === 'fulfilled' ? assessments[2].value : undefined
+      researchAssessment?.mergeEvidence()
+      splitAssessmentBranch?.mergeEvidence()
+      topicAssessmentBranch?.mergeEvidence()
       for (const assessment of assessments) if (assessment.status === 'rejected') throw assessment.reason
       const adaptive = assessments[0].status === 'fulfilled' ? assessments[0].value : undefined
       const topicAssessment = assessments[1].status === 'fulfilled' ? assessments[1].value : undefined
-      researchAssessment?.mergeEvidence()
       if (adaptive) {
         adaptiveResearchOverhead = {
           model: adaptive.model,
@@ -4246,7 +4279,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         })
         .filter((t) => t.text.length > 0)
 
-      const knownTopics = pageBoundTurn || nativeClassification ? [] : await getSessionTopicLabels(session.id, 20)
+      const topicEvidence = topicEvidenceFromHistory(preExistingDbMessages)
 
       let classification: TopicClassification | null = nativeClassification?.classification ?? null
       if (!nativeClassification && !pageBoundTurn) {
@@ -4261,10 +4294,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             recentUserTurns,
             replyToText: replyResolved?.text ?? null,
             currentMessage: userMessageText,
-            knownTopicsThisSession: knownTopics,
+            ...topicEvidence,
             decisionRuntime: options.decisionRuntime,
             workspaceId: assistant.workspaceId ?? undefined,
-            runId: `memory-topic-${session.id}-${Date.now()}`,
+            runId: `memory-topic-${earlyStoredUserMsg?.id ?? crypto.randomUUID()}`,
           })
         } catch (err) {
           console.error('[chat] topic classifier failed:', err)
@@ -6771,10 +6804,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           // wastes worker calls and biases the turn toward synthesis-from-
           // snippets instead of the browse the user asked for.
           try {
+            const preparedSplit = standardSplitPreparation?.matches(message, backgroundProvider, options.decisionRuntime) ? standardSplitPreparation : undefined
             const preflight = await runPreflight({
               provider: backgroundProvider,
               model: backgroundModel,
               message,
+              ...(preparedSplit ? { classify: preparedSplit.read } : {}),
               tools: allTools,
               context: {
                 userId: user.id,
@@ -6862,9 +6897,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             if (preflight.type === 'researched') {
               preflightContext = preflight.context
             }
-            // Attribute the preflight classifier call as overhead regardless
-            // of whether it split (the Gemini call happened either way).
-            await recordOverheadUsage({
+            // An early prepared result was already charged once, even if the
+            // preflight chooses passthrough. The late fallback retains its charge.
+            if (!preparedSplit) await recordOverheadUsage({
               usageStore: options.usageStore,
               userId: user.id,
               assistantId: assistant.id,
@@ -6877,6 +6912,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
               ...backgroundUsageAttribution,
             })
           } catch (err) {
+            if (isAuthorityChangedError(err) || abortController.signal.aborted) throw err
             console.error('[chat] pre-flight failed, continuing without:', err)
           }
         }
@@ -7578,10 +7614,9 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           runtimeSystemContext: preparedRun.trustedContext,
           messages,
           tools: preparedRun.tools,
-          // These built-in adapters (including Gemini's Anthropic fallback)
-          // re-read the session declarations. Snapshot-based adapters do not.
-          deferToolSchemas: customLlmRuntime?.routeKind !== 'custom' &&
-            registryRow(customLlmRuntime?.selector ?? preparedRun.model.model)?.provider === 'gemini',
+          // Presentation-only opt-in: capable drivers use the registration plan;
+          // legacy/custom and eager fallback drivers retain the complete tools list.
+          deferToolSchemas: true,
           routineCalendarRead: routineDeclineReason === null && options.decisionRuntime ? {
               runtime:options.decisionRuntime, llm:{provider:preparedRun.model.provider,modelId:preparedRun.model.model},
               workspaceId:assistant.workspaceId??undefined, calendarTools:boundRoutineCalendarTools,historyCalls:routineHistoryCalls,

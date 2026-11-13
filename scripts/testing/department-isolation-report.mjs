@@ -19,18 +19,40 @@ export function parseShard(value) {
   return { index, total }
 }
 
+const nativeGroups = [
+  ['derived-store', 'kernel', 'strict-intake', 'ui', 'compatibility'],
+  ['access-store', 'entrypoints', 'ingest-application-replay'],
+  ['workflow-authority', 'operation-stores', 'access-policy', 'review-lifecycle'],
+  ['organization'],
+  ['native-query-capacity'],
+  ['retained-conversation'],
+  ['recovered-topic-history'],
+  ['recovered-calendar-history'],
+]
+
+/** The CI matrix and receipt partition must use the same production topology. */
+export function acceptanceShards(profile = 'full') {
+  if (!['full', 'current'].includes(profile)) throw new Error('Unknown acceptance profile')
+  const historical = profile === 'full' ? DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.packageDir === 'apps/api').length : 0
+  return Array.from({ length: historical + nativeGroups.length }, (_, index) => index + 1)
+}
+
+/** Whole-job budgets include setup and every serialized case, not slower reads. */
+export function acceptanceMatrix(profile = 'full') {
+  const shards = acceptanceShards(profile)
+  return { include: shards.map(index => ({
+    shard: index,
+    timeoutMinutes: suitesForShard({ index, total: shards.length }, profile)
+      .some(suite => ['retained-conversation', 'recovered-calendar-history'].includes(suite.id)) ? 45 : 20,
+  })) }
+}
+
 export function suitesForShard(shard, profile = 'full') {
   if (!['full', 'current'].includes(profile)) throw new Error('Unknown acceptance profile')
-  const nativeGroups = [
-    ['derived-store', 'kernel', 'strict-intake', 'ui', 'compatibility'],
-    ['access-store', 'entrypoints', 'ingest-application-replay'],
-    ['workflow-authority', 'operation-stores', 'access-policy', 'review-lifecycle'],
-    ['organization'],
-  ]
   if (profile === 'current') {
     const suites = DEPARTMENT_ISOLATION_SUITES.filter(suite => suite.packageDir !== 'apps/api')
     if (!shard) return suites
-    if (shard.total !== 4) throw new Error('Current acceptance uses four shards')
+    if (shard.total !== nativeGroups.length) throw new Error(`Current acceptance uses ${nativeGroups.length} shards`)
     return suites.filter(suite => nativeGroups[shard.index - 1].includes(suite.id))
   }
   if (!shard) return [...DEPARTMENT_ISOLATION_SUITES]

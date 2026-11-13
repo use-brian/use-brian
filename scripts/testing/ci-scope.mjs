@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, readFileSync, realpathSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+import { acceptanceMatrix, acceptanceShards } from './department-isolation-report.mjs'
 
 // [COMP:ci/execution-topology] Unknown comparison inputs select more coverage.
 export function needsHistoricalTests(paths) {
@@ -31,6 +32,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')),
     args => execFileSync('git', args, { encoding: 'utf8' }))
   console.log(JSON.stringify(scope))
+  const profile = scope.historical ? 'full' : 'current'
+  const shards = acceptanceShards(profile)
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT,
-    `historical=${scope.historical}\nprofile=${scope.historical ? 'full' : 'current'}\nshards=${scope.historical ? '[1,2,3,4,5,6,7]' : '[1,2,3,4]'}\ntotal=${scope.historical ? 7 : 4}\n`)
+    `historical=${scope.historical}\nprofile=${profile}\nshards=${JSON.stringify(shards)}\ntotal=${shards.length}\nmatrix=${JSON.stringify(acceptanceMatrix(profile))}\n`)
 }

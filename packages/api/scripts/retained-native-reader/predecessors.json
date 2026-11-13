@@ -1,0 +1,471 @@
+[
+  {
+    "signature": "native_turn_helpers_current()",
+    "language": "sql",
+    "volatility": "s",
+    "bodyTemplate": "803d9cd34a7c94347e32172c77ea7387d5cb8e642f905ca08f7f18b796451255",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_helpers_current",
+      "prorows": 0,
+      "pronargs": 0,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": null,
+      "proargtypes": [],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  },
+  {
+    "signature": "native_turn_publication_contract()",
+    "language": "sql",
+    "volatility": "s",
+    "bodyTemplate": "publication-tables-8196",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_publication_contract",
+      "prorows": 0,
+      "pronargs": 0,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "16",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": null,
+      "proargtypes": [],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  },
+  {
+    "signature": "native_turn_prepare_publication(uuid,uuid,text,jsonb,jsonb)",
+    "body": "61cb2d845de95e9a20f585285f65000033599197dd6db5f75315aada2d23eaa7",
+    "language": "plpgsql",
+    "volatility": "v",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_prepare_publication",
+      "prorows": 0,
+      "pronargs": 5,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "producer",
+        "sources",
+        "target"
+      ],
+      "proargtypes": [
+        "2950",
+        "2950",
+        "25",
+        "3802",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  },
+  {
+    "signature": "read_native_turn_requirements(uuid,jsonb)",
+    "body": "15bf5ffc81de78b0403eb30b2b00dd81f275b7691eada049243ebf8f6c4045b8",
+    "language": "plpgsql",
+    "volatility": "v",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "read_native_turn_requirements",
+      "prorows": 0,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "roots"
+      ],
+      "proargtypes": [
+        "2950",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "v",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  },
+  {
+    "signature": "native_turn_edges(uuid,jsonb)",
+    "body": "e5c5255989035650c73945e979581faeedb0135ce8f940b347f4f9df1d28735e",
+    "language": "sql",
+    "volatility": "s",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_edges",
+      "prorows": 1000,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "2249",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "t",
+        "t",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "frontier",
+        "parent",
+        "child",
+        "edge_kind"
+      ],
+      "proargtypes": [
+        "2950",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "3802",
+        "3802",
+        "3802",
+        "25"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  },
+  {
+    "signature": "native_turn_privacy_edges(uuid,jsonb)",
+    "body": "f1d8050be647b82a5fd1ebb051f62d2dd0c17067f4551264fb6ff3ce5de5f1d7",
+    "language": "sql",
+    "volatility": "s",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_privacy_edges",
+      "prorows": 1000,
+      "pronargs": 2,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": true,
+      "prosecdef": true,
+      "prorettype": "2249",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": [
+        "i",
+        "i",
+        "t",
+        "t"
+      ],
+      "proargnames": [
+        "w",
+        "frontier",
+        "parent",
+        "child"
+      ],
+      "proargtypes": [
+        "2950",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": [
+        "2950",
+        "3802",
+        "3802",
+        "3802"
+      ],
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  },
+  {
+    "signature": "native_turn_compact_domain(uuid,text,uuid,text[],jsonb,jsonb,jsonb)",
+    "body": "7fd5badb63e7d68c82cfa4e266c2ff35caa83703b3f9f7c286e5283569b4fe2b",
+    "language": "plpgsql",
+    "volatility": "s",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_compact_domain",
+      "prorows": 0,
+      "pronargs": 7,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "t",
+        "i",
+        "fields",
+        "memo",
+        "worklist_frame",
+        "completed_points"
+      ],
+      "proargtypes": [
+        "2950",
+        "25",
+        "2950",
+        "1009",
+        "3802",
+        "3802",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  },
+  {
+    "signature": "native_turn_compact_envelope(uuid,text,uuid,text,text[],jsonb,jsonb,jsonb)",
+    "body": "ad8339ec66f3144c25efe8fdc60aa1aa2825a550edc45e74ea016bd25d75a098",
+    "language": "plpgsql",
+    "volatility": "s",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_compact_envelope",
+      "prorows": 0,
+      "pronargs": 8,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "t",
+        "i",
+        "selection",
+        "fields",
+        "memo",
+        "worklist_frame",
+        "completed_points"
+      ],
+      "proargtypes": [
+        "2950",
+        "25",
+        "2950",
+        "25",
+        "1009",
+        "3802",
+        "3802",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  },
+  {
+    "signature": "native_turn_compact_field(uuid,uuid,text,jsonb,jsonb,jsonb,jsonb)",
+    "body": "eb933c5f96df29237167f291cf3f01f41cf928eb7be0f981bc90764ba16313cc",
+    "language": "plpgsql",
+    "volatility": "s",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_compact_field",
+      "prorows": 0,
+      "pronargs": 7,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "i",
+        "v",
+        "memo",
+        "worklist_frame",
+        "completed_points",
+        "completed_fields"
+      ],
+      "proargtypes": [
+        "2950",
+        "2950",
+        "25",
+        "3802",
+        "3802",
+        "3802",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  },
+  {
+    "signature": "native_turn_compact_scan(uuid,uuid,text,integer,text[],jsonb,jsonb,jsonb,jsonb,jsonb)",
+    "body": "7fb479137370a384bd417ee4515a742da8d1b87cd239648bffaac0e696293bdd",
+    "language": "plpgsql",
+    "volatility": "s",
+    "metadata": {
+      "probin": null,
+      "procost": 100,
+      "prokind": "f",
+      "proname": "native_turn_compact_scan",
+      "prorows": 0,
+      "pronargs": 10,
+      "proconfig": [
+        "search_path=pg_catalog, public, pg_temp"
+      ],
+      "proretset": false,
+      "prosecdef": true,
+      "prorettype": "3802",
+      "prosqlbody": null,
+      "prosupport": "-",
+      "proargmodes": null,
+      "proargnames": [
+        "w",
+        "s",
+        "t",
+        "through",
+        "fields",
+        "bounds",
+        "visibility",
+        "memo",
+        "worklist_frame",
+        "completed_points"
+      ],
+      "proargtypes": [
+        "2950",
+        "2950",
+        "25",
+        "23",
+        "1009",
+        "3802",
+        "3802",
+        "3802",
+        "3802",
+        "3802"
+      ],
+      "proisstrict": false,
+      "proparallel": "u",
+      "protrftypes": null,
+      "provariadic": "0",
+      "provolatile": "s",
+      "proleakproof": false,
+      "proallargtypes": null,
+      "proargdefaults": null,
+      "pronargdefaults": 0
+    }
+  }
+]

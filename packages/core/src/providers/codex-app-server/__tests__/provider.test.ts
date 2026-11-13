@@ -9,6 +9,7 @@ import type { Message, StreamChunk, ToolDefinition } from '../../types.js'
 import {
   CodexProviderProtocolError,
   CodexTurnError,
+  codexToolSchemaMode,
   createCodexAppServerProvider,
 } from '../provider.js'
 import { CodexRpcPeer } from '../rpc.js'
@@ -37,6 +38,7 @@ type Harness = {
   peer: CodexRpcPeer
   inbound: PassThrough
   outbound: RpcFrame[]
+  usageCounts: Map<string, number>
 }
 
 const MODEL = 'gpt-codex-test'
@@ -63,6 +65,7 @@ function createHarness(writeGate?: (frame: RpcFrame, done: (error?: Error | null
     peer: new CodexRpcPeer({ input: inbound, output, maxFrameBytes: 8 * 1024 * 1024 }),
     inbound,
     outbound,
+    usageCounts: new Map(),
   }
 }
 
@@ -104,10 +107,10 @@ function request(harness: Harness, id: string, method: string, params: unknown):
   harness.inbound.write(`${JSON.stringify({ id, method, params })}\n`)
 }
 
-function respondToThreadStart(harness: Harness, frame: RpcFrame, threadId = 'thread-1'): void {
+function respondToThreadStart(harness: Harness, frame: RpcFrame, threadId = 'thread-1', model = MODEL): void {
   respond(harness, frame, {
     thread: { id: threadId },
-    model: MODEL,
+    model,
     modelProvider: 'openai',
   })
 }
@@ -117,6 +120,8 @@ function respondToTurnStart(harness: Harness, frame: RpcFrame, turnId = 'turn-1'
 }
 
 function usage(harness: Harness, threadId: string, turnId: string): void {
+  const count = (harness.usageCounts.get(threadId) ?? 0) + 1
+  harness.usageCounts.set(threadId, count)
   notify(harness, 'thread/tokenUsage/updated', {
     threadId,
     turnId,
@@ -129,11 +134,11 @@ function usage(harness: Harness, threadId: string, turnId: string): void {
         totalTokens: 18,
       },
       total: {
-        inputTokens: 11,
-        cachedInputTokens: 3,
-        outputTokens: 7,
-        reasoningOutputTokens: 2,
-        totalTokens: 18,
+        inputTokens: 11 * count,
+        cachedInputTokens: 3 * count,
+        outputTokens: 7 * count,
+        reasoningOutputTokens: 2 * count,
+        totalTokens: 18 * count,
       },
     },
   })
@@ -1024,21 +1029,23 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
     harness.peer.close()
   })
 
-  it('interrupts an active Codex turn and fails the stream when Brian aborts', async () => {
+  it.each([MODEL, 'gpt-5.6-luna'])('interrupts eager/native turns and fails the stream when Brian aborts (%s)', async model => {
     const harness = createHarness()
     const controller = new AbortController()
     const provider = createCodexAppServerProvider({
       transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' },
-      models: [MODEL],
+      models: [model],
     })
     const session = provider.createSession({
-      model: MODEL,
+      model,
       systemPrompt: 'You are Brian.',
       signal: controller.signal,
+      tools: [ECHO_TOOL],
+      toolRegistration: { mode: 'deferred', catalog: [ECHO_TOOL], active: [] },
     })
     const streamed = collect(session.send([{ role: 'user', content: 'Wait.' }]))
     const threadStart = await waitForMethod(harness, 'thread/start')
-    respondToThreadStart(harness, threadStart)
+    respondToThreadStart(harness, threadStart, 'thread-1', model)
     const turnStart = await waitForMethod(harness, 'turn/start')
     respondToTurnStart(harness, turnStart)
     await new Promise<void>((resolve) => setImmediate(resolve))
@@ -1079,6 +1086,228 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
 
     await expect(streamed).rejects.toEqual(new CodexTurnError())
     harness.peer.close()
+  })
+
+  it('reconciles a completion snapshot coalesced with the turn/start reply', async () => {
+    const harness = createHarness()
+    try {
+      const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' }, models: [MODEL] })
+      const session = provider.createSession({ model: MODEL, systemPrompt: 'Synthetic.' })
+      const first = collect(session.send([{ role: 'user', content: 'Hello' }]))
+      respondToThreadStart(harness, await waitForMethod(harness, 'thread/start'))
+      const start = await waitForMethod(harness, 'turn/start')
+      const item = { type: 'agentMessage', id: 'm', text: 'Hello' }
+      harness.inbound.write([
+        { id: start.id, result: { turn: { id: 'turn-1', status: 'inProgress' } } },
+        { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-1', item } },
+        { method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [item] } } },
+      ].map(frame => JSON.stringify(frame)).join('\n') + '\n')
+      expect((await first).filter(c => c.type === 'text_delta')).toEqual([{ type: 'text_delta', text: 'Hello' }])
+    } finally { harness.peer.close() }
+  })
+
+  it('refuses an unseen earlier item in the authoritative completed turn', async () => {
+    const harness = createHarness()
+    try {
+      const { first } = await startToolTurn(harness)
+      const failure = expect(first).rejects.toThrow('Codex emitted inconsistent response text')
+      notify(harness, 'item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: 'later', delta: 'Later' })
+      notify(harness, 'turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [
+        { type: 'agentMessage', id: 'earlier', text: 'Earlier' }, { type: 'agentMessage', id: 'later', text: 'Later' },
+      ] } })
+      await failure
+    } finally { harness.peer.close() }
+  })
+
+  it('rejects malformed agent-message snapshots instead of treating them as metadata', async () => {
+    const harness = createHarness()
+    try {
+      const { first } = await startToolTurn(harness)
+      const failure = expect(first).rejects.toBeInstanceOf(CodexProviderProtocolError)
+      notify(harness, 'item/completed', { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'agentMessage', id: 'm', text: 42 } })
+      await failure
+    } finally { harness.peer.close() }
+  })
+
+  it.each(['item-only', 'turn-only', 'partial', 'full'])('reconciles completed text without duplicate output: %s', async mode => {
+    const harness = createHarness()
+    try {
+      const { first } = await startToolTurn(harness)
+      const item = { type: 'agentMessage', id: 'message-1', text: 'Hello', phase: 'final_answer' }
+      if (mode === 'partial' || mode === 'full') notify(harness, 'item/agentMessage/delta', {
+        threadId: 'thread-1', turnId: 'turn-1', itemId: item.id, delta: mode === 'partial' ? 'Hel' : 'Hello',
+      })
+      if (mode !== 'turn-only') {
+        notify(harness, 'item/completed', { threadId: 'thread-1', turnId: 'turn-1', item })
+        // Duplicate completion and late redundant deltas must not duplicate text.
+        notify(harness, 'item/completed', { threadId: 'thread-1', turnId: 'turn-1', item })
+        notify(harness, 'item/agentMessage/delta', { threadId: 'thread-1', turnId: 'turn-1', itemId: item.id, delta: 'Hello' })
+      }
+      usage(harness, 'thread-1', 'turn-1')
+      notify(harness, 'turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [item] } })
+      const chunks = await first
+      expect(chunks.filter(c => c.type === 'text_delta').map(c => c.text).join('')).toBe('Hello')
+      expect(chunks.at(-1)).toMatchObject({ type: 'message_end', usage: { inputTokens: 11, outputTokens: 7 } })
+    } finally { harness.peer.close() }
+  })
+
+  it.each(['commentary', 'partial_answer', 'final_answer', null, undefined])('preserves public agent text for phase %s', async phase => {
+    const harness = createHarness()
+    try {
+      const { first } = await startToolTurn(harness)
+      notify(harness, 'turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [
+        { type: 'reasoning', id: 'reasoning', text: 'Not a public answer' },
+        { type: 'agentMessage', id: 'public', text: 'Public answer', phase },
+      ] } })
+      expect((await first).filter(c => c.type === 'text_delta')).toEqual([{ type: 'text_delta', text: 'Public answer' }])
+    } finally { harness.peer.close() }
+  })
+
+  it('ignores another turn snapshot and resets item state between native turns', async () => {
+    const harness = createHarness()
+    try {
+      const { session, first } = await startToolTurn(harness)
+      notify(harness, 'item/completed', { threadId: 'thread-1', turnId: 'stale-turn', item: { type: 'agentMessage', id: 'same-id', text: 'Stale' } })
+      notify(harness, 'turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [
+        { type: 'agentMessage', id: 'same-id', text: 'First' },
+      ] } })
+      expect((await first).filter(c => c.type === 'text_delta')).toEqual([{ type: 'text_delta', text: 'First' }])
+      const second = collect(session.send([{ role: 'user', content: 'Next' }]))
+      respondToTurnStart(harness, await waitForMethod(harness, 'turn/start', 1), 'turn-2')
+      notify(harness, 'turn/completed', { threadId: 'thread-1', turn: { id: 'turn-2', status: 'completed', items: [
+        { type: 'agentMessage', id: 'same-id', text: 'Second' },
+      ] } })
+      expect((await second).filter(c => c.type === 'text_delta')).toEqual([{ type: 'text_delta', text: 'Second' }])
+    } finally { harness.peer.close() }
+  })
+
+  it.each(['conflict', 'ordering', 'usage'])('fails before a coalesced terminal frame can mask a protocol error: %s', async problem => {
+    const harness = createHarness()
+    try {
+      const { first } = await startToolTurn(harness)
+      const failure = expect(first).rejects.toThrow('Codex emitted inconsistent response text')
+      const end = { method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [] } } }
+      const delta = { method: 'item/agentMessage/delta', params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'm', delta: 'Private prefix' } }
+      const usageFrame = (count: number) => ({ method: 'thread/tokenUsage/updated', params: {
+        threadId: 'thread-1', turnId: 'turn-1', tokenUsage: {
+          last: { inputTokens: count, cachedInputTokens: 0, outputTokens: count, totalTokens: count * 2, reasoningOutputTokens: 0 },
+          total: { inputTokens: count, cachedInputTokens: 0, outputTokens: count, totalTokens: count * 2, reasoningOutputTokens: 0 },
+        },
+      } })
+      const frames = problem === 'conflict' ? [delta,
+        { method: 'item/completed', params: { threadId: 'thread-1', turnId: 'turn-1', item: { type: 'agentMessage', id: 'm', text: 'Conflicting private text' } } }, end,
+      ] : problem === 'ordering' ? [delta,
+        { method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [
+          { type: 'agentMessage', id: 'earlier', text: 'Earlier' }, { type: 'agentMessage', id: 'm', text: 'Private prefix' },
+        ] } } }, end,
+      ] : [usageFrame(1), usageFrame(0), end]
+      harness.inbound.write(frames.map(frame => JSON.stringify(frame)).join('\n') + '\n')
+      await failure
+      const interrupt = await waitForMethod(harness, 'turn/interrupt')
+      expect(interrupt.params).toEqual({ threadId: 'thread-1', turnId: 'turn-1' })
+      respond(harness, interrupt, {})
+      const unsubscribe = await waitForMethod(harness, 'thread/unsubscribe')
+      expect(unsubscribe.params).toEqual({ threadId: 'thread-1' })
+      respond(harness, unsubscribe, {})
+      expect(harness.peer.closed).toBe(false)
+    } finally { harness.peer.close() }
+  })
+
+  it('never recovers snapshot text from a failed turn', async () => {
+    const harness = createHarness()
+    try {
+      const { first } = await startToolTurn(harness)
+      const failure = expect(first).rejects.toBeInstanceOf(CodexTurnError)
+      notify(harness, 'turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'failed', error: { message: 'upstream' }, items: [
+        { type: 'agentMessage', id: 'm', text: 'Failed answer' },
+      ] } })
+      await failure
+    } finally { harness.peer.close() }
+  })
+
+  it('accounts every internal model call once, including repeated usage notifications', async () => {
+    const harness = createHarness()
+    try {
+      const { first } = await startToolTurn(harness)
+      for (const count of [1, 2, 2, 3]) notify(harness, 'thread/tokenUsage/updated', {
+        threadId: 'thread-1', turnId: 'turn-1', tokenUsage: {
+          last: { inputTokens: 11, cachedInputTokens: 3, outputTokens: 7, reasoningOutputTokens: 2, totalTokens: 18 },
+          total: { inputTokens: 11 * count, cachedInputTokens: 3 * count, outputTokens: 7 * count, reasoningOutputTokens: 2 * count, totalTokens: 18 * count },
+        },
+      })
+      complete(harness, 'thread-1', 'turn-1')
+      expect((await first).at(-1)).toMatchObject({ type: 'message_end', usage: { inputTokens: 33, outputTokens: 21, cacheReadTokens: 9 } })
+    } finally { harness.peer.close() }
+  })
+
+  it.each([
+    'gpt-5.5', 'gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra',
+    'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6.1-sol-pro',
+  ])('retains registry-reviewed native deferred registration for %s', model => {
+    expect(codexToolSchemaMode(model)).toBe('native-deferred')
+  })
+
+  it.each(['gpt-5.2', 'future-unverified-model', 'gemini-3.6-flash', 'gpt-future-sol'])('ignores a deferred plan and retains eager registration for %s', async model => {
+    const harness = createHarness()
+    try {
+      const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' }, models: [model] })
+      expect(provider.toolSchemaMode?.(model)).toBe('eager')
+      const session = provider.createSession({ model, systemPrompt: 'Synthetic.', tools: [ECHO_TOOL],
+        toolRegistration: { mode: 'deferred', catalog: [{ ...ECHO_TOOL, name: 'deferred_only' }], active: [] } })
+      const first = collect(session.send([{ role: 'user', content: 'Synthetic' }]))
+      const start = await waitForMethod(harness, 'thread/start')
+      expect(start.params).toMatchObject({ dynamicTools: [{ type: 'function', name: 'brian_echo',
+        description: ECHO_TOOL.description, inputSchema: ECHO_TOOL.parameters }] })
+      expect(JSON.stringify(start.params)).not.toMatch(/deferLoading|deferred_only/)
+      respond(harness, start, { thread: { id: 'thread-1' }, model, modelProvider: 'openai' })
+      respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
+      complete(harness, 'thread-1', 'turn-1')
+      expect((await first).at(-1)).toMatchObject({ type: 'message_end', stopReason: 'end_turn' })
+    } finally { harness.peer.close() }
+  })
+
+  it.each([false, true])('registers the complete native deferred catalog with canonical tool identity (stateless: %s)', async stateless => {
+    const harness = createHarness()
+    try {
+      const model = 'gpt-5.6-luna'
+      const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' }, models: [model], toolBatchQuietMs: 1 })
+      const options = { model, systemPrompt: 'Synthetic.', tools: [],
+        toolRegistration: { mode: 'deferred' as const, catalog: [ECHO_TOOL], active: [] } }
+      const messages: Message[] = [{ role: 'user', content: 'Synthetic' }]
+      const stream = collect(stateless ? provider.stream({ ...options, messages }) : provider.createSession(options).send(messages))
+      const started = await waitForMethod(harness, 'thread/start')
+      expect(started.params).toMatchObject({ dynamicTools: [{ type: 'namespace', name: 'brian', tools: [{ name: 'brian_echo', deferLoading: true }] }] })
+      respondToThreadStart(harness, started, 'thread-1', model)
+      respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
+      notify(harness, 'turn/completed', { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed', items: [
+        { type: 'agentMessage', id: 'm', text: 'Done' },
+      ] } })
+      if (stateless) respond(harness, await waitForMethod(harness, 'thread/unsubscribe'), {})
+      expect((await stream).filter(c => c.type === 'text_delta')).toEqual([{ type: 'text_delta', text: 'Done' }])
+    } finally { harness.peer.close() }
+  })
+
+  it.each([
+    { namespace: null, tool: 'brian_echo' },
+    { namespace: 'unrelated', tool: 'brian_echo' },
+    { namespace: 'brian', tool: 'outside_allowlist' },
+    { namespace: 'brian', tool: 'discoverTools' },
+  ])('refuses a callback outside its exact deferred catalog: $namespace/$tool', async ({ namespace, tool }) => {
+    const harness = createHarness()
+    try {
+      const model = 'gpt-5.6-luna'
+      const provider = createCodexAppServerProvider({ transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' }, models: [model] })
+      const session = provider.createSession({ model, systemPrompt: 'Synthetic.', tools: [],
+        toolRegistration: { mode: 'deferred', catalog: [ECHO_TOOL], active: [] } })
+      const first = collect(session.send([{ role: 'user', content: 'Synthetic' }]))
+      respondToThreadStart(harness, await waitForMethod(harness, 'thread/start'), 'thread-1', model)
+      respondToTurnStart(harness, await waitForMethod(harness, 'turn/start'))
+      request(harness, 'invalid-namespace', 'item/tool/call', { threadId: 'thread-1', turnId: 'turn-1', callId: 'call',
+        namespace, tool, arguments: { text: 'Not executed' } })
+      expect((await waitForResponse(harness, 'invalid-namespace')).error).toBeDefined()
+      complete(harness, 'thread-1', 'turn-1')
+      expect((await first).some(c => c.type === 'tool_use_start')).toBe(false)
+    } finally { harness.peer.close() }
   })
 
   it('rejects models outside the authenticated catalog before opening a thread', () => {

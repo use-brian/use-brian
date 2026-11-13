@@ -17,7 +17,7 @@ import { PGlite } from '@electric-sql/pglite'
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm'
 import { vector } from '@electric-sql/pglite-pgvector'
 import assert from 'node:assert/strict'
-import { describe } from 'node:test'
+import { describe, type TestContext } from 'node:test'
 import { migrationOwnerTest as it } from './migration-owner-groups.js'
 import { fileURLToPath } from 'node:url'
 import { readFile, readdir } from 'node:fs/promises'
@@ -77,6 +77,52 @@ async function assertOrdinaryOwner(db: PGlite): Promise<void> {
     (await db.query('SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user')).rows,
     [{ rolsuper: false, rolbypassrls: false }],
   )
+}
+
+/** [COMP:api/native-chat-read-cost] Reuse the ordinary-owner full-chain fixture at8266. */
+async function assertRetainedBootstrap(db:PGlite,t:TestContext):Promise<void>{
+ const migration='8267_retained_native_graph.sql'
+ const sql=toPgliteMigrationSql(await readFile(`${migrationsDir}/${migration}`,'utf8'),migration)
+ const guard='public.native_turn_helpers_current()',publication='public.native_turn_publication_contract()'
+ const definitions=(await db.query<{signature:string;definition:string;body:string}>(
+  `SELECT p.oid::regprocedure::text signature,pg_get_functiondef(p.oid) definition,p.prosrc body
+   FROM pg_proc p WHERE p.oid=ANY($1::regprocedure[])`,[ [guard,publication] ])).rows
+ const original=(name:string)=>definitions.find(row=>row.signature===name.replace('public.',''))!
+ const roster=original(guard).body.match(/AND array_agg\(h.signature ORDER BY h.signature\)=(ARRAY\[[\s\S]*?\]::text\[\]) AND bool_and/)?.[1]
+ assert.ok(roster)
+ await db.exec(`CREATE SEQUENCE public.retained_bootstrap_probe;
+  CREATE FUNCTION public.retained_bootstrap_marker() RETURNS boolean LANGUAGE plpgsql AS $probe$
+   BEGIN PERFORM nextval('public.retained_bootstrap_probe');RETURN true;END$probe$;
+  REVOKE ALL ON FUNCTION public.retained_bootstrap_marker() FROM PUBLIC,app_user`)
+ const changedBody=(name:string,body:string)=>original(name).definition.replace(original(name).body,()=>body)
+ const scenarios=[
+  {name:'native guard code with the same149 members',sql:changedBody(guard,`SELECT public.retained_bootstrap_marker() AND (${original(guard).body})`)},
+  {name:'missing native member',sql:changedBody(guard,original(guard).body.replace(roster,()=>roster.replace(/'[^']*',/,'')))},
+  {name:'extra native member',sql:changedBody(guard,original(guard).body.replace(roster,()=>roster.replace(']::text[]',",'fictional_bootstrap_member()']::text[]")))},
+  {name:'publication comparator code',sql:changedBody(publication,`SELECT public.retained_bootstrap_marker() AND (${original(publication).body})`)},
+  {name:'executable metadata COST',sql:`ALTER FUNCTION ${guard} COST 101`},
+  {name:'PUBLIC guard execution',sql:`GRANT EXECUTE ON FUNCTION ${guard} TO PUBLIC`},
+  {name:'publication default',sql:'ALTER TABLE public.native_turn_publication_work ALTER COLUMN completion_ready SET DEFAULT true'},
+  {name:'publication trigger',sql:'ALTER TABLE public.native_turn_frames DISABLE TRIGGER native_turn_frame_immutable'},
+ ]
+ try{
+  for(const scenario of scenarios)await t.test(`refuses retained bootstrap ${scenario.name} before executing unknown code`,async()=>{
+   await db.exec("SELECT setval('public.retained_bootstrap_probe',1,false);BEGIN")
+   try{
+    await db.exec(scenario.sql)
+    const before=(await db.query("SELECT oid,encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') fingerprint FROM pg_proc p WHERE pronamespace='public'::regnamespace ORDER BY oid")).rows
+    await db.exec('SAVEPOINT retained_install_attempt')
+    await assert.rejects(db.exec(sql),/retained_reader_predecessor_changed|native_annotation_publication_(contract|defaults|triggers)_changed/)
+    await db.exec('ROLLBACK TO SAVEPOINT retained_install_attempt')
+    assert.deepEqual((await db.query('SELECT is_called FROM public.retained_bootstrap_probe')).rows,[{is_called:false}])
+    assert.deepEqual((await db.query("SELECT oid,encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') fingerprint FROM pg_proc p WHERE pronamespace='public'::regnamespace ORDER BY oid")).rows,before)
+    assert.deepEqual((await db.query(`SELECT to_regclass('public.native_retained_contract_helpers') registry,
+     to_regprocedure('public.read_native_retained_session_query(uuid,uuid,integer,integer)') facade,
+     EXISTS(SELECT 1 FROM _migrations WHERE name=$1) applied`,[migration])).rows,[{registry:null,facade:null,applied:false}])
+    await assertOrdinaryOwner(db)
+   }finally{await db.exec('ROLLBACK')}
+  })
+ }finally{await db.exec('DROP FUNCTION public.retained_bootstrap_marker();DROP SEQUENCE public.retained_bootstrap_probe')}
 }
 
 async function assertMigrationSecurity(db: PGlite, forceSkillScopeRls: boolean): Promise<void> {
@@ -618,14 +664,17 @@ describe('[COMP:api/migration-owner-role] Migrations run as an ordinary owner ro
     }
   })
 
-  it('replays the whole chain from empty without a superuser', async () => {
+  it('replays the whole chain from empty without a superuser', async (t) => {
     const snapshot = process.env.BRIAN_TEST_PGLITE_SNAPSHOT
     const identity = snapshot ? await preparedIdentity() : undefined
     const db = await openAsOwner({ prepareRuntime: true })
     try {
       // One connection for every file, so the baseline's row_security = off
       // is still in force when the later data-rewriting migrations run.
-      assert.ok((await migratePglite(db, migrationsDir)) > 0)
+      assert.ok((await migratePglite(db, migrationsDir, { through: '8266_home_app_role_isolation.sql' })) > 0)
+      await assertRetainedBootstrap(db,t)
+      assert.equal(await migratePglite(db, migrationsDir, { through: '8267_retained_native_graph.sql' }), 1)
+      await migratePglite(db, migrationsDir)
       assert.equal(await migratePglite(db, migrationsDir), 0)
       await assertOrdinaryOwner(db)
       await assertMigrationSecurity(db, false)

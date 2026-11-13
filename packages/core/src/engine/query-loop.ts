@@ -2,12 +2,12 @@ import { registryRow } from '@use-brian/shared/model-registry'
 import { debugDocumentFlow, withDocumentFlowDebug } from './document-flow-debug.js'
 import { askQuestionSchema } from '../tools/base/ask-question.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
-import { selectInitialToolSchemas, type ToolSelectionOptions } from './tool-selection.js'
+import { selectInitialToolSchemas, type ToolSelectionOptions, type ToolSelectionResult } from './tool-selection.js'
 import { createToolDiscovery } from './tool-discovery.js'
 import { getHeapStatistics } from 'node:v8'
 import { renderSystemContext } from '../providers/system-context.js'
 import { isInputAuthorityError, ownsInputAdmission, captureInputAdmissionProvider } from '../providers/input-authority.js'
-import type { LLMProvider, Message, ContentBlock, TokenUsage, AssistantResponse, SendOptions, ThinkingLevel, ToolDefinition, ToolParameter } from '../providers/types.js'
+import type { LLMProvider, Message, ContentBlock, TokenUsage, AssistantResponse, SendOptions, ThinkingLevel, ToolDefinition, ToolSchemaRegistration, ToolParameter } from '../providers/types.js'
 import type { Tool, ToolContext, ToolResultMeta } from '../tools/types.js'
 import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
 import { createAccumulator } from '../providers/accumulator.js'
@@ -286,7 +286,7 @@ export type QueryLoopOptions = {
   runtimeSystemContext?: string
   messages: Message[]
   tools: Map<string, Tool>
-  /** Host opt-in only for adapters that re-read the session tool array on every send. */
+  /** Presentation-only opt-in; legacy adapters retain their full eager tool list. */
   deferToolSchemas?: boolean
   toolSelection?: ToolSelectionOptions
   /** Canonical host-owned read adapters; late planning sees the entire prepared context. */
@@ -745,31 +745,54 @@ async function* queryLoopCore(
       : false
   }
 
-  // Build tool definitions for the LLM
-  let toolDefinitions: ToolDefinition[] = Array.from(tools.values())
-    .filter(t => !t.hiddenFromModel && (!t.deferredSchemaOnly || options.deferToolSchemas)).map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.inputSchema._def
-      ? jsonSchemaFromZod(t.inputSchema)
-      : { type: 'object' as const, properties: {} as Record<string, ToolParameter> },
-  }))
+  // Only explicitly capable drivers opt in. In particular, an eager/legacy
+  // driver must not gain a new reserved tool name or auxiliary executor.
+  const registrationMode = options.deferToolSchemas ? provider.toolSchemaMode?.(model) ?? 'eager' : 'eager'
+  const deferToolSchemas = registrationMode === 'dynamic' || registrationMode === 'native-deferred'
 
-  if (options.deferToolSchemas && toolDefinitions.length > 0) {
-    const selected = options.toolSelection?.preselected !== undefined
-      ? { names: [...options.toolSelection.preselected].filter(name => toolDefinitions.some(tool => tool.name === name)),
-          model: null, usage: null, path: 'preparation', durationMs: 0 }
-      : options.toolSelection ? await selectInitialToolSchemas({
-      ...options.toolSelection, definitions: toolDefinitions, messages: options.toolSelection.input?.messages ?? options.messages,
-      runId: `chat-tools-${context.sessionId}-${Date.now()}`, signal: context.abortSignal,
-      assertInputAuthority: options.toolSelection.input?.assertInputAuthority ?? (() => assertModelInputAuthority(context)),
-    }) : undefined
+  // Build tool definitions for the LLM
+  const catalog: ToolDefinition[] = Array.from(tools.values())
+    .filter(t => !t.hiddenFromModel && (!t.deferredSchemaOnly || deferToolSchemas))
+    .map(t => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema._def
+        ? jsonSchemaFromZod(t.inputSchema)
+        : { type: 'object' as const, properties: {} as Record<string, ToolParameter> },
+    }))
+
+  // Keep the original eager-compatible list intact for unknown/fallback adapters.
+  const eagerNames = new Set(Array.from(tools.values())
+    .filter(t => !t.hiddenFromModel && !t.deferredSchemaOnly).map(t => t.name))
+  const toolDefinitions = catalog.filter(t => eagerNames.has(t.name))
+  let toolRegistration: ToolSchemaRegistration | undefined
+  if (deferToolSchemas && catalog.length > 0) {
+    let selected: ToolSelectionResult | undefined
+    if (options.toolSelection?.preselected !== undefined) {
+      selected = {
+        names: [...options.toolSelection.preselected].filter(name => catalog.some(tool => tool.name === name)),
+        model: null, usage: null, path: 'preparation', durationMs: 0,
+      }
+    } else if (options.toolSelection && registrationMode === 'dynamic') {
+      // Native search and eager drivers do not need another model round trip.
+      selected = await selectInitialToolSchemas({
+        ...options.toolSelection,
+        definitions: catalog,
+        messages: options.toolSelection.input?.messages ?? options.messages,
+        runId: `chat-tools-${context.sessionId}-${Date.now()}`,
+        signal: context.abortSignal,
+        assertInputAuthority: options.toolSelection.input?.assertInputAuthority ?? (() => assertModelInputAuthority(context)),
+      })
+    }
     if (selected) await options.toolSelection?.onResult?.(selected)
-    const discovery = createToolDiscovery(toolDefinitions, selected?.names)
+    const discovery = createToolDiscovery(catalog, selected?.names)
     tools.set(discovery.tool.name, discovery.tool)
-    toolDefinitions = discovery.definitions
-    toolDefinitions.push({ name: discovery.tool.name, description: discovery.tool.description,
-      parameters: jsonSchemaFromZod(discovery.tool.inputSchema) })
+    toolRegistration = { mode: 'deferred', catalog, active: discovery.definitions }
+    discovery.definitions.push({
+      name: discovery.tool.name,
+      description: discovery.tool.description,
+      parameters: jsonSchemaFromZod(discovery.tool.inputSchema),
+    })
   }
 
   // In stateless mode, use provider.stream() each turn (no rawHistory accumulation).
@@ -788,6 +811,7 @@ async function* queryLoopCore(
     systemPrompt,
     runtimeSystemContext,
     tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
+    toolRegistration,
     maxTokens: options.maxTokens,
     inputTokenLimit: options.inputTokenLimit,
     signal: context.abortSignal,
@@ -892,7 +916,7 @@ async function* queryLoopCore(
   }
   if(terminalEvidence.length>MAX_TERMINAL_EVIDENCE)terminalEvidence.splice(0,terminalEvidence.length-MAX_TERMINAL_EVIDENCE)
   if(routine.messages.length){nextMessages.push(...routine.messages);if(options.stateless)statelessHistory.push(...routine.messages)}
-  if(routine.complete){toolDefinitions.length=0;tools.clear()}
+  if(routine.complete){toolDefinitions.length=0;toolRegistration=undefined;tools.clear()}
   if(options.routineCalendarRead){
     await assertModelInputPreparation(context, provider, model, nextMessages)
     session=options.stateless?null:createPreparedSession()
@@ -1024,6 +1048,7 @@ async function* queryLoopCore(
             runtimeSystemContext,
             messages: statelessHistory,
             tools: toolDefinitions.length > 0 ? toolDefinitions : undefined,
+            toolRegistration,
             maxTokens: options.maxTokens,
             inputTokenLimit: options.inputTokenLimit,
             ...(nextThinkingLevel ? { thinkingLevel: nextThinkingLevel } : {}),

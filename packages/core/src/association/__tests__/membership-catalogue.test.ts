@@ -13,6 +13,17 @@ describe('[COMP:crm/membership-catalogue] publication contract',()=>{
     expect(resolveMembershipCatalogue(doc,'oasa').plans[0].i18n.en.name).toBe('New plan')
     expect(doc.plans[0].i18n.en.name).toBe('New plan')
   })
+  it('publishes each plan’s selected application fields and preserves legacy defaults',()=>{
+    const previous=document()
+    expect(resolveMembershipCatalogue(previous,'sea').plans[0].application.optionalFields).toBeUndefined()
+    const next=structuredClone(previous)
+    next.plans[0].application.optionalFields=['special_request']
+    const saved=MembershipCatalogueDocumentSchema.parse(next)
+    expect(resolveMembershipCatalogue(saved,'sea').plans[0].application.optionalFields).toEqual(['special_request'])
+    expect(membershipPublicationIssues(saved)).toEqual([])
+    saved.plans[0].application.optionalFields=['interests','interests']
+    expect(MembershipCatalogueDocumentSchema.safeParse(saved).success).toBe(false)
+  })
   it('inherits shared edits for fields without a brand override',()=>{
     const doc=document();doc.plans[0].overrides.sea={en:{name:'SEA only name'}};doc.plans[0].i18n.en.benefits=['Changed shared benefit'];
     expect(resolveMembershipCatalogue(doc,'sea').plans[0].i18n.en).toMatchObject({name:'SEA only name',benefits:['Changed shared benefit']});

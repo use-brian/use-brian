@@ -1,8 +1,10 @@
 import { debugDocumentFlow } from '../../engine/document-flow-debug.js'
 import { Buffer } from 'node:buffer'
-import { providerAliasMap } from '@use-brian/shared/model-registry'
+import { MODEL_REGISTRY, providerAliasMap } from '@use-brian/shared/model-registry'
 import { renderSystemContext } from '../system-context.js'
 import { assertInputAuthority, isInputAuthorityError } from '../input-authority.js'
+import { registeredToolDefinitions } from '../tool-registration.js'
+import { CodexTextReconciler } from './text-reconciler.js'
 import { z } from 'zod'
 import type {
   ContentBlock,
@@ -15,11 +17,15 @@ import type {
   StreamChunk,
   TokenUsage,
   ToolDefinition,
+  ToolSchemaRegistrationMode,
 } from '../types.js'
 import type { CodexRpcPeer } from './rpc.js'
 import { CodexRpcRemoteError } from './rpc.js'
 import {
   AgentMessageDeltaNotificationSchema,
+  AgentMessageItemSchema,
+  ItemCompletedNotificationSchema,
+  ItemLifecycleNotificationSchema,
   DynamicToolCallParamsSchema,
   DynamicToolCallResponseSchema,
   ReasoningSummaryTextDeltaNotificationSchema,
@@ -38,6 +44,16 @@ import {
 
 const MAX_SYSTEM_PROMPT_BYTES = 512 * 1024
 const MODEL_ALIASES = providerAliasMap('openai-codex')
+// Verified against the pinned runtime's model-specific wire surfaces. GPT-5.2
+// accepts registration but exposes no tool_search: deferring would hide tools
+// permanently. Unknown/new models stay eager until the offline contract passes.
+const NATIVE_DEFERRED_MODELS = new Set(MODEL_REGISTRY
+  .filter(row => row.provider === 'openai-codex' && row.codexNativeDeferredTools === true)
+  .map(row => row.apiModelId))
+
+export function codexToolSchemaMode(model: string): ToolSchemaRegistrationMode {
+  return NATIVE_DEFERRED_MODELS.has(MODEL_ALIASES[model] ?? model) ? 'native-deferred' : 'eager'
+}
 const MAX_HISTORY_TEXT_FIELD_BYTES = 256 * 1024
 // Inference app-server peers use an 8 MiB JSONL frame (process.ts). Keep the
 // injected items array below that outer envelope while allowing ordinary
@@ -126,6 +142,7 @@ export function createCodexAppServerProvider(
   return {
     name: 'openai-codex',
     models,
+    toolSchemaMode: codexToolSchemaMode,
 
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
       const session = createSession({
@@ -134,6 +151,7 @@ export function createCodexAppServerProvider(
         systemPrompt: request.systemPrompt,
         runtimeSystemContext: request.runtimeSystemContext,
         tools: request.tools,
+        toolRegistration: request.toolRegistration,
         maxTokens: request.maxTokens,
         temperature: request.temperature,
         thinkingLevel: request.thinkingLevel,
@@ -182,7 +200,19 @@ class CodexProviderRuntime {
       transport.rpc.onRequest('item/tool/call', (params) => this.#handleToolCall(params)),
       transport.rpc.onNotification('item/agentMessage/delta', (params) => {
         this.#handleNotification(params, AgentMessageDeltaNotificationSchema, (session, parsed) => {
-          session.onTextDelta(parsed.turnId, parsed.delta)
+          session.onTextDelta(parsed.turnId, parsed.itemId, parsed.delta)
+        })
+      }),
+      transport.rpc.onNotification('item/started', (params) => {
+        this.#handleNotification(params, ItemLifecycleNotificationSchema, (session, parsed) => {
+          if (parsed.item.type === 'agentMessage') session.onMessageStarted(parsed.turnId, parsed.item.id)
+        })
+      }),
+      transport.rpc.onNotification('item/completed', (params) => {
+        this.#handleNotification(params, ItemCompletedNotificationSchema, (session, parsed) => {
+          if (parsed.item.type === 'agentMessage') {
+            session.onMessageCompleted(parsed.turnId, AgentMessageItemSchema.parse(parsed.item))
+          }
         })
       }),
       transport.rpc.onNotification('item/reasoning/textDelta', (params) => {
@@ -278,11 +308,20 @@ class CodexProviderRuntime {
       // notification in one stream chunk. Wait on the explicit turn-start
       // barrier; a single microtask is insufficient because rpc.request()
       // itself adopts the correlated response promise.
+      const fail = () => session.onRuntimeClosed(
+        new CodexProviderProtocolError('Codex emitted inconsistent response text'),
+      )
       void session.whenTurnReady().then(() => {
-        if (this.#sessions.get(parsed.data.threadId) === session) {
+        if (this.#sessions.get(parsed.data.threadId) !== session) return
+        try {
           apply(session, parsed.data)
+        } catch {
+          // Fail in this reaction, before a coalesced terminal notification can
+          // finish the queue. A chained catch runs one microtask too late.
+          // Never include model text or item IDs in errors/logs.
+          fail()
         }
-      })
+      }, fail)
     }
   }
 }
@@ -292,6 +331,9 @@ class CodexProviderSession implements ProviderSession {
   readonly #transport: CodexProviderTransport
   readonly #options: CodexSessionInit
   readonly #allowedTools: ReadonlyMap<string, ToolDefinition>
+  readonly #dynamicTools: readonly unknown[]
+  readonly #toolNamespace: 'brian' | null
+  readonly #text = new CodexTextReconciler()
   readonly #toolBatchQuietMs: number
   readonly #toolResultTimeoutMs: number
   readonly #sessionIdleUnsubscribeMs: number
@@ -316,6 +358,7 @@ class CodexProviderSession implements ProviderSession {
   #idleTimer: ReturnType<typeof setTimeout> | undefined
   #abortListener: (() => void) | undefined
   #lastUsage: TokenUsage = emptyUsage()
+  #cumulativeUsage: TokenUsage = emptyUsage()
   #sendActive = false
   #disposed = false
   #closedReason: Error | undefined
@@ -336,7 +379,20 @@ class CodexProviderSession implements ProviderSession {
       systemPrompt: truncateUtf8(renderSystemContext(options), MAX_SYSTEM_PROMPT_BYTES),
       runtimeSystemContext: undefined,
     }
-    this.#allowedTools = validateTools(options.tools ?? [])
+    const mode = codexToolSchemaMode(options.model)
+    this.#allowedTools = validateTools(registeredToolDefinitions(options, mode))
+    this.#toolNamespace = mode === 'native-deferred' && options.toolRegistration?.mode === 'deferred' ? 'brian' : null
+    const eager = new Set(this.#toolNamespace ? options.toolRegistration!.active.map(tool => tool.name) : [])
+    const definitions = Array.from(this.#allowedTools.values(), tool => ({
+      type: 'function', name: tool.name, description: tool.description, inputSchema: tool.parameters,
+      ...(this.#toolNamespace ? { deferLoading: !eager.has(tool.name) } : {}),
+    }))
+    // Registration is complete and immutable; Codex's metadata-only search
+    // loads schemas on demand, never executors or new authority. The original
+    // Brian name remains the canonical executor/approval/ledger identity.
+    this.#dynamicTools = this.#toolNamespace && definitions.length
+      ? [{ type: 'namespace', name: this.#toolNamespace, description: 'Admitted Brian tools', tools: definitions }]
+      : definitions
     this.#inputCheck = options.assertInputAuthority
     this.#toolBatchQuietMs = toolBatchQuietMs
     this.#toolResultTimeoutMs = toolResultTimeoutMs
@@ -437,6 +493,7 @@ class CodexProviderSession implements ProviderSession {
       )
     }
 
+    this.#text.clear()
     let currentMessages = messages
     if (!this.#threadId) {
       if (messages.length === 0) {
@@ -513,12 +570,7 @@ class CodexProviderSession implements ProviderSession {
         model: wireModel,
         baseInstructions: this.#options.systemPrompt,
         developerInstructions: null,
-        dynamicTools: Array.from(this.#allowedTools.values(), (tool) => ({
-          type: 'function',
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.parameters,
-        })),
+        dynamicTools: this.#dynamicTools,
         cwd: this.#transport.cwd,
         ephemeral: true,
         allowProviderModelFallback: false,
@@ -582,7 +634,7 @@ class CodexProviderSession implements ProviderSession {
     if (!this.#activeTurnId || call.turnId !== this.#activeTurnId) {
       throw new CodexProviderProtocolError('Codex dynamic tool call targeted the wrong turn')
     }
-    if (call.namespace != null) {
+    if ((call.namespace ?? null) !== this.#toolNamespace) {
       throw new CodexProviderProtocolError('Codex emitted an unexpected tool namespace')
     }
     if (!this.#allowedTools.has(call.tool)) {
@@ -750,8 +802,20 @@ class CodexProviderSession implements ProviderSession {
     })
   }
 
-  onTextDelta(turnId: string, delta: string): void {
-    if (turnId === this.#activeTurnId) this.#emit({ type: 'text_delta', text: delta })
+  onMessageStarted(turnId: string, itemId: string): void {
+    if (turnId === this.#activeTurnId && !this.#closedReason && !this.#disposed) this.#text.start(itemId)
+  }
+
+  onTextDelta(turnId: string, itemId: string, delta: string): void {
+    if (turnId !== this.#activeTurnId || this.#closedReason || this.#disposed) return
+    const text = this.#text.delta(itemId, delta)
+    if (text) this.#emit({ type: 'text_delta', text })
+  }
+
+  onMessageCompleted(turnId: string, item: { id: string; text: string }): void {
+    if (turnId !== this.#activeTurnId || this.#closedReason || this.#disposed) return
+    const text = this.#text.complete(item)
+    if (text) this.#emit({ type: 'text_delta', text })
   }
 
   onThinkingDelta(turnId: string, delta: string): void {
@@ -759,29 +823,49 @@ class CodexProviderSession implements ProviderSession {
   }
 
   #emit(chunk: StreamChunk): void {
+    if (this.#closedReason || this.#disposed) return
     if (this.#activeQueue) this.#activeQueue.push(chunk)
     else this.#detached.push(chunk)
   }
 
   onUsage(notification: ThreadTokenUsageUpdatedNotification): void {
-    if (notification.turnId !== this.#activeTurnId) return
-    const usage = notification.tokenUsage.last
+    if (notification.turnId !== this.#activeTurnId || this.#closedReason || this.#disposed) return
+    const usage = notification.tokenUsage.total
     const mapped: TokenUsage = {
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cachedInputTokens,
       cacheWriteTokens: usage.cacheWriteInputTokens,
     }
-    // A gap model call happens with no send open; it is real spend, so it
-    // accumulates and rides on the next message_end instead of being overwritten.
-    if (this.#activeQueue) this.#lastUsage = mapped
-    else this.#detachedUsage = addUsage(this.#detachedUsage, mapped)
+    // Native schema search can make multiple physical calls within one Brian
+    // send. Charge fresh increments of the pinned runtime's thread totals, not
+    // only its last call; repeated usage notifications must not double bill.
+    const delta: TokenUsage = {
+      inputTokens: mapped.inputTokens - this.#cumulativeUsage.inputTokens,
+      outputTokens: mapped.outputTokens - this.#cumulativeUsage.outputTokens,
+      cacheReadTokens: (mapped.cacheReadTokens ?? 0) - (this.#cumulativeUsage.cacheReadTokens ?? 0),
+      cacheWriteTokens: (mapped.cacheWriteTokens ?? 0) - (this.#cumulativeUsage.cacheWriteTokens ?? 0),
+    }
+    if (Object.values(delta).some(value => value < 0)) {
+      throw new CodexProviderProtocolError('Codex emitted decreasing usage totals')
+    }
+    this.#cumulativeUsage = mapped
+    if (this.#activeQueue) this.#lastUsage = addUsage(this.#lastUsage, delta)
+    else this.#detachedUsage = addUsage(this.#detachedUsage, delta)
   }
 
   onTurnCompleted(notification: TurnCompletedNotification): void {
-    if (notification.turn.id !== this.#activeTurnId) return
+    if (notification.turn.id !== this.#activeTurnId || this.#closedReason || this.#disposed) return
+    if (notification.turn.status === 'completed') {
+      const snapshots = (notification.turn.items ?? [])
+        .filter(item => item.type === 'agentMessage').map(item => AgentMessageItemSchema.parse(item))
+      for (const text of this.#text.completeTurn(snapshots)) {
+        if (text) this.#emit({ type: 'text_delta', text })
+      }
+    }
     const queue = this.#activeQueue
     this.#activeTurnId = undefined
+    this.#text.clear()
 
     if (!queue) {
       // The turn ended while Brian held a tool. Codex has already cancelled
@@ -835,14 +919,20 @@ class CodexProviderSession implements ProviderSession {
   onRuntimeClosed(reason: Error): void {
     if (this.#closedReason) return
     this.#closedReason = reason
+    this.#text.clear()
+    this.#detached = []
+    this.#detachedEnd = undefined
     this.#activeQueue?.fail(reason)
     this.#failParked('Codex app-server stopped before the tool completed.')
-    this.#cancelIdleTimer()
+    // Protocol failures can close one session while its shared RPC peer stays
+    // alive. Do not retain that terminal session/thread after cancelling idle cleanup.
+    void this.dispose()
   }
 
   async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
+    this.#text.clear()
     this.#abortListener?.()
     this.#cancelIdleTimer()
     if (this.#toolBatchTimer) clearTimeout(this.#toolBatchTimer)
@@ -857,6 +947,7 @@ class CodexProviderSession implements ProviderSession {
     const threadId = this.#threadId
     const turnId = this.#activeTurnId
     this.#activeTurnId = undefined
+    this.#text.clear()
     try {
       await this.#transport.rpc.request(
         'turn/interrupt',

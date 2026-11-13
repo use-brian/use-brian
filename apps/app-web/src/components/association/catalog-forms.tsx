@@ -1,20 +1,22 @@
 "use client";
 
 /** Native editors over the canonical generic catalogs and vertical tickets. [COMP:app-web/association] */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ClipboardList, ExternalLink, Ticket, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import { saveAssociationPlan,saveAssociationEvent,saveAssociationTicket,saveAssociationPromotion,type AssociationPlan,type AssociationEvent,type AssociationTicket,type AssociationPromotion,type AssociationPlanSave,type AssociationPromotionSave } from "@/lib/api/association";
+import { listAssociationPage,saveAssociationPlan,saveAssociationEvent,saveAssociationTicket,saveAssociationPromotion,type AssociationPlan,type AssociationEvent,type AssociationTicket,type AssociationPromotion,type AssociationPlanSave,type AssociationPromotionSave } from "@/lib/api/association";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { AssociationField as Field,AssociationChoice as Choice,useAssociationAction,associationInstant,associationLocalTime } from "./operator-controls";
-import { AssociationMoneyField as Money, AssociationCatalogPicker } from "./workspace-ui";
+import { AssociationMoneyField as Money, AssociationCatalogPicker, useAssociationDraftGuard } from "./workspace-ui";
+import { EventRegistrationFields, eventRegistrationMetadata, invalidRegistrationQuestion, readEventRegistration } from "./events/registration-form";
 import { ChoiceCards, FormFooter, FormSection as Group, InlineNotice, Segmented, SwitchField } from "./ui";
 
-function catalogKey(name:string) { return name.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,54) || `item-${crypto.randomUUID().slice(0,8)}`; }
+function catalogKey(name:string) { return name.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,54).replace(/-$/,"") || `item-${crypto.randomUUID().slice(0,8)}`; }
 const COMMON_CURRENCIES=["HKD","USD","CNY","JPY","SGD","EUR","GBP","AUD","TWD","MOP"];
 function currencyList(known:readonly string[]) { return [...new Set([...known.filter(Boolean),...COMMON_CURRENCIES])]; }
 function timezones():string[] { try { return typeof Intl.supportedValuesOf==="function"?Intl.supportedValuesOf("timeZone"):[]; } catch { return []; } }
-function plusHours(local:string,hours:number):string { if(!local)return ""; const date=new Date(local); if(Number.isNaN(date.getTime()))return ""; date.setHours(date.getHours()+hours); return new Date(date.getTime()-date.getTimezoneOffset()*60_000).toISOString().slice(0,23); }
+function plusHours(local:string,hours:number):string { if(!local)return ""; const date=new Date(local); if(Number.isNaN(date.getTime()))return ""; date.setHours(date.getHours()+hours); return eventLocalTime(date.toISOString()); }
 
 function ReferenceField({label,help,value,onChange,locked,maxLength}:{label:string;help:string;value:string;onChange:(v:string)=>void;locked:boolean;maxLength:number}) {
   return <Field label={label} help={help} value={value} onChange={onChange} required disabled={locked} maxLength={maxLength} autoComplete="off" />;
@@ -49,72 +51,237 @@ export function AssociationPlanForm({workspaceId,plan,disabled,onSaved,currencie
   </form>;
 }
 
-export function AssociationEventForm({workspaceId,event,disabled,onSaved,onDirtyChange}:{workspaceId:string;event?:AssociationEvent;disabled:boolean;onSaved:(record:AssociationEvent)=>void;onDirtyChange?:(dirty:boolean)=>void}) {
-  const copy=useT().associationPage,u=copy.ux,t=copy.manage,action=useAssociationAction(workspaceId);
-  const [form,setForm]=useState<Omit<AssociationEvent,"id">>(()=>({slug:event?.slug ?? "",title:event?.title ?? "",description:event?.description ?? "",startsAt:associationLocalTime(event?.startsAt),endsAt:associationLocalTime(event?.endsAt),timezone:event?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,mode:event?.mode ?? "venue",venue:event?.venue ?? null,onlineUrl:event?.onlineUrl ?? null,registrationOpensAt:associationLocalTime(event?.registrationOpensAt),registrationClosesAt:associationLocalTime(event?.registrationClosesAt),capacity:event?.capacity ?? null,status:event?.status ?? "draft",canonicalUrl:event?.canonicalUrl ?? null,programmeKey:event?.programmeKey ?? null,metadata:event?.metadata ?? {}}));
-  const [baseline,setBaseline]=useState(form);
-  const dirty=JSON.stringify(form)!==JSON.stringify(baseline);
-  useEffect(()=>{onDirtyChange?.(dirty);},[dirty,onDirtyChange]);
-  const [customKey,setCustomKey]=useState(!!event),[customEnd,setCustomEnd]=useState(!!event);
-  const [validation,setValidation]=useState("");
-  const set=<K extends keyof typeof form>(key:K,value:(typeof form)[K])=>setForm(old=>({...old,[key]:value}));
-  const zones=timezones();
-  return <form className="space-y-5" onSubmit={e=>{e.preventDefault();if(disabled||!e.currentTarget.checkValidity())return;if(!form.startsAt||!form.endsAt||form.endsAt<=form.startsAt||(form.registrationOpensAt&&form.registrationClosesAt&&form.registrationClosesAt<=form.registrationOpensAt)){setValidation(u.dateInvalid);return;}setValidation("");void action.run(`${t.save}: ${form.title}`,async()=>{const result=await saveAssociationEvent(workspaceId,{...form,status:event?.status ?? "draft",startsAt:associationInstant(form.startsAt)!,endsAt:associationInstant(form.endsAt)!,registrationOpensAt:associationInstant(form.registrationOpensAt ?? ""),registrationClosesAt:associationInstant(form.registrationClosesAt ?? ""),venue:form.mode==="online"?null:form.venue||null,onlineUrl:form.mode==="venue"?null:form.onlineUrl||null,canonicalUrl:form.canonicalUrl||null,programmeKey:form.programmeKey||null});setBaseline(form);onSaved(result.record);},false);}}>
-    <h3 className="sr-only">{event?t.edit:t.newEvent}</h3><fieldset disabled={disabled||action.pending} className="grid min-w-0 gap-6">
-      <Group title={u.basics}>
-        <div className="col-span-full"><Field label={u.title} value={form.title} onChange={v=>setForm(old=>({...old,title:v,...(!customKey?{slug:catalogKey(v)}:{})}))} required maxLength={300}/></div>
-        <Field label={t.start} type="datetime-local" value={form.startsAt} onChange={v=>setForm(old=>({...old,startsAt:v,...(!customEnd?{endsAt:plusHours(v,2)}:{})}))} required help={t.timeHint}/>
-        <Field label={t.end} type="datetime-local" value={form.endsAt} onChange={v=>{setCustomEnd(true);set("endsAt",v);}} required/>
-        <ChoiceCards label={u.where} value={form.mode} onChange={v=>set("mode",v)} columns={3} options={[{value:"venue",label:t.options.venue},{value:"online",label:t.options.online},{value:"hybrid",label:t.options.hybrid}]}/>
-        {form.mode!=="online"?<Field label={t.venue} value={form.venue ?? ""} onChange={v=>set("venue",v)} maxLength={2000}/>:null}
-        {form.mode!=="venue"?<Field label={u.meetingLink} type="url" value={form.onlineUrl ?? ""} onChange={v=>set("onlineUrl",v)} maxLength={2000}/>:null}
-        <Field label={u.capacity} type="number" min={1} max={1000000} value={form.capacity===null?"":String(form.capacity)} onChange={v=>set("capacity",v?Number(v):null)} help={u.capacityHelp}/>
-        <div className="col-span-full"><Field label={t.description} multiline value={form.description} onChange={v=>set("description",v)} maxLength={50000}/></div>
+type EventBasics = Omit<AssociationEvent, "id" | "metadata" | "status" | "commerceManaged">;
+type RegistrationMethod = "automatic" | "free" | "paid" | "external" | "none";
 
+function eventLocalTime(instant: string | null | undefined) {
+  return associationLocalTime(instant).replace(/:00\.000$/, "").replace(/\.000$/, "");
+}
+
+function eventBasics(event?: AssociationEvent): EventBasics {
+  return {
+    slug: event?.slug ?? "", title: event?.title ?? "", description: event?.description ?? "",
+    startsAt: eventLocalTime(event?.startsAt), endsAt: eventLocalTime(event?.endsAt),
+    timezone: event?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, mode: event?.mode ?? "venue",
+    venue: event?.venue ?? null, onlineUrl: event?.onlineUrl ?? null,
+    registrationOpensAt: eventLocalTime(event?.registrationOpensAt), registrationClosesAt: eventLocalTime(event?.registrationClosesAt),
+    capacity: event?.capacity ?? null, canonicalUrl: event?.canonicalUrl ?? null, programmeKey: event?.programmeKey ?? null,
+  };
+}
+
+function registrationSettings(event?: AssociationEvent) {
+  const kind = event?.metadata.registrationKind;
+  const method: RegistrationMethod = kind === "free" || kind === "paid" || kind === "external" || kind === "none" ? kind : "automatic";
+  const external = event?.metadata.external as Record<string, unknown> | undefined;
+  return {
+    method, url: typeof external?.url === "string" ? external.url : "",
+    label: typeof external?.label === "string" ? external.label : "",
+    notice: typeof external?.notice === "string" ? external.notice : "",
+  };
+}
+
+export function AssociationEventForm({ workspaceId, event, disabled, onSaved, onDirtyChange, currencies = [], canSell = true, shortcuts }: {
+  workspaceId: string;
+  event?: AssociationEvent;
+  disabled: boolean;
+  onSaved: (record: AssociationEvent) => void;
+  onDirtyChange?: (dirty: boolean) => void;
+  currencies?: readonly string[];
+  canSell?: boolean;
+  shortcuts?: ReactNode;
+}) {
+  const t = useT().associationPage, u = t.ux, m = t.manage, s = t.staff, w = t.eventSetup;
+  const action = useAssociationAction(workspaceId);
+  const [suffix] = useState(() => crypto.randomUUID().replaceAll("-", "").slice(0, 16));
+  const slug = useRef("");
+  const [form, setForm] = useState(() => eventBasics(event));
+  const [baseline, setBaseline] = useState(form);
+  const [registration, setRegistration] = useState(() => event ? registrationSettings(event) : { ...registrationSettings(), method: "none" as RegistrationMethod });
+  const [savedRegistration, setSavedRegistration] = useState(registration);
+  const [currencyChoice, setCurrency] = useState("");
+  const currency = currencyChoice || currencies[0] || COMMON_CURRENCIES[0]!;
+  const [price, setPrice] = useState<number | null>(null);
+  const [standardForm] = useState(() => readEventRegistration({}));
+  const [questions, setQuestions] = useState(standardForm);
+  const [customForm, setCustomForm] = useState(false);
+  const [invalidQuestion, setInvalidQuestion] = useState("");
+  const [created, setCreated] = useState<AssociationEvent | null>(null);
+  const [customEnd, setCustomEnd] = useState(!!event);
+  const [validation, setValidation] = useState("");
+  const [validationTarget, setValidationTarget] = useState<"title" | "dates" | "external" | "price" | "">("");
+  const registrationChanged = JSON.stringify(registration) !== JSON.stringify(savedRegistration);
+  const local = registration.method === "free" || registration.method === "paid";
+  const dirty = JSON.stringify(form) !== JSON.stringify(baseline) || registrationChanged ||
+    (!event && local && (price !== null || (customForm && JSON.stringify(questions) !== JSON.stringify(standardForm))));
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useAssociationDraftGuard(!event && dirty);
+  const set = <K extends keyof EventBasics>(key: K, value: EventBasics[K]) => setForm(old => ({ ...old, [key]: value }));
+  const zones = timezones();
+  function fail(message: string, target: typeof validationTarget = "") {
+    setValidation(message);
+    setValidationTarget(target);
+  }
+  async function save() {
+    if (!form.title.trim()) { fail(w.eventTitleRequired, "title"); return; }
+    const paid = !event && registration.method === "paid";
+    if (!form.startsAt || !form.endsAt || form.endsAt <= form.startsAt ||
+      (form.registrationOpensAt && form.registrationClosesAt && form.registrationClosesAt <= form.registrationOpensAt)) {
+      fail(u.dateInvalid, "dates");
+      return;
+    }
+    if (registration.method === "external" && !/^https?:\/\//i.test(registration.url.trim())) {
+      fail(s.invalidRegistrationLink, "external");
+      return;
+    }
+    if (paid && (price === null || !Number.isSafeInteger(price) || price <= 0 || !/^[A-Z]{3}$/.test(currency))) {
+      fail(w.invalidTicketPrice, "price");
+      return;
+    }
+    const invalid = !event && local && customForm ? invalidRegistrationQuestion(questions) : "";
+    setInvalidQuestion(invalid);
+    if (invalid) return;
+    fail("");
+    await action.run(event ? w.saveDetails : t.eventPage.saveDraft, async () => {
+      let record = created;
+      if (!record) {
+        let latest: AssociationEvent | undefined;
+        if (event) {
+          const page = await listAssociationPage(workspaceId, "events", { id: event.id });
+          latest = page.items.find(row => row.id === event.id);
+          if (!latest || JSON.stringify(eventBasics(latest)) !== JSON.stringify(baseline) ||
+            (registrationChanged && JSON.stringify(registrationSettings(latest)) !== JSON.stringify(savedRegistration))) {
+            fail(s.eventDetailsChanged);
+            throw new Error("stale_event_basics");
+          }
+        }
+        let metadata = { ...latest?.metadata };
+        if (!event || registrationChanged) {
+          metadata.registrationKind = !event && local ? "automatic" : registration.method;
+          if (registration.method === "external") {
+            metadata.external = { ...(metadata.external as object | undefined), url: registration.url.trim(), label: registration.label.trim(), notice: registration.notice.trim() };
+          }
+        }
+        if (!event && local && customForm) metadata = eventRegistrationMetadata(metadata, questions, standardForm);
+        if (!slug.current) slug.current = event?.slug ?? `${catalogKey(form.title)}-${suffix}`;
+        const result = await saveAssociationEvent(workspaceId, {
+          ...form, slug: slug.current, metadata, status: latest?.status ?? "draft",
+          startsAt: associationInstant(form.startsAt)!, endsAt: associationInstant(form.endsAt)!,
+          registrationOpensAt: associationInstant(form.registrationOpensAt ?? ""), registrationClosesAt: associationInstant(form.registrationClosesAt ?? ""),
+          venue: form.mode === "online" ? null : form.venue || null, onlineUrl: form.mode === "venue" ? null : form.onlineUrl || null,
+          canonicalUrl: form.canonicalUrl || null, programmeKey: form.programmeKey || null,
+        });
+        record = result.record;
+        if (!event && local) setCreated(record);
+      }
+      if (!event && local) {
+        await saveAssociationTicket(workspaceId, record.id, {
+          key: "general-admission", name: w.generalAdmission, currency, priceMinor: paid ? price! : 0, memberPriceMinor: null,
+          capacity: null, perOrderLimit: 10, saleStartsAt: null, saleEndsAt: null, status: "on_sale",
+          eligiblePlanKeys: [], eligibilityRequired: false, eligibilityScope: "buyer",
+        });
+      }
+      const next = eventBasics(record);
+      const nextRegistration = registrationSettings(record);
+      setForm(next); setBaseline(next); setRegistration(nextRegistration); setSavedRegistration(nextRegistration);
+      onSaved(record);
+    }, false);
+  }
+  const admissionOptions = [
+    { value: "none", label: w.noRegistration, icon: X },
+    ...(canSell ? [
+      { value: "free" as const, label: w.freeRegistration, icon: ClipboardList },
+      { value: "paid" as const, label: w.paidRegistration, icon: Ticket },
+    ] : []),
+    { value: "external", label: w.externalRegistration, icon: ExternalLink },
+  ] as const;
+
+  return <form className="space-y-6" onSubmit={e => { e.preventDefault(); if (!disabled && e.currentTarget.reportValidity()) void save(); }}>
+    <fieldset disabled={disabled || action.pending || !!created} className="grid min-w-0 gap-7">
+      <Group title={w.details}>
+        <div className="col-span-full"><Field label={u.title} value={form.title} onChange={v=>set("title",v)} required maxLength={300} aria-invalid={validationTarget === "title"}/>{validationTarget === "title" && <p className="mt-1 text-sm text-destructive" role="alert">{validation}</p>}</div>
+        <Field label={m.start} type="datetime-local" value={form.startsAt} onChange={v=>setForm(old=>({...old,startsAt:v,...(!customEnd?{endsAt:plusHours(v, 2)}:{})}))} required help={m.timeHint}/>
+        <Field label={m.end} type="datetime-local" value={form.endsAt} onChange={v=>{setCustomEnd(true);set("endsAt",v);}} required aria-invalid={validationTarget === "dates"}/>
+        {validationTarget === "dates" && <p className="col-span-full text-sm text-destructive" role="alert">{validation}</p>}
+        <ChoiceCards label={u.where} value={form.mode} onChange={v=>set("mode",v)} columns={3} options={[{value:"venue",label:m.options.venue},{value:"online",label:m.options.online},{value:"hybrid",label:m.options.hybrid}]}/>
+        {form.mode !== "online" && <Field label={m.venue} value={form.venue ?? ""} onChange={v=>set("venue",v)} maxLength={2000}/>}
+        {form.mode !== "venue" && <Field label={u.meetingLink} type="url" value={form.onlineUrl ?? ""} onChange={v=>set("onlineUrl",v)} maxLength={2000}/>}
+        <div className="col-span-full"><Field label={m.description} multiline value={form.description} onChange={v=>set("description",v)} maxLength={50000}/></div>
       </Group>
-      <Group title={u.moreOptions} collapsible>
-        <Field label={t.opens} type="datetime-local" value={form.registrationOpensAt ?? ""} onChange={v=>set("registrationOpensAt",v)}/>
-        <Field label={t.closes} type="datetime-local" value={form.registrationClosesAt ?? ""} onChange={v=>set("registrationClosesAt",v)}/>
-        {zones.length?<label className="flex min-w-0 flex-col gap-1 text-sm">{t.timezone}<SearchableSelect aria-label={t.timezone} value={form.timezone} onValueChange={v=>set("timezone",v)} items={zones.map(zone=>({value:zone,label:zone.replace(/_/g," ")}))} className="min-h-11 md:min-h-9"/></label>
-          :<Field label={t.timezone} value={form.timezone} onChange={v=>set("timezone",v)} required maxLength={100}/>}
-        <Field label={t.canonicalUrl} type="url" value={form.canonicalUrl ?? ""} onChange={v=>set("canonicalUrl",v)} maxLength={2000}/>
-        <Field label={t.programmeKey} value={form.programmeKey ?? ""} onChange={v=>set("programmeKey",v)} maxLength={63}/>
-        <ReferenceField label={u.reference} help={u.referenceHelp} value={form.slug} onChange={v=>{setCustomKey(true);set("slug",v);}} locked={!!event} maxLength={100}/>
+      <Group title={w.admission} id="event-admission">
+        {event ? <>
+          <Choice label={s.registrationMethod} value={registration.method} values={["automatic", "free", "paid", "external", "none"]}
+            labels={{ automatic: w.websiteRegistration, free: s.registrationFree, paid: s.registrationPaid, external: s.registrationExternal, none: s.registrationNone }}
+            onChange={method => setRegistration(current => ({ ...current, method: method as RegistrationMethod }))} />
+          <div className="flex flex-wrap items-end gap-2">{shortcuts}</div>
+        </> : <>
+          <ChoiceCards label={w.registrationQuestion} value={registration.method} options={admissionOptions} columns={4}
+            onChange={method => { setRegistration(current => ({ ...current, method })); fail(""); setInvalidQuestion(""); }} />
+          {canSell && !local && registration.method !== "external" && <p className="col-span-full text-sm text-muted-foreground">{w.chooseRegistration}</p>}
+          {!canSell && <p className="col-span-full text-sm text-muted-foreground">{w.ticketingUnavailable}</p>}
+        </>}
+        {(event || local) && <Field label={w.eventCapacity} type="number" min={1} max={1000000} value={form.capacity === null ? "" : String(form.capacity)} onChange={v=>set("capacity",v?Number(v):null)} help={u.capacityHelp}/>}
+        {!event && local && <div className="col-span-full space-y-4">
+          {registration.method === "paid" && <div className="grid items-start gap-4 md:grid-cols-2">
+            <Money label={w.ticketPrice} currency={currency} value={price} onChange={setPrice} required />
+            {currencies.length > 1 && <Choice label={m.currency} value={currency} onChange={setCurrency} values={[...new Set([currency, ...currencies])]} labels={Object.fromEntries([currency, ...currencies].map(code => [code, code]))} />}
+            {validationTarget === "price" && <p className="text-sm text-destructive md:col-span-2" role="alert">{validation}</p>}
+          </div>}
+          <SwitchField label={w.customQuestions} help={w.standardForm} checked={customForm} onChange={value => { setCustomForm(value); setInvalidQuestion(""); }} />
+          {customForm && <EventRegistrationFields title={form.title} draft={questions} setDraft={setQuestions} invalidQuestion={invalidQuestion} disabled={disabled || action.pending} embedded />}
+        </div>}
+        {registration.method === "external" && <>
+          <Field label={s.registrationLink} type="url" value={registration.url} onChange={url => setRegistration(current => ({ ...current, url }))} required maxLength={2000} aria-invalid={validationTarget === "external"}/>
+          <Field label={s.registrationLinkLabel} value={registration.label} onChange={label => setRegistration(current => ({ ...current, label }))} required maxLength={300}/>
+          <div className="col-span-full"><Field label={s.registrationNotice} value={registration.notice} onChange={notice => setRegistration(current => ({ ...current, notice }))} required maxLength={1000}/></div>
+          {validationTarget === "external" && <p className="col-span-full text-sm text-destructive" role="alert">{validation}</p>}
+        </>}
+      </Group>
+      <Group title={w.registrationSchedule} collapsible defaultOpen={!!(form.registrationOpensAt || form.registrationClosesAt) && !!event}>
+        <Field label={m.opens} type="datetime-local" value={form.registrationOpensAt ?? ""} onChange={v=>set("registrationOpensAt",v)}/>
+        <Field label={m.closes} type="datetime-local" value={form.registrationClosesAt ?? ""} onChange={v=>set("registrationClosesAt",v)}/>
+        {zones.length ? <label className="flex min-w-0 flex-col gap-1 text-sm">{m.timezone}<SearchableSelect aria-label={m.timezone} value={form.timezone} onValueChange={v=>set("timezone",v)} items={[...new Set([form.timezone, ...zones])].map(zone=>({value:zone,label:zone.replace(/_/g," ")}))} className="min-h-11 md:min-h-9"/></label>
+          : <Field label={m.timezone} value={form.timezone} onChange={v=>set("timezone",v)} required maxLength={100}/>}
       </Group>
     </fieldset>
-    {validation?<p role="alert" className="text-sm text-destructive">{validation}</p>:null}{action.feedback}
-    <FormFooter><Button type="submit" className="min-h-11 md:min-h-9" disabled={disabled||action.pending}>{event?t.save:copy.eventPage.saveDraft}</Button></FormFooter>
+    {validation && !validationTarget && <p role="alert" className="text-sm text-destructive">{validation}</p>}
+    {created && action.outcome === "failed" ? <InlineNotice tone="warning">{w.ticketSaveFailed}</InlineNotice> : !validation && action.feedback}
+    <FormFooter>
+      <Button type="submit" className="min-h-11 md:min-h-9" disabled={disabled || action.pending || (!!event && !dirty)}>
+        {action.pending ? w.savingDraft : created ? w.retryTicket : event ? w.saveDetails : t.eventPage.saveDraft}
+      </Button>
+      {created && !action.pending && <Button type="button" variant="outline" className="min-h-11 md:min-h-9" onClick={() => onSaved(created)}>{w.openDraft}</Button>}
+    </FormFooter>
   </form>;
 }
 
-export function AssociationTicketForm({workspaceId,eventId,ticket,disabled,onSaved,currencies=[],onDirtyChange}:{workspaceId:string;eventId:string;ticket?:AssociationTicket;disabled:boolean;onSaved:()=>void;currencies?:readonly string[];onDirtyChange?:(dirty:boolean)=>void}) {
-  const u=useT().associationPage.ux,t=useT().associationPage.manage,action=useAssociationAction(workspaceId);
-  const [form,setForm]=useState(()=>({key:ticket?.key ?? "",name:ticket?.name ?? "",currency:ticket?.currency ?? currencies[0] ?? "",priceMinor:Number(ticket?.priceMinor ?? 0),memberPriceMinor:ticket?.memberPriceMinor===null||ticket?.memberPriceMinor===undefined?null:Number(ticket.memberPriceMinor),eligiblePlanKeys:ticket?.eligiblePlanKeys ?? [],eligibilityRequired:ticket?.eligibilityRequired ?? false,eligibilityScope:ticket?.eligibilityScope ?? "buyer" as AssociationTicket["eligibilityScope"],capacity:ticket?.capacity ?? null,perOrderLimit:ticket?.perOrderLimit ?? 10,saleStartsAt:associationLocalTime(ticket?.saleStartsAt),saleEndsAt:associationLocalTime(ticket?.saleEndsAt),status:ticket?.status ?? "draft"}));
+export function AssociationTicketForm({workspaceId,eventId,ticket,disabled,onSaved,currencies=[],onDirtyChange,firstTicket=false}:{workspaceId:string;eventId:string;ticket?:AssociationTicket;disabled:boolean;onSaved:()=>void;currencies?:readonly string[];onDirtyChange?:(dirty:boolean)=>void;firstTicket?:boolean}) {
+  const copy=useT().associationPage,u=copy.ux,t=copy.manage,w=copy.eventSetup,action=useAssociationAction(workspaceId);
+  const [suffix] = useState(() => crypto.randomUUID().slice(0, 8));
+  const [form,setForm]=useState(()=>({key:ticket?.key ?? (firstTicket ? `general-admission-${suffix}` : ""),name:ticket?.name ?? (firstTicket ? w.generalAdmission : ""),currency:ticket?.currency ?? currencies[0] ?? COMMON_CURRENCIES[0]!,priceMinor:Number(ticket?.priceMinor ?? 0),memberPriceMinor:ticket?.memberPriceMinor===null||ticket?.memberPriceMinor===undefined?null:Number(ticket.memberPriceMinor),eligiblePlanKeys:ticket?.eligiblePlanKeys ?? [],eligibilityRequired:ticket?.eligibilityRequired ?? false,eligibilityScope:ticket?.eligibilityScope ?? "buyer" as AssociationTicket["eligibilityScope"],capacity:ticket?.capacity ?? null,perOrderLimit:ticket?.perOrderLimit ?? 10,saleStartsAt:associationLocalTime(ticket?.saleStartsAt),saleEndsAt:associationLocalTime(ticket?.saleEndsAt),status:ticket?.status ?? (firstTicket ? "on_sale" : "draft")}));
   const [baseline,setBaseline]=useState(form);
   const dirty=JSON.stringify(form)!==JSON.stringify(baseline);
   useEffect(()=>{onDirtyChange?.(dirty);},[dirty,onDirtyChange]);
-  const [customKey,setCustomKey]=useState(!!ticket);
   const [validation,setValidation]=useState("");
   const set=<K extends keyof typeof form>(key:K,value:(typeof form)[K])=>setForm(old=>({...old,[key]:value}));
+  const missingPlanMessage = useT().associationPage.staff.ticketNeedsPlan;
   const statuses:AssociationTicket["status"][]=["draft","on_sale","closed",...(form.status==="sold_out"?["sold_out" as const]:[])];
-  return <form className="space-y-5" onSubmit={e=>{e.preventDefault();if(disabled||!e.currentTarget.checkValidity())return;if(!Number.isSafeInteger(form.priceMinor)||form.priceMinor<0||(form.memberPriceMinor!==null&&(!Number.isSafeInteger(form.memberPriceMinor)||form.memberPriceMinor<0))){setValidation(u.moneyInvalid);return;}if(form.saleStartsAt&&form.saleEndsAt&&form.saleEndsAt<=form.saleStartsAt){setValidation(u.dateInvalid);return;}setValidation("");void action.run(`${t.save}: ${form.name}`,async()=>{await saveAssociationTicket(workspaceId,eventId,{...form,eligiblePlanKeys:form.eligiblePlanKeys.map(v=>v.trim()).filter(Boolean),saleStartsAt:associationInstant(form.saleStartsAt),saleEndsAt:associationInstant(form.saleEndsAt)});setBaseline(form);onSaved();},false);}}>
+  return <form className="space-y-5" onSubmit={e=>{e.preventDefault();if(disabled||!e.currentTarget.checkValidity())return;if(!Number.isSafeInteger(form.priceMinor)||form.priceMinor<0||(form.memberPriceMinor!==null&&(!Number.isSafeInteger(form.memberPriceMinor)||form.memberPriceMinor<0))){setValidation(u.moneyInvalid);return;}if(form.saleStartsAt&&form.saleEndsAt&&form.saleEndsAt<=form.saleStartsAt){setValidation(u.dateInvalid);return;}if(form.eligibilityRequired&&!form.eligiblePlanKeys.length){setValidation(missingPlanMessage);return;}setValidation("");void action.run(`${t.save}: ${form.name}`,async()=>{await saveAssociationTicket(workspaceId,eventId,{...form,eligiblePlanKeys:form.eligiblePlanKeys.map(v=>v.trim()).filter(Boolean),saleStartsAt:associationInstant(form.saleStartsAt),saleEndsAt:associationInstant(form.saleEndsAt)});setBaseline(form);onSaved();},false);}}>
     <h3 className="sr-only">{ticket?t.edit:t.newTicket}</h3><fieldset disabled={disabled||action.pending} className="grid min-w-0 gap-6">
-      <Group title={u.basics}>
-        <div className="col-span-full"><Field label={t.name} value={form.name} onChange={v=>setForm(old=>({...old,name:v,...(!customKey?{key:catalogKey(v)}:{})}))} required maxLength={200}/></div>
+      <Group title={w.ticketDetails}>
+        <div className="col-span-full"><Field label={t.name} value={form.name} onChange={v=>setForm(old=>({...old,name:v,...(!ticket ? { key: `${catalogKey(v)}-${suffix}` } : {})}))} required maxLength={200}/></div>
         <Money label={t.price} currency={form.currency ?? ""} value={form.priceMinor} onChange={v=>set("priceMinor",v ?? Number.NaN)} required help={u.moneyHelp}/>
         <Field label={t.currency} value={form.currency} onChange={v=>set("currency",v.toUpperCase())} required maxLength={3} list={currencyList(currencies)} autoComplete="off"/>
-        <Money label={t.memberPrice} currency={form.currency} value={form.memberPriceMinor} onChange={v=>set("memberPriceMinor",v)}/>
-        <Field label={u.capacity} type="number" min={1} max={1000000} value={form.capacity===null?"":String(form.capacity)} onChange={v=>set("capacity",v?Number(v):null)} help={u.capacityHelp}/>
+        <Field label={w.ticketCapacity} type="number" min={1} max={1000000} value={form.capacity===null?"":String(form.capacity)} onChange={v=>set("capacity",v?Number(v):null)} help={u.capacityHelp}/>
         <ChoiceCards label={u.saleStatus} value={form.status} onChange={v=>set("status",v)} columns={3} options={statuses.map(value=>({value,label:t.options[value]}))}/>
       </Group>
-      <Group title={u.moreOptions} collapsible defaultOpen={form.eligibilityRequired}>
+      <Group title={w.ticketRules} collapsible defaultOpen={form.eligibilityRequired}>
+        <Money label={t.memberPrice} currency={form.currency} value={form.memberPriceMinor} onChange={v=>set("memberPriceMinor",v)}/>
         <Field label={t.saleStart} type="datetime-local" value={form.saleStartsAt} onChange={v=>set("saleStartsAt",v)} help={t.timeHint}/>
         <Field label={t.saleEnd} type="datetime-local" value={form.saleEndsAt} onChange={v=>set("saleEndsAt",v)}/>
         <Field label={t.perOrder} type="number" min={1} max={1000} value={String(form.perOrderLimit)} onChange={v=>set("perOrderLimit",Number(v))} required/>
         <div className="col-span-full"><SwitchField label={u.membersOnly} help={u.membersOnlyHelp} checked={form.eligibilityRequired} onChange={v=>set("eligibilityRequired",v)}/></div>
         {form.eligibilityRequired?<><div className="col-span-full space-y-2"><p className="text-sm font-medium">{u.whichPlans}</p><AssociationCatalogPicker workspaceId={workspaceId} resource="plans" usePlanKeys selected={form.eligiblePlanKeys} onChange={eligiblePlanKeys=>set("eligiblePlanKeys",eligiblePlanKeys)}/></div>
           <div className="col-span-full space-y-1.5 text-sm"><p className="font-medium">{u.whoMustBeMember}</p><Segmented label={u.whoMustBeMember} value={form.eligibilityScope} onChange={v=>set("eligibilityScope",v)} options={[{value:"buyer",label:u.buyer},{value:"attendees",label:u.everyGuest},{value:"buyer_and_attendees",label:u.both}]}/></div></>:null}
-        <ReferenceField label={u.reference} help={u.referenceHelp} value={form.key} onChange={v=>{setCustomKey(true);set("key",v);}} locked={!!ticket} maxLength={63}/>
       </Group>
     </fieldset>
     {validation?<p role="alert" className="text-sm text-destructive">{validation}</p>:null}{action.feedback}

@@ -10,7 +10,8 @@ describe('[COMP:crm/assurance-fixture] Disposable database safety', () => {
   it('uses the canonical runtime by default and accepts its explicit selection', () => {
     const command=['node','fictional-case.mjs','--flag']
     expect(parseLocalFixtureArguments(['--',...command])).toMatchObject({runtimeRole:'app_user',command})
-    expect(parseLocalFixtureArguments(['--pg-bin','/fictional/pg18','--runtime-role','app_user','--migration-dir','/fictional/overlay','--',...command])).toEqual({pgBin:'/fictional/pg18',runtimeRole:'app_user',migrationDirs:['/fictional/overlay'],walArchive:false,command})
+    expect(parseLocalFixtureArguments(['--pg-bin','/fictional/pg18','--runtime-role','app_user','--migration-dir','/fictional/overlay','--',...command])).toEqual({pgBin:'/fictional/pg18',runtimeRole:'app_user',migrationDirs:['/fictional/overlay'],walArchive:false,ordinaryOwner:false,command})
+    expect(parseLocalFixtureArguments(['--ordinary-owner','--',...command])).toMatchObject({ordinaryOwner:true,runtimeRole:'app_user',command})
   })
   it('rejects arbitrary or missing role selection before fixture creation', () => {
     for (const role of ['assurance_app','admin_fixture_app','owner','app_user; SET ROLE owner','other_runtime']) expect(() => parseLocalFixtureArguments(['--runtime-role',role,'--','node','fictional-case.mjs'])).toThrow('Unsupported fixture runtime role')
@@ -56,6 +57,12 @@ describe('[COMP:crm/assurance-fixture] Disposable database safety', () => {
       const load = vi.fn()
       await expect(loadMigrationEnvironment(load, env)).resolves.toBe('fixture')
       expect(load).not.toHaveBeenCalled()
+      const baseMarker={token:'synthetic-token',port:54329,database:'brian_assurance'}
+      await writeFile(marker,JSON.stringify({...baseMarker,bootstrapRole:'unreviewed-role'}))
+      await expect(loadMigrationEnvironment(load,env)).rejects.toThrow('Unsupported fixture bootstrap role')
+      await writeFile(marker,JSON.stringify({...baseMarker,bootstrapRole:'assurance_bootstrap'}))
+      await expect(loadMigrationEnvironment(load,env)).resolves.toBe('fixture')
+      await writeFile(marker,JSON.stringify(baseMarker))
       for (const altered of [
         { ...env, BRIAN_ASSURANCE_TOKEN: 'wrong-token' },
         { ...env, DATABASE_URL: 'postgresql://db.example:54329/brian_assurance' },

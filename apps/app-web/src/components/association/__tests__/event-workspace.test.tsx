@@ -2,18 +2,19 @@
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const api = vi.hoisted(() => ({ module: vi.fn(), list: vi.fn(), read: vi.fn(), media: vi.fn(), save: vi.fn(), publish: vi.fn(), event: vi.fn(), confirm: vi.fn(), upload: vi.fn() }));
-vi.mock("@/lib/api/association", async original => ({ ...await original<typeof import("@/lib/api/association")>(), getAssociationModuleSnapshot: api.module, listAssociationPage: api.list, getSiteContentDraft: api.read, listWebsiteMedia: api.media, saveSiteContentDraft: api.save, publishSiteContent: api.publish, saveAssociationEvent: api.event, uploadWebsiteMedia: api.upload }));
+const api = vi.hoisted(() => ({ module: vi.fn(), list: vi.fn(), read: vi.fn(), media: vi.fn(), save: vi.fn(), publish: vi.fn(), event: vi.fn(), confirm: vi.fn(), upload: vi.fn(), push: vi.fn(), replace: vi.fn(), ticket: vi.fn() }));
+vi.mock("@/lib/api/association", async original => ({ ...await original<typeof import("@/lib/api/association")>(), getAssociationModuleSnapshot: api.module, listAssociationPage: api.list, getSiteContentDraft: api.read, listWebsiteMedia: api.media, saveSiteContentDraft: api.save, publishSiteContent: api.publish, saveAssociationEvent: api.event, saveAssociationTicket: api.ticket, uploadWebsiteMedia: api.upload }));
 vi.mock("@/lib/surface-prefetch", () => ({ associationModuleCacheKey: (w: string) => `association-module:${w}:viewer`, associationPageCacheKey: (w: string, r: string, q = {}) => `crm:${w}:viewer:${r}:${JSON.stringify(q)}`, associationIntentKey: () => "fixture" }));
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: api.confirm }));
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }), useSearchParams: () => new URLSearchParams() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: api.push, replace: api.replace }), useSearchParams: () => new URLSearchParams() }));
 import { AssociationEventsPanel } from "../events-panel";
+import { EventRegistrationForm } from "../events/registration-form";
 import { EventPageEditor } from "../events/event-page-editor";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import { resetSurfaceCache } from "@/lib/surface-cache";
 import type { AssociationEvent } from "@/lib/api/association";
-const e = en.associationPage.eventPage, u = en.associationPage.ux, m = en.associationPage.manage;
+const w = en.associationPage.eventSetup, e = en.associationPage.eventPage, u = en.associationPage.ux, m = en.associationPage.manage;
 const event: AssociationEvent = { id: "event-one", slug: "community-workshop", title: "Community workshop", description: "Meet the community", startsAt: "2027-01-05T12:00:00Z", endsAt: "2027-01-05T14:00:00Z", timezone: "UTC", mode: "venue", venue: "Community hall", onlineUrl: null, registrationOpensAt: null, registrationClosesAt: null, capacity: 20, status: "published", canonicalUrl: null, programmeKey: null, metadata: {} };
 const savedPage = { event: event.slug, summary: { en: "Saved draft" }, sections: [] };
 const publishedPage = { event: event.slug, summary: { en: "Published copy" }, sections: [] };
@@ -32,6 +33,36 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); resetSurfaceCache(); vi.useRealTimers(); });
 describe("[COMP:app-web/association] Event website workspace", () => {
+  it("previews a new question before saving its version and preserves unrelated event data", async () => {
+    const staff = en.associationPage.staff;
+    const current = { ...event, metadata: { registrationKind: "free", externalImport: { preserved: true }, attendeeFields: ["phone"] } };
+    api.list.mockResolvedValue({ items: [current], nextCursor: null });
+    api.event.mockImplementation(async (_workspaceId, record) => ({ record: { id: event.id, ...record } }));
+    await render(<EventRegistrationForm workspaceId="w" event={current} disabled={false} onDirtyChange={vi.fn()} onSaved={vi.fn()} />);
+    await click(staff.addQuestion);
+    await type(staff.question, "What should we prepare?");
+    await click(w.previewForm);
+    const preview = host.querySelector("[data-registration-preview]");
+    expect(preview?.textContent).toContain("What should we prepare?");
+    expect(preview?.querySelector<HTMLInputElement>('input[type="tel"]')?.required).toBe(true);
+    expect(api.event).not.toHaveBeenCalled();
+    await click(staff.saveForm);
+    expect(api.event).toHaveBeenCalledWith("w", expect.objectContaining({ metadata: expect.objectContaining({
+      externalImport: { preserved: true },
+      questionnaire: { version: expect.stringMatching(/^form-/), questions: [expect.objectContaining({ label: "What should we prepare?", type: "text" })] },
+    }) }));
+  });
+  it("keeps another staff member's registration edits when the form changed before save", async () => {
+    const staff = en.associationPage.staff;
+    api.list.mockResolvedValue({ items: [{ ...event, metadata: { attendeeFields: ["organisation"] } }], nextCursor: null });
+    await render(<EventRegistrationForm workspaceId="w" event={event} disabled={false} onDirtyChange={vi.fn()} onSaved={vi.fn()} />);
+    await click(staff.addQuestion);
+    await type(staff.question, "Our own edit");
+    await click(staff.saveForm);
+    expect(api.event).not.toHaveBeenCalled();
+    expect(host.textContent).toContain(staff.formChanged);
+    expect(host.querySelector<HTMLInputElement>('input[maxlength="500"]')?.value).toBe("Our own edit");
+  });
   it("requests website visibility before pagination and labels saved page changes", async () => {
     await render(<AssociationEventsPanel workspaceId="w" />);
     expect(api.list).toHaveBeenCalledWith("w", "events", expect.objectContaining({ website: "visible" }));
@@ -41,11 +72,65 @@ describe("[COMP:app-web/association] Event website workspace", () => {
   });
   it("creates a hidden event and opens its workspace directly", async () => {
     await render(<AssociationEventsPanel workspaceId="w" initialNew />);
-    await type(u.title, "New community workshop"); await type(m.start, "2027-01-05T12:00");
+    await type(u.title, event.title); await type(m.start, "2027-01-05T12:00");
     await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    expect(api.event).toHaveBeenCalledWith("w", expect.objectContaining({ status: "draft", title: "New community workshop" }));
+    expect(api.event).toHaveBeenCalledWith("w", expect.objectContaining({ status: "draft", title: event.title, slug: expect.stringMatching(/^community-workshop-[0-9a-f]{16}$/) }));
     expect(host.querySelector("[data-event-detail]")).toBeTruthy();
-    expect(host.textContent).toContain(e.nameDetails); expect(host.textContent).toContain(e.feesTitle);
+    expect(host.querySelector("[data-event-basics]")).toBeTruthy();
+    expect(api.replace).toHaveBeenCalledWith(`/w/w/association?section=events&filter=drafts&eventId=${event.id}`);
+    await click(w.tickets);
+    expect(host.querySelector("[data-event-tickets]")).toBeTruthy();
+    expect(api.push).toHaveBeenCalledWith(`/w/w/association?section=events&eventId=${event.id}&view=tickets`);
+  });
+  it("creates a paid draft with its questions and retries a failed ticket without saving the event twice", async () => {
+    const staff = en.associationPage.staff;
+    api.event.mockImplementation(async (_workspace, body) => ({ record: { id: event.id, ...body } }));
+    api.ticket.mockRejectedValueOnce(new Error("temporary")).mockResolvedValueOnce({ ticket: { key: "general-admission" } });
+    await render(<AssociationEventsPanel workspaceId="w" initialNew />);
+    await type(u.title, "Paid workshop");
+    await type(m.start, "2027-01-05T12:00");
+    await click(w.paidRegistration);
+    const price = [...host.querySelectorAll("label")].find(label => label.firstChild?.textContent === w.ticketPrice)?.querySelector("input");
+    expect(price).toBeTruthy();
+    await type(w.ticketPrice, "180.57");
+    const questions = [...host.querySelectorAll("label")].find(label => label.textContent?.startsWith(w.customQuestions))?.querySelector<HTMLElement>('[role="switch"]');
+    await act(async () => questions!.click());
+    await click(staff.addQuestion);
+    await type(staff.question, "Dietary requirements");
+    await click(w.previewForm);
+    await click(e.saveDraft);
+    expect(host.textContent).toContain(w.ticketSaveFailed);
+    expect(api.event).toHaveBeenCalledWith("w", expect.objectContaining({ metadata: expect.objectContaining({
+      registrationKind: "automatic", questionnaire: expect.objectContaining({ questions: [expect.objectContaining({ label: "Dietary requirements" })] }),
+    }) }));
+    expect(api.ticket).toHaveBeenCalledWith("w", event.id, expect.objectContaining({ key: "general-admission", priceMinor: 18057, status: "on_sale" }));
+    await click(w.retryTicket);
+    expect(api.ticket).toHaveBeenCalledTimes(2);
+    expect(api.event).toHaveBeenCalledOnce();
+    expect(host.querySelector("[data-event-basics]")).toBeTruthy();
+  });
+  it("preserves the latest registration metadata when staff save event basics", async () => {
+    await render(<AssociationEventsPanel workspaceId="w" initialEventId={event.id} />);
+    const latest = { ...event, metadata: { registrationKind: "free", attendeeFields: ["phone"] } };
+    api.list.mockResolvedValue({ items: [latest], nextCursor: null });
+    api.event.mockImplementation(async (_workspace, body) => ({ record: { id: event.id, ...body } }));
+    await type(m.venue, "Different venue");
+    const form = host.querySelector("[data-event-basics] form")!;
+    await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(api.event).toHaveBeenCalledWith("w", expect.objectContaining({ venue: "Different venue", status: "published", metadata: latest.metadata }));
+  });
+  it("requires confirmation before including other event pages in publication", async () => {
+    const load = api.read.getMockImplementation()!;
+    api.read.mockImplementation(async (workspace, collection) => {
+      const result = await load(workspace, collection);
+      return collection !== "event-pages" ? result : { ...result, document: { schemaVersion: 1, pages: [savedPage, { event: "other-event", sections: [] }] } };
+    });
+    api.confirm.mockResolvedValue(false);
+    await render(<EventPageEditor workspaceId="w" event={event} />);
+    await click(e.publishPage);
+    expect(api.confirm).toHaveBeenCalledOnce();
+    expect(api.publish).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("other event");
   });
   it("keeps create and page-draft controls out of a member's view", async () => {
     api.module.mockResolvedValue({ canManage: false, module: { state: "enabled" } });
@@ -81,17 +166,18 @@ describe("[COMP:app-web/association] Event website workspace", () => {
   it("keeps unsaved page changes when staff decline to leave the editor", async () => {
     api.confirm.mockResolvedValue(false);
     await render(<AssociationEventsPanel workspaceId="w" initialEventId={event.id} />);
+    await click(w.websitePage);
     await type(e.summary, "Keep this draft"); await click(u.guests);
     expect(api.confirm).toHaveBeenCalled(); expect(host.querySelector("[data-event-page-editor]")).toBeTruthy();
     expect((host.querySelector("[data-event-page-editor] textarea") as HTMLTextAreaElement).value).toBe("Keep this draft");
   });
-  it("guards unsaved name edits and blocks publication until they are saved", async () => {
+  it("keeps unsaved details when staff decline to move to publication", async () => {
     api.confirm.mockResolvedValue(false);
     await render(<AssociationEventsPanel workspaceId="w" initialEventId={event.id} />);
-    await type(u.title, "Keep this new name"); await click(u.guests);
+    await type(u.title, "Keep this new name"); await click(w.websitePage);
     expect(api.confirm).toHaveBeenCalled(); expect(host.querySelector("[data-event-detail]")).toBeTruthy();
-    expect([...host.querySelectorAll("button")].find(b => b.textContent === e.publishPage)?.disabled).toBe(true);
-    expect(host.textContent).toContain(e.finishDetails);
+    expect(host.querySelector("[data-event-page-editor]")).toBeNull();
+    expect(host.querySelector<HTMLInputElement>('[data-event-basics] input[maxlength="300"]')?.value).toBe("Keep this new name");
   });
   it("hides an event through its canonical status while preserving its identity and history", async () => {
     await render(<AssociationEventsPanel workspaceId="w" initialEventId={event.id} />); await click(e.moreActions);
@@ -117,6 +203,17 @@ describe("[COMP:app-web/association] Event website workspace", () => {
     await render(null); resetSurfaceCache(); api.read.mockResolvedValue({ version: 2, document: { pages: [savedPage] }, published: { pages: [publishedPage] }, readers: [], issues: ["Missing media"], issueDetails: [] });
     await render(<EventPageEditor workspaceId="w" event={event} />);
     expect([...host.querySelectorAll("button")].find(b => b.textContent === e.publishPage)?.disabled).toBe(true);
+  });
+  it("opens the website that has read the published event pages first", async () => {
+    const load = api.read.getMockImplementation()!;
+    api.read.mockImplementation(async (workspace, collection) => {
+      if (collection === "settings") return { published: { sites: {
+        brand: { websiteUrl: "https://brand.example" }, events: { websiteUrl: "https://events.example" },
+      } } };
+      return { ...await load(workspace, collection), readers: ["brand", "events"], observations: { events: { revision: 1 } } };
+    });
+    await render(<EventPageEditor workspaceId="w" event={event} />);
+    expect(host.querySelector("iframe")?.src).toBe("https://events.example/preview/event/");
   });
   it("accepts ready messages only from the preview frame and compares draft with published content", async () => {
     vi.useFakeTimers(); await render(<EventPageEditor workspaceId="w" event={event} />);

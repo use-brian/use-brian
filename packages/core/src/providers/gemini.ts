@@ -1,3 +1,4 @@
+import { registeredToolDefinitions } from './tool-registration.js'
 import { bufferProviderStream } from './stream-backpressure.js'
 import type { HttpRetryWindow } from './types.js'
 /**
@@ -11,7 +12,7 @@ import type { HttpRetryWindow } from './types.js'
 import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import { Agent } from 'undici'
 import { providerAliasMap, recordedAliasIds, providerModelIds, registryRow } from '@use-brian/shared/model-registry'
-import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, SessionOptions, StreamChunk, Message, ContentBlock, ThinkingLevel, ToolDefinition, StopReason, TokenUsage } from './types.js'
+import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, SessionOptions, StreamChunk, Message, ContentBlock, ThinkingLevel, ToolDefinition, ToolSchemaRegistration, StopReason, TokenUsage } from './types.js'
 import type { GoogleTransport } from './google-transport.js'
 import { aiStudioTransport } from './google-transport.js'
 import { createGeminiHttpRetry } from './gemini-http-retry.js'
@@ -332,7 +333,7 @@ export function geminiSamplingConfig(modelId: string, temperature?: number): { t
   return { temperature }
 }
 
-function toToolDeclarations(tools: ToolDefinition[]): GeminiFunctionDeclaration[] {
+function toToolDeclarations(tools: readonly ToolDefinition[]): GeminiFunctionDeclaration[] {
   return tools.map((t) => ({
     name: t.name,
     description: t.description,
@@ -675,7 +676,7 @@ export function resolveGeminiThinkingLevel(
 
 function buildRequest(
   contents: GeminiContent[],
-  options: { systemPrompt: string; runtimeSystemContext?: string; historySystemContext?: string[]; tools?: ToolDefinition[]; maxTokens?: number; temperature?: number; thinkingLevel?: ThinkingLevel; responseFormat?: 'json'; responseSchema?: Record<string, unknown> },
+  options: { systemPrompt: string; runtimeSystemContext?: string; historySystemContext?: string[]; tools?: ToolDefinition[]; toolRegistration?: ToolSchemaRegistration; maxTokens?: number; temperature?: number; thinkingLevel?: ThinkingLevel; responseFormat?: 'json'; responseSchema?: Record<string, unknown> },
   modelId: string,
 ): GeminiRequest {
   // Universal choke point: every request (stateless stream() AND stateful
@@ -685,8 +686,9 @@ function buildRequest(
   const systemParts = systemContextParts(options)
 
   const toolEntries: GeminiToolEntry[] = []
-  if (options.tools?.length) {
-    toolEntries.push({ functionDeclarations: toToolDeclarations(options.tools) })
+  const tools = registeredToolDefinitions(options, 'dynamic')
+  if (tools.length) {
+    toolEntries.push({ functionDeclarations: toToolDeclarations(tools) })
   }
   // Google Search grounding is removed entirely. The explicit webSearch +
   // urlReader tools handle all web search via a Brave/Serper/Tavily/DDG
@@ -887,6 +889,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
 
   const provider: LLMProvider = {
     name: 'gemini',
+    toolSchemaMode: () => 'dynamic',
     models: [...providerModelIds('gemini')],
 
     // Stateless single-shot

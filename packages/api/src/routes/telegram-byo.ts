@@ -80,6 +80,7 @@ import { processChannelMessage } from './channel-pipeline.js'
 import { admitChannelMessage } from './channel-message-admission.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { isDeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
+import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 import { deliveryAudienceFailureKind, deliveryFailureAnalytics } from '../context-scope/delivery-failure.js'
 import { cacheInboundImage } from './channel-file-cache.js'
 import { mediaByteLimit, type ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
@@ -2245,6 +2246,8 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   type ToolEntry = { id: string; name: string; description?: string; done: boolean }
   const toolTimeline: ToolEntry[] = []
   let statusMessageId: string | null = null
+  let statusClosed = false
+  let statusUpdates = Promise.resolve()
   let lastStatusUpdate = 0
   const STATUS_THROTTLE_MS = 1500
   // Cap the timeline so a long browse (dozens of clicks) doesn't stack an
@@ -2263,25 +2266,58 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     return [`(+${hidden} earlier step${hidden === 1 ? '' : 's'})`, ...lines.slice(-MAX_TIMELINE_LINES)].join('\n')
   }
 
+  function queueStatus(update: () => Promise<void>): Promise<void> {
+    if (statusClosed) return Promise.resolve()
+    const pending = statusUpdates.then(async () => {
+      if (!statusClosed) await update()
+    })
+    // A failed status update must not strand cleanup or later updates.
+    statusUpdates = pending.catch(() => {})
+    return pending
+  }
+
+  function discardStatus(): void {
+    const messageId = statusMessageId
+    statusMessageId = null
+    if (!messageId) return
+    // Telegram requests can stall. Progress deletion must never hold the
+    // terminal reply, Stop acknowledgement or lease release behind them.
+    void (async () => {
+      try { await adapter.deleteMessage?.(incoming.channelId, messageId) }
+      catch { /* Progress deletion is best effort. */ }
+    })()
+  }
+
+  async function cleanupStatus(): Promise<void> {
+    if (statusClosed) return
+    statusClosed = true
+    discardStatus()
+    // Keep ownership of an in-flight send without making terminal delivery
+    // wait for it. Queued and later updates cannot create another card.
+    void statusUpdates.then(discardStatus)
+  }
+
   async function updateToolStatus(): Promise<void> {
-    const now = Date.now()
-    if (now - lastStatusUpdate < STATUS_THROTTLE_MS) return
-    lastStatusUpdate = now
-    const latest = toolTimeline.at(-1)
-    const response = {
-      ephemeral: true,
-      text: latest ? `${latest.done ? '✓' : '⏳'} ${humanizeToolName(latest.name)}` : 'Thinking...',
-      collapsibleDetails: latest ? `Watch more\n${formatToolTimeline()}` : undefined,
-    }
-    try {
-      if (statusMessageId) {
-        await adapter.editMessage(incoming.channelId, statusMessageId, response)
-      } else {
-        statusMessageId = await adapter.sendMessage(incoming.channelId, response)
+    await queueStatus(async () => {
+      const now = Date.now()
+      if (now - lastStatusUpdate < STATUS_THROTTLE_MS) return
+      lastStatusUpdate = now
+      const latest = toolTimeline.at(-1)
+      const response = {
+        ephemeral: true,
+        text: latest ? `${latest.done ? '✓' : '⏳'} ${humanizeToolName(latest.name)}` : 'Thinking...',
+        collapsibleDetails: latest ? `Watch more\n${formatToolTimeline()}` : undefined,
       }
-    } catch {
-      // Edit/send failed — non-critical
-    }
+      try {
+        if (statusMessageId) {
+          await adapter.editMessage(incoming.channelId, statusMessageId, response)
+        } else {
+          statusMessageId = await adapter.sendMessage(incoming.channelId, response)
+        }
+      } catch {
+        // Edit/send failed — non-critical
+      }
+    })
   }
 
   const combinedText = attachmentContext + incoming.text
@@ -2386,10 +2422,11 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         await adapter.sendTypingIndicator(incoming.channelId)
       },
       async onStatus(message) {
-        if (!statusMessageId) {
-          statusMessageId = await adapter.sendStatus(incoming.channelId, message)
-        }
+        await queueStatus(async () => {
+          if (!statusMessageId) statusMessageId = await adapter.sendStatus(incoming.channelId, message)
+        })
       },
+      onCleanup: cleanupStatus,
       async onToolStart(id, name) {
         toolTimeline.push({ id, name, done: false })
         await updateToolStatus()
@@ -2419,11 +2456,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       },
       async sendResponse(text, documents, _question, actions) {
         if (conversationContext) await assertTelegramConversationCurrent(conversationContext)
-        // Delete the tool status message, then send response as a new message
-        if (statusMessageId) {
-          await adapter.deleteMessage?.(incoming.channelId, statusMessageId)
-          statusMessageId = null
-        }
+        await cleanupStatus()
         // Strip zero-width spaces (U+200B, U+FEFF) that some models emit as "empty" responses
         const cleaned = text.replace(/[\u200B\uFEFF]/g, '').trim()
         if (cleaned || documents?.length || actions?.length) {
@@ -2464,10 +2497,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         }
       },
       async sendError(err) {
-        if (statusMessageId) {
-          await adapter.deleteMessage?.(incoming.channelId, statusMessageId).catch(() => {})
-          statusMessageId = null
-        }
+        await cleanupStatus()
         // Server-authored messages (usage limit, custom-model image refusal)
         // surface verbatim; arbitrary provider/runtime wording stays hidden.
         // The whitelist lives in _channel-error-text.ts — shared, because a
@@ -2503,7 +2533,7 @@ export function telegramIncomingFailureText(channelId: string, err: unknown): st
     if (failure === 'unbound') return TELEGRAM_GROUP_NOT_APPROVED_NOTICE
     return channelUserErrorText(err)
   }
-  if (isDeliveryAudienceUnverifiedError(err)) return channelUserErrorText(err)
+  if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) return channelUserErrorText(err)
   return TELEGRAM_RETRY_NOTICE
 }
 

@@ -117,6 +117,7 @@ export async function sessionTitleProjection(input:{claims:NativeClaims|null;ses
   const projection=bindScopeSources(Object.freeze({title:title.title,titleRevisionId:title.revisionId}),boundScopeSources(title))
   projectionAuthorities.set(projection,{authority});return projection
  }catch(error){
+  const timeout=titleDatabaseTimeout(error);if(timeout)throw timeout
   if(error instanceof DerivedScopeError||isAuthorityChangedError(error))return heldTitleProjection()
   throw error
  }
@@ -166,6 +167,7 @@ async function tryTitleGroup(claims:NativeClaims,entries:PreparedTitle[],context
   })
   return result
  }catch(error){
+  const timeout=titleDatabaseTimeout(error);if(timeout)throw timeout
   if(error instanceof DerivedScopeError||isAuthorityChangedError(error))return null
   // A union may exceed a canonical walk bound although each original row
   // remains supported. Only that known optional-cohort failure delegates.
@@ -174,9 +176,33 @@ async function tryTitleGroup(claims:NativeClaims,entries:PreparedTitle[],context
   throw error
  }
 }
-/** Original per-row authority and sources are checked again at the actual collection boundary. */
+/** Native caller/output validators retain SQL failures in a private cause chain.
+ * Recognize only the two optional-title timeout codes, before an authority
+ * wrapper can turn one into an ordinary per-row refusal. Cycles are bounded. */
+function titleDatabaseTimeout(error:unknown):object|null{
+ const seen=new Set<object>()
+ for(let depth=0;depth<16&&typeof error==='object'&&error!==null&&!seen.has(error);depth++){
+  seen.add(error)
+  if('code'in error&&['57014','55P03'].includes(String(error.code)))return error
+  error='cause'in error?error.cause:undefined
+ }
+ return null
+}
+/** Titles are optional list decoration. A database timeout must withhold all
+ * provisional bytes, not fail the session list or reuse an earlier admission.
+ * Do not retry per row: a workspace lock can block the whole page. */
 export async function sessionTitleProjections(input:{claims:NativeClaims|null;sessionIds:readonly string[]}):Promise<Map<string,TitleProjection>>{
- const command=structuredClone(input),prepared:Array<{id:string;projection:TitleProjection}>=[]
+ const command=structuredClone(input)
+ try{return await collectSessionTitleProjections(command)}
+ catch(error){
+  const timeout=titleDatabaseTimeout(error);if(!timeout)throw error
+  console.warn('Session list titles withheld after database timeout:',timeout)
+  return new Map(command.sessionIds.map(id=>[id,heldTitleProjection()]))
+ }
+}
+/** Original per-row authority and sources are checked again at the actual collection boundary. */
+async function collectSessionTitleProjections(command:{claims:NativeClaims|null;sessionIds:readonly string[]}):Promise<Map<string,TitleProjection>>{
+ const prepared:Array<{id:string;projection:TitleProjection}>=[]
  if(!command.sessionIds.length)return new Map()
  if(!command.claims)return new Map(command.sessionIds.map(id=>[id,heldTitleProjection()]))
  // Presence metadata can only withhold a label. Missing canonical parents,
@@ -210,6 +236,7 @@ export async function sessionTitleProjections(input:{claims:NativeClaims|null;se
     projectionAuthorities.set(projection,{authority,previewPending:true})
    }
   }catch(error){
+   const timeout=titleDatabaseTimeout(error);if(timeout)throw timeout
    if(!(error instanceof DerivedScopeError||isAuthorityChangedError(error)))throw error
   }
   prepared.push({id,projection})
@@ -304,6 +331,7 @@ export async function sessionTitleProjections(input:{claims:NativeClaims|null;se
    else await assertSourceModelOutputAuthority({...executionToolContext(authority.execution,{appId:'native-session-title-list-output'}),scopeAccumulator:authority.accumulator})
    result.set(id,finalProjection)
   }catch(error){
+   const timeout=titleDatabaseTimeout(error);if(timeout)throw timeout
    if(error instanceof DerivedScopeError||isAuthorityChangedError(error)){result.set(id,heldTitleProjection());continue}
    throw error
   }

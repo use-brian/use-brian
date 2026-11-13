@@ -4,6 +4,8 @@ import type {PoolClient} from 'pg'
 import {ContextScopeAccumulator,DerivedScopeError,resourceScopeKey,type ScopeSource} from '@use-brian/core'
 import {applicationJsonSchema} from '@use-brian/shared'
 import type {readNativeSessionEvidence} from './native-session-evidence.js'
+import {nativeSessionCurrentScopeSchema} from './native-session-evidence.js'
+import {readRetainedNativePacket} from './native-retained-reader.js'
 
 export type NativeSessionQuerySelection=Readonly<{sessionId:string;throughSequence:number;topicThroughSequence:number}>
 const source=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
@@ -22,7 +24,7 @@ export const nativeSessionAnnotationSchema=z.object({id:z.string().uuid(),sequen
 // ordinary fallback, so malformed payloads cannot commit observations.
 const captures=z.object({history:z.array(capture.extend({row:body.nullable()})).min(1),
  annotations:z.array(capture.extend({row:nativeSessionAnnotationSchema.nullable()})).min(1)}).strict()
-const packet=captures.extend({proof:z.object({admitted:z.literal(true),immutable:z.array(source),current:z.array(source)}).strict()})
+const packet=captures.extend({proof:z.object({admitted:z.literal(true),immutable:z.array(source),current:z.array(nativeSessionCurrentScopeSchema)}).strict()})
 export type NativeSessionQueryCaptures=z.infer<typeof captures>
 type CompleteNativeEvidence=Extract<Awaited<ReturnType<typeof readNativeSessionEvidence>>,{kind:'complete'}>
 
@@ -52,7 +54,8 @@ export async function readNativeSessionQueryEvidence(client:Pick<PoolClient,'que
  // operation repeats its code, actor and source checks on every invocation.
  const installed=(await client.query<{available:boolean}>(
   "SELECT to_regprocedure('public.read_native_turn_session_query(uuid,uuid,integer,integer)') IS NOT NULL AS available")).rows[0]?.available===true
- let raw:unknown=installed?(await client.query<{value:unknown}>('SELECT read_native_turn_session_query($1,$2,$3,$4) AS value',args)).rows[0]?.value:null
+ let raw:unknown=await readRetainedNativePacket(client,'query',args)
+ if(raw===null&&installed)raw=(await client.query<{value:unknown}>('SELECT read_native_turn_session_query($1,$2,$3,$4) AS value',args)).rows[0]?.value
  // NULL is possible only before observation writes. A post-write exception or
  // malformed packet must abort the enclosing frame, never retry the old reader.
  if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_session_query_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value

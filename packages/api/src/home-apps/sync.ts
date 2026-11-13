@@ -267,7 +267,14 @@ export function createHomeAppSyncWorker(opts: HomeAppSyncWorkerOptions): {
   return {
     start() {
       if (timer) return
-      timer = setInterval(() => void tick(), intervalMs)
+      timer = setInterval(() => {
+        // Discovery and lock failures belong to this scheduled tick. Observe
+        // them here so they cannot terminate unrelated assistant turns; the
+        // next normal interval owns recovery, and manual tick() still rejects.
+        void tick().catch((err: unknown) => {
+          console.error('[home-app-sync] tick failed:', describeSyncError(err))
+        })
+      }, intervalMs)
       timer.unref?.()
     },
     stop() {

@@ -43,6 +43,9 @@ import request from 'supertest'
 import { createTestApp } from './helpers.js'
 import { TelegramApiError } from '@use-brian/channels'
 import { CUSTOM_MODEL_IMAGE_REJECTION } from '../_channel-error-text.js'
+import { channelUserErrorText } from '../_channel-error-text.js'
+import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
+import type { ChannelHooks } from '../channel-pipeline.js'
 import type { OutgoingMessage } from '@use-brian/channels'
 import type { ToolConfirmationRequest, ConfirmationResolver } from '@use-brian/core'
 
@@ -145,15 +148,23 @@ vi.mock('@use-brian/channels', async () => {
       return Object.assign(real, {
         sendMessage: vi.fn(async (channelId: string, message: OutgoingMessage) => {
           adapterSendCalls.push({ channelId, ...message })
+          if (adapterSendFailure) throw adapterSendFailure
           if (useRealTelegramSend) return realSendMessage(channelId, message)
           return 'msg_stub'
         }),
         answerCallbackQuery: vi.fn(async () => { confirmationOrder.push('ack') }),
-        sendStatus: vi.fn(async () => 'status_stub'),
+        sendStatus: vi.fn(async () => {
+          adapterStatusCalls++
+          return adapterStatusPending ? await adapterStatusPending : 'status_stub'
+        }),
         sendTypingIndicator: vi.fn(async () => {}),
         editMessage: vi.fn(async (...args: unknown[]) => { adapterEditCalls.push(args) }),
         setMessageActions: vi.fn(async (...args: unknown[]) => { adapterActionCalls.push(args) }),
-        deleteMessage: vi.fn(async () => {}),
+        deleteMessage: vi.fn(async (...args: unknown[]) => {
+          adapterDeleteCalls.push(args)
+          if (adapterDeleteFailure) throw adapterDeleteFailure
+          await adapterDeletePending
+        }),
         reactToMessage: vi.fn(async () => {}),
         leaveChat: vi.fn(async (chatId: string) => { leaveChatCalls.push(chatId) }),
         // Stub the network-touching media helpers — the real impl calls
@@ -234,6 +245,7 @@ const pipelineCalls: Array<{
   userContentBlocks?: Array<{ type: string; mimeType?: string }>
 }> = []
 let pipelineError: Error | undefined
+let pipelineHookRun: ((hooks: ChannelHooks) => Promise<void>) | undefined
 let deliverChannelResponse: typeof import('../channel-pipeline.js')['deliverChannelResponse']
 
 beforeAll(async () => {
@@ -268,12 +280,7 @@ vi.mock('../channel-pipeline.js', () => ({
     providerVisibleContext?: string | null
     messageText?: string
     userContentBlocks?: Array<{ type: string; mimeType?: string }>
-    hooks: {
-      sendResponse: (text: string, documents?: OutgoingTestDocument[], question?: { question: string; options?: string[] }, actions?: OutgoingAction[]) => Promise<void>
-      sendError?: (err: Error) => Promise<void>
-      onConfirmationRequired: (req: ToolConfirmationRequest) => Promise<void>
-      onToolStart: (id: string, name: string) => Promise<void>
-    }
+    hooks: ChannelHooks
   }) => {
     const binding = params.interactionScope && params.incomingMessage ? {
       integrationId: params.interactionScope.integrationId, assistantId: params.assistant.id,
@@ -304,10 +311,12 @@ vi.mock('../channel-pipeline.js', () => ({
       messageText: params.messageText,
       userContentBlocks: params.userContentBlocks,
     })
-    if (pipelineConfirmation) {
-      await params.hooks.onToolStart(pipelineConfirmation.toolCallId, pipelineConfirmation.toolName)
+    if (pipelineHookRun) {
+      await pipelineHookRun(params.hooks)
+    } else if (pipelineConfirmation) {
+      await params.hooks.onToolStart?.(pipelineConfirmation.toolCallId, pipelineConfirmation.toolName)
       pipelineConfirmationDispose = channelConfirmations.register(params.interactionScope!, pipelineConfirmation, pipelineResolver as unknown as ConfirmationResolver)
-      await params.hooks.onConfirmationRequired(pipelineConfirmation)
+      await params.hooks.onConfirmationRequired?.(pipelineConfirmation, pipelineResolver as unknown as ConfirmationResolver)
     } else if (pipelineError) {
       await params.hooks.sendError?.(pipelineError)
     } else {
@@ -393,6 +402,12 @@ vi.mock('../../db/channel-user-store.js', async () => {
 type OutgoingTestDocument = { filename: string; mime: string; data: Uint8Array; caption?: string }
 const adapterSendCalls: Array<OutgoingMessage & { channelId: string }> = []
 const adapterEditCalls: unknown[][] = []
+const adapterDeleteCalls: unknown[][] = []
+let adapterDeleteFailure: Error | undefined
+let adapterDeletePending: Promise<void> | undefined
+let adapterSendFailure: Error | undefined
+let adapterStatusPending: Promise<string> | undefined
+let adapterStatusCalls = 0
 const adapterActionCalls: unknown[][] = []
 let pipelineConfirmation: ToolConfirmationRequest | undefined
 const pipelineResolver = { resolve: vi.fn() }
@@ -503,6 +518,13 @@ beforeEach(() => {
   adapterSendCalls.length = 0
   pipelineQuestion = undefined
   adapterEditCalls.length = 0
+  adapterDeleteCalls.length = 0
+  adapterDeleteFailure = undefined
+  adapterDeletePending = undefined
+  adapterSendFailure = undefined
+  adapterStatusPending = undefined
+  adapterStatusCalls = 0
+  pipelineHookRun = undefined
   adapterActionCalls.length = 0
   pipelineConfirmation = undefined
   pipelineResolver.resolve.mockClear()
@@ -602,6 +624,154 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
       }),
     )
   }
+
+  async function startSyntheticTurn() {
+    await postUpdate(makeApp(), {
+      update_id: 790,
+      message: { message_id: 790, from: { id: 42, first_name: 'Casey' },
+        chat: { id: 42, type: 'private' }, date: Math.floor(Date.now() / 1000), text: 'hello' },
+    })
+  }
+
+  it.each(['reply', 'authority refusal', 'Stop', 'cancellation'] as const)(
+    'removes its progress card exactly once on %s and ignores later status', async terminal => {
+      let finished = false
+      const refusal = new AuthorityChangedError(true)
+      refusal.message = 'PRIVATE connector payload; usage limit'
+      pipelineHookRun = async hooks => {
+        await hooks.onStatus?.('Searching tools')
+        try {
+          if (terminal === 'reply') await hooks.sendResponse('Synthetic final reply')
+          else if (terminal === 'authority refusal') await hooks.sendError(refusal)
+          else if (terminal === 'Stop') await hooks.sendResponse('Stopped.')
+        } finally { await hooks.onCleanup?.() }
+        await hooks.onCleanup?.()
+        await hooks.onStatus?.('Late search')
+        await hooks.onToolStart?.('late-tool', 'mcp_search')
+        finished = true
+      }
+      await startSyntheticTurn()
+      await vi.waitFor(() => expect(finished).toBe(true))
+      expect(adapterDeleteCalls).toEqual([['42', 'status_stub']])
+      expect(adapterStatusCalls).toBe(1)
+      expect(adapterEditCalls).toHaveLength(0)
+      expect(adapterSendCalls.map(call => call.text)).toEqual(terminal === 'cancellation' ? [] : [
+        terminal === 'reply' ? 'Synthetic final reply' : terminal === 'Stop' ? 'Stopped.' : channelUserErrorText(refusal),
+      ])
+      expect(JSON.stringify(adapterSendCalls)).not.toContain('PRIVATE')
+    },
+  )
+
+  it('deletes an in-flight card after it gets its id without recreating it from queued status', async () => {
+    let resolveStatus!: (id: string) => void
+    adapterStatusPending = new Promise(resolve => { resolveStatus = resolve })
+    let finished = false
+    pipelineHookRun = async hooks => {
+      const sending = hooks.onStatus?.('Searching tools')
+      await vi.waitFor(() => expect(adapterStatusCalls).toBe(1))
+      const queued = hooks.onToolStart?.('queued-tool', 'mcp_search')
+      const cleaning = hooks.onCleanup?.()
+      resolveStatus('owned-progress')
+      await Promise.all([sending, queued, cleaning])
+      await hooks.onStatus?.('Late status')
+      await hooks.onCleanup?.()
+      finished = true
+    }
+    await startSyntheticTurn()
+    await vi.waitFor(() => expect(finished).toBe(true))
+    expect(adapterDeleteCalls).toEqual([['42', 'owned-progress']])
+    expect(adapterStatusCalls).toBe(1)
+    expect(adapterEditCalls).toHaveLength(0)
+    expect(adapterSendCalls).toHaveLength(0)
+  })
+
+  it.each(['Stop', 'authority refusal'] as const)('finishes %s without waiting for an unresolved status send', async terminal => {
+    let resolveStatus!: (id: string) => void
+    adapterStatusPending = new Promise(resolve => { resolveStatus = resolve })
+    let sending: Promise<void> | undefined
+    let finished = false
+    pipelineHookRun = async hooks => {
+      sending = hooks.onStatus?.('Searching tools')
+      await vi.waitFor(() => expect(adapterStatusCalls).toBe(1))
+      if (terminal === 'Stop') await hooks.sendResponse('Stopped.')
+      else await hooks.sendError(new AuthorityChangedError(true))
+      await hooks.onCleanup?.()
+      await hooks.onStatus?.('Late status')
+      await hooks.onToolStart?.('late-tool', 'mcp_search')
+      finished = true
+    }
+    await startSyntheticTurn()
+    await vi.waitFor(() => expect(finished).toBe(true))
+    expect(adapterSendCalls.map(call => call.text)).toEqual([
+      terminal === 'Stop' ? 'Stopped.' : channelUserErrorText(new AuthorityChangedError(true)),
+    ])
+    expect(adapterDeleteCalls).toHaveLength(0)
+    resolveStatus('late-owned-progress')
+    await sending
+    await vi.waitFor(() => expect(adapterDeleteCalls).toEqual([['42', 'late-owned-progress']]))
+    expect(adapterStatusCalls).toBe(1)
+    expect(adapterEditCalls).toHaveLength(0)
+  })
+
+  it('does not wait for an unresolved progress deletion before final delivery or cleanup', async () => {
+    let resolveDelete!: () => void
+    adapterDeletePending = new Promise(resolve => { resolveDelete = resolve })
+    let finished = false
+    pipelineHookRun = async hooks => {
+      await hooks.onStatus?.('Searching tools')
+      await hooks.sendResponse('Synthetic final reply')
+      await hooks.onCleanup?.()
+      finished = true
+    }
+    await startSyntheticTurn()
+    await vi.waitFor(() => expect(finished).toBe(true))
+    expect(adapterDeleteCalls).toEqual([['42', 'status_stub']])
+    expect(adapterSendCalls.map(call => call.text)).toEqual(['Synthetic final reply'])
+    resolveDelete()
+    await flushMicrotasks()
+  })
+
+  it('still delivers the final reply when progress deletion fails', async () => {
+    adapterDeleteFailure = new Error('Synthetic status deletion failure')
+    let finished = false
+    pipelineHookRun = async hooks => {
+      await hooks.onStatus?.('Searching tools')
+      await hooks.sendResponse('Synthetic final reply')
+      await hooks.onCleanup?.()
+      finished = true
+    }
+    await startSyntheticTurn()
+    await vi.waitFor(() => expect(finished).toBe(true))
+    expect(adapterDeleteCalls).toEqual([['42', 'status_stub']])
+    expect(adapterSendCalls.map(call => call.text)).toEqual(['Synthetic final reply'])
+  })
+
+  it.each(['reply', 'error'] as const)('cleans up without replacing a failed %s delivery', async delivery => {
+    const failure = new Error('Synthetic delivery failure')
+    let observed: unknown
+    let finished = false
+    pipelineHookRun = async hooks => {
+      await hooks.onStatus?.('Searching tools')
+      adapterSendFailure = failure
+      try {
+        if (delivery === 'reply') await hooks.sendResponse('Synthetic final reply')
+        else await hooks.sendError(new AuthorityChangedError())
+      } catch (error) { observed = error }
+      finally { await hooks.onCleanup?.() }
+      finished = true
+    }
+    await startSyntheticTurn()
+    await vi.waitFor(() => expect(finished).toBe(true))
+    expect(observed).toBe(failure)
+    expect(adapterDeleteCalls).toEqual([['42', 'status_stub']])
+    expect(adapterSendCalls).toHaveLength(1)
+  })
+
+  it('uses the same safe authority notice in detached Telegram error handling', () => {
+    const error = new AuthorityChangedError(true)
+    expect(telegramIncomingFailureText('42', error)).toBe(channelUserErrorText(error))
+    expect(telegramIncomingFailureText('-1002000000001', error)).toBe(channelUserErrorText(error))
+  })
 
   it('explains that a custom text-only model cannot inspect an inbound image', async () => {
     // The one shared copy of this sentence — matched by identity in

@@ -15,6 +15,8 @@ const migrationRenames = [
   ['564_crm_intake_existing_or_new.sql', '5640_crm_intake_existing_or_new.sql'],
   ['8146_explicit_unclassified_legacy_erasure.sql', '81460_explicit_unclassified_legacy_erasure.sql'],
   ['8147_private_chat_recovery.sql', '81470_private_chat_recovery.sql'],
+  ['8259_workspace_decision_shadow_sampling.sql', '8264_workspace_decision_shadow_sampling.sql'],
+  ['8260_workspace_decision_classifier_first.sql', '8265_workspace_decision_classifier_first.sql'],
 
   // Resolve every released spelling directly to its final name: embedded
   // migration lookup intentionally does not follow transitive rename chains.

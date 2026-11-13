@@ -11,6 +11,7 @@ import { sessionContextGeneration } from '../db/session-context-revisions.js'
 import { upsertSessionState, resolveSessionState } from '../db/session-state-queries.js'
 import { assertSourceModelInputAuthority } from '../application-platform/model-source-authority.js'
 import { executionToolContext } from '@use-brian/core'
+import { inheritPrivateTranscriptCredential } from '../db/private-transcript.js'
 
 type Runtime = { provider: LLMProvider; model: string; providerKeySource: 'user' | 'platform' }
 type Result = Awaited<ReturnType<typeof runSessionStateDiff>>
@@ -33,7 +34,7 @@ export function restrictStateJobAuthority(authority: SessionContextAuthority, jo
     if (!await current()) throw new StateJobChanged()
     signal.throwIfAborted()
   }
-  return { accumulator: authority.accumulator, execution: { ...execution,
+  const restricted: SessionContextAuthority = { accumulator: authority.accumulator, execution: { ...execution,
     lifecycle: { ...execution.lifecycle, abortSignal: signal },
     security: { ...execution.security, authority: { ...original, assertCurrent,
       async execute<T>(operation: () => Promise<T>): Promise<T> {
@@ -44,6 +45,8 @@ export function restrictStateJobAuthority(authority: SessionContextAuthority, jo
       },
     } },
   } }
+  inheritPrivateTranscriptCredential(execution, restricted.execution)
+  return restricted
 }
 
 /** Keep the pre-inference generation through the actual SQL CAS, not a preflight. */

@@ -1,3 +1,4 @@
+import { registeredToolDefinitions } from '../../providers/tool-registration.js'
 import { describe, expect, it, vi } from 'vitest'
 import { executionFixture, fixtureDecisionProvider } from '../../decisions/__tests__/execution-fixture.js'
 import type { DecisionRequest } from '../../decisions/types.js'
@@ -9,7 +10,7 @@ import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { buildTool } from '../../tools/types.js'
 import { z } from 'zod'
 
-const llm: LLMProvider = { name: 'fixture', models: ['fixture'],
+const llm: LLMProvider = { name: 'fixture', models: ['fixture'], toolSchemaMode: () => 'dynamic',
   stream: async function* () { throw new Error('Unexpected LLM call') },
   createSession: () => { throw new Error('Unexpected session') } }
 const definitions: ToolDefinition[] = [
@@ -99,7 +100,7 @@ describe('[COMP:engine/tool-selection] bounded initial schema decisions', () => 
 
   it.each([false, true])('keeps optional read adapters out of non-deferred provider schemas (%s)', async deferred => {
     const provider: LLMProvider = { ...llm, createSession: vi.fn((options: Parameters<LLMProvider['createSession']>[0]) => ({ async *send() {
-      expect(options.tools?.some((tool: ToolDefinition) => tool.name === 'calendarRead') ?? false).toBe(deferred)
+      expect(registeredToolDefinitions(options, 'dynamic').some((tool: ToolDefinition) => tool.name === 'calendarRead')).toBe(deferred)
       yield { type: 'text_delta' as const, text: 'Done' }
       yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } }
     } })) }
@@ -114,6 +115,32 @@ describe('[COMP:engine/tool-selection] bounded initial schema decisions', () => 
       } })) { /* drain */ }
   })
 
+  it.each((['native-deferred', 'eager', undefined] as const).flatMap(mode => [false, true].map(prepared => ({ mode, prepared }))))('does not classify initial tools for $mode adapters (preselected: $prepared)', async ({ mode, prepared }) => {
+    const evaluate = vi.fn(async (request: DecisionRequest) => answers(request, true))
+    const runtime = executionFixture({ primary: fixtureDecisionProvider(evaluate), llm })
+    const tool = buildTool({ name: 'listTasks', description: 'Read tasks', inputSchema: z.object({}), execute: async () => ({ data: [] }) })
+    const provider: LLMProvider = { ...llm, toolSchemaMode: mode ? () => mode : undefined,
+      createSession: options => ({ async *send() {
+        expect(options.tools?.map(t => t.name)).toEqual(['listTasks'])
+        if (mode === 'native-deferred') {
+          expect(options.toolRegistration?.catalog.map(t => t.name)).toEqual(['listTasks'])
+          expect(options.toolRegistration?.active.map(t => t.name)).toEqual(prepared ? ['listTasks', 'discoverTools'] : ['discoverTools'])
+        } else {
+          expect(options.toolRegistration).toBeUndefined()
+        }
+        yield { type: 'text_delta', text: 'Done.' }
+        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
+      } }),
+    }
+    for await (const _ of queryLoop({ provider, model: 'fixture', systemPrompt: 'Test', messages: base.messages,
+      tools: new Map([[tool.name, tool]]), ledger: NOOP_TURN_LEDGER, deferToolSchemas: true,
+      toolSelection: { runtime, llm: base.llm, ...(prepared ? { preselected: ['listTasks', 'notGranted'] } : {}) }, context: {
+        userId: 'u', assistantId: 'a', sessionId: 's', appId: 'test', channelType: 'web', channelId: 'c',
+        abortSignal: new AbortController().signal,
+      } })) { /* drain */ }
+    expect(evaluate).not.toHaveBeenCalled()
+  })
+
   it.each([false, true])('executes the selected tool without repeating preparation (%s)', async prepared => {
     const execute = vi.fn(async () => ({ data: [] }))
     const tool = buildTool({ name: 'listTasks', description: 'Read tasks', inputSchema: z.object({}),
@@ -125,7 +152,7 @@ describe('[COMP:engine/tool-selection] bounded initial schema decisions', () => 
     let turn = 0
     const provider: LLMProvider = { ...llm, createSession: options => ({
       async *send() {
-        seen.push(options.tools!.map(tool => tool.name))
+        seen.push(registeredToolDefinitions(options, 'dynamic').map(tool => tool.name))
         if (turn++ === 0) {
           yield { type: 'tool_use_start', id: 'read', name: 'listTasks' }
           yield { type: 'tool_use_delta', id: 'read', input: '{}' }

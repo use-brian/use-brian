@@ -11,7 +11,7 @@
  *   DELETE /api/workspaces/:wid/metered-profiles/:id — delete
  *   PUT    /api/workspaces/:wid/model-defaults/:cls — set a class default (owner/admin)
  *   DELETE /api/workspaces/:wid/model-defaults/:cls — back to registry default (owner/admin)
- *   PUT    /api/workspaces/:wid/decision-routing  — LLM-only, shadow, or approved hybrid (owner/admin)
+ *   PUT    /api/workspaces/:wid/decision-routing  — LLM-only, shadow, approved hybrid, or admin classifier-first (owner/admin)
  *
  * Menus honor key presence (L12): a model whose provider key is absent at
  * boot is absent from every menu — never listed, never erroring. Metered
@@ -48,6 +48,7 @@ import type {
 } from '../db/decision-evaluation-profiles.js'
 import { isAuthorityBearingDecisionOperation } from '../decision-promotion.js'
 import {
+  classifierFirstGrant,
   WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
   type OperatorDecisionDefault,
 } from '../workspace-decision-routing.js'
@@ -60,7 +61,7 @@ export type ModelMenuRouteOptions = {
   decisionRoutingStore?: WorkspaceDecisionRoutingStore
   decisionEvaluationProfileStore?: Pick<DecisionEvaluationProfileStore, 'listApproved'>
   configuredDecisionAdapters?: ReadonlySet<string>
-  /** Inherited deployment default, shown only when the workspace has no explicit row. */
+  /** Explicit deployment policy; classifier_first also permits matching hybrid selections. */
   operatorDecisionDefault?: OperatorDecisionDefault
   /** Provider keys configured at boot (the routing table's keys). */
   configuredProviders: ProviderAvailability
@@ -122,8 +123,13 @@ const setModelRouteSchema = z.union([
 
 const setDecisionRoutingSchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('llm_only') }).strict(),
-  z.object({ mode: z.literal('shadow'), modelAlias: z.string().min(1) }).strict(),
+  z.object({
+    mode: z.literal('shadow'),
+    modelAlias: z.string().min(1),
+    shadowSampleRate: z.union([z.literal(0.1), z.literal(1)]).optional(),
+  }).strict(),
   z.object({ mode: z.literal('hybrid'), modelAlias: z.string().min(1) }).strict(),
+  z.object({ mode: z.literal('classifier_first'), modelAlias: z.string().min(1) }).strict(),
 ])
 
 function configuredProviderForPreference(preference: string): string {
@@ -271,8 +277,11 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
           ? decisionSetting.modelAlias
           : opts.operatorDecisionDefault?.modelAlias ?? null,
         updatedAt: decisionSetting?.updatedAt ?? null,
-        operatorOverride: !decisionSetting && Boolean(opts.operatorDecisionDefault),
-        shadowSampleRate: WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
+        operatorOverride: decisionSetting?.mode === 'classifier_first'
+          || (!decisionSetting && Boolean(opts.operatorDecisionDefault))
+          || (decisionSetting?.mode === 'hybrid'
+            && Boolean(classifierFirstGrant(opts.operatorDecisionDefault, decisionSetting.modelAlias))),
+        shadowSampleRate: decisionSetting?.shadowSampleRate ?? WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
         models: decisionModelRows()
           .filter((row) => opts.configuredDecisionAdapters?.has(row.decisionCapabilities.adapterId))
           .map((row) => ({
@@ -280,6 +289,7 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
             displayName: row.displayName,
             provider: row.provider,
             adapterId: row.decisionCapabilities.adapterId,
+            classifierFirst: classifierFirstGrant(opts.operatorDecisionDefault, row.alias),
             hybridOperations: approvedDecisionProfiles
               .filter((profile) => (
                 profile.modelCatalogId === row.alias
@@ -490,7 +500,10 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
       if (!row || !opts.configuredDecisionAdapters?.has(row.decisionCapabilities.adapterId)) {
         return void res.status(400).json({ error: 'Decision classifier is not available' })
       }
-      if (parsed.data.mode === 'hybrid') {
+      // The deployment owner can explicitly grant 100% classifier-first
+      // routing for this exact model. This is not evaluation approval; all
+      // other hybrid selections retain the existing profile-registry gate.
+      if (parsed.data.mode === 'hybrid' && !classifierFirstGrant(opts.operatorDecisionDefault, row.alias)) {
         if (!opts.decisionEvaluationProfileStore) {
           return void res.status(503).json({ error: 'Decision profile registry is unavailable' })
         }
@@ -516,8 +529,14 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
       workspaceId: req.params.wid,
       mode: parsed.data.mode,
       modelAlias: parsed.data.mode === 'llm_only' ? null : parsed.data.modelAlias,
+      shadowSampleRate: parsed.data.mode === 'shadow'
+        ? parsed.data.shadowSampleRate ?? WORKSPACE_DECISION_SHADOW_SAMPLE_RATE
+        : WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
     })
-    res.json({ decisionRouting: setting })
+    res.json({ decisionRouting: {
+      ...setting,
+      shadowSampleRate: setting.shadowSampleRate ?? WORKSPACE_DECISION_SHADOW_SAMPLE_RATE,
+    } })
   })
 
   return router

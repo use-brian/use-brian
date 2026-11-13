@@ -1,4 +1,5 @@
 import { isDeliveryAudienceUnverifiedError } from '../context-scope/delivery-authority.js'
+import { isAuthorityChangedError } from '../context-scope/authority-lease.js'
 
 /**
  * User-facing text for a channel `sendError` hook.
@@ -21,8 +22,8 @@ import { isDeliveryAudienceUnverifiedError } from '../context-scope/delivery-aut
  *   Telegram BYO route had been fixed in isolation and the other seven
  *   channel routes kept masking. This helper is the one copy of that
  *   decision; route-local whitelists are the drift that caused the repeat.
- * Typed audience refusals get a fixed access notice: a tool may have committed
- * before delivery was withheld, so generic retry advice risks duplicate work.
+ * Typed authority and audience refusals get a fixed access notice: a tool may
+ * have committed before delivery was withheld, so retry advice risks duplicate work.
  *
  * Spec: docs/architecture/platform/byo-llm-key.md → "Strict fallback and
  * attachments"; docs/architecture/context-engine/scoped-context.md ->
@@ -92,7 +93,7 @@ export function channelUserErrorText(
   err: Error,
   fallback = 'Something went wrong. Please try again.',
 ): string {
-  if (isDeliveryAudienceUnverifiedError(err)) return DELIVERY_AUDIENCE_NOTICE
+  if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) return DELIVERY_AUDIENCE_NOTICE
   if (err.message.includes('usage limit')) return err.message
   if (err.message === CUSTOM_MODEL_IMAGE_REJECTION) return err.message
   if (err.message === CONTEXT_NOT_AVAILABLE_MESSAGE) return err.message

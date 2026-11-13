@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DeliveryAudienceUnverifiedError } from '../../context-scope/delivery-authority.js'
+import { AuthorityChangedError } from '../../context-scope/authority-lease.js'
 import {
   CONTEXT_NOT_AVAILABLE_MESSAGE,
   CUSTOM_MODEL_IMAGE_REJECTION,
@@ -7,6 +8,20 @@ import {
 } from '../_channel-error-text.js'
 
 describe('[COMP:api/channel-error-text] channel sendError text', () => {
+  it.each([false, true])('uses the fixed access notice when authority changes (possible effects: %s)', possibleEffects => {
+    const error = new AuthorityChangedError(possibleEffects)
+    error.message = 'PRIVATE provider payload; usage limit'
+    error.cause = new Error('PRIVATE connector configuration')
+    expect(channelUserErrorText(error, 'Please retry')).toBe(channelUserErrorText(new DeliveryAudienceUnverifiedError()))
+    expect(channelUserErrorText(error)).not.toMatch(/PRIVATE|usage limit|Please retry/)
+  })
+
+  it('does not classify an arbitrary vendor error by its authority-looking name', () => {
+    const error = new Error('Vendor failure')
+    error.name = 'AuthorityChangedError'
+    expect(channelUserErrorText(error)).toBe('Something went wrong. Please try again.')
+  })
+
   it('explains a delivery refusal and asks users to check saved changes before repeating a request', () => {
     const error = new DeliveryAudienceUnverifiedError(undefined, 'source_held')
     const text = channelUserErrorText(error)

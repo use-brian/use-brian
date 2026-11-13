@@ -49,12 +49,19 @@ beforeEach(() => { state.read.length = 0; state.next = null })
 describe('[COMP:api/caller-scope-evidence] per-source audience validation', () => {
   it('preserves safe native-proof cancellation metadata without changing the refusal', async () => {
     const databaseError = Object.assign(new Error('PRIVATE SQL and source id'), { code: '57014' })
-    const client = { query: vi.fn(async (_sql: string) => { throw databaseError }) }
+    const client = { query: vi.fn(async (sql: string, args?: unknown[]) => {
+      if (sql === 'SELECT to_regprocedure($1) IS NOT NULL AS available') {
+        expect(args).toEqual(['public.read_native_retained_scope_evidence(uuid,jsonb)'])
+        return { rows: [{ available: false }] }
+      }
+      if (sql === 'SELECT read_native_turn_scope_evidence($1,$2) AS value') throw databaseError
+      throw new Error(`Unexpected native-proof query: ${sql}`)
+    }) }
     await expect(validateAudienceScopeEvidence({ sources: [source('field', { resourceKind: 'application_field' })] }, ceiling, client as never))
       .rejects.toMatchObject({ reason: 'delivery_audience_unverified', retrySafe: false, diagnostic: 'source_unverifiable',
         verificationPhase: 'native_proof', verificationSqlstateClass: '57', cause: databaseError })
-    expect(client.query).toHaveBeenCalledOnce()
-    expect(client.query.mock.calls[0][0]).toContain('read_native_turn_scope_evidence')
+    expect(client.query.mock.calls.map(([sql])=>sql).filter(sql=>!sql.includes('to_regprocedure')))
+      .toEqual(['SELECT read_native_turn_scope_evidence($1,$2) AS value'])
     expect(state.read).toHaveLength(0)
   })
 

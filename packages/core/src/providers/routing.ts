@@ -1,4 +1,4 @@
-import { registerInputAdmissionOwner, assertProviderInputPreparation, captureInputAdmissionProvider, ownsInputAdmission } from './input-authority.js'
+import { registerInputAdmissionOwner, assertProviderInputPreparation, captureInputAdmissionProvider, ownsInputAdmission, isInputAuthorityError } from './input-authority.js'
 /**
  * Routing provider — model id → provider instance, per request.
  *
@@ -44,6 +44,8 @@ export function bindExactModelProvider(provider: LLMProvider, model: string): LL
   return registerInputAdmissionOwner({
     name: child.name,
     models: child.models,
+    toolSchemaMode: () => child.toolSchemaMode?.(model) ?? 'eager',
+    supportedThinkingLevels: () => child.supportedThinkingLevels?.(model, { allowProviderFallback: false }) ?? [],
     stream(request) {
       const actual = { ...request, model, allowProviderFallback: false }
       return (async function* () {
@@ -174,6 +176,23 @@ export function createRoutingProvider(
 
   return registerInputAdmissionOwner({
     name: 'routing',
+    supportedThinkingLevels(requestedModel, route) {
+      // Match physical dispatch: exact decision calls must not borrow an
+      // Auto-resolved model's advertised effort. No capability lookup does I/O.
+      try {
+        const model = route?.allowProviderFallback === false ? requestedModel
+          : options?.resolveModel?.(requestedModel, route) ?? requestedModel
+        return effectiveFor(model, route?.allowProviderFallback !== false)
+          .supportedThinkingLevels?.(model, route) ?? []
+      } catch (error) {
+        if (isInputAuthorityError(error)) throw error
+        return []
+      }
+    },
+    toolSchemaMode(requestedModel) {
+      const model = options?.resolveModel?.(requestedModel) ?? requestedModel
+      return effectiveFor(model).toolSchemaMode?.(model) ?? 'eager'
+    },
     models: Object.values(providers).flatMap((p) => p.models),
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {

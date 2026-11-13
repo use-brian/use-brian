@@ -59,7 +59,10 @@ async function withoutAcquisition<T>(run: () => Promise<T>) {
   const query = pg.Client.prototype.query
   const presence = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function(this: pg.Client, ...args: Parameters<typeof query>) {
     const sql = typeof args[0] === 'string' ? args[0] : String((args[0] as { text?: string })?.text ?? '')
-    if (sql.includes("to_regprocedure('public.read_native_turn_session_query(")) {
+    const values = Array.isArray(args[1]) ? args[1] : []
+    if (sql.includes("to_regprocedure('public.read_native_turn_session_query(")
+      || sql === 'SELECT to_regprocedure($1) IS NOT NULL AS available'
+        && values[0] === 'public.read_native_retained_session_query(uuid,uuid,integer,integer)') {
       return Promise.resolve({ rows: [{ available: false }] }) as unknown as ReturnType<typeof query>
     }
     return query.apply(this, args)
@@ -151,9 +154,10 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
     const expected = await withoutAcquisition(() => readAdmittedSessionQuery({ ...selection(), authority: authority() }))
     expect(actual.value).toEqual(expected)
     expect(normalize(boundScopeSources(actual.value))).toEqual(normalize(boundScopeSources(expected)))
-    expect(actual.sql.filter(sql => sql.includes('SELECT read_native_turn_session_query('))).toHaveLength(1)
+    const acquisitionReads = actual.sql.filter(sql => /SELECT read_native_(?:retained_session_query|turn_session_query)\(/.test(sql))
+    expect(acquisitionReads).toHaveLength(1)
     expect(actual.sql.some(sql => sql.includes('SELECT read_native_session_query_evidence('))).toBe(false)
-    expect(actual.sql.some(sql => /SELECT read_native_(?:attended_memory|file_session|empty_query|covered_session)_evidence\(/.test(sql))).toBe(false)
+    expect(actual.sql.some(sql => /SELECT read_native_(?:retained_scope|turn_scope|attended_memory|file_session|empty_query|covered_session)_evidence\(/.test(sql))).toBe(false)
   }, 120_000)
 
   it('rolls back actual acquisition observations before a malformed payload can leave the reader frame', async () => {
@@ -163,7 +167,7 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
     const spy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function(this: pg.Client, ...args: Parameters<typeof query>) {
       const sql = typeof args[0] === 'string' ? args[0] : String((args[0] as { text?: string })?.text ?? '')
       const result = query.apply(this, args)
-      if (!/SELECT read_native_(?:turn_session_query|session_query_evidence)\(/.test(sql)) return result
+      if (!/SELECT read_native_(?:retained_session_query|turn_session_query|session_query_evidence)\(/.test(sql)) return result
       // Execute the real materializing SQL, then corrupt only a payload DTO at
       // the driver boundary. The proof and every authority check stay real.
       return (result as unknown as Promise<Json>).then(result => {
@@ -186,7 +190,7 @@ describe.sequential('[COMP:api/application-persistence] joint native body and to
     const result = await traced(async () => {
       await expect(readAdmittedSessionQuery({ ...selection(), authority: { execution: narrowed, accumulator: new ContextScopeAccumulator() } })).rejects.toBeDefined()
     })
-    expect(result.sql.some(sql => /SELECT read_native_(?:turn_session_query|session_query_evidence)\(/.test(sql))).toBe(false)
+    expect(result.sql.some(sql => /SELECT read_native_(?:retained_session_query|turn_session_query|session_query_evidence)\(/.test(sql))).toBe(false)
   })
 
   for (const noFile of [true, false]) it(`preserves ${noFile ? 'the original no-file query' : 'a body query with an empty topic ceiling'}`, async () => frame(async client => {

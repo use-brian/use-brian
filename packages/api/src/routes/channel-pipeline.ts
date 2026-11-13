@@ -2,7 +2,7 @@ import { assertTelegramConversationCurrent } from '../telegram-conversation-cont
 import { recordingInputScope, type RecordingAdmission } from '../channel-recording.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
 import { isInputAuthorityError } from '@use-brian/core'
-import { captureAttendedSessionClassification, classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
+import { topicEvidenceFromHistory, captureAttendedSessionClassification, classifyAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory } from './attended-session-context.js'
 import { getPool } from '../db/client.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
@@ -119,7 +119,7 @@ import {
 import {
   findOrCreateSession, addSessionMessage, readSessionMessageScopeSource, setSessionMessageChannelId, type Session,
   getSessionMessages, getPreferredChannel,
-  getSessionTopicLabels, coalesceConsecutiveUserMessages,
+  coalesceConsecutiveUserMessages,
   markDowngradeNoticeSent, clearDowngradeNotice,
 } from '../db/sessions.js'
 import { resolveChatModelSelection, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL, backgroundModelFor } from '../model-resolution.js'
@@ -1478,7 +1478,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             : {}),
         },
       })
-      if (isDeliveryAudienceUnverifiedError(err)) {
+      if (!abortController.signal.aborted) {
         await hooks.sendError(err)
       }
       await hooks.onCleanup?.()
@@ -1846,9 +1846,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     })
     .filter((t) => t.text.length > 0)
 
-  const knownTopics = nativeClassification ? [] : room
-    ? [...new Set(preExistingDbMessages.map(m => m.topicLabel).filter((label): label is string => Boolean(label)))].slice(-20)
-    : await getSessionTopicLabels(session.id, 20)
+  const topicEvidence = topicEvidenceFromHistory(preExistingDbMessages)
 
   classification = nativeClassification?.classification ?? null
   if (!nativeClassification) {
@@ -1863,10 +1861,10 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         recentUserTurns,
         replyToText: replyResolved?.text ?? null,
         currentMessage: messageText,
-        knownTopicsThisSession: knownTopics,
+        ...topicEvidence,
         decisionRuntime: params.decisionRuntime,
         workspaceId: assistant.workspaceId ?? undefined,
-        runId: `memory-topic-${session.id}-${Date.now()}`,
+        runId: `memory-topic-${earlyUserMessageRow?.id ?? crypto.randomUUID()}`,
       })
     } catch (err) {
       console.error(`[${channelType}] topic classifier failed:`, err)
@@ -2993,6 +2991,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // Taken here, directly before the `try` whose `finally` releases it, so no
   // setup failure can strand it until the sweeper.
   const turnLeaseToken = slot.token
+  let turnFailed = false
 
   // ── Query loop ──
   try {
@@ -3554,6 +3553,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
         .catch((err) => console.debug(`[${channelType}] memory nudge failed:`, err))
     }
   } catch (err) {
+    turnFailed = true
     if (isAuthorityChangedError(err) || isDeliveryAudienceUnverifiedError(err)) {
       console.warn(`[${channelType}] channel turn stopped by live authority:`, (err as Error).name)
       analytics?.logEvent({
@@ -3568,7 +3568,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
             : {}),
         },
       })
-      if (isDeliveryAudienceUnverifiedError(err)) {
+      if (!abortController.signal.aborted) {
         await hooks.sendError(err)
       }
       return
@@ -3594,7 +3594,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     } catch (authErr) {
       if (!isAuthorityChangedError(authErr) && !isDeliveryAudienceUnverifiedError(authErr)) throw authErr
       console.warn(`[${channelType}] recovery withheld: live authority refused`, (authErr as Error).name)
-      if (isDeliveryAudienceUnverifiedError(authErr)) await hooks.sendError(authErr)
+      if (!abortController.signal.aborted) await hooks.sendError(authErr)
       return
     }
 
@@ -3641,6 +3641,6 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
     // Watch viewers clear their "Working" card on the terminal bus event —
     // published in the finally, not on the paths we happened to think of.
     publishTurnCompleted({ sessionId: session.id, senderUserId: userId, publishSessionEvent })
-    await releaseTurn(session.id, turnLeaseToken, 'completed')
+    await releaseTurn(session.id, turnLeaseToken, turnFailed ? 'failed' : 'completed')
   }
 }

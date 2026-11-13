@@ -29,6 +29,7 @@ import { renderEmailBody } from '@use-brian/channels'
 import { createMailboxApi } from '../mailbox/mailbox-api.js'
 import { readSendAsAliases } from '../mailbox/send-as.js'
 import { createSearchEmailArchiveTool, getGlobalMailboxArchiveDeps } from '../mailbox/archive-search-tool.js'
+import { projectMailboxAuthorityConfig } from '../mailbox/config-authority.js'
 import { createMailboxContactImportTools, getGlobalMailboxContactImportDeps } from '../mailbox/contact-import-tools.js'
 import { createSyncMailboxNowTool, getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
@@ -633,7 +634,7 @@ export async function injectMcpTools(params: {
   let bindingsInvalid = false
   const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
   const instanceBinding = (instance: Record<string, unknown>) => digest([instance.id,instance.scope,instance.userId,instance.workspaceId,
-    instance.provider,instance.connectedEmail,instance.connected,instance.url,instance.sensitivity,instance.compartments,instance.projectIds,instance.config,
+    instance.provider,instance.connectedEmail,instance.connected,instance.url,instance.sensitivity,instance.compartments,instance.projectIds,projectMailboxAuthorityConfig(instance),
     instance.healthStatus === 'auth_failed'])
   const exposureBinding = (grant: Record<string, unknown>) => digest([grant.id,grant.connectorInstanceId,grant.targetType,grant.targetId,
     grant.grantedByUserId,grant.compartments,grant.projectIds])

@@ -20,7 +20,7 @@ test('[COMP:ci/execution-topology] scenario workers execute a disjoint, complete
     delete env.NODE_TEST_CONTEXT
     if (group) env.BRIAN_TEST_MIGRATION_OWNER_GROUP = group
     else delete env.BRIAN_TEST_MIGRATION_OWNER_GROUP
-    const result = spawnSync(process.execPath, ['--test', fixture], { encoding: 'utf8', env })
+    const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', fixture], { encoding: 'utf8', env })
     assert.equal(result.status, 0, result.stdout + result.stderr)
     return [...result.stdout.matchAll(/^\s*# executed:(.*)$/gm)].map(match => match[1])
   }

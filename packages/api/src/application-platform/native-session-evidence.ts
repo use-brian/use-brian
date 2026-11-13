@@ -1,10 +1,15 @@
 /** Closed native session evidence read. [COMP:api/application-persistence] */
 import {z} from 'zod'
+import {readNativePrivateTitleEvidence} from './native-private-title-evidence.js'
+import {readRetainedNativePacket} from './native-retained-reader.js'
 import type {PoolClient} from 'pg'
 import {ContextScopeAccumulator,resourceScopeKey,type ResourceScope,type ScopeEvidence,type ScopeSource} from '@use-brian/core'
 const scope=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().nullable(),assistantId:z.string().uuid().nullable(),
  sensitivity:z.enum(['public','internal','confidential']),compartments:z.array(z.string()),projectIds:z.array(z.string().uuid()),
  resourceKind:z.enum(['application_field','session_context_revision','session_message','memory','workspace_file']),resourceId:z.string().uuid(),version:z.string().min(1)}).strict()
+// Canonical media ancestors remain current-scope obligations for every receiver.
+// They do not widen accepted roots or become newly declared factual inputs.
+export const nativeSessionCurrentScopeSchema=scope.extend({resourceKind:z.enum([...scope.shape.resourceKind.options,'episode','recording'] as const)}).strict()
 const labelScope=scope.pick({workspaceId:true,userId:true,assistantId:true,sensitivity:true,compartments:true,projectIds:true}).strict()
 const historyResult=z.discriminatedUnion('available',[
  z.object({purpose:z.literal('memory_history'),available:z.literal(false)}).strict(),
@@ -15,9 +20,9 @@ type NativeEvidence=CompleteNativeEvidence
  |{kind:'memory_history';available:false}|{kind:'memory_history';available:true;root:ScopeSource;scopes:ResourceScope[]}
 const result=z.discriminatedUnion('admitted',[
  z.object({admitted:z.literal(false)}).strict(),
- z.object({admitted:z.literal(true),immutable:z.array(scope),current:z.array(scope)}).strict(),
+ z.object({admitted:z.literal(true),immutable:z.array(scope),current:z.array(nativeSessionCurrentScopeSchema)}).strict(),
 ])
-const cohortProof=z.object({immutable:z.array(scope),current:z.array(scope)}).strict()
+const cohortProof=z.object({immutable:z.array(scope),current:z.array(nativeSessionCurrentScopeSchema)}).strict()
 const publicationResult=z.object({admitted:z.literal(true),cohorts:z.tuple([cohortProof,cohortProof])}).strict()
 
 /** Private host acquisition: the database independently projects each exact
@@ -31,8 +36,9 @@ export async function readNativePublicationCohorts(client:Pick<PoolClient,'query
   "SELECT to_regprocedure('public.read_native_turn_publication_cohorts(uuid,jsonb)') IS NOT NULL AS available")).rows[0]?.available===true
  if(!installed)return null
  const identities=cohorts.map(roots=>roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version})))
- const raw=(await client.query<{value:unknown}>('SELECT read_native_turn_publication_cohorts($1,$2) AS value',
-  [workspaceId,JSON.stringify(identities)])).rows[0]?.value
+ const args=[workspaceId,JSON.stringify(identities)]
+ let raw:unknown=await readRetainedNativePacket(client,'cohorts',args)
+ if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_turn_publication_cohorts($1,$2) AS value',args)).rows[0]?.value
  if(raw===null)return null
  const parsed=publicationResult.parse(raw)
  return parsed.cohorts.map((proof,index)=>{
@@ -45,12 +51,17 @@ export async function readNativePublicationCohorts(client:Pick<PoolClient,'query
 }
 /** Null means an unchanged original-family fallback; no authorization result is cached. */
 export async function readNativeSessionEvidence(client:Pick<PoolClient,'query'>,workspaceId:string,roots:readonly ScopeSource[]):Promise<NativeEvidence|null>{
+ if(roots.length===1&&roots[0].resourceKind==='session_context_revision'&&roots[0].version==='1'){
+  const privateTitle=await readNativePrivateTitleEvidence(client,workspaceId,roots)
+  if(privateTitle)return privateTitle
+ }
  if(!roots.length||roots.length>4096||!roots.some(root=>root.resourceKind==='application_field'||root.resourceKind==='session_context_revision')||roots.some(root=>!['application_field','session_context_revision','session_message','memory','workspace_file'].includes(root.resourceKind)))return null
  // Field observations can hide Memory ancestors too. The closed validator
  // discovers the complete native closure and preserves its original fallback.
  const args=[workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)]
- let raw:unknown=(await client.query<{value:unknown}>('SELECT read_native_turn_scope_evidence($1,$2) AS value',
-  [workspaceId,JSON.stringify(roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version})))])).rows[0]?.value
+ const identities=[workspaceId,JSON.stringify(roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version})))]
+ let raw:unknown=await readRetainedNativePacket(client,'scope',identities)
+ if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_turn_scope_evidence($1,$2) AS value',identities)).rows[0]?.value
  if(raw===null&&roots.length>100){
   raw=(await client.query<{value:unknown}>('SELECT read_native_covered_session_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value
  }else if(raw===null){

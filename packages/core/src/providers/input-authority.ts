@@ -27,6 +27,8 @@ export function captureInputAdmissionProvider(provider: LLMProvider): LLMProvide
   const stream = provider.stream, createSession = provider.createSession
   const captured: LLMProvider = {
     name: provider.name, models: provider.models,
+    toolSchemaMode: provider.toolSchemaMode?.bind(provider) ?? (() => 'eager'),
+    supportedThinkingLevels: provider.supportedThinkingLevels?.bind(provider) ?? (() => []),
     stream: stream.bind(provider), createSession: createSession.bind(provider),
   }
   const owner = admissionOwners.get(provider)

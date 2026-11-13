@@ -47,6 +47,7 @@ export type ModelProvider =
   | 'openai-codex'
   | 'xai'
   | 'typesafe'
+  | 'openai-decisions'
   | `openai-compat:${string}`
 
 /**
@@ -197,6 +198,8 @@ type ModelRegistryBase = {
   maxOutput: number
   /** Model-specific minimum initial-response window; provider idle and loop liveness share it. */
   firstResponseTimeoutMs?: number
+  /** Pinned Codex runtime's reviewed native tool-search contract. Absent stays eager. */
+  codexNativeDeferredTools?: boolean
   /** Per-provider quirk-wrapper stack override (plan L2; consumed by the
    * routing provider, not yet by boot). */
   wrappers?: readonly string[]
@@ -484,6 +487,44 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
   },
 
+  {
+    // Native /v1/decisions, NOT Codex subscription chat or Responses.
+    // Keep its selector/recording identity distinct even though the wire
+    // model name is shared with the subscription row. Rates: OpenAI Decisions
+    // guide + GPT-6 Luna pricing, reviewed 2026-11-11. Host admission remains
+    // deliberately narrower than the general model's advertised context.
+    alias: 'openai-decisions-gpt-6-luna',
+    displayName: 'GPT-6 Luna Decisions',
+    provider: 'openai-decisions',
+    apiModelId: 'gpt-6-luna',
+    class: 'background',
+    tier: 'other',
+    status: 'active',
+    menu: false,
+    recordAlias: true,
+    rates: {
+      brackets: [{ upToInputTokens: Infinity, inPerMTok: 0.1, outPerMTok: 0 }],
+      cacheReadPerMTok: 0.01,
+      cacheWritePerMTok: 0.125,
+    },
+    contextWindow: 64_000,
+    maxOutput: 0,
+    capabilities: { tools: false, vision: false, thinking: false, nativePdf: false },
+    inference: 'decision',
+    decisionCapabilities: {
+      adapterId: 'openai-decisions',
+      wireModelId: 'gpt-6-luna',
+      primitives: ['choice', 'boolean', 'score'],
+      batch: true,
+      maxOptions: 255,
+      maxQuestions: 400,
+      maxRubricLevels: 10,
+      maxInputTokens: 64_000,
+      maxQuestionInputTokens: 32_000,
+      uncertainty: ['native_distribution'],
+    },
+  },
+
   // ── Legacy rows (classification/pricing of historical usage only) ──
   {
     // Prior Max default. Preserve its identity and original rates for
@@ -648,6 +689,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   // hosted never configures `openai-codex`.
   {
     alias: 'gpt-5.6-luna',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-5.6 Luna',
     provider: 'openai-codex',
     apiModelId: 'gpt-5.6-luna',
@@ -664,6 +706,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-6-luna',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-6 Luna',
     provider: 'openai-codex',
     apiModelId: 'gpt-6-luna',
@@ -679,6 +722,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   {
     // Pro prefers Terra when entitled, then Sol, before older Pro models.
     alias: 'gpt-6.1-terra',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-6.1 Terra',
     provider: 'openai-codex',
     apiModelId: 'gpt-6.1-terra',
@@ -709,6 +753,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-5.6-terra',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-5.6 Terra',
     provider: 'openai-codex',
     apiModelId: 'gpt-5.6-terra',
@@ -723,6 +768,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-5.6-sol',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-5.6 Sol',
     provider: 'openai-codex',
     apiModelId: 'gpt-5.6-sol',
@@ -737,6 +783,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-5.5',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-5.5',
     provider: 'openai-codex',
     apiModelId: 'gpt-5.5',
@@ -767,6 +814,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   // Older Pro selections remain callable; Max and Research retain Auto priority.
   {
     alias: 'gpt-6-sol',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-6 Sol',
     provider: 'openai-codex',
     apiModelId: 'gpt-6-sol',
@@ -781,6 +829,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-6.1-sol',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-6.1 Sol',
     provider: 'openai-codex',
     apiModelId: 'gpt-6.1-sol',
@@ -795,6 +844,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'gpt-6-astra',
+    codexNativeDeferredTools: true,
     displayName: 'GPT-6 Astra',
     provider: 'openai-codex',
     apiModelId: 'gpt-6-astra',
@@ -1072,8 +1122,9 @@ for (const row of MODEL_REGISTRY) {
 
 // apiModelId also prices (an outage-fallback turn records the resolved
 // snapshot id, e.g. `claude-haiku-4-5-20251001`). Rows sharing an apiModelId
-// share a rate blob by construction; first row wins, and it never overrides
-// an id already claimed as an alias.
+// share a rate blob within the same inference lane; native Decisions and
+// subscription chat may deliberately differ and must record their own alias.
+// First row wins, and it never overrides an id already claimed as an alias.
 for (const row of MODEL_REGISTRY) {
   if (!byPricingId.has(row.apiModelId)) byPricingId.set(row.apiModelId, row)
 }

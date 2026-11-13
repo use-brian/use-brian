@@ -100,7 +100,9 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     fetchMock.mockResolvedValueOnce(sseResponse(TURN_CHUNKS))
       .mockResolvedValueOnce(sseResponse([{ candidates: [{ content: { role: 'model', parts: [{ text: 'Done.' }] }, finishReason: 'STOP' }] }]))
     const tools: ToolDefinition[] = [{ name: 'patchPage', description: 'Patch a page', parameters: { type: 'object', properties: {} } }]
-    const session = createGeminiProvider('test-key').createSession({ model: 'gemini-pro', systemPrompt: 'sys', tools })
+    const catalog = [...tools, { name: 'findRecord', description: 'Find a record', parameters: { type: 'object' as const, properties: {} } }]
+    const session = createGeminiProvider('test-key').createSession({ model: 'gemini-pro', systemPrompt: 'sys', tools: catalog,
+      toolRegistration: { mode: 'deferred', catalog, active: tools } })
     await collect(session.send([{ role: 'user', content: 'Build a page' }]))
     tools.push({ name: 'findRecord', description: 'Find a record', parameters: { type: 'object', properties: {} } })
     await collect(session.send([{ role: 'user', content: [{ type: 'tool_result', toolUseId: 'fc-provider-1', name: 'patchPage', content: 'saved' }] }]))

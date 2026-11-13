@@ -78,6 +78,54 @@ describe('[COMP:api/application-persistence] bounded title group context partiti
   mocks.group.mockRejectedValue(new Error('Fictional storage unavailable'))
   await expect(sessionTitleProjections({claims,sessionIds:ids})).rejects.toThrow('Fictional storage unavailable')
  })
+ for(const code of ['57014','55P03'])it(`withholds the entire page on database timeout ${code} without retrying groups`,async()=>{
+  const warning=vi.spyOn(console,'warn').mockImplementation(()=>{})
+  try{
+   mocks.group.mockRejectedValue(Object.assign(new Error('database lock timeout'),{code}))
+   const result=await sessionTitleProjections({claims,sessionIds:ids})
+   expect([...result.keys()]).toEqual(ids)
+   expect([...result.values()]).toEqual(ids.map(()=>({title:null,titleRevisionId:null})))
+   expect(mocks.group).toHaveBeenCalledTimes(1)
+   expect(mocks.read).not.toHaveBeenCalled()
+   expect(warning).toHaveBeenCalledTimes(1)
+  }finally{warning.mockRestore()}
+ })
+ it('discards already collected titles when a later individual read times out',async()=>{
+  const warning=vi.spyOn(console,'warn').mockImplementation(()=>{})
+  try{
+   mocks.read.mockImplementation(async id=>{
+    if(id==='second')throw Object.assign(new Error('canceling statement due to statement timeout'),{code:'57014'})
+    return title(id)
+   })
+   // Repeated identities intentionally use the individual path.
+   const requested=['first','second','first','second']
+   const result=await sessionTitleProjections({claims,sessionIds:requested})
+   expect([...result.entries()]).toEqual(['first','second'].map(id=>[id,{title:null,titleRevisionId:null}]))
+   expect(mocks.read).toHaveBeenCalledTimes(2)
+   expect(mocks.output).toHaveBeenCalledTimes(1)
+  }finally{warning.mockRestore()}
+ })
+ for(const code of ['57014','55P03'])it(`discards provisional bytes on wrapped final-output timeout ${code}`,async()=>{
+  const warning=vi.spyOn(console,'warn').mockImplementation(()=>{})
+  try{
+   const sql=Object.assign(new Error('Fictional SQL timeout'),{code})
+   const validation=Object.assign(new Error('Fictional caller proof unavailable'),{cause:sql,reason:'caller_evidence_unavailable'})
+   const output=Object.assign(new Error('Fictional output source unavailable'),{cause:validation,reason:'authority_changed'})
+   mocks.output.mockResolvedValueOnce(undefined).mockRejectedValueOnce(output)
+   const result=await sessionTitleProjections({claims,sessionIds:['first','second','first','second']})
+   expect([...result.values()]).toEqual(['first','second'].map(()=>({title:null,titleRevisionId:null})))
+   expect(mocks.read).toHaveBeenCalledTimes(2)
+   expect(mocks.output).toHaveBeenCalledTimes(2)
+   expect(warning).toHaveBeenCalledExactlyOnceWith('Session list titles withheld after database timeout:',sql)
+  }finally{warning.mockRestore()}
+ })
+ it('does not treat a cyclic ordinary authority cause as a database timeout',async()=>{
+  const error=Object.assign(new Error('Fictional changed authority'),{reason:'authority_changed',cause:null as unknown})
+  error.cause=error
+  mocks.output.mockRejectedValue(error)
+  const result=await sessionTitleProjections({claims,sessionIds:['first']})
+  expect(result.get('first')).toEqual({title:null,titleRevisionId:null})
+ })
  it('keeps shared-audience readers on their individual authority path',async()=>{
   mocks.resolve.mockImplementation(async input=>{const result=execution(input);result.executionContext.security.access.sharedAudience=true;return result})
   await sessionTitleProjections({claims,sessionIds:ids})

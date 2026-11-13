@@ -213,6 +213,61 @@ describe('[COMP:api/home-app-sync] syncHomeAppFromGitHub', () => {
 })
 
 describe('[COMP:api/home-app-sync] the poller', () => {
+  it.each(['discovery', 'lock'] as const)('observes a scheduled %s failure and resumes only at the next interval', async (stage) => {
+    vi.useFakeTimers()
+    const failure = new Error(`${stage} temporarily unavailable`)
+    const getAppsDue = vi.fn(async () => [app()])
+    const acquire = vi.fn(async () => true)
+    if (stage === 'discovery') getAppsDue.mockRejectedValueOnce(failure)
+    else acquire.mockRejectedValueOnce(failure)
+    const release = vi.fn(async () => {})
+    const onEvent = vi.fn()
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const worker = createHomeAppSyncWorker({
+      deps: deps().value, getAppsDue, tryAcquireLock: acquire, releaseLock: release,
+      intervalMs: 1000, onEvent,
+    })
+    try {
+      worker.start()
+      worker.start()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(logged).toHaveBeenCalledExactlyOnceWith('[home-app-sync] tick failed:', failure.message)
+      expect(applyCalls).toEqual([])
+      expect(syncErrors).toEqual([])
+      expect(onEvent).not.toHaveBeenCalled()
+      expect(acquire).toHaveBeenCalledTimes(1)
+      expect(release).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(999)
+      expect(acquire).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(applyCalls).toHaveLength(1)
+      expect(onEvent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ outcome: expect.objectContaining({ status: 'synced' }) }))
+      expect(acquire).toHaveBeenCalledTimes(2)
+      expect(release).toHaveBeenCalledTimes(2)
+      worker.stop()
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(acquire).toHaveBeenCalledTimes(2)
+      expect(applyCalls).toHaveLength(1)
+      expect(logged).toHaveBeenCalledTimes(1)
+    } finally {
+      worker.stop()
+      vi.useRealTimers()
+      logged.mockRestore()
+    }
+  })
+
+  it('retains manual tick rejection and releases its running flag for the caller', async () => {
+    const failure = new Error('discovery temporarily unavailable')
+    const getAppsDue = vi.fn(async () => [] as never[]).mockRejectedValueOnce(failure)
+    const release = vi.fn(async () => {})
+    const worker = createHomeAppSyncWorker({ deps: deps().value, getAppsDue, releaseLock: release })
+    await expect(worker.tick()).rejects.toBe(failure)
+    expect(release).toHaveBeenCalledTimes(1)
+    await expect(worker.tick()).resolves.toBeUndefined()
+    expect(getAppsDue).toHaveBeenCalledTimes(2)
+    expect(release).toHaveBeenCalledTimes(2)
+  })
+
   it('records each failure and keeps going — one bad repo cannot stop the tick', async () => {
     const good = app({ id: 'ok' })
     const bad = app({ id: 'bad', repo: 'invalid' })

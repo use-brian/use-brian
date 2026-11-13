@@ -35,6 +35,7 @@ jobs:
       profile: ${{ steps.scope.outputs.profile }}
       shards: ${{ steps.scope.outputs.shards }}
       total: ${{ steps.scope.outputs.total }}
+      matrix: ${{ steps.scope.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,6 +64,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify retained migration source
+        run: node packages/api/scripts/retained-native-reader/build.mjs --check
 
       # Clean API compilation can exceed 4 GiB; keep this a step-local build budget.
       - name: Build
@@ -272,6 +276,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # These tests also compile the API through their transitive build graph.
+      # Match the root unit command: hook subprocesses must not compete with
+      # sibling package tests and compiler pools on the same runner.
       - name: Unit tests
         env:
           NODE_OPTIONS: --max-old-space-size=6144
@@ -282,7 +288,7 @@ jobs:
           --filter='!app-web'
           --filter='!@use-brian/app-desktop'
           --filter='!@use-brian/api-open'
-          --concurrency=4
+          --concurrency=1
 
   embedded-current-tests:
     needs: ci-scope
@@ -342,11 +348,12 @@ jobs:
       github.event.pull_request.head.repo.full_name != github.repository
     name: Department isolation (${{ matrix.shard }}/${{ needs.ci-scope.outputs.total }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The suite registry budgets setup plus all serialized cases. Individual
+    # SQL, test-turn and application/model deadlines remain unchanged.
+    timeout-minutes: ${{ matrix.timeoutMinutes }}
     strategy:
       fail-fast: false
-      matrix:
-        shard: ${{ fromJSON(needs.ci-scope.outputs.shards) }}
+      matrix: ${{ fromJSON(needs.ci-scope.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 

@@ -49,10 +49,10 @@ test('fixture refuses unreviewed runtime roles and callback boundaries before st
 test('disposable activation follows successful migration or the explicit prefix boundary', async () => {
   const {readFile}=await import('node:fs/promises')
   const source=await readFile(new URL('../crm/local-fixture.mjs',import.meta.url),'utf8')
-  assert.equal((source.match(/activateRuntimeRole\(connection/g)||[]).length,2)
+  assert.equal((source.match(/await activate\(\)/g)||[]).length,2)
   const callback=source.indexOf('await beforeApply({')
-  assert.ok(source.indexOf('await activateRuntimeRole(connection')<callback)
-  assert.ok(source.lastIndexOf('await activateRuntimeRole(connection')>source.indexOf("logPath: join(directory, 'migrations.log')"))
+  assert.ok(source.indexOf('await activate()')<callback)
+  assert.ok(source.lastIndexOf('await activate()')>source.indexOf("logPath: join(directory, 'migrations.log')"))
   assert.doesNotMatch(source,/convergeRuntimeRole|ALTER ROLE app_user LOGIN/)
 })
 
@@ -64,7 +64,7 @@ test('shared safety recognizes the complete closed guard before every existing i
     assert.match(sql,/actual_oids\[1:120\] IS DISTINCT FROM expected_oids/)
     assert.match(sql,/actual_oids\[121\] IS DISTINCT FROM dispatcher_oid/)
     assert.match(sql,/8128_native_memory_history_admission.sql/)
-    assert.match(sql,/IF pinned OR feedback OR amended OR history THEN/)
+    assert.match(sql,/IF pinned OR feedback OR amended OR history OR privacy OR chat_read_frame OR typed_manifest OR edge_dispatch\s+OR to_regprocedure\('public\.read_native_session_cohort_frame\(uuid,text\[\],uuid\[\],text\[\],boolean\)'\) IS NOT NULL THEN/)
     assert.match(sql,/actual_oids\[122\] IS DISTINCT FROM helper.oid/)
     assert.match(sql,/public.application_memory_history_status\(uuid,uuid,text\)/)
     assert.match(sql,/SELECT count\(\*\)=121/)

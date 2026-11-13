@@ -2,35 +2,46 @@
 
 /** Offline payments: owner/admin table of cases and the record / mark-paid / undo / cancel flows. [COMP:app-web/association] */
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Banknote } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
+import { listCrmEntitlementPlans } from "@/lib/api/crm";
+import { associationPageCacheKey } from "@/lib/surface-prefetch";
 import type { AssociationPlan } from "@/lib/api/association";
 import { crmRecordHref } from "@/lib/crm-view";
 import { Button } from "@/components/ui/button";
 import { useAssociationModule } from "./module-controls";
-import { AssociationContactPicker, AssociationListState, useAssociationContactSelection, useAssociationPage } from "./operator-controls";
+import { AssociationContactPicker, AssociationListState, useAssociationContactSelection, useAssociationPage, useAssociationProjection } from "./operator-controls";
 import { AssociationMembershipRescueActionForm, AssociationMembershipRescueForm, type AssociationRescueIntent } from "./membership-rescue";
+import { associationHref } from "./navigation";
 import { AssociationEditor, associationMoney } from "./workspace-ui";
 import { EmptyState, InlineNotice, PageHeader, ResponsiveTable, StatusPill, associationDate } from "./ui";
 
-export function AssociationPaymentsPanel({workspaceId,initialNew=false}:{workspaceId:string;initialNew?:boolean}) {
+export function AssociationPaymentsPanel({workspaceId,initialNew=false,initialContactId="",initialPlanId=""}:{workspaceId:string;initialNew?:boolean;initialContactId?:string;initialPlanId?:string}) {
+  const router = useRouter();
   const t=useT().associationPage,u=t.ux,m=t.manage,module=useAssociationModule(workspaceId);
   const canManage=!!module.data?.canManage&&!module.error;
   const rescues=useAssociationPage(workspaceId,"rescues",{},canManage),plans=useAssociationPage(workspaceId,"plans",{},canManage);
-  const [mode,setMode]=useState<"list"|"new">(initialNew?"new":"list"),[contact,setContact]=useAssociationContactSelection(workspaceId),[plan,setPlan]=useState<AssociationPlan|null>(null);
+  const [mode,setMode]=useState<"list"|"new">(initialNew?"new":"list"),[contact,setContact,contactRead]=useAssociationContactSelection(workspaceId, initialContactId),[plan,setPlan]=useState<AssociationPlan|null>(null);
+  const [prefillPlan, setPrefillPlan] = useState(initialPlanId);
+  const planRead = useAssociationProjection(prefillPlan && canManage ? associationPageCacheKey(workspaceId, "payment-plan", { id: prefillPlan }) : null, () => listCrmEntitlementPlans(workspaceId));
+  const chosenPlan = plan ?? planRead.data?.find(row => row.id === prefillPlan && !row.provider && Number(row.feeMinor) > 0);
+  const backToMember = initialContactId ? associationHref(workspaceId, "memberships", { contactId: initialContactId }) : "";
   const [selected,setSelected]=useState<{id:string;intent:AssociationRescueIntent}|null>(null),[saved,setSaved]=useState(false);
   const selectedRow=canManage?rescues.data?.items.find(row=>row.id===selected?.id):undefined;
   useEffect(()=>{if(selected&&!selectedRow)setSelected(null);},[selected,selectedRow]);
-  function done(){setSelected(null);setMode("list");setPlan(null);setSaved(true);void rescues.refresh();}
+  function done(){if (backToMember) { router.push(backToMember); return; } setSelected(null);setMode("list");setPlan(null);setSaved(true);void rescues.refresh();}
   if(module.data&&!module.data.canManage)return <section className="space-y-5"><PageHeader title={u.offlinePayments} description={u.offlinePaymentsHelp}/><InlineNotice tone="neutral">{t.ownerOnly}</InlineNotice></section>;
   if(selected&&selectedRow)return <AssociationEditor title={selected.intent==="settle"?u.markPaid:selected.intent==="cancel"?u.cancelCase:u.undoPayment} onClose={()=>setSelected(null)}><AssociationMembershipRescueActionForm key={`${selected.id}:${selected.intent}`} workspaceId={workspaceId} row={selectedRow} intent={selected.intent} onSaved={done}/></AssociationEditor>;
   if(!canManage)return <section className="space-y-5"><PageHeader title={u.offlinePayments} description={u.offlinePaymentsHelp}/><AssociationListState {...module}>{null}</AssociationListState></section>;
-  if(mode==="new")return <AssociationEditor title={u.recordOfflinePayment} onClose={()=>{setMode("list");setPlan(null);}}>
+  if(mode==="new")return <AssociationEditor title={u.recordOfflinePayment} onClose={()=>{if (backToMember) router.push(backToMember); else { setMode("list"); setPlan(null); }}}>
     <div className="space-y-5">
-      <section className="space-y-2"><h3 className="text-sm font-semibold">{u.selectPerson}</h3><AssociationContactPicker workspaceId={workspaceId} selected={contact} onSelect={row=>{setContact(row);setPlan(null);}} onClear={()=>{setContact(null);setPlan(null);}}/></section>
-      {contact&&!plan?<section className="space-y-2"><h3 className="text-sm font-semibold">{u.choosePlan}</h3><AssociationListState {...plans}><div className="grid gap-3 md:grid-cols-2">{plans.data?.items.filter(row=>!row.provider&&Number(row.feeMinor)>0).map(row=><button key={row.id} type="button" className="flex min-h-8 max-sm:min-h-11 flex-wrap items-center justify-between gap-3 rounded-xl border border-border p-4 text-left hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-ring" disabled={!!plans.error} onClick={()=>setPlan(row)}><span className="font-medium">{row.name}</span><span className="text-sm text-muted-foreground">{associationMoney(row.feeMinor,row.currency)}</span></button>)}</div></AssociationListState></section>:null}
-      {contact&&plan?<AssociationMembershipRescueForm key={`${plan.id}:${contact.id}`} workspaceId={workspaceId} plan={plan} contact={contact} disabled={!canManage||!!plans.error} onSaved={done}/>:null}
+      <section className="space-y-2"><h3 className="text-sm font-semibold">{u.selectPerson}</h3><AssociationContactPicker workspaceId={workspaceId} selected={contact} onSelect={row=>{setContact(row);setPlan(null);setPrefillPlan("");}} onClear={()=>{setContact(null);setPlan(null);setPrefillPlan("");}}/></section>
+      {!!contactRead.error && <InlineNotice tone="danger">{m.loadFailed}</InlineNotice>}
+      {!!prefillPlan && (!planRead.data || !!planRead.error) && <AssociationListState {...planRead}>{null}</AssociationListState>}
+      {contact&&!chosenPlan&&(!prefillPlan||!!planRead.data)?<section className="space-y-2"><h3 className="text-sm font-semibold">{u.choosePlan}</h3><AssociationListState {...plans}><div className="grid gap-3 md:grid-cols-2">{plans.data?.items.filter(row=>!row.provider&&Number(row.feeMinor)>0).map(row=><button key={row.id} type="button" className="flex min-h-8 max-sm:min-h-11 flex-wrap items-center justify-between gap-3 rounded-xl border border-border p-4 text-left hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-ring" disabled={!!plans.error} onClick={()=>setPlan(row)}><span className="font-medium">{row.name}</span><span className="text-sm text-muted-foreground">{associationMoney(row.feeMinor,row.currency)}</span></button>)}</div></AssociationListState></section>:null}
+      {contact&&chosenPlan?<AssociationMembershipRescueForm key={`${chosenPlan.id}:${contact.id}`} workspaceId={workspaceId} plan={chosenPlan} contact={contact} disabled={!canManage||!!(plan ? plans.error : planRead.error)} onSaved={done}/>:null}
     </div>
   </AssociationEditor>;
   return <section className="space-y-5">

@@ -26,7 +26,8 @@ describe("[COMP:app-desktop/siri] App Intents packaging", () => {
     const signer = read("../../scripts/sign-siri-extension.mjs");
     const verifier = read("../../scripts/verify-siri-extension.mjs");
 
-    expect(builder).toContain("afterPack: scripts/sign-siri-extension.mjs");
+    expect(builder).toContain("afterPack: scripts/after-pack.mjs");
+    expect(read("../../scripts/after-pack.mjs")).toContain("await signSiriExtension(context)");
     expect(builder).toContain("afterSign: scripts/verify-siri-extension.mjs");
     expect(builder).toContain("to: Extensions/Brian Siri.appex");
     expect(builder).toContain('"Contents/Extensions/Brian Siri\\\\.appex"');
