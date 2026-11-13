@@ -4,7 +4,7 @@ import { globSync } from 'node:fs'
 import { cp, mkdir, readFile, readdir, lstat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { command, cleanOutputs, cleanupDatabases, resetSnapshot } from './preflight-source.mjs'
-import { acceptanceShards } from './department-isolation-report.mjs'
+import { acceptanceMatrix, acceptanceShards } from './department-isolation-report.mjs'
 
 // Reuse the declared YAML dependency of the existing CI topology tooling.
 const yaml = createRequire(new URL('../../apps/app-desktop/package.json', import.meta.url))('js-yaml')
@@ -59,8 +59,16 @@ export function workflowContext({ historical = true, sha = 'local-snapshot', bra
   return { github: { event_name: 'push', head_ref: '', repository: 'local/snapshot', ref: `refs/heads/${branch}`, sha,
     event: { pull_request: { head: { repo: { full_name: 'local/snapshot' } } } } }, runner: { temp: runnerTemp }, matrix: {},
     needs: { 'ci-scope': { result: 'success', outputs: { historical: String(historical), profile,
-      shards: JSON.stringify(shards), total: String(shards.length) } } } }
+      shards: JSON.stringify(shards), total: String(shards.length), matrix: JSON.stringify(acceptanceMatrix(profile)) } } } }
 }
+
+function jobBudgetMs(id, definition, context) {
+  const minutes = expand(definition['timeout-minutes'] === undefined ? 30 : definition['timeout-minutes'], context)
+  if (typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0 || !Number.isFinite(minutes * 60_000))
+    throw new Error(`Unsupported CI timeout: ${id}`)
+  return minutes * 60_000
+}
+
 export function compileWorkflow(source, context) {
   const workflow = yaml.load(source)
   if (!workflow?.jobs || !workflow.jobs['build-test']) throw new Error('Missing required CI aggregate build-test')
@@ -68,18 +76,26 @@ export function compileWorkflow(source, context) {
   const jobs = []
   for (const [id, job] of Object.entries(workflow.jobs)) {
     if (job['continue-on-error']) throw new Error(`Unsupported optional job: ${id}`)
-    if (job['timeout-minutes'] !== undefined && (!Number.isFinite(job['timeout-minutes']) || job['timeout-minutes'] <= 0)) throw new Error(`Unsupported CI timeout: ${id}`)
     if (job.uses || job.container || job.services || job.env || job.defaults) throw new Error(`Unsupported CI execution environment: ${id}`)
     const needs = typeof job.needs === 'string' ? [job.needs] : job.needs ?? []
     if (needs.some(id => !workflow.jobs[id])) throw new Error(`Missing CI dependency for ${id}`)
-    const matrix = job.strategy?.matrix ?? {}
-    if (matrix.include || matrix.exclude || typeof matrix !== 'object') throw new Error(`Unsupported matrix for ${id}`)
+    const matrix = expand(job.strategy?.matrix ?? {}, context)
+    if (!matrix || Array.isArray(matrix) || typeof matrix !== 'object' || Object.hasOwn(matrix, 'exclude'))
+      throw new Error(`Unsupported matrix for ${id}`)
     let variants = [{}]
-    for (const [key, values] of Object.entries(matrix)) {
-      const expanded = expand(values, context)
-      if (!Array.isArray(expanded) || !expanded.length) throw new Error(`Empty or unsupported matrix: ${id}.${key}`)
-      variants = variants.flatMap(variant => expanded.map(value => ({ ...variant, [key]: value })))
+    if (Object.hasOwn(matrix, 'include')) {
+      if (Object.keys(matrix).length !== 1 || !Array.isArray(matrix.include) || !matrix.include.length ||
+          matrix.include.some(variant => !variant || Array.isArray(variant) || typeof variant !== 'object' || !Object.keys(variant).length))
+        throw new Error(`Unsupported include matrix for ${id}`)
+      variants = matrix.include.map(variant => ({ ...variant }))
+    } else {
+      for (const [key, values] of Object.entries(matrix)) {
+        const expanded = expand(values, context)
+        if (!Array.isArray(expanded) || !expanded.length) throw new Error(`Empty or unsupported matrix: ${id}.${key}`)
+        variants = variants.flatMap(variant => expanded.map(value => ({ ...variant, [key]: value })))
+      }
     }
+    for (const variant of variants) jobBudgetMs(id, job, { ...context, matrix: variant })
     jobs.push({ id, needs, definition: job, variants })
   }
   // A missing dependency on a required job cannot silently remove it from the gate.
@@ -147,7 +163,7 @@ export async function executeWorkflow({ source, root, context, env, directory, l
     if (!when) { done.set(job.id, { result: 'skipped', durationMs: 0 }); context.needs[job.id] = { ...context.needs[job.id], result: 'skipped' }; continue }
     const durations = []
     for (const [variantIndex, matrix] of job.variants.entries()) {
-      const record = { id: job.id, matrix, status: 'running', steps: [], budgetMs: (job.definition['timeout-minutes'] ?? 30) * 60_000 }
+      const record = { id: job.id, matrix, status: 'running', steps: [], budgetMs: jobBudgetMs(job.id, job.definition, { ...context, matrix }) }
       results.push(record)
       console.log(`Preflight: ${job.id} ${JSON.stringify(matrix)}`)
       const started = performance.now()

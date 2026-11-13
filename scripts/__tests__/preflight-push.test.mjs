@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { git, identity, command, environment, snapshot, resetSnapshot } from '../testing/preflight-source.mjs'
 import { compileWorkflow, executeWorkflow, expression, workflowContext } from '../testing/preflight-workflow.mjs'
 import { publicationPlan, runPreflight, verifyReceipt, validateContainerBuild } from '../testing/preflight-push.mjs'
+import { acceptanceMatrix, acceptanceShards } from '../testing/department-isolation-report.mjs'
 
 const owned = []
 afterEach(async () => { for (const path of owned.splice(0)) await rm(path, { recursive: true, force: true }) })
@@ -63,7 +64,8 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
         { run: 'test ! -e .env.local; echo leaked > tracked.txt; echo leaked > leaked.txt; mkdir -p node_modules packages/example/dist; echo leaked > node_modules/leaked.txt; echo leaked > "$HOME/leaked.txt"; echo compiled > packages/example/dist/index.js; tar -czf "$RUNNER_TEMP/deps.tgz" packages/example/dist' },
         { uses: 'actions/upload-artifact@v4', with: { name: 'deps-${{ github.sha }}', path: '${{ runner.temp }}/deps.tgz', 'if-no-files-found': 'error' } },
       ] },
-      tests: { needs: 'build', strategy: { matrix: { part: [1, 2] } }, steps: [
+      tests: { needs: 'build', 'timeout-minutes': '${{ matrix.timeoutMinutes }}',
+        strategy: { matrix: { include: [{ part: 1, timeoutMinutes: 20 }, { part: 2, timeoutMinutes: 45 }] } }, steps: [
         { run: 'test ! -e packages/example/dist/index.js; test ! -e node_modules/leaked.txt; test ! -e "$HOME/leaked.txt"; test ! -e leaked.txt; test "$(cat tracked.txt)" = original' },
         { uses: 'actions/download-artifact@v4', with: { name: 'deps-${{ github.sha }}', path: '${{ runner.temp }}' } },
         { run: 'tar -xzf "$RUNNER_TEMP/deps.tgz"; test "$(cat packages/example/dist/index.js)" = compiled; echo passed > "$RUNNER_TEMP/part-${{ matrix.part }}.json"' },
@@ -81,6 +83,7 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
     assert.equal(report.status, 'passed', JSON.stringify(report))
     const verification = report.repositories[0].verification
     assert.equal(verification.jobs.length, 4)
+    assert.deepEqual(verification.jobs.filter(job => job.id === 'tests').map(job => job.budgetMs), [20, 45].map(minutes => minutes * 60_000))
     assert.ok(verification.jobs.every(job => job.status === 'passed' && job.durationMs >= 0))
     assert.ok(verification.criticalPathMs > 0)
     await verifyReceipt(reportPath, [{ root, kind: 'oss' }])
@@ -93,6 +96,9 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
     ['unknown required action', { jobs: { 'build-test': { steps: [{ uses: 'example/unsupported@v1' }] } } }, /Unsupported required action/],
     ['unknown failure policy', { jobs: { 'build-test': { steps: [{ run: 'false', 'continue-on-error': '${{ false }}' }] } } }, /conditional continue-on-error/],
     ['job budget', { jobs: { 'build-test': { 'timeout-minutes': 0.002, steps: [{ run: 'node -e "setTimeout(()=>{},5000)"' }] } } }, /budget/],
+    ['matrix job budget', { jobs: { 'build-test': { 'timeout-minutes': '${{ matrix.timeoutMinutes }}',
+      strategy: { matrix: { include: [{ timeoutMinutes: 0.002 }] } },
+      steps: [{ run: 'node -e "setTimeout(()=>{},5000)"' }] } } }, /budget/],
   ]) test(`blocks publication after ${name} and retains the failed receipt`, async () => {
     const root = await repository(workflow)
     const { report, reportPath } = await preflight(root)
@@ -159,12 +165,34 @@ describe('[COMP:tooling/push-preflight] actual local publication boundary', () =
 
   test('plans the complete maintained full/current workflow with no guessed test command list', async () => {
     const source = await readFile(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
-    for (const [historical, count] of [[true, 33], [false, 24]]) {
+    for (const [historical, count] of [[true, 34], [false, 25]]) {
       const context = workflowContext({ historical })
       const jobs = compileWorkflow(source, context).filter(job => job.definition.if === undefined || expression(job.definition.if, context))
       assert.equal(jobs.flatMap(job => job.variants).length, count)
       assert.ok(jobs.some(job => job.id === 'build-test'))
+      const profile = historical ? 'full' : 'current'
+      assert.deepEqual(jobs.find(job => job.id === 'department-isolation-shards').variants, acceptanceMatrix(profile).include)
+      assert.deepEqual(JSON.parse(context.needs['ci-scope'].outputs.shards), acceptanceShards(profile))
     }
+  })
+
+  test('rejects unsupported matrices and invalid per-variant budgets before execution', () => {
+    for (const matrix of [{ include: [] }, { include: [null] }, { include: [1] }, { include: [{}] },
+      { include: [{ part: 1 }], part: [1] }, { part: [1], exclude: [] }, [1], 'unsupported']) {
+      assert.throws(() => compileWorkflow(JSON.stringify({ jobs: {
+        'build-test': { strategy: { matrix }, steps: [{ run: 'true' }] },
+      } }), workflowContext()), /matrix/)
+    }
+    for (const timeoutMinutes of [0, -1, null, '45', 'invalid', 1e308]) {
+      assert.throws(() => compileWorkflow(JSON.stringify({ jobs: {
+        'build-test': { 'timeout-minutes': '${{ matrix.timeoutMinutes }}',
+          strategy: { matrix: { include: [{ timeoutMinutes }] } }, steps: [{ run: 'true' }] },
+      } }), workflowContext()), /timeout/)
+    }
+    assert.throws(() => compileWorkflow(JSON.stringify({ jobs: {
+      'build-test': { 'timeout-minutes': '${{ matrix.timeoutMinutes }}',
+        strategy: { matrix: { include: [{ part: 1 }] } }, steps: [{ run: 'true' }] },
+    } }), workflowContext()), /Unknown CI value/)
   })
 
   test('retains historical coverage for already-pushed feature changes in the develop review range', async () => {
