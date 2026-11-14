@@ -39,7 +39,7 @@ side effects. Delivery authorization stays separate.
 
 ## Components
 
-- `packages/api/src/context-scope/request-permission-context.ts` is the public
+- `packages/api/src/context-scope/admission.ts` is the public
   request owner. It reuses the action provider's exact selected snapshot and
   derives delivery admission from it. A new selection clears old delivery
   receipts, while retaining registered executions for admitted in-flight work.
@@ -50,10 +50,10 @@ side effects. Delivery authorization stays separate.
   internal provider that reuses `resolveExecutionContextSystem`. It returns a
   new execution and a detached, frozen turn scope on refresh. It retains trusted
   identity and binding facts; it does not accept a model-supplied permission result.
-- `packages/api/src/context-scope/response-delivery-admission.ts` stores internal
+- The same admission owner stores internal
   delivery receipts for the selected execution, destination and evidence. It
   owns no permission loader, invalidation subscription or refresh lifecycle.
-  `response-permission-snapshot.ts` provides compatibility aliases only.
+  The former response-permission compatibility exports have been removed.
 - `packages/api/src/context-scope/permission-events.ts` routes workspace and
   global invalidations through the existing shared PostgreSQL listener.
 - Migration `8208_permission_snapshot_events.sql` emits a dedicated notification

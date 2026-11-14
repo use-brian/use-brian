@@ -1,4 +1,4 @@
-import {tryNativeInvocationEvidence,tryNativeCombinedOutputEvidence} from './native-invocation-evidence.js'
+import {tryNativeInvocationEvidence} from './native-invocation-evidence.js'
 import { nativeSessionQueryContextSources } from '../application-platform/session-query-context.js'
 /** Native attended recipient admission. [COMP:api/application-persistence] [COMP:api/delivery-authority] */
 import {ContextScopeAccumulator,intersectAccessCeilings,type AccessCeiling,type ExecutionContext,type ScopeEvidence,type ScopeSource} from '@use-brian/core'
@@ -163,17 +163,6 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
    return{allowed:false,reason:'delivery_audience_unverified',diagnostic:scopeEvidenceFailureOf(error)??'verification_error',...deliveryFailureMetadata(error)}
   }
  }
-}
-
-/** Optional personal-web operation: both current caller and recipient obligations
- * are validated by one closed native proof. Unsupported destinations decline. */
-export async function tryValidateNativePersonalOutput(execution:ExecutionContext,input:DeliveryAudienceInput):Promise<ScopeEvidence|null>{
- const pinned=structuredClone(input)
- const ceiling=await tryResolveNativePersonalRecipient(execution,pinned)
- if(!ceiling)return null
- const result=await tryNativeCombinedOutputEvidence(execution,pinned.scopeEvidence??{},ceiling)
- await execution.security.authority.assertCurrent()
- return result
 }
 
 /** Fresh destination metadata only. It grants no source, retention or delivery

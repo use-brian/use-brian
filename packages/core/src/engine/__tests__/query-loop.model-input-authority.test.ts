@@ -182,35 +182,14 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     await expect(run(p.value,ctx)).rejects.toMatchObject({ reason: 'authority_changed',retrySafe: false })
     expect(p.createSession).toHaveBeenCalledTimes(1);expect(p.send).toHaveBeenCalledTimes(1)
   })
-  it('runs a new combined final proof through both lease checks',async()=>{
-    const output=vi.fn(async()=>{}),lease=vi.fn(async()=>{}),combined=vi.fn(async()=>true)
-    const ctx={...context(async()=>{}),assertModelOutputAuthority:output,
-      authority:{assertCurrent:lease,execute:async<T>(operation:()=>Promise<T>)=>operation()}}
-    await assertModelOutputAuthority(ctx,combined)
-    expect(combined).toHaveBeenCalledTimes(1);expect(lease).toHaveBeenCalledTimes(2)
-    expect(output).not.toHaveBeenCalled()
-    await assertModelOutputAuthority(ctx,async()=>false)
-    expect(output).toHaveBeenCalledTimes(1)
-  })
-  it('cannot use a combined final proof to revive a prior refusal',async()=>{
-    const combined=vi.fn(async()=>true),ctx={...context(async()=>{}),
-      assertModelOutputAuthority:async()=>{throw new Error('Fictional final refusal')}}
-    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({reason:'authority_changed'})
-    await expect(assertModelOutputAuthority(ctx,combined)).rejects.toMatchObject({reason:'authority_changed'})
-    expect(combined).not.toHaveBeenCalled()
-  })
-  it.each([false, true])('preserves the destination refusal and latches output denial (combined=%s)', async combined => {
-    const refusal = Object.assign(new Error('The current destination is not authorized for this response.'), {
-      reason: 'delivery_audience_unverified', retrySafe: false, diagnostic: 'teams',
-    })
-    const output = vi.fn(async () => { throw refusal })
-    const ctx = context(async () => {})
-    ctx.assertModelOutputAuthority = output
-    const check = combined ? async () => { throw refusal } : undefined
-    await expect(assertModelOutputAuthority(ctx, check)).rejects.toBe(refusal)
+  it('preserves destination refusal and latches denial before a later dispatch', async () => {
+    const refusal = Object.assign(new Error('Fictional destination refusal'), { reason: 'delivery_audience_unverified', retrySafe: false })
+    const ctx: ToolContext = { ...context(async () => {}), assertModelOutputAuthority: async () => { throw refusal } }
+    const dispatch = vi.fn(), assertCurrent = vi.fn()
+    await expect(assertModelOutputAuthority(ctx, { dispatch, assertCurrent })).rejects.toBe(refusal)
     ctx.assertModelOutputAuthority = async () => {}
-    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
-    expect(output).toHaveBeenCalledTimes(combined ? 0 : 1)
+    await expect(assertModelOutputAuthority(ctx, { dispatch, assertCurrent })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(dispatch).not.toHaveBeenCalled(); expect(assertCurrent).not.toHaveBeenCalled()
   })
   it('does not expose a destination-shaped refusal from model input preparation', async () => {
     const p = provider()
@@ -226,7 +205,7 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     const refusal = Object.assign(new Error('The current destination is not authorized for this response.'), {
       reason: 'delivery_audience_unverified', retrySafe: false, diagnostic: 'teams',
     })
-    const ctx = { ...context(async () => {}), assertModelOutputAuthority: async () => { throw refusal } }
+    const ctx: ToolContext = { ...context(async () => {}), assertModelOutputAuthority: async () => { throw refusal } }
     const collect = async () => {
       for await (const event of queryLoop({ provider: p.value, model: 'mock-model', systemPrompt: 'Fictional context',
         messages: [{ role: 'user', content: 'Read the input' }], tools: new Map(), ledger: NOOP_TURN_LEDGER,
@@ -235,65 +214,78 @@ describe('[COMP:engine/model-input-authority] every model boundary', () => {
     await expect(collect()).rejects.toBe(refusal)
     expect(events).toEqual([])
   })
-  it('refuses final output if the lease changes during the combined proof',async()=>{
-    let revoked=false
-    const ctx={...context(async()=>{}),authority:{assertCurrent:async()=>{if(revoked)throw new Error('Fictional revoked lease')},execute:async<T>(operation:()=>Promise<T>)=>operation()}}
-    await expect(assertModelOutputAuthority(ctx,async()=>{revoked=true;return true})).rejects.toMatchObject({reason:'authority_changed'})
+  it('keeps a final handoff fence refusal sticky', async () => {
+    const ctx = context(async () => {}), dispatch = vi.fn()
+    await expect(assertModelOutputAuthority(ctx, { dispatch, assertCurrent() { throw new Error('Fictional evidence mutation') } }))
+      .rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(dispatch).not.toHaveBeenCalled()
   })
-  it('latches a final evidence-fence refusal even after its transient mutation is gone',async()=>{
-    const output=vi.fn(async()=>{}),ctx={...context(async()=>{}),assertModelOutputAuthority:output}
-    await expect(assertModelOutputAuthority(ctx,async()=>true,()=>{throw new Error('Fictional final evidence mutation')}))
-      .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
-    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
-    expect(output).not.toHaveBeenCalled()
-  })
-  it('uses an invocation-local combined boundary for every event without skipping input checks',async()=>{
-    const p=provider(),input=vi.fn(async()=>{}),output=vi.fn(async()=>{}),combined=vi.fn(async()=>true)
-    const events=await run(p.value,{...context(input),assertModelOutputAuthority:output},{tryAssertOutputBoundary:combined})
-    expect(events.length).toBeGreaterThan(0);expect(combined).toHaveBeenCalledTimes(events.length)
-    expect(output).not.toHaveBeenCalled();expect(input).toHaveBeenCalledTimes(2)
-    expect(combined.mock.calls.length).toBe(events.length)
-  })
-  it('retains the original output hook when the optional outer boundary declines',async()=>{
-    const p=provider(),output=vi.fn(async()=>{}),combined=vi.fn(async()=>false)
-    const events=await run(p.value,{...context(async()=>{}),assertModelOutputAuthority:output},{tryAssertOutputBoundary:combined})
-    expect(output).toHaveBeenCalledTimes(events.length)
-  })
-  it('does not inherit the combined outer boundary into a nested loop',async()=>{
-    const p=provider({tool:true}),child=provider(),combined=vi.fn(async()=>true),childScope=new ContextScopeAccumulator()
-    const output=vi.fn(async(current:ToolContext)=>{if(current.scopeAccumulator===childScope)throw new Error('Fictional child denial')})
-    const observe=buildTool({name:'observe',description:'Run a fictional child',inputSchema:z.object({}).strict(),isReadOnly:true,isConcurrencySafe:true,
-      execute:async(_input,current)=>{
-        expect('tryAssertOutputBoundary' in current).toBe(false)
-        await run(child.value,{...current,scopeAccumulator:childScope})
-        return{data:{value:'Unreachable child output'}}
-      }})
-    await expect(run(p.value,{...context(async()=>{}),assertModelOutputAuthority:output},{tools:new Map([['observe',observe]]),tryAssertOutputBoundary:combined}))
-      .rejects.toMatchObject({reason:'authority_changed',retrySafe:false})
-    expect(output.mock.calls.some(([current])=>current.scopeAccumulator===childScope)).toBe(true)
-  })
-  it('refuses an optional combined operation after a prior sticky denial',async()=>{
-    const p=provider(),combined=vi.fn(async()=>true),ctx={...context(async()=>{}),executionContext:{} as NonNullable<ToolContext['executionContext']>,
-      assertModelOutputAuthority:async()=>{throw new Error('Fictional prior refusal')}}
-    await expect(assertModelOutputAuthority(ctx)).rejects.toMatchObject({reason:'authority_changed'})
-    await expect(run(p.value,ctx,{tryAssertOutputBoundary:combined})).rejects.toMatchObject({reason:'authority_changed'})
-    expect(combined).not.toHaveBeenCalled();expect(p.send).not.toHaveBeenCalled()
-  })
-  it('observes a sticky denial arising during the awaited combined operation',async()=>{
-    const p=provider(),ctx={...context(async()=>{}),executionContext:{} as NonNullable<ToolContext['executionContext']>}
-    const combined=vi.fn(async(current:ToolContext)=>{
-      await expect(assertModelOutputAuthority({...current,assertModelOutputAuthority:async()=>{throw new Error('Fictional concurrent refusal')}}))
-        .rejects.toMatchObject({reason:'authority_changed'})
-      return true
+  it('hands detached events to one output operation without a second yielded copy', async () => {
+    const p = provider(), input = vi.fn(async () => {}), output = vi.fn(async () => {}), observed: QueryEvent[] = []
+    const dispatchOutput = vi.fn(async (current: ToolContext, event: QueryEvent) => {
+      await assertModelOutputAuthority(current, { assertCurrent() {}, dispatch() { observed.push(event) } })
     })
-    await expect(run(p.value,ctx,{tryAssertOutputBoundary:combined})).rejects.toMatchObject({reason:'authority_changed'})
-    expect(combined).toHaveBeenCalledTimes(1)
+    const yielded = await run(p.value, { ...context(input), assertModelOutputAuthority: output }, { dispatchOutput })
+    expect(yielded).toEqual([]); expect(observed.length).toBeGreaterThan(0)
+    expect(output).toHaveBeenCalledTimes(observed.length); expect(input).toHaveBeenCalledTimes(2)
   })
-
-  it('rechecks the live lease after a combined operation before releasing its event',async()=>{
-    const p=provider();let revoked=false
-    const ctx={...context(async()=>{}),authority:{assertCurrent:async()=>{if(revoked)throw new Error('Fictional lease revoked')},execute:async<T>(run:()=>Promise<T>)=>run()}}
-    await expect(run(p.value,ctx,{tryAssertOutputBoundary:async()=>{revoked=true;return true}})).rejects.toMatchObject({reason:'authority_changed'})
+  it('does not inherit the outer output operation into a nested loop', async () => {
+    const p = provider({ tool: true }), child = provider(), childScope = new ContextScopeAccumulator()
+    const output = vi.fn(async (current: ToolContext) => { if (current.scopeAccumulator === childScope) throw new Error('Fictional child denial') })
+    const observe = buildTool({ name: 'observe', description: 'Run a fictional child', inputSchema: z.object({}).strict(), isReadOnly: true, isConcurrencySafe: true,
+      execute: async (_input, current) => {
+        expect('dispatchOutput' in current).toBe(false)
+        await run(child.value, { ...current, scopeAccumulator: childScope })
+        return { data: { value: 'Unreachable child output' } }
+      } })
+    await expect(run(p.value, { ...context(async () => {}), assertModelOutputAuthority: output }, {
+      tools: new Map([['observe', observe]]), dispatchOutput: async current => assertModelOutputAuthority(current),
+    })).rejects.toMatchObject({ reason: 'authority_changed', retrySafe: false })
+    expect(output.mock.calls.some(([current]) => current.scopeAccumulator === childScope)).toBe(true)
   })
-
+  it('closes the producer when the output operation stops the turn', async () => {
+    const p = provider(), controller = new AbortController(), delivered: QueryEvent[] = []
+    await run(p.value, { ...context(async () => {}), abortSignal: controller.signal }, {
+      dispatchOutput: async (current, event) => assertModelOutputAuthority(current, {
+        assertCurrent() {}, dispatch() { delivered.push(event); controller.abort() },
+      }),
+    })
+    expect(delivered).toHaveLength(1)
+  })
+  it('preserves typed provider diagnostics at the host output operation', async () => {
+    class FixtureFailure extends Error { readonly code = 'fixture_failure' }
+    const failure = new FixtureFailure('Fictional provider failure'), p = provider(), delivered: QueryEvent[] = []
+    p.send.mockImplementation(() => (async function* () { throw failure })())
+    await run(p.value, context(async () => {}), { dispatchOutput: async (current, event) =>
+      assertModelOutputAuthority(current, { assertCurrent() {}, dispatch() { delivered.push(event) } }),
+    })
+    const error = delivered.find(event => event.type === 'error')
+    expect(error?.type).toBe('error')
+    if (error?.type === 'error') {
+      expect(error.error).toBeInstanceOf(FixtureFailure)
+      expect(error.error).toHaveProperty('code', 'fixture_failure')
+    }
+  })
+  it('refuses a concurrent denial arising while the output operation awaits', async () => {
+    const p = provider(), ctx = { ...context(async () => {}), executionContext: {} as NonNullable<ToolContext['executionContext']> }
+    const dispatch = vi.fn()
+    const output = async (current: ToolContext) => {
+      await expect(assertModelOutputAuthority({ ...current, assertModelOutputAuthority: async () => { throw new Error('Concurrent denial') } }))
+        .rejects.toMatchObject({ reason: 'authority_changed' })
+    }
+    await expect(run(p.value, { ...ctx, assertModelOutputAuthority: output }, { dispatchOutput: async current => {
+      await assertModelOutputAuthority(current, { assertCurrent() {}, dispatch })
+    } })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(dispatch).not.toHaveBeenCalled()
+  })
+  it('observes lease withdrawal during an output proof before dispatch', async () => {
+    let revoked = false
+    const dispatch = vi.fn(), ctx = { ...context(async () => {}),
+      authority: { assertCurrent: async () => { if (revoked) throw new Error('Revoked lease') }, execute: async<T>(run: () => Promise<T>) => run() },
+      assertModelOutputAuthority: async () => { revoked = true },
+    }
+    await expect(assertModelOutputAuthority(ctx, { assertCurrent() {}, dispatch })).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(dispatch).not.toHaveBeenCalled()
+  })
 })

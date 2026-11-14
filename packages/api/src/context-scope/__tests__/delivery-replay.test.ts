@@ -56,7 +56,12 @@ vi.mock('../../ledger/runtime.js', () => ({
 
 vi.mock('@use-brian/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@use-brian/core')>()),
-  queryLoop: mocks.queryLoop,
+  queryLoop: async function* (options: import('@use-brian/core').QueryLoopOptions) {
+    for await (const event of mocks.queryLoop(options)) {
+      if (options.dispatchOutput) await options.dispatchOutput(options.context, event)
+      else yield event
+    }
+  },
 }))
 
 import {

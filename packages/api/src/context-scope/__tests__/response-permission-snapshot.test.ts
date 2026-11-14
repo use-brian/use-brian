@@ -7,7 +7,7 @@ import type { Session } from '../../db/sessions.js'
 import type { AuthorizeDeliveryAudience } from '../delivery-authority.js'
 import { createAttendedDeliveryAudienceAuthorizer, validateAttendedAudienceEvidence } from '../attended-audience.js'
 import { getApplicationExecutionBinding } from '../../application-platform/execution-context.js'
-import { createWebResponsePermissionSnapshot, ownsWebResponsePermissionSnapshot } from '../response-permission-snapshot.js'
+import { createResponseDeliveryAdmission } from '../admission.js'
 
 vi.mock('../attended-audience.js', () => ({
   createAttendedDeliveryAudienceAuthorizer: vi.fn(),
@@ -45,7 +45,7 @@ function fixture(options: { shared?: boolean; evidence?: ScopeEvidence; input?: 
     effectiveClearance: 'internal', contextCompartments: [], contextProjectId: null,
     ...options.session } as Session
   const context: ToolContext = { ...executionToolContext(execution, { appId: 'chat' }), scopeAccumulator: accumulator }
-  const snapshot = createWebResponsePermissionSnapshot(execution, accumulator, session)
+  const snapshot = createResponseDeliveryAdmission(execution, accumulator, session)
   return { input, execution, accumulator, session, context, snapshot }
 }
 function deferred<T>() {
@@ -213,16 +213,9 @@ describe('native web response delivery snapshot', () => {
     const other = fixture({ input: otherFacts })
     const wrong: ToolContext = kind === 'accumulator' ? { ...f.context, scopeAccumulator: new ContextScopeAccumulator() }
       : kind === 'authority' ? { ...f.context, authority: other.context.authority } : other.context
-    expect(ownsWebResponsePermissionSnapshot(f.snapshot!, f.context)).toBe(true)
-    expect(ownsWebResponsePermissionSnapshot(f.snapshot!, wrong)).toBe(false)
     await expect(f.snapshot!.assertOutputAuthority(wrong)).rejects.toThrow()
     await expect(f.snapshot!.assertOutputAuthority(f.context)).rejects.toThrow()
     expect(admit).toHaveBeenCalledTimes(1)
-  })
-
-  it('cannot forge snapshot ownership with a copied object', () => {
-    const f = fixture()
-    expect(ownsWebResponsePermissionSnapshot({ ...f.snapshot! }, f.context)).toBe(false)
   })
 
   it('uses live fallback on every external-source output, including unchanged chunks', async () => {

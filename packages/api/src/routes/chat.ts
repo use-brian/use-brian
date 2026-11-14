@@ -46,7 +46,7 @@ import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query, getPool } from '../db/client.js'
 import { createTurnTiming, markTurnEnd } from './turn-timings.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
-import { createRequestPermissionContext, type RequestPermissionContext } from '../context-scope/request-permission-context.js'
+import { createRequestPermissionContext, type RequestPermissionContext } from '../context-scope/admission.js'
 import { createExecutionPermissionSnapshots } from '../context-scope/execution-permission-snapshots.js'
 import {
   resolvePinnedContext,
@@ -7910,7 +7910,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           sink: { kind: 'sse', ...(permissionContext
             ? { permissionContext, assertOutputAuthority: permissionContext.authorizeDelivery,
                 onOutputAuthorityTiming: (ms: number) => turnTiming.add('audience_check', ms) }
-            : nativeOutputBoundary ? { nativeOutputBoundary,assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority || classifySession(session).anchor.kind === 'doc_thread' ? { assertOutputAuthority:assertDeliveryAudience } : {}),
+            : nativeOutputBoundary ? { assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority || classifySession(session).anchor.kind === 'doc_thread' ? { assertOutputAuthority:assertDeliveryAudience } : {}),
           onReplyTextComplete: () => postReply.announceTextCompletion(() => {
             sendActivityEvent('reply_text_complete', {})
             turnStream.setReplyPhase('saving')
