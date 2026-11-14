@@ -81,21 +81,26 @@ async function assertModelInputPreparation(context: ToolContext, provider: Query
   return assertModelAuthority(context, 'input', ownsInputAdmission(provider, { model, messages }) ? async () => true : undefined)
 }
 /** The final host sink uses the same sticky boundary as streamed loop events. */
-export async function assertModelOutputAuthority(context: ToolContext, tryBoundary?: () => Promise<boolean>, assertBoundaryCurrent?: () => void): Promise<void> {
-  return assertModelAuthority(context, 'output', tryBoundary, assertBoundaryCurrent)
+export async function assertModelOutputAuthority(context: ToolContext, delivery?: {
+  assertCurrent(): void
+  dispatch(): void | Promise<void>
+}): Promise<void> {
+  return assertModelAuthority(context, 'output', undefined, delivery?.assertCurrent, delivery?.dispatch)
 }
-async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'output',tryBoundary?:()=>Promise<boolean>,assertBoundaryCurrent?:()=>void): Promise<void> {
+async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'output',tryBoundary?:()=>Promise<boolean>,assertBoundaryCurrent?:()=>void,dispatch?:()=>void|Promise<void>): Promise<void> {
   const check = boundary === 'input' ? context.assertModelInputAuthority : context.assertModelOutputAuthority
-  if (!check && !context.authority && !tryBoundary) return
   const identity = context.executionContext ?? context
   if (invalidModelContexts.has(identity)) {
     throw Object.assign(new Error('The model context is unavailable.'), { reason: 'authority_changed' as const,retrySafe: false })
   }
   try {
-    await context.authority?.assertCurrent()
+    // Input admission precedes reading/dispatch. Output source predicates own
+    // their reads; the invocation lease is freshest at the physical handoff,
+    // after those predicates and immediately before the synchronous fence.
+    if (boundary === 'input') await context.authority?.assertCurrent()
     const combined=tryBoundary?await tryBoundary():false
     if(!combined)await check?.(context)
-    if(combined)await context.authority?.assertCurrent()
+    if(combined || boundary === 'output')await context.authority?.assertCurrent()
     assertBoundaryCurrent?.()
     // A concurrent/nested denial during the awaited operation is sticky too.
     if(invalidModelContexts.has(identity))throw Object.assign(new Error('The model context is unavailable.'),{
@@ -112,6 +117,9 @@ async function assertModelAuthority(context: ToolContext, boundary: 'input' | 'o
       reason: 'authority_changed' as const, retrySafe: false,
     })
   }
+  // No await or generator yield between the final fence and physical handoff.
+  // Transport failures are not rewritten into authority failures.
+  return dispatch?.()
 }
 
 function hasVisibleText(text: string): boolean {
@@ -271,10 +279,10 @@ export type QueryEvent =
 // ── Query loop options ─────────────────────────────────────────
 
 export type QueryLoopOptions = {
-  /** Host-owned outer invocation boundary. Never copied onto ToolContext, so
-   * nested loops retain their own source checks. True requires a complete
-   * current caller+recipient operation; false runs the unchanged output hook. */
-  tryAssertOutputBoundary?: (context:ToolContext,event:QueryEvent)=>Promise<boolean>
+  /** Complete host output operation, including admission and physical handoff.
+   * When supplied, events go to this operation instead of being yielded.
+   * Never inherited by nested loops through ToolContext. */
+  dispatchOutput?: (context:ToolContext,event:QueryEvent)=>Promise<void>
   provider: LLMProvider
   model: string
   /** Provider output cap. Custom endpoint profiles supply this explicitly. */
@@ -665,9 +673,17 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
       queryLoopCore({ ...options, tools: filteredTools, context: toolContext, stallWatchdog: watchdog ?? undefined }),
     )
     for await (const event of events) {
-      await assertModelAuthority(toolContext,'output',options.tryAssertOutputBoundary
-        ?()=>options.tryAssertOutputBoundary!(toolContext,event):undefined)
-      yield event
+      // Error is an opaque diagnostic, not a wire DTO. structuredClone drops
+      // its subtype/code (including `stalled`) and would change recovery.
+      if (options.dispatchOutput) await options.dispatchOutput(toolContext,
+        event.type === 'error' ? { ...event } : structuredClone(event))
+      else {
+        await assertModelAuthority(toolContext, 'output')
+        yield event
+      }
+      // Stop closes the producer as well as suppressing delivery. Do not pull
+      // another provider chunk or tool step after the sink cancels this turn.
+      if (options.dispatchOutput && options.context.abortSignal?.aborted) break
     }
   } finally {
     if (toolContext.abortSignal?.aborted) {

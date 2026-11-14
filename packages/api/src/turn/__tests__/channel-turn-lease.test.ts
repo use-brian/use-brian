@@ -29,8 +29,9 @@ vi.mock('../../routes/route-helpers.js', async (original) => ({
 }))
 vi.mock('@use-brian/core', async (original) => ({
   ...await original<any>(),
-  queryLoop: vi.fn(async function* (options: { context?: { abortSignal?: AbortSignal } }) {
-    yield { type: 'text_delta', text: 'working' }
+  queryLoop: vi.fn(async function* (options: import('@use-brian/core').QueryLoopOptions) {
+    if (options.dispatchOutput) await options.dispatchOutput(options.context, { type: 'text_delta', text: 'working' })
+    else yield { type: 'text_delta', text: 'working' }
     // Hold the turn open until something aborts it (or the test releases it).
     await new Promise<void>((resolve) => {
       holdOpen.release = resolve

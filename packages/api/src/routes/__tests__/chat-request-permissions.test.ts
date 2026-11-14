@@ -9,7 +9,7 @@ describe('chat request permission ownership', () => {
     expect(source).toContain('resolveExecutionContextSystem(executionInput)')
     expect(source).toContain('createRequestPermissionContext(resolvedExecution, scopeAccumulator, session, {')
     expect(source).toContain('createActionSnapshots: () => createExecutionPermissionSnapshots(executionInput)')
-    expect(source).not.toContain('createWebResponsePermissionSnapshot')
+    expect(source).not.toContain('createResponseDeliveryAdmission')
   })
 
   it('uses only the request owner for native cached delivery, retaining fallback boundaries', () => {

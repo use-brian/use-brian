@@ -35,7 +35,12 @@ const mockLoadDecisionPlaybookContext = vi.fn()
 // injection + model resolution are exercised end to end.
 vi.mock('@use-brian/core', async (io) => ({
   ...(await io<typeof import('@use-brian/core')>()),
-  queryLoop: (...a: unknown[]) => mockQueryLoop(...a),
+  queryLoop: async function* (options: import('@use-brian/core').QueryLoopOptions) {
+    for await (const event of mockQueryLoop(options)) {
+      if (options.dispatchOutput) await options.dispatchOutput(options.context, event)
+      else yield event
+    }
+  },
   runPreflight: (...a: unknown[]) => mockRunPreflight(...a),
 }))
 vi.mock('../../db/users.js', () => ({

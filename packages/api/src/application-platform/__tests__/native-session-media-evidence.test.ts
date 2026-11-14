@@ -5,7 +5,7 @@ import type { AccessCeiling, ScopeSource } from '@use-brian/core'
 import { describe, expect, it, vi } from 'vitest'
 import { readNativePublicationCohorts, readNativeSessionEvidence } from '../native-session-evidence.js'
 import { readNativeSessionQueryEvidence } from '../native-session-query-evidence.js'
-import { tryValidateNativeCombinedOutputEvidence } from '../../context-scope/caller-evidence.js'
+import { tryValidateNativeScopeEvidence } from '../../context-scope/caller-evidence.js'
 
 const workspaceId = randomUUID(), ownerId = randomUUID()
 function source(resourceKind: ScopeSource['resourceKind'], over: Partial<ScopeSource> = {}): ScopeSource {
@@ -67,14 +67,14 @@ describe('[COMP:api/native-chat-read-cost] internal media evidence', () => {
   it.each(['episode', 'recording'] as const)('still refuses a private %s ancestor for a shared recipient', async kind => {
     const field = source('application_field'), media = source(kind, { userId: ownerId })
     const read = client({ admitted: true, immutable: [field], current: [field, media] })
-    await expect(tryValidateNativeCombinedOutputEvidence({ sources: [field] }, ceiling, { ...ceiling, userId: '' }, read))
+    await expect(tryValidateNativeScopeEvidence({ sources: [field] }, { ...ceiling, userId: '' }, read, 'audience'))
       .rejects.toMatchObject({ reason: 'delivery_audience_unverified', diagnostic: 'user_visibility' })
   })
 
   it('still refuses a media ancestor above the recipient clearance', async () => {
     const field = source('application_field'), media = source('recording', { sensitivity: 'confidential' })
     const read = client({ admitted: true, immutable: [field], current: [field, media] })
-    await expect(tryValidateNativeCombinedOutputEvidence({ sources: [field] }, ceiling, { ...ceiling, clearance: 'internal' }, read))
+    await expect(tryValidateNativeScopeEvidence({ sources: [field] }, { ...ceiling, clearance: 'internal' }, read, 'audience'))
       .rejects.toMatchObject({ reason: 'delivery_audience_unverified', diagnostic: 'clearance' })
   })
 

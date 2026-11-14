@@ -1,6 +1,6 @@
 import { hasWorkspaceMcpRetainedAuthority } from '../db/session-context-revisions.js'
 import {tryNativeInvocationEvidence} from '../context-scope/native-invocation-evidence.js'
-import {createAttendedDeliveryAudienceAuthorizer,tryValidateNativePersonalOutput,tryResolveNativePersonalRecipient} from '../context-scope/attended-audience.js'
+import {createAttendedDeliveryAudienceAuthorizer,tryResolveNativePersonalRecipient} from '../context-scope/attended-audience.js'
 import {DeliveryAudienceUnverifiedError,isDeliveryAudienceUnverifiedError,type DeliveryAudienceInput} from '../context-scope/delivery-authority.js'
 import { nativeSessionQueryContextSources } from './session-query-context.js'
 import { readPersistentSessionContextAncestors } from '../db/session-context-ancestry.js'
@@ -254,34 +254,5 @@ export async function tryAssertNativePublicationPreparationCurrent(boundary:Nati
   // The awaited caller must fence its synchronous assembly too: a microtask
   // after this function resolves must not replace the roots it just inspected.
   return Object.freeze({assertUnchanged:()=>{try{current()}catch(error){nativeOutputFailure(execution,error)}}})
- }catch(error){nativeOutputFailure(execution,error)}
-}
-/** False/null keeps the original caller and recipient boundaries. The optional
- * snapshot fences only this admission's awaited handoff; it is not a permission
- * receipt for another event or operation. No caller can supply proof or allow. */
-type NativeOutputEvidenceFence=Readonly<{evidence:string}>
-export function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutputBoundary,context:ToolContext,
- recipientCallback:((context:ToolContext)=>Promise<void>)|undefined):Promise<boolean>
-export function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutputBoundary,context:ToolContext,
- recipientCallback:((context:ToolContext)=>Promise<void>)|undefined,captureFence:true):Promise<NativeOutputEvidenceFence|null>
-export async function tryAssertNativeCombinedOutput(boundary:NativeAttendedOutputBoundary,context:ToolContext,
- recipientCallback:((context:ToolContext)=>Promise<void>)|undefined,captureFence=false):Promise<boolean|NativeOutputEvidenceFence|null>{
- const binding=nativeOutputBindings.get(boundary)
- if(!binding||recipientCallback!==boundary.assertOutputAuthority)return captureFence?null:false
- const {execution,accumulator}=binding
- try{
-  assertNativeOutputBinding(binding,context)
-  const originalEvidence=JSON.stringify(accumulator.evidence)
-  const detached=new ContextScopeAccumulator(execution.security.provenance)
-  detached.note(accumulator.evidence)
-  await execution.security.authority.assertCurrent()
-  const evidence=await tryValidateNativePersonalOutput(execution,{...binding.input,scopeEvidence:detached.evidence})
-  await execution.security.authority.assertCurrent()
-  assertNativeOutputBinding(binding,context)
-  if(JSON.stringify(accumulator.evidence)!==originalEvidence)denied()
-  if(!evidence)return captureFence?null:false
-  accumulator.note(evidence)
-  // Capture synchronously at admission, before resolving to an awaited caller.
-  return captureFence?Object.freeze({evidence:JSON.stringify(accumulator.evidence)}):true
  }catch(error){nativeOutputFailure(execution,error)}
 }

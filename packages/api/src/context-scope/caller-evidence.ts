@@ -94,8 +94,8 @@ function labelFailure(
   return null
 }
 
-function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client:Pick<PoolClient,'query'>|undefined,workflowRunId:string|undefined,nativeOnly:true,readNative?:typeof readNativeSessionEvidence,additionalCeilings?:readonly AccessCeiling[]):Promise<ScopeEvidence|null>
-function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client?:Pick<PoolClient,'query'>,workflowRunId?:string,nativeOnly?:false,readNative?:typeof readNativeSessionEvidence,additionalCeilings?:readonly AccessCeiling[],pageAudience?:PageThreadAudience):Promise<ScopeEvidence>
+function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client:Pick<PoolClient,'query'>|undefined,workflowRunId:string|undefined,nativeOnly:true,readNative?:typeof readNativeSessionEvidence):Promise<ScopeEvidence|null>
+function validateScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,kind:'caller'|'audience',client?:Pick<PoolClient,'query'>,workflowRunId?:string,nativeOnly?:false,readNative?:typeof readNativeSessionEvidence,pageAudience?:PageThreadAudience):Promise<ScopeEvidence>
 async function validateScopeEvidence(
   evidence: ScopeEvidence,
   ceiling: AccessCeiling,
@@ -104,7 +104,6 @@ async function validateScopeEvidence(
   workflowRunId?: string,
   nativeOnly = false,
   readNative:typeof readNativeSessionEvidence = readNativeSessionEvidence,
-  additionalCeilings:readonly AccessCeiling[] = [],
   pageAudience?: PageThreadAudience,
 ): Promise<ScopeEvidence|null> {
   const currentVisibility = (scope: ResourceScope, receiver: AccessCeiling) => {
@@ -118,7 +117,6 @@ async function validateScopeEvidence(
   let snapshot: ScopeEvidence
   try {
     ceiling=intersectAccessCeilings(ceiling,ceiling)
-    additionalCeilings=additionalCeilings.map(value=>intersectAccessCeilings(value,value))
     if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) throw unavailable(kind, 'shape')
     if (evidence.sensitivity !== undefined && !isSensitivity(evidence.sensitivity)) throw unavailable(kind, 'shape')
     for (const labels of [evidence.compartments,evidence.projectIds]) {
@@ -137,12 +135,8 @@ async function validateScopeEvidence(
   // (scoped-context.md -> "Reading is not deriving").
   let sources = snapshot.sources ?? []
   const originalSources=structuredClone(sources)
-  const nativeCeilings=[ceiling,...additionalCeilings]
-  for (const checkedCeiling of nativeCeilings) {
-    for (const source of sources) failure ??= currentVisibility(source, checkedCeiling) ?? labelFailure(source, checkedCeiling)
-    failure ??= labelFailure({ sensitivity:snapshot.sensitivity??'public',compartments:snapshot.compartments??[],projectIds:snapshot.projectIds??[] },checkedCeiling)
-    if(failure)throw unavailable(checkedCeiling===ceiling?kind:'audience',failure)
-  }
+  for (const source of sources) failure ??= currentVisibility(source, ceiling) ?? labelFailure(source, ceiling)
+  failure ??= labelFailure({ sensitivity:snapshot.sensitivity??'public',compartments:snapshot.compartments??[],projectIds:snapshot.projectIds??[] },ceiling)
   if (failure) throw unavailable(kind, failure)
   if (!sources.length) return nativeOnly ? null : snapshot
   if (!client && sources.some(source=>source.resourceKind==='session_context_revision')) throw unavailable(kind,'source_unverifiable')
@@ -156,20 +150,12 @@ async function validateScopeEvidence(
         const expanded = new ContextScopeAccumulator(snapshot)
         expanded.note(native.evidence)
         for (const source of [...native.evidence.sources ?? [], ...native.current]) {
-          for(const checkedCeiling of nativeCeilings){
-            const refused=currentVisibility(source,checkedCeiling)??labelFailure(source,checkedCeiling)
-            if(refused)throw unavailable(checkedCeiling===ceiling?kind:'audience',refused)
-          }
+          const refused=currentVisibility(source,ceiling)??labelFailure(source,ceiling)
+          if(refused)throw unavailable(kind,refused)
         }
         if (failure) throw unavailable(kind, failure)
         for (const current of native.current) expanded.note({ sensitivity: current.sensitivity,
           compartments: current.compartments, projectIds: current.projectIds })
-        // Sequential delivery sees the caller's expanded aggregate, not only
-        // each source separately. Preserve that independent recipient floor.
-        for(const checkedCeiling of additionalCeilings) failure ??= labelFailure({
-          sensitivity:expanded.evidence.sensitivity??'public',compartments:expanded.evidence.compartments??[],projectIds:expanded.evidence.projectIds??[],
-        },checkedCeiling)
-        if(failure)throw unavailable(additionalCeilings.length?'audience':kind,failure)
         return expanded.evidence
       }
     } catch (error) { throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error, 'native_proof') }
@@ -379,18 +365,12 @@ export async function validateCallerScopeEvidence(evidence: ScopeEvidence, ceili
 /** Final output evidence checked against the current destination audience. */
 export async function validateAudienceScopeEvidence(evidence: ScopeEvidence, ceiling: AccessCeiling, client?: Pick<PoolClient, 'query'>,
   pageAudience?: PageThreadAudience): Promise<ScopeEvidence> {
-  return validateScopeEvidence(evidence, ceiling, 'audience', client, undefined, false, readNativeSessionEvidence, [], pageAudience)
+  return validateScopeEvidence(evidence, ceiling, 'audience', client, undefined, false, readNativeSessionEvidence, pageAudience)
 }
 
 /** Closed native proof only; an unsupported closure must take the original full path. */
 export async function tryValidateNativeScopeEvidence(evidence:ScopeEvidence,ceiling:AccessCeiling,client:Pick<PoolClient,'query'>,kind:'caller'|'audience'):Promise<ScopeEvidence|null>{
  return validateScopeEvidence(evidence,ceiling,kind,client,undefined,true)
-}
-
-/** One fresh native read, with independent caller and recipient label/visibility obligations.
- * This function accepts source identities only, never a precomputed allow result. */
-export async function tryValidateNativeCombinedOutputEvidence(evidence:ScopeEvidence,caller:AccessCeiling,recipient:AccessCeiling,client:Pick<PoolClient,'query'>):Promise<ScopeEvidence|null>{
- return validateScopeEvidence(evidence,caller,'caller',client,undefined,true,readNativeSessionEvidence,[recipient])
 }
 
 /** Own the fresh acquisition and both exact validators in one private operation.

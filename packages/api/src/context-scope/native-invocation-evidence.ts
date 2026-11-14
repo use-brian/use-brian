@@ -3,7 +3,7 @@ import {intersectAccessCeilings,type AccessCeiling,type ExecutionContext,type Sc
 import {getAppPool,applyRLSGucs,rollbackAndRelease,runWithAgentAccess} from '../db/client.js'
 import {getApplicationExecutionBinding} from '../application-platform/execution-context.js'
 import {hasWorkspaceMcpRetainedAuthority} from '../db/session-context-revisions.js'
-import {tryValidateNativeScopeEvidence,tryValidateNativeCombinedOutputEvidence} from './caller-evidence.js'
+import {tryValidateNativeScopeEvidence} from './caller-evidence.js'
 
 /** Null requires the full original validator; it never means admitted. Callers bracket this read with their original live lease.
  * An optional server-owned metadata guard only narrows a completed proof under its native locks. */
@@ -11,13 +11,7 @@ export async function tryNativeInvocationEvidence(execution:ExecutionContext,evi
  return readNativeInvocationEvidence(execution,evidence,recipient,kind,narrowingGuard)
 }
 
-/** Only a native attended sink may combine its current caller and recipient proof. */
-export async function tryNativeCombinedOutputEvidence(execution:ExecutionContext,evidence:ScopeEvidence,recipient:AccessCeiling):Promise<ScopeEvidence|null>{
- if(execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member')return null
- return readNativeInvocationEvidence(execution,evidence,recipient,'caller',undefined,true)
-}
-
-async function readNativeInvocationEvidence(execution:ExecutionContext,evidence:ScopeEvidence,recipient:AccessCeiling,kind:'caller'|'audience',narrowingGuard?:()=>Promise<void>,combined=false):Promise<ScopeEvidence|null>{
+async function readNativeInvocationEvidence(execution:ExecutionContext,evidence:ScopeEvidence,recipient:AccessCeiling,kind:'caller'|'audience',narrowingGuard?:()=>Promise<void>):Promise<ScopeEvidence|null>{
  const roots=evidence.sources??[],actor=execution.security.access.userId,workspaceId=execution.security.access.workspaceId
  const nativeAttended=execution.identity.kind==='attended'&&execution.identity.principal.kind==='workspace_member'
   &&execution.identity.principal.userId===actor
@@ -47,9 +41,7 @@ async function readNativeInvocationEvidence(execution:ExecutionContext,evidence:
   if(nativeDelegated||nativeVerifiedAttended||nativeProgrammatic)await client.query("SELECT set_config('app.v2_assistant_id',$1,true)",[execution.assistant.id])
   // The SQL facade acquires its native lock only after proving eligibility.
   // Unknown/generic/independent-source closures therefore fall back unlocked.
-  const admitted=combined
-   ?await tryValidateNativeCombinedOutputEvidence(evidence,execution.security.ceiling,recipient,client)
-   :await tryValidateNativeScopeEvidence(evidence,recipient,client,kind)
+  const admitted=await tryValidateNativeScopeEvidence(evidence,recipient,client,kind)
   if(admitted)await narrowingGuard?.()
   await client.query('COMMIT');return admitted
  })}finally{await rollbackAndRelease(client)}

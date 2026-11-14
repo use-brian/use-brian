@@ -9,7 +9,7 @@ import { createAttendedDeliveryAudienceAuthorizer, validateAttendedAudienceEvide
 import { createActionPermissionSnapshots } from '../action-permission-snapshots.js'
 import type { PermissionInvalidation, subscribePermissionInvalidation } from '../permission-events.js'
 import type { ResolvedExecutionContext } from '../execution-context.js'
-import { createRequestPermissionContext, ownsRequestPermissionContext } from '../request-permission-context.js'
+import { createRequestPermissionContext, ownsRequestPermissionContext } from '../admission.js'
 
 vi.mock('../attended-audience.js', () => ({
   createAttendedDeliveryAudienceAuthorizer: vi.fn(), validateAttendedAudienceEvidence: vi.fn(),

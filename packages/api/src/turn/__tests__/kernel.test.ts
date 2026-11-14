@@ -28,8 +28,11 @@ vi.mock('@use-brian/core', async (importOriginal) => {
       if (simulateModelBoundaries) await context.assertModelInputAuthority?.(context)
       for (const [index, event] of loopEvents.entries()) {
         loopBeforeEvent?.(index)
-        if (simulateModelBoundaries) await actual.assertModelOutputAuthority(context)
-        yield event
+        if (options.dispatchOutput) await (options.dispatchOutput as (current: import('@use-brian/core').ToolContext, event: unknown) => Promise<void>)(context, event)
+        else {
+          if (simulateModelBoundaries) await actual.assertModelOutputAuthority(context)
+          yield event
+        }
       }
       await loopCleanup?.()
       if (loopThrows) throw loopThrows
@@ -49,7 +52,7 @@ vi.mock('../../context-scope/attended-audience.js', () => ({
 
 import { ContextScopeAccumulator, createExecutionContext, executionToolContext, type ScopeSource, type ToolContext } from '@use-brian/core'
 import type { Session } from '../../db/sessions.js'
-import { createRequestPermissionContext } from '../../context-scope/request-permission-context.js'
+import { createRequestPermissionContext } from '../../context-scope/admission.js'
 import { validateAttendedAudienceEvidence, createAttendedDeliveryAudienceAuthorizer } from '../../context-scope/attended-audience.js'
 import { assertSourceModelInputAuthority, assertSourceModelOutputAuthority } from '../../application-platform/model-source-authority.js'
 import { runAssistantTurn, TurnRefusal, servedTurnModel, turnUsageIdentity, type TurnSinkKind } from '../kernel.js'
@@ -120,7 +123,7 @@ describe('[COMP:api/turn-kernel] runAssistantTurn', () => {
         ...(terminal ? { assertOutputAuthority: async () => { throw new AuthorityChangedError() } } : {}),
       } })
       if (terminal) {
-        const authority = {}, executionContext = { security: { authority } }
+        const authority = { assertCurrent: async () => {} }, executionContext = { security: { authority } }
         options.loop.context = { authority, executionContext, scopeAccumulator: { evidence: {} } } as never
       }
       if (terminal) await expect(runAssistantTurn(options)).rejects.toBeInstanceOf(AuthorityChangedError)
@@ -198,6 +201,20 @@ describe('[COMP:api/turn-kernel] runAssistantTurn', () => {
     const result = await runAssistantTurn(params('adapter', { abortController }))
     expect(result.aborted).toBe(true)
     expect(leaseCalls.at(-1)).toBe('release')
+  })
+
+  it('refuses a hook replacing the checked lease even when the original context remains unchanged', async () => {
+    const authority = { assertCurrent: async () => {} }, executionContext = { security: { authority } }
+    const seen = vi.fn(), afterLoop = vi.fn()
+    const context = { authority, executionContext, scopeAccumulator: undefined,
+      assertModelOutputAuthority: async (current: ToolContext) => { current.authority = { ...authority } as never } }
+    loopEvents = [textTurn('withheld')]
+    const options = params('return', { loop: { ...params('return').loop, context: context as never },
+      sink: { kind: 'return', onEvent: seen, afterLoop } })
+    await expect(runAssistantTurn(options)).rejects.toMatchObject({ reason: 'authority_changed' })
+    context.assertModelOutputAuthority = async () => {}
+    await expect(runAssistantTurn(options)).rejects.toMatchObject({ reason: 'authority_changed' })
+    expect(seen).not.toHaveBeenCalled(); expect(afterLoop).not.toHaveBeenCalled()
   })
 
   it('heart-beats while the turn runs', async () => {
