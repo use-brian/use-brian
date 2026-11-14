@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
-import type {LLMProvider,Message,StreamChunk} from '@use-brian/core'
+import type {LLMProvider,Message,StreamChunk,TopicClassification} from '@use-brian/core'
 import {chatRoutes} from '../../routes/chat.js'
 import {runProactiveCompaction} from '../../routes/proactive-compaction.js'
 import {createDbCapabilityStore} from '../../db/capability-store.js'
@@ -12,13 +12,14 @@ import * as storedSessions from '../../db/sessions.js'
 import * as audience from '../../context-scope/attended-audience.js'
 import {createResponseDeliveryAdmission} from '../../context-scope/response-delivery-admission.js'
 import {takeTurnLease,releaseTurn} from '../../turn/lease.js'
-import {boundScopeSources,ContextScopeAccumulator,executionToolContext} from '@use-brian/core'
+import {bindScopeSources,boundScopeSources,ContextScopeAccumulator,executionToolContext} from '@use-brian/core'
 import {getAppPool,getPool} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {addSessionMessage,createPersonalWebSession,setCompactSummaryAndBoundary,readCompactSummary,findSessionById} from '../../db/sessions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
+import {writeSessionMessageAnnotation} from '../../db/session-message-annotations.js'
 import {readPrivateTranscript} from '../../db/private-transcript.js'
 import * as privateTranscripts from '../../db/private-transcript.js'
 import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
@@ -54,6 +55,93 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
    messages:[{role:'assistant',senderAssistantId:f.assistantId,content:[{type:'text',text:'We chose the amber notebook. The office opens at nine.'}]}]})
   return{f,session,scope,input,reply,memory,fresh,claims,userId,device,original}
  }
+ async function mixedPublication(){
+  const c=await setup(),authority=await c.fresh()
+  // Carry the actual earlier Memory field obligations into a fresh publication
+  // together with newly captured dialogue and a real generated annotation.
+  authority.accumulator.note({sources:c.original.accumulator.evidence.sources??[]})
+  const history=await readPrivateTranscript(authority,c.session.id,c.reply.sequenceNum)
+  expect(history?.map(row=>row.id)).toEqual([c.input.id,c.reply.id])
+  const classification=bindScopeSources<TopicClassification>({topic_label:'Fictional notebook discussion',state:'continue',confidence:0.9},boundScopeSources(history!))
+  const annotation=await writeSessionMessageAnnotation({sessionId:c.session.id,messageId:c.input.id,classification,replyToText:null,authority})
+  expect(annotation).not.toBeNull()
+  authority.accumulator.note({sources:boundScopeSources(annotation!)})
+  const sources=authority.accumulator.evidence.sources??[]
+  expect(sources.map(source=>source.resourceKind)).toEqual(expect.arrayContaining(['private_transcript','application_field','session_context_revision']))
+  const messages=[
+   {role:'assistant',content:[{type:'text',text:'The notebook is still amber.'}]},
+   {role:'assistant',content:[{type:'text',text:'The current Memory still says nine.'}]},
+  ]
+  return{...c,authority,annotation:annotation!,sources,messages}
+ }
+ it('publishes and reads back a private batch with earlier Memory fields and a current context revision',async()=>{
+  const c=await mixedPublication()
+  const replies=await publishNativeSessionMessageBatch({sessionId:c.session.id,authority:c.authority,derivationTarget:c.scope,
+   derivation:{producer:'fixture:mixed-private-publication',sources:c.sources},messages:c.messages})
+  expect(replies).toHaveLength(2)
+  const history=await readPrivateTranscript(await c.fresh(),c.session.id,replies[1].sequenceNum)
+  expect(history?.map(row=>row.id)).toEqual([c.input.id,c.reply.id,...replies.map(row=>row.id)])
+  expect(history?.slice(-2).map(row=>row.content)).toEqual(c.messages.map(row=>row.content))
+  const recorded=(await c.f.pool.query<{resourceId:string;sourceKind:string}>(`SELECT d.resource_id AS "resourceId",s.source_kind AS "sourceKind"
+   FROM scope_derivations d JOIN scope_derivation_sources s ON s.workspace_id=d.workspace_id AND s.derivation_id=d.id
+   WHERE d.workspace_id=$1 AND d.resource_kind='session_message' AND d.resource_id=ANY($2::uuid[])`,
+   [c.f.workspaceId,replies.map(row=>row.id)])).rows
+  for(const reply of replies)expect(recorded.filter(row=>row.resourceId===reply.id).map(row=>row.sourceKind))
+   .toEqual(expect.arrayContaining(['private_transcript','application_field','session_context_revision']))
+ })
+ it.each(['message-hold','message-edit','memory-hold','context-revision-hold'] as const)(
+  'rolls back the entire private publication after insert-time %s',async change=>{
+   const c=await mixedPublication(),name='fixture_private_pub_'+randomUUID().replaceAll('-','')
+   const sequence=name+'_calls',trigger=name+'_insert',fn=name+'_change'
+   const readMessages=async()=>(await c.f.pool.query(`SELECT id,role,content,sequence_num,scope_held,scope_version
+    FROM session_messages WHERE workspace_id=$1 AND session_id=$2 ORDER BY sequence_num`,[c.f.workspaceId,c.session.id])).rows
+   const readDerivations=async()=>(await c.f.pool.query(`SELECT id,resource_kind,resource_id,resource_version
+    FROM scope_derivations WHERE workspace_id=$1 ORDER BY id`,[c.f.workspaceId])).rows
+   const readEdges=async()=>(await c.f.pool.query(`SELECT derivation_id,source_kind,source_id,source_version
+    FROM scope_derivation_sources WHERE workspace_id=$1 ORDER BY derivation_id,source_kind,source_id`,[c.f.workspaceId])).rows
+   const readMemory=async()=>(await c.f.pool.query('SELECT summary,scope_held,scope_version FROM memories WHERE workspace_id=$1 AND id=$2',
+    [c.f.workspaceId,c.memory.id])).rows
+   const readRevision=async()=>(await c.f.pool.query('SELECT scope_held FROM session_context_scope_revisions WHERE workspace_id=$1 AND id=$2',
+    [c.f.workspaceId,c.annotation.revisionId])).rows
+   const before={messages:await readMessages(),derivations:await readDerivations(),edges:await readEdges(),memory:await readMemory(),revision:await readRevision()}
+   const mutation={
+    'message-hold':`UPDATE public.session_messages SET scope_held=true WHERE id='${c.input.id}'::uuid;`,
+    'message-edit':`UPDATE public.session_messages SET content=jsonb_build_array(jsonb_build_object('type','text','text','Fictional message changed during publication.')) WHERE id='${c.input.id}'::uuid;`,
+    'memory-hold':`UPDATE public.memories SET scope_held=true WHERE id='${c.memory.id}'::uuid;`,
+    'context-revision-hold':`UPDATE public.session_context_scope_revisions SET scope_held=true WHERE id='${c.annotation.revisionId}'::uuid;`,
+   }[change]
+   try{
+    await c.f.pool.query(`CREATE SEQUENCE public.${sequence}`)
+    await c.f.pool.query(`REVOKE ALL ON SEQUENCE public.${sequence} FROM PUBLIC`)
+    await c.f.pool.query(`CREATE FUNCTION public.${fn}() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
+     SET search_path=pg_catalog,public,pg_temp AS $fixture$ BEGIN
+     IF NEW.session_id='${c.session.id}'::uuid AND NEW.role='assistant' THEN
+      PERFORM nextval('public.${sequence}'::regclass);
+      ${mutation}
+      PERFORM nextval('public.${sequence}'::regclass);
+     END IF;RETURN NEW;END $fixture$`)
+    await c.f.pool.query(`REVOKE ALL ON FUNCTION public.${fn}() FROM PUBLIC`)
+    await c.f.pool.query(`CREATE TRIGGER ${trigger} AFTER INSERT ON public.session_messages FOR EACH ROW EXECUTE FUNCTION public.${fn}()`)
+    await expect(publishNativeSessionMessageBatch({sessionId:c.session.id,authority:c.authority,derivationTarget:c.scope,
+     derivation:{producer:'fixture:insert-time-private-withdrawal',sources:c.sources},messages:c.messages}))
+     .rejects.toMatchObject({name:'DerivedScopeError',code:'scope_source_changed'})
+    // Sequence increments survive transaction rollback. The second increment
+    // proves both SQL insertion and the fixture mutation actually completed.
+    const fired=(await c.f.pool.query<{calls:string;called:boolean}>(`SELECT last_value AS calls,is_called AS called FROM public.${sequence}`)).rows[0]
+    expect(fired.called).toBe(true)
+    expect(Number(fired.calls)).toBeGreaterThanOrEqual(2)
+    expect(Number(fired.calls)).toBeLessThanOrEqual(c.messages.length*2)
+    expect(await readMessages()).toEqual(before.messages)
+    expect(await readDerivations()).toEqual(before.derivations)
+    expect(await readEdges()).toEqual(before.edges)
+    expect(await readMemory()).toEqual(before.memory)
+    expect(await readRevision()).toEqual(before.revision)
+   }finally{
+    await c.f.pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON public.session_messages`)
+    await c.f.pool.query(`DROP FUNCTION IF EXISTS public.${fn}()`)
+    await c.f.pool.query(`DROP SEQUENCE IF EXISTS public.${sequence}`)
+   }
+  })
  it.each(['title','state'] as const)('preserves private dialogue and current Memory reads through the %s job wrapper',async kind=>{
   const c=await setup(),fresh=await c.fresh(),signal=new AbortController().signal
   let current=true
