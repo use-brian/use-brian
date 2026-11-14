@@ -10,7 +10,7 @@ import { captureAttendedSessionClassification, forkAttendedSessionClassification
 // Only persistence and the host's source proof are synthetic.
 const spies = vi.hoisted(() => ({ query: vi.fn(), proof: vi.fn() }))
 vi.mock('../../db/session-query-reader.js', () => ({ readAdmittedSessionQuery: spies.query, captureSessionTopics: vi.fn(), sessionQueryRootMetadata: vi.fn() }))
-vi.mock('../../application-platform/model-source-authority.js', () => ({ assertSourceModelInputAuthority: spies.proof, ownsNativeAttendedAssembly: vi.fn() }))
+vi.mock('../../application-platform/model-source-authority.js', () => ({ assertSourceModelInputAuthority: spies.proof }))
 
 const body = 'Compare fictional Acorn and Birch markets and separately research their independent regulatory risks.'
 const workspaceId = 'fictional-workspace'

@@ -13,9 +13,9 @@ import {generateAttendedSessionTitle} from './attended-session-title.js'
 import {readSessionTitle} from '../db/session-title-store.js'
 import { pinSessionTitleClaims } from './session-title-authority.js'
 import {authSessionStore} from '../db/auth-session-store.js'
-import {assertSourceModelInputAuthority,createNativeAttendedOutputBoundary,tryAssertNativePreparationCurrent,tryAssertNativePublicationPreparationCurrent} from '../application-platform/model-source-authority.js'
+import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
 import { publishNativeSessionMessageBatch } from '../db/session-message-publication.js'
-import { topicEvidenceFromHistory, captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage, assessAttendedSessionMessage, captureNativeClassifiedAssembly, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
+import { topicEvidenceFromHistory, captureAttendedSessionClassification, forkAttendedSessionClassification, prepareAttendedSplitMessage, assessAttendedSessionMessage, classifyAttendedResearchMessage, readAttendedSessionHistory, readClassifiedSessionHistory, attendedSessionTurnCount } from './attended-session-context.js'
 import type { PoolClient } from 'pg'
 import { withSessionMessagePublication } from '../db/session-context-revisions.js'
 import { createAttendedDeliveryAudienceAuthorizer } from '../context-scope/attended-audience.js'
@@ -3107,11 +3107,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           })
         : undefined
       requestPermissions = permissionContext
-      const nativeOutputBoundary=!programmatic&&!permissionContext&&nativeTranscriptAuthority&&turnPolicy.deliveryCeiling.ceiling==='owner'
-        &&!executionContext.security.access.sharedAudience&&classifySession(session).surface==='chat'?createNativeAttendedOutputBoundary(executionContext,scopeAccumulator,{
-        workspaceId:assistant.workspaceId??'',assistantId:assistant.id,userId:user.id,channelType:'web',
-        channelId:session.channelId,sessionId:session.id,recipientType:turnPolicy.deliveryCeiling.recipientType,
-      }):undefined
       const currentTurnWrite = () => ({
         ...turnOutputWrite({
           producer: 'turn:web',
@@ -4244,10 +4239,8 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         }
       }
 
-      const nativeClassificationAssembly = topicAssessment && nativeTranscriptAuthority && nativeOutputBoundary
-        ? captureNativeClassifiedAssembly(topicAssessment, nativeTranscriptAuthority, nativeOutputBoundary) : undefined
       const nativeClassification = topicAssessment
-        ? await turnTiming.time('topic_annotation', () => nativeClassificationAssembly?.defer() ?? topicAssessment.defer())
+        ? await turnTiming.time('topic_annotation', () => topicAssessment.defer())
         : undefined
       topicAssessmentBranch?.mergeEvidence()
 
@@ -4315,7 +4308,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         const activeAttemptId = planStore.activeAttemptId.bind(planStore)
         const recentDormantAttemptId = planStore.recentDormantAttemptId.bind(planStore)
         const setAttemptState = planStore.setAttemptState.bind(planStore)
-        const effect = <T>(run: () => Promise<T>): Promise<T> => nativeClassificationAssembly?.runEffect(run) ?? run()
+        const effect = async <T>(run: () => Promise<T>): Promise<T> => {
+          await topicAssessment?.assertCurrent()
+          return run()
+        }
         try {
           if (classification.state === 'shift') {
             const activeId = await effect(() => activeAttemptId(session.id))
@@ -4566,8 +4562,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // boundary; null (never compacted) loads full history.
       const dbMessages = await turnTiming.time('history_read', async () => pageBoundTurn ? [storedUserMsg] : nativeTranscriptAuthority
         ? nativeClassification
-          ? await (nativeClassificationAssembly?.readHistory(session.compactBoundarySequence)
-            ?? readClassifiedSessionHistory(nativeTranscriptAuthority, session.id, nativeClassification.history, session.compactBoundarySequence))
+          ? await readClassifiedSessionHistory(nativeTranscriptAuthority, session.id, nativeClassification.history, session.compactBoundarySequence)
           : await readAttendedSessionHistory(nativeTranscriptAuthority, session.id, session.compactBoundarySequence)
         : await getSessionMessages(session.id, {
             fromSequence: session.compactBoundarySequence,
@@ -4640,7 +4635,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
       // internally. We apply web-only post-transforms (stripUnsignedToolUses,
       // retryHint injection) to the returned message array before the query
       // loop.
-      if (!nativeOutputBoundary) await assertDeliveryAudience()
+      await assertDeliveryAudience()
       const compactionResult = pageBoundTurn
         ? { messages: toStampedMessages(dbMessages, user.timezone ?? 'UTC', sharedSenderNames, roomAssistantVoices) as Message[] }
         : await turnTiming.time('compaction', () => runProactiveCompaction({
@@ -5016,9 +5011,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         try {
           episodicContext = await optionalContext(candidate => fetchEpisodicContext({
             authority: candidate ?? { execution: executionContext, accumulator: scopeAccumulator },
-            store: nativeClassificationAssembly ? { ...store,
-              fetchByTopic: query => nativeClassificationAssembly.runEffect(() => fetchByTopic(query)),
-            } : store,
+            store: { ...store, fetchByTopic: async query => {
+              await topicAssessment?.assertCurrent()
+              return fetchByTopic(query)
+            } },
             sessionId: session.id,
             classification,
           }), null)
@@ -7184,14 +7180,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           return
         }
         turnTiming.mark('loop')
-        // Only a containing fresh native recipient with no external delivery
-        // obligation may defer its full graph proof to actual publication.
-        let publicationAssembly = nativeOutputBoundary && !abortController.signal.aborted
-          ? await tryAssertNativePublicationPreparationCurrent(nativeOutputBoundary, {
-            ...executionToolContext(executionContext, { appId: 'native-publication-preparation' }), scopeAccumulator,
-          }) : null
-        if (publicationAssembly) publicationAssembly.assertUnchanged()
-        else await assertDeliveryAudience()
+        await assertDeliveryAudience()
         flushed = true
 
         console.log(
@@ -7230,8 +7219,6 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         }
         const savedTurns: SavedTurn[] = []
         const batchWrite = currentTurnWrite()
-        publicationAssembly?.assertUnchanged()
-        publicationAssembly = null
         const publish = async (tx: PoolClient) => {
           const nativeRows: Array<Parameters<typeof publishNativeSessionMessageBatch>[0]['messages'][number]> = []
           const nativeSaved = new Map<number, { isLast: boolean; attachments: typeof outboundAttachments }>()
@@ -7544,12 +7531,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         }
         const preparedRun = await prepareAssistantRun({
           executionContext,
-          beforeAssembly: async canonicalBrief => {
-            if (canonicalBrief && nativeOutputBoundary && await tryAssertNativePreparationCurrent(nativeOutputBoundary, {
-              ...executionToolContext(executionContext, { appId: 'native-run-preparation' }), scopeAccumulator,
-            })) return
-            await assertDeliveryAudience()
-          },
+          beforeAssembly: assertDeliveryAudience,
           model: {
             provider: turnProvider,
             model,
@@ -7574,7 +7556,11 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           userVisibleContributions: [{ name: 'turn', content: userVisibleContext }],
         })
         const routineDeclineReason = routineCalendarReadDeclineReason({
-          nativeOutput: Boolean(nativeOutputBoundary), nativeTranscript: Boolean(nativeTranscriptAuthority),
+          // Preserve the selector's supported profile independently of admission ownership.
+          nativeOutput: Boolean(!programmatic && !permissionContext && nativeTranscriptAuthority
+            && turnPolicy.deliveryCeiling.ceiling === 'owner' && !executionContext.security.access.sharedAudience
+            && classifySession(session).surface === 'chat'),
+          nativeTranscript: Boolean(nativeTranscriptAuthority),
           decisionRuntime: Boolean(options.decisionRuntime), research: researchMode, coordinator: coordinatorMode,
           site: Boolean(operateSiteIntent), document: Boolean(docCtx), modelRoute: customLlmRuntime,
           calendarTools: boundRoutineCalendarTools, preparedTools: preparedRun.tools,
@@ -7910,7 +7896,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           sink: { kind: 'sse', ...(permissionContext
             ? { permissionContext, assertOutputAuthority: permissionContext.authorizeDelivery,
                 onOutputAuthorityTiming: (ms: number) => turnTiming.add('audience_check', ms) }
-            : nativeOutputBoundary ? { assertOutputAuthority:nativeOutputBoundary.assertOutputAuthority,onOutputAuthorityTiming:(ms:number)=>turnTiming.add('audience_check',ms) } : nativeTranscriptAuthority || classifySession(session).anchor.kind === 'doc_thread' ? { assertOutputAuthority:assertDeliveryAudience } : {}),
+            : nativeTranscriptAuthority || classifySession(session).anchor.kind === 'doc_thread' ? { assertOutputAuthority:assertDeliveryAudience } : {}),
           onReplyTextComplete: () => postReply.announceTextCompletion(() => {
             sendActivityEvent('reply_text_complete', {})
             turnStream.setReplyPhase('saving')

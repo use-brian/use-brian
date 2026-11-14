@@ -143,8 +143,9 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
    await execution.security.authority.assertCurrent()
    const session=await readSessionById(pinned.sessionId!)
    if(!session)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'session_missing'}
-   if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||classifySession(session).surface!=='chat'
-    ||session.channelType!==pinned.channelType||session.channelId!==pinned.channelId)return fallback()
+   if(session.channelType!==pinned.channelType||session.channelId!==pinned.channelId)
+    return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'binding_recipient_conflict'}
+   if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||classifySession(session).surface!=='chat')return fallback()
    const owner=await findAssistantById(session.assistantId)
    if(!owner||owner.workspaceId!==pinned.workspaceId)return{allowed:false,reason:'delivery_audience_unverified',diagnostic:'session_assistant_missing'}
    // Resolve both actual constraints afresh. Their intersection admits only
@@ -163,31 +164,4 @@ export function createAttendedDeliveryAudienceAuthorizer(execution:ExecutionCont
    return{allowed:false,reason:'delivery_audience_unverified',diagnostic:scopeEvidenceFailureOf(error)??'verification_error',...deliveryFailureMetadata(error)}
   }
  }
-}
-
-/** Fresh destination metadata only. It grants no source, retention or delivery
- * permission; callers must independently validate the complete evidence. */
-export async function tryResolveNativePersonalRecipient(execution:ExecutionContext,input:DeliveryAudienceInput):Promise<AccessCeiling|null>{
- const pinned=structuredClone(input),actor=execution.security.access.userId
- if(!isWebTransport(pinned.channelType)||pinned.sessionId!==execution.lifecycle.sessionId
-  ||execution.lifecycle.sessionPersisted===false||execution.security.access.sharedAudience
-  ||execution.identity.kind!=='attended'||execution.identity.principal.kind!=='workspace_member'
-  ||execution.identity.principal.authenticationKind!=='native_session'
-  ||execution.identity.principal.userId!==actor||pinned.userId!==actor
-  ||execution.ownership.kind!=='workspace'||pinned.workspaceId!==execution.security.access.workspaceId
-  ||pinned.assistantId!==execution.assistant.id||getApplicationExecutionBinding(execution)
-  ||pinned.recipientType==='group'||pinned.recipientMode&&pinned.recipientMode!=='member')return null
- await execution.security.authority.assertCurrent()
- const session=await readSessionById(pinned.sessionId!)
- if(!session)throw new DeliveryAudienceUnverifiedError(undefined,'session_missing')
- if(policyFor(session).deliveryCeiling.ceiling!=='owner'||session.userId!==actor||classifySession(session).surface!=='chat'
-  ||session.channelType!==pinned.channelType||session.channelId!==pinned.channelId)return null
- const owner=await findAssistantById(session.assistantId)
- if(!owner||owner.workspaceId!==pinned.workspaceId)throw new DeliveryAudienceUnverifiedError(undefined,'session_assistant_missing')
- const resolve=createDeliveryAudienceEnvelopeResolver()
- const sink=await resolve({...pinned,userId:session.userId}),recipient=await resolve(pinned)
- if(!sink.allowed)throw new DeliveryAudienceUnverifiedError(sink.detail,sink.diagnostic)
- if(!recipient.allowed)throw new DeliveryAudienceUnverifiedError(recipient.detail,recipient.diagnostic)
- if(sink.ceiling.userId!==actor||recipient.ceiling.userId!==actor)throw new DeliveryAudienceUnverifiedError(undefined,'binding_recipient_conflict')
- return intersectAccessCeilings(sink.ceiling,recipient.ceiling)
 }
