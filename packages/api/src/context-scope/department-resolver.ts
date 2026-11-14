@@ -7,6 +7,7 @@
  * scope mode or readiness constant.
  * Spec: docs/architecture/context-engine/scoped-context.md -> "Reference predicate (v2)".
  */
+import {z} from 'zod'
 import type { DepartmentReadGrant, Sensitivity } from '@use-brian/core'
 import { ANONYMOUS, eff, effBase, projectAdmission, type AccessSnapshot, type Edge, type Principal, type ProjectEdge, type Reader, type Tier } from './reference-predicate.js'
 
@@ -27,43 +28,58 @@ export type DepartmentReadInput = {
  * and their base clearances. A person who is not a workspace member is the
  * anonymous principal (no edges, base public).
  */
+const tier = z.enum(['public', 'internal', 'confidential'])
+const principalEdge = z.object({ kind: z.enum(['user', 'assistant']), id: z.string().uuid(),
+  expiresAt: z.coerce.date().nullable() }).strict()
+const departmentSnapshot = z.object({
+  member: z.object({ role: z.string(), clearance: tier }).strict().nullable(),
+  assistant: z.object({ clearance: tier }).strict().nullable(),
+  edges: z.array(principalEdge.extend({ departmentId: z.string().uuid(), clearance: tier })),
+  activeProjects: z.array(z.string().uuid()),
+  projectEdges: z.array(principalEdge.extend({ projectId: z.string().uuid() })),
+}).strict()
+
 export async function loadDepartmentSnapshot(query: Query, input: DepartmentReadInput): Promise<{ snapshot: AccessSnapshot; principal: Principal }> {
-  const member = (await query<{ role: string; clearance: Tier }>(
-    'SELECT role, clearance FROM workspace_members WHERE workspace_id = $1 AND user_id = $2',
-    [input.workspaceId, input.userId])).rows[0]
+  // One statement is the fact owner. Membership and edges cannot come from
+  // different committed states; no fact or decision survives this operation.
+  const result = await query<{ snapshot: unknown }>(`WITH member AS MATERIALIZED (
+    SELECT role, clearance FROM workspace_members WHERE workspace_id=$1 AND user_id=$2
+  ), active_projects AS MATERIALIZED (
+    SELECT s.project_id FROM project_shared_scopes s JOIN workspaces w ON w.id=s.workspace_id
+    WHERE s.workspace_id=$1 AND s.status='active' AND w.project_shared_spaces
+  ) SELECT jsonb_build_object(
+    'member', (SELECT to_jsonb(m) FROM member m),
+    'assistant', (SELECT jsonb_build_object('clearance',a.clearance) FROM assistants a
+      WHERE a.id=$3 AND a.workspace_id=$1 AND public.assistant_placement_visible($2,a.id)),
+    'edges', coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'kind',e.principal_kind,'id',coalesce(e.user_id,e.assistant_id),
+      'departmentId',e.department_id,'clearance',e.clearance,'expiresAt',e.expires_at))
+      FROM department_edges e WHERE e.workspace_id=$1
+        AND ((e.user_id=$2 AND EXISTS(SELECT 1 FROM member)) OR e.assistant_id=$3)), '[]'::jsonb),
+    'activeProjects', coalesce((SELECT jsonb_agg(project_id ORDER BY project_id) FROM active_projects), '[]'::jsonb),
+    'projectEdges', coalesce((SELECT jsonb_agg(jsonb_build_object(
+      'kind',e.principal_kind,'id',coalesce(e.user_id,e.assistant_id),
+      'projectId',e.project_id,'expiresAt',e.expires_at))
+      FROM project_shared_members e WHERE e.workspace_id=$1 AND EXISTS(SELECT 1 FROM active_projects)
+        AND ((e.user_id=$2 AND EXISTS(SELECT 1 FROM member)) OR e.assistant_id=$3)), '[]'::jsonb)
+    ) AS snapshot`, [input.workspaceId, input.userId, input.assistantId])
+  if (result.rows.length !== 1) throw new Error('authority_unavailable')
+  const loaded = departmentSnapshot.parse(result.rows[0].snapshot)
+  const { member, assistant } = loaded
   const principal: Principal = member ? { kind: 'user', id: input.userId } : ANONYMOUS
   const base: Record<string, Tier> = {}
   // §3: owner and admin bases are confidential; everyone else's is set by governance.
   if (member) base[`user:${input.userId}`] = member.role === 'owner' || member.role === 'admin' ? 'confidential' : member.clearance
   if (input.assistantId) {
-    const assistant = (await query<{ clearance: Tier }>(
-      'SELECT clearance FROM assistants WHERE id = $1 AND workspace_id = $2 AND public.assistant_placement_visible($3, id)', [input.assistantId, input.workspaceId, input.userId])).rows[0]
-    // An assistant outside the workspace is not a reader of it.
+    // An absent or invisible assistant cannot act as a reader.
     if (!assistant) throw new Error('authority_unavailable')
     base[`assistant:${input.assistantId}`] = assistant.clearance
   }
-  const rows = (await query<{ kind: 'user' | 'assistant'; id: string; departmentId: string; clearance: Tier; expiresAt: Date | null }>(
-    `SELECT principal_kind AS kind, coalesce(user_id, assistant_id) AS id, department_id AS "departmentId",
-            clearance, expires_at AS "expiresAt"
-       FROM department_edges
-      WHERE workspace_id = $1 AND ((user_id = $2 AND $4::boolean) OR assistant_id = $3)`,
-    [input.workspaceId, input.userId, input.assistantId, member !== undefined])).rows
-  const edges: Edge[] = rows.map(r => ({ principal: { kind: r.kind, id: r.id }, departmentId: r.departmentId,
+  const edges: Edge[] = loaded.edges.map(r => ({ principal: { kind: r.kind, id: r.id }, departmentId: r.departmentId,
     clearance: r.clearance, expiresAt: r.expiresAt }))
-  // Shared Projects (project-shared-spaces.md): active scopes only while the
-  // workspace capability is on; roster edges of exactly these two principals.
-  const scopes = (await query<{ projectId: string }>(
-    `SELECT s.project_id AS "projectId" FROM project_shared_scopes s JOIN workspaces w ON w.id = s.workspace_id
-      WHERE s.workspace_id = $1 AND s.status = 'active' AND w.project_shared_spaces ORDER BY s.project_id`,
-    [input.workspaceId])).rows
-  const projectRows = scopes.length === 0 ? [] : (await query<{ kind: 'user' | 'assistant'; id: string; projectId: string; expiresAt: Date | null }>(
-    `SELECT principal_kind AS kind, coalesce(user_id, assistant_id) AS id, project_id AS "projectId", expires_at AS "expiresAt"
-       FROM project_shared_members
-      WHERE workspace_id = $1 AND ((user_id = $2 AND $4::boolean) OR assistant_id = $3)`,
-    [input.workspaceId, input.userId, input.assistantId, member !== undefined])).rows
-  const projectEdges: ProjectEdge[] = projectRows.map(r => ({ principal: { kind: r.kind, id: r.id }, projectId: r.projectId, expiresAt: r.expiresAt }))
+  const projectEdges: ProjectEdge[] = loaded.projectEdges.map(r => ({ principal: { kind: r.kind, id: r.id }, projectId: r.projectId, expiresAt: r.expiresAt }))
   return { snapshot: { workspaceId: input.workspaceId, edges, base, projectEdges,
-    activeProjects: scopes.map(row => row.projectId),
+    activeProjects: loaded.activeProjects,
     workspaceOwners: member?.role === 'owner' ? [input.userId] : [] }, principal }
 }
 

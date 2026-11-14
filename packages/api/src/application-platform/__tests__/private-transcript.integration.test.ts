@@ -1,4 +1,5 @@
 import {randomUUID} from 'node:crypto'
+import pg from 'pg'
 import express from 'express'
 import request from 'supertest'
 import type {LLMProvider,Message,StreamChunk,TopicClassification} from '@use-brian/core'
@@ -10,10 +11,12 @@ import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
 import * as queryFrames from '../../db/session-context-revisions.js'
 import * as storedSessions from '../../db/sessions.js'
 import * as audience from '../../context-scope/attended-audience.js'
+import * as nativeEvidence from '../native-session-evidence.js'
 import {createResponseDeliveryAdmission} from '../../context-scope/admission.js'
 import {takeTurnLease,releaseTurn} from '../../turn/lease.js'
 import {bindScopeSources,boundScopeSources,ContextScopeAccumulator,executionToolContext} from '@use-brian/core'
-import {getAppPool,getPool} from '../../db/client.js'
+import {getAppPool,getPool,applyRLSGucs,runWithAgentAccess} from '../../db/client.js'
+import {validateCallerScopeEvidence,validateAudienceScopeEvidence} from '../../context-scope/caller-evidence.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {addSessionMessage,createPersonalWebSession,setCompactSummaryAndBoundary,readCompactSummary,findSessionById} from '../../db/sessions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
@@ -74,6 +77,92 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
   ]
   return{...c,authority,annotation:annotation!,sources,messages}
  }
+ it('validates private dialogue directly at each boundary without generic ancestry discovery',async()=>{
+  const c=await setup(),authority=await c.fresh()
+  const history=await readPrivateTranscript(authority,c.session.id,c.reply.sequenceNum)
+  const evidence={sources:boundScopeSources(history!)}
+  expect(evidence.sources.map(source=>source.resourceKind)).toEqual(['private_transcript'])
+  const queries=vi.spyOn(pg.Client.prototype,'query')
+  const caller=await validateCallerScopeEvidence(evidence,authority.execution.security.ceiling)
+  const recipient=await validateAudienceScopeEvidence(evidence,authority.execution.security.ceiling)
+  expect(caller.sources).toEqual(evidence.sources)
+  expect(recipient.sources).toEqual(evidence.sources)
+  // This is an executed work bound over the real database, not a mocked proof:
+  // each operation reads the fresh transcript state and no generic graph.
+  expect(queries).toHaveBeenCalledTimes(2)
+  for(const call of queries.mock.calls){
+   expect(String(call[0])).toContain('read_scope_source($1,t.kind,t.id)')
+   expect(call[1]).toEqual([c.f.workspaceId,['private_transcript'],evidence.sources.map(source=>source.resourceId)])
+  }
+  queries.mockRestore()
+  await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.input.id])
+  await expect(validateAudienceScopeEvidence(evidence,authority.execution.security.ceiling))
+   .rejects.toMatchObject({diagnostic:'source_held'})
+ })
+ it.each(['different-actor','application','public-share'] as const)('refuses a private transcript withheld by the non-owner %s reader',async mode=>{
+  const c=await setup(),authority=await c.fresh()
+  const history=await readPrivateTranscript(authority,c.session.id,c.reply.sequenceNum)
+  const readerAccess=mode==='different-actor'?(await c.f.modelContext(c.f.secondId)).execution.security.access:authority.execution.security.access
+  const client=await getAppPool().connect()
+  try{await runWithAgentAccess(readerAccess,async()=>{
+   await client.query('BEGIN')
+   await applyRLSGucs(client,mode==='different-actor'?c.f.secondId:c.userId)
+   if(mode==='application')await client.query("SELECT set_config('app.application_id',$1,true)",[randomUUID()])
+   if(mode==='public-share')await client.query("SELECT set_config('app.public_share_root',$1,true)",[randomUUID()])
+   await expect(validateCallerScopeEvidence({sources:boundScopeSources(history!)},authority.execution.security.ceiling,client))
+    .rejects.toMatchObject({diagnostic:'source_unverifiable'})
+  })}finally{await client.query('ROLLBACK');client.release()}
+ })
+ it.each(['caller','audience'] as const)('composes native and dialogue proofs for %s without generic mixed-cohort traversal',async boundary=>{
+  const c=await setup(),sources=structuredClone(c.original.accumulator.evidence.sources!)
+  const read=nativeEvidence.readNativeSessionEvidence
+  const native=vi.spyOn(nativeEvidence,'readNativeSessionEvidence').mockImplementation(async(...args)=>{
+   expect(args[2].some(source=>source.resourceKind==='private_transcript')).toBe(false)
+   const result=await read(...args)
+   expect(result?.kind).toBe('complete')
+   return result
+  })
+  const context={...executionToolContext(c.original.execution,{appId:'fictional-composed-proof'}),scopeAccumulator:c.original.accumulator}
+  await (boundary==='caller'?assertSourceModelInputAuthority(context):assertSourceModelOutputAuthority(context))
+  expect(native).toHaveBeenCalledOnce()
+  expect(c.original.accumulator.evidence.sources).toEqual(expect.arrayContaining(sources))
+ })
+ it.each(['caller','audience'] as const)('refuses dialogue withdrawn while the %s native proof is starting',async boundary=>{
+  const c=await setup(),read=nativeEvidence.readNativeSessionEvidence
+  const native=vi.spyOn(nativeEvidence,'readNativeSessionEvidence').mockImplementation(async(...args)=>{
+   // Withdraw before the SQL reader acquires workspace locks. Attempting this
+   // after it returns would test a lock timeout, not a completed withdrawal.
+   await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.input.id])
+   const result=await read(...args)
+   expect(result?.kind).toBe('complete')
+   return result
+  })
+  const context={...executionToolContext(c.original.execution,{appId:'fictional-composed-proof'}),scopeAccumulator:c.original.accumulator}
+  await expect(boundary==='caller'?assertSourceModelInputAuthority(context):assertSourceModelOutputAuthority(context))
+   .rejects.toMatchObject({reason:'authority_changed',cause:{diagnostic:'source_held'}})
+  expect(native).toHaveBeenCalledOnce()
+  expect((await c.f.pool.query('SELECT scope_held FROM session_messages WHERE id=$1',[c.input.id])).rows[0].scope_held).toBe(true)
+ })
+ it('does not promote a database owner into native mixed-source read authority',async()=>{
+  const c=await mixedPublication(),client=await c.f.pool.connect()
+  try{await runWithAgentAccess(c.authority.execution.security.access,async()=>{
+   await client.query('BEGIN')
+   await applyRLSGucs(client,c.userId)
+   // The owner connection is for maintenance, not an admitted native reader.
+   // Source-family composition must preserve that refusal, including fallback.
+   await expect(validateCallerScopeEvidence({sources:c.sources},c.authority.execution.security.ceiling,client))
+    .rejects.toMatchObject({diagnostic:'source_unverifiable',cause:{code:'42501'}})
+  })}finally{await client.query('ROLLBACK');client.release()}
+ })
+ it.each(['transcript','memory'] as const)('retains every mixed source obligation when %s is held',async held=>{
+  const c=await setup(),evidence=c.original.accumulator.evidence
+  expect(evidence.sources?.map(source=>source.resourceKind)).toEqual(expect.arrayContaining(['private_transcript','application_field']))
+  await audience.validateAttendedAudienceEvidence(c.original.execution,evidence,c.original.execution.security.ceiling,{directHumanSource:true})
+  if(held==='transcript')await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.input.id])
+  else await c.f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[c.memory.id])
+  await expect(audience.validateAttendedAudienceEvidence(c.original.execution,evidence,c.original.execution.security.ceiling,{directHumanSource:true}))
+   .rejects.toBeTruthy()
+ })
  it('publishes and reads back a private batch with earlier Memory fields and a current context revision',async()=>{
   const c=await mixedPublication()
   const replies=await publishNativeSessionMessageBatch({sessionId:c.session.id,authority:c.authority,derivationTarget:c.scope,

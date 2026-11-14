@@ -159,6 +159,8 @@ export async function readApplicationFieldAncestors(workspaceId: string, rawRoot
   // even when the files themselves contribute no field ancestors.
   const cohorts = new Map<ScopeSource['resourceKind'], ScopeSource[]>()
   for (const root of roots) {
+    // Dialogue is validated as a transcript, never as the fields behind an old reply.
+    if (root.resourceKind === 'private_transcript') continue
     const cohort = cohorts.get(root.resourceKind)
     if (cohort) cohort.push(root)
     else cohorts.set(root.resourceKind, [root])
