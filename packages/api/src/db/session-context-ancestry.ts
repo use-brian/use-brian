@@ -9,8 +9,10 @@ const metadata=z.object({workspaceId:z.string().uuid(),userId:z.string().uuid().
 function changed():never{throw new DerivedScopeError('scope_source_changed')}
 /** Metadata discovery grants no rights; supplied transactions admit every parent. */
 export async function readPersistentSessionContextAncestors(workspaceId:string,rawRoots:readonly ScopeSource[],client?:Pick<PoolClient,'query'>):Promise<ScopeSource[]> {
- const roots=structuredClone(rawRoots),found=new Map<string,ScopeSource>()
- if(roots.some(source=>source.workspaceId!==workspaceId))changed()
+ if(rawRoots.some(source=>source.workspaceId!==workspaceId))changed()
+ // Dialogue has its own immutable manifest and current-source validator. It
+ // deliberately carries no upstream persistent-context requirements.
+ const roots=structuredClone(rawRoots.filter(source=>source.resourceKind!=='private_transcript')),found=new Map<string,ScopeSource>()
  for(let offset=0;offset<roots.length;offset+=100){
   const part=roots.slice(offset,offset+100)
   const rows=(await (client ?? getPool()).query<{nodeVersion:string;source:unknown}>(client

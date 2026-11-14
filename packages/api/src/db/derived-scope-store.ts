@@ -172,12 +172,12 @@ export async function readCurrentScopeSources(
     const row = byOrd.get(index + 1) ?? null
     // A CRM event snapshot is withheld (NULL) while held or retired, so its
     // absence is not proof of deletion.
-    if (!row) return source.resourceKind === 'external_source' || source.resourceKind === 'application_field' || source.resourceKind === 'session_context_revision' ? { state: 'unverifiable', source }
+    if (!row) return source.resourceKind === 'external_source' || source.resourceKind === 'application_field' || source.resourceKind === 'session_context_revision' || source.resourceKind === 'private_transcript' ? { state: 'unverifiable', source }
       : source.resourceKind === 'crm_event' ? { state: 'held', source } : { state: 'gone', source }
     if (row.held) return { state: 'held', source }
     if (source.resourceKind === 'crm_event' && (!row.causalEntityId
       || !unique.has(`entity:${row.causalEntityId}`))) return { state: 'unverifiable', source }
-    if (row.retractedAt || row.validTo) return source.resourceKind === 'external_source' ? { state: 'unverifiable', source } : { state: 'gone', source }
+    if (row.retractedAt || row.validTo) return source.resourceKind === 'external_source' || source.resourceKind === 'private_transcript' ? { state: 'unverifiable', source } : { state: 'gone', source }
     if (row.version === source.version && resourceScopeKey(row) === resourceScopeKey(source)) {
       return { state: 'current', source }
     }

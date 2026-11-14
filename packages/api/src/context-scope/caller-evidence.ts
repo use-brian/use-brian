@@ -113,6 +113,36 @@ async function validateScopeEvidence(
     // fields and every other source keep their ordinary per-source visibility.
     return visibilityFailure(pageSource ? { ...scope, userId: null } : scope, receiver)
   }
+  const validateCurrent = async (evidence: ScopeEvidence, currentRoots: readonly ScopeSource[]): Promise<ScopeEvidence> => {
+    // Current-label revalidation (decision D1): an edit, supersession or delete
+    // after the read never blocks by itself - often the turn made that change
+    // (list then close a task). A held source, or one whose CURRENT envelope
+    // no longer fits the receiver, does. Exact-version lineage is the derived
+    // writer's rule (`revalidateScopeSources`), not the audience's.
+    let states: Awaited<ReturnType<typeof readCurrentScopeSources>>
+    try {
+      states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, currentRoots, workflowRunId, kind === 'caller' ? 'context' : 'deliver', !!client)
+    } catch (error) {
+      throw unavailable(kind, 'verification_error', error, 'current_source')
+    }
+    const raised: ScopeEvidence = { ...evidence }
+    for (const state of states) {
+      if (state.state === 'held') throw unavailable(kind, 'source_held')
+      if (state.state === 'unverifiable') throw unavailable(kind, 'source_unverifiable')
+      if (state.state === 'stale_input') throw unavailable(kind, 'source_changed')
+      if (state.state !== 'changed') continue
+      const current = state.current
+      if (currentVisibility(current, ceiling) || labelFailure(current, ceiling)) {
+        throw unavailable(kind, 'source_reclassified')
+      }
+      // High-water: the receiver's evidence carries both the read labels and
+      // the source's current ones.
+      raised.sensitivity = maxSensitivity(raised.sensitivity ?? 'public', current.sensitivity)
+      raised.compartments = [...new Set([...(raised.compartments ?? []), ...current.compartments])].sort()
+      raised.projectIds = [...new Set([...(raised.projectIds ?? []), ...current.projectIds])].sort()
+    }
+    return raised
+  }
   let failure: ScopeEvidenceFailure | null = null
   let snapshot: ScopeEvidence
   try {
@@ -145,7 +175,10 @@ async function validateScopeEvidence(
   // validator below, including independent source and Page admission.
   if (client && !workflowRunId) {
     try {
-      const native = await readNative(client, ceiling.workspaceId, sources)
+      // Dialogue is a separate leaf obligation, never an unsupported native root.
+      // Compose both fresh proofs inside this same operation and transaction.
+      const transcripts = sources.filter(source=>source.resourceKind==='private_transcript')
+      const native = await readNative(client, ceiling.workspaceId, sources.filter(source=>source.resourceKind!=='private_transcript'))
       if (native?.kind==='complete') {
         const expanded = new ContextScopeAccumulator(snapshot)
         expanded.note(native.evidence)
@@ -156,7 +189,7 @@ async function validateScopeEvidence(
         if (failure) throw unavailable(kind, failure)
         for (const current of native.current) expanded.note({ sensitivity: current.sensitivity,
           compartments: current.compartments, projectIds: current.projectIds })
-        return expanded.evidence
+        return transcripts.length ? await validateCurrent(expanded.evidence, transcripts) : expanded.evidence
       }
     } catch (error) { throw scopeEvidenceFailureOf(error) ? error : unavailable(kind, 'source_unverifiable', error, 'native_proof') }
   }
@@ -265,7 +298,9 @@ async function validateScopeEvidence(
   // Page receipts carry principal boundaries beyond generic labels. Resolve
   // each immutable observation; never treat a missing receipt as D1 deletion.
   const pageKinds = new Set(['page_event_changed','page_event_destination','page_live_changed','page_live_destination'])
-  const ordinarySources = sources.filter(source=>!pageKinds.has(source.resourceKind))
+  // Private dialogue has no Page ancestry. Keep it in `sources` for the
+  // mandatory current transcript proof below, including mixed evidence.
+  const ordinarySources = sources.filter(source=>!pageKinds.has(source.resourceKind)&&source.resourceKind!=='private_transcript')
   if (ordinarySources.length) {
     try {
       const { rows } = await (client ?? getPool()).query<{dependencies: ScopeSource[]}>(
@@ -314,33 +349,7 @@ async function validateScopeEvidence(
     throw scopeEvidenceFailureOf(error) ? error : unavailable(kind,'verification_error',error)
   }
 
-  // Current-label revalidation (decision D1): an edit, supersession or delete
-  // after the read never blocks by itself - often the turn made that change
-  // (list then close a task). A held source, or one whose CURRENT envelope
-  // no longer fits the receiver, does. Exact-version lineage is the derived
-  // writer's rule (`revalidateScopeSources`), not the audience's.
-  let states: Awaited<ReturnType<typeof readCurrentScopeSources>>
-  try {
-    states = await readCurrentScopeSources(client ?? getPool(), ceiling.workspaceId, sources.filter(source=>!pageKinds.has(source.resourceKind)), workflowRunId, kind === 'caller' ? 'context' : 'deliver', !!client)
-  } catch (error) {
-    throw unavailable(kind, 'verification_error', error, 'current_source')
-  }
-  const raised: ScopeEvidence = raisedPages.evidence
-  for (const state of states) {
-    if (state.state === 'held') throw unavailable(kind, 'source_held')
-    if (state.state === 'unverifiable') throw unavailable(kind, 'source_unverifiable')
-    if (state.state === 'stale_input') throw unavailable(kind, 'source_changed')
-    if (state.state !== 'changed') continue
-    const current = state.current
-    if (currentVisibility(current, ceiling) || labelFailure(current, ceiling)) {
-      throw unavailable(kind, 'source_reclassified')
-    }
-    // High-water: the receiver's evidence carries both the read labels and
-    // the source's current ones.
-    raised.sensitivity = maxSensitivity(raised.sensitivity ?? 'public', current.sensitivity)
-    raised.compartments = [...new Set([...(raised.compartments ?? []), ...current.compartments])].sort()
-    raised.projectIds = [...new Set([...(raised.projectIds ?? []), ...current.projectIds])].sort()
-  }
+  const raised = await validateCurrent(raisedPages.evidence, sources.filter(source=>!pageKinds.has(source.resourceKind)))
   try {
     if(historyKey(await projectHistory(originalSources))!==historyKey(historyProjection)
       ||historyKey(await projectHistory(projectedHistoryRoots))!==historyKey(projectedHistory))throw unavailable(kind,'source_unverifiable')

@@ -207,6 +207,30 @@ describeIf('[COMP:access/predicate-parity] RLS, store predicate and turn resolve
     }
   })
 
+  it('acquires one coherent permission snapshot and observes withdrawal at the next operation', async () => {
+    const client = await pool.connect()
+    const input = { workspaceId: WORKSPACE, userId: PEOPLE.maya.id, assistantId: ASSISTANTS.ops.id }
+    const query = <R>(sql: string, values: unknown[]) => client.query(sql, values) as unknown as Promise<{ rows: R[] }>
+    try {
+      await client.query('BEGIN')
+      const before = await loadDepartmentSnapshot(query, input)
+      let calls = 0
+      const captured = await loadDepartmentSnapshot(async <R>(sql: string, values: unknown[]) => {
+        const result = await query<R>(sql, values)
+        if (++calls === 1) await client.query('DELETE FROM department_edges WHERE workspace_id=$1 AND user_id=$2 AND department_id=$3',
+          [WORKSPACE, PEOPLE.maya.id, DEPARTMENTS.finance])
+        return result
+      }, input)
+      // A subsequent statement cannot change facts already captured, or cause
+      // one operation to assemble facts from both sides of the withdrawal.
+      expect(captured).toEqual(before)
+      expect(calls).toBe(1)
+      expect(resolveDepartmentReadGrant(captured.snapshot, captured.principal, input, now).departments[DEPARTMENTS.finance]).toBe('internal')
+      const next = await loadDepartmentSnapshot(query, input)
+      expect(resolveDepartmentReadGrant(next.snapshot, next.principal, input, now).departments[DEPARTMENTS.finance]).toBeUndefined()
+    } finally { await client.query('ROLLBACK'); client.release() }
+  })
+
   it('admission computes WRITE through the reference in a flagged workspace', async () => {
     const admit = async (input: Parameters<typeof admitWorkspaceResource>[3]) => {
       const loaded = await loadDepartmentSnapshot(<R>(sql: string, v: unknown[]) => pool.query(sql, v) as unknown as Promise<{ rows: R[] }>,

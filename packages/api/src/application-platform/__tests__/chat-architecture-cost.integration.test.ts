@@ -79,7 +79,9 @@ describe.sequential('[COMP:api/native-chat-read-cost] chat replacement baseline'
     await getAppPool().end(); await getPool().end()
   })
 
-  it.each(['empty-private', 'populated-private', 'shared-room'] as const)('%s', async scenario => {
+  const scenarios = (['empty-private', 'populated-private', 'shared-room'] as const).flatMap(scenario =>
+    (['legacy', 'department-v2'] as const).map(permissionModel => ({ scenario, permissionModel })))
+  it.each(scenarios)('$scenario / $permissionModel', async ({ scenario, permissionModel }) => {
     // Only the verified disposable bootstrap may enable observation. Actual
     // requests still use the ordinary owner and the non-owner app_user roles.
     const marker = JSON.parse(await readFile(process.env.BRIAN_ASSURANCE_FIXTURE!, 'utf8')) as { bootstrapRole?: string }
@@ -93,6 +95,7 @@ describe.sequential('[COMP:api/native-chat-read-cost] chat replacement baseline'
     } finally { await admin.end() }
     const f = await persistentContextFixture('confidential')
     try {
+      await f.pool.query('UPDATE workspaces SET department_read_v2=$2 WHERE id=$1', [f.workspaceId, permissionModel === 'department-v2'])
       const device = (await authSessionStore.create(f.ownerId, { deviceLabel: 'Fictional cost browser', userAgent: null, ipAddress: null }))!
       const claims = { userId: f.ownerId, sessionId: device.id, authVersion: device.authVersion }
       const session = scenario === 'shared-room' ? f.session : await createPersonalWebSession({
@@ -131,15 +134,22 @@ describe.sequential('[COMP:api/native-chat-read-cost] chat replacement baseline'
         memoryStore: createDbMemoryStore(), capabilityStore: createDbCapabilityStore(), pendingApprovalsStore: createPendingApprovalsStore() }))
       const before = await functionStats()
       let queries = 0, queryMs = 0, poolWaitMs = 0, checkouts = 0, firstTextMs: number | undefined
+      const queryWork = new Map<string, { shape: string; calls: number; elapsedMs: number }>()
       const originalQuery = pg.Client.prototype.query
       const originalConnect = pg.Pool.prototype.connect
-      // Preserve both callback and promise overloads. Observe no SQL text/values.
+      // Preserve both callback and promise overloads. Record statement shape
+      // without parameter values or SQL literals, only in this synthetic rig.
       const querySpy = vi.spyOn(pg.Client.prototype, 'query').mockImplementation(function (this: pg.Client, ...args: unknown[]) {
         queries++; const start = performance.now()
+        const sql = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? ''
+        const shape = sql.replace(/'(?:[^']|'')*'/g, '?').replace(/\$\d+/g, '?').replace(/\s+/g, ' ').trim()
+        const work = queryWork.get(shape) ?? { shape, calls: 0, elapsedMs: 0 }
+        work.calls++; queryWork.set(shape, work)
+        const finish = () => { const elapsed = performance.now() - start; queryMs += elapsed; work.elapsedMs += elapsed }
         const callback = args.at(-1)
-        if (typeof callback === 'function') args[args.length - 1] = (...values: unknown[]) => { queryMs += performance.now() - start; callback(...values) }
+        if (typeof callback === 'function') args[args.length - 1] = (...values: unknown[]) => { finish(); callback(...values) }
         const result = Reflect.apply(originalQuery, this, args)
-        if (result && typeof result.finally === 'function') return result.finally(() => { queryMs += performance.now() - start })
+        if (result && typeof result.finally === 'function') return result.finally(finish)
         return result
       } as typeof originalQuery)
       const poolSpy = vi.spyOn(pg.Pool.prototype, 'connect').mockImplementation(function (this: pg.Pool, ...args: unknown[]) {
@@ -164,10 +174,12 @@ describe.sequential('[COMP:api/native-chat-read-cost] chat replacement baseline'
       const functions = [...after.values()].map(row => { const prior = before.get(row.name); return { name: row.name,
         calls: row.calls - (prior?.calls ?? 0), totalMs: row.totalMs - (prior?.totalMs ?? 0), selfMs: row.selfMs - (prior?.selfMs ?? 0) }
       }).filter(row => row.calls > 0).sort((a, b) => b.selfMs - a.selfMs)
-      const metrics = { scenario, elapsedMs, firstTextMs, queries, queryMs, poolWaitMs, checkouts, retainedCoverage,
-        outputEvents: (body.match(/event: text_delta/g) ?? []).length, functionCalls: functions.reduce((sum, row) => sum + row.calls, 0), functions }
+      const metrics = { scenario, permissionModel, elapsedMs, firstTextMs, queries, queryMs, poolWaitMs, checkouts, retainedCoverage,
+        outputEvents: (body.match(/event: text_delta/g) ?? []).length, functionCalls: functions.reduce((sum, row) => sum + row.calls, 0), functions,
+        queryWork: [...queryWork.values()].sort((a, b) => b.calls - a.calls) }
       results.push(metrics)
-      console.info('chat-cost', JSON.stringify({ ...metrics, functions: functions.slice(0, 5) }))
+      console.info('chat-cost', JSON.stringify({ ...metrics, queryWork: undefined, functions: functions.slice(0, 5) }))
+      expect(metrics.queryWork.reduce((sum, work) => sum + work.calls, 0)).toBe(queries)
       expect(response.status).toBe(200); expect(body).not.toContain('event: error'); expect(firstTextMs).toBeDefined()
       if (scenario === 'populated-private') expect(JSON.stringify(calls[0])).toContain('The notebook is amber.')
       const saved = await readAttendedSessionHistory(await fresh(), session.id)

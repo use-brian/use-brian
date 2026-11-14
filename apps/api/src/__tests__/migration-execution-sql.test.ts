@@ -109,19 +109,26 @@ test('[COMP:api/migration-execution-sql] refuses unknown consumers outside publi
 })
 
 test('[COMP:api/migration-execution-sql] authenticates every adapted immutable source and leaves other migrations alone', async () => {
-  let count = 0
+  const adaptedFiles: number[] = []
   for (const name of await readdir(migrations)) {
     if (!name.endsWith('.sql')) continue
     const sql = await readFile(new URL(name, migrations), 'utf8')
-    if (!sql.includes('FOR caller IN SELECT p.oid,p.prosrc FROM pg_proc p')) continue
-    assert.notEqual(toMigrationExecutionSql(sql, name), sql)
+    const executable = toMigrationExecutionSql(sql, name)
+    if (executable === sql) {
+      // A matching loop in an unreviewed migration (including8268) does not
+      // authorize an execution rewrite or enroll its bytes as historical SQL.
+      assert.equal(toMigrationExecutionSql(sql + '\n', name), sql + '\n')
+      continue
+    }
     assert.equal(sql.match(/^BEGIN;\s*$/gm)?.length, 1)
     assert.equal(sql.match(/^COMMIT;\s*$/gm)?.length, 1)
     assert.throws(() => toMigrationExecutionSql(sql + '\n', name), /content changed/)
-    count++
+    adaptedFiles.push(Number(name.split('_')[0]))
   }
-  assert.ok(count >= 13)
+  assert.deepEqual(adaptedFiles.sort((a,b)=>a-b), [8188,8196,8197,8198,8199,8200,8201,8204,8205,8229,
+    8234,8235,8236,8242,8243,8245,8246,8247,8248,8249,8250,8251])
   assert.equal(toMigrationExecutionSql('SELECT 1;', 'future.sql'), 'SELECT 1;')
+  assert.equal(toMigrationExecutionSql(source, 'future.sql'), source)
 })
 
 const memoryFile = '8246_native_private_memory_empty_domain.sql'
