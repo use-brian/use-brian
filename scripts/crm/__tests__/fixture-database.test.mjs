@@ -10,6 +10,104 @@ import pg from 'pg'
 import { runtimeRoleSql } from '../runtime-role.mjs'
 import { assertLocalFixture, cleanRuntimeEnvironment, runCommand, createLocalFixture } from '../local-fixture.mjs'
 
+test('[COMP:api/private-transcript] private transcript preparation migration refuses predecessor drift atomically', { timeout: 300_000 }, async () => {
+  await assertLocalFixture()
+  const env = cleanRuntimeEnvironment(process.env)
+  const pgBin = (await runCommand('pg_config', ['--bindir'], { env })).trim()
+  const filename = '8268_private_transcript_preparation_eligibility.sql'
+  const sql = await readFile(new URL('../../../packages/api/migrations/' + filename, import.meta.url), 'utf8')
+  const target = 'prepare_native_session_message_covered(uuid,uuid,text,jsonb,jsonb)'
+  const observed = []
+  const fixture = await createLocalFixture({ pgBin, env, ordinaryOwner: true, beforeApplyFile: filename,
+    beforeApply: async ({ adminUrl }) => {
+      const owner = new pg.Client({ connectionString: adminUrl })
+      await owner.connect()
+      try {
+        assert.deepEqual((await owner.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows,
+          [{ rolsuper: false, rolbypassrls: false }])
+        await owner.query(`CREATE FUNCTION fixture_private_plan_canary() RETURNS boolean LANGUAGE plpgsql AS
+          $canary$ BEGIN RAISE EXCEPTION 'unreviewed_private_plan_guard_executed'; END $canary$`)
+        await owner.query('REVOKE ALL ON FUNCTION fixture_private_plan_canary() FROM PUBLIC')
+        const snapshot = async () => ({
+          functions: (await owner.query("SELECT oid,to_jsonb(p) AS metadata FROM pg_proc p WHERE pronamespace='public'::regnamespace ORDER BY oid")).rows,
+          turn: (await owner.query('SELECT to_jsonb(h) AS metadata FROM native_turn_contract_helpers h ORDER BY to_jsonb(h)::text')).rows,
+          retained: (await owner.query('SELECT to_jsonb(h) AS metadata FROM native_retained_contract_helpers h ORDER BY to_jsonb(h)::text')).rows,
+        })
+        const before = await snapshot()
+        const replaceBody = async (signature, body) => {
+          const original = (await owner.query('SELECT pg_get_functiondef($1::regprocedure) AS definition,prosrc AS body FROM pg_proc WHERE oid=$1::regprocedure', [signature])).rows[0]
+          assert.equal(original.definition.split(original.body).length, 2)
+          await owner.query(original.definition.replace(original.body, body))
+        }
+        const fingerprint = async signature => (await owner.query("SELECT encode(sha256(convert_to(to_jsonb(p)::text,'UTF8')),'hex') AS value FROM pg_proc p WHERE oid=$1::regprocedure", [signature])).rows[0].value
+        const cases = [
+          ['target body', () => replaceBody(target, 'BEGIN RETURN NULL; END')],
+          ['target cost', () => owner.query(`ALTER FUNCTION ${target} COST 2`)],
+          ['target search path', () => owner.query(`ALTER FUNCTION ${target} SET search_path=pg_catalog,public`)],
+          ['target public execution', () => owner.query(`GRANT EXECUTE ON FUNCTION ${target} TO PUBLIC`)],
+          ['root cover body', () => replaceBody('application_native_root_cover(uuid,jsonb)', 'BEGIN RETURN NULL; END')],
+          ['covered frame body', () => replaceBody('read_native_covered_session_frame(uuid,text[],uuid[],text[])', 'BEGIN RETURN NULL; END')],
+          ['turn guard canary', () => replaceBody('native_turn_helpers_current()', 'SELECT public.fixture_private_plan_canary()')],
+          ['retained guard canary', () => replaceBody('native_retained_helpers_current()', 'SELECT public.fixture_private_plan_canary()')],
+          ['coherently changed nested guard and caller pins', async () => {
+            const nested = 'application_native_covered_evidence_helpers_current()'
+            const guard = 'application_native_transcript_prepare_helpers_current()'
+            const batch = 'prepare_native_session_message_batch(uuid,uuid,text,jsonb,jsonb)'
+            const oldNested = await fingerprint(nested),oldGuard = await fingerprint(guard)
+            await replaceBody(nested, 'BEGIN RETURN public.fixture_private_plan_canary(); END')
+            const guardBody = (await owner.query('SELECT prosrc FROM pg_proc WHERE oid=$1::regprocedure', [guard])).rows[0].prosrc
+            assert.equal(guardBody.split(oldNested).length, 2)
+            await replaceBody(guard, guardBody.replace(oldNested, await fingerprint(nested)))
+            const batchBody = (await owner.query('SELECT prosrc FROM pg_proc WHERE oid=$1::regprocedure', [batch])).rows[0].prosrc
+            assert.equal(batchBody.split(oldGuard).length, 3)
+            await replaceBody(batch, batchBody.replaceAll(oldGuard, await fingerprint(guard)))
+          }],
+          ['turn registry fingerprint', () => owner.query("UPDATE native_turn_contract_helpers SET fingerprint=repeat('0',64) WHERE signature=(SELECT signature FROM native_turn_contract_helpers ORDER BY signature LIMIT 1)")],
+          ['unknown function consumer', async () => {
+            await owner.query(`CREATE FUNCTION fixture_private_plan_consumer() RETURNS text LANGUAGE sql AS $consumer$ SELECT '${await fingerprint(target)}'::text $consumer$`)
+          }],
+          ['unknown procedure consumer', async () => {
+            await owner.query(`CREATE PROCEDURE fixture_private_plan_consumer() LANGUAGE plpgsql AS $consumer$ BEGIN PERFORM '${await fingerprint(target)}'::text; END $consumer$`)
+          }],
+        ]
+        for (const [label, mutate] of cases) {
+          await owner.query('BEGIN')
+          try {
+            await mutate()
+            await assert.rejects(owner.query(sql), error => {
+              assert.match(error.message, /private_transcript_preparation_/)
+              assert.doesNotMatch(error.message, /unreviewed_private_plan_guard_executed/)
+              return true
+            }, label)
+          } finally { await owner.query('ROLLBACK') }
+          assert.deepEqual(await snapshot(), before, label + ' must not partially repin helpers')
+          observed.push(label)
+        }
+        await owner.query('DROP FUNCTION fixture_private_plan_canary()')
+      } finally { await owner.end() }
+    },
+  })
+  try {
+    assert.equal(observed.length, 12)
+    const owner = new pg.Client({ connectionString: fixture.adminUrl })
+    const app = new pg.Client({ connectionString: fixture.appUrl })
+    await owner.connect()
+    await app.connect()
+    try {
+      assert.equal((await owner.query('SELECT 1 FROM _migrations WHERE name=$1', [filename])).rowCount, 1)
+      assert.deepEqual((await owner.query('SELECT native_turn_helpers_current() AS turn,native_retained_helpers_current() AS retained')).rows,
+        [{ turn: true, retained: true }])
+      for (const signature of [
+        'application_native_transcript_prepare_helpers_current()', 'application_native_covered_evidence_helpers_current()',
+        'native_turn_publication_contract()', 'application_native_worklist_helpers_current()',
+        'application_native_dependency_batch_helpers_current()', 'application_native_field_reference_helpers_current()',
+        'application_memory_statement_helpers_current()',
+      ]) assert.equal((await owner.query(`SELECT ${signature} AS current`)).rows[0].current, true, signature)
+      assert.equal((await app.query('SELECT has_function_privilege(current_user,$1,\'EXECUTE\') AS allowed', [target])).rows[0].allowed, false)
+    } finally { await app.end(); await owner.end() }
+  } finally { await fixture.dispose() }
+})
+
 test('[COMP:crm/assurance-fixture] Default PostgreSQL clients remain inside the disposable cluster', async () => {
   const marker = await assertLocalFixture()
   const defaults = new pg.Client()
