@@ -14,10 +14,6 @@ function source(resourceKind: ScopeSource['resourceKind'], over: Partial<ScopeSo
 }
 function client(value: unknown) {
   return { query: vi.fn(async (sql: string, args?: unknown[]) => {
-    if (sql === 'SELECT to_regprocedure($1) IS NOT NULL AS available') {
-      expect(args).toEqual(['public.read_native_retained_scope_evidence(uuid,jsonb)'])
-      return { rows: [{ available: false }] }
-    }
     if (sql === 'SELECT read_native_turn_scope_evidence($1,$2) AS value') return { rows: [{ value }] }
     throw new Error(`Unexpected media scope query: ${sql}`)
   }) } as unknown as Pick<PoolClient, 'query'>
@@ -33,7 +29,7 @@ describe('[COMP:api/native-chat-read-cost] internal media evidence', () => {
     expect(result).toMatchObject({ kind: 'complete', current: [field, episode, recording] })
     if (result?.kind !== 'complete') throw new Error('Expected complete fixture proof')
     expect(result.evidence.sources).toEqual([field])
-    expect(vi.mocked(read.query).mock.calls.map(([sql])=>sql).filter(sql=>typeof sql==='string'&&!sql.includes('to_regprocedure')))
+    expect(vi.mocked(read.query).mock.calls.map(([sql])=>sql))
       .toEqual(['SELECT read_native_turn_scope_evidence($1,$2) AS value'])
   })
 

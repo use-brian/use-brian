@@ -8,7 +8,7 @@ vi.mock('@use-brian/core', async original => ({ ...await original<typeof import(
   classifySplit: spies.classify, executionToolContext: (execution: unknown, base: object) => ({ ...base, executionContext: execution }),
 }))
 vi.mock('../../db/session-query-reader.js', () => ({ readAdmittedSessionQuery: spies.query, captureSessionTopics: vi.fn(), sessionQueryRootMetadata: vi.fn() }))
-vi.mock('../../application-platform/model-source-authority.js', () => ({ assertSourceModelInputAuthority: spies.proof, ownsNativeAttendedAssembly: vi.fn() }))
+vi.mock('../../application-platform/model-source-authority.js', () => ({ assertSourceModelInputAuthority: spies.proof }))
 
 const body = 'A fictional authored request requiring an independent splitter assessment.'
 const result: SplitResult = { tasks: ['Fictional lookup A', 'Fictional lookup B'], usage: { inputTokens: 8, outputTokens: 4 }, model: 'fixture-model' }

@@ -23,9 +23,8 @@ export type PrepareAssistantRunInput = {
   ) => Map<string, Tool> | Promise<Map<string, Tool>>
   trustedContributions?: readonly NamedRunContribution[]
   userVisibleContributions?: readonly NamedRunContribution[]
-  /** Host guard before local assembly callbacks. The flag describes the exact
-   * captured Brief resolver; it grants no source or delivery permission. */
-  beforeAssembly?: (canonicalBrief: boolean) => Promise<void>
+  /** Current host admission before local assembly callbacks. */
+  beforeAssembly?: () => Promise<void>
 }
 
 export type PreparedAssistantRun = {
@@ -64,9 +63,8 @@ export async function prepareAssistantRun(
       throw Object.assign(new Error('The preparation authority changed.'), { reason: 'authority_changed', retrySafe: false })
     }
   }
-  // The host guard owns its original lease too. Run it before invoking the
-  // generic lease method so a replaced native method cannot run first.
-  await beforeAssembly?.(briefPreparation.canonical)
+  // Pin the original lease across host admission before invoking any assembly callback.
+  await beforeAssembly?.()
   assertLeaseIdentity()
   await assertCurrent.call(authority)
   assertLeaseIdentity()
@@ -78,7 +76,7 @@ export async function prepareAssistantRun(
   // mutating tools recheck the accepted direction before they act, and an
   // unattended run refuses an incompatible change before any provider work
   // (project-briefs.md -> "Grounding a turn", "Revision boundaries").
-  const brief = await briefPreparation.apply(executionContext, bound)
+  const brief = await briefPreparation(executionContext, bound)
   const tools = brief.tools
   const trusted = [...(input.trustedContributions ?? []), ...(brief.contribution ? [brief.contribution] : [])]
   const userVisible = input.userVisibleContributions ?? []

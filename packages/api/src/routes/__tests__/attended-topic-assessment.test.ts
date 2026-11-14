@@ -10,7 +10,7 @@ vi.mock('../../db/client.js',async original=>({...await original<typeof import('
 vi.mock('../../db/session-query-reader.js',()=>({readAdmittedSessionQuery:spies.query,captureSessionTopics:vi.fn(),sessionQueryRootMetadata:vi.fn()}))
 vi.mock('../../db/session-context-revisions.js',()=>({readSessionQueryFrame:vi.fn()}))
 vi.mock('../../db/session-message-annotations.js',()=>({prepareSessionMessageAnnotation:spies.prepare,writeSessionMessageAnnotation:vi.fn()}))
-vi.mock('../../application-platform/model-source-authority.js',()=>({assertSourceModelInputAuthority:spies.proof,ownsNativeAttendedAssembly:vi.fn()}))
+vi.mock('../../application-platform/model-source-authority.js',()=>({assertSourceModelInputAuthority:spies.proof}))
 
 beforeEach(()=>{
  vi.clearAllMocks()

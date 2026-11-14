@@ -1,10 +1,10 @@
 import {randomUUID} from 'node:crypto'
 import pg from 'pg'
 import {afterAll,afterEach,beforeAll,describe,expect,it,vi} from 'vitest'
-import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,type LLMProvider,type QueryEvent} from '@use-brian/core'
-import {createNativeAttendedOutputBoundary,tryAssertNativePreparationCurrent,tryAssertNativePublicationPreparationCurrent} from '../model-source-authority.js'
-import * as attendedAudience from '../../context-scope/attended-audience.js'
-import * as externalAncestry from '../external-source-ancestry.js'
+import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,type LLMProvider,type QueryEvent,type ToolContext} from '@use-brian/core'
+import {assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {createAttendedDeliveryAudienceAuthorizer} from '../../context-scope/attended-audience.js'
+import {DeliveryAudienceUnverifiedError} from '../../context-scope/delivery-authority.js'
 import {getAppPool,getPool} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {createPersonalWebSession} from '../../db/sessions.js'
@@ -33,10 +33,14 @@ async function setup(inherited=false){
    accumulator:new ContextScopeAccumulator({sources:sources.filter(source=>source.resourceKind!=='workspace_file')})}
  }
  const context={...executionToolContext(authority.execution,{appId:'fictional-output'}),scopeAccumulator:authority.accumulator}
- const boundary=createNativeAttendedOutputBoundary(authority.execution,authority.accumulator,{
-  workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.ownerId,sessionId:session.id,
-  channelType:'web',channelId:session.channelId,recipientType:'individual',
- })
+ const authorize=createAttendedDeliveryAudienceAuthorizer(authority.execution)
+ const boundary={assertOutputAuthority:async(current:ToolContext)=>{
+  if(!current.scopeAccumulator)throw new Error('Fixture accumulator missing')
+  const decision=await authorize({workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.ownerId,
+   sessionId:session.id,channelType:'web',channelId:session.channelId,recipientType:'individual',scopeEvidence:current.scopeAccumulator.evidence})
+  if(!decision.allowed)throw new DeliveryAudienceUnverifiedError(decision.detail,decision.diagnostic)
+  current.scopeAccumulator.note(decision.evidence)
+ }}
  return{authority,context,boundary}
 }
 async function trace<T>(run:()=>Promise<T>){
@@ -103,13 +107,13 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
  })
  afterEach(async()=>{vi.restoreAllMocks();await unhold()})
  afterAll(async()=>{try{await f?.cleanup()}finally{await getAppPool().end();await getPool().end()}})
- it('assembles a native run without an early graph proof but refuses a later source hold before provider dispatch',async()=>{
+ it('admits assembly and independently refuses a later source hold before provider dispatch',async()=>{
   const c=await setup(),full=vi.fn(()=>c.boundary.assertOutputAuthority(c.context))
   const prepared=await trace(()=>prepareAssistantRun({
    executionContext:c.authority.execution,model:{provider,model:'fixture'},candidateTools:new Map(),bindTools:tools=>tools,
-   beforeAssembly:async canonical=>{if(canonical&&await tryAssertNativePreparationCurrent(c.boundary,c.context))return;await full()},
+   beforeAssembly:full,
   }))
-  expect(full).not.toHaveBeenCalled();expect(nativeProofs(prepared.sql)).toBe(0)
+  expect(full).toHaveBeenCalledOnce();expect(nativeProofs(prepared.sql)).toBeGreaterThan(0)
   await hold()
   const createSession=vi.fn(provider.createSession),guardedProvider={...provider,createSession},onEvent=vi.fn(async()=>{})
   await expect(runAssistantTurn({sessionId:session.id,policy:{admission:'personal'},lease:{mode:'none'},abortController:new AbortController(),
@@ -127,16 +131,16 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
    messages:[{role:'assistant',content:[{type:'text',text:'Fictional saved answer'}],senderAssistantId:f.assistantId}]})
  }
  it('refuses a source held after local buffer assembly at the actual publication boundary',async()=>{
-  const c=await setup(),assembled=await trace(()=>tryAssertNativePublicationPreparationCurrent(c.boundary,c.context))
-  expect(assembled.value).not.toBeNull();assembled.value!.assertUnchanged();expect(nativeProofs(assembled.sql)).toBe(0)
+  const c=await setup()
+  await c.boundary.assertOutputAuthority(c.context)
   const before=(await f.pool.query('SELECT count(*)::int count FROM session_messages WHERE session_id=$1',[session.id])).rows[0].count
   await hold()
   await expect(publishPrepared(c)).rejects.toThrow()
   expect((await f.pool.query('SELECT count(*)::int count FROM session_messages WHERE session_id=$1',[session.id])).rows[0].count).toBe(before)
  })
- it('derives the current publication floor without a preliminary recipient proof',async()=>{
+ it('derives the current publication floor independently of preliminary admission',async()=>{
   const c=await setup()
-  const fence=await tryAssertNativePublicationPreparationCurrent(c.boundary,c.context);expect(fence).not.toBeNull();fence!.assertUnchanged()
+  await c.boundary.assertOutputAuthority(c.context)
   try{
    await f.pool.query("UPDATE workspace_files SET sensitivity='confidential' WHERE id=$1",[fileId])
    const [saved]=await publishPrepared(c)
@@ -146,89 +150,26 @@ describe.sequential('[COMP:api/turn-kernel] native attended output boundary',()=
  })
  it('reauthorizes the recipient after durable publication before any saved delivery',async()=>{
   const c=await setup()
-  const fence=await tryAssertNativePublicationPreparationCurrent(c.boundary,c.context);expect(fence).not.toBeNull();fence!.assertUnchanged()
+  await c.boundary.assertOutputAuthority(c.context)
   const [saved]=await publishPrepared(c),deliver=vi.fn()
   await hold()
   await expect((async()=>{await c.boundary.assertOutputAuthority(c.context);deliver(saved.id)})()).rejects.toMatchObject({reason:'delivery_audience_unverified'})
   expect(deliver).not.toHaveBeenCalled()
   expect((await f.pool.query('SELECT id FROM session_messages WHERE id=$1',[saved.id])).rows).toEqual([{id:saved.id}])
  })
- it('declines a changed destination binding before native publication preparation',async()=>{
+ it('refuses a changed destination binding before publication',async()=>{
   const c=await setup()
   try{
    await f.pool.query('UPDATE sessions SET channel_id=$1 WHERE id=$2',[randomUUID(),session.id])
-   expect(await tryAssertNativePublicationPreparationCurrent(c.boundary,c.context)).toBeNull()
+   await expect(c.boundary.assertOutputAuthority(c.context)).rejects.toMatchObject({reason:'delivery_audience_unverified'})
   }finally{await f.pool.query('UPDATE sessions SET channel_id=$1 WHERE id=$2',[session.channelId,session.id])}
  })
- it('keeps full audience admission when the fresh recipient does not contain the original caller',async()=>{
-  const c=await setup()
-  vi.spyOn(attendedAudience,'tryResolveNativePersonalRecipient').mockResolvedValue({...c.authority.execution.security.ceiling,clearance:'public',departmentRead:undefined})
-  expect(await tryAssertNativePublicationPreparationCurrent(c.boundary,c.context)).toBeNull()
- })
  it('does not treat an accumulated scalar floor as source-free permission',async()=>{
-  const c=await setup(),original=c.authority.execution
-  const execution={...original,security:{...original.security,ceiling:{...original.security.ceiling,clearance:'public' as const,departmentRead:undefined}}}
-  const context={...c.context,executionContext:execution}
-  const boundary=createNativeAttendedOutputBoundary(execution,c.authority.accumulator,{
-   workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.ownerId,sessionId:session.id,
-   channelType:'web',channelId:session.channelId,recipientType:'individual',
-  })
-  await expect(tryAssertNativePublicationPreparationCurrent(boundary,context)).rejects.toMatchObject({reason:'delivery_audience_unverified',diagnostic:'clearance'})
- })
- it('keeps execution-provenance sources on the full audience path',async()=>{
-  const c=await setup(),original=c.authority.execution
-  const execution={...original,security:{...original.security,provenance:{sources:c.authority.accumulator.evidence.sources}}}
-  const boundary=createNativeAttendedOutputBoundary(execution,c.authority.accumulator,{
-   workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.ownerId,sessionId:session.id,
-   channelType:'web',channelId:session.channelId,recipientType:'individual',
-  })
-  expect(await tryAssertNativePublicationPreparationCurrent(boundary,{...c.context,executionContext:execution})).toBeNull()
- })
- it('keeps external delivery obligations even when a native root could be retained',async()=>{
-  const c=await setup(),sources=structuredClone(c.authority.accumulator.evidence.sources!)
-  const external={...sources[0],resourceKind:'external_source' as const,resourceId:randomUUID(),userId:null,assistantId:null}
-  const ancestry=vi.spyOn(externalAncestry,'readExternalSourceAncestors').mockResolvedValue([external])
-  expect(await tryAssertNativePublicationPreparationCurrent(c.boundary,c.context)).toBeNull()
-  expect(ancestry).toHaveBeenCalledWith(f.workspaceId,sources)
- })
- it('rejects evidence replaced during complete external-ancestry discovery',async()=>{
   const c=await setup()
-  vi.spyOn(externalAncestry,'readExternalSourceAncestors').mockImplementation(async()=>{
-   c.authority.accumulator.note({compartments:['fictional-late-floor']});return[]
-  })
-  await expect(tryAssertNativePublicationPreparationCurrent(c.boundary,c.context)).rejects.toMatchObject({reason:'authority_changed'})
-  await expect(tryAssertNativePublicationPreparationCurrent(c.boundary,c.context)).rejects.toMatchObject({reason:'authority_changed'})
- })
- it('fences a queued evidence mutation after the guard resolves and before buffer assembly resumes',async()=>{
-  const c=await setup(),pending=tryAssertNativePublicationPreparationCurrent(c.boundary,c.context)
-  void pending.then(()=>{c.authority.accumulator.note({compartments:['fictional-microtask-floor']})})
-  const fence=await pending
-  expect(fence).not.toBeNull()
-  expect(()=>fence!.assertUnchanged()).toThrow()
-  await expect(tryAssertNativePublicationPreparationCurrent(c.boundary,c.context)).rejects.toMatchObject({reason:'authority_changed'})
- })
- it('fences nested caller-grant mutations while destination and ancestry reads await',async()=>{
-  const c=await setup(),original=c.authority.execution
-  const grants=['fictional-original-grant']
-  const execution={...original,security:{...original.security,ceiling:{...original.security.ceiling,compartments:grants,mutationCompartments:[],departmentRead:undefined}}}
-  const context={...c.context,executionContext:execution}
-  const boundary=createNativeAttendedOutputBoundary(execution,c.authority.accumulator,{
-   workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.ownerId,sessionId:session.id,
-   channelType:'web',channelId:session.channelId,recipientType:'individual',
-  })
-  vi.spyOn(externalAncestry,'readExternalSourceAncestors').mockImplementation(async()=>{grants.push('fictional-added-grant');return[]})
-  await expect(tryAssertNativePublicationPreparationCurrent(boundary,context)).rejects.toMatchObject({reason:'authority_changed'})
- })
- it.each(['missing','external'] as const)('keeps %s roots on the original full audience path',async kind=>{
-  const c=await setup(),execution=c.authority.execution
-  const accumulator=new ContextScopeAccumulator(kind==='missing'?{}:{sources:[{
-   ...c.authority.accumulator.evidence.sources![0],resourceKind:'external_source',resourceId:randomUUID(),userId:null,assistantId:null,
-  }]})
-  const boundary=createNativeAttendedOutputBoundary(execution,accumulator,{
-   workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.ownerId,sessionId:session.id,
-   channelType:'web',channelId:session.channelId,recipientType:'individual',
-  })
-  expect(await tryAssertNativePublicationPreparationCurrent(boundary,{...c.context,scopeAccumulator:accumulator})).toBeNull()
+  c.authority.accumulator.note({projectIds:[randomUUID()]})
+  const execution=c.authority.execution
+  await expect(assertSourceModelInputAuthority({...c.context,executionContext:{...execution,security:{...execution.security,
+   ceiling:{...execution.security.ceiling,projectIds:[]}}}})).rejects.toMatchObject({reason:'authority_changed'})
  })
  it('admits each physical event and final completion exactly once',async()=>{
   const current=await run()

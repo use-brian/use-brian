@@ -6,7 +6,7 @@ import {readAdmittedSessionQuery,captureSessionTopics,sessionQueryRootMetadata} 
 import {readSessionQueryFrame} from '../db/session-context-revisions.js'
 import {writeSessionMessageAnnotation,prepareSessionMessageAnnotation} from '../db/session-message-annotations.js'
 import type {Session,SessionMessage} from '../db/sessions.js'
-import {assertSourceModelInputAuthority,ownsNativeAttendedAssembly,type NativeAttendedOutputBoundary} from '../application-platform/model-source-authority.js'
+import {assertSourceModelInputAuthority} from '../application-platform/model-source-authority.js'
 import {resolveReplyText,type ResolveReplyParams} from '../routes/_reply-context.js'
 import {isAuthorityChangedError} from '../context-scope/authority-lease.js'
 
@@ -60,62 +60,7 @@ function copyBoundHistory(history:readonly SessionMessage[]):SessionMessage[]{
  return history.map(row=>bindScopeSources(structuredClone(row),structuredClone(boundScopeSources(row))))
 }
 type ClassifiedInput={classification:TopicClassification;reply:Awaited<ReturnType<typeof resolveReplyText>>;history:SessionMessage[];pendingAnnotation?:object}
-type TopicAssessment={publish:()=>Promise<ClassifiedInput>;defer:()=>Promise<ClassifiedInput>}
-const nativeAssessments=new WeakMap<TopicAssessment,{rootAuthority:SessionContextAuthority;rootExecution:SessionContextAuthority['execution'];rootAccumulator:ContextScopeAccumulator;defer:()=>Promise<ClassifiedInput>;
- publicDefer:TopicAssessment['defer'];publicPublish:TopicAssessment['publish'];check:()=>Promise<void>;assertBinding:()=>void}>()
-
-/** A private data handoff to the actual native sink owner, never an allow receipt.
- * Public/custom assessment and history entry points retain full fresh admission. */
-export function captureNativeClassifiedAssembly(assessment:TopicAssessment,authority:SessionContextAuthority,boundary:NativeAttendedOutputBoundary){
- const entry=nativeAssessments.get(assessment),{execution,accumulator}=authority
- if(!entry||entry.rootAuthority!==authority||entry.rootExecution!==execution||entry.rootAccumulator!==accumulator
-  ||assessment.defer!==entry.publicDefer||assessment.publish!==entry.publicPublish
-  ||!ownsNativeAttendedAssembly(boundary,execution,accumulator))return undefined
- const lease=execution.security.authority,assertCurrent=lease.assertCurrent
- let staged:ClassifiedInput|undefined,refusal:unknown
- const assertBinding=()=>{
-  if(refusal)throw refusal
-  if(authority.execution!==execution||authority.accumulator!==accumulator||execution.security.authority!==lease
-   ||lease.assertCurrent!==assertCurrent||assessment.defer!==entry.publicDefer||assessment.publish!==entry.publicPublish
-   ||!ownsNativeAttendedAssembly(boundary,execution,accumulator))throw new DerivedScopeError('scope_source_changed')
-  entry.assertBinding()
- }
- const checked=async<T>(operation:()=>Promise<T>):Promise<T>=>{
-  try{assertBinding();await assertCurrent.call(lease);assertBinding();const result=await operation();assertBinding();return result}
-  catch(error){
-   if(!(error instanceof DerivedScopeError)&&!isAuthorityChangedError(error))throw error
-   refusal=Object.assign(error,{reason:'authority_changed',retrySafe:false});throw refusal
-  }
- }
- return Object.freeze({
-  defer:()=>checked(async()=>{
-   if(staged)throw new DerivedScopeError('scope_source_changed')
-   const result=await entry.defer()
-   const classification=structuredClone(result.classification)
-   if(classification.related_topics)Object.freeze(classification.related_topics)
-   if(classification.usage)Object.freeze(classification.usage)
-   Object.freeze(classification)
-   staged=Object.freeze({...result,classification:bindScopeSources(classification,boundScopeSources(result.classification)),
-    reply:result.reply?bindScopeSources(Object.freeze({...result.reply}),boundScopeSources(result.reply)):null})
-   return staged
-  }),
-  readHistory:(fromSequence?:number|null)=>checked(async()=>{
-   if(!staged)throw new DerivedScopeError('scope_evidence_missing')
-   const receipt=classifiedTranscripts.get(staged.history)
-   if(!receipt||receipt.execution!==execution||receipt.annotationId)throw new DerivedScopeError('scope_evidence_missing')
-   if(!await classifiedTranscriptCurrent(execution,receipt))return readClassifiedSessionHistory(authority,receipt.sessionId,staged.history,fromSequence)
-   await assertCurrent.call(lease);assertBinding()
-   accumulator.note({sources:receipt.sources})
-   return attendedHistoryResult(authority,receipt.sessionId,copyBoundHistory(receipt.history),receipt.sources,fromSequence)
-  }),
-  runEffect:<T>(effect:()=>Promise<T>)=>checked(async()=>{
-   if(!staged)throw new DerivedScopeError('scope_evidence_missing')
-   await entry.check();assertBinding()
-   return effect()
-  }),
- })
-}
-
+type TopicAssessment={assertCurrent:()=>Promise<void>;publish:()=>Promise<ClassifiedInput>;defer:()=>Promise<ClassifiedInput>}
 async function classifiedTranscriptCurrent(execution:SessionContextAuthority['execution'],receipt:ClassifiedTranscript){
  return(await getPool().query<{current:boolean}>(`SELECT
   (SELECT coalesce(max(sequence_num),0) FROM session_messages WHERE (workspace_id=$1 OR workspace_id IS NULL) AND session_id=$2)=$3
@@ -199,7 +144,18 @@ export async function assessAttendedSessionMessage(input:{
  const expected=ephemeral?undefined:(await getPool().query<{id:string}>('SELECT scope_revision_id AS id FROM session_message_annotation_heads WHERE workspace_id=$1 AND session_id=$2 AND message_id=$3',
   [authority.execution.security.access.workspaceId,session.id,message.id])).rows[0]?.id
  const context={...executionToolContext(authority.execution,{appId:'native-session-topic'}),scopeAccumulator:authority.accumulator}
- const check=async()=>{assertBinding();await(measure?measure('topic_authority',()=>assertSourceModelInputAuthority(context)):assertSourceModelInputAuthority(context));assertBinding()}
+ let refusal:unknown
+ const check=async()=>{
+  if(refusal)throw refusal
+  try{
+   assertBinding()
+   await(measure?measure('topic_authority',()=>assertSourceModelInputAuthority(context)):assertSourceModelInputAuthority(context))
+   assertBinding()
+  }catch(error){
+   if(!(error instanceof DerivedScopeError)&&!isAuthorityChangedError(error))throw error
+   refusal=Object.assign(error,{reason:'authority_changed',retrySafe:false});throw refusal
+  }
+ }
  const options=bindScopeSources<TopicClassifierOptions>({provider:input.provider,model:input.model,decisionRuntime:input.decisionRuntime,
   allowTrivialShortcut,currentMessage:text(current),recentUserTurns:history.filter(row=>row.sequenceNum<message.sequenceNum&&row.role==='user'&&(!ephemeral||row.topicLabel)).slice(-8)
    .map(row=>({text:text(row),topicLabel:row.topicLabel})).filter(turn=>turn.text.length>0),
@@ -207,16 +163,11 @@ export async function assessAttendedSessionMessage(input:{
   authority,assertInputAuthority:check,workspaceId:authority.execution.security.access.workspaceId,
   runId:'memory-topic-'+message.id},boundScopeSources(query))
  const classification=await classifyTopic(options)
- const privateClassification=bindScopeSources(structuredClone(classification),structuredClone(boundScopeSources(classification)))
- const privateHistory=copyBoundHistory(history),privateReply=reply?structuredClone(reply):null
- const defer=async(full:boolean)=>{
-  // A sibling assessment/quota wait may have changed the original inputs.
-  // Public callers re-admit here; private assembly checks real effects later.
-  if(full)await check()
-  else{assertBinding();await assertCurrent.call(lease);assertBinding()}
-  const selectedClassification=full?classification:bindScopeSources(structuredClone(privateClassification),boundScopeSources(privateClassification))
-  const selectedHistory=full?history:bindScopeSources(copyBoundHistory(privateHistory),boundScopeSources(query))
-  const selectedReply=full?reply:privateReply?bindScopeSources(structuredClone(privateReply),reply?boundScopeSources(reply):[]):null
+ const defer=async()=>{
+  await check()
+  const selectedClassification=bindScopeSources(structuredClone(classification),structuredClone(boundScopeSources(classification)))
+  const selectedHistory=bindScopeSources(copyBoundHistory(history),boundScopeSources(query))
+  const selectedReply=reply?bindScopeSources(structuredClone(reply),boundScopeSources(reply)):null
   const pendingAnnotation=ephemeral?undefined:await prepareSessionMessageAnnotation({sessionId:session.id,messageId:message.id,
    classification:selectedClassification,replyToText:selectedReply?.text??null,authority,expectedRevision:expected})
   assertBinding()
@@ -224,7 +175,7 @@ export async function assessAttendedSessionMessage(input:{
    messageId:message.id,history:copyBoundHistory(selectedHistory),sources:structuredClone(boundScopeSources(query))})
   return{classification:selectedClassification,reply:selectedReply,history:selectedHistory,pendingAnnotation}
  }
- const assessment:TopicAssessment={defer:()=>defer(true),publish:async()=>{
+ const assessment:TopicAssessment={assertCurrent:check,defer,publish:async()=>{
  if(ephemeral)await check()
  const annotation=ephemeral?null:await writeSessionMessageAnnotation({sessionId:session.id,messageId:message.id,classification,replyToText:reply?.text??null,authority,expectedRevision:expected})
  if(!ephemeral&&!annotation)throw new DerivedScopeError('scope_source_changed')
@@ -234,10 +185,7 @@ export async function assessAttendedSessionMessage(input:{
   sources:structuredClone(boundScopeSources(query.history))})
  return{classification,reply,history}
  }}
- if(captured?.authority===authority)nativeAssessments.set(assessment,{rootAuthority:captured.rootAuthority,rootExecution:captured.rootExecution,
-  rootAccumulator:captured.rootAccumulator,defer:()=>defer(false),
-  publicDefer:assessment.defer,publicPublish:assessment.publish,check,assertBinding})
- return assessment
+ return Object.freeze(assessment)
 }
 
 /** Sequential callers retain the original classify-and-publish contract. */

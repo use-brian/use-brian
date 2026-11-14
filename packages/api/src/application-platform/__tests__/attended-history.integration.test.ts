@@ -3,12 +3,12 @@ import {randomUUID} from 'node:crypto'
 import {validateAttendedAudienceEvidence} from '../../context-scope/attended-audience.js'
 import {afterAll,afterEach,describe,expect,it,vi} from 'vitest'
 import {boundScopeSources,ContextScopeAccumulator,executionToolContext,NOOP_TURN_LEDGER,queryLoop,type QueryEvent,type LLMProvider} from '@use-brian/core'
-import {captureAttendedSessionClassification,forkAttendedSessionClassification,assessAttendedSessionMessage,captureNativeClassifiedAssembly,classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory,readClassifiedSessionHistory,attendedSessionTurnCount} from '../../routes/attended-session-context.js'
+import {captureAttendedSessionClassification,forkAttendedSessionClassification,assessAttendedSessionMessage,classifyAttendedSessionMessage,classifyAttendedResearchMessage,readAttendedSessionHistory,readClassifiedSessionHistory,attendedSessionTurnCount} from '../../routes/attended-session-context.js'
 import * as sessionQueries from '../../db/session-query-reader.js'
 import {addSessionMessage,createPersonalWebSession} from '../../db/sessions.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {resolveSessionTitleAuthority} from '../../routes/session-title-authority.js'
-import {createNativeAttendedOutputBoundary,assertSourceModelInputAuthority} from '../model-source-authority.js'
+import {assertSourceModelInputAuthority} from '../model-source-authority.js'
 import {readSessionMessageAnnotation} from '../../db/session-message-annotations.js'
 import {bindSessionContextRetainedAuthority,writeSessionContextRevision} from '../../db/session-context-revisions.js'
 import {getAppPool,getPool} from '../../db/client.js'
@@ -45,25 +45,24 @@ describe.sequential('[COMP:api/application-persistence] actual admitted reply hi
   const measurements:string[]=[]
   const assessment=await assessAttendedSessionMessage({authority:fork.authority,session,message,capture:fork.capture,
    provider:classifierProvider(),model:'fixture',measure:async(counter,run)=>{measurements.push(counter);return run()}})
-  const boundary=createNativeAttendedOutputBoundary(authority.execution,authority.accumulator,{
-   workspaceId:f.workspaceId,assistantId:f.assistantId,userId:f.ownerId,sessionId:session.id,
-   channelType:'web',channelId:session.channelId,recipientType:'individual',
-  })
-  const handoff=captureNativeClassifiedAssembly(assessment,authority,boundary)
-  expect(handoff).toBeDefined()
-  return{f,session,scope,earlier,message,authority,assessment,boundary,handoff:handoff!,measurements,fork,claims}
+  let result:Awaited<ReturnType<typeof assessment.defer>>
+  const handoff={
+   defer:async()=>result=await assessment.defer(),
+   readHistory:()=>readClassifiedSessionHistory(authority,session.id,result.history),
+   runEffect:async<T>(effect:()=>Promise<T>)=>{await assessment.assertCurrent();return effect()},
+  }
+  return{f,session,scope,earlier,message,authority,assessment,handoff,measurements,fork,claims}
  }
- it('stages immutable classifier bytes and captured history without the two repeated full proofs',async()=>{
+ it('stages independent classifier bytes and freshly admits captured history',async()=>{
   const c=await stagedSetup(),before=c.measurements.length
   const framed=vi.spyOn(await import('../../db/session-context-revisions.js'),'readSessionQueryFrame')
   const result=await c.handoff.defer();c.fork.mergeEvidence()
   result.history[0].content='Untrusted mutation of returned staging bytes'
   const history=await c.handoff.readHistory()
-  expect(history[0].content).toBe(c.earlier.content)
+  expect(history[0].content).toEqual([{type:'text',text:c.earlier.content}])
   expect(boundScopeSources(history)).toEqual(boundScopeSources(result.history))
-  expect(c.measurements).toHaveLength(before)
-  expect(framed).not.toHaveBeenCalled()
-  expect(Object.isFrozen(result.classification)).toBe(true)
+  expect(c.measurements).toHaveLength(before+1)
+  expect(framed).toHaveBeenCalledOnce()
   expect(result.pendingAnnotation).toBeDefined()
   expect(await readSessionMessageAnnotation(c.session.id,c.message.id,c.authority)).toBeNull()
  })
@@ -106,14 +105,6 @@ describe.sequential('[COMP:api/application-persistence] actual admitted reply hi
   await expect(c.handoff.runEffect(async()=>{throw failure})).rejects.toBe(failure)
   await expect(c.handoff.runEffect(async()=>9)).resolves.toBe(9)
  })
- it('refuses copied owners and replaced assessment methods instead of granting staging privileges',async()=>{
-  const c=await stagedSetup()
-  expect(captureNativeClassifiedAssembly({...c.assessment},c.authority,c.boundary)).toBeUndefined()
-  expect(captureNativeClassifiedAssembly(c.assessment,c.authority,{...c.boundary})).toBeUndefined()
-  c.assessment.defer=async()=>{throw new Error('Must not run replaced method')}
-  expect(captureNativeClassifiedAssembly(c.assessment,c.authority,c.boundary)).toBeUndefined()
-  await expect(c.handoff.defer()).rejects.toMatchObject({reason:'authority_changed'})
- })
  it('refuses a root accumulator replaced while the staging lease is pending',async()=>{
   const c=await stagedSetup(),pending=c.handoff.defer()
   queueMicrotask(()=>{(c.authority as {accumulator:ContextScopeAccumulator}).accumulator=new ContextScopeAccumulator()})
@@ -124,11 +115,6 @@ describe.sequential('[COMP:api/application-persistence] actual admitted reply hi
   const c=await stagedSetup(),replacement=await resolveSessionTitleAuthority({claims:c.claims,sessionId:c.session.id,readOnly:false})
   const root=c.authority as {execution:typeof c.authority.execution;accumulator:ContextScopeAccumulator}
   root.execution=replacement.execution;root.accumulator=replacement.accumulator
-  const boundary=createNativeAttendedOutputBoundary(root.execution,root.accumulator,{
-   workspaceId:c.f.workspaceId,assistantId:c.f.assistantId,userId:c.f.ownerId,sessionId:c.session.id,
-   channelType:'web',channelId:c.session.channelId,recipientType:'individual',
-  })
-  expect(captureNativeClassifiedAssembly(c.assessment,c.authority,boundary)).toBeUndefined()
   await expect(c.handoff.defer()).rejects.toMatchObject({reason:'authority_changed'})
  })
  it('preserves the complete admitted query evidence through a web reply snippet',async()=>{

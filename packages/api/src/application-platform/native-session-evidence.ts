@@ -60,8 +60,7 @@ export async function readNativeSessionEvidence(client:Pick<PoolClient,'query'>,
  // discovers the complete native closure and preserves its original fallback.
  const args=[workspaceId,roots.map(root=>root.resourceKind),roots.map(root=>root.resourceId),roots.map(root=>root.version)]
  const identities=[workspaceId,JSON.stringify(roots.map(source=>({kind:source.resourceKind,id:source.resourceId,version:source.version})))]
- let raw:unknown=await readRetainedNativePacket(client,'scope',identities)
- if(raw===null)raw=(await client.query<{value:unknown}>('SELECT read_native_turn_scope_evidence($1,$2) AS value',identities)).rows[0]?.value
+ let raw:unknown=(await client.query<{value:unknown}>('SELECT read_native_turn_scope_evidence($1,$2) AS value',identities)).rows[0]?.value
  if(raw===null&&roots.length>100){
   raw=(await client.query<{value:unknown}>('SELECT read_native_covered_session_evidence($1,$2,$3,$4) AS value',args)).rows[0]?.value
  }else if(raw===null){

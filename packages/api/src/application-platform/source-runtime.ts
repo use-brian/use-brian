@@ -89,7 +89,8 @@ export function createConnectorSourceRuntimeFactory(options: { issuer: string; k
     const native = service ? {assertCurrent:async()=>{await service.assertCurrent();await execution.security.authority.assertCurrent()},
       allows:(binding:{compartments:string[];projectIds:string[]})=>binding.compartments.every(v=>execution.security.ceiling.compartments?.includes(v))
         &&binding.projectIds.every(v=>execution.security.ceiling.projectIds?.includes(v))}
-      : await createConnectorRuntimeAuthority({workspaceId:input.workspaceId,initiatingUserId:execution.security.access.userId,assistantId:execution.assistant.id})
+      : await runWithAgentAccess(execution.security.access,()=>createConnectorRuntimeAuthority({
+        workspaceId:input.workspaceId,initiatingUserId:execution.security.access.userId,assistantId:execution.assistant.id}))
     const initialInstance = await options.instances.getSystem(input.instanceId), credentials = await options.instances.getAuthCredentialsSystem(input.instanceId)
     if (!initialInstance || initialInstance.url !== profile.mcp_url || !initialInstance.connected || initialInstance.healthStatus === 'auth_failed'
       || !credentials || !['bearer','custom_header'].includes(credentials.type)) unavailable()
