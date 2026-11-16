@@ -56,6 +56,19 @@ describe('[COMP:ci/execution-topology] historical coverage selection', () => {
     } finally { rmSync(directory, { recursive: true, force: true }) }
   })
 
+  it('bounds PostgreSQL key downloads and retries TLS/read failures without disabling verification', () => {
+    const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
+    const install = workflow.match(/- name: Install PostgreSQL 18 with required extensions\n([\s\S]*?)(?=\n      - name:)/)?.[1]
+    assert.ok(install, 'PostgreSQL installation step must exist')
+    assert.match(install, /sudo curl --fail --show-error --location \\/)
+    assert.match(install, /--retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180/)
+    assert.match(install, /--connect-timeout 15 --max-time 60/)
+    assert.match(install, /https:\/\/www\.postgresql\.org\/media\/keys\/ACCC4CF8\.asc/)
+    assert.doesNotMatch(install, /--insecure|(?:^|\s)-k(?:\s|$)|--allow-unauthenticated|trusted=yes/)
+    assert.match(install, /signed-by=\/usr\/share\/postgresql-common\/pgdg\/apt\.postgresql\.org\.asc/)
+    assert.match(install, /sudo apt-get install -y postgresql-18 postgresql-18-pgvector/)
+  })
+
   it('runs exhaustive coverage on nightly/manual and unavailable or malformed history', () => {
     const unavailable = () => { throw new Error('Missing git history') }
     for (const event of ['schedule', 'workflow_dispatch', 'unknown', 'push', 'pull_request']) {

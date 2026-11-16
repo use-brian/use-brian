@@ -370,7 +370,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ca-certificates curl
           sudo install -d /usr/share/postgresql-common/pgdg
+          # Retry transient TLS/read failures without weakening verification.
           sudo curl --fail --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
+            --connect-timeout 15 --max-time 60 \
             --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
             https://www.postgresql.org/media/keys/ACCC4CF8.asc
           . /etc/os-release
