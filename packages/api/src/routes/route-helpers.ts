@@ -236,8 +236,8 @@ export function isValidDateString(date: string): boolean {
  * drop `mcp_search`, and ordering a search for a tool the callee does not
  * hold is the same tool-awareness violation in the opposite direction.
  */
-const SEARCH_BEFORE_DENIAL =
-  'For an unlisted capability, run `mcp_search` before denying it.'
+const CAPABILITY_SEARCH_BEFORE_DENIAL =
+  'For an unlisted capability, run `mcp_search` before declaring it unavailable in this run. The model turn binds the final admitted Brian tool catalog as well as permitted indexed sources. A keyword result is not a complete inventory: use an empty query and follow nextOffset until null to list all currently searchable operations. The indexed-source count alone is not the total tool count.'
 
 /**
  * Deliberately "may be folded", not "is folded": the workflow path runs with
@@ -273,7 +273,7 @@ export function buildUnavailableCapabilitiesPrompt(
   // the model needs the search-before-denial rule or it answers from absence.
   if (capabilities.length === 0) {
     if (!searchable) return ''
-    return `\n\n# Connector tools\n\n${FOLDED_SURFACE}${sourceRoster} ${SEARCH_BEFORE_DENIAL}`
+    return `\n\n# Connector tools\n\n${FOLDED_SURFACE}${sourceRoster} ${CAPABILITY_SEARCH_BEFORE_DENIAL}`
   }
 
   const scopeRestricted = capabilities.includes(CONNECTOR_SCOPE_RESTRICTION)
@@ -285,13 +285,13 @@ export function buildUnavailableCapabilitiesPrompt(
 
   const head = `\n\n# Unavailable capabilities\n\nThese capabilities are not available in this run. Do not call, search for, or simulate them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\n${remediation}`
 
-  const closedWorld = searchable
-    ? ` ${FOLDED_SURFACE}${sourceRoster} ${SEARCH_BEFORE_DENIAL} A listed capability remains unavailable even if searched.`
+  const discoveryScope = searchable
+    ? ` ${FOLDED_SURFACE}${sourceRoster} ${CAPABILITY_SEARCH_BEFORE_DENIAL} A listed capability remains unavailable even if searched.`
     : scopeRestricted || sourceRestricted
       ? ' Visible tools describe only this restricted run, not the platform integration catalog. Do not infer that an absent service is disconnected or unsupported.'
-      : ` The list and visible tools are the complete integration surface. For any other service, say Use Brian has no integration and offer the nearest supported alternative.`
+      : ' This list describes connected-service availability in this run, not all Brian tools or the platform integration catalog. For any other service, do not invent an integration; offer another admitted tool when appropriate. Missing parameter schemas do not establish that another Brian capability is unavailable.'
 
-  return `${head}${closedWorld} Do not suggest a connector setting for an unlisted service.`
+  return `${head}${discoveryScope} Do not suggest a connector setting for an unlisted service.`
 }
 
 /**

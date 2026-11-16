@@ -3,7 +3,7 @@ import { Buffer } from 'node:buffer'
 import { MODEL_REGISTRY, providerAliasMap } from '@use-brian/shared/model-registry'
 import { renderSystemContext } from '../system-context.js'
 import { assertInputAuthority, isInputAuthorityError } from '../input-authority.js'
-import { registeredToolDefinitions } from '../tool-registration.js'
+import { registeredToolDefinitions, toolDiscoveryInstructions } from '../tool-registration.js'
 import { CodexTextReconciler } from './text-reconciler.js'
 import { z } from 'zod'
 import type {
@@ -374,12 +374,13 @@ class CodexProviderSession implements ProviderSession {
   ) {
     this.#runtime = runtime
     this.#transport = transport
+    const mode = codexToolSchemaMode(options.model)
+    const runtimeSystemContext = [options.runtimeSystemContext, toolDiscoveryInstructions(options, mode)].filter(Boolean).join('\n\n')
     this.#options = {
       ...options,
-      systemPrompt: truncateUtf8(renderSystemContext(options), MAX_SYSTEM_PROMPT_BYTES),
+      systemPrompt: truncateUtf8(renderSystemContext({ ...options, runtimeSystemContext }), MAX_SYSTEM_PROMPT_BYTES),
       runtimeSystemContext: undefined,
     }
-    const mode = codexToolSchemaMode(options.model)
     this.#allowedTools = validateTools(registeredToolDefinitions(options, mode))
     this.#toolNamespace = mode === 'native-deferred' && options.toolRegistration?.mode === 'deferred' ? 'brian' : null
     const eager = new Set(this.#toolNamespace ? options.toolRegistration!.active.map(tool => tool.name) : [])

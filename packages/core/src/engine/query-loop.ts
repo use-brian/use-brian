@@ -143,8 +143,11 @@ export type QueryEvent =
   /** Successful terminal clarification, after misuse stripping and suspend handling. */
   | ({ type: 'question' } & import('../tools/base/ask-question.js').AssistantQuestion)
   | { type: 'tool_start'; id: string; name: string }
+  /** Canonical host operation after proxy resolution; tool_start is the wire name. */
   | { type: 'tool_input'; id: string; name: string; input: Record<string, unknown> }
   /**
+   * Results use canonical host names for notifications and UI behavior. Model
+   * messages retain the requested proxy names and IDs for provider pairing.
    * `metaByToolUseId` carries optional per-tool-call observability data
    * (e.g. which web search provider served a `webSearch` call). It is a
    * side channel — never serialized to the model, never persisted to
@@ -750,6 +753,20 @@ async function* queryLoopCore(
   const registrationMode = options.deferToolSchemas ? provider.toolSchemaMode?.(model) ?? 'eager' : 'eager'
   const deferToolSchemas = registrationMode === 'dynamic' || registrationMode === 'native-deferred'
 
+  // Bind metadata search only after all route/worker/capability narrowing.
+  // Preserve the original wrapped execute: catalog visibility must not bypass
+  // connector source authority, denied-call state, or scoped dispatchers.
+  let loadToolSchemas: (names: readonly string[]) => void = () => {}
+  const unifiedSearch = tools.get('mcp_search')?.acceptsToolCatalog === true
+  for (const [name, tool] of tools) {
+    if (!tool.acceptsToolCatalog) continue
+    tools.set(name, { ...tool, execute: (input, toolContext) => tool.execute(input, {
+      ...toolContext,
+      requestTools: tools,
+      admittedToolCatalog: { definitions: catalog, mode: registrationMode, loadSchemas: names => loadToolSchemas(names) },
+    }) })
+  }
+
   // Build tool definitions for the LLM
   const catalog: ToolDefinition[] = Array.from(tools.values())
     .filter(t => !t.hiddenFromModel && (!t.deferredSchemaOnly || deferToolSchemas))
@@ -786,8 +803,10 @@ async function* queryLoopCore(
     }
     if (selected) await options.toolSelection?.onResult?.(selected)
     const discovery = createToolDiscovery(catalog, selected?.names)
+    if (registrationMode === 'dynamic') loadToolSchemas = discovery.loadSchemas
     tools.set(discovery.tool.name, discovery.tool)
-    toolRegistration = { mode: 'deferred', catalog, active: discovery.definitions }
+    toolRegistration = { mode: 'deferred', catalog, active: discovery.definitions,
+      ...(unifiedSearch ? { discoveryTool: 'mcp_search' as const } : {}) }
     discovery.definitions.push({
       name: discovery.tool.name,
       description: discovery.tool.description,
@@ -967,6 +986,17 @@ async function* queryLoopCore(
     }
     const toolNames = new Map<string, string>()
 
+    const resolvedToolCalls = new Map<string, { name: string; input: Record<string, unknown> }>()
+    // Host control-flow uses canonical identities; provider history/results
+    // retain the original proxy envelope and name for exact call pairing.
+    const effectiveToolBlock = (block: ContentBlock): ContentBlock => {
+      const call = block.type === 'tool_use' ? resolvedToolCalls.get(block.id)
+        : block.type === 'tool_result' ? resolvedToolCalls.get(block.toolUseId) : undefined
+      if (!call) return block
+      return block.type === 'tool_use' ? { ...block, name: call.name, input: call.input }
+        : block.type === 'tool_result' ? { ...block, name: call.name } : block
+    }
+
     const pendingConfirmations: ToolConfirmationRequest[] = []
     // WU-6.3 — durability events queued by the executor when a suspended
     // tool persisted a `pending_approvals` row. Drained alongside
@@ -979,6 +1009,11 @@ async function* queryLoopCore(
       context,
       loopDetector,
       deniedTools,
+      admittedToolNames: new Set([...catalog.map(tool => tool.name), ...(registrationMode === 'dynamic' ? ['discoverTools'] : [])]),
+      onToolCallResolved: (id, call) => {
+        resolvedToolCalls.set(id, call)
+        observeToolName(call.name)
+      },
       confirmationResolver: options.confirmationResolver,
       confirmationTimeoutMs: options.confirmationTimeoutMs,
       onConfirmationRequired: (request) => {
@@ -1013,6 +1048,13 @@ async function* queryLoopCore(
     // post-drain synthesis as two final answers).
     let suppressBeforeAskQuestion: boolean | undefined
     let spawnedWorkerThisTurn = false
+    function observeToolName(name: string): void {
+      if (name === 'spawnWorker') { suppressText = true; spawnedWorkerThisTurn = true }
+      if (name === 'askQuestion') {
+        if (suppressBeforeAskQuestion === undefined) suppressBeforeAskQuestion = suppressText
+        suppressText = false
+      }
+    }
 
     // Set when a `steer` arrives mid-stream and the gate above allows us to
     // drop this response on the floor and re-enter with the new instruction.
@@ -1122,15 +1164,7 @@ async function* queryLoopCore(
           // askQuestion needs its accompanying text visible to the user
           // Suppress text while coordinator is spawning workers — user shouldn't
           // see intermediate chatter like "I'm sending workers..."
-          if (chunk.name === 'spawnWorker') {
-            suppressText = true
-            spawnedWorkerThisTurn = true
-          }
-          // But askQuestion needs its text visible
-          if (chunk.name === 'askQuestion') {
-            if (suppressBeforeAskQuestion === undefined) suppressBeforeAskQuestion = suppressText
-            suppressText = false
-          }
+          observeToolName(chunk.name)
         }
 
         if (chunk.type === 'tool_use_delta') {
@@ -1143,8 +1177,11 @@ async function* queryLoopCore(
           let input: Record<string, unknown> = {}
           try { input = JSON.parse(inputJson) } catch { /* empty */ }
           const name = toolNames.get(chunk.id) ?? 'unknown'
-          yield { type: 'tool_input', id: chunk.id, name, input }
           toolExecutor.addTool(chunk.id, name, input)
+          // Consumers (brain notifications, documents, worker cards) need the
+          // canonical operation, while the accumulator keeps the wire call.
+          const hostCall = resolvedToolCalls.get(chunk.id) ?? { name, input }
+          yield { type: 'tool_input', id: chunk.id, ...hostCall }
           toolInputBuffers.delete(chunk.id)
           // WU-6.3 — advance the loop step cursor. The awaiting_approval
           // event stamped after this tool suspends carries this index.
@@ -1176,8 +1213,8 @@ async function* queryLoopCore(
           noteTransientResults(completed.metaByToolUseId)
           allToolResults.push(...completed.blocks)
           debugDocumentFlow('tool_result', { sessionId: context.sessionId, turn, messages: [{ role: 'user', content: completed.blocks }] })
-          yield { type: 'tool_result', id: '', results: completed.blocks, metaByToolUseId: completed.metaByToolUseId }
-          const citations = extractCitationsFromToolResults(completed.blocks)
+          yield { type: 'tool_result', id: '', results: completed.blocks.map(effectiveToolBlock), metaByToolUseId: completed.metaByToolUseId }
+          const citations = extractCitationsFromToolResults(completed.blocks.map(effectiveToolBlock))
           if (citations.length > 0) {
             yield { type: 'citation', sources: citations }
           }
@@ -1400,8 +1437,8 @@ async function* queryLoopCore(
         noteTransientResults(results.metaByToolUseId)
         allToolResults.push(...results.blocks)
         debugDocumentFlow('tool_result', { sessionId: context.sessionId, turn, messages: [{ role: 'user', content: results.blocks }] })
-        yield { type: 'tool_result', id: '', results: results.blocks, metaByToolUseId: results.metaByToolUseId }
-        const citations = extractCitationsFromToolResults(results.blocks)
+        yield { type: 'tool_result', id: '', results: results.blocks.map(effectiveToolBlock), metaByToolUseId: results.metaByToolUseId }
+        const citations = extractCitationsFromToolResults(results.blocks.map(effectiveToolBlock))
         if (citations.length > 0) {
           yield { type: 'citation', sources: citations }
         }
@@ -1445,7 +1482,7 @@ async function* queryLoopCore(
     // normally; the workers will run, Phase 4b will drain, synthesis will
     // happen. Only when askQuestion is the sole call do we surface the
     // question text and exit.
-    const toolResultBlocks = allToolResults.filter(
+    const toolResultBlocks = allToolResults.map(effectiveToolBlock).filter(
       (r): r is ContentBlock & { type: 'tool_result'; name: string } =>
         r.type === 'tool_result',
     )
@@ -1470,7 +1507,7 @@ async function* queryLoopCore(
       )
 
     if (askQuestionCalledThisTurn) {
-      const askQuestionToolUse = response.content.find(
+      const askQuestionToolUse = response.content.map(effectiveToolBlock).find(
         (b): b is ContentBlock & { type: 'tool_use' } =>
           b.type === 'tool_use' && b.name === 'askQuestion',
       )
@@ -1510,7 +1547,7 @@ async function* queryLoopCore(
       }
       const askQuestionToolUseIds = new Set<string>()
       response.content = response.content.filter((b) => {
-        if (b.type === 'tool_use' && b.name === 'askQuestion') {
+        if (b.type === 'tool_use' && (effectiveToolBlock(b) as typeof b).name === 'askQuestion') {
           askQuestionToolUseIds.add(b.id)
           return false
         }
@@ -1533,7 +1570,7 @@ async function* queryLoopCore(
       }
     }
 
-    appendTerminalEvidence(response.content, allToolResults, terminalEvidence)
+    appendTerminalEvidence(response.content.map(effectiveToolBlock), allToolResults.map(effectiveToolBlock), terminalEvidence)
 
     // ── Phase 3b: Per-turn assistant record ────────────────────
     if(response.content.some(block=>(block as {type:string}).type==='host_observation'))throw new Error('Provider output cannot author host observations')
@@ -1707,7 +1744,7 @@ async function* queryLoopCore(
         options.questionResumeEnabled === true
         && typeof context.createPendingQuestion === 'function'
       if (canSuspend) {
-        const askQuestionToolUse = response.content.find(
+        const askQuestionToolUse = response.content.map(effectiveToolBlock).find(
           (b): b is ContentBlock & { type: 'tool_use' } =>
             b.type === 'tool_use' && b.name === 'askQuestion',
         )
@@ -1795,7 +1832,7 @@ async function* queryLoopCore(
       //   - questionResumeEnabled is off (workers, scheduled jobs, smoke), OR
       //   - createPendingQuestion hook is absent, OR
       //   - the suspend persistence failed (logged above).
-      const questionCall = response.content.find((b) => b.type === 'tool_use' && b.name === 'askQuestion')
+      const questionCall = response.content.map(effectiveToolBlock).find((b) => b.type === 'tool_use' && b.name === 'askQuestion')
       const parsedQuestion = askQuestionSchema.safeParse(questionCall?.type === 'tool_use' ? questionCall.input : undefined)
       if (parsedQuestion.success && toolResultBlocks.every((r) => !r.isError)) {
         yield { type: 'question', ...parsedQuestion.data }

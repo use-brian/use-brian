@@ -121,6 +121,8 @@ export type ThinkingLevel = 'low' | 'high'
 export type ToolSchemaRegistrationMode = 'eager' | 'dynamic' | 'native-deferred'
 export type ToolSchemaRegistration = {
   mode: 'deferred'
+  /** Metadata search bound to the complete admitted registry by the engine. */
+  discoveryTool?: 'mcp_search'
   /** Complete capability-filtered, model-visible catalog; no discovery helper.
    * Names remain canonical executor identities, not provider wire aliases. */
   catalog: readonly ToolDefinition[]

@@ -17,7 +17,9 @@ import { CodexRpcPeer } from '../rpc.js'
 import { createCodexAppServerProvider, codexToolSchemaMode } from '../provider.js'
 import { queryLoop, type QueryEvent } from '../../../engine/query-loop.js'
 import { NOOP_TURN_LEDGER } from '../../../engine/turn-ledger.js'
-import { buildTool } from '../../../tools/types.js'
+import { buildTool, type Tool } from '../../../tools/types.js'
+import { buildToolIndex, createMcpSearchTools } from '../../../mcp/tool-search.js'
+import type { McpSettingsStore } from '../../../mcp/types.js'
 
 const models = providerModelIds('openai-codex')
 const nativeModels = models.filter(model => codexToolSchemaMode(model) === 'native-deferred')
@@ -114,6 +116,42 @@ describe('[COMP:providers/codex-deferred-tools] offline pinned runtime', () => {
     })
   })
 
+  it('searches the unified catalog, then loads the matched native schema through the pinned runtime', async () => {
+    const result = await runFixture('gpt-5.6-luna', true, true, 'none', true)
+    expect(result.requests).toHaveLength(4)
+    // Connector search is offered, while ordinary Brian schemas remain deferred.
+    expect(JSON.stringify(result.requests[0])).toContain('mcp_search')
+    expect(JSON.stringify(result.requests[0])).not.toContain('synthetic_optional_field_')
+    expect(JSON.stringify(result.requests[0])).toContain('native tool search')
+    expect(JSON.stringify(result.requests[0])).toContain('final admitted Brian tool catalog together with indexed')
+    expect(JSON.stringify(result.requests[1])).toContain('[Brian] echo:')
+    expect(JSON.stringify(result.requests[1])).toContain('load this exact name with native tool search first')
+    const discovery = result.requests[2]!.input.filter(item => item.type === 'tool_search_output')
+    expect(discovery).toHaveLength(1)
+    expect(discovery[0]).toMatchObject({ tools: [{ name: 'brian', tools: [{ name: 'echo' }] }] })
+    expect(result.events.filter(event => event.type === 'tool_start').map(event => event.name)).toEqual(['mcp_search', 'echo'])
+    expect(result.callbacks).toEqual([{ name: 'echo', input: { value: 'synthetic-value' } }])
+    expect(result.events.find(event => event.type === 'turn_complete')).toMatchObject({
+      response: { content: [{ type: 'text', text: 'OK' }], stopReason: 'end_turn' },
+    })
+  })
+
+  it.each(['none', 'invalid-input', 'deny'] as const)('executes a discovered native tool through the host proxy without loading its provider schema (%s)', async gate => {
+    const result = await runFixture('gpt-5.6-luna', true, true, gate, true, true)
+    expect(result.requests).toHaveLength(3)
+    expect(JSON.stringify(result.requests[0])).not.toContain('synthetic_optional_field_')
+    expect(JSON.stringify(result.requests[1])).toContain('server=\\"brian\\"')
+    expect(result.requests.flatMap(request => request.input).filter(item => item.type === 'tool_search_output')).toEqual([])
+    expect(result.callbacks).toEqual(gate === 'none' ? [{ name: 'echo', input: { value: 'synthetic-value' } }] : [])
+    const outputs = result.requests[2]!.input.filter(item => item.type === 'function_call_output')
+    expect(outputs).toContainEqual(expect.objectContaining({ call_id: 'echo-call', output: expect.stringContaining(
+      gate === 'none' ? 'echo:synthetic-value' : gate === 'invalid-input' ? 'Validation failed' : 'declined',
+    ) }))
+    expect(JSON.stringify(outputs)).not.toContain('wrong tool')
+    expect(result.events.filter(event => event.type === 'tool_confirmation_required')).toHaveLength(gate === 'deny' ? 1 : 0)
+    expect(result.events.filter(event => event.type === 'tool_start').map(event => event.name)).toEqual(['mcp_search', 'mcp_call'])
+  })
+
   it.each(nativeModels)('discovers only the admitted deferred namespace and routes its callback for %s', async model => {
     const { requests, callbacks, threadId, turnId, usageTotals } = await runFixture(model, true)
     expect(requests).toHaveLength(3)
@@ -174,8 +212,8 @@ function expectSurface(request: ModelRequest, deferred: boolean, adapter = false
 }
 
 /** No account client, credential fixture, inherited config, or real upstream. */
-async function runFixture(model: string, deferred: boolean, adapter = false, gate: 'none' | 'invalid-input' | 'deny' = 'none') {
-  const needsSearch = deferred && (!adapter || codexToolSchemaMode(model) === 'native-deferred')
+async function runFixture(model: string, deferred: boolean, adapter = false, gate: 'none' | 'invalid-input' | 'deny' = 'none', connectorFirst = false, nativeProxy = false) {
+  const needsSearch = !nativeProxy && deferred && (!adapter || codexToolSchemaMode(model) === 'native-deferred')
   const codexHome = await mkdtemp(join(tmpdir(), 'brian-codex-deferred-home-'))
   const cwd = await mkdtemp(join(tmpdir(), 'brian-codex-deferred-cwd-'))
   const requests: ModelRequest[] = []
@@ -192,10 +230,13 @@ async function runFixture(model: string, deferred: boolean, adapter = false, gat
         expect(request.method).toBe('POST')
         expect(request.url).toBe('/v1/responses')
         requests.push(RequestSchema.parse(JSON.parse(Buffer.concat(chunks).toString('utf8'))))
-        const n = requests.length
+        const n = requests.length - (connectorFirst ? 1 : 0)
         if (n > (deferred ? needsSearch ? 3 : 2 : 1)) throw new Error('Unexpected extra model request')
-        const id = `response-fixture-${n}`
-        const item = needsSearch && n === 1
+        const id = `response-fixture-${requests.length}`
+        const item = connectorFirst && n === 0
+          ? { type: 'function_call', id: 'connector-item', call_id: 'connector-call', namespace: 'brian',
+              name: 'mcp_search', arguments: JSON.stringify({ query: 'echo synthetic string' }) }
+          : needsSearch && n === 1
           ? {
               type: 'tool_search_call', id: 'search-item', call_id: 'search-call',
               execution: 'client', arguments: { query: 'echo synthetic string', limit: 1 },
@@ -203,8 +244,10 @@ async function runFixture(model: string, deferred: boolean, adapter = false, gat
           : deferred && n === (needsSearch ? 2 : 1)
             ? {
                 type: 'function_call', id: 'echo-item', call_id: 'echo-call',
-                ...(needsSearch ? { namespace: 'brian' } : {}), name: 'echo',
-                arguments: JSON.stringify({ value: gate === 'invalid-input' ? 17 : 'synthetic-value' }),
+                ...(needsSearch || nativeProxy ? { namespace: 'brian' } : {}), name: nativeProxy ? 'mcp_call' : 'echo',
+                arguments: JSON.stringify(nativeProxy
+                  ? { server: 'brian', tool: 'echo', args: { value: gate === 'invalid-input' ? 17 : 'synthetic-value' } }
+                  : { value: gate === 'invalid-input' ? 17 : 'synthetic-value' }),
               }
             : {
                 type: 'message', id: 'final-item', role: 'assistant',
@@ -269,7 +312,7 @@ async function runFixture(model: string, deferred: boolean, adapter = false, gat
     await rpc.notify('initialized', {})
     if (adapter) {
       const provider = createCodexAppServerProvider({ transport: { rpc, cwd }, models: [model], toolBatchQuietMs: 1 })
-      const tools = new Map([
+      const tools = new Map<string, Tool>([
         ['basic', buildTool({ name: 'basic', description: basic.description, inputSchema: z.object({}).strict(),
           isReadOnly: true, isConcurrencySafe: true, execute: async () => ({ data: 'basic' }) })],
         ['echo', buildTool({ name: 'echo', description: deferredNamespace.tools[0]!.description,
@@ -281,6 +324,16 @@ async function runFixture(model: string, deferred: boolean, adapter = false, gat
             return { data: 'echo:synthetic-value' }
           } })],
       ])
+      if (connectorFirst) {
+        for (const tool of createMcpSearchTools({ index: buildToolIndex([
+          { kind: 'local', serverName: 'fixtureCalendar', tools: [buildTool({
+            name: 'listAppointments', description: 'List scheduled appointments', inputSchema: z.object({}),
+            isReadOnly: true, execute: async () => { throw new Error('Unrelated connector must not execute') },
+          })] },
+        ]), settingsStore: {} as McpSettingsStore, assistantId: 'fixture-assistant', userId: 'fixture-user' })) {
+          tools.set(tool.name, tool)
+        }
+      }
       await withTimeout((async () => {
         for await (const event of queryLoop({
           provider, model, systemPrompt: 'Synthetic isolated contract.',
