@@ -116,4 +116,6 @@ The native fixture uses temporary isolated `CODEX_HOME`/cwd directories, synthet
 
 Mixed-catalog regressions exercise unified MCP lookup of memory and non-memory tools, automatic dynamic schema loading, and pinned-runtime native schema loading and canonical execution, without making all native tools eager. Inventory tests page through five introspection operations plus twenty native operations without duplicates; final-admission tests reject broader inherited registries in eager/dynamic/native and stateful/stateless modes. MCP unit tests also cover source-label queries, hidden/capability-filtered entries, qualified direct-only aliases, and scoped misses.
 
+Successful discovery and dispatch do not waive data-layer source checks. See [native Memory write lineage](native-memory-write-lineage.md) for index-read → save behavior and its DB-backed regressions.
+
 These are correctness and wire-shape checks, not real-provider latency measurements. Deferral reduces initial schema presentation but can add a discovery model round trip when a tool is needed. System instructions, history and other provider context still contribute input tokens; no specific production token or latency reduction is claimed.

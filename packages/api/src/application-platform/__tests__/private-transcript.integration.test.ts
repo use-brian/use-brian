@@ -12,11 +12,13 @@ import * as storedSessions from '../../db/sessions.js'
 import * as audience from '../../context-scope/attended-audience.js'
 import {createResponseDeliveryAdmission} from '../../context-scope/response-delivery-admission.js'
 import {takeTurnLease,releaseTurn} from '../../turn/lease.js'
-import {boundScopeSources,ContextScopeAccumulator,executionToolContext} from '@use-brian/core'
+import {boundScopeSources,ContextScopeAccumulator,createMemoryTools,executionToolContext} from '@use-brian/core'
 import {getAppPool,getPool} from '../../db/client.js'
 import {authSessionStore} from '../../db/auth-session-store.js'
 import {addSessionMessage,createPersonalWebSession,setCompactSummaryAndBoundary,readCompactSummary,findSessionById} from '../../db/sessions.js'
 import {createDbMemoryStore} from '../../db/memory-store.js'
+import * as memoryRows from '../../db/memories.js'
+import * as derivedScope from '../../db/derived-scope-store.js'
 import {readAdmittedSessionQuery} from '../../db/session-query-reader.js'
 import {publishNativeSessionMessageBatch} from '../../db/session-message-publication.js'
 import {readPrivateTranscript} from '../../db/private-transcript.js'
@@ -32,7 +34,11 @@ await assertLocalFixture()
 
 describe.sequential('[COMP:api/private-transcript] ordinary private conversation continuity',()=>{
  let fixture:Awaited<ReturnType<typeof persistentContextFixture>>|undefined
- afterEach(async()=>{vi.restoreAllMocks();await fixture?.cleanup();fixture=undefined})
+ afterEach(async()=>{
+  vi.restoreAllMocks()
+  try{if(fixture)expect((await fixture.pool.query('SELECT count(*)::int AS count FROM native_memory_query_write_intents WHERE workspace_id=$1',[fixture.workspaceId])).rows).toEqual([{count:0}])}
+  finally{await fixture?.cleanup();fixture=undefined}
+ })
  afterAll(async()=>{await getAppPool().end();await getPool().end()})
  async function setup(member=false){
   fixture=await persistentContextFixture('confidential');const f=fixture,userId=member?f.secondId:f.ownerId
@@ -54,6 +60,101 @@ describe.sequential('[COMP:api/private-transcript] ordinary private conversation
    messages:[{role:'assistant',senderAssistantId:f.assistantId,content:[{type:'text',text:'We chose the amber notebook. The office opens at nine.'}]}]})
   return{f,session,scope,input,reply,memory,fresh,claims,userId,device,original}
  }
+ it.each(['transcript','current-message','memory-index','empty-index','immediate-index'] as const)('saves a native Memory from admitted private conversation evidence (%s)',async mode=>{
+  const c=await setup(),authority=await c.fresh(),store=createDbMemoryStore()
+  const input=await addSessionMessage({sessionId:c.session.id,role:'user',content:[{type:'text',text:'Remember that my fictional notebook is amber.'}],senderUserId:c.userId,scope:c.scope})
+  if(mode==='empty-index')await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memory.id])
+  if(mode.endsWith('index')){
+   const index=await store.getIndex(authority.execution.security.access,false,authority)
+   authority.accumulator.note({sources:boundScopeSources(index)})
+  }
+  const history=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:input.sequenceNum,
+   ...(mode!=='transcript'?{currentMessageId:input.id}:{}),authority})
+  authority.accumulator.note({sources:boundScopeSources(history)})
+  expect(authority.accumulator.evidence.sources?.some(source=>source.resourceKind==='private_transcript')).toBe(true)
+  if(mode==='immediate-index'){
+   const create=memoryRows.createMemory
+   vi.spyOn(memoryRows,'createMemory').mockImplementation(async(params,links,client)=>{
+    await client!.query('SET CONSTRAINTS ALL IMMEDIATE')
+    return create(params,links,client)
+   })
+  }
+  const tools=createMemoryTools(store),context={...executionToolContext(authority.execution,{appId:'chat'}),scopeAccumulator:authority.accumulator}
+  const result=await tools.saveMemory.execute({summary:'The fictional personal notebook is amber.',scope:'user'},context)
+  expect(result.isError,JSON.stringify(result)).not.toBe(true)
+  authority.accumulator.note(result.scopeEvidence??{})
+  await assertSourceModelInputAuthority(context)
+  await assertSourceModelOutputAuthority(context)
+  // The original input query remains usable for the next write and final reply.
+  const again=await tools.saveMemory.execute({summary:'The fictional notebook has a linen cover.',scope:'user'},context)
+  expect(again.isError,JSON.stringify(again)).not.toBe(true)
+  authority.accumulator.note(again.scopeEvidence??{})
+  await publishNativeSessionMessageBatch({sessionId:c.session.id,authority,derivationTarget:c.scope,
+   derivation:{producer:'fixture:memory-write-reply',sources:authority.accumulator.evidence.sources??[]},
+   messages:[{role:'assistant',content:[{type:'text',text:'Saved both fictional notebook facts.'}]}]})
+  expect((await c.f.pool.query('SELECT count(*)::int AS count FROM memories WHERE workspace_id=$1 AND source_session_id=$2',
+   [c.f.workspaceId,c.session.id])).rows[0].count).toBe(2)
+  const fresh=await c.fresh(),index=await store.getIndex(fresh.execution.security.access,false,fresh)
+  expect(index.filter(row=>row.summary.includes('notebook'))).toHaveLength(2)
+ })
+ it.each(['growth','hold','edit','delete','transcript','device'] as const)('refuses an index-backed Memory write after independent source withdrawal (%s)',async change=>{
+  const c=await setup(),authority=await c.fresh(),store=createDbMemoryStore()
+  const index=await store.getIndex(authority.execution.security.access,false,authority)
+  const history=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:c.reply.sequenceNum,authority})
+  authority.accumulator.note({sources:[...boundScopeSources(index),...boundScopeSources(history)]})
+  if(change==='growth')await c.f.memory('An unrelated fictional addition.',c.userId)
+  if(change==='hold')await c.f.pool.query('UPDATE memories SET scope_held=true WHERE id=$1',[c.memory.id])
+  if(change==='edit')await c.f.pool.query('UPDATE memories SET summary=$2,scope_version=scope_version+1 WHERE id=$1',[c.memory.id,'A changed fictional office fact.'])
+  if(change==='delete')await c.f.pool.query('DELETE FROM memories WHERE id=$1',[c.memory.id])
+  if(change==='transcript')await c.f.pool.query('UPDATE session_messages SET scope_held=true WHERE id=$1',[c.reply.id])
+  if(change==='device')await authSessionStore.revokeForUser(c.userId,c.device.id)
+  const before=(await c.f.pool.query('SELECT count(*)::int AS count FROM scope_derivations WHERE workspace_id=$1',[c.f.workspaceId])).rows[0].count
+  await expect(createMemoryTools(store).saveMemory.execute({summary:'This refused fictional memory must not survive.',scope:'user'},
+   {...executionToolContext(authority.execution,{appId:'chat'}),scopeAccumulator:authority.accumulator})).rejects.toBeTruthy()
+  expect((await c.f.pool.query('SELECT id FROM memories WHERE workspace_id=$1 AND source_session_id=$2',[c.f.workspaceId,c.session.id])).rows).toHaveLength(0)
+  expect((await c.f.pool.query('SELECT count(*)::int AS count FROM scope_derivations WHERE workspace_id=$1',[c.f.workspaceId])).rows[0].count).toBe(before)
+ })
+ it('does not exempt an output from a different frozen index field selection',async()=>{
+  const c=await setup(),store=createDbMemoryStore(),first=await c.fresh(),other=await c.fresh()
+  const index=await store.getIndex(first.execution.security.access,false,first)
+  const ranked=await store.getIndexRanked!(other.execution.security.access,20,other)
+  first.accumulator.note({sources:boundScopeSources(index)})
+  other.accumulator.note({sources:boundScopeSources(ranked.rows)})
+  for(const authority of [first,other])await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:c.reply.sequenceNum,authority})
+  const tools=createMemoryTools(store)
+  expect((await tools.saveMemory.execute({summary:'A fictional fact derived from the first index.',scope:'user'},
+   {...executionToolContext(first.execution,{appId:'chat'}),scopeAccumulator:first.accumulator})).isError).not.toBe(true)
+  await expect(tools.saveMemory.execute({summary:'A fictional fact from the now-stale other projection.',scope:'user'},
+   {...executionToolContext(other.execution,{appId:'chat'}),scopeAccumulator:other.accumulator})).rejects.toBeTruthy()
+  expect((await c.f.pool.query('SELECT id FROM memories WHERE workspace_id=$1 AND source_session_id=$2',[c.f.workspaceId,c.session.id])).rows).toHaveLength(1)
+ })
+ it('does not let the runtime role read or forge pending Memory query selectors',async()=>{
+  expect((await getAppPool().query(`SELECT has_table_privilege(current_user,'native_memory_query_write_intents','SELECT') AS read,
+   has_table_privilege(current_user,'native_memory_query_write_intents','INSERT') AS write,
+   has_table_privilege(current_user,'native_memory_query_write_intents','UPDATE') AS update,
+   has_table_privilege(current_user,'native_memory_query_write_intents','DELETE') AS delete`)).rows)
+   .toEqual([{read:false,write:false,update:false,delete:false}])
+  await expect(getAppPool().query('SELECT * FROM native_memory_query_write_intents')).rejects.toMatchObject({code:'42501'})
+ })
+ it('rolls back tentative Memory lineage when SQL rejects a source after the row insert',async()=>{
+  const c=await setup(),authority=await c.fresh(),store=createDbMemoryStore()
+  const index=await store.getIndex(authority.execution.security.access,false,authority)
+  const history=await readAdmittedSessionQuery({sessionId:c.session.id,throughSequence:c.reply.sequenceNum,authority})
+  authority.accumulator.note({sources:[...boundScopeSources(index),...boundScopeSources(history)]})
+  const record=derivedScope.recordDerivedResource
+  let reached=false
+  vi.spyOn(derivedScope,'recordDerivedResource').mockImplementation(async(client,evidence,output,actor)=>{
+   reached=true
+   return record(client,{...evidence,sources:evidence.sources.map(source=>source.resourceKind==='private_transcript'
+    ?{...source,version:'not-the-observed-version'}:source)},output,actor)
+  })
+  const before=(await c.f.pool.query('SELECT count(*)::int AS count FROM scope_derivations WHERE workspace_id=$1',[c.f.workspaceId])).rows[0].count
+  await expect(createMemoryTools(store).saveMemory.execute({summary:'This late-refused fictional memory must not survive.',scope:'user'},
+   {...executionToolContext(authority.execution,{appId:'chat'}),scopeAccumulator:authority.accumulator})).rejects.toMatchObject({code:'scope_source_changed'})
+  expect(reached).toBe(true)
+  expect((await c.f.pool.query('SELECT id FROM memories WHERE workspace_id=$1 AND source_session_id=$2',[c.f.workspaceId,c.session.id])).rows).toHaveLength(0)
+  expect((await c.f.pool.query('SELECT count(*)::int AS count FROM scope_derivations WHERE workspace_id=$1',[c.f.workspaceId])).rows[0].count).toBe(before)
+ })
  it.each(['title','state'] as const)('preserves private dialogue and current Memory reads through the %s job wrapper',async kind=>{
   const c=await setup(),fresh=await c.fresh(),signal=new AbortController().signal
   let current=true
