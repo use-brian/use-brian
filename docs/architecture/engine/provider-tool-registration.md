@@ -22,6 +22,33 @@ Capable requests/sessions receive a separate `toolRegistration` plan:
 
 The original filtered executor registry remains authoritative. Schema discovery cannot add an executor or grant a capability. Canonical tool names, argument validation, confirmation/approval, current input authority checks, tool-result authority checks, cancellation and ledger execution paths are unchanged. Catalogs and selection results are invocation-local, not cached permissions.
 
+## Discovery scope is part of registration
+
+`mcp_search` is the unified **metadata search**, not a universal executor. In a model turn it combines two sources:
+
+- The loop's final admitted Brian registry: memory, files, Office, browser, planning, etc.
+- The already-scoped connected-source index, including folded local/remote connector tools and introspection reads.
+
+The source-index count (for example, five introspection tools) is not the total tool count. Exact-name and keyword searches rank across both sources. Results report the searchable native/indexed counts, match count, and pagination state. Each result has an exact invocation route: native operations can use the engine-bound `mcp_call` route with `server:"brian"` when advertised, or their direct schema; indexed operations retain their source-specific `mcp_call` or direct-adapter route. Indexed adapters are not duplicated as native operations, including after policy denial.
+
+For an inventory, call `mcp_search({query:"", limit:8, offset:0})`, then repeat with `nextOffset` until it is `null`. Inventory pages are compact and do not eagerly load every schema. Search an exact name for its parameters. Discovery/proxy helpers are excluded from operation counts. Results are current-turn views, not permission snapshots; visibility changes can change later pages. Keyword results and individual pages must never be presented as a complete inventory.
+
+The core search tool advertises the host-only `acceptsToolCatalog` capability. **After all route, worker, and capability narrowing**, the query loop binds `admittedToolCatalog` to that tool's invocation context while preserving the original guarded `execute`. The supplied `requestTools` is the loop's final registry, not a broader parent or earlier route registry. No executor or permission is added. Outside a model turn, the tool reports source-index-only scope rather than claiming a full Brian inventory.
+
+For dynamic drivers, a capability lookup loads matching native schemas (and indexed direct-only adapter schemas) into the existing active array, so a second `discoverTools` call is unnecessary. Native-deferred drivers keep immutable registration: the advertised host proxy needs no provider-native schema loading, while a direct native call still loads the exact schema through native search when needed. Eager drivers already have their schemas. Turns without unified MCP search retain their original native/`discoverTools` discovery path.
+
+`toolDiscoveryInstructions` renders this contract at the **actual driver boundary**, using the engine's `discoveryTool` registration marker. Eager fallback drivers are not told to invoke an unavailable dynamic helper, and native-deferred drivers are not told to invoke synthetic `discoverTools`. Already supplied schemas should be used without another lookup. Discovery never overrides explicit availability or policy refusals.
+
+MCP search indexes source identities/display labels as well as capability text. Hidden local tools stay out of model search and source summaries. Direct-only search uses the exact installed, admitted adapter identity, including surviving qualified aliases; it does not infer permission from a same-named unrelated tool or a hidden proxy. Direct adapters from independently scoped indexes retain their owning index's visibility/denial check and are deduplicated by source identity. Original source dispatchers, blocked-call state, capability checks, and approval gates remain authoritative.
+
+### Canonical native proxy execution
+
+The host-owned `resolveToolCall` on `mcp_call` resolves `server:"brian"` (case-insensitive) against the final admitted registry. This is not another source in the connector index. A real indexed source named Brian takes precedence; native metadata then advertises direct invocation instead. Indexed adapters and discovery/proxy helpers cannot be smuggled through the native route. Missing, hidden, or non-admitted targets fail closed. Standalone `mcp_call.execute` does not execute native targets.
+
+The central tool executor validates the proxy envelope, resolves once, and schedules the canonical tool. It does **not** invoke `target.execute` from inside a proxy or nested executor. The target's schema, capability and workflow gates, confirmation/approval, shared denial/loop state, concurrency slot, sensitivity/evidence checks, live authority and wrapped dispatcher, timeout and result accounting all run normally. Approval records use the canonical name and input.
+
+Provider call IDs and result names remain on the original proxy envelope: a parked Codex `mcp_call` must receive an `mcp_call` result, not a result named after the target. Host control-flow and `tool_input`/`tool_result` events separately observe canonical identities, including brain-write notifications, document rendering, worker suppression, `askQuestion` termination/suspension, citations, and terminal evidence. The provider accumulator and persisted wire call/result pair remain unchanged. Offline pinned-runtime regressions exercise successful, invalid-input, and denied native proxy calls without a second schema-search round trip.
+
 ## Gemini
 
 Gemini uses `dynamic` mode. Its common request builder reads `active` on **every** send, for both stateless and stateful operation. The existing bounded host discovery helper adds admitted schemas to that same array. Stateful function-call thought signatures/history are preserved.
@@ -86,5 +113,7 @@ node node_modules/typescript/bin/tsc --noEmit -p packages/api/tsconfig.json
 ```
 
 The native fixture uses temporary isolated `CODEX_HOME`/cwd directories, synthetic inputs and a fake loopback Responses endpoint, with the production hardening profile unchanged. It checks every currently registered Codex selector: native discovery or the eager GPT-5.2 fallback, exact model-visible tools, schema withholding/loading, canonical execution, invalid argument rejection, denied confirmation, complete final text without an empty-response retry and all internal-call usage. Other suites cover Gemini discovery/signatures, stateful/stateless paths, routing/eager fallback, authority withdrawal, cancellation, usage duplication and coalesced completion/error races.
+
+Mixed-catalog regressions exercise unified MCP lookup of memory and non-memory tools, automatic dynamic schema loading, and pinned-runtime native schema loading and canonical execution, without making all native tools eager. Inventory tests page through five introspection operations plus twenty native operations without duplicates; final-admission tests reject broader inherited registries in eager/dynamic/native and stateful/stateless modes. MCP unit tests also cover source-label queries, hidden/capability-filtered entries, qualified direct-only aliases, and scoped misses.
 
 These are correctness and wire-shape checks, not real-provider latency measurements. Deferral reduces initial schema presentation but can add a discovery model round trip when a tool is needed. System instructions, history and other provider context still contribute input tokens; no specific production token or latency reduction is claimed.

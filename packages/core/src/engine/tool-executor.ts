@@ -45,6 +45,8 @@ type ToolStatus = 'queued' | 'pending_confirmation' | 'awaiting_slot' | 'executi
 type TrackedTool = {
   id: string
   name: string
+  /** Provider pairing stays on the requested proxy name, not the resolved name. */
+  wireName?: string
   input: Record<string, unknown>
   status: ToolStatus
   isConcurrencySafe: boolean
@@ -73,6 +75,10 @@ export type ToolExecutorOptions = {
   loopDetector: LoopDetector
   onToolStart?: (id: string, name: string) => void
   onToolEnd?: (id: string, name: string, result: ToolResult) => void
+  /** Full schema admission, when stricter than the executor registry. */
+  admittedToolNames?: ReadonlySet<string>
+  /** Canonical execution identity for host control-flow; wire IDs/names stay unchanged. */
+  onToolCallResolved?: (id: string, call: { name: string; input: Record<string, unknown> }) => void
   /** Resolver for tools that require user confirmation before execution. */
   confirmationResolver?: ConfirmationResolver
   /** Timeout for confirmation prompts (default 5 min). */
@@ -1038,10 +1044,32 @@ export function createToolExecutor(options: ToolExecutorOptions) {
      * Add a tool call from the model stream. Starts execution immediately if possible.
      */
     addTool(id: string, name: string, input: Record<string, unknown>) {
+      const requested = options.tools.get(name)
+      let wireName: string | undefined
+      // Resolve only host-owned envelopes, never a model-supplied executor.
+      // Proxy and target must both be admitted. Target guards run below using
+      // its canonical name/input, sharing denial state with direct calls.
+      if (requested?.resolveToolCall && !requested.hiddenFromModel && !deniedTools.has(name)
+        && !missingToolCapability(requested, options.context.activeCapabilities)
+        && (!options.admittedToolNames || options.admittedToolNames.has(name))) {
+        const envelope = requested.inputSchema.safeParse(input)
+        if (envelope.success) {
+          const call = requested.resolveToolCall(envelope.data, options.tools)
+          const target = call && options.tools.get(call.name)
+          if (call && target && !target.hiddenFromModel && !target.resolveToolCall
+            && (!options.admittedToolNames || options.admittedToolNames.has(call.name))) {
+            wireName = name
+            name = call.name
+            input = call.input
+            options.onToolCallResolved?.(id, call)
+          }
+        }
+      }
       const toolDef = options.tools.get(name)
       tracked.push({
         id,
         name,
+        ...(wireName ? { wireName } : {}),
         input,
         status: 'queued',
         isConcurrencySafe: toolDef?.isConcurrencySafe ?? false,
@@ -1068,7 +1096,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           || t.status === 'executing'
         ) break // preserve order
         if (t.result) {
-          blocks.push(t.result)
+          blocks.push(t.wireName && t.result.type === 'tool_result' ? { ...t.result, name: t.wireName } : t.result)
           // Emit tool-produced images right after their tool_result so they land
           // in the same tool-results user turn the model reads next.
           if (t.resultImages?.length) blocks.push(...t.resultImages)

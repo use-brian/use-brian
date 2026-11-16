@@ -1,4 +1,4 @@
-import { registeredToolDefinitions } from './tool-registration.js'
+import { registeredToolDefinitions, toolDiscoveryInstructions } from './tool-registration.js'
 import { bufferProviderStream } from './stream-backpressure.js'
 import type { HttpRetryWindow } from './types.js'
 /**
@@ -684,6 +684,8 @@ function buildRequest(
   // for all of them. Drops reasoning / content-less parts that would 400.
   const safeContents = normalizeGeminiRequestContents(contents, modelId)
   const systemParts = systemContextParts(options)
+  const discoveryInstructions = toolDiscoveryInstructions(options, 'dynamic')
+  if (discoveryInstructions) systemParts.push(discoveryInstructions)
 
   const toolEntries: GeminiToolEntry[] = []
   const tools = registeredToolDefinitions(options, 'dynamic')
