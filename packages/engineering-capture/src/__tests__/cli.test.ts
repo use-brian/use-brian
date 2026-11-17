@@ -1,4 +1,5 @@
 import {spawn} from 'node:child_process'
+import {DatabaseSync} from 'node:sqlite'
 import {once} from 'node:events'
 import {mkdtempSync,writeFileSync,readFileSync,rmSync,symlinkSync} from 'node:fs'
 import {tmpdir} from 'node:os'
@@ -38,10 +39,25 @@ describe('[COMP:engineering-capture/collector] real hook process continuity',()=
   const dir=mkdtempSync(join(tmpdir(),'capture-worker-'));dirs.push(dir)
   const config=CollectorConfigSchema.parse({version:1,provider:'codex',endpoint:'http://127.0.0.1:1/api/brain/mcp',credentialEnv:'FIXTURE_CAPTURE_KEY',project:dir,stateRoot:join(dir,'spool')}),path=join(dir,'config.json');writeFileSync(path,JSON.stringify(config),{mode:0o600})
   const spool=new CaptureSpool(config),id=spool.enqueue({provider:'codex',sessionId:'future-session',cwd:dir,role:'user',content:'Future selected event',attributionQuality:'reported_unverified'});spool.accept(id,{deliveryStatus:'pending',firesAt:new Date(Date.now()+3600000).toISOString()})
-  const child=spawn(process.execPath,[resolve('dist/cli.js'),'worker','--config',path,'--idle-exit-ms','30'],{env:{PATH:process.env.PATH,HOME:process.env.HOME},stdio:'ignore'}),closed=once(child,'close')
-  try{let leased=false;for(let i=0;i<100;i++){if(!spool.acquireLease('probe')){leased=true;break}spool.releaseLease('probe');await new Promise(r=>setTimeout(r,20))};expect(leased).toBe(true)
-   await new Promise(r=>setTimeout(r,1500));expect(child.exitCode).toBeNull();expect(spool.status()).toMatchObject({counts:{pending:1}})
-  }finally{child.kill('SIGTERM');await closed;spool.close()}
+  // Readiness must not acquire the lease: a competing probe can make the
+  // correctly implemented single-worker CLI exit before we observe it.
+  const observer=new DatabaseSync(join(config.stateRoot,'spool.sqlite'),{readOnly:true})
+  const activeLease=observer.prepare('SELECT token FROM leases WHERE connection=? AND expires_ms>?')
+  const child=spawn(process.execPath,[resolve('dist/cli.js'),'worker','--config',path,'--idle-exit-ms','30'],{env:{PATH:process.env.PATH,HOME:process.env.HOME},stdio:['ignore','ignore','pipe']}),closed=once(child,'close')
+  let stderr='';child.stderr.on('data',chunk=>{stderr+=chunk})
+  try{
+   let leased=false
+   for(let i=0;i<100;i++){
+    if(child.exitCode!==null||child.signalCode!==null)throw new Error(`worker exited before acquiring its lease (${child.exitCode??child.signalCode}): ${stderr}`)
+    if(activeLease.get(spool.connection,Date.now())){leased=true;break}
+    await new Promise(r=>setTimeout(r,20))
+   }
+   expect(leased,`worker did not acquire its lease: ${stderr}`).toBe(true)
+   await new Promise(r=>setTimeout(r,1500))
+   expect(child.exitCode,stderr).toBeNull();expect(child.signalCode,stderr).toBeNull()
+   expect(activeLease.get(spool.connection,Date.now())).toBeDefined()
+   expect(spool.status()).toMatchObject({counts:{pending:1}})
+  }finally{child.kill('SIGTERM');await closed;observer.close();spool.close()}
  },10000)
 
 })

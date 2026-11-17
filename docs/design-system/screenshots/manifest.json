@@ -1,0 +1,721 @@
+{
+  "sourceRevision": "43a70a8e3608ffc53d76207af4aba85cfb37ea76",
+  "capturedAt": "2026-11-16T07:10:23.422Z",
+  "browser": "153.0.8010.0",
+  "deviceScaleFactor": 1,
+  "locale": "en-US",
+  "timezone": "UTC",
+  "reducedMotion": "reduce",
+  "palette": "notion",
+  "caveats": [
+    "Only accounts and auth login are full public page captures; feature captures are explicitly labeled isolated production components, not authenticated pages.",
+    "No production data, account credentials, authentication bypass, or API writes. Fixture hosts block all /api requests and non-local origins.",
+    "Auth portal uses its own permanent dark theme. No custom palette, native desktop, mobile Safari, or live authenticated workspace validation.",
+    "Only Next.js development indicators are hidden; component styles are unmodified. Portable Linux Chromium uses its bundled/system fallback fonts, not macOS/Windows native fonts or the Next-loaded mono face in previews. Emoji glyph availability depends on installed fonts; blank emoji cells are not a product finding."
+  ],
+  "screenshots": [
+    {
+      "id": "REF",
+      "name": "reference-accounts-light-desktop",
+      "url": "http://127.0.0.1:3203/accounts",
+      "kind": "page",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "file": "reference-accounts-light-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#fff",
+          "primary": "#2383e2",
+          "action": "#37352f",
+          "ring": "#737373"
+        },
+        "elements": [],
+        "horizontalOverflow": false,
+        "heading": "Use Brian"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "REF",
+      "name": "reference-accounts-dark-desktop",
+      "url": "http://127.0.0.1:3203/accounts",
+      "kind": "page",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "file": "reference-accounts-dark-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "primary": "#529cca",
+          "action": "#d4d4d4",
+          "ring": "#a3a3a3"
+        },
+        "elements": [],
+        "horizontalOverflow": false,
+        "heading": "Use Brian"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "REF",
+      "name": "reference-accounts-light-phone",
+      "url": "http://127.0.0.1:3203/accounts",
+      "kind": "page",
+      "width": 360,
+      "height": 800,
+      "mode": "light",
+      "file": "reference-accounts-light-phone.png",
+      "measurements": {
+        "root": {
+          "background": "#fff",
+          "primary": "#2383e2",
+          "action": "#37352f",
+          "ring": "#737373"
+        },
+        "elements": [],
+        "horizontalOverflow": false,
+        "heading": "Use Brian"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F01",
+      "name": "f01-auth-login-desktop",
+      "url": "http://127.0.0.1:3205/login",
+      "kind": "page",
+      "width": 1440,
+      "height": 1000,
+      "mode": "portal-dark",
+      "file": "f01-auth-login-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#081018",
+          "primary": "#55d6e8",
+          "action": "",
+          "ring": ""
+        },
+        "elements": [
+          {
+            "tag": "INPUT",
+            "label": "",
+            "width": 354,
+            "height": 45.5,
+            "fontSize": "13px",
+            "background": "rgb(7, 16, 24)",
+            "color": "rgb(243, 247, 250)",
+            "border": "rgb(85, 214, 232)",
+            "accentColor": "auto",
+            "outline": "rgb(243, 247, 250) none 3px",
+            "boxShadow": "rgba(85, 214, 232, 0.133) 0px 0px 0px 3px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Sign in to your workspace"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F01",
+      "name": "f01-auth-login-phone",
+      "url": "http://127.0.0.1:3205/login",
+      "kind": "page",
+      "width": 360,
+      "height": 800,
+      "mode": "portal-dark",
+      "file": "f01-auth-login-phone.png",
+      "measurements": {
+        "root": {
+          "background": "#081018",
+          "primary": "#55d6e8",
+          "action": "",
+          "ring": ""
+        },
+        "elements": [
+          {
+            "tag": "INPUT",
+            "label": "",
+            "width": 246,
+            "height": 50,
+            "fontSize": "16px",
+            "background": "rgb(7, 16, 24)",
+            "color": "rgb(243, 247, 250)",
+            "border": "rgb(85, 214, 232)",
+            "accentColor": "auto",
+            "outline": "rgb(243, 247, 250) none 3px",
+            "boxShadow": "rgba(85, 214, 232, 0.133) 0px 0px 0px 3px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Sign in to your workspace"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F02",
+      "name": "f02-renderers-light-desktop",
+      "url": "http://127.0.0.1:3210/?surface=renderers&mode=light",
+      "kind": "isolated-production-components",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "surface": "renderers",
+      "file": "f02-renderers-light-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "primary": "#2383E2",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "SECTION",
+            "label": "Common app primitivesSave changesShared checkbox",
+            "width": 496,
+            "height": 154,
+            "fontSize": "16px",
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "none"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Save changes",
+            "width": 109.75,
+            "height": 32,
+            "fontSize": "14px",
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0.1) 0px 1px 3px 0px, rgba(0, 0, 0, 0.1) 0px 1px 2px -1px"
+          },
+          {
+            "tag": "SECTION",
+            "label": "views-renderer primitivesSave changesCheckbox property cell",
+            "width": 496,
+            "height": 154,
+            "fontSize": "16px",
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "none"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Rendered views: action and checkbox primitives"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F02",
+      "name": "f02-renderers-dark-desktop",
+      "url": "http://127.0.0.1:3210/?surface=renderers&mode=dark",
+      "kind": "isolated-production-components",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "surface": "renderers",
+      "file": "f02-renderers-dark-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "primary": "#529CCA",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "SECTION",
+            "label": "Common app primitivesSave changesShared checkbox",
+            "width": 496,
+            "height": 154,
+            "fontSize": "16px",
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgb(47, 47, 47)",
+            "accentColor": "auto",
+            "outline": "oklab(0.715469 0.0000326335 0.0000143051 / 0.5) none 3px",
+            "boxShadow": "none"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Save changes",
+            "width": 109.75,
+            "height": 32,
+            "fontSize": "14px",
+            "background": "rgb(212, 212, 212)",
+            "color": "rgb(25, 25, 25)",
+            "border": "rgba(0, 0, 0, 0)",
+            "accentColor": "auto",
+            "outline": "oklab(0.715469 0.0000326335 0.0000143051 / 0.5) none 3px",
+            "boxShadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0.1) 0px 1px 3px 0px, rgba(0, 0, 0, 0.1) 0px 1px 2px -1px"
+          },
+          {
+            "tag": "SECTION",
+            "label": "views-renderer primitivesSave changesCheckbox property cell",
+            "width": 496,
+            "height": 154,
+            "fontSize": "16px",
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgb(47, 47, 47)",
+            "accentColor": "auto",
+            "outline": "oklab(0.715469 0.0000326335 0.0000143051 / 0.5) none 3px",
+            "boxShadow": "none"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Rendered views: action and checkbox primitives"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F03",
+      "name": "f03-workflow-light-desktop",
+      "url": "http://127.0.0.1:3210/?surface=workflow&mode=light",
+      "kind": "isolated-production-components",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "surface": "workflow",
+      "file": "f03-workflow-light-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "primary": "#2383E2",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Manual onlyRuns only when you press Run now or when an assistant calls runW",
+            "width": 237.5,
+            "height": 113.75,
+            "fontSize": "16px",
+            "background": "oklab(0.605744 -0.0497463 -0.159793 / 0.05)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(35, 131, 226)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, oklab(0.605744 -0.0497463 -0.159793 / 0.25) 0px 0px 0px 1px, rgba(0, 0, 0, 0) 0px 0px 0px 0px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Workflow builder: trigger selection"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F03",
+      "name": "f03-workflow-dark-desktop",
+      "url": "http://127.0.0.1:3210/?surface=workflow&mode=dark",
+      "kind": "isolated-production-components",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "surface": "workflow",
+      "file": "f03-workflow-dark-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "primary": "#529CCA",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Manual onlyRuns only when you press Run now or when an assistant calls runW",
+            "width": 237.5,
+            "height": 113.75,
+            "fontSize": "16px",
+            "background": "oklab(0.663958 -0.0531394 -0.085565 / 0.05)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgb(82, 156, 202)",
+            "accentColor": "auto",
+            "outline": "oklab(0.715469 0.0000326335 0.0000143051 / 0.5) none 3px",
+            "boxShadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, oklab(0.663958 -0.0531394 -0.085565 / 0.25) 0px 0px 0px 1px, rgba(0, 0, 0, 0) 0px 0px 0px 0px"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Workflow builder: trigger selection"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F04",
+      "name": "f04-association-light-desktop",
+      "url": "http://127.0.0.1:3210/?surface=association&mode=light",
+      "kind": "isolated-production-components",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "surface": "association",
+      "file": "f04-association-light-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "primary": "#2383E2",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Public registrationAnyone can register for this event.",
+            "width": 504,
+            "height": 58,
+            "fontSize": "14px",
+            "background": "oklab(0.605744 -0.0497463 -0.159793 / 0.05)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(35, 131, 226)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "none"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Association: form choice cards"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F04",
+      "name": "f04-association-dark-desktop",
+      "url": "http://127.0.0.1:3210/?surface=association&mode=dark",
+      "kind": "isolated-production-components",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "surface": "association",
+      "file": "f04-association-dark-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "primary": "#529CCA",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Public registrationAnyone can register for this event.",
+            "width": 504,
+            "height": 58,
+            "fontSize": "14px",
+            "background": "oklab(0.663958 -0.0531394 -0.085565 / 0.05)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgb(82, 156, 202)",
+            "accentColor": "auto",
+            "outline": "oklab(0.715469 0.0000326335 0.0000143051 / 0.5) none 3px",
+            "boxShadow": "none"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Association: form choice cards"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F05",
+      "name": "f05-shopify-light-desktop",
+      "url": "http://127.0.0.1:3210/?surface=shopify&mode=light",
+      "kind": "isolated-production-components",
+      "width": 1440,
+      "height": 1000,
+      "mode": "light",
+      "surface": "shopify",
+      "file": "f05-shopify-light-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "primary": "#2383E2",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Where am I losing shoppers?Every stage from landing to paid, and which step",
+            "width": 333.328125,
+            "height": 78,
+            "fontSize": "16px",
+            "background": "oklab(0.605744 -0.0497463 -0.159793 / 0.05)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(35, 131, 226)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "none"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shopify: Analyse choices"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F05",
+      "name": "f05-shopify-dark-desktop",
+      "url": "http://127.0.0.1:3210/?surface=shopify&mode=dark",
+      "kind": "isolated-production-components",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "surface": "shopify",
+      "file": "f05-shopify-dark-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "primary": "#529CCA",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [
+          {
+            "tag": "BUTTON",
+            "label": "Where am I losing shoppers?Every stage from landing to paid, and which step",
+            "width": 333.328125,
+            "height": 78,
+            "fontSize": "16px",
+            "background": "oklab(0.663958 -0.0531394 -0.085565 / 0.05)",
+            "color": "rgb(212, 212, 212)",
+            "border": "rgb(82, 156, 202)",
+            "accentColor": "auto",
+            "outline": "oklab(0.715469 0.0000326335 0.0000143051 / 0.5) none 3px",
+            "boxShadow": "none"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shopify: Analyse choices"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F06",
+      "name": "f06-emoji-dark-desktop",
+      "url": "http://127.0.0.1:3210/?surface=emoji&mode=dark",
+      "kind": "isolated-production-components",
+      "width": 1440,
+      "height": 1000,
+      "mode": "dark",
+      "surface": "emoji",
+      "file": "f06-emoji-dark-desktop.png",
+      "measurements": {
+        "root": {
+          "background": "#191919",
+          "primary": "#529CCA",
+          "action": "#D4D4D4",
+          "ring": "#A3A3A3"
+        },
+        "elements": [],
+        "horizontalOverflow": false,
+        "heading": "Document icon: emoji picker in dark mode"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F07",
+      "name": "f07-controls-light-360",
+      "url": "http://127.0.0.1:3210/?surface=controls&mode=light",
+      "kind": "isolated-production-components",
+      "width": 360,
+      "height": 800,
+      "mode": "light",
+      "surface": "controls",
+      "file": "f07-controls-light-360.png",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "primary": "#2383E2",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "DIV",
+            "label": "Default actionFirst option▼",
+            "width": 278,
+            "height": 92,
+            "fontSize": "16px",
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "none"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Default action",
+            "width": 113.28125,
+            "height": 44,
+            "fontSize": "14px",
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0.1) 0px 1px 3px 0px, rgba(0, 0, 0, 0.1) 0px 1px 2px -1px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Add item",
+            "width": 32,
+            "height": 32,
+            "fontSize": "14px",
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0.1) 0px 1px 3px 0px, rgba(0, 0, 0, 0.1) 0px 1px 2px -1px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Example choice",
+            "width": 116.3125,
+            "height": 32,
+            "fontSize": "14px",
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "none"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example switch",
+            "width": 36,
+            "height": 20,
+            "fontSize": "16px",
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "none"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shared controls: phone target-size baseline"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    },
+    {
+      "id": "F07",
+      "name": "f07-controls-light-700",
+      "url": "http://127.0.0.1:3210/?surface=controls&mode=light",
+      "kind": "isolated-production-components",
+      "width": 700,
+      "height": 800,
+      "mode": "light",
+      "surface": "controls",
+      "file": "f07-controls-light-700.png",
+      "measurements": {
+        "root": {
+          "background": "#FFFFFF",
+          "primary": "#2383E2",
+          "action": "#37352F",
+          "ring": "#737373"
+        },
+        "elements": [
+          {
+            "tag": "DIV",
+            "label": "Default actionFirst option▼",
+            "width": 618,
+            "height": 32,
+            "fontSize": "16px",
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "none"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Default action",
+            "width": 113.28125,
+            "height": 32,
+            "fontSize": "14px",
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0.1) 0px 1px 3px 0px, rgba(0, 0, 0, 0.1) 0px 1px 2px -1px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Add item",
+            "width": 32,
+            "height": 32,
+            "fontSize": "14px",
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(255, 255, 255)",
+            "border": "rgba(0, 0, 0, 0)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0.1) 0px 1px 3px 0px, rgba(0, 0, 0, 0.1) 0px 1px 2px -1px"
+          },
+          {
+            "tag": "BUTTON",
+            "label": "Example choice",
+            "width": 116.3125,
+            "height": 32,
+            "fontSize": "14px",
+            "background": "rgba(0, 0, 0, 0)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgb(237, 237, 236)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "none"
+          },
+          {
+            "tag": "SPAN",
+            "label": "Example switch",
+            "width": 36,
+            "height": 20,
+            "fontSize": "16px",
+            "background": "rgb(55, 53, 47)",
+            "color": "rgb(55, 53, 47)",
+            "border": "rgba(0, 0, 0, 0)",
+            "accentColor": "auto",
+            "outline": "oklab(0.555523 0.0000253916 0.0000110865 / 0.5) none 3px",
+            "boxShadow": "none"
+          }
+        ],
+        "horizontalOverflow": false,
+        "heading": "Shared controls: phone target-size baseline"
+      },
+      "pageErrors": [],
+      "blockedRequests": []
+    }
+  ]
+}

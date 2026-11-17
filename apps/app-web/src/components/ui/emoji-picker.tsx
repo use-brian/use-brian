@@ -32,6 +32,8 @@ import type { LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isImageIcon } from "@use-brian/shared/page-icon";
 import { useT } from "@/lib/i18n/client";
+import { useOptionalTheme, type ResolvedTheme } from "@/lib/theme";
+import type { Picker } from "emoji-mart";
 
 export type EmojiPickerProps = {
   /** Raised with the chosen emoji, or `null` for the Remove action. */
@@ -121,6 +123,27 @@ export function EmojiPicker({
 }
 
 /**
+ * The app provider is authoritative (including system/custom modes). Existing
+ * standalone previews don't all mount it. Keep that compatibility here,
+ * without observing the DOM in the normal app or catching errors from hooks.
+ */
+function usePickerTheme(): ResolvedTheme {
+  const resolved = useOptionalTheme()?.resolved;
+  const subscribe = React.useCallback((onChange: () => void) => {
+    if (resolved !== undefined) return () => {};
+    const observer = new MutationObserver(onChange);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
+  }, [resolved]);
+  const fallback = React.useSyncExternalStore<ResolvedTheme>(
+    subscribe,
+    () => document.documentElement.classList.contains("dark") ? "dark" : "light",
+    () => "light",
+  );
+  return resolved ?? fallback;
+}
+
+/**
  * Lazily loads + mounts the vanilla emoji-mart Picker (a custom element)
  * into a container div. Only rendered while the popover is open, so the
  * heavy data import is deferred to first use. Mounts once; the latest
@@ -133,6 +156,10 @@ function EmojiMart({
   onSelect: (native: string) => void;
   perLine?: number;
 }) {
+  const theme = usePickerTheme();
+  const themeRef = React.useRef(theme);
+  themeRef.current = theme;
+  const pickerRef = React.useRef<Picker | null>(null);
   const ref = React.useRef<HTMLDivElement>(null);
   const onSelectRef = React.useRef(onSelect);
   onSelectRef.current = onSelect;
@@ -148,7 +175,7 @@ function EmojiMart({
       if (cancelled || !host) return;
       const picker = new martMod.Picker({
         data: dataMod.default,
-        theme: "light",
+        theme: themeRef.current,
         previewPosition: "none",
         skinTonePosition: "none",
         navPosition: "top",
@@ -156,13 +183,21 @@ function EmojiMart({
         maxFrequentRows: 1,
         onEmojiSelect: (e: { native: string }) => onSelectRef.current(e.native),
       });
+      pickerRef.current = picker;
       host.appendChild(picker as unknown as Node);
     })();
     return () => {
       cancelled = true;
+      pickerRef.current = null;
       host?.replaceChildren();
     };
   }, [perLine]);
+
+  React.useEffect(() => {
+    // Update the existing shadow-root picker, not its host/React key. Recreating
+    // it here would reset the search, active category, and keyboard focus.
+    pickerRef.current?.update({ theme });
+  }, [theme]);
 
   return <div ref={ref} />;
 }

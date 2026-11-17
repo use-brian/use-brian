@@ -45,6 +45,10 @@ Open-source. Hosted or self-hosted.
 
 [Getting started](https://usebrian.ai/docs/quickstart) · [Integrations & permissions](https://usebrian.ai/docs/tools) · [API & MCP](https://usebrian.ai/docs/api)
 
+## Frontend development
+
+[Common design system](docs/design-system/README.md) · [Consistency audit](docs/design-system/audit.md) · [Fixes and page-level review](docs/design-system/implementation.md) · [Before screenshots](docs/design-system/screenshots/index.html) · [After screenshots](docs/design-system/screenshots/after/index.html)
+
 ---
 
 [AGPLv3](./LICENSE) · [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md) · [Commercial licensing](mailto:sales@usebrian.ai) · [Implementation help](https://studio.usebrian.ai)
