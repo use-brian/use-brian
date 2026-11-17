@@ -1,46 +1,82 @@
 @import "tailwindcss";
+@import "../../../../packages/chat-ui/src/theme.css";
 
+/* Standalone auth has no workspace theme provider or saved palette access.
+   Reuse the canonical default theme, with OS mode selection before first paint.
+   The small dark bridge below mirrors only the shared tokens this entry uses;
+   globals.test.ts guards parity with theme.css until it exposes an OS variant. */
 :root {
-  color-scheme: dark;
-  --background: #081018;
-  --card: #101b25;
-  --border: #263541;
-  --foreground: #f3f7fa;
-  --muted: #9eb0bc;
-  --primary: #55d6e8;
-  --danger: #ff9c9c;
+  color-scheme: light;
+  --ring: #737373;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root:not(.light):not(.dark) {
+    color-scheme: dark;
+    --background: #191919;
+    --foreground: #D4D4D4;
+    --card: #1F1F1F;
+    --card-foreground: #D4D4D4;
+    --muted-foreground: #979797;
+    --accent: #2F2F2F;
+    --border: #2F2F2F;
+    --input: #2F2F2F;
+    --ring: #A3A3A3;
+  }
+}
+
+/* Also honor an explicit host-resolved mode, without requiring one. */
+:root.dark { color-scheme: dark; --ring: #A3A3A3; }
+
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--background); color: var(--foreground); font-family: ui-sans-serif, system-ui, sans-serif; }
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-rocknroll);
+  font-weight: 450;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
 a { color: inherit; }
 button, input { font: inherit; }
-.shell { min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 50% 10%, #153344 0, var(--background) 46%); }
-.card { width: min(100%, 420px); border: 1px solid var(--border); border-radius: 24px; padding: 32px; background: color-mix(in srgb, var(--card) 94%, transparent); box-shadow: 0 24px 80px #0008; }
-.brand { font-size: 14px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--primary); }
-.title { margin: 12px 0 8px; font-size: 28px; line-height: 1.15; }
-.body { margin: 0; color: var(--muted); line-height: 1.55; }
-.stack { display: grid; gap: 16px; margin-top: 24px; }
-.label { display: grid; gap: 7px; font-size: 13px; font-weight: 650; }
-.input { width: 100%; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; color: var(--foreground); background: #071018; outline: none; }
-.input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px #55d6e822; }
-.button { width: 100%; border: 0; border-radius: 12px; padding: 12px 16px; color: #041217; background: var(--primary); font-weight: 750; cursor: pointer; }
+.shell { min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: var(--background); }
+.card { min-width: 0; width: min(100%, 420px); border: 1px solid var(--border); border-radius: calc(var(--radius) * 1.4); padding: 32px; color: var(--card-foreground); background: var(--card); overflow-wrap: anywhere; }
+.brand { font-size: 14px; font-weight: 650; color: var(--muted-foreground); }
+.title { margin: 12px 0 8px; font-family: var(--font-display); font-size: 30px; font-weight: 700; line-height: 1.2; }
+.body { margin: 0; color: var(--muted-foreground); line-height: 1.55; }
+.stack { min-width: 0; display: grid; gap: 16px; margin-top: 24px; }
+.label { min-width: 0; display: grid; gap: 8px; font-size: 14px; font-weight: 600; }
+.input { min-width: 0; width: 100%; border: 1px solid var(--input); border-radius: var(--radius); padding: 12px 14px; color: var(--foreground); background: var(--background); outline: none; }
+.input:focus { border-color: var(--ring); box-shadow: none; }
+.input[aria-invalid="true"], .input[aria-invalid="true"]:focus { border-color: var(--destructive); }
+.button { width: 100%; border: 1px solid transparent; border-radius: var(--radius); padding: 12px 16px; color: var(--action-foreground); background: var(--action); font-size: 14px; font-weight: 600; cursor: pointer; white-space: normal; }
 .button:disabled { cursor: wait; opacity: .55; }
 .oidc-button { display: block; text-align: center; text-decoration: none; }
-.separator { display: flex; align-items: center; gap: 12px; margin-top: 22px; color: var(--muted); font-size: 12px; text-transform: uppercase; }
+.separator { display: flex; align-items: center; gap: 12px; margin-top: 24px; color: var(--muted-foreground); font-size: 12px; text-transform: uppercase; }
 .separator::before, .separator::after { content: ""; flex: 1; height: 1px; background: var(--border); }
-.link { color: var(--primary); text-decoration: none; font-weight: 650; }
-.message { margin-top: 16px; color: var(--muted); font-size: 14px; line-height: 1.5; }
-.error { color: var(--danger); }
-.languages { display: flex; justify-content: center; gap: 8px; margin-top: 24px; }
-.languages button { border: 1px solid var(--border); border-radius: 999px; padding: 5px 9px; color: var(--muted); background: transparent; cursor: pointer; }
+.link { color: var(--foreground); text-decoration: underline; text-underline-offset: 3px; font-weight: 600; }
+.message { margin-top: 16px; color: var(--muted-foreground); font-size: 14px; line-height: 1.5; }
+.error { color: color-mix(in srgb, var(--destructive) 75%, var(--foreground)); }
+.languages { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 24px; }
+.languages button { border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 9px; color: var(--foreground); background: transparent; font-size: 14px; cursor: pointer; }
 
 .recipient { overflow-wrap: anywhere; }
 .recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
-.recovery-button { max-width: 100%; border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; color: var(--foreground); background: transparent; font-size: 13px; cursor: pointer; }
+.recovery-button { max-width: 100%; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; color: var(--foreground); background: transparent; font-size: 14px; cursor: pointer; white-space: normal; overflow-wrap: anywhere; }
 .recovery-button:disabled, .languages button:disabled { cursor: wait; opacity: .55; }
-.recovery-button:focus-visible, .languages button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.button:focus-visible, .link:focus-visible, .recovery-button:focus-visible, .languages button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+@media (hover: hover) {
+  .button:not(:disabled):hover { background: color-mix(in srgb, var(--action) 90%, var(--action-foreground)); }
+  .recovery-button:not(:disabled):hover, .languages button:not(:disabled):hover { background: var(--accent); }
+}
 @media (width < 48rem) {
+  .shell { padding: 16px; }
+  .card { padding: 24px; }
   .input { font-size: 16px; }
-  .languages button, .recovery-button { min-width: 44px; min-height: 44px; }
+  .input, .button, .languages button, .recovery-button { min-width: 44px; min-height: 44px; }
+  .link { display: inline-flex; align-items: center; min-height: 44px; }
+}
+@media (forced-colors: active) {
+  .input:focus, .button:focus-visible, .link:focus-visible, .recovery-button:focus-visible, .languages button:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
 }
