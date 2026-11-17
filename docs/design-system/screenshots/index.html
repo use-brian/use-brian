@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Use Brian: design-system audit screenshots</title>
+<style>
+  :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+  body { margin: 0 auto; padding: 24px; max-width: 1400px; }
+  h1 { font-size: 28px; } h2 { margin-top: 40px; }
+  a { color: inherit; text-underline-offset: 3px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,480px),1fr)); gap: 20px; }
+  figure { margin: 0; border: 1px solid #8886; border-radius: 12px; overflow: hidden; }
+  img { display: block; width: 100%; height: auto; }
+  figcaption { padding: 12px 16px; } .phone img { max-width: 360px; margin: auto; }
+  .note { border-left: 4px solid #888; padding-left: 16px; }
+</style>
+</head>
+<body>
+<header>
+<h1>Use Brian: original before-fix design-system audit</h1>
+<p><strong>Historical baseline.</strong> F01–F07 now have fixes in the accompanying commits. <a href="after/index.html">After gallery</a> · <a href="../implementation.md">Fixes and whole-page review</a></p>
+<p>Baseline <code>develop 43a70a8e3</code> · 16 captures · <a href="../audit.md">Findings and source references</a> · <a href="README.md">Method and reproduction</a> · <a href="manifest.json">Capture manifest</a></p>
+<p class="note"><strong>Evidence boundary:</strong> only account entry and auth login are full public pages. Feature images are explicitly labeled isolated, unchanged production components with synthetic fixture input, not full authenticated pages. No product styling has been fixed in these images.</p>
+</header>
+<section>
+<h2>Common-system page references</h2>
+<div class="grid">
+<figure><a href="reference-accounts-light-desktop.png"><img src="reference-accounts-light-desktop.png" alt="Real public account-entry page in light mode with neutral Sign in action"></a><figcaption>Reference: account entry, light desktop, 1440px.</figcaption></figure>
+<figure><a href="reference-accounts-dark-desktop.png"><img src="reference-accounts-dark-desktop.png" alt="Same account-entry page in dark mode with a neutral light Sign in action"></a><figcaption>Reference: account entry, dark desktop, 1440px.</figcaption></figure>
+<figure class="phone"><a href="reference-accounts-light-phone.png"><img src="reference-accounts-light-phone.png" alt="Account-entry public page at 360px"></a><figcaption>Reference: account entry, light 360px viewport.</figcaption></figure>
+</div>
+</section>
+<section>
+<h2>F01: independent auth portal identity</h2>
+<p>Real public page. Compare the navy/cyan background, card, CTA, and focused field with both account-entry references.</p>
+<div class="grid">
+<figure><a href="f01-auth-login-desktop.png"><img loading="lazy" src="f01-auth-login-desktop.png" alt="Auth portal with cyan action and focus halo on a navy gradient surface"></a><figcaption>Portal desktop, 1440px. Email field focused; no submission.</figcaption></figure>
+<figure class="phone"><a href="f01-auth-login-phone.png"><img loading="lazy" src="f01-auth-login-phone.png" alt="Auth portal at 360px with cyan focus and action"></a><figcaption>Portal 360px. Localized glyph availability depends on capture fonts.</figcaption></figure>
+</div>
+</section>
+<section>
+<h2>F02: renderer-owned action versus common Button</h2>
+<p>Isolated real primitives. Left neutral action versus right accent action. The checkbox property pictured on the right is disabled; do not treat it as an enabled-state color test.</p>
+<div class="grid">
+<figure><a href="f02-renderers-light-desktop.png"><img loading="lazy" src="f02-renderers-light-desktop.png" alt="Light comparison of neutral app Button and blue views-renderer Button"></a><figcaption>Light production-component comparison.</figcaption></figure>
+<figure><a href="f02-renderers-dark-desktop.png"><img loading="lazy" src="f02-renderers-dark-desktop.png" alt="Dark comparison of neutral light app Button and blue views-renderer Button"></a><figcaption>Dark production-component comparison.</figcaption></figure>
+</div>
+</section>
+<section>
+<h2>F03: workflow selected trigger chrome</h2>
+<p>Isolated TriggerEditor. Inspect the selected Manual card border, wash, and icon against the neutral reference controls below.</p>
+<div class="grid">
+<figure><a href="f03-workflow-light-desktop.png"><img loading="lazy" src="f03-workflow-light-desktop.png" alt="Workflow trigger selection using blue accent border and icon in light mode"></a><figcaption>Light manual-trigger fixture, no workflow run.</figcaption></figure>
+<figure><a href="f03-workflow-dark-desktop.png"><img loading="lazy" src="f03-workflow-dark-desktop.png" alt="Workflow trigger selection using blue accent border and icon in dark mode"></a><figcaption>Dark manual-trigger fixture.</figcaption></figure>
+</div>
+</section>
+<section>
+<h2>F04: association choice-card selection</h2>
+<p>Isolated ChoiceCards with synthetic labels. Selected border/dot uses accent, while the real shared Switch and actions are neutral.</p>
+<div class="grid">
+<figure><a href="f04-association-light-desktop.png"><img loading="lazy" src="f04-association-light-desktop.png" alt="Association choice cards showing accent-selected state beside neutral shared controls in light mode"></a><figcaption>Light ChoiceCards fixture, not a production form-page capture.</figcaption></figure>
+<figure><a href="f04-association-dark-desktop.png"><img loading="lazy" src="f04-association-dark-desktop.png" alt="Association choice cards showing accent-selected state beside neutral shared controls in dark mode"></a><figcaption>Dark ChoiceCards fixture.</figcaption></figure>
+</div>
+</section>
+<section>
+<h2>F05: Shopify analysis choices</h2>
+<p>Isolated AnalyseTab. Inspect the selected first card versus neutral Run it and reference controls. No store query was executed.</p>
+<div class="grid">
+<figure><a href="f05-shopify-light-desktop.png"><img loading="lazy" src="f05-shopify-light-desktop.png" alt="Shopify analysis with accent-selected first choice in light mode"></a><figcaption>Light AnalyseTab fixture.</figcaption></figure>
+<figure><a href="f05-shopify-dark-desktop.png"><img loading="lazy" src="f05-shopify-dark-desktop.png" alt="Shopify analysis with accent-selected first choice in dark mode"></a><figcaption>Dark AnalyseTab fixture.</figcaption></figure>
+</div>
+</section>
+<section>
+<h2>F06: forced-light emoji picker inside dark app UI</h2>
+<p>Isolated real picker. The white inner panel versus dark header/page is the finding. Blank emoji cells are a missing capture-environment emoji font, not a product defect.</p>
+<div class="grid"><figure><a href="f06-emoji-dark-desktop.png"><img loading="lazy" src="f06-emoji-dark-desktop.png" alt="White emoji picker panel beneath a dark app popover header"></a><figcaption>Dark picker fixture; glyph completeness is not evaluated.</figcaption></figure></div>
+</section>
+<section>
+<h2>F07: below-md phone target-size gap</h2>
+<p>Isolated unenlarged primitive defaults. At 700px the text Button is only 32px high, although the phone contract extends to 767px. Icon/select/switch targets also need caller-level review. Full composed pages may enlarge these targets.</p>
+<div class="grid">
+<figure class="phone"><a href="f07-controls-light-360.png"><img loading="lazy" src="f07-controls-light-360.png" alt="Shared control defaults at 360px including a 44px text Button and smaller icon and select controls"></a><figcaption>360px viewport: default text Button 44px high.</figcaption></figure>
+<figure><a href="f07-controls-light-700.png"><img loading="lazy" src="f07-controls-light-700.png" alt="Shared control defaults at 700px including a 32px text Button"></a><figcaption>700px viewport: default text Button 32px high.</figcaption></figure>
+</div>
+</section>
+<footer><p>F08–F12 are source-only follow-ups, not pictured here. See <a href="../coverage.md">coverage and next visual pass</a>. Open a thumbnail for the original full-size PNG.</p></footer>
+</body>
+</html>
