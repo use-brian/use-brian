@@ -99,8 +99,8 @@ export function ChoiceCards<V extends string>({ label, value, options, onChange,
     <div ref={group} role="radiogroup" aria-label={label} className={cn("grid gap-2", columns === 4 ? "sm:grid-cols-4" : columns === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2")}>
       {options.map((option, index) => { const Icon = option.icon, checked = option.value === value; return <button key={option.value} type="button" role="radio" aria-checked={checked} disabled={disabled} tabIndex={checked || (index === 0 && !options.some(item => item.value === value)) ? 0 : -1}
         onClick={() => onChange(option.value)} onKeyDown={event => onKeyDown(event, index)}
-        className={cn("flex max-sm:min-h-11 items-start gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60", checked ? "border-primary bg-primary/5" : "border-border hover:bg-accent/40")}>
-        {Icon ? <Icon aria-hidden className={cn("mt-0.5 size-4 shrink-0", checked ? "text-primary" : "text-muted-foreground")} /> : <span aria-hidden className={cn("mt-1 size-3 shrink-0 rounded-full border-2", checked ? "border-primary bg-primary" : "border-muted-foreground/50")} />}
+        className={cn("flex max-sm:min-h-11 items-start gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60", checked ? "border-interaction/60 bg-interaction/5" : "border-border hover:bg-accent/40")}>
+        {Icon ? <Icon aria-hidden className={cn("mt-0.5 size-4 shrink-0", checked ? "text-foreground" : "text-muted-foreground")} /> : <span aria-hidden className={cn("mt-1 size-3 shrink-0 rounded-full border-2", checked ? "border-interaction bg-interaction" : "border-muted-foreground/50")} />}
         <span className="min-w-0"><span className="block font-medium">{option.label}</span>{option.hint ? <span className="block text-xs text-muted-foreground">{option.hint}</span> : null}</span>
       </button>; })}
     </div>

@@ -139,7 +139,7 @@ function SortableSection({ section, position, selected, open, onFocus, onToggle,
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: section.id });
   const Icon = KIND_ICONS[section.kind];
   return <li ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} data-section-card={section.id} onFocusCapture={onFocus}
-    className={cn("rounded-2xl border bg-background", isDragging ? "z-10 border-primary shadow-lg" : selected ? "border-primary ring-1 ring-primary/20" : "border-border")}>
+    className={cn("rounded-2xl border bg-background", isDragging ? "z-10 border-interaction/60 bg-interaction/5 shadow-lg" : selected ? "border-interaction/60 bg-interaction/5 ring-1 ring-interaction/20" : "border-border")}>
     <div className="flex flex-wrap items-center justify-between gap-1 px-4 pt-3 text-xs text-muted-foreground">
       <span>{format(e.sectionPosition, { number: position })}</span>
       {section.hidden ? <span className="inline-flex items-center gap-1"><EyeOff aria-hidden className="size-3.5" />{e.sectionHidden}</span> : null}
@@ -305,7 +305,7 @@ export function EventPageEditor({ workspaceId, event, tickets = [], onDirtyChang
 
       <div className={cn("grid min-w-0 gap-6", layout === "edit" ? "xl:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]" : "")} data-preview-layout={layout}>
         <div className="min-w-0 space-y-5" hidden={layout === "preview"}>
-          <section className={cn("space-y-4 rounded-2xl border bg-background p-4", focus.target !== "section" ? "border-primary ring-1 ring-primary/20" : "border-border")}>
+          <section className={cn("space-y-4 rounded-2xl border bg-background p-4", focus.target !== "section" ? "border-interaction/60 bg-interaction/5 ring-1 ring-interaction/20" : "border-border")}>
             <h3 className="font-semibold">{e.coverTitle}</h3>
             <div className="grid grid-cols-2 gap-3 rounded-xl bg-muted/40 p-3" data-event-placement>
               <div className="space-y-2"><div aria-hidden className="flex h-14 gap-2 rounded-lg bg-muted/40 p-2"><span className="w-10 shrink-0 rounded bg-primary/15" /><span className="flex flex-1 flex-col justify-center gap-1.5"><span className="h-2 w-3/4 rounded bg-primary/30" /><span className="h-1.5 rounded bg-primary/15" /><span className="h-1.5 w-2/3 rounded bg-primary/15" /></span></div><p className="text-xs font-medium">{e.cardLocation}</p></div>

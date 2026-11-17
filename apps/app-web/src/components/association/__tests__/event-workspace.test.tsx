@@ -237,10 +237,17 @@ describe("[COMP:app-web/association] Event website workspace", () => {
     expect(host.querySelector("[data-event-placement]")?.textContent).toContain(e.cardLocation);
     expect(host.querySelector("[data-event-placement]")?.textContent).toContain(e.introLocation);
     const row = host.querySelector('[data-section-card="text-one"]')!;
+    const introduction = host.querySelector("[data-event-placement]")!.closest("section")!;
+    expect(introduction.className).toContain("border-interaction/60 bg-interaction/5 ring-1 ring-interaction/20");
+    expect(row.className).toContain("border-border");
     expect(row.textContent).toContain(e.sectionPosition.replace("{number}", "1"));
     const frame = host.querySelector("iframe")!, send = vi.spyOn(frame.contentWindow!, "postMessage");
     await act(async () => window.dispatchEvent(new MessageEvent("message", { origin: "https://preview.example", source: frame.contentWindow, data: { type: "brian:event-preview:ready" } })));
     await act(async () => row.querySelector<HTMLButtonElement>("button[aria-expanded]")!.click());
+    expect(row.className).toContain("border-interaction/60 bg-interaction/5 ring-1 ring-interaction/20");
+    expect(introduction.className).toContain("border-border");
+    expect(introduction.className).not.toContain("ring-interaction/20");
+    expect(row.querySelector("button[aria-expanded]")?.getAttribute("aria-expanded")).toBe("true");
     await act(async () => { await vi.advanceTimersByTimeAsync(150); });
     expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ focus: expect.objectContaining({ target: "section", id: "text-one" }) }), "https://preview.example");
     await click(e.publishedVersion);
