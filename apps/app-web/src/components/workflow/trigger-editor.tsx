@@ -107,7 +107,7 @@ export function TriggerEditor({
               className={cn(
                 "flex flex-col items-start gap-1.5 rounded-lg border p-3 text-left transition",
                 selected
-                  ? "border-primary bg-primary/5 ring-1 ring-primary/25"
+                  ? "border-interaction/60 bg-interaction/5 ring-1 ring-interaction/20"
                   : "border-border hover:border-interaction/40 hover:bg-muted/40",
                 disabled && "cursor-not-allowed opacity-60",
               )}
@@ -116,7 +116,7 @@ export function TriggerEditor({
                 className={cn(
                   "flex h-7 w-7 items-center justify-center rounded-md",
                   selected
-                    ? "bg-primary/15 text-primary"
+                    ? "bg-interaction/10 text-foreground"
                     : "bg-muted text-muted-foreground",
                 )}
               >
