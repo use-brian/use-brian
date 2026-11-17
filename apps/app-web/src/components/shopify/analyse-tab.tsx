@@ -226,8 +226,8 @@ Rules:
             aria-pressed={a.key === picked}
             className={`rounded-xl border px-3 py-2.5 text-left transition-colors ${
               a.key === picked
-                ? "border-primary bg-primary/5"
-                : "border-border bg-card hover:border-primary/40"
+                ? "border-interaction/60 bg-interaction/5"
+                : "border-border bg-card hover:border-interaction/40 hover:bg-interaction/5"
             }`}
           >
             <span className="block text-[13px] font-semibold">{a.title}</span>
