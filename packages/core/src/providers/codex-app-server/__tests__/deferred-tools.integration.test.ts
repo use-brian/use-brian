@@ -340,7 +340,13 @@ async function runFixture(model: string, deferred: boolean, adapter = false, gat
           messages: [{ role: 'user', content: 'Discover the synthetic echo tool, call it, then reply OK.' }],
           tools, deferToolSchemas: true, // Raw runtime loop with no `selectToolSchemas` port: any classifier
           // selection would throw, so native discovery must stay on `preselected`.
-          toolSelection: { preselected: ['basic'] },
+          toolSelection: {
+            preselected: ['basic'], llm: { provider, modelId: model },
+            runtime: {
+              async run() { throw new Error('A preselected tool must not run a selection decision') },
+              async observe() { throw new Error('A preselected tool must not observe a selection decision') },
+            },
+          },
           confirmationResolver: gate === 'deny' ? { resolve: () => {}, waitForDecision: async () => ({ decision: 'deny' }) } : undefined,
           ledger: NOOP_TURN_LEDGER, maxTurns: 4,
           context: { userId: 'fixture-user', assistantId: 'fixture-assistant', sessionId: 'fixture-session',

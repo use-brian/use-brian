@@ -357,6 +357,7 @@ function lazyLocalEntry(
     inputSchema: descriptor.inputSchema ?? {},
     tool: descriptorPlaceholder(descriptor),
     tokens: tokenize(descriptor.name, descriptor.description),
+    sourceTokens: tokenize(`${server} ${label ?? ''}`, ''),
     lazy: {
       resolve,
       ...(descriptor.version !== undefined ? { version: descriptor.version } : {}),
