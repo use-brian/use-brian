@@ -328,13 +328,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # These scenarios each prove a complete chain on one connection.
+          # Full-chain replays need time for dependency compilation and migration.
           - { group: owner-legacy, timeoutMinutes: 15 }
           - { group: owner-fresh, timeoutMinutes: 15 }
-          - { group: owner-cutover, timeoutMinutes: 10 }
-          - { group: owner-successor, timeoutMinutes: 10 }
+          - { group: owner-cutover, timeoutMinutes: 15 }
+          - { group: owner-successor, timeoutMinutes: 15 }
           - { group: owner-prerequisites, timeoutMinutes: 10 }
-          - { group: session, timeoutMinutes: 10 }
+          - { group: session, timeoutMinutes: 15 }
           - { group: remaining, timeoutMinutes: 10 }
     steps:
       - uses: actions/checkout@v4
