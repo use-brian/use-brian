@@ -13,6 +13,11 @@ import {addSessionMessage,claimTurnLease} from '../../db/sessions.js'
 import {withSessionMessagePublication} from '../../db/session-context-revisions.js'
 import {persistentContextFixture} from './fixtures/persistent-context.js'
 import {policyFor,sessionKindSql,type SessionKindRow} from '../../session-kind.js'
+import {resolveExecutionContextSystem} from '../../context-scope/execution-context.js'
+import {bindSessionTurnAuthority} from '../../context-scope/authority-lease.js'
+import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {findAssistantById} from '../../db/users.js'
+import {readSessionById} from '../../db/sessions.js'
 
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
 await assertLocalFixture()
@@ -95,7 +100,15 @@ describe.sequential('[COMP:api/native-turn-frame] authenticated durable buffered
      const denied=await child({...command,mode:'receive'},directory) as ResponseEvent
      expect(denied.status).toBe(200)
      expect((denied.body as Array<{id:string}>).some(row=>row.id===unrelated.id)).toBe(true)
-     expect(messageIds.some(id=>(denied.body as Array<{id:string}>).some(row=>row.id===id))).toBe(false)
+     const visibleAfterInputHold = denied.body as Array<{ id: string }>
+     expect(visibleAfterInputHold.some(row=>row.id===operations[0].input_message_id)).toBe(false)
+     // A later upstream hold preserves delivered dialogue. A direct hold on
+     // the published reply must withhold the protected row on authenticated reopen.
+     expect(visibleAfterInputHold.some(row=>row.id===finalized[0].id)).toBe(true)
+     await f.pool.query(`INSERT INTO scope_resource_states(workspace_id,resource_kind,resource_id,resource_version,review_state,classification_revision,holding_reason)
+      SELECT workspace_id,'session_message',id,scope_version::text,'held',1,'Fictional published output hold' FROM session_messages WHERE id=$1`,[finalized[0].id])
+     const withheld=await child({...command,mode:'receive'},directory) as ResponseEvent
+     expect((withheld.body as Array<{id:string}>).some(row=>row.id===finalized[0].id)).toBe(false)
      await f.pool.query('UPDATE auth_sessions SET revoked_at=now() WHERE id=$1',[device.id])
      const revoked=await child({...command,mode:'receive'},directory) as ResponseEvent
      expect(revoked.status).toBe(401);expect(JSON.stringify(revoked.body)).not.toContain('Fictional durable tool answer')
@@ -272,7 +285,12 @@ describe.sequential('[COMP:api/native-turn-frame] authenticated durable buffered
     expect(stopped.status).toBe(200);expect(stopped.body).toMatchObject({stopped:true,via:'cancel_requested',turnId:owner.id})
     expect(JSON.stringify(stopped.body)).not.toContain(owner.token)
    }) as ResponseEvent
-   expect(published.status).toBe(200);expect(published.body).not.toContain('event: error')
+   expect(published.status).toBe(200)
+   expect(published.body).not.toContain('event: error')
+   expect(published.body).toContain(`event: done\ndata: {"stopped":true,"reason":"stopped_by_user","turnId":"${originalId}"}`)
+   expect(published.body).not.toContain('event: reply_complete')
+   expect(published.body).not.toContain('event: assistant_message_saved')
+   expect(published.body).toContain('Fictional durable tool answer')
    expect(published.providerAborted).toBe(false)
    expect((await f.pool.query("SELECT count(*)::int n,sum(input_tokens)::int input,sum(output_tokens)::int output FROM oss_usage_tracking WHERE session_id=$1 AND trigger_key='main_response'",[f.session.id])).rows[0]).toEqual({n:1,input:4,output:4})
    const receipt=(await f.pool.query('SELECT * FROM native_conversation_publications WHERE session_id=$1',[f.session.id])).rows[0]
@@ -280,20 +298,64 @@ describe.sequential('[COMP:api/native-turn-frame] authenticated durable buffered
    expect(receipt.terminal_descriptor).toBeNull();expect(receipt.terminal_outputs).toBeNull()
    expect(receipt.outputs.filter((m:{kind:string})=>m.kind==='session_message')).toHaveLength(3)
    expect((await f.pool.query('SELECT status,turn_end_reason FROM sessions WHERE id=$1',[f.session.id])).rows[0]).toEqual({status:'idle',turn_end_reason:'stopped_by_user'})
-   const wire=published.submittedPublication!;expect(wire).toBeTruthy()
+   const wire=published.submittedPublication?.slice(0,7)
+   if (!wire || !originalToken) throw new Error('Missing exact publication command and original token')
    const operation=wire[6] as {version:number;stopped:boolean;terminalCandidate:unknown}
    expect(operation.version).toBe(2);expect(operation.stopped).toBe(false);expect(operation.terminalCandidate).not.toBeNull()
-   const authority=await f.modelContext(),sources=JSON.parse(wire[4] as string)
+   const session = (await readSessionById(f.session.id))!, assistant = (await findAssistantById(f.assistantId))!
+   const { executionContext: execution } = await resolveExecutionContextSystem({
+     userId: f.ownerId, workspaceId: f.workspaceId, assistant, session, sessionAuthority: session, sharedAudience: true, memberMode: 'member',
+     identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: f.ownerId, authenticationKind: 'native_session' } },
+     ownership: { kind: 'workspace', workspaceId: f.workspaceId },
+     lifecycle: { sessionId: session.id, channelType: 'web', channelId: session.channelId, abortSignal: new AbortController().signal },
+     nativeSessionCredential: { userId: f.ownerId, sessionId: device.id, authVersion: device.authVersion },
+   })
+   const dispose = bindSessionTurnAuthority(execution.security.authority, { sessionId: session.id, assistantId: assistant.id, token: originalToken })
+   const authority = { execution, accumulator: new ContextScopeAccumulator() }, sources = JSON.parse(wire[4] as string)
    const retry=()=>withSessionMessagePublication(authority,sources,async db=>(await db.query<{value:any}>(
     'SELECT publish_native_session_message_batch($1,$2,$3,$4,$5,$6,$7) AS value',wire)).rows[0].value,{stoppedTurnToken:originalToken})
-   const again=await retry();expect(again.publication).toMatchObject({requestedStopped:false,stopped:true,terminalDescriptor:null,terminalOutputs:null})
-   expect((await f.pool.query('SELECT command_digest FROM native_conversation_publications WHERE id=$1',[receipt.id])).rows[0].command_digest).toBe(receipt.command_digest)
-   wire[6]={...operation,terminalCandidate:null}
-   await expect(retry()).rejects.toMatchObject({code:'scope_source_changed'})
+   try {
+    const readBack = await withSessionMessagePublication(authority,sources,async db=>{
+     const result = await db.query<{value:{items:Array<{operationId:string; state:string; reason?:string}>}}>(
+       'SELECT read_native_conversation_publications($1,$2) AS value',wire.slice(0,2))
+     const expected = await db.query<{digest:string}>(`SELECT encode(sha256(convert_to(jsonb_build_object('format',2,'workspaceId',$1::uuid,'sessionId',$2::uuid,'operation',$7::jsonb,'command',jsonb_build_object('payloads',$3::jsonb,'producer',$4::text,'sources',$5::jsonb,'target',$6::jsonb))::text,'UTF8')),'hex') AS digest`,wire)
+     return {items:result.rows[0].value.items,digest:expected.rows[0].digest}
+    },{stoppedTurnToken:originalToken})
+    expect(readBack.digest).toBe(receipt.command_digest)
+    if (readBack.items[0]?.state!=='committed') {
+     const ancestry = (await f.pool.query(`WITH RECURSIVE roots(kind,id,version) AS (
+       SELECT 'session_context_revision',frame,'1' FROM unnest($2::uuid[]) frame
+       UNION SELECT CASE WHEN n->>'kind'='message_annotation' THEN 'session_context_revision' ELSE 'session_message' END,
+        (n->>'id')::uuid,n->>'version' FROM jsonb_array_elements($3::jsonb) n
+      ), nodes(kind,id,version) AS (
+       SELECT * FROM roots UNION SELECT e.kind,e.id,e.version FROM nodes n
+       CROSS JOIN LATERAL conversation_source_edges($1,n.kind,n.id,n.version) e
+      ) SELECT kind,version,count(*)::int AS count FROM nodes GROUP BY kind,version ORDER BY kind`,
+      [f.workspaceId,receipt.frame_ids,JSON.stringify(receipt.outputs)])).rows
+     console.info('stopped-publication-ancestry', ancestry)
+    }
+    expect(readBack.items).toEqual([expect.objectContaining({operationId:receipt.id,state:'committed'})])
+    const again=await retry();expect(again.publication).toMatchObject({requestedStopped:false,stopped:true,terminalDescriptor:null,terminalOutputs:null})
+    expect((await f.pool.query('SELECT command_digest FROM native_conversation_publications WHERE id=$1',[receipt.id])).rows[0].command_digest).toBe(receipt.command_digest)
+    wire[6]={...operation,terminalCandidate:null}
+    await expect(retry()).rejects.toMatchObject({code:'scope_source_changed'})
+    wire[6]=operation
+   } finally { dispose() }
    expect((await f.pool.query(`SELECT calls FROM ${counter}`)).rows[0].calls).toBe(1)
    const status=await child({...base,mode:'receive'},directory) as ResponseEvent
    expect(status.statusBody).toMatchObject({turnId:originalId,status:'idle',turnEndReason:'stopped_by_user'})
    expect(JSON.stringify(status.body)).toContain('Fictional durable tool answer')
+   expect(published.providerSends).toBe(2)
+   expect(published.toolCalls).toBe(1)
+   const successor = await claimTurnLease(f.session.id, f.assistantId)
+   expect(successor).toBeTruthy()
+   expect(successor).not.toBe(originalToken)
+   const retireRetry = bindSessionTurnAuthority(execution.security.authority, { sessionId: session.id, assistantId: assistant.id, token: originalToken })
+   try {
+    await expect(retry()).rejects.toMatchObject({code:'scope_source_changed'})
+    expect((await f.pool.query('SELECT turn_lease_token FROM sessions WHERE id=$1',[f.session.id])).rows[0])
+      .toEqual({turn_lease_token:successor})
+   } finally { retireRetry() }
   }finally{await f.pool.query(`DROP TABLE IF EXISTS ${counter}`);await f.cleanup();await rm(directory,{recursive:true,force:true})}
  },120000)
 

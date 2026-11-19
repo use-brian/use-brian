@@ -5,15 +5,18 @@ import {z} from 'zod'
 import type {PoolClient,ClientBase} from 'pg'
 import {assertHostObservationPublication} from '@use-brian/core/engine/routine-read.js'
 import type {SessionContextAuthority} from '@use-brian/core/memory/session-state-types.js'
-import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {ContextScopeAccumulator,type ScopeEvidence} from '@use-brian/agent-runtime/security/context-scope.js'
 import {deriveResourceScope, deriveWriteScope, DerivedScopeError, type DerivedWriteEvidence, type ResourceScope, type ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
-import {executionToolContext} from '@use-brian/agent-runtime/security/execution-context.js'
+import {executionToolContext,type ExecutionContext} from '@use-brian/agent-runtime/security/execution-context.js'
 import {bindScopeSource, bindScopeSources, boundScopeSources} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {applicationJsonSchema} from '@use-brian/shared'
 import {commitTransaction,getPool,rollbackAndRelease} from './client.js'
 import {bufferedWebPublicationDescriptor,recordTurnCompletion,bindTurnCompletion,verifyTurnCompletionReceipt,type BufferedWebPublication,type TurnCompletionBinding} from './conversation-publication-recovery.js'
 import {bufferedTerminalCandidate,acceptCommittedTerminalPublication,type BoundBufferedTerminalCommand} from '../turn/terminal-publication.js'
 import {admitModelInput} from '../context-scope/admission.js'
+import {admitVerifiedSharedRoomResumeEvidence} from '../context-scope/native-invocation-evidence.js'
+import type {AccessCeiling} from '@use-brian/agent-runtime/security/access-ceiling.js'
+import {boundScopeSource} from '@use-brian/agent-runtime/security/source-evidence.js'
 import {addSessionMessage,readSessionMessageScopeSource,type SessionMessage,type SessionMessageAttachment} from './sessions.js'
 import {publicConversationScope,readPublicConversationFloor,type PublicTurnConversationBinding} from './public-conversation.js'
 import {channelEvidenceFitsEnvelope,pinVerifiedChannelPublication,selectVerifiedChannelHistory,type ChannelRecordPublication} from './verified-channel-record.js'
@@ -341,6 +344,14 @@ export async function withPublicConversationWrite<T>(binding:PublicTurnConversat
  }finally{await rollbackAndRelease(client)}
 }
 
+/** The stored room continuation retains its own checked audience and outcome. */
+export type SharedRoomResumePublication = {
+  execution: ExecutionContext
+  evidence: ScopeEvidence
+  recipient: AccessCeiling
+  outcomeNote?: string
+}
+
 /** The stored writer of the reply publication, for lanes without native
  * transcript authority (durable resume, external callee). Without a completion it
  * keeps the displaced shape exactly: one autocommit row, or one transaction for
@@ -349,11 +360,11 @@ export async function withPublicConversationWrite<T>(binding:PublicTurnConversat
  * authority bracket; it adds no authorization of its own. */
 export async function publishStoredTurnPublication(input:{sessionId:string;rows:readonly StoredTurnPublicationRow[];
  write:{scope:ResourceScope}|{derivation:DerivedWriteEvidence;derivationTarget?:ResourceScope};
- token:string;stopped:boolean;completion?:TurnCompletionBinding;publicConversation?:PublicTurnConversationBinding;channelRecord?:ChannelRecordPublication}):Promise<SessionMessage[]>{
+ token:string;stopped:boolean;completion?:TurnCompletionBinding;publicConversation?:PublicTurnConversationBinding;channelRecord?:ChannelRecordPublication;sharedRoomResume?:SharedRoomResumePublication}):Promise<SessionMessage[]>{
  const {sessionId,rows,write}=input
  if(rows.length<1||rows.length>512)throw new DerivedScopeError('scope_evidence_missing')
  const completion=input.completion?bindTurnCompletion(input.completion):undefined
- if(!completion&&!input.publicConversation&&!input.channelRecord&&rows.length===1)return [await addSessionMessage({sessionId,...rows[0]!,...write})]
+ if(!completion&&!input.publicConversation&&!input.channelRecord&&!input.sharedRoomResume&&rows.length===1)return [await addSessionMessage({sessionId,...rows[0]!,...write})]
  const workspaceId='scope' in write?write.scope.workspaceId:(write.derivationTarget?.workspaceId??deriveResourceScope(structuredClone(write.derivation)).workspaceId)
  const tx=await getPool().connect()
  try{
@@ -367,14 +378,33 @@ export async function publishStoredTurnPublication(input:{sessionId:string;rows:
     ||input.channelRecord.address.workspaceId!==workspaceId)throw new DerivedScopeError('scope_source_changed')
    await pinVerifiedChannelPublication(tx,input.channelRecord,input.token)
   }
+  const resume=input.sharedRoomResume
+  let replyWrite=write
+  if(resume){
+   if(input.publicConversation||input.channelRecord||input.stopped||workspaceId!==resume.recipient.workspaceId
+    ||completion&&(completion.lane!=='resume'||completion.assistantId!==resume.execution.assistant.id
+      ||completion.input?.kind!=='approval'||resume.execution.identity.kind!=='system'
+      ||completion.input.ref!==resume.execution.identity.jobId))throw new DerivedScopeError('scope_source_changed')
+   await admitVerifiedSharedRoomResumeEvidence(resume.execution,resume.evidence,resume.recipient,'audience',
+    {client:tx,sessionId,token:input.token})
+   if(resume.outcomeNote!==undefined){
+    if(!completion||!('derivation' in write))throw new DerivedScopeError('scope_evidence_missing')
+    const outcome=await addSessionMessage({sessionId,role:'system',content:[{type:'text',text:resume.outcomeNote}],...write,
+     derivation:{...write.derivation,producer:'turn:resume-outcome'}},tx)
+    const source=boundScopeSource(outcome)
+    if(!source)throw new DerivedScopeError('scope_evidence_missing')
+    replyWrite={...write,derivation:{...write.derivation,sources:[...write.derivation.sources,source]}}
+   }
+  }
   const stored:SessionMessage[]=[]
-  for(const row of rows)stored.push(await addSessionMessage({sessionId,...row,...write},tx))
-  if(input.publicConversation||input.channelRecord){
+  for(const row of rows)stored.push(await addSessionMessage({sessionId,...row,...replyWrite},tx))
+  if(input.publicConversation||input.channelRecord||resume){
    const result=await tx.query<{valid:boolean}>(`SELECT NOT EXISTS(SELECT 1 FROM public.conversation_message_quarantine
     WHERE session_id=$1 AND message_id=ANY($2::uuid[])) AS valid`,[sessionId,stored.map(row=>row.id)])
    if(result.rows[0]?.valid!==true)throw new DerivedScopeError('scope_source_changed')
   }
   if(completion)await recordTurnCompletion(tx,{workspaceId,sessionId,token:input.token,stopped:input.stopped,binding:completion,rows:stored})
+  resume?.execution.lifecycle.abortSignal.throwIfAborted()
   await commitTransaction(tx)
   return stored
  }finally{await rollbackAndRelease(tx)}

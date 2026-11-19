@@ -29,7 +29,7 @@ import type { SessionContextAuthority } from '@use-brian/core/memory/session-sta
 import { synthesizeMissingToolResults } from '@use-brian/agent-runtime/engine/tool-pairing.js'
 import type { ContentBlock } from '@use-brian/agent-runtime/providers/types.js'
 import type { DerivedWriteEvidence, ResourceScope } from '@use-brian/agent-runtime/security/derived-scope.js'
-import { publishBufferedWebConversation, publishNativeSessionMessageBatch, publishStoredTurnPublication } from '../db/conversation-store.js'
+import { publishBufferedWebConversation, publishNativeSessionMessageBatch, publishStoredTurnPublication, type SharedRoomResumePublication } from '../db/conversation-store.js'
 import type { BufferedWebPublication, TurnCompletionInput, TurnCompletionLane } from '../db/conversation-publication-recovery.js'
 import type { SessionMessage, SessionMessageAttachment } from '../db/sessions.js'
 import type { BoundBufferedTerminalCommand } from './terminal-publication.js'
@@ -65,6 +65,8 @@ export type TurnPublicationRequest = {
   publicConversation?: PublicTurnConversationBinding
   /** Verified provider append pins the addressed envelope inside the writer. */
   channelRecord?: ChannelRecordPublication
+  /** The shared room continuation's own source proof and answer note. */
+  sharedRoomResume?: SharedRoomResumePublication
   /** Native only: the classification's pending annotation, published in the same transaction. */
   pendingAnnotation?: object
   /** Native shared web only: the buffered root and the selected terminal ordinals. */
@@ -95,6 +97,7 @@ export async function writeTurnPublication(owner: TurnPublicationOwnerPort, requ
   const completion = request.disposition === 'reply' && request.completion
     ? { operationId: owner.operationId, ...request.completion } : undefined
   if (native && 'derivation' in write) {
+    if (request.sharedRoomResume) throw new Error('Shared room resume requires its stored writer.')
     const command = { sessionId: owner.sessionId, messages: rows, derivation: write.derivation, derivationTarget: write.derivationTarget,
       authority: native, ...(request.measure ? { measure: request.measure } : {}),
       publication: { pendingAnnotation: request.pendingAnnotation, ...(completion ? { completion } : {}),
@@ -113,7 +116,8 @@ export async function writeTurnPublication(owner: TurnPublicationOwnerPort, requ
   return request.execute(() => publishStoredTurnPublication({ sessionId: owner.sessionId, rows, write, token: owner.token,
     stopped: owner.stopped, ...(completion ? { completion } : {}),
     ...(request.publicConversation ? { publicConversation: request.publicConversation } : {}),
-    ...(request.channelRecord ? { channelRecord: request.channelRecord } : {}) }))
+    ...(request.channelRecord ? { channelRecord: request.channelRecord } : {}),
+    ...(request.sharedRoomResume ? { sharedRoomResume: request.sharedRoomResume } : {}) }))
 }
 
 /** A buffered model round: its content and the tool results it received. */

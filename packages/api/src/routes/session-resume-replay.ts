@@ -72,6 +72,8 @@ import {
   createDeliveryAudienceAuthorizer,
   DeliveryAudienceUnverifiedError,
 } from '../context-scope/delivery-authority.js'
+import { roomAudienceCeiling } from './_room-binding.js'
+import { admitVerifiedSharedRoomResumeEvidence } from '../context-scope/native-invocation-evidence.js'
 import { findAssistantById } from '../db/users.js'
 import type { SessionResumeReplay, ResumeReplayParams } from './chat.js'
 import { MODEL_MAP, chatTierBudget, tierForModel } from '../model-resolution.js'
@@ -549,17 +551,23 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         userId: session.userId,
         sharedAudience: !policyFor(session).context.personalMemory,
       })
-      // A closing row carries no source content, only the session's input
-      // envelope, and is written only while the original lease is still current.
-      const failureScope = resumeEnvelope
-      if (failureScope) publishFailureOutcome = async () => {
-        await owner.publish({ disposition: 'closing', native: null, write: { scope: failureScope },
-          execute: operation => retryTransientWrite(abortController.signal, sessionId, () => lease.execute(operation)),
-          rows: [{ role: 'assistant', senderAssistantId: assistant.id, content: [{ type: 'text', text: RESUME_FAILED_TEXT }] }] })
-      }
       const execution = resumeExecution(session, { ...assistant, workspaceId: assistant.workspaceId! }, params.approvalId,
         turnScope, bounded, lease, abortController.signal)
       const context = buildContext(session, turnScope, execution)
+      const sessionKind = classifySession(session)
+      const roomRecipient = session.channelType === 'web' && sessionKind.audience === 'workspace'
+        && sessionKind.anchor.kind === 'none' && sessionKind.surface === 'chat'
+        ? roomAudienceCeiling(assistant.workspaceId, session) : undefined
+      const bindFailureOutcome = (evidence?: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence) => {
+        if (!resumeEnvelope) return
+        publishFailureOutcome = async () => {
+          await owner.publish({ disposition: 'closing', native: null, write: { scope: resumeEnvelope },
+            ...(roomRecipient && evidence ? { sharedRoomResume: { execution, evidence, recipient: roomRecipient } } : {}),
+            execute: operation => retryTransientWrite(abortController.signal, sessionId, () => lease.execute(operation)),
+            rows: [{ role: 'assistant', senderAssistantId: assistant.id, content: [{ type: 'text', text: RESUME_FAILED_TEXT }] }] })
+        }
+      }
+      if (!roomRecipient) bindFailureOutcome()
       owner.bindModelPreparation({ kind: 'execution', toolProfile: 'resume', execution, assertCurrent: assertReplayCurrent }, {
         provider: deps.provider, configuredProviders: turnDeps.configuredProviders,
         resolveWorkspaceCustomLlm: turnDeps.resolveWorkspaceCustomLlm?.bind(turnDeps) ?? null,
@@ -639,33 +647,47 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         }
         const scopedTools = owner.prepareTools(candidates)
         await assertReplayCurrent()
+        const scopeAccumulator = context.scopeAccumulator as ContextScopeAccumulator
+        // A shared room checks the original checkpoint and retained dialogue
+        // before the approved tool can produce an effect.
+        const readHistory = async () => {
+          const { messages } = await owner.prepareHistory({ native: null, evidence: scopeAccumulator })
+          await assertReplayCurrent()
+          return messages
+        }
+        const roomHistory = roomRecipient ? await readHistory() : undefined
+        if (roomRecipient) {
+          scopeAccumulator.note(await admitVerifiedSharedRoomResumeEvidence(execution, scopeAccumulator.evidence, bounded, 'caller'))
+          bindFailureOutcome(scopeAccumulator.evidence)
+        }
         const outcomeNote = await resolveResumeOutcomeNote(scopedTools, params, context)
         await assertReplayCurrent()
 
         // ── 2. Rebuild the conversation, append the outcome note ──
-        // The original owner performs the stored-history read and notes its evidence.
-        const scopeAccumulator = context.scopeAccumulator as ContextScopeAccumulator
-        const dbMessages = (await owner.prepareHistory({ native: null, evidence: scopeAccumulator })).messages
-        await assertReplayCurrent()
+        const dbMessages = roomHistory ?? await readHistory()
         const history = ensureToolResultPairing(toStampedMessages(dbMessages, 'UTC') as Message[])
         const messages: Message[] = [
           ...history,
           { role: 'user', content: [{ type: 'text', text: outcomeNote }] },
         ]
 
-        const outcomeWrite = turnOutputWrite({
-          producer: 'turn:resume-outcome',
-          accumulator: scopeAccumulator,
-          envelope: resumeEnvelope,
-        })
-        const storedOutcome = await retryTransientWrite(abortController.signal, sessionId, () => executeWithCurrentAuthority(() => addSessionMessage({
-          sessionId,
-          role: 'system',
-          content: [{ type: 'text', text: outcomeNote }],
-          ...outcomeWrite,
-        })))
-        const outcomeSource = boundScopeSource(storedOutcome)
-        if (outcomeSource) scopeAccumulator.noteSource(outcomeSource)
+        // A shared room records the answer note with its admitted reply. The
+        // publication transaction supplies its durable source edge.
+        if (!roomRecipient) {
+          const outcomeWrite = turnOutputWrite({
+            producer: 'turn:resume-outcome',
+            accumulator: scopeAccumulator,
+            envelope: resumeEnvelope,
+          })
+          const storedOutcome = await retryTransientWrite(abortController.signal, sessionId, () => executeWithCurrentAuthority(() => addSessionMessage({
+            sessionId,
+            role: 'system',
+            content: [{ type: 'text', text: outcomeNote }],
+            ...outcomeWrite,
+          })))
+          const outcomeSource = boundScopeSource(storedOutcome)
+          if (outcomeSource) scopeAccumulator.noteSource(outcomeSource)
+        }
 
         // ── 3. Drive the continuation turn ──
         // Layer 2 is the charter block every runner renders, not the legacy
@@ -679,7 +701,9 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
           ? `${baseSystemPrompt}\n\n${activeWorkspaceContext}`
           : baseSystemPrompt
 
-        const authorizeResumeAudience = createDeliveryAudienceAuthorizer()
+        const authorizeResumeAudience = createDeliveryAudienceAuthorizer(roomRecipient ? {
+          validateEvidence: (evidence, recipient) => admitVerifiedSharedRoomResumeEvidence(execution, evidence, recipient, 'audience'),
+        } : {})
         // D2: the continuation bills like the turn it resumes.
         const resumeBilling = await resolveTurnBilling({
           policy: resumePolicy,
@@ -752,7 +776,8 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
             // "Reply publication"). A system execution holds no native
             // transcript authority, so the owner uses its stored writer.
             if (!finalContent) return
-            await owner.publish({ disposition: 'reply', rows: [{ role: 'assistant', content: finalContent }],
+            await owner.publish({ disposition: 'reply', rows: [{ role: 'assistant', content: finalContent, senderAssistantId: assistant.id }],
+              ...(roomRecipient ? { sharedRoomResume: { execution, evidence: scopeAccumulator.evidence, recipient: roomRecipient, outcomeNote } } : {}),
               completion: { lane: 'resume', input: { kind: 'approval', ref: params.approvalId }, assistantId: assistant.id },
               write: turnOutputWrite({ producer: 'turn:resume-output', accumulator: scopeAccumulator, envelope: resumeEnvelope }),
               native: null,
@@ -778,7 +803,9 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       // Lease loss, Stop and a refused or uncertain authority write nothing.
       // A committed or possibly committed reply is never followed by this note.
       const state = owner.completion.state
-      if (publishFailureOutcome && owner.abortKind === null && (state === 'unpublished' || state === 'refused')) {
+      const authorityRefused = error instanceof AuthorityChangedError || error instanceof DeliveryAudienceUnverifiedError
+        || (error as { reason?: unknown } | null)?.reason === 'authority_changed'
+      if (publishFailureOutcome && !authorityRefused && owner.abortKind === null && (state === 'unpublished' || state === 'refused')) {
         try { await publishFailureOutcome() }
         catch (noteError) { console.warn(`[session-resume] failure outcome not recorded for ${sessionId}: ${noteError instanceof Error ? noteError.message : String(noteError)}`) }
       }

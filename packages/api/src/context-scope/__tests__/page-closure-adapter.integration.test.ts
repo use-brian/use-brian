@@ -2,10 +2,14 @@ import {afterAll,afterEach,describe,expect,it} from 'vitest'
 import type {ScopeEvidence} from '@use-brian/agent-runtime/security/context-scope.js'
 import type {ScopeSource} from '@use-brian/agent-runtime/security/derived-scope.js'
 import type {PoolClient} from 'pg'
-import {applyRLSGucs,getAppPool,getPool,runWithAgentAccess} from '../../db/client.js'
+import {applyRLSGucs,getAppPool,getPool,rollbackAndRelease,runWithAgentAccess} from '../../db/client.js'
 import {scopeEvidenceFailureOf,validateAudienceScopeEvidence,validateCallerScopeEvidence} from '../caller-evidence.js'
+import {persistentSourceFixture} from '../../application-platform/__tests__/fixtures/persistent-source.js'
+import {pinPreparedExternalSourceAuthority} from '../../application-platform/retained-source-authority.js'
 import {persistentContextFixture} from '../../application-platform/__tests__/fixtures/persistent-context.js'
 import {ContextScopeAccumulator} from '@use-brian/agent-runtime/security/context-scope.js'
+import {createDbCommentThreadStore} from '../../db/comment-thread-store.js'
+import {readSessionById} from '../../db/sessions.js'
 import {publishSessionTitle} from '../../db/session-title-store.js'
 import {readRetainedContextFrame} from '../../db/session-context-revisions.js'
 const {assertLocalFixture}=await import(new URL('../../../../../scripts/crm/local-fixture.mjs',import.meta.url).href)
@@ -22,8 +26,8 @@ await assertLocalFixture()
 type Fixture=Awaited<ReturnType<typeof setup>>
 type Outcome={outcome:'admit';floor:{sensitivity:string;compartments:string[];projectIds:string[]};adapter:string}|{outcome:'deny';diagnostic:string;adapter:string}
 let fixture:Awaited<ReturnType<typeof persistentContextFixture>>|undefined
-async function setup(){
- const f=fixture=await persistentContextFixture('internal'),pool=f.pool,w=f.workspaceId
+async function setup(clearance:'internal'|'confidential'='internal'){
+ const f=fixture=await persistentContextFixture(clearance),pool=f.pool,w=f.workspaceId
  // A Teamspace Page: its receipt carries a principal boundary (Teamspace
  // membership) that no scalar label represents. The owner is its only member.
  const teamspace=(await pool.query<{id:string}>(`INSERT INTO teamspaces(workspace_id,name,sensitivity,created_by) VALUES($1,'Fictional teamspace','internal',$2) RETURNING id`,[w,f.ownerId])).rows[0].id
@@ -58,7 +62,8 @@ async function validate(x:Fixture,userId:string,kind:'caller'|'audience',generic
  const execution=await x.f.execution(userId as typeof x.f.ownerId),client=await getAppPool().connect()
  let adapter='none'
  const proxy={query:async(text:string,values?:unknown[])=>{
-  if(typeof text==='string'&&text.startsWith('SELECT capture_page_closure_evidence')){
+  if(generic && text.includes('conversation_mixed_evidence_route')) return {rows:[{route:null}]}
+  if(text.startsWith('SELECT capture_page_closure_evidence')){
    if(generic){adapter='declined';return {rows:[{value:null}]}}
    const result=await client.query(text,values);adapter=result.rows[0]?.value?'admitted':'declined';return result
   }
@@ -127,14 +132,18 @@ describe.sequential('[COMP:api/page-closure-adapter] Page-derived closures are a
 
  it('reads a Page-derived title payload through the adapter (8286), refusing exactly where the full evaluation refuses',async()=>{
   const x=await setup()
-  const authority={execution:await x.f.execution(x.f.ownerId),accumulator:new ContextScopeAccumulator()}
-  const title=await publishSessionTitle({sessionId:x.f.session.id,title:'Fictional Page discussion',manual:false,
+  const thread = await createDbCommentThreadStore().createThread({ userId: x.f.ownerId, workspaceId: x.f.workspaceId,
+   assistantId: x.f.assistantId, pageId: x.page.id, anchorKind: 'human_range' })
+  const session = await readSessionById(thread.sessionId)
+  if (!session) throw new Error('Missing authoritative Page thread session')
+  const authority={execution:await x.f.execution(x.f.ownerId,session),accumulator:new ContextScopeAccumulator()}
+  const title=await publishSessionTitle({sessionId:session.id,title:'Fictional Page discussion',manual:false,
    expectedRevision:null,authority,derivation:{producer:'fixture:page-title',sources:x.evidence.sources}})
   expect(title).not.toBeNull()
   const read=async(userId:string)=>{
-   const reader={execution:await x.f.execution(userId as typeof x.f.ownerId),accumulator:new ContextScopeAccumulator()}
+   const reader={execution:await x.f.execution(userId as typeof x.f.ownerId,session),accumulator:new ContextScopeAccumulator()}
    return readRetainedContextFrame(reader,[],async client=>{
-    const value=(await client.query('SELECT read_session_title_revision($1,$2,$3) AS value',[x.f.workspaceId,x.f.session.id,title!.revisionId])).rows[0].value
+    const value=(await client.query('SELECT read_session_title_revision($1,$2,$3) AS value',[x.f.workspaceId,session.id,title!.revisionId])).rows[0].value
     // The same revision admitted by the Page adapter and by nothing else in this statement.
     const proof=(await client.query('SELECT capture_page_closure_evidence($1,$2,$3) AS value',[x.f.workspaceId,
      JSON.stringify([{kind:'session_context_revision',id:title!.revisionId,version:'1'}]),userId])).rows[0].value
@@ -157,6 +166,85 @@ describe.sequential('[COMP:api/page-closure-adapter] Page-derived closures are a
   const evidence={sources:[pageSource as unknown as ScopeSource,...x.evidence.sources]}
   for(const result of await equivalent(x,x.f.ownerId,evidence))expect(result).toMatchObject({outcome:'admit',adapter:'admitted'})
   for(const result of await equivalent(x,x.f.secondId,evidence))expect(result.outcome).toBe('deny')
+ })
+
+ it('proves a native Page closure and independent source on the same transaction, then refuses either revocation', async () => {
+  const x = await setup('confidential')
+  const independent = await persistentSourceFixture(x.f)
+  const native = x.evidence.sources[0]
+  const sources = [native, ...independent.observations]
+  try {
+   const read = async (kind: 'caller' | 'audience', appendIndependentEdge?: () => Promise<void>) => {
+    const execution = await x.f.execution()
+    const prepared = await independent.coordinator.prepare(execution, independent.observations, kind === 'caller' ? 'context' : 'deliver')
+    const client = await getAppPool().connect()
+    let captured = 0, checkedIndependently = 0
+    const measured = {
+     query: async (sql: string, values?: unknown[]) => {
+      if (sql.startsWith('SELECT capture_page_closure_evidence')) {
+       const roots = JSON.parse(String(values?.[1]))
+       expect(roots.map((r: { id: string }) => r.id)).toEqual([native.resourceId])
+       captured++
+      }
+      if (sql.includes('external_source_snapshot')) {
+       checkedIndependently++
+       await appendIndependentEdge?.()
+      }
+      if (sql.includes('read_admitted_session_context_dependencies')) {
+       expect(values?.[2]).not.toContain(native.resourceId)
+      }
+      return client.query(sql, values)
+     },
+    } as unknown as PoolClient
+    try {
+     return await runWithAgentAccess(execution.security.access, async () => {
+      await client.query('BEGIN')
+      await applyRLSGucs(client, x.f.ownerId, execution.assistant.id)
+      await client.query('SELECT id FROM workspaces WHERE id=$1 FOR SHARE', [x.f.workspaceId])
+      await pinPreparedExternalSourceAuthority(client, execution, prepared)
+      const check = kind === 'caller' ? validateCallerScopeEvidence : validateAudienceScopeEvidence
+      const admitted = await check({ sources }, execution.security.ceiling, measured)
+      expect(admitted.sensitivity).toBe(independent.observations[0].sensitivity)
+      expect(admitted.sources).toEqual(expect.arrayContaining(sources))
+      expect(captured).toBe(1)
+      expect(checkedIndependently).toBe(1)
+      await client.query('COMMIT')
+     })
+    } finally {
+     await rollbackAndRelease(client)
+    }
+   }
+   await read('caller')
+   await read('audience')
+   await independent.pool.query("UPDATE grants SET actions=array_remove(actions,'deliver') WHERE account_id=$1", [x.f.ownerId])
+   await expect(read('audience')).rejects.toThrow()
+   await read('caller')
+   const extra=(await x.f.pool.query<{ id: string; version: string }>(`
+    INSERT INTO workspace_files(workspace_id,path,name,storage_uri,created_by_user_id,source,sensitivity)
+    VALUES($1,'/fictional-mixed-lineage.txt','Fictional lineage append','fixture://lineage-append',$2,'user','internal')
+    RETURNING id,scope_version::text AS version`,[x.f.workspaceId,x.f.ownerId])).rows[0]
+   const appendEdge = async () => {
+    const writer = await x.f.pool.connect()
+    try {
+     await writer.query('BEGIN')
+     await writer.query("SELECT set_config('app.current_user_id',$1,true),set_config('statement_timeout','2000ms',true)",[x.f.ownerId])
+     const edge = await writer.query(`INSERT INTO scope_derivation_sources(workspace_id,derivation_id,source_kind,source_id,source_version)
+      SELECT workspace_id,id,'workspace_file',$3,$4 FROM scope_derivations
+      WHERE workspace_id=$1 AND resource_id=$2 AND resource_kind='workspace_file'`,
+     [x.f.workspaceId,native.resourceId,extra.id,extra.version])
+     expect(edge.rowCount).toBe(1)
+     await writer.query('COMMIT')
+    } finally {
+     await rollbackAndRelease(writer)
+    }
+   }
+   await expect(read('caller', appendEdge)).rejects.toMatchObject({ diagnostic: 'source_unverifiable' })
+   await read('caller')
+   await x.f.pool.query('DELETE FROM teamspace_members WHERE teamspace_id=$1 AND user_id=$2', [x.teamspace, x.f.ownerId])
+   await expect(read('caller')).rejects.toMatchObject({ diagnostic: 'source_unverifiable' })
+  } finally {
+   await independent.cleanup()
+  }
  })
 
  it('admits more than 100 roots instead of refusing at the lineage reader (8288)',async()=>{
