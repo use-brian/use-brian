@@ -12,6 +12,7 @@ import type {ChannelIntegrationStore} from '../db/channel-integrations.js'
 import {getAppPool,getPool,applyRLSGucs,rollbackAndRelease,runWithAgentAccess} from '../db/client.js'
 import {applyApplicationRLSContext,releaseApplicationTransactionBinding,getApplicationExecutionBinding} from '../application-platform/execution-context.js'
 import {getSharedRetainedSourceAuthority} from '../application-platform/source-runtime.js'
+import {isConversationEvidenceRoot} from '../application-platform/conversation-evidence.js'
 import {readApplicationFieldAncestors} from '../application-platform/field-evidence.js'
 import {readExternalSourceAncestors} from '../application-platform/external-source-ancestry.js'
 import {readPersistentSessionContextAncestors} from '../db/session-context-ancestry.js'
@@ -87,7 +88,7 @@ export async function admitAttendedAudienceEvidence(execution:ExecutionContext,r
   // The existing native validator already checks current ordinary source
   // envelopes. Field, context and independent-source evidence requires the
   // bound non-owner transaction below; no admission result is cached.
-  if(!fields.length&&!external.length&&!sources.some(source=>['application_field','external_source','session_context_revision'].includes(source.resourceKind))){
+  if(!fields.length&&!hasExternal&&!sources.some(isConversationEvidenceRoot)){
    const current=await validateAudience(evidence.evidence,recipient)
    return current
   }

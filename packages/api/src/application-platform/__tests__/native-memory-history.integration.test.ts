@@ -353,9 +353,16 @@ describe.sequential('[COMP:corrections/row-history] current native Memory audit 
    const historyFields=(await x.f.pool.query("SELECT id FROM application_field_resources WHERE workspace_id=$1 AND resource_id=$2 AND selection='history'",[x.f.workspaceId,saved.id])).rows.map(row=>row.id)
    const roots=all.filter(source=>source.resourceKind==='application_field'&&historyFields.includes(source.resourceId))
    expect(roots).toHaveLength(1)
-   const full=await originalMemoryAuthority(x);full.accumulator.note({sources:all})
+   const ordinaryAuthority = await originalMemoryAuthority(x)
+   const ordinary = await memoryStore.create({ workspaceId: x.f.workspaceId, assistantId: x.f.assistantId,
+    userId: x.f.ownerId, createdByUserId: x.f.ownerId, summary: 'Fictional independent native point',
+    sensitivity: 'internal', authority: ordinaryAuthority })
+   const ordinaryCapture = await memoryStore.getById(ordinaryAuthority.execution.security.access, ordinary.id, ordinaryAuthority)
+   const ordinaryRoots = boundScopeSources(ordinaryCapture!)
+   expect(ordinaryRoots.some(source => source.resourceKind === 'application_field')).toBe(true)
+   const full=await originalMemoryAuthority(x);full.accumulator.note({sources:[...ordinaryRoots,...all]})
    await expect(admitModelInput(full.context)).resolves.toBeUndefined()
-   const tool=async()=>{const host=await originalMemoryAuthority(x);host.accumulator.note({sources:roots});return host.context}
+   const tool=async()=>{const host=await originalMemoryAuthority(x);host.accumulator.note({sources:[...ordinaryRoots,...roots]});return host.context}
    await expect(admitModelInput(await tool())).resolves.toBeUndefined()
    await expect(admitModelOutput(await tool())).resolves.toBeUndefined()
    await x.sourcePool.query("UPDATE grants SET actions=array_remove(actions,'deliver') WHERE kind='human' AND account_id=$1",[x.f.ownerId])

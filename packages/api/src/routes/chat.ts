@@ -7060,11 +7060,14 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           afterCommit: async (rows) => {
           const savedTurns = [...assembled.assistantRows].flatMap(([index, row]) => rows[index]
             ? [{ stored: rows[index]!, isLast: row.isLast, attachments: row.isLast ? outboundAttachments : [] }] : [])
-          if (savedTurns.length > 0 && !stoppedNativeBuffer) await assertDeliveryAudience()
+          // The authenticated commit can observe Stop under its publication lock
+          // before the local heartbeat updates the request's signal.
+          const stopped = stoppedNativeBuffer || ownedTurn.abortKind === 'stop'
+          if (savedTurns.length > 0 && !stopped) await assertDeliveryAudience()
           for (const saved of savedTurns) {
             lastAssistantMessageId = saved.stored.id
             turnLedgerHandle.bindAssistantMessageId(saved.stored.id)
-            if (stoppedNativeBuffer) continue
+            if (stopped) continue
 
             // The UI uses `assistant_message_saved` to attach retry/edit/
             // feedback actions to the most recent bubble. Only emit for the
@@ -7101,6 +7104,12 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
             }
           }
         } }))
+
+        if (ownedTurn.abortKind === 'stop') {
+          recallBuffer?.discard()
+          turnTiming.mark('flush')
+          return
+        }
 
         // Flush the per-turn memory recall buffer once the final assistant
         // message id is known. All buffered recalls (index_inject + tool_call)
@@ -8336,7 +8345,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         )
         await settleResearch(
           turnLoopResult.selection.kind === 'text' ? sanitizeDeliveryText(turnLoopResult.selection.text) : '',
-          abortController.signal.aborted || !!queryLoopError,
+          ownedTurn.abortKind !== null || !!queryLoopError,
           turnLoopResult.selection.kind === 'question',
         )
         if (ownedTurn.abortKind === 'stop') throw new TurnStoppedError()

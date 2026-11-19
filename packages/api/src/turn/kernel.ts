@@ -277,7 +277,7 @@ class AssistantTurnOwner {
       && execution.identity.purpose === 'session_resume' && execution.identity.jobId === recovery.approvalId
       && execution.security.access.workspaceId === recovery.workspaceId
       && execution.lifecycle.sessionId === this.params.sessionId && execution.assistant.id === this.params.assistantId) {
-      bindVerifiedResumeEvidence(execution, async () => {
+      bindVerifiedResumeEvidence(execution, this.token, async () => {
         const signal = this.params.abortController.signal
         signal.throwIfAborted()
         const lease = await findSessionTurnLeaseState(this.params.sessionId)
@@ -440,7 +440,9 @@ class AssistantTurnOwner {
   sqlLedger(): TurnSqlLedger | undefined { return readTurnSqlLedger(this.sqlTurnId) }
   get released(): boolean { return this.didRelease }
   get completionReason():TurnEndReason|undefined{return this.endReason}
-  get abortKind():'stop'|'lease_lost'|'abort'|null{return turnAbortKind(this.params.abortController.signal)}
+  get abortKind():'stop'|'lease_lost'|'abort'|null{
+    return this.terminal.isStopped() ? 'stop' : turnAbortKind(this.params.abortController.signal)
+  }
   openInput(): Pick<TurnInboxHandle, 'port'> {
     if (this.closed) throw new Error('This turn has already closed.')
     this.input ??= registerTurnInbox(this.params.sessionId, { assistantId: this.params.assistantId })
@@ -517,7 +519,7 @@ class AssistantTurnOwner {
     const { reason, pendingAssistantTurns, userText, channelType, authorizeDestination, recordUsage } = request
     const signal = this.params.abortController.signal
     const model = this.preparedBackgroundModel, context = this.recoveryContext
-    if (this.closed || signal.aborted || this.recoveryMessage || !model || !context
+    if (this.closed || this.abortKind || this.recoveryMessage || !model || !context
       || (this.sinkKind !== 'sse' && this.sinkKind !== 'adapter')) return Promise.resolve(null)
     if (reason === 'empty') {
       const selection = this.selectedOutput()
