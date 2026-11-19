@@ -225,6 +225,38 @@ export async function readCurrentScopeSources(
   })
 }
 
+/** Preserve the application-field lineage recognized by the existing output writers. */
+async function encloseCrmSummaryLineage(
+  client: Pick<pg.PoolClient, 'query'>,
+  evidence: DerivedWriteEvidence,
+  workspaceId: string,
+): Promise<DerivedWriteEvidence> {
+  const crm = evidence.sources.filter(source => isCrmSummarySource(source.resourceKind))
+  if (!crm.length) return evidence
+  const checked = await readCurrentScopeSources(client, workspaceId, crm)
+  if (checked.length !== crm.length || checked.some(source => source.state !== 'current')) {
+    throw new DerivedScopeError('scope_source_changed')
+  }
+  const packets = new Set<string>()
+  for (const source of crm) {
+    const packet = (source as ScopeSource & { sourceProof?: unknown }).sourceProof
+    if (typeof packet !== 'string') throw new DerivedScopeError('scope_evidence_missing')
+    packets.add(packet)
+  }
+  const canonical = evidence.sources.filter(source => !isCrmSummarySource(source.resourceKind))
+  for (const packet of packets) {
+    const { rows: [row] } = await client.query<{ evidence: ScopeSource[] | null }>(
+      'SELECT materialize_crm_summary_native_evidence($1,$2) AS evidence', [workspaceId, packet],
+    )
+    if (!row?.evidence?.length) throw new DerivedScopeError('scope_source_changed')
+    canonical.push(...row.evidence)
+  }
+  const sources = [...new Map(canonical.map(source => [
+    JSON.stringify([source.resourceKind, source.resourceId, source.version]), source,
+  ])).values()]
+  return { ...evidence, sources }
+}
+
 /** The database validates the output reference and envelope again. */
 export async function recordDerivedResource(
   client: Pick<pg.PoolClient, 'query'>,
@@ -233,6 +265,7 @@ export async function recordDerivedResource(
   /** The acting author, whose own private rows may feed a wider target (D3). */
   actorUserId?: string | null,
 ): Promise<void> {
+  evidence = await encloseCrmSummaryLineage(client, evidence, output.workspaceId)
   // The output must carry every label it was derived from and must not take
   // another person's private rows anywhere else; its assistant visibility is
   // the target's own (decision D3).
