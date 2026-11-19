@@ -34,6 +34,7 @@ import {
   seedCurrentUserIdSentinel,
   transactionReleaseDecision,
   instrumentPoolClient,
+  runWithAgentAccess,
 } from '../client.js'
 import pg from 'pg'
 
@@ -150,6 +151,16 @@ describe('[COMP:api/db-client] Database client', () => {
     // from the app_user role, NOT from disabling a bypass GUC. If a refactor
     // reintroduces `SET … system_bypass`, this fails.
     expect(calls.some((c: string) => c.includes('system_bypass'))).toBe(false)
+  })
+
+  it('disables repeated JIT compilation with the transaction-local agent settings', async () => {
+    await runWithAgentAccess({ clearance: 'internal', compartments: [] },
+      () => queryWithRLS('u_1', 'SELECT 1'))
+
+    const setup = mockClient.query.mock.calls.find(([sql]) => sql.includes('set_config'))!
+    expect(setup[0]).toContain('set_config(setting.name, setting.value, true)')
+    const [names, values] = setup[1] as [string[], string[]]
+    expect(values[names.indexOf('jit')]).toBe('off')
   })
 
   it('releases the client (via rollbackAndRelease) on success and on failure', async () => {
