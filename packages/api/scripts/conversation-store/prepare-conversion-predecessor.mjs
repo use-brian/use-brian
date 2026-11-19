@@ -26,6 +26,6 @@ try{
  code=code.slice(0,position)+`await writeFile(${JSON.stringify(generated)},JSON.stringify({format:1,sourceSha:${JSON.stringify(sourceSha)},manifest,sourceSpecs,oldTableExpression,newTableExpression,oldRoster,nextRoster,authenticationPreamble:authentication.slice(0,authentication.indexOf('DO $authenticate$')),successorSource:await readFile(new URL('publication-recovery-successor.sql',directory),'utf8')},null,2));process.exit(0);\n`+code.slice(position)
  const module=join(temporary,'compile.mjs');await writeFile(module,code);await promisify(execFile)(process.execPath,[module])
  const profile=await readFile(generated)
- if(sha(profile)!=='70b820546a5e58a99030d531e6ac2ec9b8e87d344146b0acabbe95db997fa3ed')throw Error('conversion_source_profile_changed')
+ if(sha(profile)!=='aeb52b6ec1540cfd8839528672d32e42a779c00c36535c116d0c3dfabba26c62')throw Error('conversion_source_profile_changed')
  if(args.includes('--check')){if(!(await readFile(output)).equals(profile))throw Error('conversion_source_profile_file_changed')}else await writeFile(output,profile)
 }finally{await rm(temporary,{recursive:true,force:true})}

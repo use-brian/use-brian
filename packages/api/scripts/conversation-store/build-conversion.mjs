@@ -17,7 +17,8 @@ let existingTarget=false
 try{const existing=await readFile(root+'/migrations/8273_conversation_requirement_conversion.sql','utf8');if(!existing.startsWith('-- [COMP:api/native-turn-frame] Authenticated historical requirement conversion.'))throw Error('conversion_existing_migration_not_owned');existingTarget=true}catch(error){if(error.code!=='ENOENT')throw error}
 if(!existingTarget&&Math.max(...migrations)!==8272)throw Error('conversion_migration_number_changed: recheck next global number')
 const compilerInput=await readFile(option('--compiler-input',directory+'conversion-predecessor-source.json'),'utf8')
-if(sha(compilerInput)!=='70b820546a5e58a99030d531e6ac2ec9b8e87d344146b0acabbe95db997fa3ed')throw Error('conversion_source_compiler_input_changed')
+// The frozen profile uses the current 82690 private transcript filename.
+if(sha(compilerInput)!=='aeb52b6ec1540cfd8839528672d32e42a779c00c36535c116d0c3dfabba26c62')throw Error('conversion_source_compiler_input_changed')
 const input=JSON.parse(compilerInput)
 if(sha(await readFile(join(root,'scripts/conversation-store/build-publication-recovery.mjs')))!==input.sourceSha)throw Error('conversion_source_compiler_changed')
 if(input.format!==1||input.sourceSpecs.length!==17||input.manifest.contracts.length!==281)throw Error('conversion_compiler_profile_changed')
