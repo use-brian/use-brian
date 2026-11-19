@@ -139,7 +139,9 @@ test('[COMP:api/migration-execution-sql] accepts either exact Memory writer gran
   const [predicate, successor] = aclChecks(toMigrationExecutionSql(sql, name))
   assert.ok(predicate)
   assert.equal(successor, predicate)
-  assert.deepEqual(aclChecks((await memoryWriteReleaseSource()).sql), [predicate])
+  const release = await memoryWriteReleaseSource()
+  assert.deepEqual(aclChecks(release.sql), [predicate])
+  assert.equal(release.sourceDigest, 'f15100de261ae871c9ddc1a21e8da5a7f1fae7c512922223ed03c7d53744ee19')
   const db = new PGlite()
   try {
     await db.waitReady

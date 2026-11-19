@@ -54,9 +54,8 @@ async function originalClauses(sourceRoot) {
 const pinRows = successor => Object.entries(routinePins).map(([signature, pins]) =>
   '(' + literal(signature) + ',' + literal(pins[Number(successor)]) + ')').join(',')
 
-const checkRoutines = ({ successor = true, allowInheritedAclOrder = false } = {}) => {
-  const aclMismatch = `actual.proacl IS DISTINCT FROM (CASE WHEN member.signature=${literal(writer)} THEN ARRAY[owner_grant,runtime_grant] ELSE ARRAY[owner_grant] END)`
-  return `DO $memory_write_routines$
+const writerAclMismatch = `actual.proacl IS DISTINCT FROM (CASE WHEN member.signature=${literal(writer)} THEN ARRAY[owner_grant,runtime_grant] ELSE ARRAY[owner_grant] END)`
+const checkRoutines = (successor = true) => `DO $memory_write_routines$
 DECLARE member record; actual pg_proc;
  owner_oid oid:=(SELECT relowner FROM pg_class WHERE oid='public.memories'::regclass);
  runtime_oid oid:=(SELECT oid FROM pg_roles WHERE rolname='app_user');
@@ -72,8 +71,7 @@ BEGIN
   IF encode(sha256(convert_to(actual.prosrc,'UTF8')),'hex') IS DISTINCT FROM member.body_digest
    OR actual.proowner IS DISTINCT FROM owner_oid OR actual.pronamespace<>'public'::regnamespace
    OR actual.prolang<>(SELECT oid FROM pg_language WHERE lanname='plpgsql')
-   OR ${allowInheritedAclOrder ? `(${aclMismatch}
-    AND (member.signature<>${literal(writer)} OR actual.proacl IS DISTINCT FROM ARRAY[runtime_grant,owner_grant]))` : aclMismatch}
+   OR ${writerAclMismatch}
    OR actual.proconfig IS DISTINCT FROM ARRAY['search_path=pg_catalog, public, pg_temp']
    OR actual.proargnames IS DISTINCT FROM (CASE member.signature
     WHEN ${literal(writer)} THEN ARRAY['w','k','i','v','producer','sources']
@@ -89,7 +87,6 @@ BEGIN
   THEN RAISE EXCEPTION 'memory_query_write_routine_contract_changed: %',member.signature;END IF;
  END LOOP;
 END $memory_write_routines$;`
-}
 
 const intentTable = `CREATE TABLE public.native_memory_query_write_intents(
  derivation_id uuid NOT NULL REFERENCES public.scope_derivations(id) ON DELETE CASCADE,
@@ -195,10 +192,9 @@ DO $memory_write_receipt$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM public._migrations WHERE name=${literal(migrationName)})
  THEN RAISE EXCEPTION 'memory_query_write_release_missing';END IF;
 END $memory_write_receipt$;
-${checkRoutines({ allowInheritedAclOrder: true })}
+${checkRoutines()}
 ${checkTable()}
 ${sql}`
-  assertAuthenticationReadOnly(sql)
   return sql
 }
 
@@ -216,7 +212,7 @@ DO $memory_write_predecessor$ BEGIN
 END $memory_write_predecessor$;
 ${priorSql}
 ${previous.cleanup}
-${checkRoutines({ successor: false })}
+${checkRoutines(false)}
 DO $memory_write_install_intents$ BEGIN
  IF to_regclass('public.native_memory_query_write_intents') IS NULL THEN
   ${intentTable}
@@ -280,8 +276,13 @@ export async function memoryWriteReleaseSource({ sourceRoot = root } = {}) {
   const migrationSha = sha(migration)
   if (migrationSha !== 'c3a07b8c572088697a353179806f8cb880cfc73838094a2d3c2670c0a6aec269')
     throw Error('memory_query_write_numbered_source_changed')
+  // Existing portable exports bind the original release source. The execution
+  // projection accepts the same privilege tuples in another stored order.
   const sourceDigest = sha(JSON.stringify({ predecessor: previous.sourceDigest, migrationSha, authenticationSha: sha(sql) }))
-  return { ...previous, sql, sourceDigest, migrationSha }
+  const executable = replaceOnce(sql, writerAclMismatch, `(${writerAclMismatch}
+    AND (member.signature<>${literal(writer)} OR actual.proacl IS DISTINCT FROM ARRAY[runtime_grant,owner_grant]))`)
+  assertAuthenticationReadOnly(executable)
+  return { ...previous, sql: executable, sourceDigest, migrationSha }
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
