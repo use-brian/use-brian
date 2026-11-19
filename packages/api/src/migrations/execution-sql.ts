@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { configuredTaskPublicationExecutionSql } from './configured-task-publication-execution.js'
 import { participationRetirementExecutionSql } from './participation-retirement-execution.js'
+import { memoryLineagePublicationExecutionSql, memoryPublicationMigration, memoryPublicationSourceSha256 } from './memory-lineage-publication-execution.js'
 import { pageThreadSourceExecutionSql } from './page-thread-execution.js'
 
 /** Execution-only adaptation of reviewed historical SQL; contract checks stay intact.
@@ -34,6 +35,7 @@ const reviewed: Readonly<Record<string, readonly [string, number]>> = {
   '8251_private_page_thread_source.sql': ['b49871608d903b4a50586bf12063d4fd789cb2f64cbd1fc3f846261169c73b00', 0],
   [configuredTaskPublication]: ['55b915bd94214f96266e6da94165f454361d9351dc82d6dab537137b507d2baf', 0],
   [participationRetirement]: ['5fdaec0ab2468bc805c7163478d58e88b5c407efbc02a55fafdb5dc89a74b8d0', 0],
+  [memoryPublicationMigration]: [memoryPublicationSourceSha256, 0],
   [privateTranscriptPreparation]: ['e5de14be570dea6f612243ef862c72a8e3af68126b0fe1bdbdd8ee8e3b672b80', 0],
 }
 
@@ -109,6 +111,7 @@ export function toMigrationExecutionSql(sql: string, file: string): string {
   if (createHash('sha256').update(sql).digest('hex') !== expected[0]) {
     throw new Error(`${file}: historical migration content changed; refusing execution adapter`)
   }
+  if (file === memoryPublicationMigration) return memoryLineagePublicationExecutionSql(sql)
   if (file === configuredTaskPublication) return configuredTaskPublicationExecutionSql(sql)
   if (file === participationRetirement) return participationRetirementExecutionSql(sql)
   if (file === privateTranscriptPreparation) {
