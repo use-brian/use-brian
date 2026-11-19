@@ -524,6 +524,9 @@ export function rlsGucSettings(userId: string, verifiedAssistantId?: string): Re
   if (compartments !== undefined) settings.push(['app.agent_compartments', JSON.stringify(compartments)])
   if (projects !== undefined) settings.push(['app.agent_project_ids', JSON.stringify(projects)])
   const access = currentAgentAccess()
+  // Agent admission evaluates many short nested statements. PostgreSQL can
+  // recompile the same plan for each graph point and exhaust the SQL deadline.
+  if (access) settings.push(['jit', 'off'])
   if (access?.sharedAudience) settings.push(['app.agent_shared_audience', 'true'])
   if (access?.mutationCompartments !== undefined) settings.push(['app.agent_mutation_compartments', JSON.stringify(access.mutationCompartments)])
   if (access?.workspaceId !== undefined) settings.push(['app.agent_workspace_id', access.workspaceId])
