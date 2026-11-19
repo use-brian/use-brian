@@ -126,12 +126,12 @@ test('[COMP:api/migration-execution-sql] authenticates every adapted immutable s
     adaptedFiles.push(Number(name.split('_')[0]))
   }
   assert.deepEqual(adaptedFiles.sort((a,b)=>a-b), [8188,8196,8197,8198,8199,8200,8201,8204,8205,8229,
-    8234,8235,8236,8242,8243,8245,8246,8247,8248,8249,8250,8251,8268,8290,8296])
+    8234,8235,8236,8242,8243,8245,8246,8247,8248,8249,8250,8251,8272,8290,8296,8322,82690])
   assert.equal(toMigrationExecutionSql('SELECT 1;', 'future.sql'), 'SELECT 1;')
   assert.equal(toMigrationExecutionSql(source, 'future.sql'), source)
 })
 
-test('[COMP:api/migration-execution-sql] stabilizes the two 8268 registries inside its existing transaction', async () => {
+test('[COMP:api/migration-execution-sql] stabilizes the private transcript registries inside the existing transaction', async () => {
   const name = '82690_private_transcript_preparation_eligibility.sql'
   const sql = await readFile(new URL(name, migrations), 'utf8')
   const lock = 'LOCK TABLE public.native_turn_contract_helpers, public.native_retained_contract_helpers IN SHARE MODE;\n'

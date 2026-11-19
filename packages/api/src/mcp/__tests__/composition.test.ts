@@ -138,7 +138,8 @@ describe('[COMP:api/mcp-catalog] capability composition', () => {
     const composed = await viaComposition(fixture())
     // The pair names every dynamic source by its stable `connector:<instanceId>` identity.
     const { mcp_search: composedSearch } = shape(composed.tools)
-    expect(composedSearch!.description).toContain('Search across 3 tools')
+    expect(composedSearch!.description).toContain('Search all tool capabilities admitted to the current model turn')
+    expect(composedSearch!.description).toContain('connected-source index contributes 3 tools before current visibility filtering')
     expect(composedSearch!.description).toContain('connector:ci-remote (search_tasks, create_task)')
     expect(composedSearch!.description).toContain('connector:ci-cli (list_files)')
     // Built-ins, a second account, a member exposure, KB writes, remote and CLI adapters and the pair.
