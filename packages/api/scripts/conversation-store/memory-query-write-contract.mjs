@@ -95,7 +95,7 @@ const intentTable = `CREATE TABLE public.native_memory_query_write_intents(
  FOREIGN KEY(field_id,field_version) REFERENCES public.application_field_observations(resource_id,version)
 );`
 
-const checkTable = `DO $memory_write_intents$
+const checkTable = (upstreamCapture = false) => `DO $memory_write_intents$
 DECLARE installed pg_class;
  owner_oid oid:=(SELECT relowner FROM pg_class WHERE oid='public.memories'::regclass);
 BEGIN
@@ -123,14 +123,46 @@ BEGIN
   OR (SELECT count(*) FROM pg_constraint WHERE conrelid=installed.oid AND contype<>'n')<>4
   OR (SELECT count(*) FROM pg_index WHERE indrelid=installed.oid)<>1
   OR NOT EXISTS(SELECT 1 FROM pg_index WHERE indrelid=installed.oid AND indisprimary AND indisvalid AND indisready AND indislive)
-  OR EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=installed.oid AND (NOT tgisinternal OR tgenabled<>'O'))
+  OR EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=installed.oid
+   AND (NOT tgisinternal OR tgenabled<>'O')${upstreamCapture ? " AND tgname<>'crm_recovery_capture'" : ''})
   OR EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_constraint k ON k.oid=t.tgconstraint
    WHERE k.conrelid=installed.oid AND (NOT t.tgisinternal OR t.tgenabled<>'O'))
   OR (SELECT count(*) FROM pg_trigger t JOIN pg_constraint k ON k.oid=t.tgconstraint WHERE k.conrelid=installed.oid)<>12
  THEN RAISE EXCEPTION 'memory_query_write_intents_contract_changed';END IF;
  IF EXISTS(SELECT 1 FROM public.native_memory_query_write_intents)
  THEN RAISE EXCEPTION 'memory_query_write_intents_not_empty';END IF;
+${upstreamCapture ? '' : ` IF EXISTS(SELECT 1 FROM public.crm_erasure_journal_targets
+  WHERE table_name='native_memory_query_write_intents')
+ THEN RAISE EXCEPTION 'memory_query_write_recovery_target_unexpected';END IF;
+`}
 END $memory_write_intents$;`
+
+const normalizeUpstreamCapture = `DO $memory_write_recovery_capture$
+DECLARE capture pg_trigger;
+ target public.crm_erasure_journal_targets;
+BEGIN
+ SELECT * INTO capture FROM pg_trigger
+  WHERE tgrelid='public.native_memory_query_write_intents'::regclass AND tgname='crm_recovery_capture';
+ SELECT * INTO target FROM public.crm_erasure_journal_targets
+  WHERE table_name='native_memory_query_write_intents';
+ IF capture.oid IS NULL AND target.table_name IS NULL THEN RETURN;END IF;
+ IF NOT EXISTS(SELECT 1 FROM public._migrations WHERE name=${literal(upstreamOriginal)})
+  OR NOT EXISTS(SELECT 1 FROM public._migrations WHERE name='8271_refresh_recovery_capture.sql')
+  OR capture.oid IS NULL OR target.table_name IS NULL
+  OR capture.tgfoid IS DISTINCT FROM 'public.crm_capture_erasure_effect()'::regprocedure::oid
+  OR capture.tgtype<>29 OR capture.tgenabled<>'O' OR capture.tgisinternal
+  OR capture.tgconstraint<>0 OR capture.tgparentid<>0 OR capture.tgconstrrelid<>0 OR capture.tgconstrindid<>0
+  OR capture.tgdeferrable OR capture.tginitdeferred
+  OR capture.tgnargs<>0 OR capture.tgargs<>''::bytea OR capture.tgattr<>''::int2vector
+  OR capture.tgqual IS NOT NULL OR capture.tgoldtable IS NOT NULL OR capture.tgnewtable IS NOT NULL
+  OR target.key_columns IS DISTINCT FROM ARRAY['derivation_id','field_id','field_version']
+  OR target.capture_inserts IS DISTINCT FROM false
+ THEN RAISE EXCEPTION 'memory_query_write_recovery_capture_changed';END IF;
+ IF EXISTS(SELECT 1 FROM public.crm_erasure_journal WHERE table_name='native_memory_query_write_intents')
+ THEN RAISE EXCEPTION 'memory_query_write_recovery_receipts_present';END IF;
+ DROP TRIGGER crm_recovery_capture ON public.native_memory_query_write_intents;
+ DELETE FROM public.crm_erasure_journal_targets WHERE table_name='native_memory_query_write_intents';
+END $memory_write_recovery_capture$;`
 
 function editsSql(edits) {
   return edits.map(([before, after]) => `
@@ -160,7 +192,7 @@ DO $memory_write_receipt$ BEGIN
  THEN RAISE EXCEPTION 'memory_query_write_release_missing';END IF;
 END $memory_write_receipt$;
 ${checkRoutines()}
-${checkTable}
+${checkTable()}
 ${sql}`
   assertAuthenticationReadOnly(sql)
   return sql
@@ -188,7 +220,10 @@ DO $memory_write_install_intents$ BEGIN
   REVOKE ALL ON public.native_memory_query_write_intents FROM PUBLIC,app_user;
  END IF;
 END $memory_write_install_intents$;
-${checkTable}
+LOCK TABLE public.native_memory_query_write_intents IN ACCESS EXCLUSIVE MODE;
+${checkTable(true)}
+${normalizeUpstreamCapture}
+${checkTable()}
 DO $memory_write_compose$
 DECLARE member record; actual pg_proc; after_row pg_proc; definition text; body text; marker text;
 BEGIN
@@ -239,7 +274,7 @@ export async function memoryWriteReleaseSource({ sourceRoot = root } = {}) {
     readFile(path),
   ])
   const migrationSha = sha(migration)
-  if (migrationSha !== '46a9e9339659191989d1dcf059b0c948a2d9bf77485fa62d22fb85023800c6f0')
+  if (migrationSha !== 'c3a07b8c572088697a353179806f8cb880cfc73838094a2d3c2670c0a6aec269')
     throw Error('memory_query_write_numbered_source_changed')
   const sourceDigest = sha(JSON.stringify({ predecessor: previous.sourceDigest, migrationSha, authenticationSha: sha(sql) }))
   return { ...previous, sql, sourceDigest, migrationSha }
