@@ -2158,7 +2158,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       await assertCurrentAuthority()
       if (!synthesisHandled) {
         const preparedRun = await prepareAssistantRun({
-          executionContext,
+          executionContext, scopeAccumulator,
           model: {
             provider: loopProvider,
             model,

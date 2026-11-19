@@ -2996,7 +2996,7 @@ async function processChannelMessageTurn(params: ChannelPipelineParams): Promise
   // ── Query loop ──
   try {
     const preparedRun = await prepareAssistantRun({
-      executionContext,
+      executionContext, scopeAccumulator,
       model: {
         provider: turnProvider,
         model,

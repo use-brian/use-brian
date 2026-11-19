@@ -1444,7 +1444,7 @@ export async function executePublicTurn(
     sendEvent = input.delivery === 'sse' ? openPublicTurnSse(res) : null
     sendEvent?.('session', { sessionId: channelId })
     const preparedRun = await prepareAssistantRun({
-      executionContext,
+      executionContext, scopeAccumulator,
       model: {
         provider: turnProvider,
         model,

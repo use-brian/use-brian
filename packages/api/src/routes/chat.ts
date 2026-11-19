@@ -7543,7 +7543,7 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
           } })
         }
         const preparedRun = await prepareAssistantRun({
-          executionContext,
+          executionContext, scopeAccumulator,
           beforeAssembly: async canonicalBrief => {
             if (canonicalBrief && nativeOutputBoundary && await tryAssertNativePreparationCurrent(nativeOutputBoundary, {
               ...executionToolContext(executionContext, { appId: 'native-run-preparation' }), scopeAccumulator,

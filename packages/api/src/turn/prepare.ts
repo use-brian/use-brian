@@ -1,5 +1,6 @@
-import type { ExecutionContext, LLMProvider, Tool } from '@use-brian/core'
+import type { ContextScopeAccumulator, ExecutionContext, LLMProvider, Tool } from '@use-brian/core'
 import { captureBriefRunPreparation } from '../briefs/context.js'
+import { captureHarnessRunPreparation } from '../project-harness/turn-context.js'
 
 export type PreparedModelSelection = {
   provider: LLMProvider
@@ -15,6 +16,8 @@ export type NamedRunContribution = {
 
 export type PrepareAssistantRunInput = {
   executionContext: ExecutionContext
+  /** The retained turn accumulator, shared by model/output admission and tools. */
+  scopeAccumulator?: ContextScopeAccumulator
   model: PreparedModelSelection
   candidateTools: Map<string, Tool> | (() => Map<string, Tool> | Promise<Map<string, Tool>>)
   bindTools: (
@@ -24,7 +27,7 @@ export type PrepareAssistantRunInput = {
   trustedContributions?: readonly NamedRunContribution[]
   userVisibleContributions?: readonly NamedRunContribution[]
   /** Host guard before local assembly callbacks. The flag describes the exact
-   * captured Brief resolver; it grants no source or delivery permission. */
+   * captured Brief AND harness resolvers; it grants no source or delivery permission. */
   beforeAssembly?: (canonicalBrief: boolean) => Promise<void>
 }
 
@@ -56,6 +59,7 @@ export async function prepareAssistantRun(
   input: PrepareAssistantRunInput,
 ): Promise<PreparedAssistantRun> {
   const briefPreparation = captureBriefRunPreparation()
+  const harnessPreparation = captureHarnessRunPreparation()
   const beforeAssembly = input.beforeAssembly
   const executionContext = input.executionContext, authority = executionContext.security.authority
   const assertCurrent = authority.assertCurrent, candidate = input.candidateTools, bindTools = input.bindTools
@@ -66,7 +70,7 @@ export async function prepareAssistantRun(
   }
   // The host guard owns its original lease too. Run it before invoking the
   // generic lease method so a replaced native method cannot run first.
-  await beforeAssembly?.(briefPreparation.canonical)
+  await beforeAssembly?.(briefPreparation.canonical && harnessPreparation.canonical)
   assertLeaseIdentity()
   await assertCurrent.call(authority)
   assertLeaseIdentity()
@@ -80,7 +84,13 @@ export async function prepareAssistantRun(
   // (project-briefs.md -> "Grounding a turn", "Revision boundaries").
   const brief = await briefPreparation.apply(executionContext, bound)
   const tools = brief.tools
-  const trusted = [...(input.trustedContributions ?? []), ...(brief.contribution ? [brief.contribution] : [])]
+  const harness = await harnessPreparation.apply(executionContext, tools, input.scopeAccumulator)
+  assertLeaseIdentity()
+  if (harnessPreparation.enabled) {
+    await assertCurrent.call(authority)
+    assertLeaseIdentity()
+  }
+  const trusted = [...(input.trustedContributions ?? []), ...(brief.contribution ? [brief.contribution] : []), ...(harness ? [harness] : [])]
   const userVisible = input.userVisibleContributions ?? []
 
   return {

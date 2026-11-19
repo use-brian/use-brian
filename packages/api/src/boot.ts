@@ -680,6 +680,10 @@ import { createDepartmentTools } from './workspace-access/department-tools.js'
 import { createProjectAccessTools } from './workspace-access/project-access-tools.js'
 import { createBriefTools } from './briefs/tools.js'
 import { briefRoutes } from './routes/briefs.js'
+import { projectHarnessRoutes } from './routes/project-harness.js'
+import { createHarnessExecutionStore } from './db/project-harness-execution-store.js'
+import { createProjectHarnessTools } from './project-harness/tools.js'
+import { configureHarnessTurnContext, resolveHarnessTurn } from './project-harness/turn-context.js'
 import { workRoutes } from './routes/work.js'
 import { configureBriefTurnContext, createGoalBriefBoundary, resolveBriefTurn } from './briefs/context.js'
 import { createWorkspaceMigrationTools } from './workspace-access/migration-tools.js'
@@ -2488,6 +2492,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   // Accepted Brief grounding + revision boundary for every runner's prepare stage.
   configureBriefTurnContext(resolveBriefTurn)
+  configureHarnessTurnContext(resolveHarnessTurn)
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
     workspaceId
       ? resolveWorkspaceCustomLlm({
@@ -4679,7 +4684,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   )
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
-  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools(),...createDepartmentTools(),...createProjectAccessTools(),...createBriefTools()]) allTools.set(tool.name,tool)
+  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools(),...createWorkspaceMigrationTools(),...createDepartmentTools(),...createProjectAccessTools(),...createBriefTools(),...createProjectHarnessTools()]) allTools.set(tool.name,tool)
 
   for (const tool of Object.values(createInternalLinkTools(internalLinkService))) {
     allTools.set(tool.name, tool)
@@ -7102,6 +7107,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
   // Governed Project and Department Briefs (project-briefs.md).
   app.use('/api', requireAuth(env.JWT_SECRET), briefRoutes())
+  const harnessExecution = createHarnessExecutionStore()
+  app.use('/api', requireAuth(env.JWT_SECRET), projectHarnessRoutes({ execution: harnessExecution }))
   app.use('/api', workRoutes({ taskStore, auth: requireAuth(env.JWT_SECRET) }))
   app.use('/api', taskExecutionRoutes({ auth: requireAuth(env.JWT_SECRET), effects: executionControlEffects }))
   // Saved research: activities, follow-up corrections, lessons, improvements (features/research.md).
