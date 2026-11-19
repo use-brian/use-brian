@@ -7053,7 +7053,10 @@ export function createNativeChatRuntime(baseOptions: WebChatOptions): { router: 
         const replyRow=[...assembled.assistantRows].find(([,row])=>row.isLast)?.[0] ?? null
         await turnTiming.time('reply_publication', () => ownedTurn.publish({ disposition: 'reply', rows: assembled.rows, write: batchWrite,
           native: nativeTranscriptAuthority, execute: operation => authority.execute(operation), measure: turnTiming.time,
-          pendingAnnotation: nativeClassification?.pendingAnnotation, replyRowIndex: replyRow,
+          // Only the turn that authored the group input publishes its annotation.
+          // Later responders read that revision and must leave their evidence current.
+          pendingAnnotation: roomResponseGroupContext?.sourceMessageId ? undefined : nativeClassification?.pendingAnnotation,
+          replyRowIndex: replyRow,
           // The durable completion header (8277): this turn's answer to its authored input.
           completion: { lane: 'web', input: { kind: 'session_message', ref: storedUserMsg.id }, assistantId: assistant.id },
           ...(bufferedWebPublication ? { buffered: { root: bufferedWebPublication, selectedOrdinals } } : {}),
