@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
+import type { WebSocketLike } from "@use-brian/browser-control/relay-client.js";
 import { DeploymentAccounts, deploymentAccountKey, deploymentKey, type AccountTarget } from "../deployment-accounts.js";
 import { parseDesktopConfig, serializePersistedTarget } from "../target-store.js";
 import type { StoredTokens } from "../desktop-token-store.js";
@@ -155,7 +156,7 @@ async function setup(auth: AccountTarget["auth"] = "pkce", bundled = true, signe
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 beforeEach(() => setup());
-afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 const sender = () => ({ sender: state.windows.at(-1).webContents, senderFrame: state.windows.at(-1).webContents.mainFrame });
 
 describe("[COMP:app-desktop/main] embedded browser IPC", () => {
@@ -223,16 +224,19 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
   });
 
   it("cancels pending native pairing when the main window closes", async () => {
-    const { dialog } = await import("electron");
-    let approve!: (answer: Electron.MessageBoxReturnValue) => void;
-    const consent = vi.spyOn(dialog, "showMessageBox").mockReturnValueOnce(
-      new Promise(resolve => { approve = resolve; }),
-    );
+    const socket: WebSocketLike = {
+      readyState: 1, send: vi.fn(), close: vi.fn(),
+      onopen: null, onmessage: null, onclose: null, onerror: null,
+    };
+    vi.stubGlobal("WebSocket", function () { return socket; });
     const pending = invoke(sender(), pairInput());
-    expect(consent).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(socket.onmessage).toBeTypeOf("function"));
+    socket.onopen!();
+    const receive = socket.onmessage!;
     state.windows[0].close();
-    approve({ response: 1, checkboxChecked: false });
+    receive({ data: JSON.stringify({ type: "ready" }) });
     expect(await pending).toEqual({ ok: false });
+    expect(socket.close).toHaveBeenCalledOnce();
     expect(state.windows).toHaveLength(1);
     expect(state.windows[0].destroyed).toBe(true);
   });
@@ -257,7 +261,9 @@ describe("[COMP:app-desktop/main] embedded browser IPC", () => {
     const { EmbeddedBrowser } = await import("../embedded-browser.js");
     const pair = vi.spyOn(EmbeddedBrowser.prototype, "pair").mockResolvedValue(true);
     for (const type of ["status", "request-control"]) {
-      expect(await invoke(sender(), { type })).toEqual({ ok: true, hasControl: true, connected: false, automaticBlocked: false, controlEpoch: 0 });
+      expect(await invoke(sender(), { type })).toEqual({
+        ok: true, hasControl: true, browserEnabled: true, connected: false, automaticBlocked: false, controlEpoch: 0,
+      });
     }
     expect(await invoke(sender(), pairInput("other-user"))).toEqual({ ok: false });
     expect(pair).not.toHaveBeenCalled();
