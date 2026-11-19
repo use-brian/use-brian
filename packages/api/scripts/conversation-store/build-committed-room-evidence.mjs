@@ -87,7 +87,7 @@ ${propagate}
 DROP FUNCTION pg_temp.${successorRenderer}(text,jsonb,boolean);`
 }
 
-export async function buildCommittedRoomEvidenceMigration(options) {
+async function buildCommittedRoomEvidenceMigration(options) {
   const [previous, clause, { definition }] = await Promise.all([previousSource(options), renderClause(), reviewedHelper()])
   return `-- [COMP:api/native-turn-frame] Reopen an exact committed publication with original same-room record evidence.
 BEGIN;
