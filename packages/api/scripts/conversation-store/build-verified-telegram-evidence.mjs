@@ -24,7 +24,7 @@ function replaceOnce(source, marker, replacement) {
   return source.replace(marker, () => replacement)
 }
 
-export async function buildVerifiedTelegramEvidenceMigration(options) {
+async function buildVerifiedTelegramEvidenceMigration(options) {
   const [previous, definition] = await Promise.all([previousSource(options), readDeclaration()])
   return `-- [COMP:api/telegram-conversation-context] Add the verified normal provider room evidence owner.
 BEGIN;

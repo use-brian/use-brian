@@ -13,7 +13,7 @@ const priorRenderer = prefix + 'conversion_source_body'
 const successorRenderer = 'conversation_office_evidence_body'
 const endRenderer = 'ELSE NULL; END CASE; RETURN body; END $private_page_body$;'
 const literal = value => "'" + value.replaceAll("'", "''") + "'"
-export const reviewedRoutines = Object.keys(replacements)
+const reviewedRoutines = Object.keys(replacements)
 export const officeMigration = '8325_conversation_office_observation.sql'
 
 function replaceOnce(source, before, after) {
@@ -76,7 +76,7 @@ export function currentOfficeSource(previous) {
   return { ...previous, sql }
 }
 
-export async function buildOfficeMigration(options) {
+async function buildOfficeMigration(options) {
   const previous = await previousSource(options)
   const read = file => readFile(resolve(sourceDirectory, file), 'utf8')
   const { executableProjection } = await import('./executable-record.mjs')
