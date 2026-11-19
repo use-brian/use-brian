@@ -461,13 +461,14 @@ describeNative('[COMP:platform/managed-postgres-transfer] existing embedded brai
       'conversation_envelope_backfill_checkpoint', 'conversation_envelopes', 'conversation_legacy_history_enrollments',
       'conversation_message_quarantine', 'conversation_participants', 'conversation_settings_transitions',
       'conversation_visibility_audit', 'conversation_visibility_notices', ...Object.keys(crmTables),
-      'native_turn_completions', 'native_turn_contract_witness',
+      'native_memory_query_write_intents', 'native_turn_completions', 'native_turn_contract_witness',
     ].sort())
     for (const [name, classification] of Object.entries(crmTables)) {
       expect(targetDigests[name].class, name).toBe(classification)
     }
     expect(targetDigests.crm_summary_receipt_keys.rows).toBe(1)
     expect(Object.keys(sourceDigests).filter((name) => !targetDigests[name])).toEqual([])
+    expect(targetDigests.native_memory_query_write_intents).toMatchObject({ class: 'derived', rows: 0 })
     expect(targetDigests.native_turn_completions).toMatchObject({ class: 'durable', rows: 0 })
     const facts = tables.filter((name) => sourceDigests[name] && ['durable', 'rebound'].includes(targetDigests[name].class))
     // 8322 adds one current configuration enclosure per historical workspace.

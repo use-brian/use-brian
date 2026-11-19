@@ -135,6 +135,7 @@ DECLARE owner_id oid:=(SELECT relowner FROM pg_class WHERE oid='public.sessions'
  expected jsonb; acl jsonb; p pg_proc; body text; definition text; source text; profile jsonb;
  registry pg_class; signature text; original pg_proc; snapshot record;
  writer_stage text; writer_lineage text;
+ capture_setting text:=current_setting('app.crm_erasure_capture',true);
  writer_insert constant text:=' INSERT INTO workspace_access_policies(workspace_id) VALUES(w) ON CONFLICT DO NOTHING;';
  writer_source_loop constant text:=E'\\n FOR source IN SELECT value FROM jsonb_array_elements(sources) ORDER BY value->>''resourceKind'',value->>''resourceId'' LOOP';
  writer_return constant text:=E'\\n RETURN derivation;';
@@ -227,6 +228,7 @@ BEGIN
   THEN RAISE EXCEPTION 'publication_upstream_memory_successor_changed: %',source;END IF;
   UPDATE public.native_turn_contract_helpers h SET contract=p WHERE h.signature=source;
  END LOOP;
+ PERFORM set_config('app.crm_erasure_capture',coalesce(capture_setting,''),true);
 END $memory_upstream$;
 `
   return `${parts[0]}${source}${anchor}${parts[1]}`
