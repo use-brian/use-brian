@@ -159,23 +159,21 @@ describe.sequential('[COMP:api/native-chat-read-cost] recording-derived file anc
     } finally { await rollbackAndRelease(client) }
   })
 
-  it('refuses each permissive canonical admission callee until its exact catalog contract is restored', async () => {
-    for (const signature of dependencySignatures) {
-      const saved = (await fixture.pool.query<{ definition: string; body: string; routine: unknown; language: string }>(
-        `SELECT pg_get_functiondef(p.oid) definition,p.prosrc body,to_jsonb(p) routine,l.lanname language
-         FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.oid=$1::regprocedure`, [signature])).rows[0]
-      try {
-        // This isolated owned fixture temporarily commits the mutation so the
-        // independent real app_user connection sees it. No policy is mocked.
-        const permissive = saved.language === 'sql' ? 'SELECT true' : 'BEGIN RETURN true;END'
-        await fixture.pool.query(saved.definition.replace(saved.body, () => permissive))
-        await expect(proof()).rejects.toMatchObject({code:'42501',message:'scope_source_changed'})
-      } finally {
-        await fixture.pool.query(saved.definition)
-        expect((await fixture.pool.query('SELECT to_jsonb(p) routine FROM pg_proc p WHERE p.oid=$1::regprocedure', [signature])).rows[0].routine).toEqual(saved.routine)
-      }
-      expect((await proof())?.admitted).toBe(true)
+  it.each(dependencySignatures)('refuses a permissive %s until its exact catalog contract is restored', async signature => {
+    const saved = (await fixture.pool.query<{ definition: string; body: string; routine: unknown; language: string }>(
+      `SELECT pg_get_functiondef(p.oid) definition,p.prosrc body,to_jsonb(p) routine,l.lanname language
+       FROM pg_proc p JOIN pg_language l ON l.oid=p.prolang WHERE p.oid=$1::regprocedure`, [signature])).rows[0]
+    try {
+      // This isolated owned fixture temporarily commits the mutation so the
+      // independent real app_user connection sees it. No policy is mocked.
+      const permissive = saved.language === 'sql' ? 'SELECT true' : 'BEGIN RETURN true;END'
+      await fixture.pool.query(saved.definition.replace(saved.body, () => permissive))
+      await expect(proof()).rejects.toMatchObject({code:'42501',message:'scope_source_changed'})
+    } finally {
+      await fixture.pool.query(saved.definition)
+      expect((await fixture.pool.query('SELECT to_jsonb(p) routine FROM pg_proc p WHERE p.oid=$1::regprocedure', [signature])).rows[0].routine).toEqual(saved.routine)
     }
+    expect((await proof())?.admitted).toBe(true)
   })
 
   it('refuses newly private episode ancestry outside the shared source floor', async () => {
