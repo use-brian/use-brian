@@ -14,7 +14,7 @@ export function Button(props: {
   return (
     <button
       type="button"
-      className="inline-flex items-center justify-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+      className="inline-flex items-center justify-center rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground hover:bg-action/90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground/50"
       onClick={() => {
         props.onAction?.(props.action.id, props.action.params)
       }}

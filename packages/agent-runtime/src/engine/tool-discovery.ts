@@ -6,6 +6,7 @@ import type { ToolDefinition } from '../providers/types.js'
 export function createToolDiscovery(all: ToolDefinition[], initialNames: readonly string[] = []): {
   definitions: ToolDefinition[]
   tool: Tool
+  loadSchemas(names: readonly string[]): void
 } {
   if (all.some(tool => tool.name === 'discoverTools')) throw new Error('Reserved discovery tool name')
   const direct = new Set(['mcp_search', 'mcp_call', 'askQuestion'])
@@ -20,6 +21,15 @@ export function createToolDiscovery(all: ToolDefinition[], initialNames: readonl
     definitions.push(definition); eagerBytes += bytes
   }
   const loaded = new Set(definitions.map(tool => tool.name))
+  const loadSchemas = (names: readonly string[]) => {
+    for (const name of names) {
+      const match = all.find(tool => tool.name === name)
+      if (!match || loaded.has(name)) continue
+      loaded.add(name)
+      // Keep array identity: stateful providers read it on each send.
+      definitions.push(match)
+    }
+  }
   const words = (value: string) => value.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().match(/[a-z0-9]+/g) ?? []
   const index = deferred.map(tool => ({ tool, words: new Set(words(`${tool.name} ${tool.description}`)) }))
   const tool = buildTool({
@@ -41,14 +51,9 @@ export function createToolDiscovery(all: ToolDefinition[], initialNames: readonl
       })).filter(entry => entry.score > 0)
         .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name))
         .slice(0, limit).map(entry => entry.tool)
-      for (const match of matches) {
-        if (loaded.has(match.name)) continue
-        loaded.add(match.name)
-        // Keep array identity: stateful providers read it on each send.
-        definitions.push(match)
-      }
+      loadSchemas(matches.map(match => match.name))
       return { data: matches.length ? { tools: matches } : { tools: [], message: 'No matching tools. Try an available tool name or different keywords.' } }
     },
   })
-  return { definitions, tool }
+  return { definitions, tool, loadSchemas }
 }

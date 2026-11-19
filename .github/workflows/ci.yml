@@ -83,8 +83,8 @@ jobs:
       - name: Smoke
         run: pnpm smoke
 
-      - name: Test release-evidence checks
-        run: node --test scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs scripts/__tests__/migration-owner-groups.test.mjs scripts/__tests__/preflight-push.test.mjs scripts/__tests__/docker-build-closure.test.mjs
+      - name: Test build config and release-evidence checks
+        run: node --test scripts/__tests__/api-build-config.test.mjs scripts/__tests__/test-evidence.test.mjs scripts/__tests__/department-isolation-report.test.mjs scripts/__tests__/ci-scope.test.mjs scripts/__tests__/migration-owner-groups.test.mjs scripts/__tests__/preflight-push.test.mjs scripts/__tests__/docker-build-closure.test.mjs
 
       - name: Archive database test dependencies
         run: tar -czf "$RUNNER_TEMP/database-test-dependencies.tgz" packages/*/dist
@@ -376,7 +376,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ca-certificates curl
           sudo install -d /usr/share/postgresql-common/pgdg
+          # Retry transient TLS/read failures without weakening verification.
           sudo curl --fail --show-error --location \
+            --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 180 \
+            --connect-timeout 15 --max-time 60 \
             --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
             https://www.postgresql.org/media/keys/ACCC4CF8.asc
           . /etc/os-release

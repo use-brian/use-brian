@@ -146,6 +146,82 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     }
   })
 
+  it('discovers only the installed exact-source read alias on direct-only surfaces', async () => {
+    const execute = vi.fn(async () => ({ data: [] }))
+    const read = buildTool({ name: 'lookup', description: 'Look up records', inputSchema: z.object({}),
+      isReadOnly: true, requiresConfirmation: false, execute })
+    const tools = createMcpSearchTools({ index: buildToolIndex([
+      { kind: 'local', serverName: 'alpha', tools: [read] },
+      { kind: 'local', serverName: 'beta', tools: [{ ...read }] },
+    ]), settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1', keepDynamicToolsDirect: true })
+    expect(tools.some(tool => tool.name === 'lookup')).toBe(false)
+    const alias = tools.find(tool => tool.name === 'mcp_alpha_lookup')!
+    const context = { ...ctx, requestTools: new Map([[alias.name, alias]]) }
+    const result = String((await tools[0].execute({ query: 'lookup' }, context)).data)
+    expect(result).toContain('[alpha] mcp_alpha_lookup:')
+    expect(result).not.toContain('[beta]')
+    expect(result).not.toContain('mcp_call')
+    await alias.execute({}, context)
+    expect(execute).toHaveBeenCalledOnce()
+    // A hidden proxy cannot make the other source callable in this turn.
+    const hiddenProxy = { ...tools[1], hiddenFromModel: true }
+    const hiddenProxyResult = String((await tools[0].execute({ query: 'lookup' }, { ...context,
+      requestTools: new Map([[alias.name, alias], [hiddenProxy.name, hiddenProxy]]),
+    })).data)
+    expect(hiddenProxyResult).toContain('[alpha] mcp_alpha_lookup:')
+    expect(hiddenProxyResult).not.toContain('[beta]')
+    // A raw adapter left in the executor map is not a supplied eager schema.
+    expect(String((await tools[0].execute({ query: 'lookup' }, { ...context,
+      admittedToolCatalog: { definitions: [], mode: 'eager', loadSchemas: vi.fn() },
+    })).data)).toContain('No tools found')
+    // A surviving write alias must not widen a direct-only read surface.
+    const writeAlias = { ...alias, isReadOnly: false }
+    expect(String((await tools[0].execute({ query: 'lookup' }, {
+      ...ctx, requestTools: new Map([[writeAlias.name, writeAlias]]),
+    })).data)).toContain('No tools found')
+  })
+
+  it('discovers a qualified remote read alias without widening its exact-source dispatcher', async () => {
+    const alphaCall = vi.fn(async () => ({ content: [{ type: 'text', text: 'alpha fixture' }] }))
+    const betaCall = vi.fn(async () => ({ content: [{ type: 'text', text: 'beta fixture' }] }))
+    const server = (name: string) => ({ name, url: 'https://shared.example.invalid/mcp', tools: [
+      { name: 'get_records', description: 'Get records', inputSchema: { type: 'object' as const, properties: {} } },
+    ] })
+    const alpha = server('alpha'), beta = server('beta')
+    const tools = createMcpSearchTools({ index: buildToolIndex([
+      { kind: 'remote', server: alpha, serverUrl: alpha.url, callMcpTool: alphaCall },
+      { kind: 'remote', server: beta, serverUrl: beta.url, callMcpTool: betaCall },
+    ]), settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1', keepDynamicToolsDirect: true })
+    const alias = tools.find(tool => tool.name === 'mcp_alpha_get_records')!
+    const context = { ...ctx, requestTools: new Map([[alias.name, alias]]) }
+    const result = String((await tools[0].execute({ query: 'alpha' }, context)).data)
+    expect(result).toContain('[alpha] mcp_alpha_get_records:')
+    expect(result).not.toContain('[beta]')
+    await alias.execute({}, context)
+    expect(alphaCall).toHaveBeenCalledOnce()
+    expect(betaCall).not.toHaveBeenCalled()
+  })
+
+  it('keeps hidden and ungranted tools out of search results and hidden names out of the roster', async () => {
+    const read = buildTool({ name: 'lookup', description: 'Look up records', inputSchema: z.object({}),
+      isReadOnly: true, requiresConfirmation: false, execute: vi.fn() })
+    const tools = createMcpSearchTools({ index: buildToolIndex([
+      { kind: 'local', serverName: 'visible', tools: [read,
+        { ...read, name: 'hiddenLookup', hiddenFromModel: true },
+        { ...read, name: 'gatedLookup', requiresCapability: 'restricted' }] },
+      { kind: 'local', serverName: 'hiddenOnly', tools: [{ ...read, hiddenFromModel: true }] },
+    ]), settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1' })
+    expect(tools[0].description).not.toMatch(/hiddenLookup|hiddenOnly/)
+    const result = String((await tools[0].execute({ query: 'lookup' }, ctx)).data)
+    expect(result).toContain('[visible] lookup:')
+    expect(result).not.toMatch(/hiddenLookup|hiddenOnly|gatedLookup/)
+    const granted = String((await tools[0].execute({ query: 'lookup' }, {
+      ...ctx, activeCapabilities: new Set(['restricted']),
+    })).data)
+    expect(granted).toContain('gatedLookup')
+    expect(granted).not.toContain('hiddenLookup')
+  })
+
   it('exposes only unique visible local read schemas and preserves capability and input guards', async () => {
     const execute = vi.fn(async () => ({ data: [] }))
     const read = buildTool({ name: 'calendarRead', description: 'Read events', inputSchema: z.object({ from: z.string() }),
@@ -493,12 +569,142 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     expect(text).toContain('[Notion]')
   })
 
-  it('mcp_search returns helpful message for no matches', async () => {
+  it('searches source identities and display labels even for generic tool names', async () => {
+    const server = { name: 'Albatross Records', url: 'https://example.invalid/mcp', tools: [
+      { name: 'lookup', description: 'Read an item', inputSchema: { type: 'object' as const, properties: {} } },
+    ] }
+    const read = buildTool({ name: 'listItems', description: 'Read an item', inputSchema: z.object({}),
+      isReadOnly: true, execute: vi.fn() })
+    const [search] = createMcpSearchTools({ index: buildToolIndex([
+      { kind: 'remote', server, sourceId: 'source-123', serverUrl: server.url, callMcpTool: vi.fn() },
+      { kind: 'local', serverName: 'petrelRecords', tools: [read] },
+    ]), settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1' })
+    for (const query of ['Albatross', '"Albatross Records"', 'source-123']) {
+      expect(String((await search.execute({ query }, ctx)).data)).toContain('[source-123] (Albatross Records) lookup:')
+    }
+    for (const query of ['petrelRecords', 'petrel_records']) {
+      expect(String((await search.execute({ query }, ctx)).data)).toContain('[petrelRecords] listItems:')
+    }
+  })
+
+  it('mcp_search identifies source-only scope outside a model turn', async () => {
     const { tools } = makeSearchTools()
     const result = await tools[0].execute({ query: 'xyznonexistent' }, ctx)
     const text = String(result.data)
     expect(text).toContain('No tools found')
     expect(text).toContain('Cardano Onchain Governance')  // hints at available connectors
+    expect(text).toContain('supplied source index only (no Brian turn catalog)')
+    expect(text).toContain('not user data')
+    expect(text).toContain('paginated inventory')
+  })
+
+  it('searches native tools alongside the five introspection tools and pages the entire inventory', async () => {
+    const names = ['readSessionTranscript', 'listPendingApprovals', 'listScheduledJobs', 'listResearchRuns', 'listWorkspaceSessions']
+    const operation = (name: string) => buildTool({ name, description: 'Fictional operation',
+      inputSchema: z.object({ id: z.string() }), isReadOnly: true, execute: vi.fn() })
+    const native = ['saveMemory', 'readFile', ...Array.from({ length: 18 }, (_, n) => `nativeOperation${n}`)].map(operation)
+    const tools = createMcpSearchTools({ index: buildToolIndex([
+      { kind: 'local', serverName: 'introspection', tools: names.map(operation) },
+    ]), settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1', exposeLocalReadTools: true })
+    const hidden = { ...operation('hiddenNative'), hiddenFromModel: true }
+    const gated = { ...operation('ungrantedNative'), requiresCapability: 'restricted' }
+    const requestTools = new Map([...tools, ...native, hidden, gated].map(tool => [tool.name, tool]))
+    const loadSchemas = vi.fn()
+    const context = { ...ctx, requestTools, admittedToolCatalog: {
+      definitions: [...requestTools.values()].map(tool => ({ name: tool.name, description: tool.description,
+        parameters: { type: 'object' as const, properties: { id: { type: 'string' as const } }, required: ['id'] } })),
+      mode: 'dynamic' as const, loadSchemas,
+    } }
+    const seen: string[] = []
+    let offset = 0
+    for (let page = 0; page < 10; page++) {
+      const text = String((await tools[0].execute({ query: '', limit: 8, offset }, context)).data)
+      expect(text).toContain('Searchable operations: 25 (20 native, 5 indexed)')
+      expect(text).toContain('totalMatches=25')
+      expect(text).not.toMatch(/hiddenNative|ungrantedNative/)
+      seen.push(...[...text.matchAll(/^\[(?:Brian|introspection)\] (\w+):/gm)].map(match => match[1]))
+      const next = text.match(/nextOffset=(\d+|null)/)![1]
+      if (next === 'null') break
+      expect(Number(next)).toBeGreaterThan(offset)
+      offset = Number(next)
+    }
+    expect(new Set(seen).size).toBe(25)
+    expect(seen).toHaveLength(25) // No duplicate direct/indexed adapters.
+    expect(seen).toEqual(expect.arrayContaining([...names, ...native.map(tool => tool.name)]))
+    expect(loadSchemas).not.toHaveBeenCalled() // Inventory must not eagerly load all schemas.
+    const missing = String((await tools[0].execute({ query: 'xyznonexistent' }, context)).data)
+    expect(missing).toContain('Searchable operations: 25 (20 native, 5 indexed)')
+    expect(missing).toContain('Searchable sources in this run: Brian, introspection')
+    expect(loadSchemas).not.toHaveBeenCalled()
+    const result = String((await tools[0].execute({ query: 'saveMemory', limit: 1 }, context)).data)
+    expect(result).toContain('[Brian] saveMemory:')
+    expect(result).toContain('Use mcp_call with server="brian", tool="saveMemory"')
+    expect(result).toContain('id: string')
+    expect(loadSchemas).toHaveBeenCalledWith(['saveMemory'])
+    const source = String((await tools[0].execute({ query: 'listPendingApprovals', limit: 1 }, context)).data)
+    expect(source).toContain('server="introspection", tool="listPendingApprovals"')
+  })
+
+  it('never reintroduces a denied indexed adapter through the native catalog', async () => {
+    const execute = vi.fn(async () => ({ data: [] }))
+    const read = buildTool({ name: 'guardedRead', description: 'Fictional read', inputSchema: z.object({}),
+      isReadOnly: true, requiresConfirmation: true, execute })
+    const tools = createMcpSearchTools({ index: buildToolIndex([{ kind: 'local', serverName: 'fixture', tools: [read] }]),
+      settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1', exposeLocalReadTools: true })
+    const requestTools = new Map(tools.map(tool => [tool.name, tool]))
+    const loadSchemas = vi.fn()
+    const context = { ...ctx, requestTools,
+      confirmationResolver: { waitForDecision: async () => ({ decision: 'deny' as const }) },
+      notifyConfirmationRequired: vi.fn(),
+      admittedToolCatalog: { definitions: [{ name: read.name, description: read.description,
+        parameters: { type: 'object' as const, properties: {} } }], mode: 'dynamic' as const, loadSchemas },
+    } as never
+    expect((await tools[1].execute({ server: 'fixture', tool: read.name, args: {} }, context)).isError).toBe(true)
+    const result = String((await tools[0].execute({ query: '' }, context)).data)
+    expect(result).toContain('Searchable operations: 0 (0 native, 0 indexed)')
+    expect(result).not.toContain('guardedRead')
+    expect(loadSchemas).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('retains independently indexed direct adapters without duplicating aliases or bypassing their denial state', async () => {
+    const read = buildTool({ name: 'independentRead', description: 'Fictional independently indexed read',
+      inputSchema: z.object({}), isReadOnly: true, requiresConfirmation: true, execute: vi.fn() })
+    const independent = createMcpSearchTools({ index: buildToolIndex([{ kind: 'local', serverName: 'independent', tools: [read] }]),
+      settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1', keepDynamicToolsDirect: true })
+    const main = createMcpSearchTools({ index: buildToolIndex([]), settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1' })
+    const adapters = independent.filter(tool => !['mcp_search', 'mcp_call'].includes(tool.name))
+    const context = { ...ctx, requestTools: new Map([...main, ...adapters].map(tool => [tool.name, tool])),
+      admittedToolCatalog: { definitions: adapters.map(tool => ({ name: tool.name, description: tool.description,
+        parameters: { type: 'object' as const, properties: {} } })), mode: 'dynamic' as const, loadSchemas: vi.fn() },
+      confirmationResolver: { waitForDecision: async () => ({ decision: 'deny' as const }) }, notifyConfirmationRequired: vi.fn(),
+    } as never
+    const before = String((await main[0].execute({ query: '' }, context)).data)
+    expect(before).toContain('Searchable operations: 1 (1 native, 0 indexed)')
+    expect(before).toContain('[Brian] independentRead:')
+    expect((await independent[1].execute({ server: 'independent', tool: read.name, args: {} }, context)).isError).toBe(true)
+    const after = String((await main[0].execute({ query: '' }, context)).data)
+    expect(after).toContain('Searchable operations: 0 (0 native, 0 indexed)')
+    expect(after).not.toContain('independentRead')
+  })
+
+  it('keeps same-named native and remote operations distinct by invocation route', async () => {
+    const native = buildTool({ name: 'getRecord', description: 'Fictional native record', inputSchema: z.object({}),
+      isReadOnly: true, execute: vi.fn() })
+    const server = { name: 'remote', url: 'https://example.invalid/mcp', tools: [
+      { name: 'getRecord', description: 'Fictional remote record', inputSchema: { type: 'object' as const, properties: {} } },
+    ] }
+    const tools = createMcpSearchTools({ index: buildToolIndex([{ kind: 'remote', server,
+      serverUrl: server.url, callMcpTool: vi.fn() }]), settingsStore: makeFakeSettingsStore(), assistantId: 'a1', userId: 'u1' })
+    const result = String((await tools[0].execute({ query: 'getRecord' }, { ...ctx,
+      requestTools: new Map([...tools, native].map(tool => [tool.name, tool])),
+      admittedToolCatalog: { definitions: [{ name: native.name, description: native.description,
+        parameters: { type: 'object', properties: {} } }], mode: 'eager', loadSchemas: vi.fn() },
+    })).data)
+    expect(result).toContain('[Brian] getRecord:')
+    expect(result).toContain('[remote] getRecord:')
+    expect(result).toContain('Use mcp_call with server="brian", tool="getRecord"')
+    expect(result).toContain('server="remote", tool="getRecord"')
   })
 
   it('mcp_search includes parameter schemas in results', async () => {
@@ -557,6 +763,9 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     expect(searchTool.inputSchema.safeParse({ query: 'calendar', limit: 8 }).success).toBe(true)
     expect(searchTool.inputSchema.safeParse({ query: 'calendar', limit: 0 }).success).toBe(false)
     expect(searchTool.inputSchema.safeParse({ query: 'calendar', limit: 9 }).success).toBe(false)
+    expect(searchTool.inputSchema.safeParse({}).success).toBe(true)
+    expect(searchTool.inputSchema.safeParse({ query: '', offset: 8 }).success).toBe(true)
+    for (const offset of [-1, 0.5, 100_001]) expect(searchTool.inputSchema.safeParse({ offset }).success).toBe(false)
   })
 
   it('mcp_search ranks name matches higher than description matches', async () => {
