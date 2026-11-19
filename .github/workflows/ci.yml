@@ -301,7 +301,8 @@ jobs:
     if: needs.ci-scope.outputs.historical == 'false'
     name: Embedded database current schema
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # A fresh owner replay prepares the image before the current-schema tests.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -322,11 +323,19 @@ jobs:
     if: needs.ci-scope.outputs.historical == 'true'
     name: Embedded database tests (${{ matrix.group }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: ${{ matrix.timeoutMinutes }}
     strategy:
       fail-fast: false
       matrix:
-        group: [owner-legacy, owner-fresh, owner-cutover, owner-successor, owner-prerequisites, session, remaining]
+        include:
+          # These scenarios each prove a complete chain on one connection.
+          - { group: owner-legacy, timeoutMinutes: 15 }
+          - { group: owner-fresh, timeoutMinutes: 15 }
+          - { group: owner-cutover, timeoutMinutes: 10 }
+          - { group: owner-successor, timeoutMinutes: 10 }
+          - { group: owner-prerequisites, timeoutMinutes: 10 }
+          - { group: session, timeoutMinutes: 10 }
+          - { group: remaining, timeoutMinutes: 10 }
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
