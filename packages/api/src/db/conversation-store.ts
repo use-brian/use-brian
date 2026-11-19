@@ -168,7 +168,7 @@ export async function readAdmittedSessionQuery(input:{sessionId:string;throughSe
     // The direct presentation fence can decline a private responder. Use the
     // original native selector in this same source frame for this exact input.
     const captured=await captureConversationQuery(client,workspaceId,{sessionId,throughSequence:currentSequence,topicThroughSequence:0})
-    const authored=captured.history.find(({row:message})=>message?.id===input.currentMessageId
+    const authored=captured.history.find(({row:message})=>message&&message.id===input.currentMessageId
       &&message.sequenceNum===currentSequence&&message.role==='user')
     if(!authored?.row)changed()
     const value=authored.row
