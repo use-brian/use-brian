@@ -471,12 +471,21 @@ export async function queryWithRLS<T extends pg.QueryResultRow>(
   text: string,
   values?: unknown[],
 ): Promise<pg.QueryResult<T>> {
+  return withRLSTransaction(userId, client => client.query<T>(text, values))
+}
+
+/** Keep data acquisition and source admission in the same ordinary app-role transaction. */
+export async function withRLSTransaction<T>(
+  userId: string,
+  operation: (client: pg.PoolClient) => Promise<T>,
+  verifiedAssistantId?: string,
+): Promise<T> {
   const client = await getAppPool().connect()
   let committed = false
   try {
     await client.query('BEGIN')
-    await applyRLSGucs(client, userId)
-    const result = await client.query<T>(text, values)
+    await applyRLSGucs(client, userId, verifiedAssistantId)
+    const result = await operation(client)
     await commitTransaction(client)
     committed = true
     return result

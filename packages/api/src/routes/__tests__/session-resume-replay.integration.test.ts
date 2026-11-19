@@ -24,6 +24,7 @@ const { sessionRoutes } = await import('../sessions.js')
 const { createDbSessionResumeStore } = await import('../../db/session-resume-store.js')
 const { createDbJobStore } = await import('../../db/job-store.js')
 const { getAppPool, getPool } = await import('../../db/client.js')
+const { currentTurnFrame, setTurnSqlRecording, takeTurnSqlLedger } = await import('../../db/turn-sql-accounting.js')
 const { authSessionStore } = await import('../../db/auth-session-store.js')
 const { addSessionMessage, createPersonalWebSession, createWorkspaceChatSession, getSessionMessages, readSessionById } = await import('../../db/sessions.js')
 const { findAssistantById } = await import('../../db/users.js')
@@ -53,12 +54,15 @@ describe.sequential('[COMP:brain/session-resume-worker] question resume on the c
   it.each([
     ['personal', false], ['shared-room', false], ['shared-room-revoked', false],
     ['shared-room-held', false], ['shared-room-hold-during-provider', false],
-    ['shared-room-approval-withdrawn', false], ['shared-room-wrong-assistant', false], ['shared-room-cross-room', false], ['personal', true],
+    ['shared-room-approval-withdrawn', false], ['shared-room-wrong-assistant', false], ['shared-room-cross-room', false],
+    ['personal-held-during-provider', false], ['personal', true],
   ] as const)('resumes a %s web chat after the answer (provider failure: %s)', async (scenario, providerFails) => {
     const f = await persistentContextFixture('confidential')
+    const personal = scenario.startsWith('personal')
+    let sqlTurnId: string | undefined
     try {
       const device = (await authSessionStore.create(f.ownerId, { deviceLabel: 'Fictional resume browser', userAgent: null, ipAddress: null }))!
-      const session = scenario !== 'personal' ? f.session : await createPersonalWebSession({
+      const session = !personal ? f.session : await createPersonalWebSession({
         assistantId: f.assistantId, userId: f.ownerId, workspaceId: f.workspaceId, channelType: 'web', channelId: randomUUID(), appOrigin: 'chat',
       }, { actorUserId: f.ownerId, authSessionId: device.id, authVersion: device.authVersion })
       await f.pool.query("UPDATE workspaces SET plan='pro' WHERE id=$1", [f.workspaceId])
@@ -82,7 +86,7 @@ describe.sequential('[COMP:brain/session-resume-worker] question resume on the c
       const stored = (await readSessionById(session.id))!
       const { turnScope } = await resolveExecutionContextSystem({ userId: f.ownerId, workspaceId: f.workspaceId,
         assistant: (await findAssistantById(f.assistantId))!, session: stored, sessionAuthority: stored,
-        sharedAudience: scenario !== 'personal', memberMode: 'member',
+        sharedAudience: !personal, memberMode: 'member',
         identity: { kind: 'attended', principal: { kind: 'workspace_member', userId: f.ownerId, authenticationKind: 'native_session' } },
         ownership: { kind: 'workspace', workspaceId: f.workspaceId },
         lifecycle: { sessionId: session.id, channelType: 'web', channelId: stored.channelId, abortSignal: new AbortController().signal } })
@@ -105,7 +109,8 @@ describe.sequential('[COMP:brain/session-resume-worker] question resume on the c
           return { ...modelSession, async *send(...args) {
             providerRequests++
             providerInputs.push(JSON.stringify(args[0]))
-            if (scenario === 'shared-room-hold-during-provider') await holdInput()
+            if (personal) sqlTurnId = currentTurnFrame()?.turnId
+            if (scenario === 'shared-room-hold-during-provider' || scenario === 'personal-held-during-provider') await holdInput()
             if (scenario === 'shared-room-approval-withdrawn') expect(await sessionResumeStore.deleteByApprovalId(approvalId)).toBe(true)
             yield* modelSession.send(...args)
           } }
@@ -160,6 +165,18 @@ describe.sequential('[COMP:brain/session-resume-worker] question resume on the c
       }
       const storedIds = async () => (await f.pool.query<{ id: string }>(
         'SELECT id FROM session_messages WHERE session_id=$1 ORDER BY sequence_num', [session.id])).rows.map(row => row.id)
+      if (personal) setTurnSqlRecording(true)
+      if (scenario === 'personal-held-during-provider') {
+        const before = await storedIds()
+        await expect(replay(resumeParams)).rejects.toMatchObject({ reason: 'delivery_audience_unverified' })
+        expect(providerRequests).toBe(1)
+        expect(events.filter(event => event.kind === 'turn_stream')).toEqual([])
+        const added = (await getSessionMessages(session.id, { excludeHeld: true })).filter(row => !before.includes(row.id))
+        expect(added.map(row => row.role)).toEqual(['system'])
+        expect(await committedTurnCompletion({ workspaceId: f.workspaceId, sessionId: session.id,
+          input: { kind: 'approval', ref: approvalId } })).toBeNull()
+        return
+      }
       const withdrewDuringProvider = scenario === 'shared-room-hold-during-provider' || scenario === 'shared-room-approval-withdrawn'
       if (scenario === 'shared-room-held' || scenario === 'shared-room-cross-room' || scenario === 'shared-room-wrong-assistant' || withdrewDuringProvider) {
         const before = await storedIds()
@@ -191,6 +208,13 @@ describe.sequential('[COMP:brain/session-resume-worker] question resume on the c
       const rows = await getSessionMessages(session.id, { excludeHeld: true })
       expect(rows.map(text).at(-1)).toBe('Blue it is, a calm fictional choice.')
       expect(rows.at(-1)).toMatchObject({ sessionId: session.id, role: 'assistant', senderAssistantId: f.assistantId })
+      if (personal) {
+        const ledger = sqlTurnId && takeTurnSqlLedger(sqlTurnId)
+        expect(ledger && ledger.statements.some(statement => statement.frameId === 'output_admission' && statement.pool === 'app'
+          && statement.ok && statement.shape.startsWith('SELECT capture_conversation_evidence'))).toBe(true)
+        const reopened = await request(app).get(`/sessions/${session.id}/messages`).expect(200)
+        expect(text(reopened.body.at(-1))).toBe('Blue it is, a calm fictional choice.')
+      }
       if (scenario === 'shared-room') {
         const reopened = await request(app).get(`/sessions/${session.id}/messages`).expect(200)
         const reply = reopened.body.at(-1)
@@ -221,6 +245,10 @@ describe.sequential('[COMP:brain/session-resume-worker] question resume on the c
       await expect(replay(resumeParams)).resolves.toBe('completed')
       expect(providerRequests).toBe(1)
       expect((await getSessionMessages(session.id, { excludeHeld: true })).length).toBe(before)
-    } finally { await f.cleanup() }
+    } finally {
+      if (personal) setTurnSqlRecording(undefined)
+      if (sqlTurnId) takeTurnSqlLedger(sqlTurnId)
+      await f.cleanup()
+    }
   }, 120_000)
 })

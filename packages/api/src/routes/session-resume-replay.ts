@@ -61,7 +61,7 @@ import {
 import { SensitivityAccumulator } from '@use-brian/agent-runtime/security/sensitivity.js'
 import { boundScopeSource } from '@use-brian/agent-runtime/security/source-evidence.js'
 import type { Tool, ToolContext } from '@use-brian/agent-runtime/tools/types.js'
-import { classifySession, normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches } from '../session-kind.js'
+import { classifySession, normalizeSessionVisibility, policyFor, sessionAuthorityDestinationMatches, usesStoredPrivateChat } from '../session-kind.js'
 import {
   findSessionById,
   addSessionMessage,
@@ -73,7 +73,7 @@ import {
   DeliveryAudienceUnverifiedError,
 } from '../context-scope/delivery-authority.js'
 import { roomAudienceCeiling } from './_room-binding.js'
-import { admitVerifiedSharedRoomResumeEvidence } from '../context-scope/native-invocation-evidence.js'
+import { admitVerifiedPersonalResumeAudience, admitVerifiedSharedRoomResumeEvidence } from '../context-scope/native-invocation-evidence.js'
 import { findAssistantById } from '../db/users.js'
 import type { SessionResumeReplay, ResumeReplayParams } from './chat.js'
 import { MODEL_MAP, chatTierBudget, tierForModel } from '../model-resolution.js'
@@ -558,6 +558,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       const roomRecipient = session.channelType === 'web' && sessionKind.audience === 'workspace'
         && sessionKind.anchor.kind === 'none' && sessionKind.surface === 'chat'
         ? roomAudienceCeiling(assistant.workspaceId, session) : undefined
+      const personalWebChat = usesStoredPrivateChat(session)
       const bindFailureOutcome = (evidence?: import('@use-brian/agent-runtime/security/context-scope.js').ScopeEvidence) => {
         if (!resumeEnvelope) return
         publishFailureOutcome = async () => {
@@ -703,7 +704,18 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
 
         const authorizeResumeAudience = createDeliveryAudienceAuthorizer(roomRecipient ? {
           validateEvidence: (evidence, recipient) => admitVerifiedSharedRoomResumeEvidence(execution, evidence, recipient, 'audience'),
+        } : personalWebChat ? {
+          validateEvidence: (evidence, recipient) => admitVerifiedPersonalResumeAudience(execution, evidence, recipient),
         } : {})
+        const admitResumeAudience = async () => {
+          const audience = await authorizeResumeAudience({
+            workspaceId: assistant.workspaceId!, assistantId: assistant.id,
+            userId: session.userId, channelType: session.channelType, channelId: session.channelId,
+            sessionId, scopeEvidence: scopeAccumulator.evidence,
+          })
+          if (!audience.allowed) throw new DeliveryAudienceUnverifiedError(audience.detail, audience.diagnostic)
+          return audience.evidence
+        }
         // D2: the continuation bills like the turn it resumes.
         const resumeBilling = await resolveTurnBilling({
           policy: resumePolicy,
@@ -745,7 +757,9 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
           },
           ...(policy.budget ?? {}),
           },
-          sink: { kind: 'none', onEvent: async (event) => {
+          sink: { kind: 'none', ...(personalWebChat ? { admitOutput: async () => {
+            scopeAccumulator.note(await admitResumeAudience())
+          } } : {}), onEvent: async (event) => {
           // The replay is not an interactive stream. No generated event may be
           // accepted or persisted after authority changes.
           await assertReplayCurrent()
@@ -757,16 +771,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
             turnStream.setReplyPhase('saving')
             // The continuation's output reaches the session's audience like any
             // turn's: judge its evidence against that audience first.
-            const audience = await authorizeResumeAudience({
-              workspaceId: assistant.workspaceId!,
-              assistantId: assistant.id,
-              userId: session.userId,
-              channelType: session.channelType,
-              channelId: session.channelId,
-              sessionId,
-              scopeEvidence: scopeAccumulator.evidence,
-            })
-            if (!audience.allowed) throw new DeliveryAudienceUnverifiedError(audience.detail, audience.diagnostic)
+            if (!personalWebChat) await admitResumeAudience()
             finalContent = event.response.content
           } else if (event.type === 'error') {
             throw event.error
