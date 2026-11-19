@@ -4,7 +4,6 @@
 |---|---|---|---|
 | auth-web/theme | docs/design-system/implementation.md | apps/auth-web/src/app/globals.css | apps/auth-web/src/app/globals.test.ts |
 | views/properties | docs/design-system/implementation.md | packages/views-renderer/src/widgets/Button.tsx; packages/views-renderer/src/properties/checkbox.tsx; packages/views-renderer/src/properties/files.tsx | packages/views-renderer/src/__tests__/renderer-action-neutral-f02.test.tsx |
-| app-web/association | docs/design-system/implementation.md | apps/app-web/src/components/association/ui.tsx; apps/app-web/src/components/association/events/event-page-editor.tsx | apps/app-web/src/components/association/__tests__/ui.test.tsx; apps/app-web/src/components/association/__tests__/event-workspace.test.tsx; apps/app-web/src/components/association/__tests__/neutral-selection-f04.test.ts |
 | app-web/shopify-app | docs/design-system/implementation.md | apps/app-web/src/components/shopify/analyse-tab.tsx | apps/app-web/src/components/shopify/__tests__/shopify-neutral-selection-f05.test.tsx |
 | app-web/shopify-campaign | docs/design-system/implementation.md | apps/app-web/src/components/shopify/campaign-tab.tsx | apps/app-web/src/components/shopify/__tests__/shopify-neutral-selection-f05.test.tsx |
 | app-web/emoji-picker | docs/design-system/implementation.md | apps/app-web/src/components/ui/emoji-picker.tsx; apps/app-web/src/lib/theme.tsx | apps/app-web/src/components/ui/emoji-picker.test.tsx; apps/app-web/src/lib/__tests__/theme.test.ts |
