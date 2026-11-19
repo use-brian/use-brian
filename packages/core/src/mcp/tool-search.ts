@@ -290,8 +290,8 @@ export function buildToolIndex(sources: ToolSource[]): McpToolIndex {
       })
       continue
     }
-    serverSummaries.set(source.serverName, source.summary
-      ?? summarizeCapabilities([...visibleTools.map((t) => t.name), ...descriptors.filter(d => !d.hiddenFromModel).map(d => d.name)]))
+    const visibleNames = [...visibleTools.map(tool => tool.name), ...descriptors.filter(tool => !tool.hiddenFromModel).map(tool => tool.name)]
+    if (visibleNames.length) serverSummaries.set(source.serverName, source.summary ?? summarizeCapabilities(visibleNames))
 
     for (const descriptor of descriptors) {
       entries.push(lazyLocalEntry(source.serverName, source.label, descriptor, source.resolve!))
